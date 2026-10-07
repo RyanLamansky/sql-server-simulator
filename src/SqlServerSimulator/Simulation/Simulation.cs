@@ -1260,11 +1260,36 @@ public sealed partial class Simulation
                 notified.EndedUnderBinding = null;
                 yield return new SimulatedInfoOutcome(SimulatedSqlException.TransactionEndedByAnotherSessionMessage(notified));
             }
-            using (var outcomes = this.CreateResultSetsForCommandCore(command, continueOnError).GetEnumerator())
+            // A batch a WRITETEXT BULK suspended takes this request as its
+            // data's, the request's own text going unread (probed 2026-10-07
+            // against SQL Server 2025).
+            IEnumerator<SimulatedStatementOutcome> outcomes;
+            if (command.Connection is { ParkedBulkText: { } parked } resuming)
+            {
+                resuming.ParkedBulkText = null;
+                resuming.BeginExecutionScope(command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
+                outcomes = parked.Batch!;
+            }
+            else
+            {
+                outcomes = this.CreateResultSetsForCommandCore(command, continueOnError).GetEnumerator();
+            }
+            var parking = false;
+            try
             {
                 while (MoveNextAsMember(command.Connection, outcomes))
                 {
                     var outcome = outcomes.Current;
+                    // The response ends here as though the batch had, which
+                    // waits on the connection for its data.
+                    if (outcome is SimulatedBulkTextRequest waiting && command.Connection is { } waitingOn)
+                    {
+                        waiting.Batch = outcomes;
+                        waiting.CommandText = command.CommandText;
+                        waitingOn.ParkedBulkText = waiting;
+                        parking = true;
+                        break;
+                    }
                     if (request is not null)
                     {
                         // A DML statement's OUTPUT rows hold the session until
@@ -1297,6 +1322,13 @@ public sealed partial class Simulation
                     }
                 }
             }
+            finally
+            {
+                if (!parking)
+                    outcomes.Dispose();
+            }
+            if (parking)
+                yield break;
             // Another request ended the transaction this one works on, and the
             // batch's end hasn't already rolled back what it carried on in.
             SimulatedErrorOutcome? abandoned = null;
@@ -2177,7 +2209,15 @@ public sealed partial class Simulation
         var lifecycle = new StatementLifecycle(batch, atBatchStart);
         lifecycle.Enter(batch);
         List<SimulatedStatementOutcome> outcomes = [];
-        lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+        batch.FramedStatementDepth++;
+        try
+        {
+            lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+        }
+        finally
+        {
+            batch.FramedStatementDepth--;
+        }
         // A statement compiling as it runs sends its inlining failures ahead of
         // everything it sends, unless the compile itself failed — a binder
         // error stops real before any call inlines.
@@ -2243,6 +2283,16 @@ public sealed partial class Simulation
         var timed = lifecycle.TimedCall || (lifecycle.TimedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
         foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, timed && connection.StatisticsTime, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
             yield return notice;
+
+        // A WRITETEXT BULK has its data once the batch resumes, and runs again
+        // from its first token to write it, as a statement of its own.
+        if (outcomes is [.., SimulatedBulkTextRequest resumed])
+        {
+            batch.Parser.RestoreCheckpoint(lifecycle.StatementStart);
+            batch.BulkTextReply = resumed;
+            foreach (var outcome in this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart))
+                yield return outcome;
+        }
     }
 
     /// <summary>
@@ -2291,12 +2341,13 @@ public sealed partial class Simulation
     /// Server 2025). Each failing write on the way out reports its own, so an
     /// <c>INSERT</c> whose trigger's <c>UPDATE</c> failed reports two.
     /// A statement whose <c>OUTPUT</c> clause returns rows reports through the
-    /// empty result set instead. Null for any other statement.
+    /// empty result set instead. Null for any other statement, a
+    /// <c>WRITETEXT</c> or <c>UPDATETEXT</c> among them, which count nothing.
     /// </summary>
     private static SimulatedStatementOutcome? CaughtWriteCount(BatchContext batch)
     {
         var statement = batch.CurrentStatement;
-        if (!statement.WritesRows)
+        if (!statement.WritesRows || statement.WritesText)
             return null;
         SimulatedStatementOutcome count = statement.ClientOutputShape is var (schema, names)
             ? new SimulatedSqlResultSet(schema, names, Array.Empty<byte[]>(), 0) { EndedByError = true, ErrorCaught = true }
@@ -2355,6 +2406,9 @@ public sealed partial class Simulation
     /// lock's 56; probed 2026-10-03), and a trigger body's write refused in the
     /// unit a caught error doomed (Msg 3930; probed 2026-10-04), and a block
     /// predicate refusing a row (Msg 33504; probed 2026-10-04).
+    /// A <c>WRITETEXT</c> or <c>UPDATETEXT</c> its pointer's value, offset or
+    /// bulk data failed earns it though the error ends the batch, at line 1
+    /// (probed 2026-10-07; see <see cref="StatementContext.WritesText"/>).
     /// Inside a trigger body, or a procedure it calls, a statement writing
     /// nothing earns it too, all of it running within the firing statement,
     /// while a function's Msg 208 ending the body earns none (probed
@@ -2362,6 +2416,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
+        || (batch.CurrentStatement.WritesText && error.Number is 518 or 4002 or 4022 or 7116 or 7123 or 7125 or 7133 or 7135)
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127) && !error.RefusedRecompilingDeferred
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite || batch.Connection.FiringTriggers.Count > 0)
@@ -3061,12 +3116,18 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.WriteText }:
                 outcome = RunMutation(context, ParseWriteTextStatement);
-                rowCount = outcome.RecordsAffected;
+                if (outcome is SimulatedBulkTextRequest writeTextWaits)
+                    yield return writeTextWaits;
+                else
+                    rowCount = outcome.RecordsAffected;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.UpdateText }:
                 outcome = RunMutation(context, ParseUpdateTextStatement);
-                rowCount = outcome.RecordsAffected;
+                if (outcome is SimulatedBulkTextRequest updateTextWaits)
+                    yield return updateTextWaits;
+                else
+                    rowCount = outcome.RecordsAffected;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Truncate }:
@@ -3947,6 +4008,14 @@ public sealed partial class Simulation
         // Msg 3930 exactly as a DML statement does (probe-confirmed) — real
         // names the message's own advice: roll back instead.
         RejectWriteInDoomedTransaction(connection);
+        // A loopback server's call can't end the caller's transaction it runs
+        // in: its outermost COMMIT is Msg 3981, which ends the call and dooms
+        // that transaction (probed 2026-10-07 against SQL Server 2025).
+        if (tx.TranCount == 1 && connection.Membership == TransactionMembership.Enlisted)
+        {
+            tx.EndRollback();
+            throw SimulatedSqlException.TransactionOperationWithPendingRequests(state: 1).EndingBatch();
+        }
         if (tx.TranCount == 1)
             connection.RefuseTransactionOperationWithRequestsPending(tx, state: 1);
         tx.TranCount--;
@@ -4144,6 +4213,24 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Ends the transaction a loopback server's call feeding an
+    /// <c>INSERT … EXEC</c> began (<see cref="BatchContext.InsertExecTransaction"/>)
+    /// with the statement: committed with it, or rolled back when it failed.
+    /// </summary>
+    private static void EndInsertExecTransaction(BatchContext batch, bool commit)
+    {
+        if (batch.InsertExecTransaction is not { } statementTransaction)
+            return;
+        batch.InsertExecTransaction = null;
+        if (statementTransaction.Ended)
+            return;
+        if (commit)
+            statementTransaction.EndCommit();
+        else
+            statementTransaction.EndRollback();
+    }
+
+    /// <summary>
     /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
     /// statement-level atomicity. Routes mutations to the connection's
     /// active transaction's <see cref="UndoLog"/> when one exists (an
@@ -4157,6 +4244,7 @@ public sealed partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
+
         context.Batch.CurrentStatement.WritesRows = true;
         // A table-variable target takes no transaction; its parser clears this.
         context.Batch.CurrentStatement.TransactedWrite = true;
@@ -4236,11 +4324,13 @@ public sealed partial class Simulation
             // statement success regardless of any enclosing tx, so their
             // throwaway log always commits here.
             tableVarLog.Commit();
+            EndInsertExecTransaction(context.Batch, commit: true);
             return outcome;
         }
         catch
         {
             RewindStatement();
+            EndInsertExecTransaction(context.Batch, commit: false);
             throw;
         }
         finally

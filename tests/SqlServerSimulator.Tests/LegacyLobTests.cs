@@ -268,7 +268,8 @@ public sealed class LegacyLobTests
     /// <summary>
     /// A cell that was never written has no pointer, so <c>TEXTPTR</c> hands
     /// back NULL and the write refuses it — real's Msg 7133, which is what
-    /// forces the initialize-with-an-empty-value dance.
+    /// forces the initialize-with-an-empty-value dance. The two writes follow
+    /// it with Msg 3621.
     /// </summary>
     [TestMethod]
     [DataRow("writetext t.tx @p 'x'", "WRITE TEXT", (byte)2)]
@@ -279,7 +280,8 @@ public sealed class LegacyLobTests
         var ex = Throws<SimulatedSqlException>(() => WithPointer("tx", 2, statement));
         AreEqual(7133, ex.Number);
         AreEqual(state, ex.State);
-        AreEqual($"NULL textptr (text, ntext, or image pointer) passed to {utility} function.", ex.Message);
+        AreEqual($"NULL textptr (text, ntext, or image pointer) passed to {utility} function.", ex.Errors[0].Message);
+        AreEqual(state == 2 ? 3621 : 7133, ex.Errors[^1].Number);
     }
 
     [TestMethod]
@@ -360,7 +362,8 @@ public sealed class LegacyLobTests
         var ex = Throws<SimulatedSqlException>(() => WithPointer("tx", 1, "updatetext t.tx @p 100 0 'z'"));
         AreEqual(7116, ex.Number);
         AreEqual((byte)4, ex.State);
-        AreEqual("Offset 100 is not in the range of available LOB data.", ex.Message);
+        AreEqual("Offset 100 is not in the range of available LOB data.", ex.Errors[0].Message);
+        AreEqual(3621, ex.Errors[^1].Number);
     }
 
     [TestMethod]
@@ -369,7 +372,8 @@ public sealed class LegacyLobTests
         var ex = Throws<SimulatedSqlException>(() => WithPointer("tx", 1, "updatetext t.tx @p 1 500 'z'"));
         AreEqual(7135, ex.Number);
         AreEqual((byte)4, ex.State);
-        AreEqual("Deletion length 500 is not in the range of available text, ntext, or image data.", ex.Message);
+        AreEqual("Deletion length 500 is not in the range of available text, ntext, or image data.", ex.Errors[0].Message);
+        AreEqual(3621, ex.Errors[^1].Number);
     }
 
     /// <summary>
@@ -413,19 +417,49 @@ public sealed class LegacyLobTests
             readtext t.tx @p 0 5;
             """, 7123);
 
+    /// <summary>
+    /// A pointer's value is read as its bytes cut to the first 16 — a
+    /// character value's in its code page — and too few, or a wrong 16, are
+    /// Msg 7123 rendering what was read.
+    /// </summary>
     [TestMethod]
-    public void ShortPointer_RaisesMsg7122() =>
-        new Simulation().Also(LobFixture).AssertSqlError(
-            "declare @p varbinary(16) = 0x00; readtext t.tx @p 0 5",
-            7122,
-            "Invalid text, ntext, or image pointer type. Must be binary(16).");
+    [DataRow("declare @p varbinary(16) = 0x00; readtext t.tx @p 0 5", "0x00")]
+    [DataRow("declare @p binary(20) = 0x01; readtext t.tx @p 0 5", "0x01000000000000000000000000000000")]
+    [DataRow("readtext t.tx 0x0102030405060708090a0b0c0d0e0f1011 0 5", "0x0102030405060708090A0B0C0D0E0F10")]
+    [DataRow("declare @p char(16) = 'a'; readtext t.tx @p 0 5", "0x61202020202020202020202020202020")]
+    public void PointerValue_ReadsItsFirst16Bytes(string statement, string rendered) =>
+        new Simulation().Also(LobFixture).AssertSqlError(statement, 7123, $"Invalid text, ntext, or image pointer value {rendered}.");
+
+    /// <summary>
+    /// The column and the pointer's type are judged as the batch compiles, so
+    /// none of the batch runs and no <c>TRY</c> catches them: a pointer that
+    /// can't hold <c>binary(16)</c> is Msg 7122 — a write takes an integer,
+    /// whose value is Msg 7125 at state 5 as it runs — and a column no
+    /// pointer addresses Msg 7125.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @q binary(15) = 0x01; writetext t.tx @q 'x'", 7122)]
+    [DataRow("declare @q varbinary(max) = 0x01; writetext t.tx @q 'x'", 7122)]
+    [DataRow("declare @q char(1) = 'a'; updatetext t.tx @q 0 0 'x'", 7122)]
+    [DataRow("declare @q nvarchar(16) = 'a'; writetext t.tx @q 'x'", 7122)]
+    [DataRow("declare @q bigint = 5; readtext t.tx @q 0 0", 7122)]
+    [DataRow("writetext t.tx 0x000000000000000000000000000000 'x'", 7122)]
+    [DataRow("readtext t.id 0x00000000000000000000000000000000 0 5", 7125)]
+    [DataRow("writetext t.id 0x00000000000000000000000000000000 'x'", 7125)]
+    public void PointerTypeAndColumn_RefuseTheBatchAsItCompiles(string statement, int number)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        var ex = simulation.AssertSqlError($"insert t (id) values (3); begin try {statement} end try begin catch select 0 end catch", number);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from t"));
+    }
 
     [TestMethod]
-    public void NonLobColumn_RaisesMsg7125() =>
-        new Simulation().Also(LobFixture).AssertSqlError(
-            "declare @p varbinary(16) = 0x00; readtext t.id @p 0 5",
-            7125,
-            "The text, ntext, or image pointer value conflicts with the column name specified.");
+    [DataRow("writetext t.tx 'abc' 'x'", 102)]
+    [DataRow("readtext t.tx null 0 0", 156)]
+    [DataRow("updatetext t.tx null 0 0 'x'", 156)]
+    public void PointerOperand_IsNeitherAStringNorNull(string statement, int number) =>
+        _ = new Simulation().Also(LobFixture).AssertSqlError(statement, number);
 
     [TestMethod]
     public void SinglePartName_RaisesMsg182() =>
@@ -442,11 +476,11 @@ public sealed class LegacyLobTests
 
     /// <summary>
     /// The three statements report the row counts real reports:
-    /// <c>WRITETEXT</c> 0, <c>UPDATETEXT</c> 1, <c>READTEXT</c> 1.
+    /// <c>WRITETEXT</c> 0, <c>UPDATETEXT</c> 0, <c>READTEXT</c> 1.
     /// </summary>
     [TestMethod]
     [DataRow("writetext t.tx @p 'x'", 0)]
-    [DataRow("updatetext t.tx @p 0 1 'x'", 1)]
+    [DataRow("updatetext t.tx @p 0 1 'x'", 0)]
     [DataRow("readtext t.tx @p 0 1", 1)]
     public void RowCount_MatchesStatement(string statement, int expected)
     {
@@ -519,6 +553,190 @@ public sealed class LegacyLobTests
         IsTrue(reader.Read());
         AreEqual("Hell", reader.GetString(0));
     }
+
+    /// <summary>
+    /// <c>WRITETEXT</c>'s <c>TIMESTAMP</c> clause takes a binary literal of any
+    /// length ahead of <c>WITH LOG</c> and is otherwise ignored.
+    /// </summary>
+    [TestMethod]
+    public void WriteText_TimestampClause_TakesABinaryLiteral() =>
+        AreEqual("stamped", WithPointer("tx", 1, "writetext t.tx @p timestamp = 0x0102030405060708090A with log 'stamped'; select cast(tx as varchar(20)) from t where id = 1"));
+
+    [TestMethod]
+    [DataRow("writetext t.tx @p timestamp 0x00 'x'", 102, "Incorrect syntax near '0x00'.")]
+    [DataRow("writetext t.tx @p timestamp = @p 'x'", 102, "Incorrect syntax near '@p'.")]
+    [DataRow("writetext t.tx @p timestamp = 'zz' 'x'", 102, "Incorrect syntax near 'zz'.")]
+    [DataRow("writetext t.tx @p timestamp = null 'x'", 156, "Incorrect syntax near the keyword 'null'.")]
+    [DataRow("writetext t.tx @p with log timestamp = 0x00 'x'", 102, "Incorrect syntax near 'timestamp'.")]
+    [DataRow("updatetext t.tx @p 0 0 timestamp = 0x00 'x'", 102, "Incorrect syntax near '='.")]
+    public void TimestampClause_GrammarErrors(string statement, int number, string message) =>
+        new Simulation().Also(LobFixture).AssertSqlError($"declare @p varbinary(16); {statement}", number, message);
+
+    /// <summary>
+    /// A write's error past its pointer's type aborts as under
+    /// <c>XACT_ABORT</c>, where <c>READTEXT</c>'s ends only its statement:
+    /// the batch ends, an open transaction rolls back, and Msg 3621 follows
+    /// at line 1.
+    /// </summary>
+    [TestMethod]
+    [DataRow("writetext t.tx 0x00000000000000000000000000000000 'x'", 7123)]
+    [DataRow("writetext bulk t.tx 0x00000000000000000000000000000000", 7123)]
+    [DataRow("declare @q varbinary(16); writetext t.tx @q 'x'", 7133)]
+    [DataRow("declare @q int = 5; writetext t.tx @q 'x'", 7125)]
+    [DataRow("updatetext t.tx @p 100 0 'z'", 7116)]
+    [DataRow("updatetext t.tx @p 1 500 'z'", 7135)]
+    [DataRow("declare @q varbinary(16) = (select textptr(nt) from t where id = 1); updatetext t.tx @p 0 0 t.nt @q", 518)]
+    public void WriteErrors_AbortTheTransaction(string statement, int number)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"begin tran;\ninsert t (id) values (3);\ndeclare @p varbinary(16) = (select textptr(tx) from t where id = 1);\n{statement};\ninsert t (id) values (4)";
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(number, ex.Number);
+        AreEqual(3621, ex.Errors[^1].Number);
+        AreEqual(1, ex.Errors[^1].LineNumber);
+        command.CommandText = "select concat(@@trancount, '|', (select count(*) from t))";
+        AreEqual("0|2", command.ExecuteScalar());
+    }
+
+    [TestMethod]
+    [DataRow("writetext t.tx 0x00000000000000000000000000000000 'x'", 7123)]
+    [DataRow("updatetext t.tx @p 100 0 'z'", 7116)]
+    public void WriteErrors_CaughtDoomTheTransaction(string statement, int number)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            begin tran;
+            insert t (id) values (3);
+            declare @p varbinary(16) = (select textptr(tx) from t where id = 1);
+            begin try {statement} end try begin catch select concat(error_number(), '|', xact_state(), '|', @@trancount) end catch
+            """;
+        List<object> results = [];
+        var ex = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            do
+            {
+                while (reader.Read())
+                    results.Add(reader.GetValue(0));
+            }
+            while (reader.NextResult());
+        });
+        CollectionAssert.AreEqual(new object[] { $"{number}|-1|1" }, results);
+        AreEqual(3998, ex.Number);
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void ReadTextError_EndsOnlyItsStatement()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        _ = simulation.AssertSqlError("readtext t.tx 0x00000000000000000000000000000000 0 0; insert t (id) values (3)", 7123);
+        AreEqual(3, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void WriteError_ATryCatchesIt() =>
+        AreEqual(7123, new Simulation().Also(LobFixture).ExecuteScalar(
+            "begin try writetext t.tx 0x00000000000000000000000000000000 'x' end try begin catch select error_number() end catch"));
+
+    /// <summary>
+    /// A bulk form's Msg 4022 aborts as its other errors do, rolling back the
+    /// transaction the suspended batch opened.
+    /// </summary>
+    [TestMethod]
+    public void BulkForm_Msg4022_RollsBackTheTransaction()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "begin tran; insert t (id) values (3); declare @p varbinary(16) = (select textptr(tx) from t where id = 1); writetext bulk t.tx @p";
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 1";
+        AreEqual(4022, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+        command.CommandText = "select concat(@@trancount, '|', (select count(*) from t))";
+        AreEqual("0|2", command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// The bulk forms take their data from the stream that follows, so data in
+    /// the statement — the copy form's source too — is Msg 185 as the batch
+    /// compiles, before any of it runs.
+    /// </summary>
+    [TestMethod]
+    [DataRow("writetext bulk t.tx @p 'x'")]
+    [DataRow("writetext bulk t.tx @p with log 'x'")]
+    [DataRow("writetext bulk t.tx @p timestamp = 0x00 null")]
+    [DataRow("writetext bulk t.tx @p @p")]
+    [DataRow("updatetext bulk t.tx @p 0 0 0x01")]
+    [DataRow("updatetext bulk t.tx @p 0 0 t.tx @p")]
+    public void BulkForm_DataInTheStatement_IsMsg185(string statement)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        simulation.AssertSqlError($"insert t (id) values (3); declare @p varbinary(16); {statement}", 185, "Data stream is invalid for WRITETEXT statement in bulk form.");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>
+    /// In process no bulk-load packet can follow, so the batch a bulk form
+    /// suspended meets Msg 4022 with the connection's next command, which runs
+    /// none of its own text.
+    /// </summary>
+    [TestMethod]
+    [DataRow("writetext bulk t.tx @p")]
+    [DataRow("updatetext bulk t.tx @p 0 null with log")]
+    public void BulkForm_InProcess_TheNextCommandMeetsMsg4022(string statement)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"declare @p varbinary(16) = (select textptr(tx) from t where id = 1); {statement}; insert t (id) values (3)";
+        AreEqual(-1, command.ExecuteNonQuery());
+
+        command.CommandText = "insert t (id) values (4)";
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(4022, ex.Number);
+        AreEqual("Bulk load data was expected but not sent. The batch will be terminated.", ex.Errors[0].Message);
+        AreEqual(3621, ex.Errors[^1].Number);
+
+        command.CommandText = "select count(*) from t";
+        AreEqual(2, command.ExecuteScalar());
+        AreEqual("Hello world, this is a text column.", simulation.ExecuteScalar("select cast(tx as varchar(50)) from t where id = 1"));
+    }
+
+    [TestMethod]
+    public void BulkForm_ClosingTheConnection_EndsTheWaitingBatch()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "declare @p varbinary(16) = (select textptr(tx) from t where id = 1); writetext bulk t.tx @p";
+        _ = command.ExecuteNonQuery();
+        connection.Close();
+        connection.Open();
+        command.CommandText = "select count(*) from t";
+        AreEqual(2, command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A statement a block, an <c>IF</c> or a <c>TRY</c> runs sends its
+    /// outcomes with the statement enclosing it, so a bulk form there can't
+    /// suspend its batch.
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1 = 1 writetext bulk t.tx @p")]
+    [DataRow("begin writetext bulk t.tx @p end")]
+    [DataRow("begin try updatetext bulk t.tx @p 0 0 end try begin catch end catch")]
+    public void BulkForm_Nested_IsNotModeled(string statement) =>
+        _ = Throws<NotSupportedException>(() => new Simulation().Also(LobFixture).ExecuteNonQuery($"declare @p varbinary(16) = (select textptr(tx) from t where id = 1); {statement}"));
 }
 
 internal static class LegacyLobTestExtensions

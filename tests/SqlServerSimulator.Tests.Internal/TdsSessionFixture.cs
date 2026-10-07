@@ -121,6 +121,7 @@ internal sealed class TdsSessionFixture : IDisposable
     /// <summary>
     /// The response's tokens as short text naming each DONE's kind, bits and
     /// count — <c>DONE D4 MORE 0</c>, <c>DONEINPROC C1 MORE|COUNT 1</c>,
+    /// <c>DONE FD ERROR|ATTN 0</c>,
     /// <c>DONEPROC E0 FINAL 0</c> — with <c>RET n</c> for a RETURNSTATUS,
     /// <c>ENVn</c> for an ENVCHANGE, <c>ERR n</c> / <c>INFO n</c>, and
     /// <c>ROWS</c> for a result set, which may carry only <c>int</c> columns.
@@ -185,6 +186,10 @@ internal sealed class TdsSessionFixture : IDisposable
                             bits.Add("ERROR");
                         if ((status & Tds.DoneCount) != 0)
                             bits.Add("COUNT");
+                        if ((status & Tds.DoneAttention) != 0)
+                            bits.Add("ATTN");
+                        if ((status & Tds.DoneServerError) != 0)
+                            bits.Add("SRVERROR");
                         var name = token == Tds.TokenDone ? "DONE" : token == Tds.TokenDoneProc ? "DONEPROC" : "DONEINPROC";
                         tokens.Add($"{name} {BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i + 2)):X2} {(bits.Count == 0 ? "FINAL" : string.Join('|', bits))} {BinaryPrimitives.ReadInt64LittleEndian(response.AsSpan(i + 4))}");
                         i += 12;

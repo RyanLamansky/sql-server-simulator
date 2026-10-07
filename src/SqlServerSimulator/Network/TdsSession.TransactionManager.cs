@@ -48,7 +48,9 @@ internal sealed partial class TdsSession
     /// Handles a Transaction Manager request (begin / commit / rollback /
     /// save), mapping it onto the session connection's transaction API.
     /// SqlClient sends these for the <c>SqlTransaction</c> object model;
-    /// SQL-text transactions never arrive this way.
+    /// SQL-text transactions never arrive this way. Every response closes with
+    /// a DONE naming the batch kind, and an error reports line 1 (probed
+    /// 2026-10-07 against SQL Server 2025).
     /// </summary>
     private void ExecuteTransactionManagerRequest(TdsMessage message, TdsTokenWriter writer)
     {
@@ -96,7 +98,7 @@ internal sealed partial class TdsSession
                             _ = this.connection.StartTransaction(isolationLevel);
                         }
                         this.WriteTransactionEnvChanges(writer);
-                        writer.WriteDone(Tds.DoneFinal, 0);
+                        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneFinal, 0, StatementDoneKind.Batch);
                         break;
                     }
 
@@ -124,7 +126,7 @@ internal sealed partial class TdsSession
                             open.EndCommit();
                         this.BeginFollowOnTransactionIfRequested(beginNext);
                         this.WriteTransactionEnvChanges(writer);
-                        writer.WriteDone(Tds.DoneFinal, 0);
+                        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneFinal, 0, StatementDoneKind.Batch);
                         break;
                     }
 
@@ -152,7 +154,7 @@ internal sealed partial class TdsSession
                         }
 
                         this.WriteTransactionEnvChanges(writer);
-                        writer.WriteDone(Tds.DoneFinal, 0);
+                        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneFinal, 0, StatementDoneKind.Batch);
                         break;
                     }
 
@@ -163,7 +165,7 @@ internal sealed partial class TdsSession
                             ?? throw SimulatedSqlException.SaveTransactionWithoutTransaction();
                         RefuseWithRequestsPending(open, state: 2);
                         open.SetSavepointByName(name);
-                        writer.WriteDone(Tds.DoneFinal, 0);
+                        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneFinal, 0, StatementDoneKind.Batch);
                         break;
                     }
 
@@ -172,21 +174,21 @@ internal sealed partial class TdsSession
                         Tds.TokenError, 50000, 1, 16,
                         $"The SqlServerSimulator network listener does not support Transaction Manager request type {requestType}.",
                         "SIMULATED", "", 1);
-                    writer.WriteDone(Tds.DoneError, 0);
+                    writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, StatementDoneKind.Batch);
                     break;
             }
         }
         catch (SimulatedSqlException ex)
         {
-            WriteErrors(writer, ex);
+            WriteErrors(writer, AtLineOne(ex));
             this.WriteTransactionEnvChanges(writer);
-            writer.WriteDone(Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, StatementDoneKind.Batch);
         }
 #pragma warning disable CA1031 // Deliberate: see TdsSession.IsRecoverableStatementFault.
         catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
         {
             WriteUnexpectedStatementFault(writer, ex);
-            writer.WriteDone(Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, StatementDoneKind.Batch);
         }
 #pragma warning restore CA1031
     }

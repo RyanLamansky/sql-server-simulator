@@ -1252,6 +1252,7 @@ internal sealed partial class Selection
                     _ = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
                     if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
                         RemoteWrite.RequireNoTransaction(context.Batch, linkedServer);
+                    RemoteWrite.RequireResumableTransaction(context.Batch, linkedServer);
                     var linkedColumnNames = new string[remoteColumns.Length];
                     for (var ci = 0; ci < linkedColumnNames.Length; ci++)
                         linkedColumnNames[ci] = remoteColumns[ci].Name;

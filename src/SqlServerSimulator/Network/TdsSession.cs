@@ -232,6 +232,16 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 if (message is null)
                     return;
 
+                // A WRITETEXT BULK waiting for its data takes whatever comes
+                // next, in place of what that message asks.
+                if (this.connection!.ParkedBulkText is { } parkedBulkText)
+                {
+                    if (!await this.ResumeBulkTextAsync(parkedBulkText, message, writer, cancellationToken).ConfigureAwait(false))
+                        return;
+                    pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
+                    continue;
+                }
+
                 if (message.PacketType == Tds.PacketAttention)
                 {
                     // Attention with nothing executing: the session was idle, or
@@ -796,15 +806,24 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             writer.WriteResetConnectionAck();
         }
 
-        this.databaseAtMessageStart = this.connection!.Database;
         // Test-only: force an exception the typed catches below don't handle, to
         // exercise the terminal crash boundary. No-op in production (hook null).
         simulation.NetworkBatchCrashHookForTesting?.Invoke();
+        await this.ExecuteBatchTextAsync(ExtractBatchText(message.Payload), writer, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs a SQL batch's text and streams its response, converting an error
+    /// that escapes it into the response's closing tokens.
+    /// </summary>
+    private async ValueTask ExecuteBatchTextAsync(string batchText, TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        this.databaseAtMessageStart = this.connection!.Database;
         try
         {
             using var command = this.connection.CreateCommand();
 #pragma warning disable CA2100 // This IS a SQL endpoint: the batch text is the client's query by design.
-            command.CommandText = ExtractBatchText(message.Payload);
+            command.CommandText = batchText;
 #pragma warning restore CA2100
             command.YieldsBetweenStatements = this.multiplexer is not null;
             // A cancelled batch (return value true) leaves the DONE_ATTN
@@ -1251,9 +1270,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // batch's closing DONE when it ended the batch.
                 TakeBackDoneAheadOfKill(writer, errorOutcome.Exception);
                 WriteErrors(writer, errorOutcome.Exception);
-                var errorEvents = this.EventsBefore(errorOutcome, this.PendingTransactionEventCount);
+                // The rollback the error caused goes out ahead of the Msg 3621
+                // closing its statement (probed 2026-10-07 against SQL Server
+                // 2025).
+                this.WriteTransactionEnvChanges(writer, this.EventsBefore(errorOutcome, this.PendingTransactionEventCount));
                 hasOutcome = AdvancePastClosingMessages();
-                this.WriteTransactionEnvChanges(writer, errorEvents);
                 if (errorOutcome.DoneKind == StatementDoneKind.ClosedByScope)
                 {
                     closed = false;

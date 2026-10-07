@@ -310,6 +310,7 @@ partial class Selection
         var server = RemoteWrite.ResolveServer(context.Batch, serverName);
         if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
             RemoteWrite.RequireNoTransaction(context.Batch, server);
+        RemoteWrite.RequireResumableTransaction(context.Batch, server);
 
         var (schema, columnNames, nullability) = DiscoverOpenQuerySchema(context.Batch, server, queryText);
         var plan = ForOpenQuery(server, queryText, schema, columnNames);

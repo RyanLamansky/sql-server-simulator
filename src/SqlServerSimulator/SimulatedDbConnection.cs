@@ -310,6 +310,24 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool ScopesTransactionsToBatch;
 
     /// <summary>
+    /// The batch a <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> suspended
+    /// while it waits for its data, which the session's next request resumes
+    /// in place of its own; null when none waits.
+    /// </summary>
+    internal SimulatedBulkTextRequest? ParkedBulkText;
+
+    /// <summary>
+    /// Ends a batch <see cref="ParkedBulkText"/> holds without resuming it, as
+    /// an attention, the session's end or a request real can't take in its
+    /// place does: the batch unwinds where it waits.
+    /// </summary>
+    internal void AbandonParkedBulkText()
+    {
+        if (Interlocked.Exchange(ref this.ParkedBulkText, null) is { Batch: { } batch })
+            batch.Dispose();
+    }
+
+    /// <summary>
     /// The requests this session is serving (see <see cref="SessionRequest"/>)
     /// that are still running or still outstanding: over TDS, the MARS
     /// requests received and not yet fully answered — executing, waiting for
@@ -2211,6 +2229,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override void Close()
     {
         using var culture = CultureScope.Engine();
+        this.AbandonParkedBulkText();
         // SqlClient auto-rolls-back any active transaction when its
         // connection closes. The transaction's own dispose handles the
         // explicit using-pattern; this branch covers raw Close() without
@@ -2248,6 +2267,7 @@ public sealed class SimulatedDbConnection : DbConnection
         else
         {
             this.Session.Reclaimed = true;
+            this.AbandonParkedBulkText();
             lock (this.sessionGate)
             {
                 this.RollBackTransactions();
@@ -2397,10 +2417,11 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
-    /// Opens the transaction a request carries on in, doomed, after another
-    /// request ended the one it worked in: the client was told of that
-    /// ending, so neither this transaction's beginning nor its end is
-    /// announced.
+    /// Opens a transaction whose beginning and end the client isn't told of:
+    /// the one a request carries on in, doomed, after another request ended
+    /// the one it worked in — the client was told of that ending — and an
+    /// <c>INSERT … EXEC</c>'s own, which a loopback server's call feeding it
+    /// runs in.
     /// </summary>
     internal SimulatedDbTransaction StartUnannouncedTransaction()
     {

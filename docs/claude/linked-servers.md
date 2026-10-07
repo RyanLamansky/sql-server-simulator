@@ -158,6 +158,14 @@ Committing across two `Simulation`s would need a coordinator that real's default
 `sys.dm_tran_session_transactions` lists its session neither local nor bound, and its database lock is the caller's workspace's.
 The call's session joins the caller's transaction for the call and leaves it as the call returns (`SimulatedDbTransaction.Attach` / `Detach`, from `RunRemoteCall`) — see [`locking.md`](locking.md#sessions-sharing-a-transaction) for the shared lock owner.
 With `remote proc transaction promotion` off, every server's call runs outside the transaction.
+Probed 2026-10-07 against SQL Server 2025, all modeled:
+
+- **Every call of one transaction to a server runs in one session**, which keeps the temporary tables and `CONTEXT_INFO` an earlier call left in it; it closes as the transaction ends.
+- **A call feeding an `INSERT … EXEC` outside a transaction** runs in the insert's own, unannounced to the client: it reads `@@TRANCOUNT` 1, and its writes commit with the insert or roll back when the insert fails (`BatchContext.InsertExecTransaction`).
+- **An enlisted call can't end the caller's transaction.**
+  Its `ROLLBACK`, or an error its own `XACT_ABORT` ends it on, takes the call out of the transaction (it reads `@@TRANCOUNT` 0 afterwards) and leaves the transaction doomed with its work in place, which the caller's batch then rolls back with Msg 3998; its outermost `COMMIT` is Msg 3981, ending the call and dooming the transaction the same way.
+- **A read of the server after an enlisted call** — `OPENQUERY` or a four-part name — meets the call's session, enlisted in the transaction, and can't resume it: Msg 3971 at line 1, ending the batch and rolling the transaction back as under `XACT_ABORT`, or dooming it when a `TRY` catches it.
+  A read ahead of the transaction's first call, or once it has ended, runs as any does.
 
 **A loopback read doesn't enlist**, so an `OPENQUERY` or four-part read of a row the caller's open transaction holds waits on the caller's lock, which real sits out until the provider's query timeout and then ends with the provider's Msg 7412 (`Query timeout expired`), Msg 7399 and Msg 7320 quoting the query, ending the batch and rolling the transaction back as under `XACT_ABORT` (probed 2026-10-07 against SQL Server 2025).
 The query here runs on the caller's own thread, where the wait could never end, so it raises the same errors at once (`SimulatedSqlException.ProviderQueryTimeout`).
@@ -180,8 +188,8 @@ The query here runs on the caller's own thread, where the wait could never end, 
 - **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
 - **A conversion a four-part read's query applies** (`CAST(a AS int)`) fails locally at the statement's line, where real remotes it and relays the error at line 1 (probed 2026-10-06 against SQL Server 2025); which expressions real sends to the server is its optimizer's choice — not chased.
 - **The system objects a schema rowset lists are the simulator's own**: real's `sp_tables_ex` lists 74 system tables and 628 system views in a user database, and `master`'s `spt_*` objects, which `sys.all_objects` here doesn't carry (see [`catalog-views.md`](catalog-views.md)).
-- **An enlisted call's own `ROLLBACK`** ends the caller's transaction here, which the caller then hears as Msg 3926; real's caller reads `@@TRANCOUNT` 1 afterwards (probed 2026-10-07 against SQL Server 2025).
-- **Each enlisted call opens a session of its own**, where real's provider reuses one session, one `@@SPID`, for every call of a transaction.
+- **A call outside a transaction opens a session of its own**, where real's provider takes one from a pool, reset, so the same `@@SPID` answers call after call, across the caller's batches and sessions too (probed 2026-10-07 against SQL Server 2025); what one call leaves in its session is gone by the next either way.
+- **Msg 3971's `Desc`** is real's opaque transaction handle; here it is the enlisted session's id and the transaction's, in hex.
 - **The provider's timeout of a loopback read** follows an empty result set's metadata here, where real sends none, and quotes the simulator's own query text for a four-part read, where real's provider sends its own (`SELECT … "Tbl1002"`).
 - **The `#temp` note's second copy**: real recompiles a statement reading a temporary table the batch itself created and sends its Msg 2701 again as the statement runs, where the simulator sends it once, as the batch compiles.
 
@@ -194,8 +202,7 @@ The query here runs on the caller's own thread, where the wait could never end, 
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`**.
   The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
-- **A loopback's `INSERT … EXEC … AT` outside a transaction** runs in the insert's own statement transaction on real, reading `@@TRANCOUNT` 1; here it runs outside any (probed 2026-10-07 against SQL Server 2025).
-- **An `OPENQUERY` after an enlisted call** in the same transaction meets the provider's reused session on real, which raises Msg 3971 (`The server failed to resume the transaction.`) and rolls the transaction back (probed 2026-10-07 against SQL Server 2025); here it reads as any `OPENQUERY` does.
+- **A remote call's DONE tokens**: real frames an `EXEC … AT`'s statements as a procedure scope's — DONEINPROC, then RETURNSTATUS and DONEPROC — where the simulator sends each a batch-level DONE (probed 2026-10-07 against SQL Server 2025).
 
 ## sys.servers shape
 

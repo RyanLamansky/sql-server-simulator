@@ -1,3 +1,4 @@
+using System.Globalization;
 using SqlServerSimulator.Parser;
 
 namespace SqlServerSimulator;
@@ -110,6 +111,19 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException TransactionContextInUse() =>
         new SimulatedSqlException("Transaction context in use by another session.", 3910, 16, 2) { AbortsAsUnderXactAbort = true }.PinLine(1);
+
+    /// <summary>
+    /// Msg 3971: an <c>OPENQUERY</c> or four-part read of a loopback server
+    /// a remote call of the caller's transaction ran on, which meets that
+    /// call's session — enlisted in the transaction — and can't resume it.
+    /// Reported at line 1, ending the batch and rolling the transaction back
+    /// as <see cref="TransactionContextInUse"/> does (probed 2026-10-07
+    /// against SQL Server 2025). Real's <c>Desc</c> is an opaque transaction
+    /// handle; this one is the enlisted session's id and the transaction's,
+    /// in hex.
+    /// </summary>
+    internal static SimulatedSqlException CannotResumeTransaction(int sessionId, long transactionId) =>
+        new SimulatedSqlException(string.Create(CultureInfo.InvariantCulture, $"The server failed to resume the transaction. Desc:{sessionId:x}{transactionId:x8}."), 3971, 16, 1) { AbortsAsUnderXactAbort = true }.PinLine(1);
 
     /// <summary>
     /// Msg 7412, class 0: a message the provider returned, which real relays

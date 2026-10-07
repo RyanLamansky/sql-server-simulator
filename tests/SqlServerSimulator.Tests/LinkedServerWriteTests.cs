@@ -495,6 +495,128 @@ public class LinkedServerWriteTests
             """).ExecuteScalar());
     }
 
+    /// <summary>
+    /// A loopback's call feeding an <c>INSERT … EXEC</c> outside a transaction
+    /// runs in the insert's own, whose writes go with the insert's.
+    /// </summary>
+    [TestMethod]
+    public void Loopback_InsertExecOutsideATransaction_RunsInTheInsertsOwn()
+    {
+        var sim = LoopbackOverRows();
+        _ = sim.ExecuteNonQuery("create table r (v int check (v < 10))");
+        using var connection = sim.CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("insert r exec ('select @@trancount') at SELF; select v from r").ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert r exec ('insert simulated.dbo.t values (7, 70); select 99') at SELF").ExecuteNonQuery());
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+        _ = connection.CreateCommand("insert r exec ('insert simulated.dbo.t values (7, 70); select 5') at SELF").ExecuteNonQuery();
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>
+    /// A read of a loopback server a remote call of the transaction ran on
+    /// meets that call's session, enlisted in the transaction, and can't
+    /// resume it: Msg 3971 at line 1, ending the batch and rolling back, or
+    /// dooming the transaction when caught.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select @c = a from openquery(SELF, 'select 1 a')")]
+    [DataRow("select @c = count(*) from SELF.simulated.dbo.t")]
+    public void Loopback_ReadAfterAnEnlistedCall_IsMsg3971(string read)
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand($"declare @c int; begin tran; exec ('select 1') at SELF;\n\n{read}; select 1").ExecuteNonQuery());
+        AreEqual(3971, error.Number);
+        AreEqual(1, error.LineNumber);
+        StartsWith("The server failed to resume the transaction. Desc:", error.Message);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual("3971|-1|1", connection.CreateCommand($"""
+            declare @c int; begin tran; exec ('declare @x int') at SELF;
+            begin try {read} end try begin catch select concat(error_number(), '|', xact_state(), '|', @@trancount) end catch;
+            rollback
+            """).ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Loopback_ReadBeforeTheCallOrOnceTheTransactionEnds_Runs()
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        AreEqual(2, connection.CreateCommand("begin tran; select a from openquery(SELF, 'select 2 a'); exec ('select 1') at SELF; commit; select a from openquery(SELF, 'select 2 a')").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Every call of one transaction to a loopback server runs in one session,
+    /// which keeps what an earlier call left in it; outside a transaction each
+    /// call starts afresh.
+    /// </summary>
+    [TestMethod]
+    public void Loopback_CallsOfOneTransaction_ShareASession()
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        AreEqual("1|1", connection.CreateCommand("""
+            declare @first int, @second int, @temp int;
+            begin tran;
+            exec ('create table #k (i int); select ? = @@spid', @first output) at SELF;
+            exec ('select ? = @@spid, ? = case when object_id(''tempdb..#k'') is null then 0 else 1 end', @second output, @temp output) at SELF;
+            commit;
+            select concat(case when @first = @second then 1 else 0 end, '|', @temp)
+            """).ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("""
+            declare @temp int;
+            exec ('create table #k (i int)') at SELF;
+            exec ('select ? = case when object_id(''tempdb..#k'') is null then 0 else 1 end', @temp output) at SELF;
+            select @temp
+            """).ExecuteScalar());
+    }
+
+    /// <summary>
+    /// An enlisted call can't end its caller's transaction: its ROLLBACK
+    /// leaves it, the transaction doomed with its work in place, which the
+    /// caller's batch then rolls back with Msg 3998.
+    /// </summary>
+    [TestMethod]
+    public void Loopback_EnlistedRollback_DoomsTheCallersTransaction()
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand("begin tran; insert t values (3, 30); exec ('rollback; select @@trancount') at SELF; select concat(@@trancount, '|', xact_state(), '|', (select count(*) from t))");
+        List<string> results = [];
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            do
+            {
+                while (reader.Read())
+                    results.Add(Convert.ToString(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture)!);
+            }
+            while (reader.NextResult());
+        });
+        CollectionAssert.AreEqual(new[] { "0", "1|-1|3" }, results);
+        AreEqual(3998, error.Number);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>
+    /// An error XACT_ABORT ends an enlisted call on, or the call's refused
+    /// COMMIT (Msg 3981), is the call's failure and dooms the caller's
+    /// transaction, which its batch carries on in to Msg 3998.
+    /// </summary>
+    [TestMethod]
+    [DataRow("set xact_abort on; select 1/0", 8134)]
+    [DataRow("commit; select @@trancount", 3981)]
+    public void Loopback_EnlistedCallsFailure_DoomsTheCallersTransaction(string call, int number)
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand($"begin tran; insert t values (3, 30); exec ('{call}') at SELF; insert t values (4, 40)").ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[] { number, 3930, 3998 }, error.Errors.Cast<SimulatedError>().Select(entry => entry.Number).Where(entry => entry != 3621).ToArray());
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
     [TestMethod]
     public void ReadInLocalTransaction_NeedsNoPromotion()
         => AreEqual(0, Linked("create table t (id int)").Local.ExecuteScalar("begin tran; select count(*) from OTHER.simulated.dbo.t; commit"));

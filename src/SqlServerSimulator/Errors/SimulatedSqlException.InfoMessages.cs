@@ -80,7 +80,9 @@ partial class SimulatedSqlException
             message.LineNumber = error.LineNumber;
             message.Procedure = error.Procedure;
         }
-        else if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { EndedTriggerBody: true })
+        // So does a WRITETEXT or UPDATETEXT, whatever its error (probed
+        // 2026-10-07).
+        else if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { EndedTriggerBody: true } || batch.CurrentStatement.WritesText)
         {
             message.LineNumber = 1;
         }

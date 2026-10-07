@@ -278,7 +278,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   One shared seam narrows every integer argument, so a new id / position / count parameter gets its range error for free by routing through it → [`scalars.md`](docs/claude/scalars.md).
 - **The native `REGEXP_*` family** (SQL Server 2025) — the four scalars, the `REGEXP_LIKE` predicate, the two rowset members, and the RE2 pattern dialect the simulator translates into .NET `Regex`.
   RE2 is not a `Regex` subset in either direction: some constructs are refused and others silently mean something else → [`scalars.md`](docs/claude/scalars.md#the-native-regexp_-family-sql-server-2025).
-- **Legacy LOB** — where `text` / `ntext` / `image` can't go, binary `SUBSTRING`, `TEXTPTR` / `TEXTVALID`, and `READTEXT` / `WRITETEXT` / `UPDATETEXT`.
+- **Legacy LOB** — where `text` / `ntext` / `image` can't go, binary `SUBSTRING`, `TEXTPTR` / `TEXTVALID`, and `READTEXT` / `WRITETEXT` / `UPDATETEXT`, the `BULK` forms included.
+  A bulk form **suspends its batch** on its connection, and the connection's next command resumes it in place of its own text.
   The non-comparable rejections split by *slot* rather than by type, so `xml` and the spatial pair share most of them → [`legacy-lob.md`](docs/claude/legacy-lob.md).
 - **Type promotion and arithmetic** — `Promote` / `PromoteForArithmetic`, `Storage/Decimal38`, decimal precision-scale, integer overflow and literal typing.
   `PromoteForArithmetic` is the single source of truth for both `GetSqlType` and the runtime; **they must agree**, because the row encoder rejects a type mismatch.

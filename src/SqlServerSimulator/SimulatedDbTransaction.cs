@@ -513,6 +513,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         this.ReleaseMembers();
         this.Owner.RecordTransactionEvent(TransactionEvent.Commit, this);
+        this.CloseEnlistedSessions();
     }
 
     /// <summary>
@@ -524,6 +525,17 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </summary>
     internal void EndRollback(TransactionEvent cause = TransactionEvent.Rollback)
     {
+        // A loopback server's call rolling back the caller's transaction it
+        // runs in — a ROLLBACK, an error XACT_ABORT promotes, a refused COMMIT
+        // — leaves it, the transaction doomed for the caller with its work in
+        // place until the caller's batch ends it (probed 2026-10-07 against
+        // SQL Server 2025).
+        if (this.RunningEnlistedMember() is { } enlisted)
+        {
+            this.Doomed = true;
+            _ = this.Detach(enlisted);
+            return;
+        }
         var db = this.Owner.CurrentDatabase;
         // The heap rewinds first: until the pending versions go, a snapshot
         // reads past the rolled-back rows to the versions they superseded.
@@ -538,6 +550,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.ReleaseMembers();
         this.Owner.RecordTransactionEvent(cause, this);
         this.Owner.NoteTransactionRolledBack(this);
+        this.CloseEnlistedSessions();
     }
 
     /// <summary>
@@ -634,6 +647,80 @@ public sealed class SimulatedDbTransaction : DbTransaction
 
     /// <summary>Serializes the members' runs and every change to <see cref="Members"/>.</summary>
     private readonly object membersGate = new();
+
+    /// <summary>
+    /// The member running now when it is a loopback server's session a remote
+    /// call enlisted; null otherwise.
+    /// </summary>
+    private SimulatedDbConnection? RunningEnlistedMember()
+    {
+        lock (this.membersGate)
+            return this.Members is not null && this.runner is { Membership: TransactionMembership.Enlisted } enlisted ? enlisted : null;
+    }
+
+    /// <summary>
+    /// The loopback servers' sessions the transaction's remote calls ran in,
+    /// each kept between calls: real's provider runs every call of one
+    /// transaction to a server in one session, whose temporary tables and
+    /// <c>CONTEXT_INFO</c> carry from call to call (probed 2026-10-07 against
+    /// SQL Server 2025). Closed as the transaction ends; null until a call
+    /// ran. A session out on a call isn't listed.
+    /// </summary>
+    private Dictionary<LinkedServer, SimulatedDbConnection>? enlistedSessions;
+
+    /// <summary>
+    /// Takes the session an earlier call of the transaction ran in on
+    /// <paramref name="server"/>, for the next call to run in; null when none
+    /// ran.
+    /// </summary>
+    internal SimulatedDbConnection? TakeEnlistedSession(LinkedServer server)
+    {
+        lock (this.membersGate)
+            return this.enlistedSessions is { } sessions && sessions.Remove(server, out var session) ? session : null;
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="session"/> for the transaction's next call to
+    /// <paramref name="server"/>; false once the transaction has ended, when
+    /// the caller closes it instead.
+    /// </summary>
+    internal bool KeepEnlistedSession(LinkedServer server, SimulatedDbConnection session)
+    {
+        lock (this.membersGate)
+        {
+            if (this.Ended)
+                return false;
+            (this.enlistedSessions ??= [])[server] = session;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The session a remote call of the transaction ran in on
+    /// <paramref name="server"/>, which the provider's read of that server
+    /// meets and can't resume the transaction in (see
+    /// <see cref="SimulatedSqlException.CannotResumeTransaction"/>); null when
+    /// no call ran.
+    /// </summary>
+    internal SimulatedDbConnection? EnlistedSessionOn(LinkedServer server)
+    {
+        lock (this.membersGate)
+            return this.enlistedSessions is { } sessions && sessions.TryGetValue(server, out var session) ? session : null;
+    }
+
+    private void CloseEnlistedSessions()
+    {
+        Dictionary<LinkedServer, SimulatedDbConnection>? sessions;
+        lock (this.membersGate)
+        {
+            sessions = this.enlistedSessions;
+            this.enlistedSessions = null;
+        }
+        if (sessions is null)
+            return;
+        foreach (var (_, session) in sessions)
+            session.Dispose();
+    }
 
     /// <summary>Whether <paramref name="connection"/> is the member whose count <see cref="TranCount"/> holds.</summary>
     internal bool IsRunBy(SimulatedDbConnection connection) => ReferenceEquals(this.runner ?? this.Owner, connection);

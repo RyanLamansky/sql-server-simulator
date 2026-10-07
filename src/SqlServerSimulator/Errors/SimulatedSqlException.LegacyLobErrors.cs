@@ -17,8 +17,9 @@ partial class SimulatedSqlException
         new("Table and column names must be supplied for the READTEXT or WRITETEXT utility.", 182, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 7122 — the pointer operand's own type isn't the
-    /// <c>binary(16)</c> the statements take.
+    /// Mimics SQL Server's Msg 7122 — the pointer operand's own type can't
+    /// hold the <c>binary(16)</c> the statements take, which real judges as
+    /// the batch compiles.
     /// </summary>
     internal static SimulatedSqlException InvalidTextPointerType() =>
         new("Invalid text, ntext, or image pointer type. Must be binary(16).", 7122, 16, 1);
@@ -42,10 +43,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 7125 — the named column isn't one a text pointer
-    /// can address (anything but <c>text</c> / <c>ntext</c> / <c>image</c>).
+    /// can address (anything but <c>text</c> / <c>ntext</c> / <c>image</c>)
+    /// at state 4, or a write's pointer is an integer at state 5.
     /// </summary>
-    internal static SimulatedSqlException TextPointerConflictsWithColumnName() =>
-        new("The text, ntext, or image pointer value conflicts with the column name specified.", 7125, 16, 4);
+    internal static SimulatedSqlException TextPointerConflictsWithColumnName(byte state = 4) =>
+        new("The text, ntext, or image pointer value conflicts with the column name specified.", 7125, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 7133 — the pointer operand evaluated to NULL,
@@ -78,4 +80,37 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotConvertDataType(string from, string to) =>
         new($"Cannot convert data type {from} to {to}.", 518, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 185 — <c>WRITETEXT BULK</c> or
+    /// <c>UPDATETEXT BULK</c> written with its data in the statement, which
+    /// the bulk form takes from the stream that follows instead. Raised as
+    /// the batch compiles, so none of it runs.
+    /// </summary>
+    internal static SimulatedSqlException BulkTextDataInStatement() =>
+        new("Data stream is invalid for WRITETEXT statement in bulk form.", 185, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4022 — a <c>WRITETEXT BULK</c> or
+    /// <c>UPDATETEXT BULK</c> waiting for its data met a request that isn't a
+    /// bulk-load packet. Aborts as under <c>XACT_ABORT</c>.
+    /// </summary>
+    internal static SimulatedSqlException BulkTextDataNotSent() =>
+        new("Bulk load data was expected but not sent. The batch will be terminated.", 4022, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4002 at state 2 — the bulk-load packet carrying
+    /// a <c>WRITETEXT BULK</c>'s data ended before the 4-byte length it opens
+    /// with, or before the length announced. Aborts as under <c>XACT_ABORT</c>.
+    /// </summary>
+    internal static SimulatedSqlException BulkTextStreamEndedEarly() =>
+        new("The incoming tabular data stream (TDS) protocol stream is incorrect. The stream ended unexpectedly.", 4002, 16, 2) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4014 at state 8 — a transaction-manager request
+    /// met a <c>WRITETEXT BULK</c> waiting for its data, which real reads as a
+    /// broken input stream and ends the session for.
+    /// </summary>
+    internal static SimulatedSqlException NetworkInputFatal() =>
+        new("A fatal error occurred while reading the input stream from the network. The session will be terminated (input error: 0, output error: 0).", 4014, 20, 8);
 }

@@ -456,6 +456,9 @@ public sealed partial class SimulatedSqlException : DbException
     /// <summary>A copy of this error as the batch's compile meets it, marked <see cref="BindsWithBatch"/> and ending no batch of its own.</summary>
     internal SimulatedSqlException BindingWithBatch() => new(this.Message, [.. this.Errors]) { BindsWithBatch = true };
 
+    /// <summary>A copy of a freshly made exception that aborts as <see cref="AbortsAsUnderXactAbort"/> describes.</summary>
+    internal SimulatedSqlException AbortingAsUnderXactAbort() => new(this.Message, [.. this.Errors]) { AbortsAsUnderXactAbort = true };
+
     /// <summary>
     /// This error as a linked server raised it evaluating a remote
     /// <c>UPDATE</c>'s <c>SET</c> list and the provider relayed it: at line 1

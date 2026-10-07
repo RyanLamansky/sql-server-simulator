@@ -201,7 +201,7 @@ public sealed class StatementDoneTokenTests
         _ = fixture.RunBatch("create view pv as select k, v from a1 union all select k, v from a2");
         _ = fixture.RunBatch("insert pv values (1, 1), (11, 2)");
         var tokens = Batch(fixture, "declare c cursor for select k, v from pv; open c; fetch next from c; select 1 m; update pv set v = 5 where current of c");
-        CollectionAssert.AreEqual(new[] { "ROWS", "ERR 596", "DONE FD ERROR 0" }, tokens.Skip(tokens.Count - 3).ToArray(), string.Join(" / ", tokens));
+        CollectionAssert.AreEqual(new[] { "ROWS", "ERR 596", "DONE FD ERROR|SRVERROR 0" }, tokens.Skip(tokens.Count - 3).ToArray(), string.Join(" / ", tokens));
     }
 
     /// <summary>

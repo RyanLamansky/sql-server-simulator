@@ -1041,7 +1041,9 @@ partial class Simulation
             // through untouched so the innermost producing frame wins.
             if (this.walksUnderNoExec)
                 FrameUnranStatement(batch, outcomes, this.StatementStart, this.IsCall);
-            else if (this.StartDoneKind is not null)
+            // A WRITETEXT BULK waiting for its data sends its DONE once it has
+            // written them.
+            else if (this.StartDoneKind is not null && outcomes is not [.., SimulatedBulkTextRequest])
                 _ = FrameStatement(batch, outcomes, standInForNone: true);
             foreach (var o in outcomes)
             {

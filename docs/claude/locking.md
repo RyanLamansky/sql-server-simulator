@@ -134,7 +134,7 @@ Savepoint partial rollbacks (`ROLLBACK TRAN <savepoint>`) do NOT release locks �
 `sp_bindsession` binds a session to the transaction an `sp_getbindtoken` token names, and a loopback linked server's remote call inside a transaction runs its session in the caller's (see [`linked-servers.md`](linked-servers.md#transactions)).
 Probed 2026-10-07 against SQL Server 2025, the sessions share one transaction and one lock space:
 - each reads the others' uncommitted rows and writes over their locks without waiting, while a third session waits on all of them;
-- each nests on a `@@TRANCOUNT` of its own, and any one's outermost `COMMIT`, or `ROLLBACK`, ends the transaction for all — the others hear the informational Msg 3926 at their next batch;
+- each nests on a `@@TRANCOUNT` of its own, and any bound one's outermost `COMMIT`, or `ROLLBACK`, ends the transaction for all — the others hear the informational Msg 3926 at their next batch — where an enlisted call's only dooms it (see [`linked-servers.md`](linked-servers.md#transactions));
 - a session leaving (`sp_bindsession NULL`, closing) leaves the transaction to the rest, even the one that began it;
 - `sys.dm_tran_locks` lists the transaction's locks under the member that ran last, and its database locks — one per database — under the first member still in it;
 - `sys.dm_tran_session_transactions` lists every member: the one that began it local, a bound one bound, a loopback's enlisted session neither, `enlist_count` 1 only for a member running a request.

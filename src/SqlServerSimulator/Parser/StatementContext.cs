@@ -251,6 +251,16 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
+    /// Set by <c>WRITETEXT</c> and <c>UPDATETEXT</c> once they reach their
+    /// pointer's value: an error after that — the value, an offset, the copy
+    /// form's source, the bulk form's data — aborts as under
+    /// <c>XACT_ABORT</c> and is followed by Msg 3621 at line 1, and one a
+    /// <c>TRY</c> catches leaves the statement's DONE without a count (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    public bool WritesText;
+
+    /// <summary>
     /// The kind real names in this statement's own DONE token
     /// (<see cref="StatementDoneKind"/>), read off its leading tokens when it
     /// starts and refined by a parser that learns more — a <c>DECLARE</c>'s
@@ -509,6 +519,7 @@ internal sealed class StatementContext
         this.NullEliminated = false;
         this.OwesOverflowNotice = this.OwesDivideByZeroNotice = false;
         this.WritesRows = false;
+        this.WritesText = false;
         this.ClientOutputShape = null;
         this.SendsRows = false;
         this.TransactedWrite = false;

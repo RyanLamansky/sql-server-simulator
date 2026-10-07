@@ -288,6 +288,18 @@ internal sealed class RemoteWrite
     }
 
     /// <summary>
+    /// Refuses a read of <paramref name="server"/> once a remote call of the
+    /// session's transaction ran on it, which meets that call's enlisted
+    /// session as the read compiles (Msg 3971); a statement walked without
+    /// running reads nothing.
+    /// </summary>
+    public static void RequireResumableTransaction(BatchContext batch, LinkedServer server)
+    {
+        if (!batch.IsSkipping && batch.Connection.CurrentTransaction is { } transaction && transaction.EnlistedSessionOn(server) is { } enlisted)
+            throw SimulatedSqlException.CannotResumeTransaction(enlisted.Spid, transaction.TransactionId);
+    }
+
+    /// <summary>
     /// Refuses work on <paramref name="server"/> that would enlist it in the
     /// session's open transaction: real promotes the transaction to a
     /// distributed one, which out of the box no coordinator accepts — Msg 7391
@@ -433,11 +445,15 @@ internal sealed class RemoteWrite
     /// makes doesn't last (probed 2026-10-07 against SQL Server 2025). A query
     /// left waiting on a lock <paramref name="caller"/>'s session holds — on a
     /// loopback server, outside its caller's transaction — is the provider's
-    /// timeout (<see cref="SimulatedSqlException.ProviderQueryTimeout"/>).
+    /// timeout (<see cref="SimulatedSqlException.ProviderQueryTimeout"/>), and
+    /// one of a loopback server a remote call of <paramref name="caller"/>'s
+    /// transaction ran on is Msg 3971.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query is the caller's own pass-through text or a SELECT over identifiers the parser validated, bracket-escaped; it runs against a sibling in-process Simulation.")]
     internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false, bool ownTransaction = false, BatchContext? caller = null)
     {
+        if (caller is not null)
+            RequireResumableTransaction(caller, server);
         using var connection = server.OpenSession(database);
         connection.NoBrowseTable = browse;
         // Describing a query, as the provider does before running it, reads

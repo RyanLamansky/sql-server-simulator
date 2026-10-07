@@ -671,6 +671,30 @@ internal sealed partial class BatchContext
     public bool YieldsBetweenStatements;
 
     /// <summary>
+    /// How many statements are running inside one another: 1 while a
+    /// statement the batch's own dispatch loop reached runs, more inside a
+    /// block, a <c>TRY</c>, an <c>IF</c> or a <c>WHILE</c>, whose statements
+    /// run while the enclosing one does. Only a statement at 1 sends its
+    /// outcomes as it ends rather than with an enclosing one, which is what
+    /// lets a <c>WRITETEXT BULK</c> suspend the batch there.
+    /// </summary>
+    public int FramedStatementDepth;
+
+    /// <summary>
+    /// The suspended <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> whose
+    /// data the batch resumed with, which the statement's second run takes
+    /// to write them; null otherwise.
+    /// </summary>
+    public SimulatedBulkTextRequest? BulkTextReply;
+
+    /// <summary>
+    /// The transaction an <c>INSERT … EXEC</c> outside one began for a
+    /// loopback server's call feeding it, which the statement commits or rolls
+    /// back as it ends; null otherwise.
+    /// </summary>
+    public SimulatedDbTransaction? InsertExecTransaction;
+
+    /// <summary>
     /// Set <see langword="true"/> when a batch-aborting error (a compile /
     /// bind-class name-resolution failure — see
     /// <c>Simulation.IsBatchAbortingNameResolution</c>) fires under

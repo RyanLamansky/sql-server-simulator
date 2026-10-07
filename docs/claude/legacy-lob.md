@@ -93,10 +93,12 @@ Probed 2026-09-30 against SQL Server 2025, all modeled:
 
 ```
 READTEXT   table.column text_ptr offset size [HOLDLOCK]
-WRITETEXT  table.column text_ptr [WITH LOG] { literal | @variable }
-UPDATETEXT table.column text_ptr { NULL | insert_offset } { NULL | delete_length }
+WRITETEXT  [BULK] table.column text_ptr [TIMESTAMP = 0x…] [WITH LOG] { literal | @variable }
+UPDATETEXT [BULK] table.column text_ptr { NULL | insert_offset } { NULL | delete_length }
            [WITH LOG] [ { literal | @variable } | table.column text_ptr ]
 ```
+
+The `BULK` forms take no data in the statement — see [The bulk forms](#the-bulk-forms).
 
 The name is `[db.][schema.]table.column`, up to real's four-segment limit.
 Every operand is a literal, a variable or the `NULL` keyword — nothing composite, so `WRITETEXT t.c @p 'a' + 'b'` is Msg 102 at the operator, as on real.
@@ -111,13 +113,45 @@ Every operand is a literal, a variable or the `NULL` keyword — nothing composi
   `@@ROWCOUNT` is 1.
 - **`WRITETEXT`** replaces the whole value; a NULL operand sets the cell NULL.
   `@@ROWCOUNT` is 0.
+  Its `TIMESTAMP = 0x…` clause takes a binary literal of any length ahead of `WITH LOG` and is otherwise ignored (probed 2026-10-07 against SQL Server 2025); anything but `=` and a binary literal is a syntax error at it, and `UPDATETEXT` has no such clause, reading `TIMESTAMP` as its copy form's name and stopping at the `=`.
 - **`UPDATETEXT`** splices: it deletes `delete_length` units at `insert_offset` and puts the inserted data there.
   A **NULL or negative** insert offset appends and a **NULL or negative** delete length runs to the end (both probe-confirmed — real reads a negative exactly as it reads NULL).
   Omitting the inserted data is a pure deletion.
   The copy form takes its inserted data from a second LOB cell named by its own `table.column` and pointer.
-  `@@ROWCOUNT` is 1.
+  `@@ROWCOUNT` is 0, as `WRITETEXT`'s (probed 2026-10-07 against SQL Server 2025).
 
 `WITH LOG` parses and carries no further effect — the simulator has no recovery log to opt into, and the write is undo-logged for rollback either way.
+
+### The bulk forms
+
+Real's `WRITETEXT BULK` and `UPDATETEXT BULK` take their data from the stream that follows the batch, which only a raw TDS client sends — FreeTDS's `dbwritetext` sends `writetext bulk t.c 0x<ptr> timestamp = 0x<ts> [with log]` this way.
+Probed 2026-10-07 against SQL Server 2025 with a raw TDS client, all modeled:
+
+- The column, the pointer and its type are checked as the statement starts, with the errors the plain forms raise.
+  Then the batch's response ends there, as though the batch had: the last DONE sent loses its more bit, or a bare DONE naming the batch kind goes out when none was sent.
+- The session's next message is the data.
+  A bulk-load packet (type 7) carries a 4-byte length and the bytes, in the column's own encoding — `text`'s code page, `ntext`'s UTF-16 with an odd trailing byte read as a last character's low byte, `image` verbatim.
+  A length shorter than the bytes takes its prefix, and one longer than they are, or a packet too short to carry it, is **Msg 4002** at state 2.
+  Written, the statement sends its DONE and the batch goes on.
+- Any other request is not the data: **Msg 4022**, ending the batch, the request's own text unread and the batch's remaining output answering it instead.
+  An attention ends the batch with Msg 3621 and a DONE carrying both the attention and the error bit; a transaction-manager request ends the session with Msg 4014, the transaction's rollback, Msg 3621 and Msg 596.
+- `UPDATETEXT BULK` judges its offset and deletion length once the data have come, so Msg 7116 / 7135 follow the bulk packet.
+- Data written in the statement — a literal, a variable, `NULL`, the copy form's source — is **Msg 185** as the batch compiles, for `UPDATETEXT BULK` too.
+
+In process no bulk-load packet can follow, so the connection's next command meets Msg 4022, as SqlClient's next command would against real.
+The suspended batch is parked on the connection (`SimulatedDbConnection.ParkedBulkText`) and resumed by whichever request comes next; the statement then runs a second time from its first token to write what arrived (see `SimulatedBulkTextRequest`).
+
+### Errors abort as under `XACT_ABORT`
+
+Probed 2026-10-07 against SQL Server 2025, with and without an open transaction, inside and outside `TRY`:
+
+- **The column and the pointer's type are judged as the batch compiles**, for all three statements: none of the batch runs, no `TRY` catches it, and no transaction is touched.
+  A column no pointer addresses is Msg 7125 (state 4); a pointer that can't hold `binary(16)` is Msg 7122 — anything but `binary`, `varbinary`, `char` or `varchar` of at least 16 (`max` fails too), a binary literal shorter than 16 bytes included — save that a write takes an integer, whose value is Msg 7125 at state 5 as it runs.
+  A character literal or `NULL` as the pointer is a syntax error at it.
+- **A pointer's value is its bytes cut to the first 16**, a character value's in its code page, so a short `varbinary` or one wider than 16 reaches Msg 7123 rendering what was read.
+- **A `WRITETEXT` or `UPDATETEXT` error as it runs aborts as under `XACT_ABORT`** — the pointer's value (Msg 7123, 7133, the integer's 7125), the offset and length (Msg 7116, 7135), the copy form's source type (Msg 518, read after the source's pointer) and the bulk forms' data (Msg 4022, 4002): uncaught it ends the batch and rolls an open transaction back, the rollback's ENVCHANGE ahead of Msg 3621, which follows at line 1 whatever line the statement was on; caught it dooms the transaction, which the batch's end then rolls back with Msg 3998.
+  The caught statement's DONE carries no count.
+- **`READTEXT`'s run-time errors** (Msg 7123, 7124, 7133, 7116) end only their statement and leave a transaction committable.
 
 ### What the statements are not
 
@@ -134,7 +168,7 @@ Probe-confirmed on real, and modeled:
 | 182 | 1 | A single-part name (`READTEXT tx …`) — `Table and column names must be supplied for the READTEXT or WRITETEXT utility.` |
 | 208 / 207 | 1 | An unknown table / an unknown column in the `table.column` operand. |
 | 7125 | 4 | A column no text pointer can address (anything but `text` / `ntext` / `image`) — `The text, ntext, or image pointer value conflicts with the column name specified.` |
-| 7122 | 1 | A pointer operand narrower than `binary(16)` — `Invalid text, ntext, or image pointer type. Must be binary(16).` |
+| 7122 | 1 | A pointer operand whose type can't hold `binary(16)`, judged as the batch compiles — `Invalid text, ntext, or image pointer type. Must be binary(16).` |
 | 7123 | 1 | Bytes that carry no pointer identity, a pointer read from another column, or one whose row has since been deleted — `Invalid text, ntext, or image pointer value 0x….` |
 | 7133 | 1 / 2 | A NULL pointer, which is what a cell that was never written hands back — `NULL textptr (text, ntext, or image pointer) passed to READ TEXT function.` at state 1, `WRITE TEXT` and `UPDATE TEXT` at state 2. |
 | 7124 | 1 | `READTEXT`'s window running past the value — `The offset and length specified in the READTEXT statement is greater than the actual data length of 35.` |
@@ -149,12 +183,12 @@ Msg 7133 is what forces the classic initialization dance: a cell that has never 
 
 - **The pointer's bytes are the simulator's own**, so Msg 7123 renders different hex than real's for the same statement.
 - **A cell's LOB root is forgotten when a rolled-back delete restores its row**, so a cell a write had set NULL reads no pointer after that rollback where real's still has one.
-- A pointer wider than `binary(16)` reports Msg 7122 where real truncates to 16 bytes and reports Msg 7123.
 
 ## Not modeled yet
 
-- **`WRITETEXT BULK` / `UPDATETEXT BULK`** raise `NotSupportedException`.
-  Real's bulk form is a bulk-copy data stream rather than a statement and answers Msg 185 (`Data stream is invalid for WRITETEXT statement in bulk form.`) to a normal client.
+- **A bulk form inside a block, a `TRY`, an `IF` or a `WHILE`, a module body or dynamic SQL, or on a MARS session** raises `NotSupportedException`.
+  Those statements send their outcomes with the statement enclosing them, which has nowhere to suspend; real suspends there too, and a `TRY` around the statement catches Msg 4022 and 4002 (probed 2026-10-07 against SQL Server 2025).
+- **An in-process transaction call while a bulk form waits** — `BeginTransaction`, `Commit`, `Rollback` — runs, where SqlClient's transaction-manager request would end the session with Msg 4014.
 - **`TEXTPTR` in a joined `UPDATE` / `DELETE`, a write through a join view, or a `MERGE`** raises `NotSupportedException`: those statements' row resolvers don't carry a row locator.
   A single-target `UPDATE` / `DELETE` and every read path do.
 - **`READTEXT` / `WRITETEXT` / `UPDATETEXT` through a view or a `#temp` table** resolve like any other `table.column` reference, so a view name reaches the view's own object rather than the base table's column and reports Msg 7125.

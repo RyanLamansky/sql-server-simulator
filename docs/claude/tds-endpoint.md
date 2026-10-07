@@ -103,6 +103,8 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   An idle attention (or one racing a just-completed response) is acked with the `DONE_ATTN` alone.
 - **Bulk-load (7)**: `SqlBulkCopy` — the `INSERT BULK` SQL batch opens bulk mode and the following BulkLoadBCP data packet streams rows.
   Full flow + options matrix in [Bulk load](#bulk-load-sqlbulkcopy) below.
+  A `WRITETEXT BULK` / `UPDATETEXT BULK` takes the same packet type for its data, a 4-byte length and the bytes: its batch's response ends where the statement waits, and the next message resumes the batch, whatever it is (`TdsSession.ResumeBulkTextAsync`) — the behavior is in [`legacy-lob.md`](legacy-lob.md#the-bulk-forms).
+  A bulk-load packet nothing awaits is answered with a bare DONE carrying the error bit, then the connection closes (probed 2026-10-07 against SQL Server 2025).
 
 ### Dynamic-SQL exec scope (DONEINPROC/DONEPROC)
 

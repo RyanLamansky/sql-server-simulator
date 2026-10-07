@@ -69,7 +69,7 @@ internal sealed partial class TdsSession
     /// COLMETADATA + ROW stream and writes the rows to the pending destination
     /// with bulk-load semantics, answering with a DONE carrying the row count
     /// (or an ERROR + DONE on failure). A packet with no preceding
-    /// <c>INSERT BULK</c> is a protocol error answered with a DONE.
+    /// <c>INSERT BULK</c> is a protocol error that ends the session.
     /// </summary>
     private void ExecuteBulkLoad(TdsMessage message, TdsTokenWriter writer)
     {
@@ -77,8 +77,11 @@ internal sealed partial class TdsSession
         this.pendingBulk = null;
         if (plan is null)
         {
-            writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, "SqlServerSimulator: a bulk-load data packet arrived without a preceding INSERT BULK statement.", "SIMULATED", "", 1);
+            // Real answers a bulk-load packet nothing awaits with a bare DONE
+            // carrying the error bit, then drops the connection (probed
+            // 2026-10-07 against SQL Server 2025).
             writer.WriteDone(Tds.DoneError, 0);
+            this.connection!.Close();
             return;
         }
 
@@ -108,5 +111,66 @@ internal sealed partial class TdsSession
             writer.WriteDone(Tds.DoneError, 0);
         }
 #pragma warning restore CA1031
+    }
+
+    /// <summary>
+    /// Resumes the batch a <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c>
+    /// suspended, with the message that followed it, as real does (probed
+    /// 2026-10-07 against SQL Server 2025 with a raw TDS client): a bulk-load
+    /// packet's 4-byte length and bytes are the statement's data — cut short,
+    /// Msg 4002 — and any other request is not, which is Msg 4022, the
+    /// request itself going unread and the batch's remaining output answering
+    /// it. An attention ends the batch where it waits, with Msg 3621 and a
+    /// DONE carrying both the attention and the error bit; a
+    /// transaction-manager request ends the session, with Msg 4014, the
+    /// transaction's rollback, Msg 3621 and Msg 596.
+    /// </summary>
+    /// <returns>Whether the session goes on.</returns>
+    private async ValueTask<bool> ResumeBulkTextAsync(SimulatedBulkTextRequest parked, TdsMessage message, TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        var connection = this.connection!;
+        var terminated = SimulatedSqlException.AttentionStatementTerminatedMessage(connection);
+        switch (message.PacketType)
+        {
+            case Tds.PacketAttention:
+                connection.AbandonParkedBulkText();
+                writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
+                writer.WriteDoneToken(Tds.TokenDone, Tds.DoneAttention | Tds.DoneError, 0, StatementDoneKind.Batch);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                return true;
+            case Tds.PacketBulkLoad:
+                var payload = message.Payload;
+                if (payload.Length >= sizeof(uint)
+                    && System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload) is var length
+                    && length <= (uint)(payload.Length - sizeof(uint)))
+                {
+                    parked.Data = payload.AsSpan(sizeof(uint), (int)length).ToArray();
+                }
+                else
+                {
+                    parked.StreamEndedEarly = true;
+                }
+                break;
+            case Tds.PacketTransactionManager:
+                connection.AbandonParkedBulkText();
+                var fatal = SimulatedSqlException.NetworkInputFatal();
+                fatal.ResolveDiagnostics(1, 0, "");
+                WriteErrors(writer, fatal);
+                connection.CurrentTransaction?.EndRollback();
+                this.WriteTransactionEnvChanges(writer);
+                writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
+                WriteErrors(writer, SimulatedSqlException.SessionKilled());
+                writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError | Tds.DoneServerError, 0, StatementDoneKind.Batch);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await connection.CloseAsync().ConfigureAwait(false);
+                return false;
+            default:
+                break;
+        }
+
+        this.watchedRequest = connection.BeginRequest();
+        await this.ExecuteBatchTextAsync(parked.CommandText, writer, cancellationToken).ConfigureAwait(false);
+        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+        return connection.State != System.Data.ConnectionState.Closed;
     }
 }
