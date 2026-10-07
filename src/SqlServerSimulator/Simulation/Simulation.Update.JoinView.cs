@@ -152,22 +152,35 @@ partial class Simulation
         if (positionedCursor is null && !table.SupersededKeyImages.IsEmptyLockFree())
             _ = AwaitSupersededTargetRows(batch, table, (_, prior) => QualifyingTuple(prior) is not null);
 
-        // The target source is wrapped to record each row's heap address; a
+        // The target source records each row's heap address as it reads it; a
         // target under a nested join view is reached through that view's
         // rows, computed here, after the waits above.
-        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
+        var targetAddresses = new RowAddressMap();
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses, batch), rowMaps);
+        sources = SourcesAlongPath(batch, chain, path, 0, original => original.AsWriteTarget(targetAddresses), rowMaps);
+        // A target among the chain's own sources narrows, seeks and reorders
+        // as a joined UPDATE's does, by the filters every level and the
+        // statement apply, rebound onto the join's sources.
+        var joins = chain.Joins;
+        var walkPath = path;
+        if (path.Length == 1 && chain.Views.Length != 0)
+        {
+            var targetSlot = path[0];
+            sources = Selection.PrepareMutationJoinSources(
+                sources, ref joins, JoinViewNarrowing(batch, chain, where), ref targetSlot,
+                MutationMayReorder(top, batch) && tuplesByRow is null, batch);
+            walkPath = [targetSlot];
+        }
         // A joined statement's OUTPUT may read its own other sources.
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
-        foreach (var candidate in Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null))
+        foreach (var candidate in Selection.EnumerateJoinedRows(sources, joins, batch, outerResolver: null))
         {
             tuple = candidate;
             tupleMaps = rowMaps;
 
-            if (TuplePasses() is not { } targetBytes)
+            if (TuplePasses(walkPath) is not { } targetBytes)
                 continue;
-            if (!targetAddresses.TryGetValue(targetBytes, out var address))
+            if (!targetAddresses.TryGet(targetBytes, out var address))
                 continue;
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, address))
                 continue;
@@ -206,8 +219,8 @@ partial class Simulation
         // The target row the current tuple shows when every level's own WHERE
         // passes it — together they gate candidacy exactly as the composed
         // VisibilityCheck does on the single-base path — else null.
-        byte[]? TuplePasses() =>
-            ChainLevelsPass(chain, belowRuntimes, topLevel) ? TargetBytesAlongPath(tuple, path, tupleMaps) : null;
+        byte[]? TuplePasses(int[] tuplePath) =>
+            ChainLevelsPass(chain, belowRuntimes, topLevel) ? TargetBytesAlongPath(tuple, tuplePath, tupleMaps) : null;
 
         // The target row of the current tuple's new values, and its old image
         // when something reads that.
@@ -245,7 +258,7 @@ partial class Simulation
             {
                 tuple = candidate;
                 tupleMaps = narrowedMaps;
-                if (TuplePasses() is { } targetBytes && (where is null || where.Run(runtime) == true))
+                if (TuplePasses(path) is { } targetBytes && (where is null || where.Run(runtime) == true))
                     return targetBytes;
             }
             return null;

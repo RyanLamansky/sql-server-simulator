@@ -598,14 +598,14 @@ The UPDATE path needs no such scan: its SET list has already parsed by the time 
 Everything downstream of the target is the ordinary heap insert — defaults fire for the untargeted columns, the base table's IDENTITY allocates and `SCOPE_IDENTITY` reports it (`SET IDENTITY_INSERT` names the **base table**; real answers Msg 8105 for the view name), and a NOT NULL column the list omits reports the base table's own Msg 515.
 No column list at all — including `DEFAULT VALUES` — has nothing to route on and is Msg 4405, as on real.
 
-**UPDATE execution** mirrors the alias-form joined UPDATE — join tuples, a `byte[]`→address side-channel on the target source, dedupe by `(page, slot)` — with two view-shaped differences:
+**UPDATE execution** mirrors the alias-form joined UPDATE — join tuples, a target read that records each row's address, dedupe by `(page, slot)`, and the same narrowing and reorder, by the view's filters rebound onto its sources (see [`dml.md`](dml.md#joined-row-sources)) — with two view-shaped differences:
 
 - The statement's WHERE and SET expressions name the top level's **output** columns, so each resolves by evaluating that column's projection down the chain against the current tuple.
   That makes a **derived output column readable in the WHERE** even though writing one is Msg 4406, matching real — at any level.
 - Every level's own WHERE gates which tuples are candidates, the way the composed `VisibilityCheck` does on the single-base path.
 
 Dedupe is what makes a base row appearing in several join tuples take the SET **once**: a 1-side row joined to three rows advances by one increment and reports `@@ROWCOUNT` 1 (probe-confirmed).
-When the SET reads the many side, the tuple it lands on is undefined in real and the first one here — heap order, the same rule the alias-form joined UPDATE follows.
+When the SET reads the many side, the tuple it lands on is undefined in real and the first one here — the walk's order, the same rule the alias-form joined UPDATE follows.
 Through an outer-join view the preserved side is writable on a NULL-extended row while the nullable side has nothing to write and the statement affects zero rows rather than raising (probe-confirmed).
 
 **WITH CHECK OPTION** covers the body's WHERE *and* the join at every level that carries one: the written row must find a join partner and pass every WHERE from the bottom up through that level.

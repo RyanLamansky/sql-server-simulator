@@ -110,7 +110,7 @@ A FROM source *aliased* as the target's name still wins the match, so `UPDATE u 
 
 ### Joined row sources
 
-`ExecuteJoinedUpdate` / `ExecuteJoinedDelete` enumerate their join tuples through the same `Selection.EnumerateJoinedRows` a SELECT does, and reach it through `Selection.PrepareMutationJoinSources` — the read path's own two row-source passes, minus the reorder:
+`ExecuteJoinedUpdate` / `ExecuteJoinedDelete` enumerate their join tuples through the same `Selection.EnumerateJoinedRows` a SELECT does, and reach it through `Selection.PrepareMutationJoinSources` — the read path's own row-source passes:
 
 - **Deferred sources materialize once per enumeration**, exactly as they do for a SELECT and under the same gates (non-APPLY, non-leftmost, query-body-only, and the `NEWID()` volatility rule) — see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
   A derived table / CTE reference / view joined to the target stops re-executing per target row and keys into the O(L + R) hash path instead.
@@ -118,16 +118,20 @@ A FROM source *aliased* as the target's name still wins the match, so `UPDATE u 
 - **A joined `GROUP BY` body is reduced to the join's key set** (`ReduceGroupedBodiesByJoinKeys`, run before the materialization so what materializes is the reduced body) — see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body) for the legality and the gates.
   The pass reaches the mutation path unchanged: it only ever rewrites a *deferred body's* slot, which the target — a base table the write pipeline addresses row by row — can never be, and the partner side it reads for keys may well be the target, where the pre-statement rows are what the enumeration reads however many times it runs (the Halloween reasoning below).
   The WWI `UPDATE #t … FROM #t t JOIN (<grouped aggregate>) d ON …` over 30 target rows measures **10 ms** (live 63 ms) with the aggregate covering 30 customers; a body the reduction declines pays the full 663-customer aggregate (~160 ms on the same shape).
-- **The WHERE narrows every source but the target** (`NarrowMutationJoinSources`), so a joined source carrying an indexable equality seeks before the join runs.
+- **The WHERE narrows every source, the target included** (`NarrowMutationJoinSources`): an indexable equality or range seeks, and a source no key can seek takes the scan prefilter ([`indexes.md`](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek)).
   It is the same pure narrowing it is in a SELECT because the statement re-runs its whole WHERE per join tuple, so a matched conjunct is still the filter it was.
   Every source is gated by the read path's `IsSeekNarrowingTarget` — the leftmost included, unlike the read path's unconditional leftmost attempt, since extending that to a mutation would change which key ranges a SERIALIZABLE reader locks around a write.
-- **No reorder.** The written join order stands; the target is identified by slot index.
+- **The narrowed source drives**: the read path's reorder ([`joins.md`](joins.md#join-order-reorder)) applies, so a partner the WHERE pins drives the join and the target is sought per partner row by its join key — real's plan for the shape.
+  A `TOP` or `SET ROWCOUNT` keeps the written order (`MutationMayReorder`), since the rows the walk reaches first are the ones it keeps.
 
-**The target source enumerates every row, and a prefilter drops the ones the WHERE rejects on the target alone.**
-The write pipeline reaches each affected row through an address side-channel keyed by the `byte[]` instances that enumerator yields, and settles its lock / undo bookkeeping per row it touches, so a seek on the target would be a change to the write path rather than to a read.
-The scan prefilter ([`indexes.md`](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek)) isn't: `PrefilterMutationTarget` wraps the stream *after* the address wrapper, so it passes on the instances the wrapper recorded, in the order it read them, and the write path's waits, locks, `TOP` cap and rejudging all happen for qualifying rows only, as before.
-What a rejected row stops costing is its drive through the join — an `APPLY` body's execution included — before the residual WHERE turned it away; the measured EF Core shape is on `PrefilterMutationTarget`.
-It also stops raising what only its partners raise, which is real's behavior: an `APPLY` body dividing by a rejected row's zero is no Msg 8134 on SQL Server 2025 (probed 2026-10-02), where the unfiltered walk raised it.
+**The target is read as a write target** (`FromSource.AsWriteTarget`): its lock plan, `DataLockPlan.ForWriteTarget`, reads the live rows with no lock and no snapshot, and carries the `RowAddressMap` its scan and every seek of it record each row's address in — scoped to the target's own reads, so a partner or a subquery over the same table records nothing.
+So the target seeks, prefilters and joins like any base table, and the write still waits in U and takes X only on the rows it judges qualifying, whichever access path reached them; the lock footprint is the single-table walk's, which `SeekMutationTarget` narrows the same way.
+The scan is heap order rather than `ClusteredScan`'s key order, since a clustered table's key order is rebuilt after the very writes this statement makes (measured 2026-10-07: 103 → 170 ms for a joined UPDATE scanning 200k rows to rewrite 4k).
+A row the WHERE rejects stops costing its drive through the join — an `APPLY` body's execution included — and stops raising what only its partners raise, which is real's behavior: an `APPLY` body dividing by a rejected row's zero is no Msg 8134 on SQL Server 2025 (probed 2026-10-02), where the unfiltered walk raised it.
+
+**Which partner a SET reads** for a target row several partners match is the first tuple the walk meets, and the reorder can change which source's order that is.
+Real's is its plan's — an `ANY` over a merge join's sort, which on the shapes probed 2026-10-07 against SQL Server 2025 was neither the first nor the last partner by key — so no order matches it in general; the partner-filtered shapes wrote the same rows and the same `@@ROWCOUNT` whichever source the FROM named first, on both, and the simulator's answer is the same before and after the reorder because a narrowed partner reaches every target row in its own access order either way.
+What the reorder does change is the order rows are written in, and so `OUTPUT`'s row order: a partner-first walk outputs in partner order where the written order output in target order, which real does too for the plan that drives from the partner, and doesn't for its merge-join plan over the same text.
 
 **Halloween** needs no separate protection here: the statement collects its whole affected-row set before it writes anything, so a source reading the target table reads the pre-statement rows however many times it runs — which is what makes running it once identical to running it per target row, and is what real does anyway.
 Probe-confirmed against SQL Server 2025: `UPDATE t SET v = d.m FROM #t t JOIN (SELECT MAX(v) AS m FROM #t) d ON 1 = 1` over `(10, 20, 30)` leaves every row at `30`, the CTE spelling and the grouped per-key spelling agree, `UPDATE t SET v = u.v FROM #t t JOIN #t u ON u.id = t.id + 1` reads the pre-update partner, and a `NEWID()` inside the joined source draws **once per target row** (five distinct values over five rows), which the per-row re-draw of a merged body's drawn columns is what preserves (see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration)).
@@ -135,9 +139,13 @@ Probe-confirmed against SQL Server 2025: `UPDATE t SET v = d.m FROM #t t JOIN (S
 Both passes decline in **skip mode** (an un-taken `IF` / `WHILE` branch): nothing commits there, so they are pure cost — and the materializing execution would run a deferred body on behalf of a statement that never runs, raising where the per-outer-row execution never reached one (an empty target drives no rows at all).
 The materialization's one divergence, inherited from the read path, is in [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration): a body that raises is evaluated even when the target is empty and real would never have driven a row into it.
 
-**Not wired yet: DML through a join view** (`Simulation.Update.JoinView.cs` / `Simulation.JoinViewDml.cs`).
-Its WHERE names the *view's* output columns and resolves through the per-level chain resolvers, not against the base `FromSource[]` — so the seek's name resolution against a base source could bind a view column name to a same-named base column, which is a correctness question rather than a perf one.
-The materialization half is sound there, but the chain's `WITH CHECK OPTION` probe re-enumerates the same sources per affected row, so the seam is two call sites rather than one.
+**A write through a join view takes the same passes** (`RunJoinViewUpdate`), with its target among the bottom level's own sources.
+Its WHERE names the *view's* output columns, which resolve through the per-level chain resolvers, so it narrows by `JoinViewNarrowing`: every level's own WHERE and the statement's, each conjunct rebound onto the join's sources by following each column's projection down the levels by ordinal, a conjunct naming a derived column dropped.
+A rebound conjunct answers as its original for every tuple, so the passes narrow by it while the walk still filters by the originals; the write's answers were probed 2026-10-07 against SQL Server 2025 (`MutationJoinSourceTests`).
+`UPDATE v_oc SET status = status WHERE cid = 77` over a 200k ⋈ 20k join view measures 0.27 ms (live 1.0 ms), from 100–115 ms.
+A `WITH CHECK OPTION` probe and the rejudging of a row another session changed still re-run the chain over the written order, narrowed to the one row.
+An `OUTPUT` clause keeps the written order, since `DELETED` reads each row's join tuple by its slot in the view's own sources.
+A target under a nested join view (`FROM x JOIN <join view>`) materializes that view's rows from the inner chain's join, which isn't narrowed yet.
 
 ## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT / MERGE
 

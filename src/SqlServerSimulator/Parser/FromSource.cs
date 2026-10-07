@@ -474,6 +474,30 @@ internal sealed class FromSource(
         };
 
     /// <summary>
+    /// Returns a copy of this base-table source read as a joined write's
+    /// target: its scan — and every seek the join passes take on it — reads
+    /// the live rows without locks under <see cref="DataLockPlan.ForWriteTarget"/>,
+    /// recording each row it yields in <paramref name="addresses"/>. Every
+    /// other field is preserved, so the target narrows, seeks and joins as
+    /// any base-table source does.
+    /// </summary>
+    public FromSource AsWriteTarget(RowAddressMap addresses)
+    {
+        var plan = DataLockPlan.ForWriteTarget(addresses);
+        return new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
+            this.StorageOrdinals, this.LobStore, new WriteTargetScanRows(this.BackingTable!, addresses),
+            lateralPlan: this.LateralPlan, backingTable: this.BackingTable, backingView: this.BackingView,
+            heapPlan: plan, materializeOnce: this.MaterializeOnce, isPlaceholder: this.IsPlaceholder,
+            backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
+            viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
+            lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
+        {
+            BrowseBody = this.BrowseBody,
+        };
+    }
+
+    /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
     /// replaced by an already-materialized <paramref name="rows"/> list —
     /// clearing <see cref="LateralPlan"/> and <see cref="MaterializeOnce"/> so
@@ -657,4 +681,33 @@ internal sealed class UnlockedScanRows(HeapTable table) : PerExecutionRows
 {
     public override IEnumerable<byte[]> For(BatchContext batch) =>
         RowSecurity.FilterRows(table, ClusteredScan.Rows(table, batch.Connection.StatementIo, batch.CurrentStatement.RowAddresses), batch);
+}
+
+/// <summary>
+/// A joined write's target scan (<see cref="FromSource.AsWriteTarget"/>): the
+/// live rows in heap order, past the table's filter predicate, each recorded
+/// in <paramref name="addresses"/>.
+/// </summary>
+/// <remarks>
+/// Heap order rather than <see cref="ClusteredScan"/>'s key order: a clustered
+/// table's key order is rebuilt after the very writes the statement makes, so
+/// a statement run again re-sorts the table every run (measured 2026-10-07:
+/// 103 ms → 170 ms for a joined UPDATE that scans 200k rows to rewrite 4k).
+/// Which target row the walk meets first matters only to the order the write
+/// applies its rows in, which real takes from its plan.
+/// </remarks>
+internal sealed class WriteTargetScanRows(HeapTable table, RowAddressMap addresses) : PerExecutionRows
+{
+    public override IEnumerable<byte[]> For(BatchContext batch)
+    {
+        var counts = batch.Connection.StatementIo?.Touch(table);
+        _ = counts?.ScanCount += 1;
+        var lastPage = -1;
+        foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
+        {
+            counts?.Enter(page, ref lastPage);
+            addresses.Record(bytes, page, slot);
+            yield return bytes;
+        }
+    }
 }

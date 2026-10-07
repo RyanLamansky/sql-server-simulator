@@ -1115,11 +1115,9 @@ partial class Simulation
         Selection.SettleSerializableWriteFence(table, where, serializableHint: false, context.Batch, sources[targetIndex].Qualifier);
         // Noted before the target is read, as the plain walk notes it.
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
-        sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
-
-        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Batch);
-        sources = Selection.PrefilterMutationTarget(sources, targetIndex, where, context.Batch);
+        var targetAddresses = new RowAddressMap();
+        sources[targetIndex] = sources[targetIndex].AsWriteTarget(targetAddresses);
+        sources = Selection.PrepareMutationJoinSources(sources, ref joins, where is null ? [] : [where], ref targetIndex, MutationMayReorder(top, context.Batch), context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -1147,7 +1145,7 @@ partial class Simulation
             var targetBytes = tuple[targetIndex];
             if (targetBytes is null)
                 continue;
-            if (!targetAddresses.TryGetValue(targetBytes, out var addr))
+            if (!targetAddresses.TryGet(targetBytes, out var addr))
                 continue;
             if (!seen.Add(addr))
                 continue;
@@ -2551,52 +2549,13 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Wraps the target <see cref="FromSource"/>'s row enumerator so each
-    /// yielded <c>byte[]</c> is recorded into <paramref name="addressMap"/>
-    /// alongside its <c>(page, slot)</c> address — a side-channel the join
-    /// driver doesn't see but the mutation loop relies on. The simulator's
-    /// heap row enumerators allocate a fresh <c>byte[]</c> per yield (rows
-    /// are sliced out of the page's backing buffer via <c>ToArray()</c>),
-    /// so a one-shot map built before iteration would have stale references
-    /// against the join driver's per-iteration allocations. Recording during
-    /// iteration keeps the map keyed by the exact instances the join driver
-    /// places in tuples, so the lookup is reference-equality fast and
-    /// correct even when the target source is on the inner side of a join
-    /// (which restarts its enumeration once per outer tuple).
+    /// Whether a joined write may drive its join from the source its WHERE
+    /// narrowed hardest rather than the one its FROM names first: not when a
+    /// <c>TOP</c> or <c>SET ROWCOUNT</c> keeps the rows the walk reaches
+    /// first, which the written order settles.
     /// </summary>
-    private static FromSource WrapSourceWithAddressTracking(
-        FromSource original,
-        HeapTable table,
-        Dictionary<byte[], (int Page, int Slot)> addressMap,
-        BatchContext batch)
-    {
-        var io = batch.Connection.StatementIo;
-        IEnumerable<byte[]> RowsRecording()
-        {
-            var counts = io?.Touch(table);
-            _ = counts?.ScanCount += 1;
-            var lastPage = -1;
-            // The target's filter predicate hides its rows from the write as
-            // from any read.
-            foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
-            {
-                counts?.Enter(page, ref lastPage);
-                addressMap[bytes] = (page, slot);
-                yield return bytes;
-            }
-        }
-
-        return new FromSource(
-            qualifier: original.Qualifier,
-            columnNames: original.ColumnNames,
-            columns: original.Columns,
-            storedSchema: original.StoredSchema,
-            storageOrdinals: original.StorageOrdinals,
-            lobStore: original.LobStore,
-            rows: RowsRecording(),
-            backingTable: original.BackingTable,
-            unaliasedName: original.UnaliasedName);
-    }
+    private static bool MutationMayReorder(Selection.DmlTopLimit? top, BatchContext batch) =>
+        top is null && batch.Connection.RowCountLimit is not > 0;
 
     /// <summary>
     /// Multi-source column resolver for joined UPDATE / DELETE: resolves a

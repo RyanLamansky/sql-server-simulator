@@ -175,9 +175,9 @@ partial class Simulation
         var chain = plan.Chain;
         var path = plan.Path;
         var table = plan.Table;
-        var addresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
+        var addresses = new RowAddressMap();
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        var sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, addresses, batch), rowMaps);
+        var sources = SourcesAlongPath(batch, chain, path, 0, original => original.AsWriteTarget(addresses), rowMaps);
 
         // Hoisted scaffolding: one mutable tuple slot and one resolver per
         // level, reused across the walk and the reads of single rows.
@@ -208,7 +208,7 @@ partial class Simulation
             if (!ChainLevelsPass(chain, belowRuntimes, topLevel))
                 continue;
             (int Page, int Slot)? address = null;
-            if (TargetBytesAlongPath(candidate, path, rowMaps) is { } target && addresses.TryGetValue(target, out var found))
+            if (TargetBytesAlongPath(candidate, path, rowMaps) is { } target && addresses.TryGet(target, out var found))
             {
                 if (held.Add(found))
                 {

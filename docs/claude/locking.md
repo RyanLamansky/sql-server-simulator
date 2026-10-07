@@ -639,7 +639,8 @@ Measured 2026-10-01 against the build whose joined forms judged off the heap's i
 | EF Core ExecuteUpdate through a navigation, 10 of 1,000 rows | 517–646 µs | 497–649 µs |
 | EF Core ExecuteDelete through a navigation, one row, re-inserted | 513–648 µs | 499–630 µs |
 
-The joined forms walk their target as a full scan (`WrapSourceWithAddressTracking`), which is what the per-statement figures are; the 20,000-row case pays the post-walk X pass the single-table form already paid.
+The joined forms walked their target as a full scan then, which is what the per-statement figures are; the 20,000-row case pays the post-walk X pass the single-table form already paid.
+They now seek it where the WHERE or the join key pins it (see [`dml.md`](dml.md#joined-row-sources)), reading without a lock as the scan did, so a seek changes which rows the walk reaches and never which it waits on or locks: real waits in U on the sought key another session holds and passes a row the seek doesn't reach, as the walk does (probed 2026-10-07 against SQL Server 2025 for the target sought by the WHERE, by the join key and through a join view, over an uncommitted update, delete and delete-and-reinsert).
 
 Divergences:
 

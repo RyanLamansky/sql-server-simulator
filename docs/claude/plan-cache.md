@@ -550,7 +550,7 @@ A replayed run checks behavior too: each command's results hash into a digest, a
 Four passes were kept, each measured by replay A/B (alternating builds, one case per process), and each documented on its declaration:
 
 - the scan prefilter pushes `[NOT] LIKE` (`IsSourceLocalLike`), so a `LIKE N'A%'` leftmost source of a cross join feeds its 30 rows to the join rather than 689k tuples;
-- a joined `UPDATE` / `DELETE` prefilters its target (`PrefilterMutationTarget`), so EF Core's `ExecuteDelete` over a navigation runs its `APPLY` body only for target rows the WHERE keeps;
+- a joined `UPDATE` / `DELETE` prefilters its target (`NarrowMutationJoinSources`), so EF Core's `ExecuteDelete` over a navigation runs its `APPLY` body only for target rows the WHERE keeps;
 - the semi-join switch keys EF Core's NULL-matching correlation (`TryClassifyNullMatchingCorrelation`);
 - `Token.LineAt` counts with a vectorized scan — every statement asks for its starting line, so a long seed script paid a scan of its prefix per statement.
 

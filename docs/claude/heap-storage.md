@@ -68,6 +68,9 @@ The address comes from `RowAddressMap` on `StatementContext.RowAddresses`, keyed
 A plan whose query block reads a locator installs one as it starts (`Selection.InstallsRowAddresses`, settled at parse by `ParserContext.ReadsRowLocators`), and `Selection.ExecuteWithRowAddresses` installs one around a body it runs with the address of each row appended to its projection.
 With no map installed, each producer tests one local it read once per enumeration.
 
+A joined write's target takes a map of its own instead of the statement's: the map rides on the target's lock plan (`DataLockPlan.WriteTargetAddresses`, set by `FromSource.AsWriteTarget`), and the seek materialization records into it ahead of the statement's, so the target's scan and every seek of it record their rows while a partner, or a subquery reading the same table, records nothing.
+The statement's map would have held every row any source of the statement read until it ended — a correlated subquery scanning a table per target row among them.
+
 Because the address is a projected value, it passes through a `TOP`, a sort or a window stage with its row, which is what lets a write through a row-limited or windowed body name the base row behind each row the body yields ([`programmable.md`](programmable.md#updatable-views-dml-through-views)).
 A body whose rows arrive through another view, a CTE or a derived table reads them re-encoded, so the address rides through that re-encoding too: while an `ExecuteWithRowAddresses` run drains, a view the run reads runs its own body the same way and records each row it encodes against its body's address (`Simulation.InvokeViewCore`), and a single-source query body the run executes as a source does likewise (`Selection.ExecuteCarryingRowAddresses`, gated on `Selection.CarriesRowAddresses`), down any depth of nesting.
 Outside such a run `Selection.Execute` pays one field read for the gate.

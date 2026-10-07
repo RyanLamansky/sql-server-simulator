@@ -92,50 +92,6 @@ partial class Selection
         return source.WithFilteredRows(PrefilteredRows(source, [.. pushed], batch, outerResolver));
     }
 
-    /// <summary>
-    /// The prefilter above applied to a joined <c>UPDATE</c> / <c>DELETE</c>'s
-    /// <b>target</b>, after the write pipeline has wrapped it with its address
-    /// side-channel: the filter passes on the very <c>byte[]</c> instances the
-    /// wrapper recorded, in the order it read them, so the write path — which
-    /// row addresses it resolves, which qualifying rows it waits on and locks,
-    /// what a <c>TOP</c> keeps — sees exactly the rows it saw before, minus
-    /// rows a WHERE conjunct on the target alone rejects, which it skipped
-    /// anyway. What changes is what those rejected rows cost: unfiltered, each
-    /// one drives the join to its partners, an <c>APPLY</c> body's execution
-    /// included, before the WHERE turns it away.
-    /// <para>
-    /// EF Core's <c>ExecuteDelete</c> / <c>ExecuteUpdate</c> over a navigation
-    /// emits exactly that shape — the filter on the target, a join or
-    /// <c>APPLY</c> to what it navigates — and its
-    /// <c>NorthwindBulkUpdatesSqlServerTest</c> deletes from <c>[Order
-    /// Details]</c> under <c>WHERE o.OrderID &lt; 10276</c> with a
-    /// <c>CROSS APPLY</c> body per row, which runs for all 2,155 target rows
-    /// unfiltered (~120 ms per statement) and for the 74 the filter keeps
-    /// (~1 ms).
-    /// </para>
-    /// <para>
-    /// Like the read path's, the push can only remove rows the WHERE would
-    /// have rejected, and a conjunct that raises keeps its row for the residual
-    /// to decide. A rejected row's partners go unevaluated, so an error only
-    /// they would raise — an <c>APPLY</c> body dividing by the row's zero —
-    /// doesn't surface, which is real's answer: SQL Server 2025
-    /// deletes and updates the qualifying rows of that shape without Msg 8134
-    /// (probed 2026-10-02). Skip mode declines, since nothing enumerates there.
-    /// </para>
-    /// </summary>
-    internal static FromSource[] PrefilterMutationTarget(FromSource[] sources, int targetIndex, BooleanExpression? where, BatchContext batch)
-    {
-        if (where is null || sources.Length < 2 || batch.IsSkipping)
-            return sources;
-        var conjuncts = new List<BooleanExpression>();
-        where.CollectConjuncts(conjuncts);
-        if (TryPrefilterJoinSource(sources[targetIndex], conjuncts, sources, batch, outerResolver: null) is not { } filtered)
-            return sources;
-        var narrowed = (FromSource[])sources.Clone();
-        narrowed[targetIndex] = filtered;
-        return narrowed;
-    }
-
     // Whether a top-level conjunct compares a bare column of THIS source against
     // a value that is fixed for one execution of the plan — the only shapes the
     // prefilter pushes. Every other conjunct (a sibling comparison, a subquery,

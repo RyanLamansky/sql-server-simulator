@@ -417,11 +417,9 @@ partial class Simulation
         Selection.SettleSerializableWriteFence(table, where, serializableHint: false, context.Batch, sources[targetIndex].Qualifier);
         // Noted before the target is read, as the plain walk notes it.
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
-        sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
-
-        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Batch);
-        sources = Selection.PrefilterMutationTarget(sources, targetIndex, where, context.Batch);
+        var targetAddresses = new RowAddressMap();
+        sources[targetIndex] = sources[targetIndex].AsWriteTarget(targetAddresses);
+        sources = Selection.PrepareMutationJoinSources(sources, ref joins, where is null ? [] : [where], ref targetIndex, MutationMayReorder(top, context.Batch), context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
@@ -447,7 +445,7 @@ partial class Simulation
             var targetBytes = tuple[targetIndex];
             if (targetBytes is null)
                 continue;
-            if (!targetAddresses.TryGetValue(targetBytes, out var addr))
+            if (!targetAddresses.TryGet(targetBytes, out var addr))
                 continue;
             if (!seen.Add(addr))
                 continue;

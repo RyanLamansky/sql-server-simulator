@@ -127,7 +127,7 @@ A narrowed source drops its `DataLockPlan`, so it is never re-seeked per outer r
 Past the leftmost slot the pass skips a source whose lock plan owes a SERIALIZABLE / `HOLDLOCK` phantom fence — the fence is settled inside the seek attempt, so probing every source would change which key ranges a SERIALIZABLE reader locks and when.
 The leftmost slot keeps its long-standing unconditional attempt.
 
-A joined UPDATE / DELETE narrows through `NarrowMutationJoinSources`, the same pushdown restricted to its **non-target** sources and gated at every slot including the leftmost — see [`dml.md`](dml.md#joined-row-sources).
+A joined UPDATE / DELETE narrows through `NarrowMutationJoinSources`, the same pushdown over every source its target included, gated at every slot including the leftmost — see [`dml.md`](dml.md#joined-row-sources).
 
 ### WHERE pushdown into a view / derived-table body
 
@@ -222,6 +222,9 @@ On WWI, a four-table comma list written out of join order (`InvoiceLines, Custom
 
 A materialized derived table (see below) can be a reorder *member* — its rows are fixed for the enumeration — but never the driver, since only a seek-narrowed base table drives.
 
+A joined UPDATE / DELETE and a write through a join view reorder too, unless a `TOP` or `SET ROWCOUNT` keeps the rows the written order reaches first; the target can drive or be sought like any base table, since its rows reach the write through the addresses its write-target read records — see [`dml.md`](dml.md#joined-row-sources).
+Measured 2026-10-07 on a generated `ord` (200k) ⋈ `cust` (20k) filtered on `c.id = 77`, medians: the joined `UPDATE` **58–72 → 0.2 ms** whichever source the FROM names first (live 1.0 ms), the joined `DELETE` of a different customer's rows each run **41–58 → 0.15 ms** (live 2.5 ms), and the write through the join view **110–115 → 0.27 ms** (live 1.0 ms).
+
 Measured on the WWI six-table chain filtered on its fourth source (`WHERE c.CustomerID = 90`): **246 ms → 1.4 ms** (live 7.4 ms), the same chain filtered on its last source **233 ms → 15.6 ms** (live 51 ms), and the hand-reordered control **57 ms → 10.8 ms**.
 
 Measured 2026-10-07 on a generated `line` (200k) ⋈ `ord` (200k) ⋈ `cust` (20k) chain filtered on `c.id = 77`, medians against the live reference: a single-source ON conjunct (`… AND o.status = 3`) **122 → 0.09 ms** (live 0.39), the chain followed by a `LEFT JOIN region` **130 → 0.09 ms** (live 0.37), and both together **140 → 0.12 ms** (live 0.37); a `cust` narrowed to 500 rows by `c.region = 5` driving `ord` (200k) **25 → 3.0 ms** (live 12.9), and driving `ord` and then `line` **128 → 75 ms** (live 13.7) — each now drives from `cust`, the order real's plan returns its rows in.
@@ -311,7 +314,7 @@ Not chased, for that reason.
 
 Measured on the WWI report shape `Customers JOIN (SELECT CustomerID, SUM(…) FROM Invoices JOIN InvoiceLines … GROUP BY CustomerID) agg ON …`: **77.6 s → 170 ms** (0.8× the live server), the CTE spelling of the same query **78.8 s → 165 ms**, and the same query written derived-table-first unchanged at ~148 ms.
 
-A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources` — the same gates, the same volatility rule, and no reorder — see [`dml.md`](dml.md#joined-row-sources).
+A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources` — the same gates and the same volatility rule — see [`dml.md`](dml.md#joined-row-sources).
 It declines in skip mode: a skipped statement commits nothing, so the pass is pure cost there and the materializing execution would run a body on behalf of a statement that never runs.
 
 **Divergence — a body that raises is evaluated even when the left side is empty.**

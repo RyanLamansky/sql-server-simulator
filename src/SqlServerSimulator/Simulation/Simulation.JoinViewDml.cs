@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -57,8 +58,8 @@ partial class Simulation
 
         /// <summary>
         /// The bottom level's FROM sources, cloned so the UPDATE path can swap
-        /// the target slot for an address-tracking wrapper without disturbing
-        /// the parsed profile.
+        /// the target slot for its write-target read without disturbing the
+        /// parsed profile.
         /// </summary>
         public readonly FromSource[] Sources;
 
@@ -188,6 +189,63 @@ partial class Simulation
             below = resolvers[level];
         }
         return (resolvers, belowRuntimes);
+    }
+
+    /// <summary>
+    /// The predicates a write through <paramref name="chain"/> narrows its join
+    /// by: every level's own WHERE and the statement's
+    /// <paramref name="where"/>, each conjunct rebound from the view columns it
+    /// names onto the join's sources by following each column's projection
+    /// down the levels, by ordinal. Only a conjunct of a shape the narrowing
+    /// passes read (<see cref="BooleanExpression.TryRebindOperands"/>) whose
+    /// every column projects a bare column all the way down is kept; its other
+    /// operands are row-independent. A rebound conjunct answers as the one it
+    /// came from for every tuple, so the passes may narrow by it, while the
+    /// walk still filters by the levels' and the statement's own predicates.
+    /// </summary>
+    private static List<BooleanExpression> JoinViewNarrowing(BatchContext batch, JoinViewChain chain, BooleanExpression? where)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        var narrowing = new List<BooleanExpression>(chain.Profiles[0].Excluders);
+        var conjuncts = new List<BooleanExpression>();
+        for (var level = 1; level <= chain.Views.Length; level++)
+        {
+            conjuncts.Clear();
+            if (level < chain.Views.Length)
+            {
+                foreach (var excluder in chain.Profiles[level].Excluders)
+                    excluder.CollectConjuncts(conjuncts);
+            }
+            else
+            {
+                where?.CollectConjuncts(conjuncts);
+            }
+            var namedLevel = level - 1;
+            foreach (var conjunct in conjuncts)
+            {
+                if (BooleanExpression.TryRebindOperands(conjunct, operand => Rebind(operand, namedLevel)) is { } rebound)
+                    narrowing.Add(rebound);
+            }
+        }
+        return narrowing;
+
+        // The bottom column a name written against level's output columns
+        // reads, or a row-independent operand as it is; else null.
+        Expression? Rebind(Expression operand, int level)
+        {
+            while (operand is Parenthesized parenthesized)
+                operand = parenthesized.Wrapped;
+            if (operand is not Reference reference)
+                return operand.IsRowIndependent ? operand : null;
+            for (; level >= 0; level--)
+            {
+                var ordinal = IndexOfViewOutputColumn(collation, chain.Views[level], reference.ReferencedName.Leaf);
+                if (ordinal < 0 || UnwrapDirectRef(chain.Profiles[level].Projections[ordinal]) is not { } below)
+                    return null;
+                reference = below;
+            }
+            return reference;
+        }
     }
 
     /// <summary>

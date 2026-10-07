@@ -3003,10 +3003,15 @@ internal sealed partial class Selection
     /// <summary>
     /// The row-source passes a <b>joined UPDATE / DELETE</b> takes before it
     /// enumerates its join tuples: the once-per-enumeration materialization of a
-    /// deferred source, then the WHERE narrowing of every source but the
-    /// mutation target. Returns <paramref name="sources"/> unchanged (no copy)
-    /// when neither applies; <paramref name="joins"/> is never rewritten, so the
-    /// written join order stands.
+    /// deferred source, then the WHERE narrowing of every source the write's
+    /// lock plan lets narrow — its target among them — and, when
+    /// <paramref name="reorder"/> is set, the narrowed-source-first reorder.
+    /// Returns <paramref name="sources"/> unchanged (no copy) when nothing
+    /// applies; a reorder rewrites <paramref name="joins"/> and moves
+    /// <paramref name="targetIndex"/> to the target's new slot.
+    /// <paramref name="narrowing"/> holds predicates every tuple the write keeps
+    /// satisfies — its WHERE, or a join view's filters rebound onto the join's
+    /// own sources — which the passes may only narrow by, never filter by.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -3025,20 +3030,27 @@ internal sealed partial class Selection
     /// values over five target rows, probe-confirmed) re-executing.
     /// </para>
     /// <para>
-    /// The <b>target</b> source is left exactly as it enumerates. The write
-    /// pipeline reaches each affected row through an address side-channel keyed
-    /// by the <c>byte[]</c> instances that enumerator yields, and its lock / undo
-    /// bookkeeping is settled per row it touches; narrowing it would be a change
-    /// to the write path rather than to a read, so it stays out of this pass
-    /// (the single-table mutation seek in <c>SeekMutationTarget</c> is where that
-    /// question is answered). The narrowed-source-first reorder is declined
-    /// outright for the same reason — the target's slot is identified by index.
+    /// The <b>target</b> is read under <see cref="DataLockPlan.ForWriteTarget"/>
+    /// (<see cref="FromSource.AsWriteTarget"/>), whose scan and seeks record each
+    /// row's address for the write and take no lock, so it seeks, prefilters and
+    /// joins like any base table: the write still waits in U and locks in X only
+    /// the rows it judges qualifying, whichever access path reached them.
+    /// </para>
+    /// <para>
+    /// The reorder moves which tuple reaches a target row matched by several
+    /// partners first, and so which partner a SET reading one writes — real's
+    /// choice there is its plan's, an <c>ANY</c> over whatever order its join
+    /// and sort produced. Probed 2026-10-07 against SQL Server 2025, the
+    /// partner-filtered shapes wrote the same rows and the same
+    /// <c>@@ROWCOUNT</c> whichever source the FROM named first. A row-limited
+    /// write keeps its written order, so a <c>TOP</c> or <c>SET ROWCOUNT</c>
+    /// keeps the rows it kept.
     /// </para>
     /// </remarks>
     internal static FromSource[] PrepareMutationJoinSources(
-        FromSource[] sources, JoinSpec[] joins, BooleanExpression? where, int targetIndex, BatchContext batch)
+        FromSource[] sources, ref JoinSpec[] joins, List<BooleanExpression> narrowing, ref int targetIndex, bool reorder, BatchContext batch)
     {
-        // Skip mode commits nothing, so both passes are pure cost there — and
+        // Skip mode commits nothing, so every pass is pure cost there — and
         // the materializing execution would run a deferred body on behalf of a
         // statement that never runs, which can raise where the per-outer-row
         // execution never reached one (an empty target drives no rows). The
@@ -3052,11 +3064,25 @@ internal sealed partial class Selection
         // row by row — can never be. It reads the partner side (which the
         // target may well be) ahead of the enumeration, where the pre-statement
         // rows are what a joined mutation reads however many times it runs.
-        List<BooleanExpression> excluders = where is null ? [] : [where];
-        sources = ReduceGroupedBodiesByJoinKeys(sources, joins, excluders, batch, outerResolver: null);
+        sources = ReduceGroupedBodiesByJoinKeys(sources, joins, narrowing, batch, outerResolver: null);
         sources = MaterializeUncorrelatedDeferredSources(sources, joins, batch, outerResolver: null);
-        return where is null ? sources : NarrowMutationJoinSources(sources, where, targetIndex, batch);
+        var target = sources[targetIndex];
+        (var narrowed, var narrowedJoins, target) = NarrowMutationJoinSources(sources, joins, narrowing, target, reorder, batch);
+        if (!ReferenceEquals(narrowedJoins, joins))
+        {
+            joins = narrowedJoins;
+            targetIndex = Array.IndexOf(narrowed, target);
+        }
+        return narrowed;
     }
+
+    /// <summary>
+    /// <see cref="PrepareMutationJoinSources(FromSource[], ref JoinSpec[], List{BooleanExpression}, ref int, bool, BatchContext)"/>
+    /// in the written join order, narrowing by <paramref name="where"/>.
+    /// </summary>
+    internal static FromSource[] PrepareMutationJoinSources(
+        FromSource[] sources, JoinSpec[] joins, BooleanExpression? where, int targetIndex, BatchContext batch) =>
+        PrepareMutationJoinSources(sources, ref joins, where is null ? [] : [where], ref targetIndex, reorder: false, batch);
 
     /// <summary>
     /// Whether the deferred source at <paramref name="index"/> produces the same

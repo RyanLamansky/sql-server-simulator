@@ -18,7 +18,8 @@ internal readonly struct DataLockPlan(
     LockMode? serializableRangeMode = null,
     PhantomFenceState? fence = null,
     bool lockingRead = false,
-    bool snapshotConflictCheck = false)
+    bool snapshotConflictCheck = false,
+    RowAddressMap? writeTargetAddresses = null)
 {
     /// <summary>
     /// Lock mode to acquire per touched row, or <c>null</c> when no row-
@@ -92,9 +93,29 @@ internal readonly struct DataLockPlan(
     /// </summary>
     public readonly bool SnapshotConflictCheck = snapshotConflictCheck;
 
+    /// <summary>
+    /// Set on the plan of a joined <c>UPDATE</c> / <c>DELETE</c>'s target
+    /// (<see cref="ForWriteTarget"/>): the map each row the target's scan or
+    /// seek yields is recorded in against its heap address, which is how the
+    /// write finds the row behind a join tuple. Scoped to the target's reads,
+    /// unlike the statement's <see cref="StatementContext.RowAddresses"/>, so
+    /// a partner source or a subquery reading the same table records nothing.
+    /// </summary>
+    public readonly RowAddressMap? WriteTargetAddresses = writeTargetAddresses;
+
     /// <summary>This plan with <see cref="LockingRead"/> and <see cref="SnapshotConflictCheck"/> set as given.</summary>
     public DataLockPlan WithVersioningRule(bool lockingRead, bool snapshotConflictCheck) =>
-        new(this.RowMode, this.RowTxScoped, this.SkipBlockedRows, this.NoLockReader, this.SerializableRangeMode, this.Fence, lockingRead, snapshotConflictCheck);
+        new(this.RowMode, this.RowTxScoped, this.SkipBlockedRows, this.NoLockReader, this.SerializableRangeMode, this.Fence, lockingRead, snapshotConflictCheck, this.WriteTargetAddresses);
+
+    /// <summary>
+    /// Plan for a joined write's target read: the heap's live rows, every one
+    /// recorded in <paramref name="addresses"/>, with no lock taken and no
+    /// snapshot consulted — the write waits in U on each row it judges
+    /// qualifying and X-locks the rows it keeps, as the single-table walk
+    /// does, so a seek narrowing the read never changes its lock footprint.
+    /// </summary>
+    public static DataLockPlan ForWriteTarget(RowAddressMap addresses) =>
+        new(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: true, writeTargetAddresses: addresses);
 
     /// <summary>
     /// Plan for sources where data locks don't apply (table variables,

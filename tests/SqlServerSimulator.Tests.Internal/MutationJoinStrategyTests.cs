@@ -7,8 +7,9 @@ namespace SqlServerSimulator;
 /// Perf-regression guard for the row-source passes a joined UPDATE / DELETE
 /// takes before it enumerates (<c>Selection.PrepareMutationJoinSources</c>): a
 /// deferred source materializes once and keys into the O(L + R) hash path
-/// instead of re-executing per target row, a WHERE equality narrows the joined
-/// source, and the mutation <b>target</b> is never narrowed. Every one of those
+/// instead of re-executing per target row, a WHERE equality narrows every
+/// source the mutation <b>target</b> included, and the source the WHERE narrows
+/// hardest drives the join, seeking the target by its join key. Every one of those
 /// is result-transparent — <c>Tests</c>' <c>MutationJoinSourceTests</c> pins the
 /// rows — so a silent revert to the per-target-row re-execution would otherwise
 /// go unnoticed until a real workload crawled. Reads the opt-in
@@ -150,7 +151,7 @@ public sealed class MutationJoinStrategyTests
         => Contains("CrossApply:NestedLoops", JoinTrace(
             "update t set v = d.w from t cross apply (select max(w) as w from s where s.id = t.id) d"));
 
-    // ---- the WHERE narrowing, and the target it leaves alone -----------------
+    // ---- the WHERE narrowing, the target included ----------------------------
 
     /// <summary>
     /// An equality on the joined source's indexed column seeks that source
@@ -166,27 +167,84 @@ public sealed class MutationJoinStrategyTests
         => Contains("Seek(s)", SeekTrace("delete t from t join s on s.id = t.id where s.k = 8"));
 
     /// <summary>
-    /// The target's own primary-key equality is left as a residual filter: the
-    /// write pipeline reads the target through an address side-channel keyed by
-    /// the instances its enumerator yields, so that source stays as it was. The
-    /// joined source in the same statement still seeks, which is what shows the
-    /// pass ran at all rather than declining wholesale.
+    /// The target's own primary-key equality seeks the target too: its rows
+    /// reach the write through the addresses its write-target read records,
+    /// whichever access path yields them.
     /// </summary>
     [TestMethod]
-    public void UpdateWithEqualityOnBothSides_SeeksTheJoinedSourceAndNotTheTarget()
+    public void UpdateWithEqualityOnBothSides_SeeksBothSources()
     {
         var trace = SeekTrace("update t set v = s.w from t join s on s.id = t.id where t.id = 2 and s.k = 8");
         Contains("Seek(s)", trace);
-        DoesNotContain("Seek(t)", trace);
+        Contains("Seek(t)", trace);
     }
 
-    /// <summary>The DELETE form leaves its target alone the same way.</summary>
+    /// <summary>The DELETE form seeks its target the same way.</summary>
     [TestMethod]
-    public void DeleteWithEqualityOnBothSides_SeeksTheJoinedSourceAndNotTheTarget()
+    public void DeleteWithEqualityOnBothSides_SeeksBothSources()
     {
         var trace = SeekTrace("delete t from t join s on s.id = t.id where t.id = 3 and s.k = 7");
         Contains("Seek(s)", trace);
-        DoesNotContain("Seek(t)", trace);
+        Contains("Seek(t)", trace);
+    }
+
+    // ---- the narrowed source drives ------------------------------------------
+
+    /// <summary>
+    /// A partner the WHERE pins to one row drives the join, as real's plan
+    /// does, and the target is sought per partner row by the join key instead
+    /// of scanned.
+    /// </summary>
+    [TestMethod]
+    public void UpdateFilteredOnThePartner_DrivesFromItAndSeeksTheTarget()
+    {
+        var trace = JoinTrace("update t set v = s.w from t join s on s.id = t.id where s.sid = 3");
+        Contains("Reorder(1,0)", trace);
+        Contains("Inner:NestedLoopIndexSeek(keys=1)", trace);
+    }
+
+    /// <summary>The DELETE form drives the same way.</summary>
+    [TestMethod]
+    public void DeleteFilteredOnThePartner_DrivesFromItAndSeeksTheTarget()
+    {
+        var trace = JoinTrace("delete t from t join s on s.id = t.id where s.sid = 3");
+        Contains("Reorder(1,0)", trace);
+        Contains("Inner:NestedLoopIndexSeek(keys=1)", trace);
+    }
+
+    /// <summary>
+    /// A <c>TOP</c> keeps the rows the walk reaches first, so its write keeps
+    /// the written order.
+    /// </summary>
+    [TestMethod]
+    public void UpdateTopFilteredOnThePartner_KeepsTheWrittenOrder()
+        => DoesNotContain("Reorder(1,0)", JoinTrace("update top (1) t set v = s.w from t join s on s.id = t.id where s.sid = 3"));
+
+    /// <summary>
+    /// A write through a join view narrows by the statement's WHERE rebound
+    /// through the view's projections onto its base sources: <c>sid</c>
+    /// pins <c>s</c>, which then drives and seeks the target.
+    /// </summary>
+    [TestMethod]
+    public void UpdateThroughJoinView_NarrowsByTheReboundWhere()
+    {
+        var connection = Prepared();
+        _ = Run(connection, "create view v as select t.id, t.v, s.sid, s.k, s.w from t join s on s.id = t.id");
+        _ = Run(connection, "create view v2 as select id, v, sid from v where k = 8");
+        JoinDiagnostics.Sink = [];
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            _ = Run(connection, "update v2 set v = sid where sid = 3");
+            Contains("Seek(s)", IndexSeekDiagnostics.Sink);
+            Contains("Reorder(1,0)", JoinDiagnostics.Sink);
+            Contains("Inner:NestedLoopIndexSeek(keys=1)", JoinDiagnostics.Sink);
+        }
+        finally
+        {
+            JoinDiagnostics.Sink = null;
+            IndexSeekDiagnostics.Sink = null;
+        }
     }
 
     /// <summary>

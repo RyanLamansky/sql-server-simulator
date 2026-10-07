@@ -5,10 +5,11 @@ namespace SqlServerSimulator;
 /// <summary>
 /// What a joined UPDATE / DELETE answers once its row sources go through the
 /// read path's own passes — the once-per-enumeration materialization of a
-/// deferred source and the WHERE narrowing of every source but the mutation
-/// target (<c>Selection.PrepareMutationJoinSources</c>). Both are pure cost
-/// reductions, so every value asserted here was probed against SQL Server 2025
-/// first.
+/// deferred source, the WHERE narrowing of every source the mutation target
+/// included, and the narrowed-source-first reorder
+/// (<c>Selection.PrepareMutationJoinSources</c>), which a write through a join
+/// view takes too. All are pure cost reductions, so every value asserted here
+/// was probed against SQL Server 2025 first.
 /// <para>
 /// The Halloween cases are the load-bearing ones: a derived / CTE source reading
 /// the <em>target table itself</em> reads the pre-statement rows, because the
@@ -328,9 +329,9 @@ public sealed class MutationJoinSourceTests
     }
 
     /// <summary>
-    /// A WHERE equality on the <em>target</em>'s own key still filters — the
-    /// pass leaves that source enumerating exactly as it did, so the predicate
-    /// is a residual filter rather than a seek.
+    /// A WHERE equality on the <em>target</em>'s own key seeks the target and
+    /// still filters: the conjunct stays in the WHERE the statement re-runs per
+    /// tuple.
     /// </summary>
     [TestMethod]
     public void UpdateWithEqualityOnTheTarget_UpdatesThatRowOnly()
@@ -356,6 +357,108 @@ public sealed class MutationJoinSourceTests
         AreEqual(2, sim.ExecuteNonQuery("update t set v = isnull(s.w, -1) from t left join s on s.id = t.id where s.k = 7"));
         AreEqual("1|100; 2|20; 3|300", TargetRows(sim));
     }
+
+    // ---- the narrowed source drives ------------------------------------------
+
+    /// <summary>
+    /// Naming the narrowed partner first writes what naming the target first
+    /// does: target row 1 meets two <c>k = 7</c> partners and takes the same
+    /// one's value either way (probed 2026-10-07 against SQL Server 2025,
+    /// <c>@@ROWCOUNT</c> 2 both ways).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update t set v = s.w from s join t on s.id = t.id where s.k = 7", DisplayName = "Partner named first")]
+    [DataRow("update t set v = s.w from t join s on s.id = t.id where s.k = 7", DisplayName = "Target named first")]
+    public void UpdateFilteredOnThePartner_WritesTheSameRowsInEitherOrder(string update)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Setup);
+        AreEqual(2, sim.ExecuteNonQuery(update));
+        AreEqual("1|100; 2|20; 3|300", TargetRows(sim));
+    }
+
+    /// <summary>
+    /// A partner pinned to one row by its key drives the join and the target is
+    /// sought by the join key: only that partner's target row is written
+    /// (probe-confirmed <c>10 / 200 / 30</c>, <c>@@ROWCOUNT</c> 1).
+    /// </summary>
+    [TestMethod]
+    public void UpdateFilteredOnThePartnersKey_WritesItsTargetRowOnly()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Setup);
+        AreEqual(1, sim.ExecuteNonQuery("update t set v = s.w from t join s on s.id = t.id where s.sid = 3"));
+        AreEqual("1|10; 2|200; 3|30", TargetRows(sim));
+    }
+
+    /// <summary>
+    /// OUTPUT reads the driving partner beside the written row, one row per
+    /// target row, in the order real's partner-first plan writes them
+    /// (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void UpdateFilteredOnThePartner_OutputsEachWrittenRowWithItsPartner()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Setup);
+        AreEqual("2|20|200|3; 3|30|300|4", Rows(sim, "update t set v = s.w output inserted.id, deleted.v, inserted.v, s.sid from s join t on s.id = t.id where s.sid in (3, 4)"));
+    }
+
+    /// <summary>The DELETE form removes the partner-pinned rows (probe-confirmed <c>@@ROWCOUNT</c> 2).</summary>
+    [TestMethod]
+    public void DeleteFilteredOnThePartnersKey_RemovesItsTargetRows()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(Setup);
+        AreEqual(2, sim.ExecuteNonQuery("delete t from s join t on t.id = s.id where s.sid in (1, 4)"));
+        AreEqual("2|20", TargetRows(sim));
+    }
+
+    // ---- writes through a join view narrow too -------------------------------
+
+    /// <summary>
+    /// A join view over <c>t</c> and <c>s</c>, a view over it with a WHERE of
+    /// its own, and one whose <c>w1</c> column is derived.
+    /// </summary>
+    private static Simulation WithJoinViews()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            Setup,
+            "create view v as select t.id, t.v, s.sid, s.k, s.w from t join s on s.id = t.id",
+            "create view v2 as select id, v, sid from v where k = 8",
+            "create view v3 as select t.id, t.v, s.w + 1 as w1, s.sid from t join s on s.id = t.id");
+        return sim;
+    }
+
+    /// <summary>
+    /// A WHERE on a join view's columns narrows the join it reads, rebound
+    /// through the view onto its base sources, and every level's own WHERE
+    /// still decides: each answer probe-confirmed against SQL Server 2025
+    /// (2026-10-07), the derived <c>w1</c> included, which can't narrow and
+    /// is filtered as written.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update v set v = w where sid = 3", 1, "1|10; 2|200; 3|30", DisplayName = "Partner key")]
+    [DataRow("update v set v = w where k = 8", 2, "1|10; 2|200; 3|1", DisplayName = "Partner index")]
+    [DataRow("update v set v = v + 1 where id = 1 and k = 7", 1, "1|11; 2|20; 3|30", DisplayName = "Target key and partner index")]
+    [DataRow("update v2 set v = sid where id = 3", 1, "1|10; 2|20; 3|5", DisplayName = "Nested view's own WHERE")]
+    [DataRow("update v2 set v = sid where id = 1", 0, "1|10; 2|20; 3|30", DisplayName = "Nested view's own WHERE rejecting")]
+    [DataRow("update v3 set v = 0 where w1 = 201", 1, "1|10; 2|0; 3|30", DisplayName = "Derived column")]
+    public void UpdateThroughJoinView_WritesTheRowsItsWhereSelects(string update, int count, string expected)
+    {
+        var sim = WithJoinViews();
+        AreEqual(count, sim.ExecuteNonQuery(update));
+        AreEqual(expected, TargetRows(sim));
+    }
+
+    /// <summary>
+    /// OUTPUT through a join view reads DELETED off the row's own join tuple,
+    /// which the write keeps in the view's order (probe-confirmed).
+    /// </summary>
+    [TestMethod]
+    public void UpdateThroughJoinView_OutputReadsTheRowsOwnTuple()
+        => AreEqual("2|3|3; 3|5|5", Rows(WithJoinViews(), "update v set v = sid output inserted.id, inserted.v, deleted.sid where k = 8"));
 
     // ---- everything downstream of enumeration -------------------------------
 

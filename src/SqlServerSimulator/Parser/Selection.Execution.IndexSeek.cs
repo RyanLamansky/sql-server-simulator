@@ -1920,42 +1920,81 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// The pushdown above, restricted to a joined UPDATE / DELETE's
-    /// <b>non-target</b> sources — the read side of a mutation, where a seek is
-    /// the same pure narrowing it is in a SELECT because the statement re-runs
-    /// its whole WHERE per join tuple, so a matched conjunct is still the filter
-    /// it was. See <see cref="PrepareMutationJoinSources"/> for why the target
-    /// slot and the reorder stay out.
+    /// The pushdown above for a joined UPDATE / DELETE, whose write re-runs its
+    /// whole WHERE per join tuple, so a seek or a prefilter on a matched
+    /// conjunct is the same pure narrowing it is in a SELECT. The target
+    /// narrows with the rest, its write-target plan recording the addresses of
+    /// whatever rows the narrowed read yields. Returns the sources, the joins
+    /// (rewritten only by a reorder) and the source standing for
+    /// <paramref name="target"/> among them.
     /// <para>
     /// Every source is gated by <see cref="IsSeekNarrowingTarget"/>, the
     /// leftmost included — the read path's unconditional leftmost attempt is a
     /// long-standing behavior of that path, and extending it to a mutation would
-    /// change which key ranges a SERIALIZABLE reader locks around a write. The
-    /// mutation's WHERE arrives as the single bound predicate the DML parser
-    /// produced rather than a conjunct list; the seek splits it itself.
+    /// change which key ranges a SERIALIZABLE reader locks around a write.
+    /// </para>
+    /// <para>
+    /// The target's prefilter is what keeps EF Core's <c>ExecuteDelete</c> /
+    /// <c>ExecuteUpdate</c> over a navigation affordable — the filter on the
+    /// target, a join or <c>APPLY</c> to what it navigates: its
+    /// <c>NorthwindBulkUpdatesSqlServerTest</c> deletes from <c>[Order
+    /// Details]</c> under <c>WHERE o.OrderID &lt; 10276</c> with a
+    /// <c>CROSS APPLY</c> body per row, which runs for all 2,155 target rows
+    /// unfiltered (~120 ms per statement) and for the 74 the filter keeps
+    /// (~1 ms). A rejected row's partners go unevaluated, so an error only
+    /// they would raise — an <c>APPLY</c> body dividing by the row's zero —
+    /// doesn't surface, which is real's answer: SQL Server 2025 deletes and
+    /// updates the qualifying rows of that shape without Msg 8134 (probed
+    /// 2026-10-02).
     /// </para>
     /// </summary>
-    private static FromSource[] NarrowMutationJoinSources(
-        FromSource[] sources, BooleanExpression where, int targetIndex, BatchContext batch)
+    private static (FromSource[] Sources, JoinSpec[] Joins, FromSource Target) NarrowMutationJoinSources(
+        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> narrowing, FromSource target, bool reorder, BatchContext batch)
     {
-        if (sources.Length < 2)
-            return sources;
+        if (sources.Length < 2 || narrowing.Count == 0)
+            return (sources, joins, target);
 
-        List<BooleanExpression> excluders = [where];
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var predicate in narrowing)
+            predicate.CollectConjuncts(conjuncts);
         FromSource[]? narrowed = null;
+        int[]? seekedCandidates = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (i == targetIndex || !IsSeekNarrowingTarget(sources[i]))
+            if (!IsSeekNarrowingTarget(sources[i]))
                 continue;
             var seeked = MaybeApplyIndexSeek(
-                [sources[i]], NoJoins, excluders, batch, outerResolver: null, planSources: sources);
-            if (ReferenceEquals(seeked[0], sources[i]))
+                [sources[i]], NoJoins, narrowing, batch, outerResolver: null, planSources: sources, out var candidates);
+            var replacement = ReferenceEquals(seeked[0], sources[i])
+                ? TryPrefilterJoinSource(sources[i], conjuncts, sources, batch, outerResolver: null)
+                : seeked[0];
+            if (replacement is null)
                 continue;
+            if (ReferenceEquals(sources[i], target))
+                target = replacement;
             narrowed ??= (FromSource[])sources.Clone();
-            narrowed[i] = seeked[0];
+            narrowed[i] = replacement;
+            if (candidates < 0)
+                continue;
+            if (seekedCandidates is null)
+            {
+                seekedCandidates = new int[sources.Length];
+                Array.Fill(seekedCandidates, -1);
+            }
+            seekedCandidates[i] = candidates;
         }
 
-        return narrowed ?? sources;
+        var current = narrowed ?? sources;
+        if (!reorder)
+            return (current, joins, target);
+        // As the read path's: the written driver's row count is known when the
+        // seek narrowed it or nothing did.
+        var writtenDriverRows = seekedCandidates is { } counts && counts[0] >= 0 ? counts[0]
+            : ReferenceEquals(current[0], sources[0]) && IsSeekNarrowingTarget(sources[0]) ? sources[0].BackingTable!.Heap.RowCount
+            : -1;
+        return ReorderJoinChain(current, joins, conjuncts, seekedCandidates, writtenDriverRows) is var (reorderedSources, reorderedJoins)
+            ? (reorderedSources, reorderedJoins, target)
+            : (current, joins, target);
     }
 
     /// <summary>
@@ -3112,7 +3151,7 @@ internal sealed partial class Selection
         // not-yet-applied or mis-keyed Delete can leave a tombstoned address in a
         // bucket, and a double-applied Insert can list one twice.
         var seen = new HashSet<(int, int)>();
-        var addresses = batch.CurrentStatement.RowAddresses;
+        var addresses = plan.WriteTargetAddresses ?? batch.CurrentStatement.RowAddresses;
         var heap = table.Heap;
         var work = candidates;
         // The key each row read in a deleted row's place was found by, which

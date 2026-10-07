@@ -26,6 +26,8 @@ public sealed class KeyReinsertConcurrencyTests
     [TestMethod]
     [DataRow("update t set bal = t.bal + d.delta from acc t join (values (2, 100)) d (id, delta) on t.id = d.id; select @@rowcount")]
     [DataRow("update t set bal = t.bal + d.delta from (values (2, 100)) d (id, delta) join acc t on t.id = d.id; select @@rowcount")]
+    [DataRow("update t set bal = t.bal + d.delta from acc t join (values (2, 100)) d (id, delta) on t.id = d.id where t.id = 2; select @@rowcount")]
+    [DataRow("update t set bal = t.bal + 100 from acc t join acc p on p.id = t.id where p.id = 2; select @@rowcount")]
     [DataRow("merge acc as t using (values (2, 100)) as d (id, delta) on t.id = d.id when matched then update set bal = t.bal + d.delta when not matched then insert values (d.id, d.delta); select @@rowcount")]
     [DataRow("update acc set bal = bal + 100 where id = 2; select @@rowcount")]
     public async Task WriterMeetingTheKey_WritesTheReinsertedRow(string write)

@@ -1726,6 +1726,9 @@ internal sealed partial class BatchContext
     /// </summary>
     internal long? ResolveSnapshotXidForRead(HeapTable table, in DataLockPlan plan)
     {
+        // A write's target reads the live rows, whatever the isolation level.
+        if (plan.WriteTargetAddresses is not null)
+            return null;
         var snapshotXid = this.ResolveTableSnapshotXid(table);
         // A locking read reads the latest committed row under its locks. A
         // SNAPSHOT transaction's snapshot is still fixed by it, as its first

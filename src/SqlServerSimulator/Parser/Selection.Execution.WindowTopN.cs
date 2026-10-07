@@ -457,7 +457,11 @@ partial class Selection
         var rowRuntime = new RuntimeContext(resolveSource, batch);
 
         var orderByList = new List<OrderBySpec>(window.OrderBy);
-        var partitions = new Dictionary<SqlValue[], TopRows<byte[]?[]>>(RowEqualityComparer.Instance);
+        // A row of a single source is held as its bytes rather than a one-slot
+        // copy of the tuple: past the heap's bound every row is held, and the
+        // copy was a third of what holding one allocated.
+        var singleSource = sources.Length == 1;
+        var partitions = new Dictionary<SqlValue[], TopRows<object>>(RowEqualityComparer.Instance);
         // Partition and order keys go into reused scratch: a partition is keyed
         // by a copy only the first time it is seen, and a row's keys are copied
         // only if the collector admits it — so a row the bound rejects costs no
@@ -488,21 +492,21 @@ partial class Selection
 
             if (!partitions.TryGetValue(partitionKeys, out var collector))
             {
-                collector = new TopRows<byte[]?[]>(
+                collector = new TopRows<object>(
                     upper <= TopRowsHeapMaxRows ? Math.Max(upper, 1) : int.MaxValue, orderByList);
                 partitions[[.. partitionKeys]] = collector;
             }
 
             var admission = collector.Classify(orderKeys, sequence);
             if (admission != TopRowAdmission.Rejected)
-                collector.Add(admission, [.. tuple], [.. orderKeys], sequence);
+                collector.Add(admission, singleSource ? tuple[0]! : (byte[]?[])[.. tuple], [.. orderKeys], sequence);
             sequence++;
         }
 
         // Rank each partition's retained rows and keep the ones inside the
         // bound, partition by partition in key order — the window sort's order,
         // which the unbounded path yields in too.
-        var ordered = new List<KeyValuePair<SqlValue[], TopRows<byte[]?[]>>>(partitions);
+        var ordered = new List<KeyValuePair<SqlValue[], TopRows<object>>>(partitions);
         ordered.Sort(static (a, b) =>
         {
             for (var p = 0; p < a.Key.Length; p++)
@@ -513,7 +517,7 @@ partial class Selection
             }
             return 0;
         });
-        List<(byte[]?[] Tuple, long RowNumber)> kept = [];
+        List<(object Row, long RowNumber)> kept = [];
         foreach (var (_, collector) in ordered)
         {
             var ranked = collector.Rank(lower - 1, upper);
@@ -521,10 +525,19 @@ partial class Selection
                 kept.Add((ranked[i].Payload, lower + i));
         }
 
-        foreach (var (tuple, rowNumber) in kept)
+        var singleRow = new byte[]?[1];
+        foreach (var (row, rowNumber) in kept)
         {
             window.BindResult(batch, SqlValue.FromInt64(rowNumber));
-            currentTuple = tuple;
+            if (row is byte[] bytes)
+            {
+                singleRow[0] = bytes;
+                currentTuple = singleRow;
+            }
+            else
+            {
+                currentTuple = (byte[]?[])row;
+            }
             var projected = new SqlValue[expressions.Count];
             for (var j = 0; j < expressions.Count; j++)
                 projected[j] = expressions[j].Run(rowRuntime);

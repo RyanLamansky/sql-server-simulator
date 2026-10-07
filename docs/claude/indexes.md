@@ -300,7 +300,7 @@ What it buys is the join's own strategy switch: a driving table cut to a handful
 Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.
 A year-wide range on the same shape (38% of the table, so the filter keeps filtering but the join still hashes) went 92.0 → 74.4 ms.
 
-A joined `UPDATE` / `DELETE` prefilters its **target** too (`PrefilterMutationTarget`), after the write pipeline's address wrapper, so the filter passes on the very row instances the write path keys its addresses by — see [`dml.md`](dml.md#joined-row-sources).
+A joined `UPDATE` / `DELETE` prefilters its **target** too where no key seeks it, the filter passing on the very row instances the target's write-target read recorded the addresses of — see [`dml.md`](dml.md#joined-row-sources).
 
 ### Catalog views: the row cache's indexes
 
@@ -357,7 +357,7 @@ Two properties make this a pure narrowing with no fidelity cost:
 
 Measured: 2 000 point `UPDATE`s by PK over a 20 000-row table ran ~5.4× faster than the same updates filtered on an unindexed column (0.85 vs 4.54 ms/op); the ratio grows with table size, since the scan is O(rows) and the seek amortizes to ~O(1).
 
-The **joined** (`… FROM <sources>`) form takes a different route: its target keeps the enumeration the write pipeline's address side-channel is keyed to, while its *other* sources go through the read path's own WHERE pushdown — see [`dml.md`](dml.md#joined-row-sources).
+The **joined** (`… FROM <sources>`) form takes a different route: its target is a base-table source like the others, read under a write-target lock plan that records each row's address, and every source goes through the read path's own WHERE pushdown — the equi-join's per-outer-row seek of the target included — see [`dml.md`](dml.md#joined-row-sources).
 
 ### MERGE target seeking (loop inversion)
 

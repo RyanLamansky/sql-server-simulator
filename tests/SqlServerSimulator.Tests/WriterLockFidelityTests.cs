@@ -128,6 +128,10 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c1 set v = 50 where k = 5", "update x set v = x.v + 1 from c1v x join d1 on x.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE through a join view")]
     [DataRow("update c1 set v = 50 where k = 5", "with x as (select c1.k, c1.v from c1 join d1 on c1.k = d1.k) update x set v = v + 1", "KEY U WAIT (5)", DisplayName = "UPDATE of a CTE over a join")]
     [DataRow("update c1 set v = 50 where k = 5", "delete a from c1s a join d1 on a.k = d1.k where a.v = 5", "KEY U WAIT (5)", DisplayName = "Joined DELETE through a view")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join d1 on c1.k = d1.k where c1.k = 5", "KEY U WAIT (5)", DisplayName = "Joined UPDATE seeking its target")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from d1 join c1 on c1.k = d1.k where d1.k = 5", "KEY U WAIT (5)", DisplayName = "Joined UPDATE seeking its target by the join key")]
+    [DataRow("update c1 set v = 50 where k = 5", "delete c1 from d1 join c1 on c1.k = d1.k where d1.k = 5", "KEY U WAIT (5)", DisplayName = "Joined DELETE seeking its target by the join key")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1v set v = v + 1 where k = 5", "KEY U WAIT (5)", DisplayName = "UPDATE through a join view seeking its target")]
     [DataRow("insert c5 values (3, 7, 3)", "insert c5 values (4, 7, 4)", "KEY U WAIT (7)", DisplayName = "IGNORE_DUP_KEY second insert of a key")]
     [DataRow("insert c5 values (3, 3, 3)", "insert c5 values (4, 4, 4)", "KEY RangeS-U WAIT (5)", DisplayName = "IGNORE_DUP_KEY insert into the same gap")]
     public async Task SecondWriter_WaitsWhereRealWaits(string first, string second, string expected)
@@ -173,6 +177,8 @@ public sealed class WriterLockFidelityTests
     [DataRow("update a set v = a.v + 1 from c1s a join d1 on a.k = d1.k where a.v = 5", "6", DisplayName = "Joined UPDATE through a view")]
     [DataRow("update x set v = x.v + 1 from c1v x join d1 on x.k = d1.k where x.v = 5", "6", DisplayName = "Joined UPDATE through a join view")]
     [DataRow("delete a from c1s a join d1 on a.k = d1.k where a.v = 5", "", DisplayName = "Joined DELETE through a view")]
+    [DataRow("update c1 set v = c1.v + 1 from d1 join c1 on c1.k = d1.k where d1.k = 5", "6", DisplayName = "Joined UPDATE seeking its target by the join key")]
+    [DataRow("update c1v set v = v + 1 where k = 5", "6", DisplayName = "UPDATE through a join view seeking its target")]
     public async Task TargetRead_WaitsOutAnUncommittedWrite(string write, string expected)
     {
         var simulation = new Simulation();
@@ -205,6 +211,9 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c3 set n = 2 where k = 1", "merge c3 t using (values (1)) s (n) on t.n = s.n when matched then update set v = 9;", "c3", "1:9 5:5", DisplayName = "MERGE matching an index key moved away")]
     [DataRow("delete c1 where k = 5", "merge c1v t using (values (5)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", "c1", "1:1 5:6", DisplayName = "MERGE into a join view matching a deleted row")]
     [DataRow("delete c1 where k = 5", "update a set v = a.v + 1 from c1s a join d1 on a.k = d1.k", "c1", "1:2 5:6", DisplayName = "Joined UPDATE through a view over a delete")]
+    [DataRow("delete c1 where k = 5", "update c1 set v = c1.v + 1 from d1 join c1 on c1.k = d1.k where d1.k = 5", "c1", "1:1 5:6", DisplayName = "Joined UPDATE seeking a deleted key by the join key")]
+    [DataRow("delete c1 where k = 5", "update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k where c1.k = 5", "c1", "1:1 5:6", DisplayName = "Joined UPDATE seeking a deleted key")]
+    [DataRow("delete c1 where k = 5", "update c1v set v = v + 1 where k = 5", "c1", "1:1 5:6", DisplayName = "UPDATE through a join view seeking a deleted key")]
     public async Task TargetRead_WaitsOutAWriteThatHidTheRow(string hidingWrite, string write, string table, string expected)
     {
         var simulation = new Simulation();
