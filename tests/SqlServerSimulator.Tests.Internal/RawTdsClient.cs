@@ -52,6 +52,10 @@ internal sealed class RawTdsClient : IAsyncDisposable
     public Task<byte[]> BatchAsync(string sql, CancellationToken cancellationToken) =>
         this.SendAsync(Tds.PacketSqlBatch, [.. AllHeaders(), .. Encoding.Unicode.GetBytes(sql)], cancellationToken);
 
+    /// <summary>Sends an RPC request whose payload is <paramref name="body"/>, after the transaction-descriptor ALL_HEADERS.</summary>
+    public Task<byte[]> RpcAsync(byte[] body, CancellationToken cancellationToken) =>
+        this.SendAsync(Tds.PacketRpc, [.. AllHeaders(), .. body], cancellationToken);
+
     /// <summary>Sends a transaction-manager begin request.</summary>
     public Task<byte[]> BeginTransactionAsync(CancellationToken cancellationToken) =>
         this.SendAsync(Tds.PacketTransactionManager, [.. AllHeaders(), 0x05, 0x00, 0x00, 0x00], cancellationToken);

@@ -80,9 +80,6 @@ internal sealed class FormatMessage : Expression
 
     public FormatMessage(ParserContext context)
     {
-        if (context.Token is Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionArgumentCount("formatmessage", 1);
-
         this.formatArg = Parse(context);
         List<Expression> args = [];
         while (context.Token is Tokens.Operator { Character: ',' })

@@ -154,7 +154,7 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     /// <see cref="SessionRequest.BytesAheadOfClient"/>). A result whose rows
     /// aren't materialized counts as more than any cap.
     /// </summary>
-    internal virtual long ClientBytes(long cap) => long.MaxValue;
+    internal abstract long ClientBytes(long cap);
 
     /// <summary>
     /// A cursor for a client-boundary consumer (the in-process data reader /

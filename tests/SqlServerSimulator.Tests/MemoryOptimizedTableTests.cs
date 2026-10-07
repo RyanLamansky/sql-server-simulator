@@ -563,4 +563,54 @@ public sealed class MemoryOptimizedTableTests
         _ = reader.CreateCommand("commit").ExecuteNonQuery();
         AreEqual(15, reader.CreateCommand("select sum(v) from t").ExecuteScalar());
     }
+
+    [TestMethod]
+    [DataRow("index ix nonclustered (a) where a > 0", 10794, 1, "The feature 'WHERE' is not supported with indexes on memory optimized tables.")]
+    [DataRow("index ix nonclustered (a) include (b)", 10664, 1, "Cannot specify included columns for indexes on memory optimized tables.")]
+    [DataRow("index ix nonclustered (a) with (bucket_count = 8)", 10790, 1, "The option 'bucket_count' can be specified only for hash indexes.")]
+    [DataRow("index ix nonclustered (a) with (fillfactor = 80)", 10794, 81, "The index option 'fillfactor' is not supported with indexes on memory optimized tables.")]
+    [DataRow("index ix nonclustered (a) with (pad_index = on)", 10794, 81, "The index option 'pad_index' is not supported with indexes on memory optimized tables.")]
+    public void InlineIndexShapeRefusals(string index, int number, int state, string message)
+    {
+        var ex = WithContainer().AssertSqlError($"create table t (id int not null primary key nonclustered, a int, b int, {index}) with (memory_optimized = on)", number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+    }
+
+    [TestMethod]
+    public void AlterTableIndexRefusals()
+    {
+        var sim = WithContainer();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key nonclustered, a int, index ix nonclustered (a)) with (memory_optimized = on)");
+        var drop = sim.AssertSqlError("alter table t drop index nope", 3701);
+        AreEqual("Cannot drop the index 'nope', because it does not exist or you do not have permission.", drop.Errors[0].Message);
+        AreEqual((byte)21, drop.State);
+        var alter = sim.AssertSqlError("alter table t alter index nope rebuild with (bucket_count = 8)", 3701);
+        AreEqual("Cannot alter the index 'nope', because it does not exist or you do not have permission.", alter.Errors[0].Message);
+        AreEqual((byte)22, alter.State);
+        var range = sim.AssertSqlError("alter table t alter index ix rebuild with (bucket_count = 8)", 10790);
+        AreEqual("The option 'BUCKET_COUNT' can be specified only for hash indexes.", range.Errors[0].Message);
+        AreEqual((byte)4, range.State);
+        AreEqual((byte)16, range.Class);
+    }
+
+    [TestMethod]
+    [Description("A trigger refused for its kind reports the line its CREATE starts on (probed 2026-10-07 against SQL Server 2025).")]
+    public void TriggerRefusals_ReportTheStatementsLine()
+    {
+        var sim = WithContainer();
+        _ = sim.ExecuteNonQuery("create table t (id int not null primary key nonclustered, a int) with (memory_optimized = on)");
+        var insteadOf = sim.AssertSqlError("""
+
+            create trigger tr on t with native_compilation, schemabinding
+            instead of insert as begin atomic with (transaction isolation level = snapshot, language = N'us_english') declare @x int = 1 end
+            """, 10794);
+        AreEqual("The option 'INSTEAD OF' is not supported with natively compiled triggers.", insteadOf.Errors[0].Message);
+        AreEqual((byte)130, insteadOf.State);
+        AreEqual(2, insteadOf.LineNumber);
+        AreEqual("tr", insteadOf.Procedure);
+        var interpreted = sim.AssertSqlError("\n\ncreate trigger tr2 on t\nafter insert as select 1", 10777);
+        AreEqual(3, interpreted.LineNumber);
+        AreEqual("tr2", interpreted.Procedure);
+    }
 }

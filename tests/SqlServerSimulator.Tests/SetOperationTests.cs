@@ -874,4 +874,14 @@ public sealed class SetOperationTests
         // A statement's own branch ORDER BY is refused at the operator as written.
         sim.AssertSqlError("select top 1 a from t order by a UNION all select a from u", 156, "Incorrect syntax near the keyword 'UNION'.");
     }
+
+    [TestMethod]
+    [Description("An ORDER BY ahead of a set operator is Msg 156 naming the operator; in a subquery Msg 1033 comes first.")]
+    [DataRow("select 1 a order by a union select 2", 156, "Incorrect syntax near the keyword 'union'.")]
+    [DataRow("select 1 a order by a except select 2", 156, "Incorrect syntax near the keyword 'except'.")]
+    [DataRow("select 1 a order by a intersect select 2", 156, "Incorrect syntax near the keyword 'intersect'.")]
+    [DataRow("select top 1 1 a order by a union select 2", 156, "Incorrect syntax near the keyword 'union'.")]
+    [DataRow("select 1 where exists (select 1 a order by a union select 2)", 1033, "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.")]
+    public void OrderByAheadOfASetOperator(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 }

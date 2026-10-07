@@ -855,4 +855,38 @@ public sealed class HelpProcTests
         IsEmpty(ResultSets(sim, "exec sp_tables 'k', @table_type = 'TABLE'")[0].Rows);
         HasCount(1, ResultSets(sim, "exec sp_tables 'k', @table_type = \"'TABLE'\"")[0].Rows);
     }
+
+    [TestMethod]
+    [Description("The single-column help lists sort under the database's collation (probed 2026-10-07 against SQL Server 2025).")]
+    public void HelpLists_SortUnderTheCollation()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table p (id int constraint pk primary key, a int, b int, c int)",
+            "create index ix on p (a); create index ix2 on p (b); create index [ix_] on p (c); create index [ix-] on p (a, b); create index IXa on p (b, c)",
+            "create table c (pid int constraint f1 references p(id)); create table c2 (pid int constraint f2 references p(id)); create table [c_] (pid int constraint f3 references p(id)); create table [c-] (pid int constraint f4 references p(id))",
+            "create table n1 (id int) as node; create table n2 (id int) as node",
+            "create table eb (constraint zc connection (n1 to n1)) as edge; create table ea2 (constraint yc connection (n1 to n1)) as edge; create table ea (constraint xc connection (n1 to n2), constraint wc connection (n2 to n1)) as edge");
+        AreEqual("ix,ix-,ix_,ix2,IXa,pk", string.Join(",", ResultSets(sim, "exec sp_helpindex 'p'")[0].Rows.ConvertAll(r => r[0])));
+        AreEqual("simulated.dbo.c: f1,simulated.dbo.c-: f4,simulated.dbo.c_: f3,simulated.dbo.c2: f2", string.Join(",", ResultSets(sim, "exec sp_helpconstraint 'p'")[^1].Rows.ConvertAll(r => r[0])));
+        AreEqual("simulated.dbo.ea: wc,simulated.dbo.ea: xc,simulated.dbo.ea2: yc,simulated.dbo.eb: zc", string.Join(",", ResultSets(sim, "exec sp_helpconstraint 'n1'")[^1].Rows.ConvertAll(r => r[0])));
+    }
+
+    [TestMethod]
+    [Description("sp_lock lists a session's database lock once, as DB, and none for a session in master (probed 2026-10-07 against SQL Server 2025).")]
+    public void SpLock_DatabaseLockOnceAsDb()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int primary key)");
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("begin tran; insert t values (1), (2)").ExecuteNonQuery();
+        using (var reader = connection.CreateCommand("exec sp_lock @@spid").ExecuteReader())
+        {
+            var rows = reader.EnumerateRecords().Select(r => $"{r.GetString(4)}:{r.GetString(5).Length}").ToList();
+            CollectionAssert.AreEqual(new[] { "DB:32", "TAB:32", "KEY:32", "KEY:32" }, rows);
+        }
+        _ = connection.CreateCommand("rollback; use master").ExecuteNonQuery();
+        using var inMaster = connection.CreateCommand("exec sp_lock @@spid").ExecuteReader();
+        IsFalse(inMaster.Read());
+    }
 }

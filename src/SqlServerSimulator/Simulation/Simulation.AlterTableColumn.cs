@@ -561,9 +561,8 @@ partial class Simulation
         // …except a sequence draw, which each existing row takes its own of
         // (probed 2026-10-04 against SQL Server 2025).
         var drawsPerRow = new bool[newColumns.Length];
-        static SqlValue ResolveNothing(MultiPartName reference) => throw SimulatedSqlException.InvalidColumnName(reference);
         var batch = context.Batch;
-        var runtime = new RuntimeContext(ResolveNothing, batch);
+        var runtime = new RuntimeContext(NoColumnResolver, batch);
         for (var i = 0; i < newColumns.Length; i++)
         {
             var c = newColumns[i];
@@ -1156,6 +1155,13 @@ partial class Simulation
         // uniqueidentifier).
         if (Parser.Expressions.Cast.IsIllegalExplicitConversion(existingCol.Type, newType))
             throw SimulatedSqlException.OperandTypeClash(existingCol.Type, newType);
+        // One only an explicit conversion makes is the assignment grid's Msg
+        // 257 — date-time to a number or a binary, sql_variant to anything,
+        // a string to a binary — save an xml column becoming a string or a
+        // binary, which the change takes (probed 2026-10-07 against SQL
+        // Server 2025, rows or not).
+        if (existingCol.Type is not XmlSqlType && SqlType.PairError(TypePairOperation.Assign, existingCol.Type, newType, "") is { } explicitOnly)
+            throw explicitOnly;
 
         // Collation: an explicit COLLATE wins; without one the column takes
         // the database default, whatever it carried before — a restatement

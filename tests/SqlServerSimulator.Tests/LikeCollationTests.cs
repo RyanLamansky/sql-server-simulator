@@ -364,4 +364,14 @@ public sealed class LikeCollationTests
     [DataRow("iif('ß' collate SQL_Latin1_General_CP1_CI_AS like 'ss', 1, 0)", 0)]
     public void Ligature_MatchesItsLettersWhole(string expression, int expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    [Description("A UTF-8 binary collation's varchar data matches LIKE case-sensitively (probed 2026-10-07 against SQL Server 2025).")]
+    public void Utf8BinaryVarchar_LikeIsCaseSensitive()
+        => AreEqual("1|0", new Simulation().ExecuteScalar("""
+            create table t (v varchar(5) collate Latin1_General_100_BIN2_UTF8);
+            insert t values ('abc'), ('ABC');
+            select concat((select count(*) from t where v like 'a%'), '|',
+                (select count(*) from (values (cast('abc' as varchar(5)) collate Latin1_General_100_BIN2_UTF8)) x(v) where v like 'A%'))
+            """));
 }

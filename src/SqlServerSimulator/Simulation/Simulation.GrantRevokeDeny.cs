@@ -282,7 +282,7 @@ partial class Simulation
         {
             foreach (var (permName, _) in permissions)
             {
-                if (!PermissionAcceptedOnDerivedClass(permClass, permName))
+                if (!IsAllPermission(permName) && !PermissionAcceptedOnDerivedClass(permClass, permName))
                     throw SimulatedSqlException.SyntaxErrorNearText(permName.ToUpperInvariant()).PinLine(0);
             }
         }
@@ -302,6 +302,14 @@ partial class Simulation
         // against SQL Server 2025).
         if (userSecurableName is { } targetName)
         {
+            // The class word settles which permissions apply before the name
+            // resolves (probed 2026-10-07 against SQL Server 2025: SELECT on
+            // USER::nosuch is Msg 102, not the missing user's Msg 15151).
+            foreach (var (permName, _) in permissions)
+            {
+                if (!IsAllPermission(permName) && !PermissionGraph.IsPermissionOf(principalClassWord == "role" ? "ROLE" : "USER", CanonicalPermissionName(permName)))
+                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
+            }
             if (!database.Principals.TryGetValue(targetName.Leaf, out var targetPrincipal))
                 throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.Leaf);
             if (targetPrincipal.TypeCode == "A" || targetPrincipal.IsFixedRole || principalClassWord == "role" != (targetPrincipal.TypeCode == "R"))
@@ -381,6 +389,11 @@ partial class Simulation
         // name at line 0 (probed 2026-10-04 against SQL Server 2025: CREATE
         // TABLE on a schema, CONNECT on a table, CREATE SEQUENCE on the
         // database, which is a schema permission).
+        // ALL stands for a list on the database and an object alone; on any
+        // other class it is Msg 4623 once the securable has resolved (probed
+        // 2026-10-07 against SQL Server 2025).
+        if (permClass is not (PermissionChecker.ClassDatabase or PermissionChecker.ClassObject) && permissions.Exists(p => IsAllPermission(p.Name)))
+            throw SimulatedSqlException.AllPermissionNotAvailableForClass();
         if (permClass == PermissionChecker.ClassDatabase)
             permissions = ExpandAll(context, permissions, objectTypeCode: null);
         if (permClass is PermissionChecker.ClassDatabase or PermissionChecker.ClassSchema or PermissionChecker.ClassDatabasePrincipal)
@@ -649,6 +662,9 @@ partial class Simulation
         return (eventType, schemaName, objectName, objectType, elements.ToString());
     }
 
+    /// <summary>Whether <paramref name="permName"/> is the deprecated <c>ALL</c> / <c>ALL PRIVILEGES</c>.</summary>
+    private static bool IsAllPermission(string permName) => CanonicalPermissionName(permName) is "ALL" or "ALL PRIVILEGES";
+
     /// <summary>The canonical spelling a permission name is stored and validated under: upper case, single-spaced, <c>EXEC</c> as <c>EXECUTE</c>.</summary>
     private static string CanonicalPermissionName(string permName)
     {
@@ -665,7 +681,7 @@ partial class Simulation
     /// </summary>
     private static List<(string Name, List<string>? Columns)> ExpandAll(ParserContext context, List<(string Name, List<string>? Columns)> permissions, string? objectTypeCode)
     {
-        if (!permissions.Exists(p => CanonicalPermissionName(p.Name) is "ALL" or "ALL PRIVILEGES"))
+        if (!permissions.Exists(p => IsAllPermission(p.Name)))
             return permissions;
         context.Batch.AppendInfoError(@class: 0, state: 2, number: 4628,
             message: "The ALL permission is deprecated and maintained only for compatibility. It DOES NOT imply ALL permissions defined on the entity.");

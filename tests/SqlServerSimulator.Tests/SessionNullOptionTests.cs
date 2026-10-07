@@ -43,6 +43,10 @@ public sealed class SessionNullOptionTests
             """));
 
     [TestMethod]
+    public void AnsiNullsOff_MakesHavingComparisonsWithANullTwoValued()
+        => AreEqual(1, new Simulation().ExecuteScalar("set ansi_nulls off; select count(*) from (values (1)) v(a) having count(*) <> null"));
+
+    [TestMethod]
     public void AnsiNullsOn_KeepsComparisonsWithNullUnknown()
         => AreEqual(0, new Simulation().ExecuteScalar($"{Rows} select count(*) from an where a = null"));
 

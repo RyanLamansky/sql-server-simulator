@@ -89,7 +89,7 @@ partial class Simulation
             ]);
         }
 
-        rows.Sort(ByFirstCell);
+        SortByFirstCell(rows, batch);
         yield return new SimulatedSqlResultSet(SpHelpTriggerSchema, SpHelpTriggerColumnNames, rows);
     }
 

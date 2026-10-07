@@ -209,4 +209,29 @@ public sealed class LoginDdlTests
         var sim = new Simulation();
         _ = sim.AssertSqlError($"create login [{name}] with password = 'Xy!12345'", 15025);
     }
+
+    [TestMethod]
+    public void CreateLogin_BackslashInName_Raises15006()
+        => new Simulation().AssertSqlError(@"create login [zl\x] with password = 'Zc0v!Passw0rd'", 15006,
+            @"'zl\x' is not a valid name because it contains invalid characters.");
+
+    [TestMethod]
+    public void CheckExpirationWithoutPolicy_Raises15122_OnCreateAndAlter()
+    {
+        const string message = "The CHECK_EXPIRATION option cannot be used when CHECK_POLICY is OFF.";
+        var sim = new Simulation();
+        sim.AssertSqlError("create login zl5 with password = 'Zc0v!Passw0rd', check_policy = off, check_expiration = on", 15122, message);
+        _ = sim.ExecuteNonQuery("create login zl5 with password = 'Zc0v!Passw0rd', check_policy = off");
+        sim.AssertSqlError("alter login zl5 with check_expiration = on", 15122, message);
+    }
+
+    [TestMethod]
+    [DataRow("abcdefgh1")]
+    [DataRow("Xzl5!9xyz")]
+    public void CreateLogin_PasswordNotComplexOrHoldingTheName_Raises33064(string password)
+    {
+        var ex = new Simulation().AssertSqlError($"create login zl5 with password = '{password}'", 33064);
+        AreEqual((byte)2, ex.State);
+        StartsWith("Password validation failed. The password does not meet SQL Server password policy requirements because it is not complex enough.", ex.Errors[0].Message);
+    }
 }

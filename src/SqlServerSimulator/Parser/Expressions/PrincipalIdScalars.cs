@@ -316,25 +316,6 @@ internal sealed class Permissions : Expression
         _ => null,
     };
 
-    internal static bool TableColumnExists(Database database, int objectId, string columnName)
-    {
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var (_, table) in schema.HeapTables)
-            {
-                if (table.ObjectId != objectId)
-                    continue;
-                foreach (var column in table.Columns)
-                {
-                    if (BuiltInToken.Comparer.Equals(column.Name, columnName))
-                        return true;
-                }
-                return false;
-            }
-        }
-        return false;
-    }
-
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.objectIdArg is not null)
@@ -399,6 +380,8 @@ internal sealed class HasPermsByName : Expression
         }
         if (string.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "LOGIN", StringComparison.OrdinalIgnoreCase))
             return LoginAnswer(connection, securableVal, permissionVal.CoerceTo(SqlType.NVarchar).AsString);
+        if (!this.TryReadColumnSubSecurable(runtime, classVal, out var column))
+            return SqlValue.Null(SqlType.Int32);
 
         // dbo holds every permission on whatever exists — DacFx's bacpac-export
         // gate (HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')) reads 1
@@ -406,7 +389,7 @@ internal sealed class HasPermsByName : Expression
         // NULL object, and 0 for an object or column that isn't there (probed
         // 2026-09-26 against SQL Server 2025).
         if (connection.Security.EffectiveIsDbo)
-            return this.DboAnswer(runtime, securableVal, classVal);
+            return this.DboAnswer(runtime, securableVal, classVal, column);
 
         var permission = permissionVal.CoerceTo(SqlType.NVarchar).AsString.Trim().ToUpperInvariant();
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString;
@@ -473,9 +456,11 @@ internal sealed class HasPermsByName : Expression
         // lacks; the object itself answers a column-grantable permission only
         // when every column passes, so a column DENY under a table GRANT reads
         // 0 (probed 2026-10-04 against SQL Server 2025).
-        if (this.args.Length >= 5 && this.args[3].Run(runtime) is { IsNull: false } subName && columns is not null)
+        if (column is not null)
         {
-            var ordinal = Array.FindIndex(columns, c => BuiltInToken.Comparer.Equals(c.Name, subName.CoerceTo(SqlType.NVarchar).AsString)) + 1;
+            if (columns is null)
+                return SqlValue.Null(SqlType.Int32);
+            var ordinal = Array.FindIndex(columns, c => BuiltInToken.Comparer.Equals(c.Name, column)) + 1;
             return SqlValue.FromInt32(ordinal > 0 && PermissionChecker.IsColumnGranted(database, principalId, enumPermission, majorId, schemaId, ordinal, server) ? 1 : 0);
         }
         if (columns is not null && enumPermission is Permission.Select or Permission.Update or Permission.References or Permission.Unmask)
@@ -552,7 +537,31 @@ internal sealed class HasPermsByName : Expression
         return SqlValue.FromInt32(holds ? 1 : 0);
     }
 
-    private SqlValue DboAnswer(RuntimeContext runtime, SqlValue securableVal, SqlValue classVal)
+    /// <summary>
+    /// The column a sub-securable names, null when the call names none, or
+    /// false when the answer is NULL: a sub-securable is a column of an
+    /// <c>OBJECT</c>, so one on another class, one whose class is missing or
+    /// isn't <c>COLUMN</c>, and a NULL or empty name all answer NULL (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    private bool TryReadColumnSubSecurable(RuntimeContext runtime, SqlValue classVal, out string? column)
+    {
+        column = null;
+        if (this.args.Length < 4)
+            return true;
+        var name = this.args[3].Run(runtime);
+        var kind = this.args.Length >= 5 ? this.args[4].Run(runtime) : SqlValue.Null(SqlType.NVarchar);
+        if (name.IsNull || kind.IsNull
+            || !BuiltInToken.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "OBJECT")
+            || !BuiltInToken.Equals(kind.CoerceTo(SqlType.NVarchar).AsString.Trim(), "COLUMN"))
+        {
+            return false;
+        }
+        column = name.CoerceTo(SqlType.NVarchar).AsString;
+        return column.Length > 0;
+    }
+
+    private SqlValue DboAnswer(RuntimeContext runtime, SqlValue securableVal, SqlValue classVal, string? column)
     {
         var batch = runtime.Batch;
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString.Trim();
@@ -571,11 +580,14 @@ internal sealed class HasPermsByName : Expression
         if (!isObject)
             return SqlValue.FromInt32(TryResolveSchemaByName(database, name, out _) ? 1 : 0);
 
-        string? column = null;
-        if (this.args.Length >= 5 && this.args[3].Run(runtime) is { IsNull: false } sub)
-            column = sub.CoerceTo(SqlType.NVarchar).AsString;
+        // A column answers 0 where the object lacks it and NULL on an object
+        // without columns (probed 2026-10-07 against SQL Server 2025).
         if (TryResolveObjectByName(database, name, out var objectId, out _))
-            return SqlValue.FromInt32(column is null || !IsTable(database, objectId) || Permissions.TableColumnExists(database, objectId, column) ? 1 : 0);
+        {
+            return column is null ? SqlValue.FromInt32(1)
+                : ColumnProperty.ColumnsOf(database, objectId) is not { } objectColumns ? SqlValue.Null(SqlType.Int32)
+                : SqlValue.FromInt32(Array.Exists(objectColumns, c => BuiltInToken.Comparer.Equals(c.Name, column)) ? 1 : 0);
+        }
         if (ObjectId.TryParseObjectName(name, out var parsed) && batch.TryResolveCatalogView(parsed, out var catalogView, out _))
         {
             if (column is null)
@@ -587,19 +599,6 @@ internal sealed class HasPermsByName : Expression
             }
         }
         return SqlValue.FromInt32(0);
-    }
-
-    private static bool IsTable(Database database, int objectId)
-    {
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var (_, table) in schema.HeapTables)
-            {
-                if (table.ObjectId == objectId)
-                    return true;
-            }
-        }
-        return false;
     }
 
     /// <summary>

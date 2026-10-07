@@ -1201,4 +1201,28 @@ public sealed class AlterTableColumnTests
     [TestMethod]
     public void AddColumn_PastTheMinimumRowSize_RaisesMsg1701()
         => _ = new Simulation().AssertSqlError("create table t (a char(8000)); alter table t add b char(100)", 1701);
+
+    [TestMethod]
+    [Description("A change only an explicit conversion makes is Msg 257, rows or not, save an xml column becoming a string or a binary (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("datetime", "int")]
+    [DataRow("smalldatetime", "decimal(10,2)")]
+    [DataRow("datetime", "bit")]
+    [DataRow("date", "varbinary(50)")]
+    [DataRow("sql_variant", "nvarchar(50)")]
+    [DataRow("varchar(50)", "varbinary(50)")]
+    [DataRow("varbinary(50)", "datetime2")]
+    [DataRow("hierarchyid", "varchar(50)")]
+    public void ExplicitOnlyChange_Raises257(string from, string to)
+    {
+        var ex = new Simulation().AssertSqlError($"create table t (c {from}); alter table t alter column c {to}", 257);
+        StartsWith("Implicit conversion from data type ", ex.Errors[0].Message);
+        AreEqual((byte)3, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("nvarchar(max)")]
+    [DataRow("varchar(50)")]
+    [DataRow("varbinary(50)")]
+    public void XmlColumn_BecomesAStringOrBinary(string to)
+        => AreEqual(1, new Simulation().ExecuteScalar($"create table t (c xml); alter table t alter column c {to}; select count(*) from sys.columns where object_id = object_id('t') and type_name(system_type_id) <> 'xml'"));
 }

@@ -77,8 +77,12 @@ internal sealed class DatabasePermission(
     /// <summary>The catalog-view <c>permission_name</c> — the canonical catalog spelling, or the raw stored text for an off-catalog (<see cref="SqlServerSimulator.Permission.Other"/>) name.</summary>
     public string DisplayName => Permission == Permission.Other ? PermissionName! : Permission.CanonicalName;
 
-    /// <summary>The catalog-view <c>type</c> code — the canonical 4-char code, or the first-letter heuristic for an off-catalog name.</summary>
-    public string DisplayTypeCode => Permission == Permission.Other ? PermissionGraph.TypeCodeOf(PermissionName!) ?? DeriveTypeCode(PermissionName!) : Permission.CanonicalTypeCode;
+    /// <summary>
+    /// The catalog-view <c>type</c> code — the canonical 4-char code, or for an
+    /// off-catalog name the one the built-in permission table lists, which
+    /// carries every name <c>GRANT</c> accepts.
+    /// </summary>
+    public string DisplayTypeCode => Permission == Permission.Other ? PermissionGraph.TypeCodeOf(PermissionName!)! : Permission.CanonicalTypeCode;
 
     /// <summary>
     /// Whether this row names <paramref name="permission"/> on the
@@ -92,26 +96,4 @@ internal sealed class DatabasePermission(
         && MajorId == majorId
         && Permission == permission
         && (permission != Permission.Other || database.Collation.Equals(PermissionName, permissionName));
-
-    /// <summary>
-    /// First-letter-of-each-word type-code heuristic for off-catalog permission
-    /// names (e.g. <c>ALTER ANY EXTERNAL LANGUAGE</c> → <c>AAEL</c>),
-    /// right-padded with spaces to 4 chars. Accurate for most spelled-out names
-    /// but won't byte-match real for every long name.
-    /// </summary>
-    private static string DeriveTypeCode(string permissionName)
-    {
-        var words = permissionName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        Span<char> code = stackalloc char[4];
-        var idx = 0;
-        foreach (var w in words)
-        {
-            if (idx >= 4)
-                break;
-            code[idx++] = char.ToUpperInvariant(w[0]);
-        }
-        while (idx < 4)
-            code[idx++] = ' ';
-        return new string(code);
-    }
 }

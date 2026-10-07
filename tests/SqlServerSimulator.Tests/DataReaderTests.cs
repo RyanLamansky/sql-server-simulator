@@ -243,10 +243,18 @@ public sealed class DataReaderTests
     [DataRow("cast('abc' as char(5))", typeof(string))]
     [DataRow("cast('abc' as nchar(5))", typeof(string))]
     [DataRow("cast(0x1234 as binary(4))", typeof(byte[]))]
+    [DataRow("cast('<a/>' as xml)", typeof(string))]
+    [DataRow("cast('[1]' as json)", typeof(string))]
+    [DataRow("cast('[1, 2]' as vector(2))", typeof(string))]
+    [DataRow("cast('/1/' as hierarchyid)", typeof(byte[]))]
+    [DataRow("geography::Point(1, 2, 4326)", typeof(string))]
+    [DataRow("geometry::Point(1, 2, 0)", typeof(string))]
     public void GetFieldType_ReturnsClrType(string expression, Type expected)
     {
         using var reader = OpenReader($"select {expression}");
         AreEqual(expected, reader.GetFieldType(0));
+        IsTrue(reader.Read());
+        AreEqual(expected, reader.GetValue(0).GetType());
     }
 
     [TestMethod]

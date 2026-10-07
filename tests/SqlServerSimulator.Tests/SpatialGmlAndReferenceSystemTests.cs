@@ -100,4 +100,13 @@ public sealed class SpatialGmlAndReferenceSystemTests
     [DataRow("MULTIPOLYGON (EMPTY, ((0 0,1 0,1 1,0 0)))", "MULTIPOLYGON (EMPTY, ((0 0, 1 0, 1 1, 0 0)))")]
     public void Multi_Members_May_Be_Empty(string wkt, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select geometry::Parse('{wkt}').ToString()"));
+
+    [TestMethod]
+    [DataRow("geometry", "0")]
+    [DataRow("geography", "4326")]
+    public void GmlWithNoElement_IsTheReadersFormatError(string type, string srid)
+    {
+        var ex = new Simulation().AssertSqlError($"select {type}::GeomFromGml(cast('' as xml), {srid})", 6522);
+        StartsWith($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{type}\": \r\nSystem.FormatException: One of the identified items was in an invalid format.", ex.Errors[0].Message);
+    }
 }

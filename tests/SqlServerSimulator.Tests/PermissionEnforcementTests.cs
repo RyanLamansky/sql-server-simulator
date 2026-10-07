@@ -23,6 +23,28 @@ public sealed class PermissionEnforcementTests
         return sim;
     }
 
+    /// <summary>
+    /// A joined write naming a stored view as its target checks the view's own
+    /// permissions: the verb on the view, UPDATE on each column it sets and
+    /// SELECT on each column it reads.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update v set a = 2 from v join s on s.k = v.k", "", 229, "The UPDATE permission was denied on the object 'v', database 'simulated', schema 'dbo'.")]
+    [DataRow("update v set b = 3 from v join s on s.k = v.k", "grant update (a) on v to u", 230, "The UPDATE permission was denied on the column 'b' of the object 'v', database 'simulated', schema 'dbo'.")]
+    [DataRow("update v set a = v.b from v join s on s.k = v.k", "grant update (a) on v to u; deny select (b) on v to u", 230, "The SELECT permission was denied on the column 'b' of the object 'v', database 'simulated', schema 'dbo'.")]
+    [DataRow("delete v from v join s on s.k = v.k", "grant update on v to u", 229, "The DELETE permission was denied on the object 'v', database 'simulated', schema 'dbo'.")]
+    public void JoinedWrite_OfAView_ChecksTheViewsPermissions(string write, string grants, int number, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (k int primary key, a int, b int); create table s (k int); insert t values (1, 1, 1); insert s values (1)",
+            "create view v as select k, a, b from t",
+            $"create user u without login; grant select on s to u; grant select on v to u; {grants}");
+        sim.AssertSqlError($"execute as user = 'u'; {write}", number, message);
+        _ = sim.ExecuteNonQuery("grant update (a) on v to u");
+        AreEqual(1, sim.ExecuteNonQuery("execute as user = 'u'; update v set a = 3 from v join s on s.k = v.k"));
+    }
+
     // ---- SELECT ----
 
     [TestMethod]
@@ -587,5 +609,23 @@ public sealed class PermissionEnforcementTests
         sim.ExecuteBatches("create function dbo.f() returns int as begin return 1 end", "grant execute on dbo.f to u");
         _ = sim.AssertSqlError("execute as user = 'u'; select dbo.f(); revert; execute as user = 'u3'; select dbo.f(); revert", 229);
         _ = sim.AssertSqlError("execute as user = 'u3'; begin try select dbo.f() end try begin catch end catch; select dbo.f()", 229);
+    }
+
+    [TestMethod]
+    [Description("Dependency rows show only with VIEW DEFINITION on the database: one on the module, or owning it, shows none (probed 2026-10-07 against SQL Server 2025).")]
+    public void ExpressionDependencies_NeedDatabaseViewDefinition()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int); create user u without login; create user w without login; create user o without login",
+            "create view v1 as select a from t",
+            "create schema s authorization o",
+            "create table s.t (a int)",
+            "create view s.vo as select a from s.t",
+            "grant select on sys.sql_expression_dependencies to public; grant view definition on v1 to u; grant view definition on t to u; grant view definition to w");
+        const string count = "select count(*) from sys.sql_expression_dependencies; revert";
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; " + count));
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'o'; " + count));
+        AreEqual(2, sim.ExecuteScalar("execute as user = 'w'; " + count));
     }
 }

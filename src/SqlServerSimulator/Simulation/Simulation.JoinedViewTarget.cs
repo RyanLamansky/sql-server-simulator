@@ -428,7 +428,10 @@ partial class Simulation
         var batch = context.Batch;
         var chain = new JoinViewChain(sources, joins, written) { TargetIsDerivedTable = view.IsDerivedTable };
         var (path, assignments) = ResolveJoinViewSetTargets(batch, chain, rawAssignments, written, targetIndex);
-        var table = chain.TableAt(path) ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(written, view.IsDerivedTable);
+        var table = chain.TableAt(path)
+            ?? (view.IsCorrelated && view.IsJoinUpdatable
+                ? throw new NotSupportedException("A joined UPDATE through an APPLY's correlated body reading several sources is not modeled yet.")
+                : throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(written, view.IsDerivedTable));
         var nested = chain.Nested[targetIndex]!;
 
         BindDeferredXmlMutators(context, table, rawAssignments, written);

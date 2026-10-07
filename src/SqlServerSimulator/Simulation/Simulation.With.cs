@@ -297,7 +297,8 @@ partial class Simulation
     /// </remarks>
     private static Selection ParseCteBody(ParserContext context, CteBinding binding, string[]? renameList)
     {
-        var firstBranch = Selection.ParseIntersectChain(context, QueryScope.Nested(QueryPosition.Derived, null), isFirstBranch: true);
+        var scope = QueryScope.Nested(QueryPosition.Derived, null);
+        var firstBranch = Selection.ParseIntersectChain(context, scope, isFirstBranch: true);
 
         var branches = new List<(Selection plan, bool selfRef, SetOpKind op)>
         {
@@ -312,8 +313,12 @@ partial class Simulation
 
         try
         {
+            var previous = firstBranch;
             while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
             {
+                // A branch ahead of a set operator orders itself only beside a
+                // TOP or OFFSET, Msg 1033 otherwise, as a derived table's does.
+                Selection.SettleBranchOrdering(context, scope, previous, op);
                 SetOpKind kind;
                 if (op.Keyword == Keyword.Union)
                 {
@@ -336,7 +341,8 @@ partial class Simulation
 
                 binding.SelfReferenceCountInCurrentBranch = 0;
                 context.RecursiveBranchConstructs = default;
-                var branch = Selection.ParseIntersectChain(context, QueryScope.Nested(QueryPosition.Derived, null), isFirstBranch: false);
+                var branch = Selection.ParseIntersectChain(context, scope, isFirstBranch: false);
+                previous = branch;
                 var selfRefCount = binding.SelfReferenceCountInCurrentBranch;
                 if (selfRefCount > 1)
                     throw SimulatedSqlException.RecursiveCteMultipleReferences(binding.Name);
@@ -345,6 +351,10 @@ partial class Simulation
 
                 branches.Add((branch, selfRefCount > 0, kind));
             }
+            // An ORDER BY after the last branch orders the whole body, which
+            // a CTE refuses without a TOP or OFFSET as for a single query.
+            if (branches.Count > 1)
+                Selection.SettleBranchOrdering(context, scope, previous, setOperator: null);
         }
         finally
         {

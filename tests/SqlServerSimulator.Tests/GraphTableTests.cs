@@ -434,6 +434,21 @@ public sealed class GraphTableTests
         AreEqual("CONNECTION (simulated.dbo.Person TO simulated.dbo.City, simulated.dbo.Person TO simulated.dbo.Person)", reader.GetString(6));
     }
 
+    /// <summary>A node table's sp_helpconstraint closes with the edge constraints naming it, sorted.</summary>
+    [TestMethod]
+    public void EdgeConstraint_HelpConstraintOfTheNode()
+    {
+        using var reader = Seeded(Constrained).ExecuteReader("exec sp_helpconstraint 'City', 'nomsg'");
+        List<string> last = [];
+        do
+        {
+            last.Clear();
+            while (reader.Read())
+                last.Add(reader.GetString(0));
+        } while (reader.NextResult());
+        AreEqual("simulated.dbo.L: ec|simulated.dbo.L2: ec2", string.Join("|", last));
+    }
+
     private const string Paths = """
         create table N (id int, name varchar(20), d decimal(5, 2)) as node;
         create table E (w int, m money) as edge;

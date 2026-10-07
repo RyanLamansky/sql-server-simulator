@@ -299,7 +299,7 @@ partial class Simulation
             yield break;
         }
 
-        rows.Sort(ByFirstCell);
+        SortByFirstCell(rows, batch);
         yield return new SimulatedSqlResultSet(SpHelpIndexSchema, SpHelpIndexColumnNames, rows) { ColumnNullability = SpHelpIndexNullability };
     }
 
@@ -446,7 +446,7 @@ partial class Simulation
             yield break;
         }
 
-        rows.Sort(ByFirstCell);
+        SortByFirstCell(rows, batch);
         yield return new SimulatedSqlResultSet(SpHelpStatsSchema, SpHelpStatsColumnNames, rows);
     }
 
@@ -513,7 +513,7 @@ partial class Simulation
         }
         else
         {
-            referencing.Sort(ByFirstCell);
+            SortByFirstCell(referencing, batch);
             yield return new SimulatedSqlResultSet(
                 SpHelpReferencingFkSchema, SpHelpReferencingFkColumnNames, referencing);
         }
@@ -524,7 +524,7 @@ partial class Simulation
             && EdgeConstraintsReferencing(database, node) is { Count: > 0 } edges)
         {
             var edgeRows = edges.ConvertAll(pair => new[] { SqlValue.FromString(HelpReferencingFkType, $"{HelpTableReference(database, pair.Edge)}: {pair.Constraint.Name}") });
-            edgeRows.Sort(ByFirstCell);
+            SortByFirstCell(edgeRows, batch);
             yield return HelpBlankLine(batch, procedureName, 357);
             yield return new SimulatedSqlResultSet(SpHelpReferencingFkSchema, SpHelpReferencingEdgeColumnNames, edgeRows);
         }
@@ -764,10 +764,14 @@ partial class Simulation
     private static SimulatedInfoOutcome HelpNoReferencingForeignKeys(BatchContext batch, string procedureName, int line, string objectName) =>
         Printed(SimulatedSqlException.NoReferencingForeignKeysMessage(batch, procedureName, line, objectName));
 
-    // Row order for the single-column help sets: the one cell, ordinal
-    // case-insensitive.
-    private static readonly Comparison<SqlValue[]> ByFirstCell =
-        static (a, b) => string.Compare(a[0].AsString, b[0].AsString, StringComparison.OrdinalIgnoreCase);
+    // Row order for the single-column help sets: the one cell, under the
+    // database's collation, which puts `ix-` and `ix_` ahead of `ix2` and
+    // `c:` ahead of `c2:` (probed 2026-10-07 against SQL Server 2025).
+    private static void SortByFirstCell(List<SqlValue[]> rows, BatchContext batch)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        rows.Sort((a, b) => collation.Compare(a[0].AsString, b[0].AsString));
+    }
 
     // One row per constraint (two for a foreign key: the declaration row plus a
     // blank-named REFERENCES continuation). Real sorts by the constraint's own

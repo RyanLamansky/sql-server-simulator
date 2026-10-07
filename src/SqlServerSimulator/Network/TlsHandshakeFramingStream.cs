@@ -57,21 +57,10 @@ internal sealed class TlsHandshakeFramingStream(Stream inner) : Stream
 
     public override void SetLength(long value) => throw new NotSupportedException();
 
-    public override int Read(byte[] buffer, int offset, int count) => this.Read(buffer.AsSpan(offset, count));
-
-    public override int Read(Span<byte> buffer)
-    {
-        if (this.passthrough)
-            return this.inner.Read(buffer);
-
-        if (!this.AdvanceToPayloadSync())
-            return 0;
-
-        var take = Math.Min(buffer.Length, this.pendingPayload);
-        this.inner.ReadExactly(buffer[..take]);
-        this.pendingPayload -= take;
-        return take;
-    }
+    // SslStream drives the handshake through the asynchronous members; the
+    // synchronous pair Stream requires runs them to completion.
+    public override int Read(byte[] buffer, int offset, int count) =>
+        this.ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
@@ -100,25 +89,8 @@ internal sealed class TlsHandshakeFramingStream(Stream inner) : Stream
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
         this.ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
 
-    public override void Write(byte[] buffer, int offset, int count) => this.Write(buffer.AsSpan(offset, count));
-
-    public override void Write(ReadOnlySpan<byte> buffer)
-    {
-        if (this.passthrough)
-        {
-            this.inner.Write(buffer);
-            return;
-        }
-
-        while (buffer.Length > 0)
-        {
-            var chunk = Math.Min(buffer.Length, Tds.DefaultPacketSize - Tds.HeaderSize);
-            this.FillHeader(chunk, endOfMessage: chunk == buffer.Length);
-            this.inner.Write(this.writeHeader);
-            this.inner.Write(buffer[..chunk]);
-            buffer = buffer[chunk..];
-        }
-    }
+    public override void Write(byte[] buffer, int offset, int count) =>
+        this.WriteAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
@@ -140,24 +112,6 @@ internal sealed class TlsHandshakeFramingStream(Stream inner) : Stream
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
         this.WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-
-    private bool AdvanceToPayloadSync()
-    {
-        while (this.pendingPayload == 0)
-        {
-            var header = new byte[Tds.HeaderSize];
-            var read = this.inner.Read(header, 0, Tds.HeaderSize);
-            if (read == 0)
-                return false;
-
-            if (read < Tds.HeaderSize)
-                this.inner.ReadExactly(header.AsSpan(read, Tds.HeaderSize - read));
-
-            this.pendingPayload = ((header[2] << 8) | header[3]) - Tds.HeaderSize;
-        }
-
-        return true;
-    }
 
     private void FillHeader(int payloadLength, bool endOfMessage)
     {

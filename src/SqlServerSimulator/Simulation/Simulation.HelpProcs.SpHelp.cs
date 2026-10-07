@@ -484,7 +484,7 @@ partial class Simulation
             yield break;
         }
 
-        rows.Sort(ByFirstCell);
+        SortByFirstCell(rows, batch);
         yield return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpReferencingViewColumnNames, rows) { ColumnNullability = SingleNotNullColumn };
     }
 
@@ -501,7 +501,7 @@ partial class Simulation
                 rows.Add(HelpTableTypeRow(tableType));
         }
 
-        rows.Sort(ByFirstCell);
+        rows.Sort((a, b) => database.Collation.Compare(a[0].AsString, b[0].AsString));
         return rows;
     }
 

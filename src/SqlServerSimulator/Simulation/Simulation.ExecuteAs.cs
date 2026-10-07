@@ -88,7 +88,7 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        targetName ??= targetVariable!.Run(new RuntimeContext(NoColumns, batch)) is { IsNull: false } value
+        targetName ??= targetVariable!.Run(new RuntimeContext(NoColumnResolver, batch)) is { IsNull: false } value
             ? value.CoerceTo(Storage.SqlType.NVarchar).AsString
             : throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal("");
         var cookie = cookieSlot is null ? null : System.Security.Cryptography.RandomNumberGenerator.GetBytes(ApplicationRoleCookieLength);
@@ -377,8 +377,6 @@ partial class Simulation
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(clause);
         connection.Security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity, isDatabaseScoped: true, ModuleGuard));
     }
-
-    private static Storage.SqlValue NoColumns(MultiPartName name) => throw SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>The guard a module's own <c>WITH EXECUTE AS</c> frame carries: a <c>REVERT</c> in its body leaves it in place.</summary>
     private static readonly ExecuteAsGuard ModuleGuard = new(module: true);

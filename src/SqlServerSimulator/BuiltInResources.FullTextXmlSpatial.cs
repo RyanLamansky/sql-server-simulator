@@ -613,10 +613,8 @@ internal static partial class BuiltInResources
         var nullChar = SqlValue.Null(charOneType);
         var nullDesc = SqlValue.Null(SqlType.NVarchar);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        // Appended-column constants: fresh-index defaults mirroring the
-        // sys.indexes / spatial_index modeled shape (data_space_id=1 PRIMARY,
-        // fill_factor=0, allow_row_locks / allow_page_locks true).
-        var zeroByte = SqlValue.FromByte(0);
+        // Appended-column constants: the sys.indexes shape (data_space_id=1
+        // PRIMARY), the options the index's WITH list set beside them.
         var oneInt = SqlValue.FromInt32(1);
         var nullFilter = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var primaryXmlType = SqlValue.FromByte(0);
@@ -667,13 +665,13 @@ internal static partial class BuiltInResources
                         oneInt,     // data_space_id (PRIMARY)
                         falseBit,   // ignore_dup_key
                         falseBit,   // is_unique_constraint
-                        zeroByte,   // fill_factor
-                        falseBit,   // is_padded
+                        SqlValue.FromByte(ix.FillFactor),
+                        ix.IsPadded ? trueBit : falseBit,
                         falseBit,   // is_disabled
                         falseBit,   // is_hypothetical
                         falseBit,   // is_ignored_in_optimization
-                        trueBit,    // allow_row_locks
-                        trueBit,    // allow_page_locks
+                        ix.AllowRowLocks ? trueBit : falseBit,
+                        ix.AllowPageLocks ? trueBit : falseBit,
                         falseBit,   // has_filter
                         nullFilter, // filter_definition
                         xmlType,    // xml_index_type

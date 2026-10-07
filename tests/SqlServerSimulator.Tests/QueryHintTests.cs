@@ -1065,9 +1065,19 @@ public sealed class QueryHintTests
     [DataRow("(@p unknown), optimize for (@p = 1)", 4131, "A compile-time literal value is specified more than once for the variable \"@p\" in one or more OPTIMIZE FOR clauses.")]
     [DataRow("(@p = @p)", 320, "The compile-time variable value for '@p' in the OPTIMIZE FOR clause must be a literal.")]
     [DataRow("(@d = 5)", 206, "Operand type clash: int is incompatible with date")]
+    [DataRow("(@t = -5)", 4132, "The value specified for the variable \"@t\" in the OPTIMIZE FOR clause could not be implicitly converted to that variable's type.")]
+    [DataRow("(@t = 300)", 4132, "The value specified for the variable \"@t\" in the OPTIMIZE FOR clause could not be implicitly converted to that variable's type.")]
+    [DataRow("(@p = -'5')", 102, "Incorrect syntax near '5'.")]
+    [DataRow("(@p = -0x05)", 102, "Incorrect syntax near '0x05'.")]
+    [DataRow("(@p = -null)", 156, "Incorrect syntax near the keyword 'null'.")]
     public void OptimizeFor_ChecksItsVariables(string clause, int number, string message)
         => new Simulation().AssertSqlError(
-            $"{HintTable} declare @p int = 1, @d date; select id from t where a > @p and @d is null option (optimize for {clause})", number, message);
+            $"{HintTable} declare @p int = 1, @d date, @t tinyint; select id from t where a > @p and @d is null and @t is null option (optimize for {clause})", number, message);
+
+    [TestMethod]
+    public void OptimizeFor_TakesANegatedNumberOrCurrency()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            $"{HintTable} declare @p int = 1, @m money = 1; select count(*) from t where a > @p or @m = 0 option (optimize for (@p = -5, @m = -$5.25))"));
 
     [TestMethod]
     public void OptimizeFor_TakesLiteralsItsVariablesConvert()

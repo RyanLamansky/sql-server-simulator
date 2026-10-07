@@ -472,6 +472,17 @@ internal sealed class CanonicalDefinition
                 break;
         }
         var name = string.Join('.', parts);
+        // A type's static method keeps its own name as written, its type
+        // bracketed: [geography]::Point((1),(2),(4326)) (probed 2026-10-07
+        // against SQL Server 2025).
+        if (parts.Count == 1 && this.AtAdjacentPair(':', ':'))
+        {
+            this.position += 2;
+            if (this.Current is not Name method)
+                return null;
+            this.position++;
+            return this.Arguments() is { } staticArguments ? new($"{name}::{method.Value}({staticArguments})", Shape.Atom) : null;
+        }
         if (!this.AtOperator('('))
             return new(name, Shape.Atom);
         // A single-part call is a built-in, which BuiltIn reads undelimited.

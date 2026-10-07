@@ -34,8 +34,6 @@ internal sealed class GridOperand
     /// </summary>
     public readonly List<GridPoint[]> Ghosts = [];
 
-    public bool IsEmpty => this.Points.Count == 0 && this.Lines.Count == 0 && this.Rings.Count == 0;
-
     public bool HasArea => this.Rings.Count > 0;
 
     /// <summary>
@@ -158,8 +156,6 @@ internal sealed class GridGeometry
     public readonly List<GridPoint[]> Lines = [];
 
     public readonly List<GridPoint> Points = [];
-
-    public bool IsEmpty => this.Polygons.Count == 0 && this.Lines.Count == 0 && this.Points.Count == 0;
 }
 
 /// <summary>

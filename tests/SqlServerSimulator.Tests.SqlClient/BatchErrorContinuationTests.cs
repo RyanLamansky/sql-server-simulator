@@ -177,4 +177,26 @@ public sealed class BatchErrorContinuationTests
         await using var count = new SqlCommand("select count(*) from #t", connection);
         AreEqual(0, await count.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// An unbuilt feature reached through an RPC — a parameterized command —
+    /// is the same Msg 50000 error token, closing the RPC with an error DONE
+    /// while the connection stays usable.
+    /// </summary>
+    [TestMethod]
+    public async Task NotSupportedInAnRpc_IsMsg50000_AndTheConnectionStays()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var command = new SqlCommand("dbcc page (0, 1, 0, @p) with tableresults", connection);
+            _ = command.Parameters.AddWithValue("@p", 0);
+            _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        });
+        AreEqual(50000, ex.Number);
+        await using var after = new SqlCommand("select 1", connection);
+        AreEqual(1, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

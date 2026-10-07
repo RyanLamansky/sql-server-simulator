@@ -44,6 +44,28 @@ public sealed class InsteadOfTriggerTests
 
     // === INSTEAD OF INSERT on a table ===
 
+    /// <summary>
+    /// A positioned write through a view hands its INSTEAD OF trigger the rows
+    /// a searched one does: a derived column computed from the row, and the
+    /// new row the old one with only the SET list's columns replaced.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update v set v = 6 where current of c", "upd|1|6|11|20|10|11|20")]
+    [DataRow("delete v where current of c", "del|1|10|11|20")]
+    public void InsteadOfTrigger_OnAViewWrittenWhereCurrentOf(string write, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, v int, w as v + 1); insert t (id, v) values (1, 10), (2, 20)",
+            "create view v as select id, v, w, v * 2 d from t",
+            "create trigger tr on v instead of delete as select concat_ws('|', 'del', id, v, w, d) from deleted",
+            "create trigger tr2 on v instead of update as select concat_ws('|', 'upd', i.id, i.v, i.w, i.d, d.v, d.w, d.d) from inserted i join deleted d on d.id = i.id");
+        using var reader = sim.ExecuteReader($"declare c cursor for select id from v; open c; fetch c; {write}; close c; deallocate c");
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual(expected, reader.GetString(0));
+    }
+
     [TestMethod]
     public void InsteadOfInsert_SkipsHeapWrite_FiresTrigger()
     {
@@ -636,5 +658,17 @@ public sealed class InsteadOfTriggerTests
             "create trigger tr on dbo.vw instead of insert as insert dbo.log1 select count(*), count(v) from inserted");
         _ = simulation.ExecuteNonQuery("insert dbo.vw default values");
         AreEqual("1:0", simulation.ExecuteScalar("select concat(n, ':', nv) from dbo.log1"));
+    }
+
+    [TestMethod]
+    [Description("A FROM naming only other tables still joins the INSTEAD OF view: Msg 414.")]
+    [DataRow("update v set a = 1 from t")]
+    [DataRow("update v set a = 1 output deleted.a into t from t")]
+    [DataRow("update v set a = 1 from v join t on 1 = 1")]
+    public void InsteadOfUpdateView_WithFrom_Raises414(string sql)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create view v as select a from t", "create trigger tr on v instead of update as set nocount on");
+        sim.AssertSqlError(sql, 414, "UPDATE is not allowed because the statement updates view \"v\" which participates in a join and has an INSTEAD OF UPDATE trigger.");
     }
 }

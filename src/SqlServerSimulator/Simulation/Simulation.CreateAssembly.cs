@@ -268,9 +268,6 @@ partial class Simulation
         if (!database.Assemblies.TryGetValue(assemblyName, out var assembly))
             throw SimulatedSqlException.AssemblyNotFoundInDatabase(assemblyName, database.Name);
 
-        if (!context.Batch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
-
         var type = assembly.Load().GetType(className);
         return type is not null
             ? (assembly, type)

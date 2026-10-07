@@ -51,6 +51,28 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
         ? SqlValue.FromVariantNamedDecimal(DecodeInner(source))
         : SqlValue.FromVariant(DecodeInner(source));
 
+    /// <summary>
+    /// A table-valued parameter's cell, whose base type is the one the
+    /// client sends its CLR value as: <c>int</c> for an <see cref="int"/>,
+    /// <c>float</c> for a <see cref="double"/>, and so on. A string or byte
+    /// array travels as a MAX type, which <c>sql_variant</c> can't hold
+    /// (probed 2026-10-07 against SQL Server 2025 over SqlClient 7.0).
+    /// </summary>
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVariant(raw switch
+    {
+        bool flag => SqlValue.FromBoolean(flag),
+        byte number => SqlValue.FromByte(number),
+        short number => SqlValue.FromInt16(number),
+        int number => SqlValue.FromInt32(number),
+        long number => SqlValue.FromInt64(number),
+        float number => SqlValue.FromSingle(number),
+        double number => SqlValue.FromDouble(number),
+        Guid guid => SqlValue.FromGuid(guid),
+        string => throw SimulatedSqlException.OperandTypeClash("nvarchar(max)", "sql_variant"),
+        byte[] => throw SimulatedSqlException.OperandTypeClash("varbinary(max)", "sql_variant"),
+        _ => throw new NotSupportedException($"No conversion from {raw.GetType()} to sql_variant."),
+    });
+
     public override string ToString() => "sql_variant";
 
     // Inner-type discriminators for the storage descriptor. Simulator-internal;

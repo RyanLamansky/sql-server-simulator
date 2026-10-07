@@ -46,8 +46,6 @@ internal sealed class ColumnSetValue : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Xml;
 
-    internal override bool ResultIsNullable(NullabilityContext context) => true;
-
     internal override string DebugDisplay() => "COLUMN_SET FOR ALL_SPARSE_COLUMNS";
 
     internal override void Describe(NodeShape shape) { }

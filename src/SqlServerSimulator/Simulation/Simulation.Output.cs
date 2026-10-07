@@ -890,8 +890,7 @@ partial class Simulation
         /// this case and surfaces the statement as a non-query (matches real
         /// SQL Server: <c>OUTPUT … INTO target</c> directs rows to the target
         /// only, without returning them to the client). A client-bound clause
-        /// following an <c>INTO</c> one is false here and true for
-        /// <see cref="WritesTarget"/>.
+        /// following an <c>INTO</c> one is false here.
         /// </summary>
         public bool HasTarget => outputTarget is not null;
 
@@ -901,9 +900,6 @@ partial class Simulation
         /// so the write notes each row's partners for it.
         /// </summary>
         public bool ReadsPartners;
-
-        /// <summary>True when this clause, or the <c>OUTPUT … INTO</c> clause it follows, writes a target.</summary>
-        public bool WritesTarget => outputTarget is not null || logged is not null;
 
         /// <summary>
         /// Whether the target this clause or the one it follows writes keeps a

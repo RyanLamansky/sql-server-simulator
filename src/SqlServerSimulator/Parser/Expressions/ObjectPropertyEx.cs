@@ -79,6 +79,14 @@ internal sealed class ObjectPropertyEx : Expression
                     ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
                     : SqlValue.Null(SqlType.SqlVariant);
         }
+        if (ObjectProperty.FindTableType(database, id) is { } tableType)
+        {
+            return IsBaseType(prop) ? TypeCodeVariant(tableType.ObjectTypeCode, database)
+                : BuiltInToken.Equals(prop, "Cardinality") ? SqlValue.FromVariant(SqlValue.FromInt64(0))
+                : ObjectProperty.EvaluateTableTypeProperty(database, tableType, prop) is int tableTypeResult
+                    ? SqlValue.FromVariant(SqlValue.FromInt32(tableTypeResult))
+                    : SqlValue.Null(SqlType.SqlVariant);
+        }
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
         {
             return IsBaseType(prop) ? TypeCodeVariant(system.Type, database)
@@ -108,8 +116,8 @@ internal sealed class ObjectPropertyEx : Expression
                 // BaseType's inner type is char(2) in the database collation
                 // (probe-confirmed) — the 2-char object-type code with its
                 // trailing-space padding.
+                // SchemaId answers through OBJECTPROPERTY's dispatch, above.
                 "BASETYPE" => BaseTypeVariant(obj, batch, database),
-                "SCHEMAID" => IntVariant(ObjectProperty.FindOwningSchema(database, obj)?.SchemaId),
                 _ => SqlValue.Null(SqlType.SqlVariant),
             },
             11 => upper[..len] switch
@@ -124,93 +132,10 @@ internal sealed class ObjectPropertyEx : Expression
                 },
                 _ => SqlValue.Null(SqlType.SqlVariant),
             },
-            // The TableHas* family — shared verbatim with the non-EX
-            // OBJECTPROPERTY, which real supports for every one of these
-            // (probe-confirmed; only BaseType / Cardinality above are
-            // genuinely EX-only, returning NULL from the non-EX form).
-            13 or 16 or 17 or 18 => IntVariant(TableFlagByName(obj, upper[..len]) is bool flag ? flag ? 1 : 0 : null),
+            // The TableHas* family answers through OBJECTPROPERTY's own
+            // dispatch, above; a non-table's is NULL as any other name's.
             _ => SqlValue.Null(SqlType.SqlVariant),
         };
-    }
-
-    /// <summary>
-    /// Maps an upper-cased <c>TableHas*</c> property name to its answer for
-    /// <paramref name="obj"/>: <see langword="null"/> when the object isn't a
-    /// table or the name isn't one of the family (both are NULL on real), else
-    /// the flag. Single source of truth for <c>OBJECTPROPERTY</c> and
-    /// <c>OBJECTPROPERTYEX</c>, which expose the identical set.
-    /// </summary>
-    internal static bool? TableFlagByName(SchemaObject obj, ReadOnlySpan<char> upperName) =>
-        obj is not HeapTable table ? null : upperName switch
-        {
-            "TABLEHASCHECKCNST" => HasCheckConstraint(table),
-            "TABLEHASCLUSTINDEX" => HasClusteredIndex(table),
-            "TABLEHASFOREIGNKEY" => HasOutgoingForeignKey(table),
-            "TABLEHASFOREIGNREF" => HasIncomingForeignKey(table),
-            "TABLEHASIDENTITY" => HasIdentity(table),
-            "TABLEHASINDEX" => HasAnyIndex(table),
-            "TABLEHASPRIMARYKEY" => HasPrimaryKey(table),
-            "TABLEHASROWGUIDCOL" => HasRowGuidCol(table),
-            "TABLEHASUNIQUECNST" => HasUniqueConstraint(table),
-            _ => null,
-        };
-
-    private static SqlValue IntVariant(int? value) => value is int v
-        ? SqlValue.FromVariant(SqlValue.FromInt32(v))
-        : SqlValue.Null(SqlType.SqlVariant);
-
-    private static bool HasAnyIndex(HeapTable table) => table.Indexes.Count > 0 || table.KeyConstraints.Count > 0;
-
-    private static bool HasCheckConstraint(HeapTable table) => table.CheckConstraints.Count > 0;
-
-    private static bool HasOutgoingForeignKey(HeapTable table) => table.OutgoingForeignKeys.Count > 0;
-
-    private static bool HasIncomingForeignKey(HeapTable table) => table.IncomingForeignKeys.Count > 0;
-
-    /// <summary>
-    /// Real reports 1 when any column carries the <c>ROWGUIDCOL</c> marker
-    /// (probe-confirmed); the per-column marker is tracked on
-    /// <see cref="HeapColumn.IsRowGuidCol"/>, which
-    /// <c>sys.columns.is_rowguidcol</c> already projects.
-    /// </summary>
-    private static bool HasRowGuidCol(HeapTable table)
-    {
-        foreach (var col in table.Columns)
-        {
-            if (col.IsRowGuidCol)
-                return true;
-        }
-        return false;
-    }
-
-    private static bool HasIdentity(HeapTable table)
-    {
-        foreach (var col in table.Columns)
-        {
-            if (col.Identity is not null)
-                return true;
-        }
-        return false;
-    }
-
-    private static bool HasPrimaryKey(HeapTable table)
-    {
-        foreach (var kc in table.KeyConstraints)
-        {
-            if (kc.Kind == KeyConstraintKind.PrimaryKey)
-                return true;
-        }
-        return false;
-    }
-
-    private static bool HasUniqueConstraint(HeapTable table)
-    {
-        foreach (var kc in table.KeyConstraints)
-        {
-            if (kc.Kind == KeyConstraintKind.Unique)
-                return true;
-        }
-        return false;
     }
 
     internal static bool HasClusteredIndex(HeapTable table)

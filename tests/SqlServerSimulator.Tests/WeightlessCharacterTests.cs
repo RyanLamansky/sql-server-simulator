@@ -123,4 +123,16 @@ public sealed class WeightlessCharacterTests
     [DataRow("N'x' + nchar(160) like N'x_'", 1)]
     public void Like_TellsANoBreakSpaceFromASpace(string condition, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select iif({condition}, 1, 0)"));
+
+    [TestMethod]
+    [Description("The version 90 and 140 accent-insensitive names ignore their own further marks, which the accent-sensitive names weigh (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow(0x0483, "Japanese_90_CI_AI", 1)]
+    [DataRow(0x05A3, "Japanese_90_CI_AI", 1)]
+    [DataRow(0x0483, "Japanese_90_CI_AS", 0)]
+    [DataRow(0x1DC0, "Japanese_XJIS_140_CI_AI", 1)]
+    [DataRow(0x0350, "Japanese_XJIS_140_CI_AI", 1)]
+    [DataRow(0x0F39, "Japanese_XJIS_140_CI_AI", 1)]
+    [DataRow(0x1DC0, "Japanese_XJIS_140_CI_AS", 0)]
+    public void VersionedAccentInsensitiveMarks(int codePoint, string collation, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select iif(N'a' + nchar({codePoint}) + N'b' = N'ab' collate {collation}, 1, 0)"));
 }

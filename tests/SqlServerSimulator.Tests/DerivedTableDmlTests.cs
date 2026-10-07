@@ -174,6 +174,17 @@ public sealed class DerivedTableDmlTests
     }
 
     /// <summary>
+    /// A joined <c>UPDATE</c> through an <c>APPLY</c>'s correlated body that
+    /// reads several sources is not modeled yet.
+    /// </summary>
+    [TestMethod]
+    public void JoiningApplyBody_UpdateNotModeled()
+    {
+        var simulation = Setup();
+        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("update d set v = 0 from u cross apply (select t.id, t.v from t join u u2 on u2.id = t.id where t.id = u.id) d"));
+    }
+
+    /// <summary>
     /// A body reading a table value constructor or a rowset function takes
     /// every column as derived: an <c>UPDATE</c> or <c>INSERT</c> is Msg 4406
     /// (4421 through a derived table) and a <c>DELETE</c> Msg 4406 whatever

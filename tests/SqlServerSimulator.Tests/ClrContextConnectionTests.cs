@@ -125,6 +125,14 @@ public class ClrContextConnectionTests
     }
 
     [TestMethod]
+    [Description("A typed string or binary parameter without a size is declared as long as its value, a char[] value included (probed 2026-10-07 against SQL Server 2025).")]
+    public void UnsizedParameters_TakeTheirValuesLength()
+    {
+        var sim = Sim("create procedure dbo.sp as external name simclr.Ctx.SizedParams");
+        CollectionAssert.AreEqual(new[] { "String:12,4,6,5,3,8,xy" }, Messages(sim, "exec dbo.sp"));
+    }
+
+    [TestMethod]
     [Description("The in-process provider declares a decimal parameter, typed or not, as numeric (probed 2026-10-06 against SQL Server 2025).")]
     public void DecimalParameters_ReportNumeric()
     {
@@ -195,6 +203,18 @@ public class ClrContextConnectionTests
         AreEqual(6549, ex.Number);
         Contains("tried to rollback a transaction that is not started in that CLR level", ex.Errors[0].Message);
         EndsWith(". User transaction, if any, will be rolled back.", ex.Errors[0].Message);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    [Description("A routine returning with the caller's transaction nested deeper than it found it is Msg 3992, which rolls the transaction back and ends the batch.")]
+    public void ChangedTranCount_IsMsg3992()
+    {
+        var sim = Sim();
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; exec nq N'begin tran'; select 'not reached'").ExecuteNonQuery());
+        AreEqual(3992, ex.Number);
+        StartsWith("Transaction count has been changed from 1 to 2 inside of user defined routine, trigger or aggregate \"nq\".", ex.Errors[0].Message);
         AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
     }
 

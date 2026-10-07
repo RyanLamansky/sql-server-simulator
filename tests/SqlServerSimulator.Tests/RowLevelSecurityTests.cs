@@ -441,4 +441,46 @@ public sealed class RowLevelSecurityTests
         AreEqual("208,4413,33512", string.Join(",", ex.Errors.Select(static e => e.Number)));
         _ = simulation.AssertSqlError("insert t values (1)", 208);
     }
+
+    [TestMethod]
+    [Description("Refusals of a predicate's target and of a DROP (probed 2026-10-07 against SQL Server 2025).")]
+    public void TargetAndDropRefusals()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create function dbo.f(@a int) returns table with schemabinding as return select 1 r",
+            "create view dbo.v with schemabinding as select a from dbo.t",
+            "create procedure dbo.p as select 1",
+            "create table tt (id int primary key, a int, s datetime2 generated always as row start, e datetime2 generated always as row end, period for system_time (s, e)) with (system_versioning = on (history_table = dbo.tth))");
+        sim.AssertSqlError("create security policy p1 add filter predicate dbo.f(a) on dbo.p", 33263,
+            "Security predicates can only be added to user tables and schema bound views. 'dbo.p' is not a user table or a schema bound view.");
+        sim.AssertSqlError("create security policy p2 add block predicate dbo.f(a) on dbo.v", 33503,
+            "BLOCK predicates can only be added to user tables. 'dbo.v' is not a user table.");
+        sim.AssertSqlError("create security policy p3 add block predicate dbo.f(a) on dbo.tth", 33510,
+            "BLOCK security predicates cannot reference history tables. Table 'dbo.tth' is a temporal or ledger history table.");
+        var missing = sim.AssertSqlError("drop security policy nope", 3701);
+        AreEqual("Cannot drop the security policy 'nope', because it does not exist or you do not have permission.", missing.Errors[0].Message);
+        AreEqual((byte)11, missing.Class);
+        AreEqual((byte)5, missing.State);
+        _ = sim.ExecuteNonQuery("create security policy p4 add filter predicate dbo.f(a) on dbo.t; create user u without login");
+        var denied = sim.AssertSqlError("execute as user = 'u'; drop security policy p4", 3701);
+        AreEqual((byte)14, denied.Class);
+        AreEqual((byte)20, denied.State);
+    }
+
+    [TestMethod]
+    [Description("A predicate clause after a CREATE SECURITY POLICY that the grammar doesn't take reads as a statement of its own naming an unknown object type, and CREATE OR ALTER SECURITY POLICY is two Msg 102s (probed 2026-10-07 against SQL Server 2025).")]
+    public void ParserRecoveryShapes()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create function dbo.f(@a int) returns table with schemabinding as return select 1 r");
+        sim.AssertSqlError("create security policy p5 add filter predicate dbo.f(a) on dbo.t drop filter predicate on dbo.t", 343,
+            "Unknown object type 'filter' used in a CREATE, DROP, or ALTER statement.");
+        sim.AssertSqlError("create security policy p6 add filter predicate dbo.f(a) on dbo.t alter block predicate dbo.f(a) on dbo.t", 343,
+            "Unknown object type 'block' used in a CREATE, DROP, or ALTER statement.");
+        var orAlter = sim.AssertSqlError("create or alter security policy p7 add filter predicate dbo.f(a) on dbo.t", 102);
+        CollectionAssert.AreEqual(new[] { "Incorrect syntax near 'security'.", "Incorrect syntax near 'filter'." }, orAlter.Errors.Select(error => error.Message).ToArray());
+        sim.AssertSqlError("create or alter table x (a int)", 156, "Incorrect syntax near the keyword 'table'.");
+    }
 }

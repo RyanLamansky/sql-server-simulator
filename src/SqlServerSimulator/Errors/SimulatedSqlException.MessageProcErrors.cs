@@ -187,9 +187,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException NotARole(string name) =>
         new($"'{name}' is not a role.", 15409, 11, 1);
 
-    /// <summary>Msg 15291: <c>sp_change_users_login</c> naming a user that is absent or not an orphan.</summary>
+    /// <summary>Msg 15291: <c>sp_change_users_login</c> naming a user that is absent or not mapped to a login.</summary>
     internal static SimulatedSqlException UserAbsentOrInvalid(string user) =>
         new($"Terminating this procedure. The User name '{user}' is absent or invalid.", 15291, 16, 1);
+
+    /// <summary>Msg 15287: <c>sp_change_users_login</c> naming <c>sa</c> as the login, or a fixed user as the user.</summary>
+    internal static SimulatedSqlException ForbiddenChangeUsersLoginName(string name) =>
+        new($"Terminating this procedure. '{name}' is a forbidden value for the login name parameter in this procedure.", 15287, 16, 1);
 
     /// <summary>Msg 15286: <c>sp_change_users_login</c> with an <c>@Action</c> it doesn't know.</summary>
     internal static SimulatedSqlException UnrecognizedChangeUsersLoginAction(string action) =>

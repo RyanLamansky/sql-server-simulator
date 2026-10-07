@@ -16,6 +16,27 @@ public sealed class ObjectPropertyTests
     public void IsTable_OnTable_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar("create table t (id int); select objectproperty(object_id('t'), 'IsTable')"));
 
+    /// <summary>
+    /// A table type's backing type table is a shipped table of the <c>sys</c>
+    /// schema rather than a user table, answering the <c>TableHas*</c> family
+    /// off its own keys and NULL to the index members.
+    /// </summary>
+    [TestMethod]
+    [DataRow("objectproperty(@i, 'IsTable')", 1)]
+    [DataRow("objectproperty(@i, 'IsUserTable')", 0)]
+    [DataRow("objectproperty(@i, 'IsMSShipped')", 1)]
+    [DataRow("objectproperty(@i, 'SchemaId')", 4)]
+    [DataRow("objectproperty(@i, 'OwnerId')", 4)]
+    [DataRow("objectproperty(@i, 'TableHasPrimaryKey')", 1)]
+    [DataRow("objectproperty(@i, 'TableHasIdentity')", 1)]
+    [DataRow("objectproperty(@i, 'IsIndexed')", null)]
+    [DataRow("objectpropertyex(@i, 'BaseType')", "TT")]
+    [DataRow("objectpropertyex(@i, 'Cardinality')", 0L)]
+    [DataRow("objectpropertyex(@i, 'IsTable')", 1)]
+    public void TableType_AnswersAsItsTypeTable(string call, object? expected)
+        => AreEqual(expected ?? DBNull.Value, new Simulation().ExecuteScalar(
+            $"create type dbo.tt as table (a int primary key, b int identity); declare @i int = (select type_table_object_id from sys.table_types); select {call}"));
+
     [TestMethod]
     public void IsView_OnTable_Returns0()
         => AreEqual(0, new Simulation().ExecuteScalar("create table t (id int); select objectproperty(object_id('t'), 'IsView')"));
@@ -318,5 +339,21 @@ public sealed class ObjectPropertyTests
             select string_agg(concat(name, ':', cast(objectpropertyex(object_id, 'SystemDataAccess') as int), '/', cast(objectpropertyex(object_id, 'UserDataAccess') as int), '/', objectproperty(object_id, 'IsPrecise')), ',') within group (order by name)
             from sys.objects where is_ms_shipped = 0
             """));
+    }
+
+    [TestMethod]
+    [Description("OBJECTPROPERTYEX answers the TableHas* family as an int variant, NULL for a view (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("p", "1|1|0|1|0|1|1|1|1|1|1")]
+    [DataRow("c", "0|0|1|0|1|0|0|0|0|1|0")]
+    [DataRow("h", "0|0|0|0|0|0|0|0|0|0|0")]
+    [DataRow("v", "||||||||||")]
+    public void ObjectPropertyEx_TableHasFamily(string name, string expected)
+    {
+        string[] properties = ["CheckCnst", "ClustIndex", "ForeignKey", "ForeignRef", "Identity", "Index", "PrimaryKey", "RowGuidCol", "UniqueCnst", "DefaultCnst", "NonclustIndex"];
+        var values = string.Join(", '|', ", properties.Select(property => $"isnull(cast(cast(objectpropertyex(object_id('{name}'), 'TableHas{property}') as int) as varchar), '')"));
+        AreEqual(expected, new Simulation().ExecuteBatchesScalar(
+            "create table p (id int primary key, g uniqueidentifier rowguidcol default newid(), u int unique, c int check (c > 0)); create table c (id int identity, pid int references p(id), d int default 1); create table h (a int)",
+            "create view v as select a from h",
+            $"select concat({values})"));
     }
 }

@@ -136,6 +136,10 @@ public sealed class XmlTests
     }
 
     [TestMethod]
+    public void Nodes_OfAConditionalOverAttributes_ReadTheTakenBranch()
+        => AreEqual(1, new Simulation().ExecuteScalar("declare @x xml = '<a x=\"1\"/>'; select t.c.value('.', 'int') from @x.nodes('if (1 = 1) then /a/@x else /a/@y') t(c)"));
+
+    [TestMethod]
     public void CreatePrimaryXmlIndex_Succeeds()
     {
         var sim = new Simulation();
@@ -143,6 +147,53 @@ public sealed class XmlTests
         _ = sim.ExecuteNonQuery("create primary xml index pxml_doc on dbo.doc(body)");
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.xml_indexes"));
         AreEqual("XML", sim.ExecuteScalar("select type_desc from sys.xml_indexes where name = 'pxml_doc'"));
+    }
+
+    /// <summary>
+    /// An XML index's <c>WITH</c> list: the options it takes reach the
+    /// catalog, a name no index takes is the XML INDEX's own refusal, and an
+    /// option the statement can't take is refused once the list has read.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (bogus = 1)", "155:'bogus' is not a recognized XML INDEX option.|153:Invalid usage of the option bogus in the XML INDEX statement.")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (bogus = on)", "155:'bogus' is not a recognized XML INDEX option.|155:'bogus' is not a recognized CREATE XML INDEX option.")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (bogus = 'x')", "155:'bogus' is not a recognized XML INDEX option.|102:Incorrect syntax near 'x'.")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (online = on, bogus = 1)", "155:'bogus' is not a recognized XML INDEX option.|153:Invalid usage of the option bogus in the XML INDEX statement.")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (Online = on)", "153:Invalid usage of the option ONLINE in the CREATE XML INDEX statement.")]
+    [DataRow("create primary xml index p2 on t (y) with (resumable = on)", "153:Invalid usage of the option RESUMABLE in the CREATE PRIMARY XML INDEX statement.")]
+    [DataRow("create primary xml index p2 on t (y) with (max_duration = 1)", "153:Invalid usage of the option MAX_DURATION in the CREATE PRIMARY XML INDEX statement.")]
+    [DataRow("create primary xml index p2 on t (y) with (optimize_for_sequential_key = on)", "153:Invalid usage of the option OPTIMIZE_FOR_SEQUENTIAL_KEY in the CREATE PRIMARY XML INDEX statement.")]
+    [DataRow("create primary xml index p2 on t (y) with (Ignore_Dup_Key = on)", "153:Invalid usage of the option ignore_dup_key in the CREATE PRIMARY XML INDEX statement.")]
+    [DataRow("create primary xml index p2 on t (y) with (Data_Compression = page)", "155:'data_compression' is not a recognized CREATE PRIMARY XML INDEX option.")]
+    [DataRow("create primary xml index p2 on t (y) with (Bucket_Count = 8)", "155:'Bucket_Count' is not a recognized CREATE PRIMARY XML INDEX option.")]
+    [DataRow("create primary xml index p2 on t (y) with (statistics_only = 1)", "102:Incorrect syntax near 'statistics_only'.|153:Invalid usage of the option statistics_only in the CREATE PRIMARY XML INDEX statement.")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (statistics_only = 1)", "102:Incorrect syntax near 'statistics_only'.")]
+    [DataRow("create primary xml index p2 on t (y) with (fillfactor = 0)", "129:Fillfactor 0 is not a valid percentage; fillfactor must be between 1 and 100.")]
+    [DataRow("create primary xml index p2 on t (y) with (drop_existing = on)", "6333:Could not find PRIMARY XML index named 'p2' on table 't'")]
+    [DataRow("create xml index sx on t (x) using xml index px for path with (drop_existing = on)", "6333:Could not find XML index named 'sx' on table 't'")]
+    public void XmlIndexOptions_Refusals(string create, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null primary key, x xml, y xml); create primary xml index px on t (x)");
+        var error = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery(create));
+        AreEqual(expected, string.Join("|", error.Errors.Cast<SimulatedError>().Select(e => $"{e.Number}:{e.Message}")));
+    }
+
+    [TestMethod]
+    public void XmlIndexOptions_ReachTheCatalog_AndDropExistingRebuilds()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int not null primary key, x xml);
+            create primary xml index px on t (x) with (pad_index = on, fillfactor = 50, fillfactor = 60, online = off, compression_delay = 5 minutes);
+            create xml index sx on t (x) using xml index px for path with (allow_row_locks = off, allow_page_locks = off, xml_compression = on);
+            create xml index sy on t (x) using xml index px for value;
+            """);
+        AreEqual("px:60:1:1:1,sx:0:0:0:0,sy:0:0:1:1", sim.ExecuteScalar("select string_agg(concat(name, ':', fill_factor, ':', cast(is_padded as int), ':', cast(allow_row_locks as int), ':', cast(allow_page_locks as int)), ',') within group (order by index_id) from sys.xml_indexes"));
+        _ = sim.ExecuteNonQuery("create xml index sx on t (x) using xml index px for property with (drop_existing = on, fillfactor = 70)");
+        AreEqual("px:256000:60,sy:256002:0,sx:256003:70", sim.ExecuteScalar("select string_agg(concat(name, ':', index_id, ':', fill_factor), ',') within group (order by index_id) from sys.indexes where type = 3"));
+        _ = sim.ExecuteNonQuery("create primary xml index px on t (x) with (drop_existing = on, fillfactor = 40)");
+        AreEqual("px:256000:40", sim.ExecuteScalar("select string_agg(concat(name, ':', index_id, ':', fill_factor), ',') within group (order by index_id) from sys.indexes where type = 3"));
     }
 
     [TestMethod]

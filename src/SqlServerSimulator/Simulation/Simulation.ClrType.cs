@@ -46,8 +46,6 @@ partial class Simulation
         var database = schema.Database;
         if (!database.Assemblies.TryGetValue(assemblyToken.Value, out var assembly))
             throw SimulatedSqlException.AssemblyNotFoundForType(assemblyToken.Value);
-        if (!context.Batch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
         var type = assembly.Load().GetType(classToken.Value)
             ?? throw SimulatedSqlException.Aggregate([
                 SimulatedSqlException.ClrTypeClassNotFound(classToken.Value, assembly.Name),

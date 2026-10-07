@@ -64,12 +64,21 @@ internal static class SpatialWkb
             WriteUInt32(bytes, FullGlobeCode);
             return;
         }
+        // OGC has no empty-point record: real writes an empty point as an
+        // empty MULTIPOINT, without Z or M, on its own and inside a
+        // collection (probed 2026-10-07 against SQL Server 2025).
+        if (shape.Type == SpatialShapeType.Point && shape.Figures is not [{ Length: 1 }])
+        {
+            WriteHeader(bytes, SpatialShapeType.MultiPoint, hasZ: false, hasM: false);
+            WriteUInt32(bytes, 0);
+            return;
+        }
         WriteHeader(bytes, shape.Type, hasZ, hasM);
 
         switch (shape.Type)
         {
             case SpatialShapeType.Point:
-                WritePoint(bytes, shape.Figures.Length == 1 && shape.Figures[0].Length == 1 ? shape.Figures[0][0] : EmptyPoint, hasZ, hasM);
+                WritePoint(bytes, shape.Figures[0][0], hasZ, hasM);
                 return;
             case SpatialShapeType.LineString:
             case SpatialShapeType.CircularString:
@@ -115,9 +124,6 @@ internal static class SpatialWkb
                 return;
         }
     }
-
-    /// <summary>OGC has no empty-point record; real writes NaN ordinates, which is what round-trips.</summary>
-    private static readonly SpatialCoordinate EmptyPoint = new(double.NaN, double.NaN);
 
     private static void WriteFigure(List<byte> bytes, SpatialCoordinate[] points, bool hasZ, bool hasM)
     {

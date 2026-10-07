@@ -65,6 +65,14 @@ public sealed partial class SimulatedSqlException
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 4623: the deprecated <c>ALL</c> on a securable
+    /// other than the database or an object — a schema, a principal, a type,
+    /// an XML schema collection (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AllPermissionNotAvailableForClass() =>
+        new("The all permission has been deprecated and is not available for this class of entity", 4623, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1020: a column list was given for a permission
     /// whose securable isn't an object (<c>GRANT SELECT ON SCHEMA::s (c)</c>).
     /// Severity 15, state 1, probe-confirmed wording.

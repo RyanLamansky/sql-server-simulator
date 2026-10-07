@@ -808,6 +808,45 @@ public sealed class DependencyTrackingTests
             .Single(r => (string)r["name"]! == "dbo.trg")["type"]);
     }
 
+    private static string DependsRows(Simulation sim, string name) =>
+        string.Join(",", Rows(sim, $"exec sp_depends '{name}'").ConvertAll(r => $"{r["name"]}:{r["column"] ?? "-"}:{r["selected"]}"));
+
+    /// <summary>
+    /// A schema-bound view or function lists the referenced object itself,
+    /// selected, ahead of its columns; a computed column or CHECK, also a
+    /// schema-bound reference, doesn't (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpDepends_SchemaBoundModule_ListsTheObjectRowToo()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int, b int, c as a + 1, constraint ck check (b > a))",
+            "create view dbo.vb with schemabinding as select a from dbo.t",
+            "create view dbo.vf as select a from dbo.t",
+            "create function dbo.fb(@a int) returns table with schemabinding as return select 1 r from dbo.t where b = @a");
+        AreEqual("dbo.t:-:yes,dbo.t:a:yes", DependsRows(sim, "dbo.vb"));
+        AreEqual("dbo.t:a:yes", DependsRows(sim, "dbo.vf"));
+        AreEqual("dbo.t:-:yes,dbo.t:b:yes", DependsRows(sim, "dbo.fb"));
+        AreEqual("dbo.t:a:no,dbo.t:b:no", DependsRows(sim, "ck"));
+    }
+
+    /// <summary>
+    /// A security policy's predicates each list the function and the target's
+    /// object and column rows, kept together and repeated per predicate, by
+    /// object name (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpDepends_SecurityPolicy_RepeatsEachPredicatesRows()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int, b int, owner sysname); create table lookup (k int, v int)",
+            "create function dbo.f(@a int, @o sysname) returns table with schemabinding as return select 1 r from dbo.lookup where k = @a and v > 0",
+            "create security policy p add filter predicate dbo.f(a, owner) on dbo.t, add block predicate dbo.f(b, owner) on dbo.t after insert");
+        AreEqual("dbo.f:-:yes,dbo.f:-:yes,dbo.t:-:yes,dbo.t:a:yes,dbo.t:owner:yes,dbo.t:-:yes,dbo.t:b:yes,dbo.t:owner:yes", DependsRows(sim, "p"));
+    }
+
     /// <summary>
     /// The references set is one row per referenced column, with real's
     /// <c>updated</c> / <c>selected</c> yes-no cells. The <c>selected</c> cell

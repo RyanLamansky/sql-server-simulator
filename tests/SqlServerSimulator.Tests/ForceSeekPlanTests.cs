@@ -51,6 +51,7 @@ public sealed class ForceSeekPlanTests
     [DataRow("select * from t where a in (select d from t y with (forceseek))")]
     [DataRow("select * from t with (forcescan, index(ia)) where d = 1")]
     [DataRow("select * from t with (forcescan, index(ia))")]
+    [DataRow("select * from t with (forceseek) where a = 1 or 1 / 0 = 1")]
     public void UnseekableShapes_RaiseMsg8622(string query)
         => new Simulation().AssertSqlError(
             Setup + query,
@@ -64,6 +65,14 @@ public sealed class ForceSeekPlanTests
     [DataRow("declare @p varchar(10) = 'ab%'; select * from t with (forceseek) where c like @p")]
     [DataRow("select * from t with (forceseek) where a = 1 or c = 'x'")]
     [DataRow("select * from t with (forceseek) where a = 1 or a = 2")]
+    [DataRow("select * from t with (forceseek) where a = 1 or 1 = 0")]
+    [DataRow("select * from t with (forceseek) where a is not distinct from 1")]
+    [DataRow("select * from t with (forceseek) where a = any (select 1)")]
+    [DataRow("select * from t with (forceseek) where a = 1 or not (1 = 1)")]
+    [DataRow("select * from t with (forceseek) where a = 1 or not (not (1 = 0))")]
+    [DataRow("select * from t with (forceseek) where a = 1 or 'a' = 'b'")]
+    [DataRow("select * from t with (forceseek) where a = 1 or 1 in (2, 3)")]
+    [DataRow("select * from t with (forceseek) where a = 1 or null is not null")]
     [DataRow("select * from t with (forceseek) where a <> 1")]
     [DataRow("select * from t with (forceseek) where not (a = 1)")]
     [DataRow("select * from t with (forceseek) where a is null")]

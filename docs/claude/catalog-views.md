@@ -822,7 +822,7 @@ A procedure whose real body runs an ordinary statement runs the same statement h
 - **Options** — `sp_tableoption`, `sp_indexoption` and `sp_autostats` write `sys.tables`' `lock_on_bulk_load` / `text_in_row_limit` / `large_value_types_out_of_row`, the index lock flags and `sys.stats.no_recompute`.
 - **Statistics** — `sp_updatestats` refreshes the statistics whose leading column changed (or whose table gained or lost rows) since they were last current, and `sp_createstats` creates single-column statistics through `CREATE STATISTICS`.
   Real also walks internal tables in both; only user tables are listed here.
-- **Reports** — `sp_helplanguage` (over `sys.syslanguages`, whose month and day names are real's), `sp_helpsort`, `sp_helpserver`, `sp_monitor` (host-process figures) and `sp_lock` (over the lock DMV plus each session's database lock; real also lists the locks its own metadata reads take).
+- **Reports** — `sp_helplanguage` (over `sys.syslanguages`, whose month and day names are real's), `sp_helpsort`, `sp_helpserver`, `sp_monitor` (host-process figures) and `sp_lock` (over the lock DMV, its `DATABASE` rows as `DB`; real also lists the locks its own metadata reads take and a page lock beside each key lock, and reports a key lock's index id where the simulator reports 0).
   `sp_MSforeach_worker` called directly raises the four errors real's does without the cursor its callers declare.
 
 ## Expression dependencies

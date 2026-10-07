@@ -249,7 +249,7 @@ A STATIC or FAST_FORWARD request with any of the last three is **Msg 16966** fro
 The UPDT_IN_PLACE bit (0x4000) comes back on the effective ccopt beside whatever concurrency the cursor settles on; the other `0x1000`-series flag bits are stripped from both values.
 On an **invalid statement**, the engine's error (e.g. Msg 208) plus **Msg 16945** (`The cursor was not declared.`, state 2) are emitted, the handle comes back 0, the option values echo the requested low bits, and the return status is the engine error number.
 
-**sp_cursorfetch**(@cursor, @fetchtype, @rownum, @nrows) — @rownum / @nrows are **input** for a data fetch (a real server rejects them ByRef with Msg 16902 for non-INFO fetch types; the simulator simply reads them as input).
+**sp_cursorfetch**(@cursor, @fetchtype, @rownum, @nrows) — @rownum / @nrows are **input** for a data fetch: either sent ByRef on a fetch other than INFO is Msg 16902, state 5 for @rownum ahead of state 6 for @nrows, return status 1 (probed 2026-10-07 against SQL Server 2025).
 Rows come back as an ordinary result set of up to @nrows rows, each with the trailing ROWSTAT column — 1 for a fetched row, 2 for a keyset member deleted (or key-moved) out from under the cursor, which fills its buffer row with the zeroed-or-NULL values a T-SQL `FETCH` reports and doesn't end the fetch (probed 2026-09-29 against SQL Server 2025). fetchtype: 0x1 FIRST, 0x2 NEXT, 0x4 PREV, 0x8 LAST, 0x10 ABSOLUTE (@rownum), 0x20 RELATIVE (@rownum), 0x100 INFO.
 The first buffer row uses the requested direction; subsequent rows advance NEXT.
 A **past-end** fetch returns an empty result set with return status 0.
@@ -263,7 +263,7 @@ A DML enforcement failure surfaces the engine error and returns its number.
 
 **sp_cursorprepexec**(@prep OUT, @cursor OUT, @paramdef, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) — prepares (stores statement + declaration-parsed parameter names in a per-session handle map) and opens in one call, returning both handles; the parameterized statement's bindings are the trailing params.
 **sp_cursorexecute**(@prep, @cursor OUT, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) re-opens the stored statement with fresh param values, yielding a **new** cursor handle (probe-confirmed).
-**sp_cursorprepare** / **sp_cursorunprepare** store / drop without executing (miss → Msg 8179).
+**sp_cursorprepare**(@handle OUTPUT, @params, @stmt, @options [, @scrollopt [, @ccopt]]) / **sp_cursorunprepare** store / drop without executing (miss → Msg 8179), the two options echoed when sent ByRef (probed 2026-10-07 against SQL Server 2025).
 Prepared-cursor parameter values are frozen at open onto the ApiCursor and re-applied to every fetch batch, since a keyset / dynamic cursor re-runs its SELECT per fetch.
 
 **sp_cursorclose**(@cursor) — closes + unbinds, return status 0.

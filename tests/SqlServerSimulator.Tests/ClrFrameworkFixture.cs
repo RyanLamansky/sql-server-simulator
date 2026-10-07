@@ -675,6 +675,23 @@ internal static class ClrFrameworkFixture
             }
 
             [SqlProcedure]
+            public static void SizedParams()
+            {
+                using (SqlConnection c = Open())
+                {
+                    SqlCommand cmd = new SqlCommand("select concat_ws(',', cast(sql_variant_property(@a, 'MaxLength') as int), cast(sql_variant_property(@b, 'MaxLength') as int), cast(sql_variant_property(@c, 'MaxLength') as int), cast(sql_variant_property(@d, 'MaxLength') as int), cast(sql_variant_property(@e, 'MaxLength') as int), cast(sql_variant_property(@f, 'MaxLength') as int), cast(sql_variant_property(@g, 'MaxLength') as int), @b)", c);
+                    cmd.Parameters.Add("@a", SqlDbType.NVarChar).Value = "abcdef";
+                    cmd.Parameters.Add("@b", SqlDbType.NVarChar).Value = new char[] { 'x', 'y' };
+                    cmd.Parameters.Add("@c", SqlDbType.NVarChar).Value = new SqlString("abc");
+                    cmd.Parameters.Add("@d", SqlDbType.VarBinary).Value = new byte[] { 1, 2, 3, 4, 5 };
+                    cmd.Parameters.Add("@e", SqlDbType.VarBinary).Value = new SqlBinary(new byte[] { 1, 2, 3 });
+                    cmd.Parameters.Add("@f", SqlDbType.VarChar).Value = "abcdefgh";
+                    cmd.Parameters.Add("@g", SqlDbType.NVarChar).Value = SqlString.Null;
+                    Send(Show(cmd.ExecuteScalar()));
+                }
+            }
+
+            [SqlProcedure]
             public static void DecimalParams()
             {
                 using (SqlConnection c = Open())

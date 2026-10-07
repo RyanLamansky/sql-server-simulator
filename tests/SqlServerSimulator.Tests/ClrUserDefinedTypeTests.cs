@@ -46,6 +46,23 @@ public class ClrUserDefinedTypeTests
             .ExecuteScalar($"declare @w Wide = '{text}'; select cast(@w as varbinary(200))")));
 
     [TestMethod]
+    [Description("A stored Format.Native value reads back field by field into the instance its members run on.")]
+    [DataRow("1|2|3|4|True|1.5|2.5|-1|5|6|7")]
+    [DataRow("255|-2|-3|-4|False|-1.5|-2.5|-128|65535|4294967295|18446744073709551615")]
+    public void Native_PrimitiveFields_RoundTrip(string text)
+        => AreEqual(text, ClrFrameworkFixture.Simulation("create type dbo.Wide external name simclr.Wide")
+            .ExecuteScalar($"declare @w Wide = '{text}'; select @w.ToString()"));
+
+    [TestMethod]
+    [Description("SqlTypes fields, a NULL one included, read back from their stored bytes.")]
+    public void Native_SqlTypeFields_RoundTrip()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create type dbo.SqlFields external name simclr.SqlFields");
+        AreEqual("1|12.5000|-3", sim.ExecuteScalar("declare @s SqlFields = 'x'; select @s.ToString()"));
+        AreEqual("null|null|0", sim.ExecuteScalar("declare @s SqlFields = 'nulls'; select @s.ToString()"));
+    }
+
+    [TestMethod]
     [Description("A SqlTypes field carries its not-null byte, a SqlBoolean one byte, and a nested struct its own fields in place.")]
     [DataRow("x", "0180000001" + "01C004000000000000" + "02" + "800000057FFD" + "01800000000001E848" + "018000AB3680328F5C" + "0107" + "017FFE" + "018000000000000009" + "01BFC00000" + "00")]
     [DataRow("nulls", "0080000000" + "008000000000000000" + "00" + "800000008000" + "008000000000000000" + "008000000080000000" + "0000" + "008000" + "008000000000000000" + "0080000000" + "00")]
@@ -319,4 +336,35 @@ public class ClrUserDefinedTypeTests
         => AreEqual(state, Types(
             "create table t (id int, p Point, s nvarchar(100)); insert t (id, s) values (1, 'bad')",
             "create view v as select id, s from t").AssertSqlError(statement, 6522).State);
+
+    [TestMethod]
+    [Description("A table-valued parameter's CLR-type column reads a string cell through Parse and a byte array as the serialized form (probed 2026-10-07 against SQL Server 2025 over SqlClient 7.0).")]
+    [DataRow("3,4", "3,4")]
+    [DataRow(new byte[] { 0x80, 0, 0, 1, 0x80, 0, 0, 2, 0 }, "1,2")]
+    public void TableValuedParameter_Column(object value, string expected)
+    {
+        var sim = Types();
+        sim.ExecuteBatches("create type dbo.tp as table (p dbo.Point)", "create proc dbo.pp @rows dbo.tp readonly as select p.ToString() from @rows");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand("exec dbo.pp @rows");
+        var table = new System.Data.DataTable();
+        _ = table.Columns.Add("p", value.GetType());
+        _ = table.Rows.Add(value);
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@rows";
+        parameter.Value = table;
+        ((SimulatedDbParameter)parameter).TypeName = "dbo.tp";
+        _ = command.Parameters.Add(parameter);
+        AreEqual(expected, command.ExecuteScalar());
+    }
+
+    [TestMethod]
+    [Description("A CLR-type column reads back over the in-process reader as its serialized bytes.")]
+    public void Reader_FieldTypeIsBytes()
+    {
+        using var reader = Types().ExecuteReader("select cast('1,2' as Point)");
+        AreEqual(typeof(byte[]), reader.GetFieldType(0));
+        IsTrue(reader.Read());
+        CollectionAssert.AreEqual(new byte[] { 0x80, 0, 0, 1, 0x80, 0, 0, 2, 0 }, (byte[])reader.GetValue(0));
+    }
 }

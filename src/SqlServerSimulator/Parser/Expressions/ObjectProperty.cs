@@ -42,6 +42,8 @@ internal sealed class ObjectProperty : Expression
                 : EvaluateProperty(database, obj, prop)
             : TryFindConstraint(database, id, out var constraint)
                 ? EvaluateConstraintProperty(constraint, prop)
+                : FindTableType(database, id) is { } tableType
+                    ? EvaluateTableTypeProperty(database, tableType, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
                     ? EvaluateSystemObjectProperty(system, prop)
                     : null;
@@ -129,6 +131,47 @@ internal sealed class ObjectProperty : Expression
                 if (sp.ObjectId == id) return sp;
         }
         return null;
+    }
+
+    /// <summary>The table type whose backing type table carries object id <paramref name="id"/>, if any.</summary>
+    internal static TableType? FindTableType(Database database, int id)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, type) in schema.TableTypes)
+            {
+                if (type.ObjectId == id)
+                    return type;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The properties a table type's backing type table answers (probed
+    /// 2026-10-07 against SQL Server 2025): a shipped table of the
+    /// <c>sys</c> schema, not a user table, answering the kind flags and the
+    /// <c>TableHas*</c> family off its columns, keys and indexes, and NULL to
+    /// the index, trigger, foreign-key, full-text and module members.
+    /// </summary>
+    internal static int? EvaluateTableTypeProperty(Database database, TableType type, string property)
+    {
+        Span<char> upper = stackalloc char[property.Length];
+        var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        return name switch
+        {
+            "ISMSSHIPPED" => 1,
+            "ISUSERTABLE" => 0,
+            "OWNERID" => Database.SysPrincipalId,
+            "SCHEMAID" => Database.SysSchemaId,
+            "ISANSINULLSON" or "ISCHECKCNST" or "ISCONSTRAINT" or "ISDEFAULT" or "ISDEFAULTCNST" or "ISEXECUTED" or "ISEXTENDEDPROC"
+                or "ISFOREIGNKEY" or "ISINLINEFUNCTION" or "ISPRIMARYKEY" or "ISPROCEDURE" or "ISQUEUE" or "ISQUOTEDIDENTON"
+                or "ISREPLPROC" or "ISRULE" or "ISSCALARFUNCTION" or "ISSYSTEMTABLE" or "ISTABLE" or "ISTABLEFUNCTION" or "ISTRIGGER"
+                or "ISUNIQUECNST" or "ISVIEW" or "TABLEHASCHECKCNST" or "TABLEHASCLUSTINDEX" or "TABLEHASDEFAULTCNST" or "TABLEHASIDENTITY"
+                or "TABLEHASINDEX" or "TABLEHASNONCLUSTINDEX" or "TABLEHASPRIMARYKEY" or "TABLEHASROWGUIDCOL" or "TABLEHASTEXTIMAGE"
+                or "TABLEHASTIMESTAMP" or "TABLEHASUNIQUECNST" or "TABLETEXTINROWLIMIT" => EvaluateProperty(database, type.CatalogShape, property),
+            _ => null,
+        };
     }
 
     /// <summary>

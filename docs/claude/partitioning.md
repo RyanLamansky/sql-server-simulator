@@ -63,7 +63,7 @@ An `ON` clause naming neither a scheme nor a registered filegroup (nor `"default
 `CREATE TABLE … ON scheme(column)` places the table's rows — the heap, or whichever clustered index it gets — on the scheme (`HeapTable.Partitioning`).
 A key constraint or index written without its own `ON` is **aligned**: it lands where the rows are.
 One written `ON [filegroup]` is not, and lands on that filegroup — see [Filegroup placement](#filegroup-placement).
-A clustered index created `ON` a scheme moves the rows there, one created `ON [PRIMARY]` moves them off, and dropping the clustered index leaves the heap where the index was.
+A clustered index created `ON` a scheme moves the rows there, one created `ON [PRIMARY]` moves them off, and dropping the clustered index leaves the heap where the index was — unless the drop says `WITH (MOVE TO …)`, which puts the heap on that scheme by the column it names or unpartitioned on that filegroup (probed 2026-10-07 against SQL Server 2025).
 
 The partition column must resolve (Msg 1911), be named once (Msg 2703, ahead of the one-column count check, Msg 2726 — also what a scheme written without a column list gets), be persisted if computed (Msg 7724), not be sparse (Msg 1978 state 2), and have exactly the parameter's type, length included (Msg 7726), and collation (Msg 7727).
 A key constraint's own `ON` refused any of these ways is followed by Msg 1750 (probed 2026-10-05).

@@ -86,8 +86,39 @@ internal sealed class HierarchyIdMethodCall : Expression
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        // Real counts the arguments while compiling (probed 2026-10-07
+        // against SQL Server 2025).
+        var expected = method switch
+        {
+            HierarchyIdMethod.GetAncestor or HierarchyIdMethod.IsDescendantOf => 1,
+            HierarchyIdMethod.GetDescendant or HierarchyIdMethod.GetReparentedValue => 2,
+            _ => 0,
+        };
+        if (args.Count != expected)
+            throw SimulatedSqlException.FunctionRequiresNArguments(methodName, expected);
         return new HierarchyIdMethodCall(target, method, [.. args]);
     }
+
+    /// <summary>
+    /// Real's refusal of a receiver that isn't a <c>hierarchyid</c> (a spatial
+    /// one's <c>ToString</c> aside), or null: an <c>xml</c> one has its five
+    /// methods alone (Msg 227), a spatial one lacks the hierarchyid members
+    /// (Msg 6506), and any other system type has no methods at all — Msg 258,
+    /// or for an unqualified column the missing function its dotted name
+    /// reads as (Msg 4121) (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    private SimulatedSqlException? ReceiverRefusal(SqlType receiverType) => receiverType switch
+    {
+        HierarchyIdSqlType => null,
+        SpatialSqlType when this.method == HierarchyIdMethod.ToStringMethod => null,
+        SpatialSqlType spatial => SimulatedSqlException.ClrMethodNotFound(MethodName(this.method), spatial.ClrTypeName, "Microsoft.SqlServer.Types", state: 10),
+        XmlSqlType => SimulatedSqlException.NotAValidFunctionPropertyOrField(MethodName(this.method)),
+        _ => this.target is Reference { ReferencedName.Count: 1 } column
+            ? SimulatedSqlException.CannotFindUserDefinedFunction(column.ReferencedName.WithAddedPart(MethodName(this.method)))
+            : SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType)),
+    };
+
+    private static string MethodName(HierarchyIdMethod method) => method == HierarchyIdMethod.ToStringMethod ? "ToString" : method.ToString();
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -102,10 +133,10 @@ internal sealed class HierarchyIdMethodCall : Expression
             var text = NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
             return receiver.IsNull ? SqlValue.Null(text) : SqlValue.FromNVarchar(text, receiver.AsString);
         }
+        if (this.ReceiverRefusal(receiver.Type) is { } refusal)
+            throw refusal;
         if (receiver.IsNull)
             return SqlValue.Null(this.ResultType(runtime.Batch));
-        if (receiver.Type != SqlType.HierarchyId)
-            throw SimulatedSqlException.InvalidHierarchyIdInput($"receiver is {receiver.Type}, not hierarchyid");
 
         var path = receiver.AsHierarchyId;
         return this.method switch
@@ -122,8 +153,6 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     private SqlValue RunGetAncestor(long[][] path, RuntimeContext runtime)
     {
-        if (this.arguments.Length != 1)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetAncestor expects one argument");
         var depthArg = this.arguments[0].Run(runtime);
         if (depthArg.IsNull)
             return SqlValue.Null(SqlType.HierarchyId);
@@ -140,8 +169,6 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     private SqlValue RunGetDescendant(long[][] selfPath, RuntimeContext runtime)
     {
-        if (this.arguments.Length != 2)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant expects two arguments");
         var c1Val = this.arguments[0].Run(runtime);
         var c2Val = this.arguments[1].Run(runtime);
         var c1 = c1Val.IsNull ? null : AsPath(c1Val);
@@ -214,8 +241,6 @@ internal sealed class HierarchyIdMethodCall : Expression
 
     private SqlValue RunIsDescendantOf(long[][] selfPath, RuntimeContext runtime)
     {
-        if (this.arguments.Length != 1)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("IsDescendantOf expects one argument");
         var otherVal = this.arguments[0].Run(runtime);
         if (otherVal.IsNull)
             return SqlValue.Null(SqlType.Bit);
@@ -230,8 +255,6 @@ internal sealed class HierarchyIdMethodCall : Expression
     /// </summary>
     private SqlValue RunGetReparentedValue(long[][] selfPath, RuntimeContext runtime)
     {
-        if (this.arguments.Length != 2)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetReparentedValue expects two arguments");
         var oldRootVal = this.arguments[0].Run(runtime);
         var newRootVal = this.arguments[1].Run(runtime);
         if (oldRootVal.IsNull || newRootVal.IsNull)
@@ -304,12 +327,15 @@ internal sealed class HierarchyIdMethodCall : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var receiverType = this.target.GetSqlType(batch, resolveColumnType);
+        if (this.ReceiverRefusal(receiverType) is { } refusal)
+            throw refusal;
         SqlType parameter = this.method == HierarchyIdMethod.GetAncestor ? SqlType.Int32 : SqlType.HierarchyId;
         foreach (var argument in this.arguments)
             _ = AssignmentRules.ArgumentType(argument, parameter, batch, resolveColumnType);
         // A spatial receiver's ToString is nvarchar(max), as its STAsText is
         // (probed 2026-10-05 against SQL Server 2025: LEN of it is bigint).
-        return this.method == HierarchyIdMethod.ToStringMethod && this.target.GetSqlType(batch, resolveColumnType) is SpatialSqlType
+        return this.method == HierarchyIdMethod.ToStringMethod && receiverType is SpatialSqlType
             ? NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)
             : this.ResultType(batch);
     }

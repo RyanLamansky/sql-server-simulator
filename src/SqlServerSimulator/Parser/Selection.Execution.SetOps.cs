@@ -174,11 +174,9 @@ internal sealed partial class Selection
     /// <summary>
     /// Combines two SELECT plans via a set operator (UNION / UNION ALL /
     /// INTERSECT / EXCEPT). Validates that the branches have the same
-    /// column count (Msg 205), promotes per-column types via
-    /// <see cref="SqlType.Promote"/>, and rejects per-branch ORDER BY
-    /// (which the parser tolerates greedily for the first branch via
-    /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
-    /// follows, that's a syntax error).
+    /// column count (Msg 205) and promotes per-column types via
+    /// <see cref="SqlType.Promote"/>. A branch's own ORDER BY was settled as
+    /// the branch parsed (<see cref="SettleBranchOrdering"/>).
     /// </summary>
     /// <param name="left">The plan on the left of the set operator.</param>
     /// <param name="right">The plan on the right of the set operator.</param>
@@ -191,18 +189,6 @@ internal sealed partial class Selection
     /// </param>
     internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind, bool namesOwnCollation)
     {
-        if (left.HasOrderBy && !left.OrdersOwnRows)
-        {
-            var setOpKeyword = kind switch
-            {
-                SetOpKind.Union or SetOpKind.UnionAll => "union",
-                SetOpKind.Intersect => "intersect",
-                SetOpKind.Except => "except",
-                _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
-            };
-            throw SimulatedSqlException.PerBranchOrderByRejected(setOpKeyword);
-        }
-
         if (left.Schema.Length != right.Schema.Length)
             throw SimulatedSqlException.SetOpUnequalColumnCount();
 

@@ -478,18 +478,31 @@ static class Tokenizer
                 index++;
         }
         var body = command.AsSpan(start, index - start);
-        // Reuse the runtime money parser so the simulator has a single
-        // source of truth for money string parsing.
-        var value = SqlValue.FromMoney(SqlType.Money, ParseLiteralBody(body));
+        // A value outside money's range is Msg 151 naming the literal as
+        // written, which ends the batch as it compiles (probed 2026-10-07
+        // against SQL Server 2025: $922337203685478, and the
+        // $922337203685477.5808 that -$922337203685477.5808 negates).
+        SqlValue value;
+        try
+        {
+            value = ParseLiteralBody(body) is { } amount
+                ? SqlValue.FromMoney(SqlType.Money, amount)
+                : throw SimulatedSqlException.InvalidMoneyLiteral(body.ToString(), Token.LineAt(command, start));
+        }
+        catch (SimulatedSqlException overflow) when (overflow.Number == 8115)
+        {
+            throw SimulatedSqlException.InvalidMoneyLiteral(body.ToString(), Token.LineAt(command, start));
+        }
         return new Literal(value, command, start, index - start);
     }
 
     /// <summary>
     /// Lightweight parse for the literal-form body (currency symbol
-    /// already consumed). Produces a <see cref="decimal"/>; range checks
-    /// happen later inside <see cref="SqlValue.FromMoney(SqlType, decimal)"/>.
+    /// already consumed). Produces a <see cref="decimal"/>, null for digits
+    /// past its range; range checks happen later inside
+    /// <see cref="SqlValue.FromMoney(SqlType, decimal)"/>.
     /// </summary>
-    private static decimal ParseLiteralBody(ReadOnlySpan<char> body)
+    private static decimal? ParseLiteralBody(ReadOnlySpan<char> body)
     {
         // Strip the currency symbol that's always at index 0.
         body = body[1..].Trim();
@@ -501,14 +514,15 @@ static class Tokenizer
             negative = body[0] == '-';
             body = body[1..].TrimStart();
         }
-        return body.Length == 0 ? 0m
+        // A lone point (`$.`) is zero, as no digits are.
+        return body is [] or ['.'] ? 0m
             : decimal.TryParse(
                 body,
                 System.Globalization.NumberStyles.AllowDecimalPoint,
                 System.Globalization.CultureInfo.InvariantCulture,
                 out var d)
                     ? (negative ? -d : d)
-                    : 0m;
+                    : null;
     }
 
     /// <summary>

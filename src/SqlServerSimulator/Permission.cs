@@ -117,22 +117,9 @@ internal enum PermissionState : byte
 }
 
 /// <summary>
-/// The read / write / DDL bucket a permission falls in, driving the fixed-role
-/// virtual grants (<c>db_datareader</c> → read, <c>db_datawriter</c> → write,
-/// <c>db_ddladmin</c> → DDL) and their deny counterparts.
-/// </summary>
-internal enum PermissionCategory : byte
-{
-    None,
-    Read,
-    Write,
-    Ddl,
-}
-
-/// <summary>
 /// The single source of truth for the permission catalog — the canonical name and
 /// 4-char <c>sys.database_permissions.type</c> code per <see cref="Permission"/>,
-/// the read/write/DDL classification, the covering graph, the name→enum resolver,
+/// the covering graph, the name→enum resolver,
 /// and the state-code / state-desc materialization — surfaced as extension
 /// members on <see cref="Permission"/> / <see cref="PermissionState"/>. The names
 /// and type codes are imported from <c>sys.fn_builtin_permissions</c> for the
@@ -142,16 +129,13 @@ internal enum PermissionCategory : byte
 /// </summary>
 internal static class PermissionCatalog
 {
-    private readonly struct PermissionInfo(string name, string typeCode, PermissionCategory category, Permission? serverCover = null)
+    private readonly struct PermissionInfo(string name, string typeCode, Permission? serverCover = null)
     {
         /// <summary>Canonical uppercase permission name, as real SQL Server stores it in <c>sys.database_permissions</c> regardless of the GRANT's casing.</summary>
         public readonly string Name = name;
 
         /// <summary>Canonical 4-char type code, space-padded to match real's <c>char(4)</c> column.</summary>
         public readonly string TypeCode = typeCode;
-
-        /// <summary>Read / write / DDL bucket for the fixed-role virtual grants.</summary>
-        public readonly PermissionCategory Category = category;
 
         /// <summary>
         /// For a SERVER-class permission, its <c>covering_permission_name</c>
@@ -165,95 +149,93 @@ internal static class PermissionCatalog
     // Indexed by (byte)Permission — the array order MUST track the enum.
     private static readonly PermissionInfo[] Table =
     [
-        new("", "    ", PermissionCategory.None),                    // Other (name/code come from the row's raw text)
-        new("ALTER", "AL  ", PermissionCategory.Ddl),               // Alter
-        new("ALTER ANY DATABASE", "ALDB", PermissionCategory.None, Permission.ControlServer), // AlterAnyDatabase (server scope)
-        new("ALTER ANY DATABASE DDL TRIGGER", "ALTG", PermissionCategory.Ddl), // AlterAnyDatabaseDdlTrigger
-        new("ALTER ANY FULLTEXT CATALOG", "ALFT", PermissionCategory.Ddl), // AlterAnyFullTextCatalog
-        new("ALTER ANY LOGIN", "ALLG", PermissionCategory.None, Permission.ControlServer),    // AlterAnyLogin (server scope)
-        // ALTER ANY ROLE is deliberately not Ddl: db_ddladmin does NOT confer
-        // role DDL (probe-confirmed — DROP ROLE stays Msg 15151 for a member).
-        new("ALTER ANY ROLE", "ALRL", PermissionCategory.None),     // AlterAnyRole
-        new("ALTER ANY SCHEMA", "ALSM", PermissionCategory.Ddl),    // AlterAnySchema
-        new("AUTHENTICATE", "AUTH", PermissionCategory.None),       // Authenticate
-        new("CONNECT", "CO  ", PermissionCategory.None),            // Connect
-        new("CONTROL", "CL  ", PermissionCategory.None),            // Control
-        new("CREATE AGGREGATE", "CRAG", PermissionCategory.Ddl),    // CreateAggregate
-        new("CREATE ANY DATABASE", "CRDB", PermissionCategory.None, Permission.AlterAnyDatabase), // CreateAnyDatabase (server scope)
-        new("CREATE ASSEMBLY", "CRAS", PermissionCategory.Ddl),     // CreateAssembly
-        new("CREATE FULLTEXT CATALOG", "CRFT", PermissionCategory.Ddl), // CreateFullTextCatalog
-        new("CREATE FUNCTION", "CRFN", PermissionCategory.Ddl),     // CreateFunction
-        new("CREATE PROCEDURE", "CRPR", PermissionCategory.Ddl),    // CreateProcedure
-        new("CREATE SEQUENCE", "CRSO", PermissionCategory.Ddl),     // CreateSequence
-        new("CREATE SYNONYM", "CRSN", PermissionCategory.Ddl),      // CreateSynonym
-        new("CREATE TABLE", "CRTB", PermissionCategory.Ddl),        // CreateTable
-        new("CREATE TYPE", "CRTY", PermissionCategory.Ddl),         // CreateType
-        new("CREATE VIEW", "CRVW", PermissionCategory.Ddl),         // CreateView
-        new("CREATE XML SCHEMA COLLECTION", "CRXS", PermissionCategory.Ddl), // CreateXmlSchemaCollection
-        new("DELETE", "DL  ", PermissionCategory.Write),            // Delete
-        new("EXECUTE", "EX  ", PermissionCategory.None),            // Execute
-        new("IMPERSONATE", "IM  ", PermissionCategory.None),        // Impersonate
-        new("IMPERSONATE ANY LOGIN", "IAL ", PermissionCategory.None, Permission.ControlServer), // ImpersonateAnyLogin (server scope)
-        new("INSERT", "IN  ", PermissionCategory.Write),            // Insert
-        new("RECEIVE", "RC  ", PermissionCategory.None),            // Receive
-        new("REFERENCES", "RF  ", PermissionCategory.None),         // References
-        new("SELECT", "SL  ", PermissionCategory.Read),             // Select
-        new("TAKE OWNERSHIP", "TO  ", PermissionCategory.None),     // TakeOwnership
-        new("UNMASK", "UMSK", PermissionCategory.None),             // Unmask
-        new("UPDATE", "UP  ", PermissionCategory.Write),            // Update
-        new("VIEW ANY COLUMN ENCRYPTION KEY DEFINITION", "VWCK", PermissionCategory.None), // ViewAnyColumnEncryptionKeyDefinition
-        new("VIEW ANY COLUMN MASTER KEY DEFINITION", "VWCM", PermissionCategory.None), // ViewAnyColumnMasterKeyDefinition
-        new("VIEW ANY DEFINITION", "VWAD", PermissionCategory.None, Permission.ControlServer), // ViewAnyDefinition (server scope)
-        new("VIEW CHANGE TRACKING", "VWCT", PermissionCategory.None), // ViewChangeTracking
-        new("VIEW DATABASE PERFORMANCE STATE", "VDP ", PermissionCategory.None), // ViewDatabasePerformanceState
-        new("VIEW DATABASE STATE", "VWDS", PermissionCategory.None), // ViewDatabaseState
-        new("VIEW DEFINITION", "VW  ", PermissionCategory.None),    // ViewDefinition
-        new("VIEW SERVER PERFORMANCE STATE", "VSP ", PermissionCategory.None, Permission.ViewServerState), // ViewServerPerformanceState
-        new("VIEW SERVER SECURITY STATE", "VSS ", PermissionCategory.None, Permission.ViewServerState), // ViewServerSecurityState
-        new("VIEW SERVER STATE", "VWSS", PermissionCategory.None, Permission.AlterServerState),  // ViewServerState
-        new("ADMINISTER BULK OPERATIONS", "ADBO", PermissionCategory.None, Permission.ControlServer), // AdministerBulkOperations
-        new("ALTER ANY AVAILABILITY GROUP", "ALAG", PermissionCategory.None, Permission.ControlServer), // AlterAnyAvailabilityGroup
-        new("ALTER ANY CONNECTION", "ALCO", PermissionCategory.None, Permission.ControlServer), // AlterAnyConnection
-        new("ALTER ANY CREDENTIAL", "ALCD", PermissionCategory.None, Permission.ControlServer), // AlterAnyCredential
-        new("ALTER ANY ENDPOINT", "ALHE", PermissionCategory.None, Permission.ControlServer), // AlterAnyEndpoint
-        new("ALTER ANY EVENT NOTIFICATION", "ALES", PermissionCategory.None, Permission.ControlServer), // AlterAnyEventNotification
-        new("ALTER ANY EVENT SESSION", "AAES", PermissionCategory.None, Permission.ControlServer), // AlterAnyEventSession
-        new("ALTER ANY EVENT SESSION ADD EVENT", "LSAE", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionAddEvent
-        new("ALTER ANY EVENT SESSION ADD TARGET", "LSAT", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionAddTarget
-        new("ALTER ANY EVENT SESSION DISABLE", "DES ", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionDisable
-        new("ALTER ANY EVENT SESSION DROP EVENT", "LSDE", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionDropEvent
-        new("ALTER ANY EVENT SESSION DROP TARGET", "LSDT", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionDropTarget
-        new("ALTER ANY EVENT SESSION ENABLE", "EES ", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionEnable
-        new("ALTER ANY EVENT SESSION OPTION", "LESO", PermissionCategory.None, Permission.AlterAnyEventSession), // AlterAnyEventSessionOption
-        new("ALTER ANY LINKED SERVER", "ALLS", PermissionCategory.None, Permission.ControlServer), // AlterAnyLinkedServer
-        new("ALTER ANY SERVER AUDIT", "ALAA", PermissionCategory.None, Permission.ControlServer), // AlterAnyServerAudit
-        new("ALTER ANY SERVER ROLE", "ALSR", PermissionCategory.None, Permission.ControlServer), // AlterAnyServerRole
-        new("ALTER RESOURCES", "ALRS", PermissionCategory.None, Permission.ControlServer), // AlterResources
-        new("ALTER SERVER STATE", "ALSS", PermissionCategory.None, Permission.ControlServer), // AlterServerState
-        new("ALTER SETTINGS", "ALST", PermissionCategory.None, Permission.ControlServer), // AlterSettings
-        new("ALTER TRACE", "ALTR", PermissionCategory.None, Permission.ControlServer), // AlterTrace
-        new("AUTHENTICATE SERVER", "AUTH", PermissionCategory.None, Permission.ControlServer), // AuthenticateServer
-        new("CONNECT ANY DATABASE", "CADB", PermissionCategory.None, Permission.ControlServer), // ConnectAnyDatabase
-        new("CONNECT SQL", "COSQ", PermissionCategory.None, Permission.ControlServer), // ConnectSql
-        new("CONTROL SERVER", "CL  ", PermissionCategory.None, Permission.Other), // ControlServer
-        new("CREATE ANY EVENT SESSION", "CRES", PermissionCategory.None, Permission.AlterAnyEventSession), // CreateAnyEventSession
-        new("CREATE AVAILABILITY GROUP", "CRAC", PermissionCategory.None, Permission.AlterAnyAvailabilityGroup), // CreateAvailabilityGroup
-        new("CREATE DDL EVENT NOTIFICATION", "CRDE", PermissionCategory.None, Permission.AlterAnyEventNotification), // CreateDdlEventNotification
-        new("CREATE ENDPOINT", "CRHE", PermissionCategory.None, Permission.AlterAnyEndpoint), // CreateEndpoint
-        new("CREATE LOGIN", "CRLG", PermissionCategory.None, Permission.AlterAnyLogin), // CreateLogin
-        new("CREATE SERVER ROLE", "CRSR", PermissionCategory.None, Permission.AlterAnyServerRole), // CreateServerRole
-        new("CREATE TRACE EVENT NOTIFICATION", "CRTE", PermissionCategory.None, Permission.AlterAnyEventNotification), // CreateTraceEventNotification
-        new("DROP ANY EVENT SESSION", "DRES", PermissionCategory.None, Permission.AlterAnyEventSession), // DropAnyEventSession
-        new("EXTERNAL ACCESS ASSEMBLY", "XA  ", PermissionCategory.None, Permission.UnsafeAssembly), // ExternalAccessAssembly
-        new("SELECT ALL USER SECURABLES", "SUS ", PermissionCategory.None, Permission.ControlServer), // SelectAllUserSecurables
-        new("SHUTDOWN", "SHDN", PermissionCategory.None, Permission.ControlServer), // Shutdown
-        new("UNSAFE ASSEMBLY", "XU  ", PermissionCategory.None, Permission.ControlServer), // UnsafeAssembly
-        new("VIEW ANY CRYPTOGRAPHICALLY SECURED DEFINITION", "VACD", PermissionCategory.None, Permission.ControlServer), // ViewAnyCryptographicallySecuredDefinition
-        new("VIEW ANY DATABASE", "VWDB", PermissionCategory.None, Permission.ViewAnyDefinition), // ViewAnyDatabase
-        new("VIEW ANY ERROR LOG", "VEL ", PermissionCategory.None, Permission.ControlServer), // ViewAnyErrorLog
-        new("VIEW ANY PERFORMANCE DEFINITION", "VAP ", PermissionCategory.None, Permission.ViewAnyDefinition), // ViewAnyPerformanceDefinition
-        new("VIEW ANY SECURITY DEFINITION", "VAS ", PermissionCategory.None, Permission.ViewAnyDefinition), // ViewAnySecurityDefinition
-        new("VIEW SERVER SECURITY AUDIT", "VSSA", PermissionCategory.None, Permission.ControlServer), // ViewServerSecurityAudit
+        new("", "    "), // Other (name/code come from the row's raw text)
+        new("ALTER", "AL  "), // Alter
+        new("ALTER ANY DATABASE", "ALDB", Permission.ControlServer), // AlterAnyDatabase (server scope)
+        new("ALTER ANY DATABASE DDL TRIGGER", "ALTG"), // AlterAnyDatabaseDdlTrigger
+        new("ALTER ANY FULLTEXT CATALOG", "ALFT"), // AlterAnyFullTextCatalog
+        new("ALTER ANY LOGIN", "ALLG", Permission.ControlServer), // AlterAnyLogin (server scope)
+        new("ALTER ANY ROLE", "ALRL"), // AlterAnyRole
+        new("ALTER ANY SCHEMA", "ALSM"), // AlterAnySchema
+        new("AUTHENTICATE", "AUTH"), // Authenticate
+        new("CONNECT", "CO  "), // Connect
+        new("CONTROL", "CL  "), // Control
+        new("CREATE AGGREGATE", "CRAG"), // CreateAggregate
+        new("CREATE ANY DATABASE", "CRDB", Permission.AlterAnyDatabase), // CreateAnyDatabase (server scope)
+        new("CREATE ASSEMBLY", "CRAS"), // CreateAssembly
+        new("CREATE FULLTEXT CATALOG", "CRFT"), // CreateFullTextCatalog
+        new("CREATE FUNCTION", "CRFN"), // CreateFunction
+        new("CREATE PROCEDURE", "CRPR"), // CreateProcedure
+        new("CREATE SEQUENCE", "CRSO"), // CreateSequence
+        new("CREATE SYNONYM", "CRSN"), // CreateSynonym
+        new("CREATE TABLE", "CRTB"), // CreateTable
+        new("CREATE TYPE", "CRTY"), // CreateType
+        new("CREATE VIEW", "CRVW"), // CreateView
+        new("CREATE XML SCHEMA COLLECTION", "CRXS"), // CreateXmlSchemaCollection
+        new("DELETE", "DL  "), // Delete
+        new("EXECUTE", "EX  "), // Execute
+        new("IMPERSONATE", "IM  "), // Impersonate
+        new("IMPERSONATE ANY LOGIN", "IAL ", Permission.ControlServer), // ImpersonateAnyLogin (server scope)
+        new("INSERT", "IN  "), // Insert
+        new("RECEIVE", "RC  "), // Receive
+        new("REFERENCES", "RF  "), // References
+        new("SELECT", "SL  "), // Select
+        new("TAKE OWNERSHIP", "TO  "), // TakeOwnership
+        new("UNMASK", "UMSK"), // Unmask
+        new("UPDATE", "UP  "), // Update
+        new("VIEW ANY COLUMN ENCRYPTION KEY DEFINITION", "VWCK"), // ViewAnyColumnEncryptionKeyDefinition
+        new("VIEW ANY COLUMN MASTER KEY DEFINITION", "VWCM"), // ViewAnyColumnMasterKeyDefinition
+        new("VIEW ANY DEFINITION", "VWAD", Permission.ControlServer), // ViewAnyDefinition (server scope)
+        new("VIEW CHANGE TRACKING", "VWCT"), // ViewChangeTracking
+        new("VIEW DATABASE PERFORMANCE STATE", "VDP "), // ViewDatabasePerformanceState
+        new("VIEW DATABASE STATE", "VWDS"), // ViewDatabaseState
+        new("VIEW DEFINITION", "VW  "), // ViewDefinition
+        new("VIEW SERVER PERFORMANCE STATE", "VSP ", Permission.ViewServerState), // ViewServerPerformanceState
+        new("VIEW SERVER SECURITY STATE", "VSS ", Permission.ViewServerState), // ViewServerSecurityState
+        new("VIEW SERVER STATE", "VWSS", Permission.AlterServerState), // ViewServerState
+        new("ADMINISTER BULK OPERATIONS", "ADBO", Permission.ControlServer), // AdministerBulkOperations
+        new("ALTER ANY AVAILABILITY GROUP", "ALAG", Permission.ControlServer), // AlterAnyAvailabilityGroup
+        new("ALTER ANY CONNECTION", "ALCO", Permission.ControlServer), // AlterAnyConnection
+        new("ALTER ANY CREDENTIAL", "ALCD", Permission.ControlServer), // AlterAnyCredential
+        new("ALTER ANY ENDPOINT", "ALHE", Permission.ControlServer), // AlterAnyEndpoint
+        new("ALTER ANY EVENT NOTIFICATION", "ALES", Permission.ControlServer), // AlterAnyEventNotification
+        new("ALTER ANY EVENT SESSION", "AAES", Permission.ControlServer), // AlterAnyEventSession
+        new("ALTER ANY EVENT SESSION ADD EVENT", "LSAE", Permission.AlterAnyEventSession), // AlterAnyEventSessionAddEvent
+        new("ALTER ANY EVENT SESSION ADD TARGET", "LSAT", Permission.AlterAnyEventSession), // AlterAnyEventSessionAddTarget
+        new("ALTER ANY EVENT SESSION DISABLE", "DES ", Permission.AlterAnyEventSession), // AlterAnyEventSessionDisable
+        new("ALTER ANY EVENT SESSION DROP EVENT", "LSDE", Permission.AlterAnyEventSession), // AlterAnyEventSessionDropEvent
+        new("ALTER ANY EVENT SESSION DROP TARGET", "LSDT", Permission.AlterAnyEventSession), // AlterAnyEventSessionDropTarget
+        new("ALTER ANY EVENT SESSION ENABLE", "EES ", Permission.AlterAnyEventSession), // AlterAnyEventSessionEnable
+        new("ALTER ANY EVENT SESSION OPTION", "LESO", Permission.AlterAnyEventSession), // AlterAnyEventSessionOption
+        new("ALTER ANY LINKED SERVER", "ALLS", Permission.ControlServer), // AlterAnyLinkedServer
+        new("ALTER ANY SERVER AUDIT", "ALAA", Permission.ControlServer), // AlterAnyServerAudit
+        new("ALTER ANY SERVER ROLE", "ALSR", Permission.ControlServer), // AlterAnyServerRole
+        new("ALTER RESOURCES", "ALRS", Permission.ControlServer), // AlterResources
+        new("ALTER SERVER STATE", "ALSS", Permission.ControlServer), // AlterServerState
+        new("ALTER SETTINGS", "ALST", Permission.ControlServer), // AlterSettings
+        new("ALTER TRACE", "ALTR", Permission.ControlServer), // AlterTrace
+        new("AUTHENTICATE SERVER", "AUTH", Permission.ControlServer), // AuthenticateServer
+        new("CONNECT ANY DATABASE", "CADB", Permission.ControlServer), // ConnectAnyDatabase
+        new("CONNECT SQL", "COSQ", Permission.ControlServer), // ConnectSql
+        new("CONTROL SERVER", "CL  ", Permission.Other), // ControlServer
+        new("CREATE ANY EVENT SESSION", "CRES", Permission.AlterAnyEventSession), // CreateAnyEventSession
+        new("CREATE AVAILABILITY GROUP", "CRAC", Permission.AlterAnyAvailabilityGroup), // CreateAvailabilityGroup
+        new("CREATE DDL EVENT NOTIFICATION", "CRDE", Permission.AlterAnyEventNotification), // CreateDdlEventNotification
+        new("CREATE ENDPOINT", "CRHE", Permission.AlterAnyEndpoint), // CreateEndpoint
+        new("CREATE LOGIN", "CRLG", Permission.AlterAnyLogin), // CreateLogin
+        new("CREATE SERVER ROLE", "CRSR", Permission.AlterAnyServerRole), // CreateServerRole
+        new("CREATE TRACE EVENT NOTIFICATION", "CRTE", Permission.AlterAnyEventNotification), // CreateTraceEventNotification
+        new("DROP ANY EVENT SESSION", "DRES", Permission.AlterAnyEventSession), // DropAnyEventSession
+        new("EXTERNAL ACCESS ASSEMBLY", "XA  ", Permission.UnsafeAssembly), // ExternalAccessAssembly
+        new("SELECT ALL USER SECURABLES", "SUS ", Permission.ControlServer), // SelectAllUserSecurables
+        new("SHUTDOWN", "SHDN", Permission.ControlServer), // Shutdown
+        new("UNSAFE ASSEMBLY", "XU  ", Permission.ControlServer), // UnsafeAssembly
+        new("VIEW ANY CRYPTOGRAPHICALLY SECURED DEFINITION", "VACD", Permission.ControlServer), // ViewAnyCryptographicallySecuredDefinition
+        new("VIEW ANY DATABASE", "VWDB", Permission.ViewAnyDefinition), // ViewAnyDatabase
+        new("VIEW ANY ERROR LOG", "VEL ", Permission.ControlServer), // ViewAnyErrorLog
+        new("VIEW ANY PERFORMANCE DEFINITION", "VAP ", Permission.ViewAnyDefinition), // ViewAnyPerformanceDefinition
+        new("VIEW ANY SECURITY DEFINITION", "VAS ", Permission.ViewAnyDefinition), // ViewAnySecurityDefinition
+        new("VIEW SERVER SECURITY AUDIT", "VSSA", Permission.ControlServer), // ViewServerSecurityAudit
     ];
 
     extension(Permission)
@@ -367,9 +349,6 @@ internal static class PermissionCatalog
 
         /// <summary>Canonical 4-char type code, space-padded to match real's <c>char(4)</c> column.</summary>
         internal string CanonicalTypeCode => Table[(byte)permission].TypeCode;
-
-        /// <summary>The read / write / DDL bucket, driving the fixed-role virtual grants.</summary>
-        internal PermissionCategory Category => Table[(byte)permission].Category;
 
         /// <summary>Whether this is a SERVER-class permission — one a grant stores in <c>sys.server_permissions</c> at class 100.</summary>
         internal bool IsServerClass => Table[(byte)permission].ServerCover is not null;

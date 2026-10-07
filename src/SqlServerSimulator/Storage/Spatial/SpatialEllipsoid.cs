@@ -91,20 +91,9 @@ internal static class SpatialEllipsoid
     /// <summary>Semi-major axis, metres.</summary>
     public static double SemiMajor => Datum.SemiMajor;
 
-    public static double Flattening => Datum.Flattening;
-
     public static double SemiMinor => Datum.SemiMinor;
 
     public static double EccentricitySquared => Datum.EccentricitySquared;
-
-    public static double Eccentricity => Datum.Eccentricity;
-
-    /// <summary>
-    /// Area of the zone from the equator to the north pole, per radian of
-    /// longitude — the closing constant a ring encircling a pole needs, and a
-    /// quarter of <see cref="SurfaceArea"/> over π.
-    /// </summary>
-    public static double PolarZone => Datum.PolarZone;
 
     /// <summary>Total surface area, metres squared.</summary>
     public static double SurfaceArea => Datum.SurfaceArea;
@@ -203,7 +192,14 @@ internal sealed class SpatialDatum
     public readonly double SemiMinor;
     public readonly double EccentricitySquared;
     public readonly double Eccentricity;
+
+    /// <summary>
+    /// Area of the zone from the equator to the north pole, per radian of
+    /// longitude — the closing constant a ring encircling a pole needs, and a
+    /// quarter of <see cref="SurfaceArea"/> over π.
+    /// </summary>
     public readonly double PolarZone;
+
     public readonly double SurfaceArea;
 
     /// <summary>An ellipsoid from its semi-major axis and flattening; a flattening of 0 is a sphere.</summary>

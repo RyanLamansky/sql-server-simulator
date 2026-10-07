@@ -13,6 +13,24 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class MoneyTests
 {
+    /// <summary>
+    /// A currency literal outside <c>money</c>'s range is Msg 151 naming it as
+    /// written — a minus written ahead of it doesn't count — and ends the
+    /// batch as it compiles.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select $922337203685478", "$922337203685478")]
+    [DataRow("select -$922337203685477.5808", "$922337203685477.5808")]
+    [DataRow("select $-922337203685477.5809", "$-922337203685477.5809")]
+    [DataRow("select $99999999999999999999999999999999", "$99999999999999999999999999999999")]
+    [DataRow("select £922337203685478", "£922337203685478")]
+    public void Literal_OutOfRange_RaisesMsg151(string query, string literal)
+    {
+        var error = new Simulation().AssertSqlError($"print 'never'\n{query}", 151);
+        AreEqual($"'{literal}' is an invalid money value.", error.Message);
+        AreEqual(2, error.LineNumber);
+    }
+
     [TestMethod]
     public void Literal_DollarSign_ProducesMoney()
     {
@@ -26,6 +44,8 @@ public sealed class MoneyTests
     [DataRow("$0", "0.0000")]
     [DataRow("$.5", "0.5000")]
     [DataRow("$5.", "5.0000")]
+    [DataRow("$.", "0.0000")]
+    [DataRow("$-922337203685477.5808", "-922337203685477.5808")]
     [DataRow("£5.95", "5.9500")]
     [DataRow("€5.95", "5.9500")]
     [DataRow("¥100", "100.0000")]
@@ -250,4 +270,8 @@ public sealed class MoneyTests
         AreEqual("Arithmetic overflow error for data type smallmoney, value = 300000.", ex.Message);
         AreEqual(3, ex.State);
     }
+
+    [TestMethod]
+    public void MoneyPastIntRange_Raises237()
+        => new Simulation().AssertSqlError("select cast(cast(3000000000 as money) as int)", 237, "There is insufficient result space to convert a money value to int.");
 }

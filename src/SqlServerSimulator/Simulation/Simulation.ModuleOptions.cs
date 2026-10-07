@@ -134,7 +134,10 @@ partial class Simulation
 
         var continues = host switch
         {
-            ModuleOptionHost.ScalarFunction or ModuleOptionHost.TableFunction => context.Token is ReservedKeyword { Keyword: Keyword.As or Keyword.Begin },
+            // A CLR function's EXTERNAL NAME may follow without its AS, and a
+            // CLR table-valued function's ORDER clause follows the options.
+            ModuleOptionHost.ScalarFunction => context.Token is ReservedKeyword { Keyword: Keyword.As or Keyword.Begin or Keyword.External },
+            ModuleOptionHost.TableFunction => context.Token is ReservedKeyword { Keyword: Keyword.As or Keyword.Begin or Keyword.External or Keyword.Order },
             ModuleOptionHost.InlineFunction => context.Token is ReservedKeyword { Keyword: Keyword.As or Keyword.Return },
             ModuleOptionHost.Trigger => context.Token is ReservedKeyword { Keyword: Keyword.For } or UnquotedString { ContextualKeyword: ContextualKeyword.After or ContextualKeyword.Instead },
             _ => context.Token is ReservedKeyword { Keyword: Keyword.As },

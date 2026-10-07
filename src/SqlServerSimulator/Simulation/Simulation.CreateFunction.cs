@@ -408,11 +408,11 @@ partial class Simulation
         var isSchemaBound = options.SchemaBinding;
         var executeAsClause = options.ExecuteAs;
 
-        // AS EXTERNAL NAME assembly.[class].method → the body lives in a
-        // registered CLR assembly rather than in T-SQL. The CLR form needs the
-        // AS, since EXTERNAL only follows it.
-        var sawAs = ConsumeOptionalBodyAs(context);
-        if (sawAs && context.Token is ReservedKeyword { Keyword: Keyword.External })
+        // [AS] EXTERNAL NAME assembly.[class].method → the body lives in a
+        // registered CLR assembly rather than in T-SQL (probed 2026-10-07
+        // against SQL Server 2025: the AS is optional there as before a body).
+        _ = ConsumeOptionalBodyAs(context);
+        if (context.Token is ReservedKeyword { Keyword: Keyword.External })
             return ParseClrScalarTail(context, schema, functionName, parameters, declarationErrors, returnType, isSchemaBound, isAlter, createOrAlter);
 
         // BEGIN/END required for scalar UDF bodies. Capture span between

@@ -460,6 +460,27 @@ partial class Selection
             return leadingOrdinals.Contains(ordinal);
         }
 
+        /// <summary>
+        /// Whether <paramref name="predicate"/> — under a <c>NOT</c> when
+        /// <paramref name="negated"/> — is a written constant settled never
+        /// TRUE as the statement compiles; one that raises as it folds is not.
+        /// </summary>
+        public bool SettlesNeverTrue(BooleanExpression predicate, bool negated)
+        {
+            if (!predicate.IsWrittenConstant)
+                return false;
+            bool? value;
+            try
+            {
+                value = predicate.Run(new RuntimeContext(static _ => throw new NotSupportedException(), batch));
+            }
+            catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+            {
+                return false;
+            }
+            return negated ? value != false : value != true;
+        }
+
         /// <summary>Whether <paramref name="expression"/> reads no column of the source.</summary>
         public bool IsValueSide(Expression expression)
         {

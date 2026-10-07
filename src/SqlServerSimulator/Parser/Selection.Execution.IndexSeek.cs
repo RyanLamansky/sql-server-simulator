@@ -552,14 +552,14 @@ internal sealed partial class Selection
         BooleanExpression conjunct,
         Dictionary<int, Expression[]> equalities)
     {
-        return conjunct.TryGetSubqueryProbeSubject(out var subject)
-            && TryIdentifyIndexableColumn(source, subject, out var ordinal)
-            && !equalities.ContainsKey(ordinal)
-            && LeadsSomeKeyOrIndex(table, ordinal)
-            && conjunct.TryMaterializeProbeFamily(
+        return conjunct.TryMaterializeProbeFamily(
                 batch,
                 outerResolver ?? ThrowOnColumnReference,
-                source.StoredSchema[ordinal].Type,
+                subject => TryIdentifyIndexableColumn(source, subject, out var ordinal)
+                    && !equalities.ContainsKey(ordinal)
+                    && LeadsSomeKeyOrIndex(table, ordinal)
+                        ? source.StoredSchema[ordinal].Type
+                        : null,
                 UnionSeekProbeCap,
                 out var family)
             && TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);

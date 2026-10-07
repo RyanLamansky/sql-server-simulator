@@ -266,18 +266,19 @@ partial class Simulation
         }
 
         // A memory-optimized table takes only a natively compiled trigger
-        // (probed 2026-10-02 against SQL Server 2025).
+        // (probed 2026-10-02 against SQL Server 2025), and both refusals
+        // report the line the CREATE starts on (probed 2026-10-07).
         if (parent is HeapTable { IsMemoryOptimized: true } && !options.NativeCompilation)
         {
             var notNative = SimulatedSqlException.MemoryOptimizedTriggerNotNative();
-            notNative.PreserveDiagnostics(1, triggerName.Leaf);
+            notNative.PreserveDiagnostics(context.Batch.CurrentStatement.StartLine, triggerName.Leaf);
             throw notNative;
         }
         // A natively compiled trigger is an AFTER trigger.
         if (options.NativeCompilation && timing == TriggerTiming.InsteadOf)
         {
             var insteadOf = SimulatedSqlException.InsteadOfNativeTrigger();
-            insteadOf.PreserveDiagnostics(1, triggerName.Leaf);
+            insteadOf.PreserveDiagnostics(context.Batch.CurrentStatement.StartLine, triggerName.Leaf);
             throw insteadOf;
         }
 

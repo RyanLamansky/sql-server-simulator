@@ -273,4 +273,11 @@ public sealed class StringPlusOperatorTests
     [TestMethod]
     public void MaxResult_NotClipped()
         => AreEqual(8001L, new Simulation().ExecuteScalar("select datalength(cast(replicate('a', 8000) as varchar(max)) + 'b')"));
+
+    [TestMethod]
+    [DataRow("select concat('a')", "The concat function requires 2 to 254 arguments.")]
+    [DataRow("select concat_ws(',')", "The concat_ws function requires 3 to 254 arguments.")]
+    [DataRow("select formatmessage()", "The formatmessage function requires 1 to 21 arguments.")]
+    public void TooFewArguments_Raises189(string sql, string message)
+        => new Simulation().AssertSqlError(sql, 189, message);
 }

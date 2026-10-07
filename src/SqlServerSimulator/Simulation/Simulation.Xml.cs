@@ -374,14 +374,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        // Optional WITH (...) trailer — parse-and-discard.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            context.MoveNextRequired();
-            if (context.Token is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            SkipBalancedParens(context);
-        }
+        var options = context.Token is ReservedKeyword { Keyword: Keyword.With } ? ParseXmlIndexOptions(context, isPrimary) : XmlIndexOptions.Default;
 
         if (context.Batch.IsSkipping)
             return true;
@@ -403,10 +396,19 @@ partial class Simulation
         if (ordinal < 0)
             throw SimulatedSqlException.InvalidColumnName(columnName);
 
-        foreach (var existing in table.XmlIndexes)
+        var replaced = table.XmlIndexes.Find(existing => context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName));
+        if (options.DropExisting)
         {
-            if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, tableName.ToString(), state: 201);
+            // Rebuilding a primary XML index drops the secondaries built on it
+            // (probed 2026-10-07 against SQL Server 2025).
+            if (replaced is null)
+                throw SimulatedSqlException.XmlIndexNotFoundToDrop(isPrimary, indexName, tableName.ToString());
+            _ = table.XmlIndexes.RemoveAll(existing => ReferenceEquals(existing, replaced)
+                || (replaced.IsPrimary && existing.UsingPrimaryIndexName is { } primaryName && context.Batch.CurrentDatabase.Collation.Equals(primaryName, replaced.Name)));
+        }
+        else if (replaced is not null)
+        {
+            throw SimulatedSqlException.IndexAlreadyExists(indexName, tableName.ToString(), state: 201);
         }
 
         // A primary XML index owns an internal "node table" (sys.objects type
@@ -435,9 +437,139 @@ partial class Simulation
             usingPrimaryName,
             secondaryType,
             nextIndexId,
-            internalTableObjectId);
+            internalTableObjectId)
+        {
+            FillFactor = options.FillFactor,
+            IsPadded = options.PadIndex,
+            AllowRowLocks = options.AllowRowLocks,
+            AllowPageLocks = options.AllowPageLocks,
+        };
         table.XmlIndexes.Add(index);
         return true;
+    }
+
+    /// <summary>What a <c>CREATE [PRIMARY] XML INDEX</c>'s <c>WITH</c> list sets.</summary>
+    private readonly struct XmlIndexOptions(byte fillFactor, bool padIndex, bool allowRowLocks, bool allowPageLocks, bool dropExisting)
+    {
+        public readonly byte FillFactor = fillFactor;
+        public readonly bool PadIndex = padIndex;
+        public readonly bool AllowRowLocks = allowRowLocks;
+        public readonly bool AllowPageLocks = allowPageLocks;
+        public readonly bool DropExisting = dropExisting;
+
+        public static XmlIndexOptions Default => new(0, false, true, true, false);
+    }
+
+    /// <summary>
+    /// Reads a <c>CREATE [PRIMARY] XML INDEX</c>'s <c>WITH ( option = value
+    /// [, …] )</c> list, the cursor on <c>WITH</c>; on exit, the token past
+    /// its <c>)</c>. Real refuses, as the batch compiles (probed 2026-10-07
+    /// against SQL Server 2025): a name no index takes as the generic XML
+    /// INDEX's option, followed by Msg 153 for a number, a Msg 155 naming the
+    /// statement for <c>ON</c> / <c>OFF</c> and a syntax error for anything
+    /// else; <c>STATISTICS_ONLY</c> and <c>WAIT_AT_LOW_PRIORITY</c> as syntax;
+    /// and, once the list has read, the first option the statement can't take
+    /// — <c>ONLINE</c>, <c>RESUMABLE</c> or <c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c>
+    /// on, <c>IGNORE_DUP_KEY</c> on, any <c>MAX_DURATION</c>,
+    /// <c>STATISTICS_INCREMENTAL</c>, <c>BUCKET_COUNT</c> or
+    /// <c>DATA_COMPRESSION</c>.
+    /// </summary>
+    private static XmlIndexOptions ParseXmlIndexOptions(ParserContext context, bool isPrimary)
+    {
+        var statement = isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX";
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var options = XmlIndexOptions.Default;
+        var fillFactor = options.FillFactor;
+        bool padIndex = options.PadIndex, allowRowLocks = options.AllowRowLocks, allowPageLocks = options.AllowPageLocks, dropExisting = false;
+        SimulatedSqlException? refusal = null;
+        // Every name the switch below meets is an index option's, none longer than this.
+        Span<char> upper = stackalloc char[32];
+        while (true)
+        {
+            var nameToken = context.GetNextRequired();
+            if (nameToken is not (StringToken or ReservedKeyword))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var name = nameToken.Source.ToString();
+            if (name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase))
+            {
+                throw isPrimary
+                    ? SimulatedSqlException.Aggregate([SimulatedSqlException.SyntaxErrorNear(context), SimulatedSqlException.InvalidUsageOfIndexOption(name, statement)])
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (name.Equals("WAIT_AT_LOW_PRIORITY", StringComparison.OrdinalIgnoreCase) || context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var value = context.GetNextRequired();
+            if (!IndexOptionNames.Contains(name) && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase))
+            {
+                throw SimulatedSqlException.Aggregate([
+                    SimulatedSqlException.UnrecognizedIndexOption(name, "XML INDEX"),
+                    value switch
+                    {
+                        Numeric => SimulatedSqlException.InvalidUsageOfIndexOption(name, "XML INDEX"),
+                        ReservedKeyword { Keyword: Keyword.On or Keyword.Off } => SimulatedSqlException.UnrecognizedIndexOption(name, statement),
+                        _ => SimulatedSqlException.SyntaxErrorNear(context),
+                    },
+                ]);
+            }
+            var on = value is ReservedKeyword { Keyword: Keyword.On };
+            switch (upper[..name.AsSpan().ToUpperInvariant(upper)])
+            {
+                case "ALLOW_PAGE_LOCKS":
+                    allowPageLocks = on;
+                    break;
+                case "ALLOW_ROW_LOCKS":
+                    allowRowLocks = on;
+                    break;
+                case "BUCKET_COUNT" or "STATISTICS_INCREMENTAL":
+                    refusal ??= SimulatedSqlException.UnrecognizedIndexOption(name, statement);
+                    break;
+                case "DATA_COMPRESSION":
+                    refusal ??= SimulatedSqlException.UnrecognizedIndexOption("data_compression", statement);
+                    break;
+                case "DROP_EXISTING":
+                    dropExisting = on;
+                    break;
+                case "FILLFACTOR":
+                    fillFactor = ReadFillFactor(context);
+                    break;
+                case "IGNORE_DUP_KEY" when on:
+                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("ignore_dup_key", statement, state: 2);
+                    break;
+                case "MAX_DURATION":
+                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("MAX_DURATION", statement, state: 3);
+                    break;
+                case "MAXDOP":
+                    if (ReadIntegerOptionLiteral(context) > 32767)
+                        throw SimulatedSqlException.IndexMaxDopOutOfRange(value.Source.ToString());
+                    break;
+                case "ONLINE" when on:
+                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("ONLINE", statement, state: 3);
+                    break;
+                case "OPTIMIZE_FOR_SEQUENTIAL_KEY" when on:
+                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("OPTIMIZE_FOR_SEQUENTIAL_KEY", statement, state: 6);
+                    break;
+                case "PAD_INDEX":
+                    padIndex = on;
+                    break;
+                case "RESUMABLE" when on:
+                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("RESUMABLE", statement, state: 3);
+                    break;
+            }
+            // The rest of a value: a unit (COMPRESSION_DELAY = 5 MINUTES), a
+            // nested list, an ON PARTITIONS clause.
+            context.MoveNextRequired();
+            while (context.Token is not Operator { Character: ',' or ')' })
+            {
+                if (context.Token is Operator { Character: '(' })
+                    SkipBalancedParens(context);
+                context.MoveNextRequired();
+            }
+            if (context.Token is Operator { Character: ')' })
+                break;
+        }
+        context.MoveNextOptional();
+        return refusal is null ? new(fillFactor, padIndex, allowRowLocks, allowPageLocks, dropExisting) : throw refusal;
     }
 
     private static bool ParseDropXmlSchemaCollection(ParserContext context)
@@ -520,6 +652,18 @@ internal sealed class XmlIndex(
     /// <c>using_xml_index_id</c>, and the primary's internal node table is
     /// named after it.</summary>
     public readonly int IndexId = indexId;
+
+    /// <summary>The <c>FILLFACTOR</c> written, 0 for none, as <c>sys.indexes.fill_factor</c> reports it.</summary>
+    public byte FillFactor;
+
+    /// <summary><c>PAD_INDEX</c>, <c>sys.indexes.is_padded</c>.</summary>
+    public bool IsPadded;
+
+    /// <summary><c>ALLOW_ROW_LOCKS</c>, on unless written off.</summary>
+    public bool AllowRowLocks = true;
+
+    /// <summary><c>ALLOW_PAGE_LOCKS</c>, on unless written off.</summary>
+    public bool AllowPageLocks = true;
 }
 
 /// <summary>

@@ -446,6 +446,38 @@ public sealed class PartitioningTests
         AreEqual(1, sim.ExecuteScalar("select data_space_id from sys.indexes where object_id = object_id('t') and index_id = 1"));
     }
 
+    /// <summary>
+    /// <c>DROP INDEX … WITH (MOVE TO …)</c> leaves the heap on the scheme it
+    /// names, partitioned by the column it names, or unpartitioned on a
+    /// filegroup.
+    /// </summary>
+    [TestMethod]
+    public void DropClusteredIndex_MoveTo_PlacesTheHeap()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(LeftFunctionAndScheme + """
+            create table t (a int not null, b int);
+            insert t values (1, 1), (20, 2), (30, 3);
+            create clustered index cx on t (a);
+            drop index cx on t with (move to ps (a));
+            """);
+        AreEqual("1,0,2,0", PartitionRows(sim, "t"));
+        _ = sim.ExecuteNonQuery("create clustered index cx on t (a) on ps (a); drop index cx on t with (move to [primary])");
+        AreEqual("3", PartitionRows(sim, "t"));
+    }
+
+    [TestMethod]
+    [DataRow("drop index cx on t with (move to ps)", 2726, "Partition function 'pf' uses 1 columns which does not match with the number of partition columns used to partition the table or index.")]
+    [DataRow("drop index cx on t with (move to ps (a, b))", 2726, "Partition function 'pf' uses 1 columns which does not match with the number of partition columns used to partition the table or index.")]
+    [DataRow("drop index cx on t with (move to ps (zz))", 1911, "Column name 'zz' does not exist in the target table, index or view.")]
+    [DataRow("drop index cx on t with (move to nofg)", 1921, "Invalid filegroup 'nofg' specified.")]
+    public void DropClusteredIndex_MoveTo_Refusals(string drop, int number, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(LeftFunctionAndScheme + "create table t (a int not null, b int); create clustered index cx on t (a);");
+        sim.AssertSqlError(drop, number, message);
+    }
+
     [TestMethod]
     [DataRow("create table t (a int) on ps(b)", 1911, "Column name 'b' does not exist in the target table, index or view.")]
     [DataRow("create table t (a bigint) on ps(a)", 7726, "Partition column 'a' has data type bigint which is different from the partition function 'pf' parameter data type int.")]
@@ -1285,5 +1317,59 @@ public sealed class PartitioningTests
         var error = simulation.AssertSqlError("execute as user = 'd'; create partition function pf2 (int) as range for values (1)", 6004);
         AreEqual(2, error.State);
         AreEqual("pf1", simulation.ExecuteScalar("select string_agg(name, ',') from sys.partition_functions"));
+    }
+
+    [TestMethod]
+    [Description("Change tracking on either side refuses a switch, the target's first (Msg 4900 state 1, the source's state 2).")]
+    public void Switch_ChangeTrackedSideRefuses()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create partition function pf (int) as range left for values (10, 20);
+            create partition scheme ps as partition pf all to ([PRIMARY]);
+            create table t (a int not null, b varchar(10), constraint pkt primary key (a)) on ps(a);
+            create table s (a int not null, b varchar(10), constraint pks primary key (a));
+            alter database current set change_tracking = on;
+            alter table s enable change_tracking;
+            """);
+        var target = sim.AssertSqlError("alter table t switch partition 2 to s", 4900);
+        AreEqual("The ALTER TABLE SWITCH statement failed for table 'simulated.dbo.s'. It is not possible to switch the partition of a table that has change tracking enabled. Disable change tracking before using ALTER TABLE SWITCH.", target.Errors[0].Message);
+        AreEqual((byte)1, target.State);
+        _ = sim.ExecuteNonQuery("alter table s disable change_tracking; alter table t enable change_tracking");
+        var source = sim.AssertSqlError("alter table t switch partition 2 to s", 4900);
+        Contains("for table 'simulated.dbo.t'", source.Errors[0].Message);
+        AreEqual((byte)2, source.State);
+    }
+
+    [TestMethod]
+    public void Switch_PartitionsInDifferentFilegroups_Raises4938()
+        => new Simulation().AssertSqlError("""
+            alter database current add filegroup fg2;
+            create partition function pf (int) as range left for values (10, 20);
+            create partition scheme ps as partition pf all to ([PRIMARY]);
+            create partition scheme ps2 as partition pf all to (fg2);
+            create table t (a int not null, b varchar(10)) on ps(a);
+            create table w (a int not null, b varchar(10)) on ps2(a);
+            insert t values (15, 'y');
+            alter table t switch partition 2 to w partition 2
+            """, 4938, "ALTER TABLE SWITCH statement failed. Partition 2 of table 'simulated.dbo.t' is in filegroup 'PRIMARY' and partition 2 of table 'simulated.dbo.w' is in filegroup 'fg2'.");
+
+    [TestMethod]
+    public void Switch_IndexedViews()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create partition function pf (int) as range left for values (10, 20);
+            create partition scheme ps as partition pf all to ([PRIMARY]);
+            create table t (a int not null, b varchar(10)) on ps(a);
+            create table s (a int not null, b varchar(10));
+            insert t values (15, 'y');
+            """,
+            "create view dbo.vt with schemabinding as select a, b from dbo.t",
+            "create unique clustered index cx on dbo.vt (a)");
+        sim.AssertSqlError("alter table t switch partition 2 to s", 11401, "ALTER TABLE SWITCH statement failed. Table 'simulated.dbo.t' is partitioned, but index 'cx' on indexed view 'vt' is not partitioned.");
+        sim.ExecuteBatches("drop view dbo.vt", "create view dbo.vs with schemabinding as select a, b from dbo.s", "create unique clustered index cx on dbo.vs (a)");
+        sim.AssertSqlError("alter table t switch partition 2 to s", 11402, "ALTER TABLE SWITCH statement failed. Target table 'simulated.dbo.s' is referenced by 1 indexed view(s), but source table 'simulated.dbo.t' is only referenced by 0 indexed view(s). Every indexed view on the target table must have at least one matching indexed view on the source table.");
     }
 }

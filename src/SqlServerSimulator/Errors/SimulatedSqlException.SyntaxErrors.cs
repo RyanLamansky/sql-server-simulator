@@ -70,6 +70,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UpdateOfComputedColumn(string columnName) =>
         new($"Column '{columnName}' cannot be used in an IF UPDATE clause because it is a computed column.", 2114, 16, 1);
 
+    /// <summary>Msg 151: a currency literal outside <c>money</c>'s range, named as written.</summary>
+    internal static SimulatedSqlException InvalidMoneyLiteral(string literal, int lineNumber) =>
+        WithLine(new($"'{literal}' is an invalid money value.", 151, 15, 1), lineNumber);
+
     /// <summary>
     /// Mimics SQL Server error 105: a string literal or quote-delimited
     /// identifier opened with <c>'</c> or <c>"</c> was never closed before
@@ -278,22 +282,11 @@ partial class SimulatedSqlException
         new($"Incorrect syntax near '{functionLowerName}', expected 'AS'.", 1035, 15, 10);
 
     /// <summary>
-    /// Mimics SQL Server error 189: a built-in function received the wrong
-    /// number of arguments. Wording uses the lowercase function name and the
-    /// per-function minimum (e.g. <c>"The concat function requires 2 to 254
-    /// arguments."</c>). Probe-confirmed against SQL Server 2025 (2026-05-09)
-    /// for <c>CONCAT</c> (min 2) and <c>CONCAT_WS</c> (min 3).
-    /// </summary>
-    internal static SimulatedSqlException FunctionArgumentCount(string lowercaseFunctionName, int min) =>
-        new($"The {lowercaseFunctionName} function requires {min} to 254 arguments.", 189, 15, 1);
-
-    /// <summary>
     /// Mimics SQL Server error 189 with an explicit upper bound: a built-in
     /// function received the wrong number of arguments where the accepted count
     /// is a small range (e.g. <c>"The CertPrivateKey function requires 2 to 3
     /// arguments."</c>). Probe-confirmed against SQL Server 2025 (2026-07-20) —
-    /// the function name is rendered with its documented PascalCase spelling,
-    /// unlike the lowercase-rendered <see cref="FunctionArgumentCount"/> family.
+    /// the function name is rendered as the arity table spells it.
     /// </summary>
     internal static SimulatedSqlException FunctionArgumentCountRange(string functionName, int min, int max, byte state = 1) =>
         new($"The {functionName} function requires {min} to {max} arguments.", 189, 15, state);
@@ -487,6 +480,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException LanguageNotFound(string name) =>
         new($"SET LANGUAGE failed because '{name}' is not an official language name or a language alias on this SQL Server.", 2740, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 169 state 10: a CLR table-valued function's
+    /// <c>ORDER</c> clause naming a column twice (probed 2026-10-07 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OrderClauseColumnRepeated() =>
+        new("A column has been specified more than once in the order by list. Columns in the order by list must be unique.", 169, 15, 10);
 
     /// <summary>
     /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>

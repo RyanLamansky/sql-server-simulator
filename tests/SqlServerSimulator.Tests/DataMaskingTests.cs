@@ -75,6 +75,17 @@ public sealed class DataMaskingTests
     [DataRow("select cast(e as varchar(10)) from t where id = 1", "xxxx")]
     public void Expression_MasksAsDefaultOfItsType(string query, object expected) => AreEqual(expected, AsUser(Seeded(), query));
 
+    /// <summary>
+    /// A <c>WITHIN GROUP</c> ordering only arranges an aggregate's operand, and
+    /// a percentile reads its ordering's stored values: neither masks.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(id, ',') within group (order by i desc) from t", "1,2,3")]
+    [DataRow("select top 1 percentile_cont(0.5) within group (order by i) over () from t", 24.5)]
+    [DataRow("select top 1 percentile_disc(0.5) within group (order by s) over () from t", "ab")]
+    [DataRow("select approx_percentile_disc(0.5) within group (order by i) from t", 0)]
+    public void WithinGroupOrdering_ReadsStoredValues(string query, object expected) => AreEqual(expected, AsUser(Seeded(), query));
+
     [TestMethod]
     [DataRow("select cast(e as varchar(40)) from t where id = 1")]
     [DataRow("select convert(varchar(40), e) from t where id = 1")]

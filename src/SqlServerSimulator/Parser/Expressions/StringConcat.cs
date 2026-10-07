@@ -50,12 +50,10 @@ internal sealed class StringConcat : Expression
     public StringConcat(ParserContext context, StringConcatKind kind)
     {
         this.kind = kind;
-        var min = kind == StringConcatKind.Concat ? 2 : 3;
 
+        // The built-in arity table has already refused a short list (Msg 189),
+        // so an empty one never reaches here.
         List<Expression> args = [];
-        // Empty argument list (`concat()` / `concat_ws()`) leaves context on
-        // the closing `)` already; the count check below produces Msg 189
-        // rather than Msg 102 from a downstream Expression.Parse failure.
         if (context.Token is not Tokens.Operator { Character: ')' })
         {
             args.Add(Expression.Parse(context));
@@ -65,9 +63,6 @@ internal sealed class StringConcat : Expression
                 args.Add(Expression.Parse(context));
             }
         }
-
-        if (args.Count < min)
-            throw SimulatedSqlException.FunctionArgumentCount(LowercaseName(kind), min);
 
         this.arguments = [.. args];
     }

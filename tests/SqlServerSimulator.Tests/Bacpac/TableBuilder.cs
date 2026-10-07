@@ -182,11 +182,14 @@ public sealed class TableBuilder
 
     /// <summary>
     /// Adds a named <c>DEFAULT (expression) FOR <paramref name="column"/></c>
-    /// constraint. The expression is raw T-SQL.
+    /// constraint. The expression is raw T-SQL. An <paramref name="inline"/>
+    /// one is written as DacFx writes a default declared inline in its table's
+    /// DDL: no name of its own, the server-generated one on a
+    /// <c>SqlInlineConstraintAnnotation</c>.
     /// </summary>
-    public TableBuilder Default(string name, string column, string expression)
+    public TableBuilder Default(string name, string column, string expression, bool inline = false)
     {
-        Constraints.Add(new DefaultDef(name, column, expression));
+        Constraints.Add(new DefaultDef(name, column, expression, inline));
         return this;
     }
 
@@ -310,7 +313,7 @@ public sealed class TableBuilder
                 PrimaryKeyDef pk => KeyConstraintElement(ns, "SqlPrimaryKeyConstraint", pk.Name, pk.Columns, isPrimary: true),
                 UniqueDef uq => KeyConstraintElement(ns, "SqlUniqueConstraint", uq.Name, uq.Columns, isPrimary: false),
                 CheckDef ck => CheckConstraintElement(ns, ck),
-                DefaultDef df => DefaultConstraintElement(ns, df.Name, df.Column, df.Expression),
+                DefaultDef df => DefaultConstraintElement(ns, df.Name, df.Column, df.Expression, df.Inline),
                 ForeignKeyDef fk => ForeignKeyConstraintElement(ns, fk, table),
                 _ => throw new InvalidOperationException($"Unknown constraint kind: {constraint.GetType().Name}"),
             };
@@ -412,10 +415,11 @@ public sealed class TableBuilder
                 new XAttribute("Name", "CheckExpressionScript"),
                 new XElement(ns + "Value", new XCData(ck.Expression))));
 
-    private XElement DefaultConstraintElement(XNamespace ns, string name, string column, string expression) =>
+    private XElement DefaultConstraintElement(XNamespace ns, string name, string column, string expression, bool inline) =>
         new(ns + "Element",
             new XAttribute("Type", "SqlDefaultConstraint"),
-            new XAttribute("Name", $"[{SchemaName}].[{name}]"),
+            inline ? null : new XAttribute("Name", $"[{SchemaName}].[{name}]"),
+            inline ? new XElement(ns + "Annotation", new XAttribute("Type", "SqlInlineConstraintAnnotation"), new XAttribute("Name", name)) : null,
             DefiningTableRelationship(ns),
             new XElement(ns + "Relationship",
                 new XAttribute("Name", "ForColumn"),
@@ -671,7 +675,7 @@ internal abstract record ConstraintDef(string Name);
 internal sealed record PrimaryKeyDef(string Name, string[] Columns) : ConstraintDef(Name);
 internal sealed record UniqueDef(string Name, string[] Columns) : ConstraintDef(Name);
 internal sealed record CheckDef(string Name, string Expression, bool NotForReplication) : ConstraintDef(Name);
-internal sealed record DefaultDef(string Name, string Column, string Expression) : ConstraintDef(Name);
+internal sealed record DefaultDef(string Name, string Column, string Expression, bool Inline) : ConstraintDef(Name);
 internal sealed record ForeignKeyDef(
     string Name,
     string[] ChildColumns,

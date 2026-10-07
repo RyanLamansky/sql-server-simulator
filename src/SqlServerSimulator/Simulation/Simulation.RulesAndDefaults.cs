@@ -289,7 +289,7 @@ partial class Simulation
 
         var alias = target.AliasType!;
         var previous = (isRule ? (BindableObject?)alias.BoundRule : alias.BoundDefault)
-            ?? throw SimulatedSqlException.TypeHasNothingBound(targetName, isRule);
+            ?? throw SimulatedSqlException.TypeHasNothingBound(alias.Name, isRule);
         if (isRule)
         {
             alias.BoundRule = null;

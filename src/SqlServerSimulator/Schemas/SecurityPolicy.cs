@@ -118,8 +118,4 @@ internal sealed class SecurityPredicate(
     /// on the function.
     /// </summary>
     public readonly bool IsSchemaBound = isSchemaBound;
-
-    /// <summary>Whether this predicate guards <paramref name="operation"/>.</summary>
-    public bool Guards(BlockOperation operation) =>
-        this.Kind == SecurityPredicateKind.Block && (this.Operation is null || this.Operation == operation);
 }

@@ -223,6 +223,7 @@ public sealed class WriterLockFidelityTests
     [DataRow("delete a from c1s a join d1 on a.k = d1.k where a.v = 5", "", DisplayName = "Joined DELETE through a view")]
     [DataRow("update c1 set v = c1.v + 1 from d1 join c1 on c1.k = d1.k where d1.k = 5", "6", DisplayName = "Joined UPDATE seeking its target by the join key")]
     [DataRow("update c1v set v = v + 1 where k = 5", "6", DisplayName = "UPDATE through a join view seeking its target")]
+
     public async Task TargetRead_WaitsOutAnUncommittedWrite(string write, string expected)
     {
         var simulation = new Simulation();
@@ -236,6 +237,29 @@ public sealed class WriterLockFidelityTests
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
         await blocked;
         AreEqual(expected, simulation.ExecuteScalar("select isnull(string_agg(v, ','), '') from c1 where k = 5"));
+    }
+
+    /// <summary>
+    /// A write through an <c>APPLY</c> body waits out another session's write
+    /// to a row the body reads and judges the row as committed: it no longer
+    /// qualifies, and stays as committed.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update x set v = x.v + 1 from d1 cross apply (select c1.k, c1.v from c1 where c1.k = d1.k) x where x.k = 5 and x.v < 10", DisplayName = "Joined UPDATE of an APPLY body")]
+    [DataRow("delete x from d1 cross apply (select c1.k, c1.v from c1 where c1.k = d1.k) x where x.k = 5 and x.v < 10", DisplayName = "Joined DELETE of an APPLY body")]
+    [DataRow("update x set v = x.v + 1 from d1 outer apply (select c1.k, c1.v from c1 where c1.k = d1.k and c1.v < 10) x where x.k = 5", DisplayName = "Joined UPDATE of an APPLY body filtering")]
+    public async Task ApplyBodyTarget_RejudgesACommittedWrite(string write)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Shapes);
+        using var holder = simulation.CreateOpenConnection();
+        using var writer = simulation.CreateOpenConnection();
+        using var observer = simulation.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update c1 set v = 50 where k = 5").ExecuteNonQuery();
+        var blocked = StartBlocked(writer, write, observer);
+        _ = holder.CreateCommand("commit").ExecuteNonQuery();
+        await blocked;
+        AreEqual("50", simulation.ExecuteScalar("select isnull(string_agg(v, ','), '') from c1 where k = 5"));
     }
 
     /// <summary>

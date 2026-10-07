@@ -269,4 +269,18 @@ public sealed class RulesAndDefaultsTests
     [TestMethod]
     public void ADefaultConstraintsValue_IsCheckedForTruncation()
         => _ = new Simulation().AssertSqlError("create table t (a int, b varchar(2) default 'abc'); insert t (a) values (1)", 2628);
+
+    [TestMethod]
+    [Description("Unbinding from an alias type with nothing bound names the type without its schema (probed 2026-10-07 against SQL Server 2025).")]
+    public void UnbindFromAliasTypeWithNothingBound()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.ty from int");
+        var rule = sim.AssertSqlError("exec sp_unbindrule 'dbo.ty'", 15239);
+        AreEqual("User data type 'ty' has no rule.", rule.Errors[0].Message);
+        AreEqual(144, rule.LineNumber);
+        var @default = sim.AssertSqlError("exec sp_unbindefault 'dbo.ty'", 15237);
+        AreEqual("User data type 'ty' has no default.", @default.Errors[0].Message);
+        AreEqual(156, @default.LineNumber);
+    }
 }

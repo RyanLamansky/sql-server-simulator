@@ -312,12 +312,6 @@ internal static class FullTextLexicon
     }
 
     /// <summary>
-    /// The key an inflectional match compares on — see <see cref="Stems"/>,
-    /// whose primary key this is.
-    /// </summary>
-    public static string Stem(string term) => Stems(term).Primary;
-
-    /// <summary>
     /// Reduces a term to the keys an inflectional match compares on: the
     /// irregular lemma when the term has one (two for a form two lemmas share,
     /// or for a form that is a lemma of its own as well), otherwise the term
@@ -360,7 +354,7 @@ internal static class FullTextLexicon
     /// <c>FORMSOF(INFLECTIONAL, …)</c>, ordinal-sorted and without the word
     /// itself: the irregular row's forms, or the regular noun and verb
     /// paradigm — plural, past, gerund — with the two possessives, kept only
-    /// where <see cref="Stem"/> maps the form back to the word's own key, so
+    /// where <see cref="Stems"/> maps the form back to one of the word's keys, so
     /// the list is exactly what an inflectional search here matches. Real
     /// consults a part-of-speech lexicon and lists only the paradigms a word
     /// has (<c>quick</c> gets no verb forms), which this doesn't model.
@@ -429,8 +423,24 @@ internal static class FullTextLexicon
 
     private static bool IsVowel(char ch) => ch is 'a' or 'e' or 'i' or 'o' or 'u';
 
-    private static bool EndsConsonantVowelConsonant(string word) =>
-        word.Length == 3 && !IsVowel(word[0]) && IsVowel(word[1]) && !IsVowel(word[2]) && word[2] is not ('w' or 'x' or 'y');
+    /// <summary>
+    /// Whether a regular past or gerund doubles the final consonant: a word of
+    /// one syllable ending consonant, vowel, consonant other than <c>w</c>,
+    /// <c>x</c> or <c>y</c> — <c>stop</c> → <c>stopped</c>, <c>plan</c> →
+    /// <c>planning</c>, where <c>visit</c> → <c>visited</c> (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool EndsConsonantVowelConsonant(string word)
+    {
+        if (word.Length < 3 || IsVowel(word[^3]) || !IsVowel(word[^2]) || IsVowel(word[^1]) || word[^1] is 'w' or 'x' or 'y')
+            return false;
+        for (var i = 0; i < word.Length - 3; i++)
+        {
+            if (IsVowel(word[i]))
+                return false;
+        }
+        return true;
+    }
 
     private static string Plural(string word) =>
         word.EndsWith('s') || word.EndsWith('x') || word.EndsWith('z') || word.EndsWith("ch", StringComparison.Ordinal) || word.EndsWith("sh", StringComparison.Ordinal)

@@ -131,6 +131,7 @@ public sealed class ParameterDeclarationErrorTests
     /// </summary>
     [TestMethod]
     [DataRow("declare @p nosuch", "#1: Cannot find data type nosuch.")]
+    [DataRow("create procedure p as declare @p nosuch(10, 2) = 1, @q int = 2; select @q, nosuchcol from sys.objects", "#1: Cannot find data type nosuch.")]
     [DataRow("create procedure p @a int, @p dbo.nosuch as select 1", "#2: Cannot find data type dbo.nosuch.")]
     [DataRow("create function f(@p nosuch) returns table as return select 1 x", "#1: Cannot find data type nosuch.")]
     [DataRow("exec sp_executesql N'select 1', N'@p nosuch', 1", "#1: Cannot find data type nosuch.")]
@@ -144,6 +145,18 @@ public sealed class ParameterDeclarationErrorTests
         AreEqual(2, error.Errors[^1].State);
         AreEqual("Parameter or variable '@p' has an invalid data type.", error.Errors[^1].Message);
     }
+
+    /// <summary>
+    /// A scale past the precision is refused as the spec parses, ahead of the
+    /// type name's lookup (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (c nosuch(1, 2))", 183, "The scale (2) for column 'c' must be within the range 0 to 1.")]
+    [DataRow("declare @x nosuch(1, 2)", 192, "The scale must be less than or equal to the precision.")]
+    [DataRow("select cast(1 as nosuch(1, 2))", 192, "The scale must be less than or equal to the precision.")]
+    [DataRow("create table t (c nosuch(2, 1))", 2715, "Column, parameter, or variable #1: Cannot find data type nosuch.")]
+    public void UnknownType_ScalePastPrecision_RefusedFirst(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 
     [TestMethod]
     public void UnknownParameterTypes_AllReported()

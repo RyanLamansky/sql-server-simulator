@@ -7,8 +7,16 @@ namespace SqlServerSimulator;
 /// principal; <c>EXECUTE AS</c> and module <c>WITH EXECUTE AS</c> push additional
 /// frames.
 /// </summary>
-internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName, bool isDatabaseScoped = false, ExecuteAsGuard guard = default)
+internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName, bool isDatabaseScoped = false, ExecuteAsGuard guard = default, string? homePrincipalName = null)
 {
+    /// <summary>
+    /// The user a database-scoped frame stands for in the database it was
+    /// minted in, which a <c>USE</c> elsewhere rebinds away from (to
+    /// <c>guest</c>) and a <c>USE</c> back home restores (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    public readonly string HomePrincipalName = homePrincipalName ?? databasePrincipalName;
+
     /// <summary>What a <c>REVERT</c> must satisfy to pop this frame.</summary>
     public readonly ExecuteAsGuard Guard = guard;
 
@@ -240,7 +248,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         if (this.impersonation.Count > 0)
         {
             var top = this.impersonation[^1];
-            this.impersonation[^1] = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, top.LoginName, top.IsDatabaseScoped, top.Guard);
+            this.impersonation[^1] = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, top.LoginName, top.IsDatabaseScoped, top.Guard, top.HomePrincipalName);
             this.Generation++;
             return;
         }

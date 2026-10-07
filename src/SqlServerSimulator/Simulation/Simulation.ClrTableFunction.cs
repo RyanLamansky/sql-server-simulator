@@ -11,8 +11,8 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses a CLR table-valued function's tail, <c>TABLE (cols) [ORDER
-    /// (cols)] [WITH options] AS EXTERNAL NAME assembly.[class].method</c>,
+    /// Parses a CLR table-valued function's tail, <c>TABLE (cols) [WITH
+    /// options] [ORDER (cols)] [AS] EXTERNAL NAME assembly.[class].method</c>,
     /// binds the init and <c>FillRow</c> methods, and stores the function.
     /// Cursor on entry: the <c>TABLE</c> keyword, with <c>(</c> after it.
     /// </summary>
@@ -29,8 +29,8 @@ partial class Simulation
     /// attribute names none, 6506 when the class has no such method, 6208 when
     /// it doesn't take one parameter more than the table has columns, and
     /// 6258 naming the first column whose <c>out</c> parameter doesn't bind to
-    /// its type. The <c>ORDER</c> clause is accepted and has no effect;
-    /// <c>SCHEMABINDING</c> is Msg 487.
+    /// its type. The <c>ORDER</c> clause has no effect but names the table's
+    /// columns, each once (Msg 1911, 169); <c>SCHEMABINDING</c> is Msg 487.
     /// </remarks>
     private static bool ParseClrTableFunctionTail(
         ParserContext context,
@@ -44,11 +44,18 @@ partial class Simulation
         var hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
             context, functionName.Leaf, out var outputColumns, out var keyConstraints, out var checkConstraints, out _);
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
-            SkipOrderClause(context);
-
         var options = ParseModuleOptions(context, ModuleOptionHost.TableFunction, functionName.Leaf);
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.As } || context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.External })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        {
+            ParseOrderClause(context, hasResolvedColumns ? outputColumns : null);
+            // The options come first: one after the clause starts what real
+            // reads as a common table expression.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                throw SimulatedSqlException.Aggregate([SimulatedSqlException.SyntaxErrorNear(context), SimulatedSqlException.CteRequiresPrecedingSemicolon()]);
+        }
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+            context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.External })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var externalName = ParseExternalName(context, 3);
 
@@ -131,17 +138,40 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Skips a CLR table-valued function's <c>ORDER (col [ASC | DESC], …)</c>
+    /// Reads a CLR table-valued function's <c>ORDER (col [ASC | DESC], …)</c>
     /// clause, which promises the rows' order to the optimizer and changes
-    /// nothing a query observes. Cursor on entry: <c>ORDER</c>; on exit, the
-    /// token after the closing <c>)</c>.
+    /// nothing a query observes. Each name must be one of the table's
+    /// <paramref name="columns"/> (when they resolved), every one that isn't
+    /// reported together as Msg 1911, and none named twice (Msg 169), as the
+    /// batch compiles (probed 2026-10-07 against SQL Server 2025). Cursor on
+    /// entry: <c>ORDER</c>; on exit, the token after the closing <c>)</c>.
     /// </summary>
-    private static void SkipOrderClause(ParserContext context)
+    private static void ParseOrderClause(ParserContext context, HeapColumn[]? columns)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        SkipBalancedParens(context);
+        var collation = context.CurrentDatabase.Collation;
+        List<string> named = [];
+        List<SimulatedSqlException>? missing = null;
+        var repeated = false;
+        do
+        {
+            if (context.GetNextRequired() is not Name column)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (columns is not null && !Array.Exists(columns, candidate => collation.Equals(candidate.Name, column.Value)))
+                (missing ??= []).Add(SimulatedSqlException.IndexColumnMissing(column.Value, state: 10));
+            repeated |= named.Exists(earlier => collation.Equals(earlier, column.Value));
+            named.Add(column.Value);
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
+                context.MoveNextRequired();
+        } while (context.Token is Operator { Character: ',' });
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        if (missing is not null)
+            throw SimulatedSqlException.Aggregate(missing);
+        if (repeated)
+            throw SimulatedSqlException.OrderClauseColumnRepeated();
     }
 
     /// <summary>

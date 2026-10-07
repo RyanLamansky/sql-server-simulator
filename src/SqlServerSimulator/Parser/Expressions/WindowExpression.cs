@@ -1438,12 +1438,13 @@ internal sealed class WindowExpression : Expression
 
     /// <summary>
     /// The operands the window's value is computed from; its PARTITION BY and
-    /// OVER ordering only arrange rows, except a percentile's WITHIN GROUP
-    /// ordering, which is the value it reads.
+    /// OVER ordering only arrange rows — and so does a percentile's WITHIN
+    /// GROUP ordering, though it is the value the percentile reads, so
+    /// <c>PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY masked) OVER ()</c>
+    /// returns the stored values' percentile unmasked (probed 2026-10-07
+    /// against SQL Server 2025).
     /// </summary>
-    internal override ExpressionNode?[]? MaskValueChildren => this.Kind is WindowKind.PercentileCont or WindowKind.PercentileDisc
-        ? [this.AggregateInfo, this.Operand, this.DefaultArg, .. this.OrderBy.Select(static item => item.Expr)]
-        : [this.AggregateInfo, this.Operand, this.DefaultArg];
+    internal override ExpressionNode?[]? MaskValueChildren => [this.AggregateInfo, this.Operand, this.DefaultArg];
 
     internal override void Describe(NodeShape shape)
     {

@@ -99,7 +99,7 @@ partial class Simulation
         new("msgnum", SqlType.Int32, 0, SqlValue.Null(SqlType.Int32)),
         new("severity", SqlType.SmallInt, 0, SqlValue.Null(SqlType.SmallInt)),
         new("msgtext", SqlType.NVarchar, 255, SqlValue.Null(SqlType.NVarchar)),
-        new("lang", SqlType.NVarchar, 128, SqlValue.FromNVarchar("us_english")),
+        new("lang", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
         new("with_log", SqlType.NVarchar, 5, SqlValue.Null(SqlType.NVarchar)),
         new("replace", SqlType.NVarchar, 7, SqlValue.Null(SqlType.NVarchar)),
     ];
@@ -107,7 +107,7 @@ partial class Simulation
     private static readonly SystemProcedureParameter[] DropMessageParameters =
     [
         new("msgnum", SqlType.Int32, 0, SqlValue.Null(SqlType.Int32)),
-        new("lang", SqlType.NVarchar, 128, SqlValue.FromNVarchar("us_english")),
+        new("lang", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
     ];
 
     private static readonly SystemProcedureParameter[] AlterMessageParameters =
@@ -180,7 +180,8 @@ partial class Simulation
     /// argument, the id, the severity, the language, <c>@with_log</c>,
     /// <c>@replace</c>, the us_english version's existence, its severity, and
     /// an existing row. A localized version needs the us_english one first
-    /// and its severity.
+    /// and its severity. An omitted or NULL <c>@lang</c> is the session's
+    /// language, not us_english (probed 2026-10-07).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpAddMessage(BatchContext batch, string calledAs)
     {
@@ -200,7 +201,7 @@ partial class Simulation
         var severity = values[1].AsInt16;
         if (severity is < 1 or > 25)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.UserMessageSeverityOutOfRange(), 38);
-        var languageName = values[3].IsNull ? "us_english" : values[3].AsString;
+        var languageName = values[3].IsNull ? batch.Connection.Language.Name : values[3].AsString;
         var language = FindMessageLanguage(languageName)
             ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAnOfficialLanguageName(languageName), 49);
 
@@ -251,7 +252,8 @@ partial class Simulation
     /// <summary>
     /// <c>sp_dropmessage @msgnum [, @lang]</c> removes one language's version
     /// of a user message, or every version with <c>'ALL'</c>; the us_english
-    /// version goes last. A message id of 50000 or less can't be dropped.
+    /// version goes last. A message id of 50000 or less can't be dropped. An
+    /// omitted or NULL <c>@lang</c> is the session's language.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpDropMessage(BatchContext batch, string calledAs)
     {
@@ -269,7 +271,7 @@ partial class Simulation
         if (messageId <= 50000)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropSystemMessage(), 25);
 
-        var languageName = values[1].IsNull ? "us_english" : values[1].AsString;
+        var languageName = values[1].IsNull ? batch.Connection.Language.Name : values[1].AsString;
         var all = languageName.TrimEnd(' ').Equals("ALL", StringComparison.OrdinalIgnoreCase);
         var language = all ? null : FindMessageLanguage(languageName)
             ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAnOfficialLanguageName(languageName), 38);

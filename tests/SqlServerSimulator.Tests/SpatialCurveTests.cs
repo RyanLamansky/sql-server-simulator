@@ -152,6 +152,11 @@ public sealed class SpatialCurveTests
         AreEqual(100 - (9 * Math.PI), (double)Eval("geometry::Parse('CURVEPOLYGON((0 0, 10 0, 10 10, 0 10, 0 0), CIRCULARSTRING(2 5, 5 8, 8 5, 5 2, 2 5))').STArea()")!, 1e-12);
         // Real's closest approach runs to the circle itself, √26 − 2, not to a linearization of it.
         AreEqual(Math.Sqrt(26) - 2, (double)Eval($"geometry::Parse('{Circle}').STDistance(geometry::Parse('POINT(1 5)'))")!, 1e-14);
+        AreEqual(4.0990195135927845, (double)Eval("geometry::Parse('CIRCULARSTRING(0 0, 1 1, 2 0)').STDistance(geometry::Parse('CIRCULARSTRING(0 5, 1 6, 2 5)'))")!, 1e-14);
+        AreEqual(3.0, (double)Eval("geometry::Parse('CIRCULARSTRING(0 0, 1 1, 2 0)').STDistance(geometry::Parse('CIRCULARSTRING(5 0, 6 -1, 7 0)'))")!, 1e-14);
+        AreEqual(11.806248474865697, (double)Eval("geometry::Parse('COMPOUNDCURVE((0 0, 1 0), CIRCULARSTRING(1 0, 2 1, 3 0))').STDistance(geometry::Parse('LINESTRING(10 10, 11 12)'))")!, 1e-13);
+        // A straight segment's band beside an arc's ring: real's area to about 1e-4.
+        AreEqual(4.886234037, (double)Eval("geometry::Parse('COMPOUNDCURVE((0 0, 1 0), CIRCULARSTRING(1 0, 2 1, 3 0))').STBuffer(0.5).STArea()")!, 5e-4);
         AreEqual(348215.5120912028, (double)Eval("geography::Parse('CIRCULARSTRING(0 0, 1 1, 2 0)').STLength()")!, 348215.5 * 1e-8);
         AreEqual(77191629910.77402, (double)Eval("geography::Parse('CURVEPOLYGON(COMPOUNDCURVE((0 0, 4 0), CIRCULARSTRING(4 0, 2 2, 0 0)))').STArea()")!, 77191629910.0 * 1e-8);
     }

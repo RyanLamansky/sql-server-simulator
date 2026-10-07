@@ -152,8 +152,8 @@ partial class Simulation
     /// <c>vardecimal storage format</c>, which are accepted and do nothing. The
     /// checks run in real's order, each from its own line of the procedure: the
     /// transaction, the option and its value, the table, then a <c>text in
-    /// row</c> table without a text column (probed 2026-09-30 against SQL
-    /// Server 2025). The catalog reports the options; the storage of a
+    /// row</c> table without a text column, turning it off included (probed
+    /// 2026-10-07 against SQL Server 2025). The catalog reports the options; the storage of a
     /// <c>text</c> or LOB value doesn't follow them.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpTableOption(BatchContext batch, string calledAs)
@@ -193,7 +193,7 @@ partial class Simulation
         var parts = values[0].IsNull ? null : SplitDottedName(written);
         var (table, _) = (parts is null ? null : FindUserTable(batch, parts))
             ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NoUserTableMatching(written), 92, 15388);
-        if (option == "TEXT IN ROW" && textInRow != 0 && !Array.Exists(table.Columns, static column => column.Type is TextSqlType or NTextSqlType or ImageSqlType))
+        if (option == "TEXT IN ROW" && !Array.Exists(table.Columns, static column => column.Type is TextSqlType or NTextSqlType or ImageSqlType))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotSwitchToInRowText(table.Name), 102, 2599);
 
         switch (option)

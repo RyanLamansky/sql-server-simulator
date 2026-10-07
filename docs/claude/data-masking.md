@@ -87,6 +87,7 @@ Real settles the result's mask by data flow, inlineable or not: a variable assig
 
 A conversion error raised computing a masked output column's value, for a principal who reads it masked, hides its value and type names: Msg 245 reads `Conversion failed when converting the ****** value '******' to data type ******.`, and Msg 220, 232 and 248 redact the same way; Msg 8114, 8115, 235 and 241 quote no value and keep their text.
 A `WHERE`, an `ORDER BY` or a `CASE WHEN` condition reads the stored value, and its error quotes it.
+So does a `WITHIN GROUP` ordering, a window percentile's included though it is the value the percentile returns: `STRING_AGG(id, ',') WITHIN GROUP (ORDER BY masked)` and `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY masked) OVER ()` read unmasked, while `APPROX_PERCENTILE_*`, whose ordering is its operand, masks (probed 2026-10-07 against SQL Server 2025).
 The projection's `CAST`, `CONVERT` and operator nodes carry the column's mask (`ErrorMask`) for this.
 
 A plan compiles its masks once — `Selection.ColumnMasks`, null for any query reading no masked column — and every sink tests that array before anything else, so an unmasked query pays one null test.

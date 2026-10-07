@@ -471,7 +471,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var userName = login.UserName;
         var opened = simulation.CreateDbConnection();
         opened.OpenSession();
-        opened.InfoMessage += this.OnInfoMessage;
         // LOGIN7 carries the client's workstation and application names; the
         // session keeps them for HOST_NAME() / APP_NAME(),
         // sys.dm_exec_sessions and the sp_who family.
@@ -548,12 +547,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         writer.WriteDone(Tds.DoneError, 0);
         opened.Dispose();
         return false;
-    }
-
-    private void OnInfoMessage(object? sender, SimulatedInfoMessageEventArgs e)
-    {
-        foreach (var error in e.Errors)
-            this.pendingInfoMessages.Enqueue(error);
     }
 
     private void WriteLoginResponse(TdsTokenWriter writer, int packetSize, uint tdsVersion)
@@ -1561,7 +1554,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         var fresh = new SimulatedDbConnection(simulation, previous.Spid);
         fresh.OpenSession();
-        fresh.InfoMessage += this.OnInfoMessage;
         // The SPID, the physical connection and the client identity LOGIN7
         // reported outlive the reset.
         fresh.Transport = previous.Transport;

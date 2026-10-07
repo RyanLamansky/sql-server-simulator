@@ -952,4 +952,21 @@ public sealed class SequenceTests
             select string_agg(concat(a, ':', n), ',') within group (order by a) from #r
             """));
     }
+
+    [TestMethod]
+    [Description("CACHE 1 is NO CACHE in effect, which CREATE and ALTER say with Msg 11707 while sys.sequences keeps reporting a cache of 1.")]
+    public void CacheOfOne_SaysNoCache()
+    {
+        var sim = new Simulation();
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => $"{error.Number}:{error.Message}"));
+        _ = connection.CreateCommand("create sequence s cache 1; create sequence t; alter sequence t cache 1").ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[]
+        {
+            "11707:The cache size for sequence object 's' has been set to NO CACHE.",
+            "11707:The cache size for sequence object 't' has been set to NO CACHE.",
+        }, messages);
+        AreEqual("1:1", connection.CreateCommand("select concat(cast(is_cached as int), ':', cache_size) from sys.sequences where name = 's'").ExecuteScalar());
+    }
 }

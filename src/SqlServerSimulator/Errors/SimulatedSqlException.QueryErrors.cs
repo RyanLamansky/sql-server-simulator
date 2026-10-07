@@ -31,14 +31,6 @@ partial class SimulatedSqlException
         new("All queries combined using a UNION, INTERSECT or EXCEPT operator must have an equal number of expressions in their target lists.", 205, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 156 specifically for the per-branch
-    /// ORDER BY rejection in set-op chains. The keyword in the message
-    /// is the set operator that follows the offending ORDER BY.
-    /// </summary>
-    internal static SimulatedSqlException PerBranchOrderByRejected(string setOpKeyword) =>
-        new($"Incorrect syntax near the keyword '{setOpKeyword}'.", 156, 15, 1);
-
-    /// <summary>
     /// Mimics SQL Server's Msg 116 — fired when an IN(SELECT) subquery
     /// projects more than one column. EXISTS doesn't trip this; only
     /// constructs that need a single value per row do.
@@ -1667,14 +1659,6 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException OutputColumnOfUnmodifiedBaseTable(string viewColumnName) =>
         new($"The column reference \"inserted.{viewColumnName}\" is not allowed because it refers to a base table that is not being modified in this statement.", 404, 16, 1);
-
-    /// <summary>
-    /// Mimics SQL Server error 414: an UPDATE naming a view with an
-    /// <c>INSTEAD OF UPDATE</c> trigger carries a <c>FROM</c> clause (probed
-    /// 2026-09-27 against SQL Server 2025, joining the view to a table).
-    /// </summary>
-    internal static SimulatedSqlException InsteadOfViewInJoinedUpdate(string viewName) =>
-        new($"UPDATE is not allowed because the statement updates view \"{viewName}\" which participates in a join and has an INSTEAD OF UPDATE trigger.", 414, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 5316: a MERGE's target carries INSTEAD OF

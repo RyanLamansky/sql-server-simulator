@@ -342,6 +342,14 @@ internal static class PermissionEnforcement
     internal static bool TryResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target, out DatabasePrincipal principal)
     {
         var effective = connection.Security.Effective;
+        // The database an EXECUTE AS ran in takes its token back as the user
+        // it stands for there, after a USE elsewhere.
+        if (effective.IsDatabaseScoped && effective.Guard.DatabaseName is { } home && BuiltInToken.Comparer.Equals(home, target.Name)
+            && target.Principals.TryGetValue(effective.HomePrincipalName, out var homePrincipal))
+        {
+            principal = homePrincipal;
+            return true;
+        }
         if (effective.IsDatabaseScoped && !AcceptsDatabaseScopedToken(connection.Simulation, connection.CurrentDatabase, target))
         {
             // An untrusted token still reaches a database that lets guest in,
@@ -1064,12 +1072,6 @@ internal static class PermissionEnforcement
         }
         return Database.DefaultSchemaName;
     }
-
-    /// <summary>Whether the effective principal may run any DDL in <paramref name="database"/> (a <c>db_owner</c> / <c>db_ddladmin</c> member) — the gate for the statements that raise Msg 15247 (CREATE SEQUENCE / ROLE / USER / SCHEMA). True for dbo / module bodies.</summary>
-    internal static bool HasDdlAdminCapability(BatchContext batch, Database database) =>
-        !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsDdlAdminOrOwner(database, principalId)
-        || Rights(batch).Implies(Permission.Control, PermissionChecker.ClassDatabase);
 
     /// <summary>Whether the effective principal is a <c>db_owner</c> member of <paramref name="database"/> (the DROP USER gate). True for dbo / module bodies.</summary>
     internal static bool IsOwner(BatchContext batch, Database database) =>

@@ -344,7 +344,9 @@ partial class Simulation
     /// <c>REPORT</c> lists them, <c>UPDATE_ONE</c> links one to a login and <c>AUTO_FIX</c>
     /// links each matching one to the login of its own name, creating that login from
     /// <c>@Password</c> when there is none. <c>@UserNamePattern</c> is a name here, not a
-    /// pattern.
+    /// pattern. Whatever the action, <c>sa</c> as <c>@LoginName</c> and <c>dbo</c>,
+    /// <c>guest</c>, <c>sys</c> or <c>INFORMATION_SCHEMA</c> as <c>@UserNamePattern</c>
+    /// are refused first (probed 2026-10-07 against SQL Server 2025).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpChangeUsersLogin(BatchContext batch, string calledAs)
     {
@@ -362,6 +364,14 @@ partial class Simulation
             user.TypeCode == "S" && user.LoginName is { } login
             && (simulation.Logins.TryGetValue(login, out var linked) ? linked.PrincipalId != user.LoginPrincipalId : !BuiltInToken.Comparer.Equals(login, "sa"));
         var users = database.Principals.EnumerateValues().OrderBy(static principal => principal.PrincipalId).ToList();
+        if (!values[2].IsNull && BuiltInToken.Comparer.Equals(values[2].AsString, "sa"))
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ForbiddenChangeUsersLoginName(values[2].AsString), 36);
+        if (!values[1].IsNull && values[1].AsString is var pattern
+            && (BuiltInToken.Comparer.Equals(pattern, "dbo") || BuiltInToken.Comparer.Equals(pattern, "guest")
+                || BuiltInToken.Comparer.Equals(pattern, "sys") || BuiltInToken.Comparer.Equals(pattern, "INFORMATION_SCHEMA")))
+        {
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ForbiddenChangeUsersLoginName(pattern), 41);
+        }
 
         switch (action)
         {
@@ -376,6 +386,8 @@ partial class Simulation
                     {
                         if (IsRegisteredLogin(batch, target.Name))
                         {
+                            yield return ProcedureMessage(batch, calledAs, 259, 15292,
+                                $"The row for user '{target.Name}' will be fixed by updating its login link to a login already in existence.");
                             target.LoginName = target.Name;
                             target.LoginPrincipalId = simulation.TryResolveServerPrincipalId(target.Name, out var fixedId) ? fixedId : 0;
                             byUpdating++;
@@ -410,16 +422,18 @@ partial class Simulation
                     var userName = values[1].AsString;
                     var loginName = values[2].AsString;
                     var user = FindDatabasePrincipal(batch, userName);
-                    var orphan = user is not null && IsOrphan(user);
+                    // Any user mapped to a login qualifies, orphaned or not: relinking
+                    // one that has its login is allowed (probed 2026-10-07).
+                    var mapped = user is { TypeCode: "S", LoginName: not null };
                     if (!IsRegisteredLogin(batch, loginName))
                     {
-                        throw orphan
+                        throw mapped
                             ? AtSystemProcedureLine(calledAs, invalid, 128)
                             : AtSystemProcedureLine(calledAs, SimulatedSqlException.UserAbsentOrInvalid(userName), 123);
                     }
-                    if (!orphan)
+                    if (!mapped)
                         throw AtSystemProcedureLine(calledAs, SimulatedSqlException.UserAbsentOrInvalid(userName), 140);
-                    var existing = users.Find(other => other.TypeCode == "S" && !IsOrphan(other) && other.LoginName is { } linked && BuiltInToken.Comparer.Equals(linked, loginName));
+                    var existing = users.Find(other => other != user && other.TypeCode == "S" && !IsOrphan(other) && other.LoginName is { } linked && BuiltInToken.Comparer.Equals(linked, loginName));
                     if (existing is not null)
                         throw AtSystemProcedureLine(calledAs, SimulatedSqlException.LoginAlreadyHasAccount(existing.Name), 175);
                     user!.LoginName = loginName;

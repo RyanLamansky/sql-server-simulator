@@ -460,4 +460,49 @@ public sealed class HierarchyIdTests
         AreEqual(DBNull.Value, ExecuteScalar("select try_cast(0x5800 as hierarchyid)"));
         AreEqual("/1/", ExecuteScalar("select cast(0x58 as hierarchyid).ToString()"));
     }
+
+    [TestMethod]
+    [Description("A method's arguments are counted while compiling, so even a skipped branch's wrong count stops the batch (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("select cast('/1/' as hierarchyid).GetAncestor()", "The GetAncestor function requires 1 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).GetAncestor(1, 2)", "The GetAncestor function requires 1 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).GetDescendant(null)", "The GetDescendant function requires 2 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).IsDescendantOf()", "The IsDescendantOf function requires 1 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).GetReparentedValue(null)", "The GetReparentedValue function requires 2 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).GetLevel(1)", "The GetLevel function requires 0 argument(s).")]
+    [DataRow("select cast('/1/' as hierarchyid).ToString(1)", "The ToString function requires 0 argument(s).")]
+    [DataRow("declare @x int = 0; if @x = 1 select cast('/1/' as hierarchyid).GetAncestor(); select 'after'", "The GetAncestor function requires 1 argument(s).")]
+    public void MethodArity_Raises174(string sql, string message)
+        => new Simulation().AssertSqlError(sql, 174, message);
+
+    [TestMethod]
+    [Description("A hierarchyid method name on another receiver: Msg 258 on a type without methods, Msg 4121 on an unqualified column of one, Msg 227 on xml and Msg 6506 on a spatial type (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("select cast(1 as int).ToString()", 258, "Cannot call methods on int.")]
+    [DataRow("declare @s varchar(10) = 'x'; select @s.ToString()", 258, "Cannot call methods on varchar.")]
+    [DataRow("select cast(1 as int).GetLevel()", 258, "Cannot call methods on int.")]
+    [DataRow("select t.i.ToString() from t", 258, "Cannot call methods on int.")]
+    [DataRow("select count(*) from t where i.GetLevel() = 1", 4121, "Cannot find either column \"i\" or the user-defined function or aggregate \"i.GetLevel\", or the name is ambiguous.")]
+    [DataRow("declare @x xml = '<a/>'; select @x.ToString()", 227, "\"ToString\" is not a valid function, property, or field.")]
+    [DataRow("select x.ToString() from t", 227, "\"ToString\" is not a valid function, property, or field.")]
+    [DataRow("select g.GetLevel() from t", 6506, "Could not find method 'GetLevel' for type 'Microsoft.SqlServer.Types.SqlGeography' in assembly 'Microsoft.SqlServer.Types'")]
+    public void MethodOnAnotherReceiver(string sql, int number, string message)
+        => new Simulation().AssertSqlError("create table t (h hierarchyid, i int, x xml, g geography); " + sql, number, message);
+
+    [TestMethod]
+    [Description("Parse takes any argument nvarchar takes implicitly, a binary one read as UTF-16, and refuses xml while compiling (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("select hierarchyid::Parse(1)", "'1'")]
+    [DataRow("select hierarchyid::Parse(0x58)", "'X'")]
+    [DataRow("select hierarchyid::Parse(cast('/' as char(3)))", "'/  '")]
+    public void Parse_ConvertsItsArgumentToNvarchar(string sql, string quoted)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 6522);
+        Contains($"24001: SqlHierarchyId.Parse failed because the input string {quoted} is not a valid string representation of a SqlHierarchyId node.", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Parse_OfABinaryPath()
+        => AreEqual("/1/", new Simulation().ExecuteScalar("select hierarchyid::Parse(0x2F0031002F00).ToString()"));
+
+    [TestMethod]
+    public void Parse_OfXml_Raises257()
+        => new Simulation().AssertSqlError("select hierarchyid::Parse(cast('<a/>' as xml))", 257, "Implicit conversion from data type xml to nvarchar is not allowed. Use the CONVERT function to run this query.");
 }

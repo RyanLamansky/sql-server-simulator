@@ -116,6 +116,7 @@ A `CATCH` reads a compile-time report's first entry through `ERROR_NUMBER()` and
 - **A type check inside a term whose names come after it** — `SELECT (a + d) + x1` — stops that term's typing at the check wherever a node other than an arithmetic operator raises it, so the term's later names go unreported.
   A type check in a node reading no column (`CAST('2020-01-01' AS date) + 1`) still ends the re-read, as does one raised outside the typing seams above.
 - **A name only a run reaches** — one skip mode doesn't bind — reports alone.
+- **A `DECLARE` type spec its parser refuses inside a module body** — a size past the type's (Msg 131, the decimal Msg 2717 state 1), a scale past the precision (192), a zero length (1001) or a bad scale (1002) — still declares that variable, but real loses the statement's later declarations and reports a Msg 137 at a later reference to one beside the first error; the simulator reports the first error alone (probed 2026-10-07 against SQL Server 2025).
 
 ## Syntax-error recovery
 

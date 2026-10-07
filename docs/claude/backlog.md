@@ -191,11 +191,9 @@ It also includes the deterministic nesting caps, which sit below real's stack-de
 Reachable code paths no test exercises, from a coverage run (`dotnet test --collect:"XPlat Code Coverage"` → reportgenerator) — not gaps in behavior, gaps in the safety net.
 The uncovered `DebugDisplay` / `ToString` debugger helpers and `Stream` boilerplate overrides are deliberately not worth testing; what remains is this list.
 
-- **`sp_cursorprepare`** (`TdsSession.CursorPrepare`) — SqlClient issues the `sp_cursoropen` family instead, so reaching it needs a driver that prepares a cursor explicitly.
-- **`ClrAssemblyMetadata.ComputePublicKeyToken` / `DescribeReference`** — strong-named assembly identity and the assembly-reference description.
 - **`LikeMatcher.Cache`'s collation key component can't be varied by any test** — the resolved collation is a per-expression-node constant in every shape reachable through SQL, so mutation-testing it catches nothing; it guards a hypothetical future caller that rebinds a node's collation between executions.
 
-Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: the first pass surfaced no merely-untested-but-correct path.
+Worth re-measuring after a large bundle rather than routinely, and worth acting on when it does run: a pass that probes each path it tests against real finds bugs there — `sp_cursorprepare`, untested, read its parameters one position late.
 It found two pieces of dead code, and every gap that was then covered turned out to be hiding a behavior bug — uncovered code here has consistently meant *wrong* code, not just unwatched code.
 
 ## Design choices to revisit

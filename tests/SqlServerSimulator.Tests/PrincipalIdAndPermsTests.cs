@@ -255,4 +255,28 @@ public sealed class PrincipalIdAndPermsTests
         AreEqual("1082605703|1082605575|50201342", simulation.ExecuteScalar(
             "execute as user = 'u'; select concat_ws('|', permissions(object_id('t'), 'a'), permissions(object_id('v'), 'a'), permissions())"));
     }
+
+    [TestMethod]
+    [Description("A sub-securable is a column of an OBJECT: 0 where the object lacks it, NULL on an object without columns, and NULL for a missing, empty or non-COLUMN sub-securable (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', 'a', 'COLUMN'", "1")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', 'zz', 'COLUMN'", "0")]
+    [DataRow("'dbo.v', 'OBJECT', 'SELECT', 'zz', 'COLUMN'", "0")]
+    [DataRow("'dbo.f', 'OBJECT', 'SELECT', 'a', 'column'", "1")]
+    [DataRow("'dbo.f', 'OBJECT', 'SELECT', 'zz', 'COLUMN'", "0")]
+    [DataRow("'dbo.p', 'OBJECT', 'EXECUTE', 'zz', 'COLUMN'", "")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', null, 'COLUMN'", "")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', 'a', null", "")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', '', 'COLUMN'", "")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', 'a', 'BOGUS'", "")]
+    [DataRow("'dbo.t', 'OBJECT', 'SELECT', 'a'", "")]
+    [DataRow("'dbo', 'SCHEMA', 'SELECT', 'a', 'COLUMN'", "")]
+    [DataRow("null, 'DATABASE', 'CREATE TABLE', 'a', 'COLUMN'", "")]
+    public void HasPermsByName_ColumnSubSecurable(string arguments, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create view v as select a from t", "create function dbo.f() returns table as return select a from t", "create procedure dbo.p as select 1", "create user u without login", "grant select on t to u");
+        AreEqual(expected, sim.ExecuteScalar($"select isnull(cast(has_perms_by_name({arguments}) as varchar), '')"));
+        if (arguments.StartsWith("'dbo.t'", StringComparison.Ordinal))
+            AreEqual(expected, sim.ExecuteScalar($"execute as user = 'u'; select isnull(cast(has_perms_by_name({arguments}) as varchar), ''); revert"));
+    }
 }

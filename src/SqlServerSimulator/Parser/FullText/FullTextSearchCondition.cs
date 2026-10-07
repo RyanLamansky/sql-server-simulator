@@ -26,7 +26,7 @@ namespace SqlServerSimulator.Parser.FullText;
 /// <b>intervening terms</b> (0 = adjacent) and <c>MAX</c> or an omitted
 /// distance means "anywhere in the same row".</description></item>
 /// <item><description><c>FORMSOF(INFLECTIONAL | THESAURUS, word, …)</c> —
-/// the inflectional form expands through <see cref="FullTextLexicon.Stem"/>,
+/// the inflectional form expands through <see cref="FullTextLexicon.Stems"/>,
 /// and the thesaurus form matches only the word itself, which is what real's
 /// shipped (empty) thesaurus files give.</description></item>
 /// <item><description><c>ISABOUT(term [WEIGHT(n)], …)</c> — an OR for

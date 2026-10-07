@@ -446,4 +446,30 @@ public sealed class TvpRpcTests
         for (var i = 0; i < oracle[0].Length; i++)
             Wire.AssertValueEqual(oracle[0][i] ?? DBNull.Value, wire[0][i] ?? DBNull.Value);
     }
+
+    /// <summary>
+    /// A table type with a <c>rowversion</c> column refuses the parameter
+    /// with Msg 273, however many rows it carries (probed 2026-10-07 against
+    /// SQL Server 2025 over SqlClient 7.0).
+    /// </summary>
+    [TestMethod]
+    public async Task RowVersionColumn_Raises273()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create type dbo.tr as table (a int, rv rowversion)");
+        Wire.ExecInProc(simulation, "create proc dbo.pr @rows dbo.tr readonly as select a from @rows");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var table = new DataTable();
+        _ = table.Columns.Add("a", typeof(int));
+        _ = table.Columns.Add("rv", typeof(byte[]));
+        await using var command = new SqlCommand("exec dbo.pr @rows", connection);
+        var parameter = command.Parameters.Add("@rows", SqlDbType.Structured);
+        parameter.Value = table;
+        parameter.TypeName = "dbo.tr";
+        var ex = await ThrowsAsync<SqlException>(() => command.ExecuteScalarAsync(TestContext.CancellationToken));
+        AreEqual(273, ex.Number);
+        AreEqual(0, ex.LineNumber);
+    }
 }

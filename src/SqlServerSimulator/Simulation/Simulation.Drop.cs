@@ -1014,13 +1014,14 @@ partial class Simulation
     /// <summary>
     /// What a <c>DROP INDEX … ON table WITH (…)</c> clause wrote:
     /// <c>ONLINE = ON</c>, and whether it named <c>MAXDOP</c> or <c>MOVE TO</c>
-    /// (with its filegroup), the clauses only a clustered index's drop takes.
+    /// (with its filegroup or partition scheme and column), the clauses only a
+    /// clustered index's drop takes.
     /// </summary>
-    private readonly struct DropIndexOptions(bool online, bool clusteredOnly, string? moveTo)
+    private readonly struct DropIndexOptions(bool online, bool clusteredOnly, Schemas.DataSpaceClause? moveTo)
     {
         public readonly bool Online = online;
         public readonly bool ClusteredOnly = clusteredOnly;
-        public readonly string? MoveTo = moveTo;
+        public readonly Schemas.DataSpaceClause? MoveTo = moveTo;
     }
 
     /// <summary>
@@ -1038,7 +1039,7 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bool online = false, clusteredOnly = false;
-        string? moveTo = null;
+        Schemas.DataSpaceClause? moveTo = null;
         while (true)
         {
             var nameToken = context.GetNextRequired();
@@ -1066,12 +1067,23 @@ partial class Simulation
             {
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.To })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                moveTo = context.GetNextRequired() is Name place ? place.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+                var place = context.GetNextRequired() is Name placeName ? placeName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+                List<string>? columns = null;
                 if (context.GetNextRequired() is Operator { Character: '(' })
                 {
-                    SkipBalancedParens(context);
+                    columns = [];
+                    do
+                    {
+                        if (context.GetNextRequired() is not Name column)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        columns.Add(column.Value);
+                        context.MoveNextRequired();
+                    } while (context.Token is Operator { Character: ',' });
+                    if (context.Token is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
                 }
+                moveTo = new Schemas.DataSpaceClause(place, columns);
                 clusteredOnly = true;
                 if (context.Token is Operator { Character: ',' })
                     continue;
@@ -1240,8 +1252,15 @@ partial class Simulation
                 // open insert, held to the transaction's end).
                 if (!context.Batch.IsSkipping)
                     context.Batch.AcquireTableRedefinitionLock(table);
+                // MOVE TO puts the rows left behind on its filegroup or, with
+                // a column, its partition scheme (probed 2026-10-07 against
+                // SQL Server 2025).
                 if (options.MoveTo is { } moveTo)
-                    table.FilegroupId = FilegroupFor(context.Batch, table, new Schemas.DataSpaceClause(moveTo, null));
+                {
+                    var placement = ResolveDataSpaceClause(context.Batch, moveTo, table);
+                    table.FilegroupId = FilegroupFor(context.Batch, table, moveTo);
+                    table.Partitioning = placement;
+                }
                 table.RemoveIndex(table.Indexes[i]);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;

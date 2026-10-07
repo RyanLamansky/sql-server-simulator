@@ -125,7 +125,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// directly through <see cref="Compare"/> / <see cref="Equals"/> /
     /// <see cref="GetHashCode"/> via the column type's pinned collation.
     /// </summary>
-    public virtual bool CaseSensitive => false;
+    public abstract bool CaseSensitive { get; }
 
     /// <summary>
     /// The <see cref="CompareInfo"/> and <see cref="CompareOptions"/> that
@@ -429,7 +429,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <see cref="RejectIfUnicodeOnly"/> gates every such construction with
     /// Msg 459.</para>
     /// </summary>
-    internal virtual Encoding StorageEncoding => CharSqlType.Cp1252Encoder;
+    internal abstract Encoding StorageEncoding { get; }
 
     /// <summary>
     /// The collation's ANSI code page — what <c>COLLATIONPROPERTY(name,
@@ -438,7 +438,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// Divehi, Indic_General, Khmer, Lao, Maltese, Maori, Nepali, Pashto,
     /// Syriac, Tibetan). <c>*_UTF8</c> names report 65001.
     /// </summary>
-    internal virtual int AnsiCodePage => 1252;
+    internal abstract int AnsiCodePage { get; }
 
     /// <summary>
     /// Raises Msg 459 when a collation with no ANSI code page is applied to

@@ -172,15 +172,12 @@ internal abstract partial class SqlType
 
     /// <summary>
     /// Converts a non-NULL CLR parameter value into a typed <see cref="SqlValue"/>
-    /// of this type. Used at the <c>DbParameter</c> boundary; NULL handling
-    /// is the caller's responsibility.
-    /// Virtual so types that aren't reachable through <c>DbParameter.DbType</c>
-    /// (the only mapping path consumers use) can opt out — the throwing
-    /// default acts as a tripwire if the parameter-binding path ever starts
-    /// dispatching to one of them. The unreachable set today: <c>char(N)</c>,
-    /// <c>nchar(N)</c>, <c>binary(N)</c>, <c>text</c>, <c>ntext</c>,
-    /// <c>image</c>, <c>rowversion</c>, <c>sysname</c>, <c>smallmoney</c> —
-    /// none of which appear in <see cref="GetByDbType"/>'s output.
+    /// of this type. Used at the <c>DbParameter</c> boundary and for each cell
+    /// of a table-valued parameter, whose columns reach every type; NULL
+    /// handling is the caller's responsibility.
+    /// The throwing default is a tripwire for <c>rowversion</c>, the one type
+    /// that takes no parameter value: a table type holding one refuses the
+    /// whole parameter with Msg 273 before any cell converts.
     /// </summary>
     /// <exception cref="NotSupportedException">No conversion exists from <paramref name="raw"/>'s CLR type to this <see cref="SqlType"/>.</exception>
     public virtual SqlValue ConvertParameter(object raw) =>
@@ -847,9 +844,13 @@ internal abstract partial class SqlType
         // concrete SqlType subclasses each arm produces; embedding the same
         // dispatch as a switch expression here would force per-arm casts to
         // satisfy best-common-type inference.
+        // A scale past the precision is refused as the spec parses, ahead of
+        // the name's lookup (probed 2026-10-07 against SQL Server 2025:
+        // `nosuch(1, 2)` is Msg 183 for a column, 192 elsewhere).
         var resolved = ResolveSimpleKeyword(resolvedName, upper)
-            ?? throw (site != TypeSpecSite.Cast
-                ? SimulatedSqlException.CannotFindDataType(name.Span, index)
+            ?? throw (declaredScale > declaredMaxLength
+                ? site == TypeSpecSite.Column && columnName is not null ? SimulatedSqlException.ColumnScaleOutOfRange(declaredScale.Value, columnName, declaredMaxLength!.Value) : SimulatedSqlException.ScaleExceedsPrecision()
+                : site != TypeSpecSite.Cast ? SimulatedSqlException.CannotFindDataType(name.Span, index)
                 : SimulatedSqlException.CannotFindDataTypeInCast(name.Span));
 
         // sql_variant carries no length spec and isn't fixed / LOB / string-

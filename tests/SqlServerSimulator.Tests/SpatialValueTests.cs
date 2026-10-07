@@ -78,6 +78,10 @@ public sealed class SpatialValueTests
     [DataRow("geography::Parse('POINT(-122 47)').STAsBinary()", "01010000000000000000805EC00000000000804740")]
     [DataRow("geometry::Parse('POINT(1 2 3 4)').STAsBinary()", "0101000000000000000000F03F0000000000000040")]
     [DataRow("geometry::Parse('POINT(1 2 3 4)').AsBinaryZM()", "01B90B0000000000000000F03F000000000000004000000000000008400000000000001040")]
+    [DataRow("geometry::Parse('POINT EMPTY').STAsBinary()", "010400000000000000")]
+    [DataRow("geography::Parse('POINT EMPTY').STAsBinary()", "010400000000000000")]
+    [DataRow("geometry::Parse('POINT EMPTY').AsBinaryZM()", "010400000000000000")]
+    [DataRow("geometry::Parse('GEOMETRYCOLLECTION(POINT EMPTY, POINT(1 2))').STAsBinary()", "0107000000020000000104000000000000000101000000000000000000F03F0000000000000040")]
     public void OgcBinary_MatchesRealBytes(string expression, string expectedHex)
         => AreEqual(expectedHex, Convert.ToHexString((byte[])Eval(expression)!));
 

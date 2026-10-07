@@ -552,6 +552,7 @@ A `TOP` over a grouped, distinct or set-operation query picks from the sorted ro
 **Not modeled yet.**
 - The order among rows a sort ties: real's sort isn't stable, and its tie order matched no textbook quicksort, heapsort or insertion variant tried against it; here ties keep the earlier sorts' order and then arrival, which is what an index already supplying the order gives on real too.
 - A filter folded into a union that also reads a table: `SELECT x FROM (SELECT 3 x UNION SELECT 1 UNION SELECT a FROM t WHERE a = 2) d WHERE x > 1` is 3, 2 on real, where a set operation reading storage sorts here (probed 2026-10-06 against SQL Server 2025).
+- A filter holding a subquery over a constant union: real then neither merges nor sorts a union of distinct constants, keeping their written order — `SELECT x FROM (SELECT 3 x UNION SELECT 1 UNION SELECT 2) d WHERE EXISTS (SELECT 1)` is 3, 1, 2 and `… (SELECT 5 x UNION SELECT 4 UNION ALL SELECT 3) d WHERE 1 = (SELECT 1)` is 5, 4, 3 — sorting only when a row repeats, where the simulator plans the union as it would unfiltered (probed 2026-10-07 against SQL Server 2025).
 - Which of two equal values a merged constant `UNION` keeps: real's merge keeps the later one (`SELECT 'b' UNION SELECT 'a' UNION SELECT 'B'` is a, B), here the earlier.
 
 ## Aggregates

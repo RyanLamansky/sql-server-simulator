@@ -29,6 +29,10 @@ public sealed class SyntaxAlternativesTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select 'a' || null"));
 
     [TestMethod]
+    public void PipeConcat_OfConstants_FiltersACatalogView()
+        => AreEqual(1, new Simulation().ExecuteScalar("create table ab (a int); select count(*) from sys.objects where name = 'a' || 'b'"));
+
+    [TestMethod]
     public void PipeConcat_TwoNonStrings_RaisesMsg402()
         => _ = new Simulation().AssertSqlError("select 1 || 2", 402);
 

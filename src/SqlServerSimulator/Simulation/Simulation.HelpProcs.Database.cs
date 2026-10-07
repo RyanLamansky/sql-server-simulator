@@ -132,7 +132,7 @@ partial class Simulation
             ]);
         }
 
-        rows.Sort(ByFirstCell);
+        SortByFirstCell(rows, batch);
         yield return new SimulatedSqlResultSet(SpHelpDbSchema, SpHelpDbColumnNames, rows);
 
         // The single-database form follows the summary with a bare PRINT and

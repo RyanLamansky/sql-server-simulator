@@ -1899,6 +1899,11 @@ internal sealed partial class BatchContext
 
     private static void MaterializeTvpRows(object source, TableType tableType, HeapTable destination, BatchContext batch)
     {
+        // A rowversion column takes nothing from a parameter, not even a
+        // NULL, and real refuses the parameter however many rows it carries
+        // (probed 2026-10-07 against SQL Server 2025 over SqlClient 7.0).
+        if (source is not TableValuedParameterData { ColumnCount: < 0 } && Array.Exists(tableType.Columns, static column => column.Type is RowVersionSqlType))
+            throw SimulatedSqlException.CannotInsertExplicitTimestamp();
         switch (source)
         {
             case System.Data.DataTable dt:

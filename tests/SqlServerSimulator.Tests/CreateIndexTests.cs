@@ -1262,4 +1262,13 @@ public sealed class CreateIndexTests
     [DataRow("create statistics st on dbo.f (b) where (a);", 102)]
     public void FilterOfABareColumn_IsASyntaxError(string statement, int number)
         => _ = new Simulation().AssertSqlError($"create table dbo.f (a bit, b int); {statement}", number);
+
+    [TestMethod]
+    public void ThousandthNonclusteredIndex_Raises1910()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table ix (a int)");
+        _ = sim.ExecuteNonQuery(string.Join("\n", Enumerable.Range(1, 999).Select(i => $"create index i{i} on ix (a)")));
+        sim.AssertSqlError("create index i1000 on ix (a)", 1910, "Could not create nonclustered index 'i1000' because it exceeds the maximum of 999 allowed per table or view.");
+    }
 }

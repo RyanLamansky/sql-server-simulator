@@ -84,7 +84,7 @@ internal static partial class BuiltInResources
         // role membership when it sees the role or the member; and a
         // user-defined type it owns or holds a permission on (probed
         // 2026-10-04 against SQL Server 2025).
-        // A dependency row is part of its referencing module's definition.
+        // A dependency row needs VIEW DEFINITION on the database.
         if (views.TryGetValue("sys.sql_expression_dependencies", out var dependencies))
             dependencies.MetadataKey = new MetadataVisibilityKey(OrdinalOf(dependencies, "referencing_id"), -1, -1, kind: MetadataVisibilityKind.Definition);
         // A permission row shows to its grantee and the principals in it
@@ -174,7 +174,7 @@ internal static partial class BuiltInResources
             {
                 MetadataVisibilityKind.Type => FilterByType(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 MetadataVisibilityKind.FullTextCatalog => FilterByFullTextCatalog(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
-                MetadataVisibilityKind.Definition => FilterByDefinition(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+                MetadataVisibilityKind.Definition => FilterByDefinition(rows, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 _ => key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
                     : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
             };
@@ -191,19 +191,14 @@ internal static partial class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> FilterByDefinition(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
-    {
-        var visible = BuildVisibleObjectIds(database, principalId, server);
-        var definitions = new HashSet<int>();
-        foreach (var (_, obj) in DefinitionVisibleObjects(database, principalId, server))
-            _ = definitions.Add(obj.ObjectId);
-        foreach (var row in rows)
-        {
-            var id = row[key.ObjectIdOrdinal].AsInt32;
-            if (visible.Contains(id) && definitions.Contains(id))
-                yield return row;
-        }
-    }
+    /// <summary>
+    /// A dependency row shows only to a principal holding <c>VIEW
+    /// DEFINITION</c> on the database itself: one on the referencing module,
+    /// or owning it, reveals nothing (probed 2026-10-07 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> FilterByDefinition(IEnumerable<SqlValue[]> rows, Database database, int principalId, ServerLoginRights server) =>
+        PermissionChecker.IsGranted(database, principalId, Permission.ViewDefinition, PermissionChecker.ClassDatabase, 0, 0, server) ? rows : [];
 
     private static IEnumerable<SqlValue[]> FilterByFullTextCatalog(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
     {

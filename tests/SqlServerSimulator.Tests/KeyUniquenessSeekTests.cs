@@ -171,6 +171,27 @@ public sealed class KeyUniquenessSeekTests
         AreEqual(SeededRows + 1, RowCount(simulation));
     }
 
+    /// <summary>
+    /// A rollback unwinding more row writes than the seek journal keeps
+    /// rebuilds the seek rather than replaying it, and the keys read true.
+    /// </summary>
+    [TestMethod]
+    public void PrimaryKey_AfterRollingBackMoreWritesThanTheJournalKeeps()
+    {
+        var simulation = Seeded("create table t (id int constraint pk_t primary key, pad char(500))");
+        _ = simulation.ExecuteNonQuery($"insert t values ({SeededRows + 1}, 'x')");
+        _ = simulation.ExecuteNonQuery("""
+            begin transaction;
+            insert t select value + 10000, 'y' from generate_series(1, 600);
+            delete t where id <= 100;
+            rollback transaction
+            """);
+        AreEqual(SeededRows + 1, RowCount(simulation));
+        simulation.AssertSqlError("insert t values (50, 'x')", 2627,
+            "Violation of PRIMARY KEY constraint 'pk_t'. Cannot insert duplicate key in object 'dbo.t'. The duplicate key value is (50).");
+        AreEqual(1, simulation.ExecuteNonQuery("insert t values (10001, 'x')"));
+    }
+
     [TestMethod]
     public void PrimaryKey_DuplicateAfterRolledBackDelete_Raises()
     {

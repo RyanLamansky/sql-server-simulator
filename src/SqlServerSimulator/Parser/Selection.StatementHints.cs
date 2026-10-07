@@ -339,11 +339,14 @@ partial class Selection
                 var negative = context.GetNextRequired() is Operator { Character: '-' };
                 if (negative)
                     context.MoveNextRequired();
+                // A minus takes a number or a currency literal; before a
+                // string, a binary literal or NULL it is a syntax error.
                 var value = context.Token switch
                 {
                     Numeric { Value: var number } => number,
-                    Literal { Value: var literal } when !negative => literal,
-                    ReservedKeyword { Keyword: Keyword.Null } when !negative => SqlValue.Null(slot.DeclaredType),
+                    Literal { Value: var literal } when !negative || literal.Type is MoneySqlType => literal,
+                    Literal or ReservedKeyword { Keyword: Keyword.Null } when negative => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    ReservedKeyword { Keyword: Keyword.Null } => SqlValue.Null(slot.DeclaredType),
                     _ => throw SimulatedSqlException.OptimizeForValueNotLiteral("@" + name),
                 };
                 if (!value.IsNull)
@@ -381,7 +384,7 @@ partial class Selection
         {
             throw SimulatedSqlException.OperandTypeClash(value.Type, declared);
         }
-        catch (SimulatedSqlException)
+        catch (Exception error) when (error is SimulatedSqlException or OverflowException)
         {
             throw SimulatedSqlException.OptimizeForValueNotConvertible(variable);
         }

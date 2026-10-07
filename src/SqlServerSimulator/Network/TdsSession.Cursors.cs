@@ -145,15 +145,23 @@ internal sealed partial class TdsSession
 
     // ---- sp_cursorprepare -------------------------------------------------
 
+    // prepared_handle OUTPUT, params, stmt, options [, scrollopt [, ccopt]]:
+    // the two options an output parameter echoes as sent (probed 2026-10-07
+    // against SQL Server 2025).
     private void CursorPrepare(TdsRpcRequest request, TdsTokenWriter writer, bool moreRequests)
     {
         var parameters = request.Parameters;
-        var declaration = AsString(parameters, 2);
-        var statement = AsString(parameters, 3);
+        var declaration = AsString(parameters, 1);
+        var statement = AsString(parameters, 2);
         var prepHandle = this.nextCursorPrepHandle++;
         this.preparedCursors[prepHandle] = new PreparedCursor(statement, ParseDeclarationNames(declaration));
 
         TdsTypeCodec.WriteReturnValue(writer, 0, parameters[0].Name, DbType.Int32, prepHandle);
+        for (var ordinal = 4; ordinal < Math.Min(parameters.Count, 6); ordinal++)
+        {
+            if (parameters[ordinal].IsOutput)
+                TdsTypeCodec.WriteReturnValue(writer, (ushort)ordinal, parameters[ordinal].Name, DbType.Int32, parameters[ordinal].Value);
+        }
         writer.WriteReturnStatus(0);
         this.CompleteCursorRpc(writer, moreRequests, error: false);
     }
@@ -350,6 +358,22 @@ internal sealed partial class TdsSession
         if (!this.apiCursors.TryGetValue(handle, out var api))
         {
             WriteInvalidHandle(writer, "sp_cursorfetch", handle);
+            EchoFetchOutputs(writer, parameters, rownum, nrows);
+            this.CompleteCursorRpc(writer, moreRequests, error: true);
+            return;
+        }
+
+        // Only INFO reports through rownum and nrows: either one sent for
+        // output on another fetch is Msg 16902, rownum's state 5 ahead of
+        // nrows' 6 (probed 2026-10-07 against SQL Server 2025).
+        if ((fetchType & 0x100) == 0 && ((parameters.Count > 2 && parameters[2].IsOutput) || (parameters.Count > 3 && parameters[3].IsOutput)))
+        {
+            var rownumOutput = parameters[2].IsOutput;
+            writer.WriteErrorOrInfo(
+                Tds.TokenError, 16902, rownumOutput ? (byte)5 : (byte)6, 16,
+                $"sp_cursorfetch: The value of the parameter '{(rownumOutput ? "rownum" : "nrows")}' is invalid.",
+                TdsSession.ServerName, "sp_cursorfetch", 1);
+            writer.WriteReturnStatus(1);
             EchoFetchOutputs(writer, parameters, rownum, nrows);
             this.CompleteCursorRpc(writer, moreRequests, error: true);
             return;
@@ -610,7 +634,7 @@ internal sealed partial class TdsSession
         writer.WriteErrorOrInfo(
             Tds.TokenError, 16909, 1, 16,
             $"{proc}: The cursor identifier value provided ({handle.ToString("x", CultureInfo.InvariantCulture)}) is not valid.",
-            "SIMULATED", "", 1);
+            TdsSession.ServerName, proc, 1);
         writer.WriteReturnStatus(1);
     }
 

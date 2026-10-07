@@ -468,4 +468,12 @@ public sealed class SynonymTests
             create sequence seq1 as int;
             drop synonym seq1
             """, 3705, "Cannot use DROP SYNONYM with 'seq1' because 'seq1' is a sequence. Use DROP SEQUENCE.");
+
+    [TestMethod]
+    public void SchemaBoundViewOverASynonym_Raises2788()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create synonym s for dbo.t");
+        sim.AssertSqlError("create view vs with schemabinding as select a from dbo.s", 2788, "Synonyms are invalid in a schemabound object or a constraint expression.");
+    }
 }

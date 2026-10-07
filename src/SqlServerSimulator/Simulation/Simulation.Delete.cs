@@ -746,7 +746,7 @@ partial class Simulation
                 ? (fullOld ?? new SqlValue[table.Columns.Length])
                 : (fullOld is null
                     ? new SqlValue[sourceView.OutputColumns.Length]
-                    : ProjectThroughView(sourceView, fullOld)));
+                    : ProjectThroughView(context.Batch, table, sourceView, fullOld)));
         }
         context.Connection.LastStatementRowCount = deleted.Count;
         var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;

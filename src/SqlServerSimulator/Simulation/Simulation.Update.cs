@@ -1795,12 +1795,21 @@ partial class Simulation
         var deletedRows = new List<SqlValue[]>(affected.Count);
         foreach (var (_, _, fullNew, fullOld) in affected)
         {
-            insertedRows.Add(sourceView is null ? fullNew : ProjectThroughView(sourceView, fullNew));
-            deletedRows.Add(sourceView is null
-                ? (fullOld ?? new SqlValue[table.Columns.Length])
-                : (fullOld is null
-                    ? new SqlValue[sourceView.OutputColumns.Length]
-                    : ProjectThroughView(sourceView, fullOld)));
+            if (sourceView is null)
+            {
+                insertedRows.Add(fullNew);
+                deletedRows.Add(fullOld ?? new SqlValue[table.Columns.Length]);
+                continue;
+            }
+            // Through a view the new row is the old one with the SET list's
+            // columns replaced: a computed or derived column keeps the value
+            // the old row shows (probed 2026-10-07 against SQL Server 2025).
+            var deleted = fullOld is null ? new SqlValue[sourceView.OutputColumns.Length] : ProjectThroughView(context.Batch, table, sourceView, fullOld);
+            var inserted = (SqlValue[])deleted.Clone();
+            foreach (var ordinal in updatedOrdinals)
+                inserted[ordinal] = fullNew[sourceView.BaseColumnOrdinals[ordinal]];
+            insertedRows.Add(inserted);
+            deletedRows.Add(deleted);
         }
         context.Connection.LastStatementRowCount = affected.Count;
         var pseudoColumns = sourceView?.OutputColumns ?? table.Columns;
@@ -1814,18 +1823,23 @@ partial class Simulation
     /// <summary>
     /// Projects a base-table row through a view's
     /// <see cref="View.BaseColumnOrdinals"/> map to the view's
-    /// <see cref="View.OutputColumns"/> shape. Derived projection slots
-    /// (BaseColumnOrdinals[i] = -1) get a typed NULL — there's no underlying
-    /// base column whose value to surface. Used by INSTEAD OF UPDATE / DELETE
-    /// on updatable views.
+    /// <see cref="View.OutputColumns"/> shape, a derived column computed from
+    /// the row (probed 2026-10-07 against SQL Server 2025: a positioned
+    /// <c>DELETE</c>'s <c>deleted</c> reads it) — save a windowed view's,
+    /// which one row can't settle, and every one when no
+    /// <paramref name="batch"/> is given (a MERGE's rows), which read NULL.
+    /// Used by INSTEAD OF UPDATE / DELETE on updatable views.
     /// </summary>
-    private static SqlValue[] ProjectThroughView(View view, SqlValue[] baseRow)
+    private static SqlValue[] ProjectThroughView(BatchContext? batch, HeapTable? table, View view, SqlValue[] baseRow)
     {
         var projected = new SqlValue[view.OutputColumns.Length];
+        Func<SqlValue[], int, SqlValue>? readDerived = null;
         for (var i = 0; i < view.OutputColumns.Length; i++)
         {
             var baseOrd = view.BaseColumnOrdinals[i];
-            projected[i] = baseOrd < 0 ? SqlValue.Null(view.OutputColumns[i].Type) : baseRow[baseOrd];
+            projected[i] = baseOrd >= 0 ? baseRow[baseOrd]
+                : batch is null || table is null || view.IsWindowed ? SqlValue.Null(view.OutputColumns[i].Type)
+                : (readDerived ??= SingleBaseViewReader(batch, view, table))(baseRow, i);
         }
         return projected;
     }

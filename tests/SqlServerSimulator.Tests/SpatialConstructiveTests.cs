@@ -367,6 +367,11 @@ public sealed class SpatialConstructiveTests
         AreEqual("MULTIPOLYGON (((20 30, 20 20, 30 20, 30 30, 20 30)), ((0 10, 0 0, 10 0, 10 10, 0 10)))",
             Text("geography::Parse('POLYGON((0 0,10 0,10 10,0 10,0 0))').STUnion(geography::Parse('POLYGON((20 20,30 20,30 30,20 30,20 20))'))"));
 
+    /// <summary>Operands no cap narrower than 89.5° holds are not modeled yet (real answers them).</summary>
+    [TestMethod]
+    public void Geography_Union_SpanningAHemisphere_NotModeled() =>
+        _ = Throws<NotSupportedException>(() => Eval("geography::Parse('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))').STUnion(geography::Parse('POLYGON((170 0, 179 0, 179 10, 170 10, 170 0))')).STArea()"));
+
     [TestMethod]
     public void Geography_Intersection_CrossesAlongTheGreatEllipticArcs()
     {

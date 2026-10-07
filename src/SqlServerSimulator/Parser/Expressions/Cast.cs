@@ -969,7 +969,7 @@ internal sealed class Cast : Expression
         or 232 // ArithmeticOverflowForType (float/real/money → integer)
         or 234 // InsufficientResultSpaceForMoney
         or 235 // money string syntax
-        or 237 // InsufficientResultSpaceForMoneyToInt
+        or 237 // MoneyPastIntegerRange
         or 241 // ConversionFailedDateTimeFromString
         or 242 // ConversionToDateTimeOutOfRange
         or 244 // OverflowConvertingNarrowInt (INT1/INT2)

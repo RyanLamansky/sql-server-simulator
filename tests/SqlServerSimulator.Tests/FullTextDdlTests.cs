@@ -429,4 +429,17 @@ public sealed class FullTextDdlTests
         AreEqual(7, sim.AssertSqlError("execute as user = 'u'; create fulltext index on dbo.x (b) key index pk_x on c", 7666).State);
         AreEqual("0|1", sim.ExecuteScalar("execute as user = 'u'; select concat((select count(*) from sys.fulltext_catalogs), '|', (select count(*) from sys.fulltext_indexes))"));
     }
+
+    [TestMethod]
+    [Description("A tracked full-text index over a legacy LOB column warns that WRITETEXT / UPDATETEXT escape tracking, naming the table as written (Msg 7657).")]
+    public void TrackedIndexOverLegacyLob_Warns7657()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.lob (id int not null constraint pk_lob primary key, body text)", "create fulltext catalog c as default");
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => $"{error.Number}:{error.Message}"));
+        _ = connection.CreateCommand("create fulltext index on dbo.lob (body) key index pk_lob").ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[] { "7657:Warning: Table or indexed view 'dbo.lob' has full-text indexed columns that are of type image, text, or ntext. Full-text change tracking cannot track WRITETEXT or UPDATETEXT operations performed on these columns." }, messages);
+    }
 }

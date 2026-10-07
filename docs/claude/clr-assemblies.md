@@ -38,8 +38,8 @@ The order real checks in: Msg 10342, a taken name (6246), a malformed image (654
 ```
 CREATE ASSEMBLY <name> [AUTHORIZATION <owner>] FROM 0x<hex> [WITH PERMISSION_SET = { SAFE | EXTERNAL_ACCESS | UNSAFE }]
 DROP ASSEMBLY [IF EXISTS] <name> [, …] [WITH NO DEPENDENTS]
-CREATE FUNCTION <name> (<params>) RETURNS <type> AS EXTERNAL NAME <assembly>.<class>.<method>
-CREATE FUNCTION <name> (<params>) RETURNS TABLE (<columns>) [ORDER (<columns>)] [WITH <options>] AS EXTERNAL NAME <assembly>.<class>.<method>
+CREATE FUNCTION <name> (<params>) RETURNS <type> [WITH <options>] [AS] EXTERNAL NAME <assembly>.<class>.<method>
+CREATE FUNCTION <name> (<params>) RETURNS TABLE (<columns>) [WITH <options>] [ORDER (<columns>)] [AS] EXTERNAL NAME <assembly>.<class>.<method>
 CREATE PROCEDURE <name> [<params>] [WITH <options>] AS EXTERNAL NAME <assembly>.<class>.<method>
 CREATE AGGREGATE <name> (<params>) RETURNS <type> EXTERNAL NAME <assembly>.<class>
 DROP AGGREGATE [IF EXISTS] <name> [, …]
@@ -168,7 +168,7 @@ A CLR procedure feeds `INSERT … EXEC` and `EXEC … WITH RESULT SETS` like a T
 `RETURNS TABLE (<columns>)` declares the result; the method named returns the rows as an `IEnumerable` or an `IEnumerator` (else Msg 6551), and the method its `SqlFunction(FillRowMethodName = …)` names splits each row object into one `out` parameter per column.
 Before any binding the result table refuses what a streamed row can't carry: `varchar` / `char` / `text` / `ntext` / `image` (**Msg 6514** state 3), `IDENTITY` (6514 state 2), `timestamp` / `rowversion` (6514 state 1, named in capitals), `NOT NULL`, `DEFAULT` and a column `CHECK` (**Msg 6526**), and a key (**Msg 6525**); `WITH SCHEMABINDING` is Msg 487.
 Then: no `FillRowMethodName` is **Msg 10306**, a missing method Msg 6506, a `FillRow` whose parameter count isn't one more than the column count **Msg 6208**, and the first column whose `out` parameter doesn't bind to its type **Msg 6258**.
-The `ORDER (…)` clause parses and has no effect.
+The `ORDER (…)` clause has no effect, but it follows the options — one written after it is real's Msg 156 and 319 at the `WITH` — and names the table's columns once each, every unknown one reported together as **Msg 1911** state 10 and a repeat as **Msg 169** state 10 (probed 2026-10-07 against SQL Server 2025).
 The function is called from `FROM` and `APPLY` like the T-SQL kinds, one-part names included, `DEFAULT` arguments reading the declared default; a NULL collection is no rows.
 
 ## Aggregates
@@ -335,5 +335,9 @@ The strong-named case is unprobed.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.
 - `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, assembly signing (a signed assembly isn't trusted for its signature), `sp_add_trusted_assembly`'s `CONTROL SERVER` gate, and a reference to another assembly registered in the database (real resolves it by name, with `sys.assembly_references` and Msg 6589 on `DROP`; here it is Msg 6503).
 - BACPAC round-trip of `SqlAssembly` model elements.
+- **`clr enabled` set to 0 while `EnableClr` is on.**
+  The option reports `EnableClr` whatever `sp_configure` writes, so registered code always runs.
+  Real (probed 2026-10-07 against SQL Server 2025) still creates CLR procedures, functions, aggregates, types and triggers with the option off, but refuses running one with **Msg 6263**: a procedure call fails as its own statement, a reference to a CLR function, table-valued function or aggregate fails the batch as it compiles (a skipped branch's included, a procedure body's when the procedure compiles), and a CLR trigger's error dooms the transaction.
+  The four routine kinds' execution gates are in place, wired to `EnableClr` alone.
 - Out-of-process execution.
   Measured cost of a cross-process round trip is ~56 µs versus ~0.12 µs for an in-process cached delegate — roughly 470× — and a child process is not a sandbox without per-OS restriction work (seccomp/namespaces, restricted tokens, `sandbox_init`), so it is only worth building together with that.

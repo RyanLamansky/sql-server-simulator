@@ -394,6 +394,143 @@ public sealed class TableValuedParameterTests
     }
 
     [TestMethod]
+    public void Structured_DataTable_FixedLengthLegacyAndVariantColumns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.t2 as table (c char(5), nc nchar(3), b binary(4), sv sql_variant, tx text, ntx ntext, img image, sn sysname, sm smallmoney)");
+        _ = simulation.ExecuteNonQuery(
+            "create proc dbo.p2 @rows dbo.t2 readonly as select concat_ws('|', '[' + c + ']', '[' + nc + ']', convert(varchar(20), b, 1), cast(sv as varchar(10)), cast(sql_variant_property(sv, 'BaseType') as varchar(20)), cast(tx as varchar(10)), cast(ntx as nvarchar(10)), convert(varchar(20), cast(img as varbinary(10)), 1), sn, sm) from @rows");
+
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.p2 @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("c", typeof(string));
+        _ = dt.Columns.Add("nc", typeof(string));
+        _ = dt.Columns.Add("b", typeof(byte[]));
+        _ = dt.Columns.Add("sv", typeof(int));
+        _ = dt.Columns.Add("tx", typeof(string));
+        _ = dt.Columns.Add("ntx", typeof(string));
+        _ = dt.Columns.Add("img", typeof(byte[]));
+        _ = dt.Columns.Add("sn", typeof(string));
+        _ = dt.Columns.Add("sm", typeof(decimal));
+        _ = dt.Rows.Add("ab", "x", "\u0001\u0002"u8.ToArray(), 42, "text", "ntext", "\u0009"u8.ToArray(), "name", 1.5m);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.t2";
+        _ = cmd.Parameters.Add(p);
+
+        AreEqual("[ab   ]|[x  ]|0x01020000|42|int|text|ntext|0x09|name|1.50", cmd.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A <c>sql_variant</c> column takes the base type the CLR value travels
+    /// as, and a string or byte array, which travels as a MAX type, is Msg 206
+    /// (probed 2026-10-07 against SQL Server 2025 over SqlClient 7.0).
+    /// </summary>
+    [TestMethod]
+    [DataRow(true, "1|bit")]
+    [DataRow((byte)3, "3|tinyint")]
+    [DataRow((short)4, "4|smallint")]
+    [DataRow(42, "42|int")]
+    [DataRow(7L, "7|bigint")]
+    [DataRow(1.5f, "1.5|real")]
+    [DataRow(2.5, "2.5|float")]
+    [DataRow("s", null)]
+    [DataRow(new byte[] { 1 }, null)]
+    public void Structured_DataTable_VariantColumn_TakesTheValuesBaseType(object value, string? expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.tv as table (sv sql_variant)");
+        _ = simulation.ExecuteNonQuery("create proc dbo.pv @rows dbo.tv readonly as select concat_ws('|', cast(sv as varchar(10)), cast(sql_variant_property(sv, 'BaseType') as varchar(20))) from @rows");
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.pv @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("sv", value.GetType());
+        _ = dt.Rows.Add(value);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.tv";
+        _ = cmd.Parameters.Add(p);
+        if (expected is not null)
+        {
+            AreEqual(expected, cmd.ExecuteScalar());
+            return;
+        }
+        var ex = Throws<SimulatedSqlException>(cmd.ExecuteScalar);
+        AreEqual(206, ex.Number);
+        AreEqual((byte)2, ex.State);
+        AreEqual($"Operand type clash: {(value is string ? "nvarchar" : "varbinary")}(max) is incompatible with sql_variant", ex.Errors[0].Message);
+    }
+
+    /// <summary>
+    /// A table type's <c>rowversion</c> column takes no value from a
+    /// parameter, not even a NULL: Msg 273 (probed 2026-10-07 against SQL
+    /// Server 2025 over SqlClient 7.0).
+    /// </summary>
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public void Structured_DataTable_RowVersionColumn_Raises273(bool withValue)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.tr as table (a int, rv rowversion)");
+        _ = simulation.ExecuteNonQuery("create proc dbo.pr @rows dbo.tr readonly as select a from @rows");
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.pr @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("a", typeof(int));
+        _ = dt.Columns.Add("rv", typeof(byte[]));
+        _ = dt.Rows.Add(1, withValue ? new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 } : null);
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.tr";
+        _ = cmd.Parameters.Add(p);
+        var ex = Throws<SimulatedSqlException>(cmd.ExecuteScalar);
+        AreEqual(273, ex.Number);
+        AreEqual((byte)1, ex.State);
+    }
+
+    /// <summary>
+    /// A <c>vector</c> column reads a string cell as its JSON text, and one of
+    /// the wrong dimension count is Msg 42204 (probed 2026-10-07 against SQL
+    /// Server 2025 over SqlClient 7.0).
+    /// </summary>
+    [TestMethod]
+    public void Structured_DataTable_VectorColumn_ParsesItsText()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create type dbo.tv as table (v vector(2))");
+        _ = simulation.ExecuteNonQuery("create proc dbo.pv @rows dbo.tv readonly as select cast(v as nvarchar(100)) from @rows");
+        using var con = simulation.CreateDbConnection();
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "exec dbo.pv @rows";
+        var dt = new DataTable();
+        _ = dt.Columns.Add("v", typeof(string));
+        _ = dt.Rows.Add("[1, 2.5]");
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@rows";
+        p.Value = dt;
+        p.TypeName = "dbo.tv";
+        _ = cmd.Parameters.Add(p);
+        AreEqual("[1.0000000e+000,2.5000000e+000]", cmd.ExecuteScalar());
+        dt.Rows[0][0] = "[1,2,3]";
+        var ex = Throws<SimulatedSqlException>(cmd.ExecuteScalar);
+        AreEqual(42204, ex.Number);
+        AreEqual("The vector dimensions 2 and 3 do not match.", ex.Errors[0].Message);
+        AreEqual((byte)4, ex.State);
+    }
+
+    [TestMethod]
     public void Structured_DataTable_ColumnNamesIgnored_PositionalFill()
     {
         var simulation = new Simulation();

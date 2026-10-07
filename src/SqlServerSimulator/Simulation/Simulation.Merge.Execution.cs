@@ -1248,7 +1248,7 @@ partial class Simulation
             {
                 var insertedViewRows = sourceView is null
                     ? insertedRows
-                    : insertedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
+                    : insertedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
                 context.Connection.LastStatementRowCount = pendingInserts.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Insert,
@@ -1277,10 +1277,10 @@ partial class Simulation
             {
                 var insertedViewRows = sourceView is null
                     ? insertedRows
-                    : insertedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
+                    : insertedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
                 var deletedViewRows = sourceView is null
                     ? deletedRows
-                    : deletedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
+                    : deletedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
                 context.Connection.LastStatementRowCount = pendingUpdates.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Update,
@@ -1305,7 +1305,7 @@ partial class Simulation
             {
                 var deletedViewRows = sourceView is null
                     ? deletedRows
-                    : deletedRows.ConvertAll(r => ProjectThroughView(sourceView, r));
+                    : deletedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
                 context.Connection.LastStatementRowCount = pendingDeletes.Count;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Delete,

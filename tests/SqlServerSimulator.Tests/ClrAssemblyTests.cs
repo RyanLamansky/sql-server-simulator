@@ -588,6 +588,43 @@ public class ClrAssemblyTests
     }
 
     [TestMethod]
+    [Description("The ORDER clause follows the options and names the table's columns once each; AS before EXTERNAL NAME is optional (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("returns table (n int, label nvarchar(20)) with execute as caller order (n desc) external name simclr.Tvfs.Series", 0, null)]
+    [DataRow("returns table (n int, label nvarchar(20)) order (label asc, n) as external name simclr.Tvfs.Series", 0, null)]
+    [DataRow("returns table (n int, label nvarchar(20)) order (n) with execute as caller as external name simclr.Tvfs.Series", 156, "Incorrect syntax near the keyword 'with'.")]
+    [DataRow("returns table (n int, label nvarchar(20)) order (Label, N desc, n) as external name simclr.Tvfs.Series", 169, "A column has been specified more than once in the order by list. Columns in the order by list must be unique.")]
+    [DataRow("returns table (n int, label nvarchar(20)) order (zz, yy) as external name simclr.Tvfs.Series", 1911, "Column name 'zz' does not exist in the target table, index or view.|Column name 'yy' does not exist in the target table, index or view.")]
+    [DataRow("returns table (n int, label nvarchar(20)) order () as external name simclr.Tvfs.Series", 102, "Incorrect syntax near ')'.")]
+    [DataRow("returns table (n int, label nvarchar(20)) order (n asc desc) as external name simclr.Tvfs.Series", 156, "Incorrect syntax near the keyword 'desc'.")]
+    public void ClrTableFunction_OrderClause(string tail, int number, string? messages)
+    {
+        var sim = ClrFrameworkFixture.Simulation();
+        var create = "create function dbo.s(@c int) " + tail;
+        if (number == 0)
+        {
+            sim.ExecuteBatches(create);
+            AreEqual(3, sim.ExecuteScalar("select count(*) from dbo.s(3)"));
+            return;
+        }
+        // The leading errors; real's parser recovers past a WITH after the
+        // clause to report a third the simulator doesn't.
+        var expected = messages!.Split('|');
+        var error = sim.AssertSqlError(create, number);
+        AreEqual(messages, string.Join("|", error.Errors.Cast<SimulatedError>().Take(expected.Length).Select(e => e.Message)));
+    }
+
+    [TestMethod]
+    [Description("A CLR scalar function's EXTERNAL NAME may follow without AS.")]
+    public void ClrScalarFunction_WithoutAs()
+    {
+        var sim = ClrSimulation();
+        sim.ExecuteBatches(
+            CreateSafeAssembly(),
+            "create function dbo.Doubler(@v int) returns int with returns null on null input external name sim_safe.UserDefinedFunctions.Doubler");
+        AreEqual(84, sim.ExecuteScalar("select dbo.Doubler(42)"));
+    }
+
+    [TestMethod]
     [Description("An iterator method (yield return) is the ordinary init method, and loads under SAFE.")]
     public void ClrTableFunction_Iterator()
         => AreEqual("a||b", ClrFrameworkFixture.Simulation(
@@ -833,4 +870,21 @@ public class ClrAssemblyTests
         else
             _ = sim.ExecuteNonQuery(query);
     }
+
+    [TestMethod]
+    [Description("ALTER AUTHORIZATION moves an assembly to a user; an unknown assembly or principal is Msg 15151 (probed 2026-10-07 against SQL Server 2025).")]
+    public void AlterAuthorization_OnAssembly()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create user u without login");
+        AreEqual("u", sim.ExecuteScalar("alter authorization on assembly::simclr to u; select user_name(principal_id) from sys.assemblies where name = 'simclr'"));
+        sim.AssertSqlError("alter authorization on assembly::nope to u", 15151, "Cannot find the assembly 'nope', because it does not exist or you do not have permission.");
+        sim.AssertSqlError("alter authorization on assembly::simclr to nobody", 15151, "Cannot find the user 'nobody', because it does not exist or you do not have permission.");
+    }
+
+    [TestMethod]
+    [Description("A CLR table-valued function's ORDER clause promises an order and changes nothing a query reads.")]
+    public void ClrTableFunction_OrderClause()
+        => AreEqual(3, ClrFrameworkFixture.Simulation(
+            "create function dbo.series(@c int) returns table (n int, label nvarchar(20)) order (n asc, label desc) as external name simclr.Tvfs.Series")
+            .ExecuteScalar("select count(*) from dbo.series(3)"));
 }

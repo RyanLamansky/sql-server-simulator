@@ -672,4 +672,18 @@ public sealed class CommonTableExpressionTests
             8159,
             "'c' has fewer columns than were specified in the column list.");
     }
+
+    [TestMethod]
+    [Description("A CTE body's branch orders itself only beside a TOP or OFFSET, before or after a set operator, as a derived table's does (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("with c as (select 1 a order by a union select 2) select * from c")]
+    [DataRow("with c as (select 1 a order by a except select 2) select * from c")]
+    [DataRow("with c as (select 1 a union select 2 a order by a) select * from c")]
+    [DataRow("with c as (select 1 a union all select 2 order by a union select 3) select * from c")]
+    public void BranchOrderByWithoutTop_Raises1033(string sql)
+        => new Simulation().AssertSqlError(sql, 1033, "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.");
+
+    [TestMethod]
+    public void BranchOrderByBesideTop_OrdersItsOwnRows()
+        => AreEqual("2,5", new Simulation().ExecuteScalar(
+            "with c as (select top 1 a from (values (1), (2)) v(a) order by a desc union all select 5) select string_agg(a, ',') within group (order by a) from c"));
 }

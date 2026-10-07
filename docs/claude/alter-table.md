@@ -308,9 +308,11 @@ The rules the renderer reproduces:
 - `AND` / `OR` flatten a left operand of their own kind and parenthesize a right one; an `OR` under an `AND` is parenthesized;
 - `IN` becomes an OR chain over its list **reversed**, `BETWEEN` a `>=` / `<=` pair, `NOT` over either parenthesizing the chain; `!=` / `!<` / `!>` become `<>` / `>=` / `<=`; `LIKE` stays lowercase and an `ESCAPE` leaves a trailing space;
 - `CAST` → `CONVERT([type],x)`, `TRY_CONVERT` without a style → `TRY_CAST(x AS [type])`, the type name folded to its system name (`integer` → `int`, `rowversion` → `timestamp`, `national char varying` → `nvarchar`); `IIF` → `CASE`; a `CASE` with no `ELSE` leaves two spaces before `end`; `YEAR` / `MONTH` / `DAY` → `datepart`, and a date part's alias its full name; `CURRENT_TIMESTAMP` → `getdate()`, `CURRENT_USER` / `SESSION_USER` / `USER` → `user_name()`, `SYSTEM_USER` → `suser_sname()`; `<<` / `>>` → `left_shift` / `right_shift`;
-- `COLLATE` parenthesizes its operand, `AT TIME ZONE` its whole expression.
+- `COLLATE` parenthesizes its operand, `AT TIME ZONE` its whole expression;
+- a method call keeps its name as written after its bracketed receiver (`[h].[GetLevel]()`), and a type's static method after its bracketed type (`[geography]::Point((1),(2),(4326))`, probed 2026-10-07).
 
-A shape outside that grammar — an ODBC `{fn …}` escape, an xml or spatial method call — keeps its **source text**, wrapped in one paren pair (a computed column's body once, not twice), so the column is never empty.
+A shape outside that grammar — an ODBC `{fn …}` escape — keeps its **source text**, wrapped in one paren pair (a computed column's body once, not twice), so the column is never empty.
+Real renders an escape's arguments canonically and maps some escapes to their T-SQL function while keeping others (`{fn ucase(s)}` → `(upper([s]))`, `{fn concat(s, 'x')}` → `({fn concat([s],'x')})`, probed 2026-10-07 against SQL Server 2025).
 The filtered-index `sys.indexes.filter_definition` has its own, narrower renderer (see [`indexes.md`](indexes.md#filtered-index-filter_definition)).
 The text scans that read a stored definition — the determinism and precision checks behind persisted and indexed computed columns — accept both forms.
 
@@ -321,7 +323,7 @@ A table type's `CREATE TYPE … AS TABLE` accepts one.
 
 ## Fidelity gaps
 
-- **An ODBC escape or a method call in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
+- **An ODBC escape in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.

@@ -68,5 +68,8 @@ internal sealed class SmallMoneySqlType() : SqlType(SqlTypeCategory.Money, TypeP
     public override SqlValue Decode(ReadOnlySpan<byte> source)
         => SqlValue.FromMoneyScaledUnits(this, BinaryPrimitives.ReadInt32LittleEndian(source));
 
+    public override SqlValue ConvertParameter(object raw) =>
+        SqlValue.FromMoney(SqlType.Money, Convert.ToDecimal(raw, CultureInfo.InvariantCulture)).CoerceTo(this);
+
     public override string ToString() => "smallmoney";
 }

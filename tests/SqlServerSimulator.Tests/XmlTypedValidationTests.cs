@@ -438,4 +438,41 @@ public sealed class XmlTypedValidationTests
         else
             AreEqual(1, simulation.ExecuteScalar(sql));
     }
+
+    /// <summary>
+    /// A text-only complex type canonicalizes its text as the simple type its
+    /// extension builds on, and a choice nothing in the element takes is met
+    /// only when some branch may match nothing (probed 2026-10-07 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("<p cur=\"x\"> 1.50 </p>", "<p cur=\"x\">1.5</p>")]
+    [DataRow("<r/>", "<r/>")]
+    [DataRow("<q/>", "<q/>")]
+    [DataRow("<r><b>5</b></r>", "<r><b>5</b></r>")]
+    [DataRow("<s/>", "6908:XML Validation: Invalid content. Expected element(s): 'a','b'. Location: /*:s[1]")]
+    [DataRow("<p cur=\"x\">abc</p>", "6926:XML Validation: Invalid simple type value: 'abc'. Location: /*:p[1]")]
+    public void SimpleContentAndChoices(string document, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create xml schema collection sc as N'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+              <xsd:complexType name="price"><xsd:simpleContent><xsd:extension base="xsd:decimal"><xsd:attribute name="cur" type="xsd:string"/></xsd:extension></xsd:simpleContent></xsd:complexType>
+              <xsd:element name="p" type="price"/>
+              <xsd:element name="r"><xsd:complexType><xsd:sequence><xsd:choice><xsd:element name="a" type="xsd:int"/><xsd:element name="b" type="xsd:int" minOccurs="0"/></xsd:choice></xsd:sequence></xsd:complexType></xsd:element>
+              <xsd:element name="s"><xsd:complexType><xsd:sequence><xsd:choice><xsd:element name="a" type="xsd:int"/><xsd:element name="b" type="xsd:int"/></xsd:choice></xsd:sequence></xsd:complexType></xsd:element>
+              <xsd:element name="q"><xsd:complexType><xsd:sequence><xsd:choice minOccurs="0"><xsd:element name="a" type="xsd:int"/></xsd:choice></xsd:sequence></xsd:complexType></xsd:element>
+            </xsd:schema>'
+            """);
+        var query = $"declare @x xml(sc) = N'{document}'; select cast(@x as nvarchar(max))";
+        if (expected.Contains(':', StringComparison.Ordinal) && char.IsDigit(expected[0]))
+        {
+            var error = Throws<SimulatedSqlException>(() => sim.ExecuteScalar(query));
+            AreEqual(expected, $"{error.Number}:{error.Message}");
+        }
+        else
+        {
+            AreEqual(expected, sim.ExecuteScalar(query));
+        }
+    }
 }

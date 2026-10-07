@@ -66,13 +66,23 @@ internal sealed class HierarchyIdStaticCall : Expression
         var arg = this.argument!.Run(runtime);
         if (arg.IsNull)
             return SqlValue.Null(SqlType.HierarchyId);
-        var str = arg.Type.Category == SqlTypeCategory.String
-            ? arg.AsString
-            : throw SimulatedSqlException.InvalidHierarchyIdInput(arg.Type.ToString()!);
+        // Any other argument reaches the method's nvarchar parameter converted,
+        // a binary one reinterpreted as UTF-16 (probed 2026-10-07 against SQL
+        // Server 2025: Parse(1) and Parse(0x58) fail on the strings '1' and 'X').
+        var str = arg.Type.Category == SqlTypeCategory.String ? arg.AsString : arg.CoerceTo(SqlType.NVarchar).AsString;
         return SqlValue.FromHierarchyId(HierarchyIdSqlType.ParsePath(str));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.HierarchyId;
+    /// <summary>
+    /// <c>Parse</c>'s argument reaches an <c>nvarchar</c> parameter, so one
+    /// that converts only explicitly (<c>xml</c>) is Msg 257 while compiling.
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.argument is not null)
+            _ = AssignmentRules.ArgumentType(this.argument, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.HierarchyId;
+    }
 
     internal override string DebugDisplay() => $"hierarchyid::{this.method}({this.argument?.DebugDisplay() ?? ""})";
 

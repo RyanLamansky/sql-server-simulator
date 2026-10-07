@@ -525,4 +525,113 @@ public class BulkInsertTests
             update t set v = 1;
             select count(distinct ts) from t
             """));
+
+    [TestMethod]
+    public void CharacterFields_ConvertToDecimalFloatTemporalAndGuidColumns()
+    {
+        var sim = WithFiles(("num.txt",
+            "1.005\t2.5e3\t2024-01-02 03:04:05.1234567\t2024-01-02\t6F9619FF-8B86-D011-B42D-00C04FC964FF\t1.5\n"
+            + "2\tinf\tnotadate\t2024-13-01\tnotaguid\t1e40\n"
+            + "-0.5\t-1E-3\t2024-01-02T03:04:05\t20240102\t6f9619ff-8b86-d011-b42d-00c04fc964ff\t-2\n"
+            + "999.995\t1,5\t2024-01-02 03:04:05\t2024-01-02 10:00\t{6F9619FF-8B86-D011-B42D-00C04FC964FF}\t3.4\n"));
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (d decimal(5, 2), f float, dt datetime, da date, g uniqueidentifier, r real)").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("bulk insert t from 'num.txt' with (maxerrors = 100)").ExecuteNonQuery());
+        AreEqual("Bulk load data conversion error (type mismatch or invalid character for the specified codepage) for row 2, column 2 (f).", ex.Errors[0].Message);
+        AreEqual("Bulk load data conversion error (truncation) for row 4, column 1 (d).", ex.Errors[1].Message);
+        AreEqual("1.01|2500|2024-01-02 03:04:05.123|2024-01-02|6F9619FF-8B86-D011-B42D-00C04FC964FF|1.5,-0.50|-0.001|2024-01-02 03:04:05.000|2024-01-02|6F9619FF-8B86-D011-B42D-00C04FC964FF|-2",
+            connection.CreateCommand("select string_agg(concat_ws('|', d, f, convert(varchar(23), dt, 121), da, g, r), ',') within group (order by d desc) from t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void WidecharLoadOfAnUnmarkedFile_ReadsItAsChar_SayingSoTwice()
+    {
+        var sim = WithFiles(("p.txt", "1\tab\n"));
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<int>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
+        AreEqual(1, connection.CreateCommand("create table p (i int, s varchar(10)); bulk insert p from 'p.txt' with (datafiletype = 'widechar')").ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[] { 4831, 4831 }, messages);
+    }
+
+    [TestMethod]
+    public void OrderHint_NamingNoColumn_Says4817AndLoads()
+    {
+        var sim = WithFiles(("p.txt", "1\tab\n"));
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Message));
+        AreEqual(1, connection.CreateCommand("create table p (i int, s varchar(10)); bulk insert p from 'p.txt' with (order (nope asc, i desc))").ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[] { "Could not bulk load. The sorted column 'nope' is not valid. The ORDER hint is ignored." }, messages);
+    }
+
+    [TestMethod]
+    [DataRow("order (i")]
+    [DataRow("order i")]
+    [DataRow("order (i, )")]
+    [DataRow("order (1)")]
+    public void OrderHint_Malformed_Raises102(string option)
+        => _ = WithFiles(("p.txt", "1\n")).AssertSqlError($"create table p (i int); bulk insert p from 'p.txt' with ({option})", 102);
+
+    [TestMethod]
+    public void OrderHint_TwoDirections_Raises156()
+        => WithFiles(("p.txt", "1\n")).AssertSqlError("create table p (i int); bulk insert p from 'p.txt' with (order (i asc desc))", 156,
+            "Incorrect syntax near the keyword 'desc'.");
+
+    [TestMethod]
+    public void RunTimeOptionRefusals()
+    {
+        var sim = WithFiles(("p.txt", "1\tab\n"));
+        _ = sim.ExecuteNonQuery("create table p (i int, s varchar(10))");
+        var ex = sim.AssertSqlError("bulk insert p from 'p.txt' with (data_source = 'nods')", 12703);
+        AreEqual("Referenced external data source \"nods\" not found.", ex.Errors[0].Message);
+        AreEqual((byte)2, ex.State);
+        sim.AssertSqlError("bulk insert p from 'p.txt' with (format = 'csv', datafiletype = 'native')", 5339,
+            "CSV format option is supported for char and widechar datafiletype options.");
+        sim.AssertSqlError("bulk insert p from 'p.txt' with (format = 'csv', fieldquote = 'ab')", 4878,
+            "Invalid quote character specified for bulk load. Quote character can be one single byte or Unicode character.");
+    }
+
+    [TestMethod]
+    public void XmlFormatFile_NativeFixedAndPrefixedFields()
+    {
+        var row = new List<byte>();
+        row.AddRange(BitConverter.GetBytes(7));
+        row.AddRange(BitConverter.GetBytes((ushort)2));
+        row.AddRange("hi"u8.ToArray());
+        row.Add(8);
+        row.AddRange(BitConverter.GetBytes(1.25));
+        row.AddRange(BitConverter.GetBytes(8));
+        row.AddRange(BitConverter.GetBytes(ushort.MaxValue));
+        row.Add(0xFF);
+        var sim = WithFileBytes(("n.dat", [.. row]), ("n.xml", Encoding.UTF8.GetBytes("""
+            <?xml version="1.0"?>
+            <BCPFORMAT xmlns="http://schemas.microsoft.com/sqlserver/2004/bulkload/format" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+             <RECORD>
+              <FIELD ID="1" xsi:type="NativeFixed" LENGTH="4"/>
+              <FIELD ID="2" xsi:type="NativePrefix" PREFIX_LENGTH="2" MAX_LENGTH="20"/>
+              <FIELD ID="3" xsi:type="NativePrefix" PREFIX_LENGTH="1"/>
+             </RECORD>
+             <ROW>
+              <COLUMN SOURCE="1" NAME="i" xsi:type="SQLINT"/>
+              <COLUMN SOURCE="2" NAME="v" xsi:type="SQLVARYCHAR"/>
+              <COLUMN SOURCE="3" NAME="f" xsi:type="SQLFLT8"/>
+             </ROW>
+            </BCPFORMAT>
+            """)));
+        AreEqual("7|hi|1.25,8||", sim.ExecuteScalar("""
+            create table n (i int, v varchar(20), f float);
+            bulk insert n from 'n.dat' with (formatfile = 'n.xml');
+            select string_agg(concat_ws('|', i, isnull(v, ''), isnull(cast(f as varchar), '')), ',') within group (order by i) from n
+            """));
+    }
+
+    [TestMethod]
+    public void NonXmlFormatFile_NativeHostType_LoadsAndReadsAsARowset()
+    {
+        byte[] data = [.. BitConverter.GetBytes(5), .. BitConverter.GetBytes((ushort)3), .. "abc"u8.ToArray()];
+        var sim = WithFileBytes(("n.dat", data), ("n.fmt", Encoding.UTF8.GetBytes("14.0\n2\n1 SQLINT 0 4 \"\" 1 i \"\"\n2 SQLCHAR 2 20 \"\" 2 v \"\"\n")));
+        AreEqual("5:abc", sim.ExecuteScalar("create table n (i int, v varchar(20)); bulk insert n from 'n.dat' with (formatfile = 'n.fmt'); select concat(i, ':', v) from n"));
+        AreEqual("5:abc", sim.ExecuteScalar("select concat(i, ':', v) from openrowset(bulk 'n.dat', formatfile = 'n.fmt') x"));
+    }
 }

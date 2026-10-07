@@ -46,6 +46,24 @@ public class BoundSessionTests
         return numbers;
     }
 
+    /// <summary>
+    /// Another session's report reads each bound member's own nesting: the
+    /// owner's two levels, and the member's own one plus the level it began.
+    /// </summary>
+    [TestMethod]
+    public void OpenTransactionCount_IsEachMembersOwn()
+    {
+        var sim = Seeded();
+        using var owner = sim.CreateOpenConnection();
+        using var bound = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        _ = Bind(owner, bound);
+        _ = owner.CreateCommand("begin tran").ExecuteNonQuery();
+        _ = bound.CreateCommand("begin tran").ExecuteNonQuery();
+        AreEqual("2,2", Scalar(observer, $"select string_agg(open_transaction_count, ',') within group (order by session_id) from sys.dm_exec_sessions where session_id in ({Scalar(owner, "select @@spid")}, {Scalar(bound, "select @@spid")})"));
+        _ = owner.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
     [TestMethod]
     public void Token_IsTheTransactions_InRealsShape()
     {
@@ -152,6 +170,27 @@ public class BoundSessionTests
         _ = Bind(owner, bound);
         owner.Dispose();
         AreEqual(1, Scalar(bound, "select @@trancount"));
+        _ = bound.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(2, Scalar(bound, "select count(*) from t"));
+        AreEqual(0, Scalar(bound, "select count(*) from sys.dm_tran_locks where resource_type <> 'DATABASE'"));
+    }
+
+    /// <summary>
+    /// The locks the closing session took more than once pass to the others
+    /// whole: the rows stay locked until the transaction ends, and then every
+    /// lock goes.
+    /// </summary>
+    [TestMethod]
+    public void TheSessionThatBeganItClosing_PassesItsRepeatedLocks()
+    {
+        var sim = Seeded();
+        var owner = sim.CreateOpenConnection();
+        using var bound = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        _ = Bind(owner, bound);
+        _ = owner.CreateCommand("insert t values (5, 50); update t set v = 31 where id = 3").ExecuteNonQuery();
+        owner.Dispose();
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand("set lock_timeout 0; update t set v = 0 where id = 5").ExecuteNonQuery()).Number);
         _ = bound.CreateCommand("rollback").ExecuteNonQuery();
         AreEqual(2, Scalar(bound, "select count(*) from t"));
         AreEqual(0, Scalar(bound, "select count(*) from sys.dm_tran_locks where resource_type <> 'DATABASE'"));

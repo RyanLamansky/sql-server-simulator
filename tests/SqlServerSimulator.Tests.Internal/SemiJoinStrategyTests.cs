@@ -93,6 +93,17 @@ public sealed class SemiJoinStrategyTests
     }
 
     [TestMethod]
+    public void CorrelatedExists_ProjectingSeveralColumns_BuildsKeysAlone()
+    {
+        using var connection = OpenWithRows(400);
+        var (trace, executions, rows) = Run(connection,
+            "select id from outer_rows o where exists (select i.v, i.tag from inner_rows i where i.k = o.k and i.tag < 20)");
+        Contains("SemiJoin:Build(keys=1,groups=20)", trace);
+        AreEqual(SemiJoinProbe.PerRowEvaluationsBeforeBuild, executions);
+        AreEqual(200, rows);
+    }
+
+    [TestMethod]
     public void CorrelatedNotExists_OuterPastThreshold_Builds()
     {
         using var connection = OpenWithRows(400);

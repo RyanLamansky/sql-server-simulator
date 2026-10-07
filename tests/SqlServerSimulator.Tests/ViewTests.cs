@@ -748,4 +748,13 @@ public sealed class ViewTests
         simulation.ExecuteBatches("create view dbo.v as select case when tag = 'x' then label end c from dbo.t1");
         Assert.AreEqual("label,tag", simulation.ExecuteScalar("select string_agg(column_name, ',') within group (order by column_name) from information_schema.view_column_usage where view_name = 'v'"));
     }
+
+    [TestMethod]
+    public void MoreThan1024Columns_Raises4505NamingTheFirstPastTheLimit()
+    {
+        var columns = string.Join(", ", Enumerable.Range(1, 1025).Select(i => $"1 c{i}"));
+        var ex = new Simulation().AssertSqlError($"create view vbig as select {columns}", 4505);
+        Assert.AreEqual("CREATE VIEW failed because column 'c1025' in view 'vbig' exceeds the maximum of 1024 columns.", ex.Errors[0].Message);
+        Assert.AreEqual("vbig", ex.Procedure);
+    }
 }

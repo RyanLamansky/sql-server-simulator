@@ -494,15 +494,6 @@ partial class SimulatedSqlException
         new($"Arithmetic overflow error for data type {targetTypeName}, value = {formattedValue}.", 220, 16, state);
 
     /// <summary>
-    /// Mimics SQL Server error 237: a <c>money</c> source overflowed an
-    /// <c>int</c> conversion target. The money-to-integer overflow surface is
-    /// splintered per target — see <see cref="TryConversionOverflow"/> —
-    /// and this is the int cell. Same text as Msg 234's string-target
-    /// variant, different error number (probe-confirmed 2026-07-31).
-    /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() => MoneyPastIntegerRange("int", 1);
-
-    /// <summary>
     /// Msg 237 for any integer target, whose state names it: 1 <c>int</c>, 2
     /// <c>smallint</c>, 3 <c>tinyint</c> — what a <c>money</c> value past
     /// <c>int</c>'s range reports whichever of them it meets (probed
@@ -536,8 +527,9 @@ partial class SimulatedSqlException
     /// <c>bigint</c> target stays Msg 8115.</item>
     /// <item><c>money</c> source → Msg 232 state 11 for tinyint, Msg 220
     /// state 7 for smallint with the value in money's ×10000 tick
-    /// representation, Msg 237 for int; <c>smallmoney</c> takes none of
-    /// these and stays Msg 8115.</item>
+    /// representation; past <c>int</c>'s range the conversion itself raises
+    /// <see cref="MoneyPastIntegerRange"/> first. <c>smallmoney</c> takes
+    /// none of these and stays Msg 8115.</item>
     /// </list>
     /// </summary>
     internal static SimulatedSqlException? TryConversionOverflow(SqlValue source, SqlType targetType)
@@ -567,8 +559,6 @@ partial class SimulatedSqlException
                 return ArithmeticOverflowForType("tinyint", source.AsMoney.ToString("F6", CultureInfo.InvariantCulture), state: 11);
             if (targetType is SmallIntSqlType)
                 return ArithmeticOverflowForDataType("smallint", (source.AsMoney * 10000m).ToString("F0", CultureInfo.InvariantCulture), state: 7);
-            if (targetType == SqlType.Int32)
-                return InsufficientResultSpaceForMoneyToInt();
         }
 
         return null;
@@ -919,15 +909,6 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DateValueBelowMinimum(string typeName) =>
         new($"An invalid {typeName} value was encountered: The date value is less than the minimum date value allowed for the data type.", 9837, 16, 3);
-
-    /// <summary>
-    /// A hierarchyid method refused its input for a reason real never reports,
-    /// because its own binder refuses the shape first — an argument count or a
-    /// receiver type no parse can produce. Kept as the 6522 real's library
-    /// would raise were the call to reach it.
-    /// </summary>
-    internal static SimulatedSqlException InvalidHierarchyIdInput(string detail) =>
-        HierarchyIdFailure($"24001: SqlHierarchyId operation failed because input '{detail}' was not valid.");
 
     /// <summary>
     /// Msg 6522 as real's hierarchyid library words each failure, at state 2

@@ -232,6 +232,7 @@ internal static class ClrTypeMarshaller
         var natural = value switch
         {
             string text => SqlValue.FromNVarchar(text),
+            char[] chars => SqlValue.FromNVarchar(new string(chars)),
             char character => SqlValue.FromNVarchar(character.ToString()),
             int number => SqlValue.FromInt32(number),
             long number => SqlValue.FromInt64(number),
@@ -334,6 +335,7 @@ internal static class ClrTypeMarshaller
             value = value switch
             {
                 string text when text.Length > size => text[..size],
+                char[] chars when chars.Length > size => chars[..size],
                 SqlString { IsNull: false } text when text.Value.Length > size => new SqlString(text.Value[..size]),
                 byte[] bytes when bytes.Length > size => bytes[..size],
                 SqlBinary { IsNull: false } bytes when bytes.Length > size => new SqlBinary(bytes.Value[..size]),

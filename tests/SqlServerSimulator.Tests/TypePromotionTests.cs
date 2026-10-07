@@ -400,4 +400,29 @@ public class TypePromotionTests
         AreEqual(1.12345679m, simulation.ExecuteScalar("select coalesce(cast(1.123456789 as decimal(38,18)), cast(2 as decimal(30,0)))"));
         AreEqual("decimal(38,8)", simulation.ExecuteScalar("select system_type_name from sys.dm_exec_describe_first_result_set(N'select cast(1 as decimal(38,18)) u union all select cast(2 as decimal(30,0))', null, 0)"));
     }
+
+    [TestMethod]
+    [Description("A legacy LOB arm outranks a bounded string or binary one, whichever side it is on (probed 2026-10-07 against SQL Server 2025).")]
+    public void LegacyLobArm_IsTheUnifiedType()
+        => AreEqual("a:text,b:ntext,c2:ntext,d:image,e:text", new Simulation().ExecuteScalar("""
+            create table t (t text, c char(3), nt ntext, nc nchar(4), i image, vb varbinary(10), sn sysname);
+            select case when c = 'x' then t else c end as a, case when c = 'x' then nt else nc end as b,
+                case when c = 'x' then nt else sn end as c2, case when c = 'x' then i else vb end as d,
+                case when c = 'x' then c else t end as e into r from t;
+            select string_agg(concat(name, ':', type_name(system_type_id)), ',') within group (order by column_id) from sys.columns where object_id = object_id('r')
+            """));
+
+    [TestMethod]
+    public void TwoGeographyArms_UnifyAsGeography()
+        => AreEqual("POINT (2 1)", new Simulation().ExecuteScalar("select coalesce(geography::Point(1, 2, 4326), geography::Point(3, 4, 4326)).STAsText()"));
+
+    [TestMethod]
+    [DataRow("select coalesce(cast(1 as smallmoney), cast('12:00' as time))", "Operand type clash: smallmoney is incompatible with time")]
+    [DataRow("select coalesce(cast('a' as char(2)), cast('12:00' as time), 1)", "Operand type clash: int is incompatible with time")]
+    [DataRow("select coalesce(cast(N'a' as nchar(2)), cast(0x01 as image))", "Operand type clash: nchar is incompatible with image")]
+    [DataRow("select coalesce(cast(0x01 as image), cast('12:00' as time))", "Operand type clash: image is incompatible with time")]
+    [DataRow("select coalesce(geometry::Point(1, 2, 0), geography::Point(3, 4, 4326))", "Operand type clash: geography is incompatible with geometry")]
+    [DataRow("select coalesce(geography::Point(1, 2, 4326), 1, 2)", "Operand type clash: int is incompatible with geography")]
+    public void UnrelatedArms_NameTheFirstThatCantConvertToTheHighestRanked(string sql, string message)
+        => new Simulation().AssertSqlError(sql, 206, message);
 }

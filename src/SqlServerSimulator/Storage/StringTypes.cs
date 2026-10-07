@@ -171,6 +171,8 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, Type
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(Utf16LeDecode(source));
 
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
+
     public override string ToString() => "sysname";
 
     /// <summary>
@@ -283,6 +285,8 @@ internal sealed class TextSqlType() : SqlType(SqlTypeCategory.String, TypePairCl
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromText(CharSqlType.Cp1252Encoder.GetString(source));
 
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw).CoerceTo(this);
+
     public override string ToString() => "text";
 }
 
@@ -310,6 +314,8 @@ internal sealed class NTextSqlType() : SqlType(SqlTypeCategory.String, TypePairC
     public override int Encode(SqlValue value, Span<byte> destination) => SystemNameSqlType.Utf16LeEncode(value.AsString, destination);
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNText(SystemNameSqlType.Utf16LeDecode(source));
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
 
     public override string ToString() => "ntext";
 }
@@ -339,6 +345,8 @@ internal sealed class ImageSqlType() : SqlType(SqlTypeCategory.Other, TypePairCl
     }
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromImage(source.ToArray());
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarbinary((byte[])raw).CoerceTo(this);
 
     public override string ToString() => "image";
 }
@@ -419,6 +427,8 @@ internal sealed class CharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromChar(this, this.collation.StorageEncoding.GetString(source));
 
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarchar((string)raw).CoerceTo(this);
+
     public override string ToString() => $"char({this.length})";
 
     public static CharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
@@ -486,6 +496,8 @@ internal sealed class NCharSqlType : SqlType
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromNChar(this, SystemNameSqlType.Utf16LeDecode(source));
 
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
+
     public override string ToString() => $"nchar({this.length})";
 
     public static NCharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
@@ -546,6 +558,8 @@ internal sealed class BinarySqlType(short length, bool trimsTrailingZeros = fals
     }
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromBinary(this, source.ToArray());
+
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarbinary((byte[])raw).CoerceTo(this);
 
     public override string ToString() => $"binary({this.length})";
 

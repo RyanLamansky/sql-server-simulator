@@ -187,4 +187,32 @@ public sealed class RecordsAffectedWireTests
         await reader.CloseAsync();
         AreEqual(2, reader.RecordsAffected);
     }
+
+    /// <summary>
+    /// <c>INSERT … EXEC</c> over the wire: the procedure's messages arrive in
+    /// order and its statements' DONEs carry no count, so only the insert's
+    /// rows are affected (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task InsertExec_CountsTheInsertAndForwardsTheBodysMessages()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table dbo.t (a int)");
+        Wire.ExecInProc(simulation, "create procedure dbo.p as begin print 'hi'; select 1 union all select 2; raiserror('warn', 10, 1); select 3 end");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SqlError>().Select(error => error.Message));
+        await using (var command = new SqlCommand("insert dbo.t exec dbo.p", connection))
+            AreEqual(3, await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
+        await using (var command = new SqlCommand("insert dbo.t exec dbo.p", connection))
+        await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            while (await reader.NextResultAsync(TestContext.CancellationToken))
+            {
+            }
+            AreEqual(3, reader.RecordsAffected);
+        }
+        CollectionAssert.AreEqual(new[] { "hi", "warn", "hi", "warn" }, messages);
+    }
 }

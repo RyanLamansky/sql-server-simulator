@@ -552,5 +552,22 @@ public sealed class ExecuteAsTests
             select concat_ws('|', is_srvrolemember('public'), is_srvrolemember('sysadmin'), has_dbaccess(db_name()), has_dbaccess('master'), has_dbaccess('model'))
             """));
     }
-}
 
+    [TestMethod]
+    [Description("An EXECUTE AS USER frame reaches another database only as guest and is the user again once the session returns; REVERT elsewhere is Msg 15199 (probed 2026-10-07 against SQL Server 2025).")]
+    public void ExecuteAsUser_UseElsewhereThenBackHome()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("create user zu without login; execute as user = 'zu'; use master").ExecuteNonQuery();
+        AreEqual("guest", connection.CreateCommand("select user_name()").ExecuteScalar());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("revert").ExecuteNonQuery());
+        AreEqual(15199, ex.Number);
+        AreEqual("The current security context cannot be reverted. Please switch to the original database where 'Execute As' was called and try it again.", ex.Errors[0].Message);
+        _ = connection.CreateCommand("use simulated").ExecuteNonQuery();
+        AreEqual("zu", connection.CreateCommand("select user_name()").ExecuteScalar());
+        AreEqual(262, Throws<SimulatedSqlException>(() => connection.CreateCommand("create table t (a int)").ExecuteNonQuery()).Number);
+        _ = connection.CreateCommand("revert").ExecuteNonQuery();
+        AreEqual("dbo", connection.CreateCommand("select user_name()").ExecuteScalar());
+    }
+}

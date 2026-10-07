@@ -50,12 +50,12 @@ internal sealed class TrigFunction : Expression
 
     public TrigFunction(ParserContext context, TrigKind kind)
     {
+        // The arity table refuses a call with no argument or with more than
+        // one (Msg 174) before this constructor runs.
         this.kind = kind;
-        if (context.Token is Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments(LowercaseName(kind), 1);
         this.source = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ')' })
-            throw SimulatedSqlException.FunctionRequiresNArguments(LowercaseName(kind), 1);
+            throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     public override SqlValue Run(RuntimeContext runtime)

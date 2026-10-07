@@ -989,7 +989,7 @@ internal sealed partial class Selection
     /// it is Msg 156 at the operator as written. <paramref name="setOperator"/>
     /// is the operator that follows the branch, null for the last branch.
     /// </summary>
-    private static void SettleBranchOrdering(ParserContext context, QueryScope scope, Selection branch, ReservedKeyword? setOperator)
+    internal static void SettleBranchOrdering(ParserContext context, QueryScope scope, Selection branch, ReservedKeyword? setOperator)
     {
         if (!branch.HasOrderBy || branch.OrdersOwnRows)
             return;

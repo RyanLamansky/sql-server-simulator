@@ -208,9 +208,10 @@ partial class Simulation
 
     /// <summary>
     /// <c>sp_lock [@spid1 [, @spid2]]</c> lists the locks held or awaited by every session, or by
-    /// the one or two named, as <c>sys.dm_tran_locks</c> reports them plus the shared lock each
-    /// session holds on its current database. Real also lists the locks the procedure's own
-    /// metadata reads take, which nothing here does.
+    /// the one or two named, as <c>sys.dm_tran_locks</c> reports them, a database's lock as
+    /// <c>DB</c> and every resource padded to 32 characters (probed 2026-10-07 against SQL
+    /// Server 2025: a session in <c>master</c> lists no <c>DB</c> row). Real also lists the locks
+    /// the procedure's own metadata reads take, which nothing here does.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpLock(BatchContext batch, string calledAs)
     {
@@ -222,19 +223,11 @@ partial class Simulation
         var simulation = batch.Connection.Simulation;
         var rows = new List<(int Spid, int DbId, int ObjId, SqlValue[] Row)>();
         var blankResource = SqlValue.FromNVarchar(new string(' ', 32));
-        foreach (var connection in simulation.SnapshotConnections())
-        {
-            if (connection.CurrentDatabase is not { } current)
-                continue;
-            rows.Add((connection.Spid, SmallDatabaseId(simulation, current), 0, [
-                SqlValue.FromInt16((short)connection.Spid), SqlValue.FromInt16(SmallDatabaseId(simulation, current)), SqlValue.FromInt32(0), SqlValue.FromInt16(0),
-                SqlValue.FromNVarchar("DB"), blankResource, SqlValue.FromNVarchar("S"), SqlValue.FromNVarchar("GRANT"),
-            ]));
-        }
         foreach (var row in LockDmvs.EnumerateDmTranLocks(batch, batch.CurrentDatabase))
         {
             var type = row[0].AsString switch
             {
+                "DATABASE" => "DB",
                 "OBJECT" => "TAB",
                 "APPLICATION" => "APP",
                 var other => other,
@@ -243,7 +236,7 @@ partial class Simulation
             var entity = row[3].IsNull ? 0 : (int)row[3].AsInt64;
             rows.Add((spid, row[1].AsInt32, entity, [
                 SqlValue.FromInt16((short)spid), SqlValue.FromInt16((short)row[1].AsInt32), SqlValue.FromInt32(entity), SqlValue.FromInt16(0),
-                SqlValue.FromNVarchar(type), type is "TAB" ? blankResource : SqlValue.FromNVarchar(row[2].AsString), SqlValue.FromNVarchar(row[4].AsString), SqlValue.FromNVarchar(row[5].AsString),
+                SqlValue.FromNVarchar(type), type is "TAB" or "DB" ? blankResource : SqlValue.FromNVarchar(row[2].AsString.TrimEnd().PadRight(32)), SqlValue.FromNVarchar(row[4].AsString), SqlValue.FromNVarchar(row[5].AsString),
             ]));
         }
         var first = values[0].IsNull ? (int?)null : values[0].AsInt32;

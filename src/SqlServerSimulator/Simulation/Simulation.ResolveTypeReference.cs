@@ -75,12 +75,27 @@ partial class Simulation
             // A variable or parameter (named with its @) and a function's
             // return type (named empty) report Msg 2715 in its variable form.
             var namesVariable = columnName is { } written && (written.Length == 0 || written[0] == '@');
+
             // A built-in type's only qualifier is sys; real names any other
             // missing qualified type as written (probed 2026-09-24 against
             // SQL Server 2025).
+            // A scale past the precision is refused as the spec parses, ahead
+            // of the name's lookup, as SqlType.GetByName refuses it for a
+            // 1-part name.
+            void RefuseScalePastPrecision()
+            {
+                if (declaredScale is { } scale && declaredMaxLength is { } precision && scale > precision)
+                {
+                    throw site == TypeSpecSite.Column && columnName is not null
+                        ? SimulatedSqlException.ColumnScaleOutOfRange(scale, columnName, precision)
+                        : SimulatedSqlException.ScaleExceedsPrecision();
+                }
+            }
+
             if (qualifiedTypeName.Count > 1 && columnName is not null
                 && !string.Equals(qualifiedTypeName.ImmediateQualifier, "sys", StringComparison.OrdinalIgnoreCase))
             {
+                RefuseScalePastPrecision();
                 throw namesVariable
                     ? SimulatedSqlException.CannotFindDataType(index, qualifiedTypeName.ToString(), columnName)
                     : SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);

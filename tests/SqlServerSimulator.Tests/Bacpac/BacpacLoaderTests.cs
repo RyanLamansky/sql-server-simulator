@@ -2588,4 +2588,30 @@ public class BacpacLoaderTests
         sim.ImportBacpac(bacpac, out _);
         AreEqual("1 60", sim.ExecuteScalar("select concat(is_broker_enabled, ' ', target_recovery_time_in_seconds) from sys.databases where name = db_name()"));
     }
+
+    [TestMethod]
+    public void UnrecognizedCollations_LandOnWarnings()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("Collation", "Bogus_CI_AS")
+            .Table("dbo", "t", t => t.Column("Id", "int").Column("Name", "nvarchar(20)", collation: "Other_Bogus_CS_AS"))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        HasCount(1, diag.Warnings.Where(w => w.Contains("Database declares Collation 'Bogus_CI_AS'", StringComparison.Ordinal)));
+        HasCount(1, diag.Warnings.Where(w => w.Contains("declares COLLATE 'Other_Bogus_CS_AS'", StringComparison.Ordinal)));
+        AreEqual("SQL_Latin1_General_CP1_CI_AS", sim.ExecuteScalar("SELECT collation_name FROM sys.columns WHERE object_id = OBJECT_ID('dbo.t') AND name = 'Name'"));
+    }
+
+    [TestMethod]
+    [Description("A default declared inline keeps the server-generated name DacFx carries on its annotation.")]
+    public void InlineDefault_KeepsItsGeneratedName()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "t", t => t.Column("Id", "int").Column("Qty", "int", nullable: true).Default("DF__t__Qty__1A2B3C4D", "Qty", "((0))", inline: true))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _);
+        AreEqual("DF__t__Qty__1A2B3C4D", sim.ExecuteScalar("SELECT name FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('dbo.t')"));
+    }
 }

@@ -94,7 +94,7 @@ partial class SimulatedSqlException
             ? new($"Column '{name}' has no rule.", 15238, 16, 1)
             : new($"Column '{name}' has no default.", 15236, 16, 1);
 
-    /// <summary>Mimics SQL Server's Msg 15237 / 15239 — unbinding an alias type with nothing of that kind bound.</summary>
+    /// <summary>Mimics SQL Server's Msg 15237 / 15239 — unbinding an alias type with nothing of that kind bound, the type named without its schema (probed 2026-10-07 against SQL Server 2025).</summary>
     internal static SimulatedSqlException TypeHasNothingBound(string name, bool isRule) =>
         isRule
             ? new($"User data type '{name}' has no rule.", 15239, 16, 1)

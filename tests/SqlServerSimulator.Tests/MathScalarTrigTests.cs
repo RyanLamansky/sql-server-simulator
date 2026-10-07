@@ -69,6 +69,10 @@ public sealed class MathScalarTrigTests
         => AssertSqlError("select sin(1, 2)", 174, "The sin function requires 1 argument(s).");
 
     [TestMethod]
+    public void Square_UnseparatedArguments_RaisesMsg102()
+        => AssertSqlError("select square(1 2)", 102, "Incorrect syntax near '2'.");
+
+    [TestMethod]
     public void Atn2_OneArg_RaisesMsg174()
         => AssertSqlError("select atn2(1)", 174, "The atn2 function requires 2 argument(s).");
 

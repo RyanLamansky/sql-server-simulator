@@ -217,4 +217,10 @@ public class OpenRowsetTests
         _ = sim.AssertSqlError("select * from opendatasource('MSOLEDBSQL', 'Data Source=x').master.sys.objects", 7302);
         _ = sim.AssertSqlError("insert opendatasource('MSOLEDBSQL', 'Data Source=x').db.dbo.t values (1)", 7302);
     }
+
+    [TestMethod]
+    public void FormatFileWithDecimalHostType_Raises4838()
+        => BulkInsertTests.WithFiles(("p.txt", "1\n"), ("d.fmt", "14.0\n1\n1 SQLDECIMAL 0 19 \"\" 1 d \"\"\n"))
+            .AssertSqlError("select * from openrowset(bulk 'p.txt', formatfile = 'd.fmt') x", 4838,
+                "The bulk data source does not support the SQLNUMERIC or SQLDECIMAL data types.");
 }

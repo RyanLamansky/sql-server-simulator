@@ -404,6 +404,96 @@ public sealed class CursorRpcTests
         AreEqual(0, unprepRet.Value);
     }
 
+    /// <summary>
+    /// <c>sp_cursorprepare</c> takes the handle, the parameter definition, the
+    /// statement and its options, echoing scroll and concurrency options sent
+    /// for output; <c>sp_cursorexecute</c> then opens the prepared statement
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task Prepare_ThenExecute()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+        int prepHandle;
+        await using (var prepare = Proc("sp_cursorprepare", connection))
+        {
+            var prep = Out("@prep");
+            var scroll = InOut("@scrollopt", 0x8);
+            var cc = InOut("@ccopt", 0x1);
+            _ = prepare.Parameters.Add(prep);
+            _ = prepare.Parameters.Add(new SqlParameter("@params", SqlDbType.NVarChar, 4000) { Value = "@p int" });
+            _ = prepare.Parameters.Add(new SqlParameter("@stmt", SqlDbType.NVarChar, 4000) { Value = "select @p as v union all select @p + 1" });
+            _ = prepare.Parameters.Add(new SqlParameter("@options", SqlDbType.Int) { Value = 1 });
+            _ = prepare.Parameters.Add(scroll);
+            _ = prepare.Parameters.Add(cc);
+            _ = await prepare.ExecuteNonQueryAsync(Token);
+            prepHandle = (int)prep.Value;
+            AreEqual(0x8, scroll.Value);
+            AreEqual(0x1, cc.Value);
+        }
+
+        await using var exec = Proc("sp_cursorexecute", connection);
+        var cursor = Out("@cursor");
+        var rowcount = Out("@rowcount");
+        _ = exec.Parameters.Add(new SqlParameter("@prep", SqlDbType.Int) { Value = prepHandle });
+        _ = exec.Parameters.Add(cursor);
+        _ = exec.Parameters.Add(InOut("@scrollopt", 0x8));
+        _ = exec.Parameters.Add(InOut("@ccopt", 0x1));
+        _ = exec.Parameters.Add(rowcount);
+        _ = exec.Parameters.Add(new SqlParameter("@p", SqlDbType.Int) { Value = 5 });
+        _ = await exec.ExecuteNonQueryAsync(Token);
+        AreEqual(2, rowcount.Value);
+
+        // INFO reports the position and the row count through its ByRef pair.
+        await using (var info = Proc("sp_cursorfetch", connection))
+        {
+            var rownum = InOut("@rownum", 0);
+            var nrows = InOut("@nrows", 1);
+            _ = info.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = cursor.Value });
+            _ = info.Parameters.Add(new SqlParameter("@fetchtype", SqlDbType.Int) { Value = 0x100 });
+            _ = info.Parameters.Add(rownum);
+            _ = info.Parameters.Add(nrows);
+            _ = await info.ExecuteNonQueryAsync(Token);
+            AreEqual(0, rownum.Value);
+            AreEqual(2, nrows.Value);
+        }
+
+        var rows = await FetchAsync(connection, (int)cursor.Value, 0x2, 0, 2, Token);
+        AreEqual("5,6", string.Join(",", rows.Select(row => row[0])));
+    }
+
+    /// <summary>
+    /// Only an INFO fetch reports through <c>rownum</c> and <c>nrows</c>:
+    /// another fetch sending either for output is Msg 16902, rownum's state 5
+    /// ahead of nrows' 6, with return status 1.
+    /// </summary>
+    [TestMethod]
+    [DataRow(true, false, 5, "rownum")]
+    [DataRow(false, true, 6, "nrows")]
+    [DataRow(true, true, 5, "rownum")]
+    public async Task Fetch_OutputRownumOrNrows_Msg16902(bool rownumOutput, bool nrowsOutput, int state, string named)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+        var (handle, _, _, _) = await OpenAsync(connection, "SELECT id FROM dbo.curp", 0x1, 0x1, Token);
+        await using var fetch = Proc("sp_cursorfetch", connection);
+        var ret = new SqlParameter("@RETURN_VALUE", SqlDbType.Int) { Direction = ParameterDirection.ReturnValue };
+        _ = fetch.Parameters.Add(ret);
+        _ = fetch.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
+        _ = fetch.Parameters.Add(new SqlParameter("@fetchtype", SqlDbType.Int) { Value = 0x2 });
+        _ = fetch.Parameters.Add(rownumOutput ? InOut("@rownum", 1) : new SqlParameter("@rownum", SqlDbType.Int) { Value = 1 });
+        _ = fetch.Parameters.Add(nrowsOutput ? InOut("@nrows", 1) : new SqlParameter("@nrows", SqlDbType.Int) { Value = 1 });
+        var ex = await ThrowsExactlyAsync<SqlException>(async () => _ = await fetch.ExecuteNonQueryAsync(Token));
+        AreEqual(16902, ex.Number);
+        AreEqual(state, ex.State);
+        AreEqual("sp_cursorfetch", ex.Procedure);
+        AreEqual($"sp_cursorfetch: The value of the parameter '{named}' is invalid.", ex.Message);
+        AreEqual(1, ret.Value);
+    }
+
     [TestMethod]
     public async Task Close_DoubleClose_And_InvalidHandle_Msg16909()
     {
@@ -420,6 +510,7 @@ public sealed class CursorRpcTests
         _ = doubleClose.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
         var ex = await ThrowsExactlyAsync<SqlException>(async () => _ = await doubleClose.ExecuteNonQueryAsync(Token));
         AreEqual(16909, ex.Number);
+        AreEqual("sp_cursorclose", ex.Procedure);
         AreEqual(1, ret.Value);
     }
 

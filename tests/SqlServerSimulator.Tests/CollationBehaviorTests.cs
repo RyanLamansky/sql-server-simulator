@@ -402,4 +402,10 @@ public sealed class CollationBehaviorTests
     public void Latin1GeneralTables_CompareAsRealDoes(string left, string right, string collation, string expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar(
             $"select case when {left} collate {collation} < {right} then '<' when {left} collate {collation} = {right} then '=' else '>' end"));
+
+    [TestMethod]
+    [Description("Equal values under a binary collation tie in a sort, uppercase before lowercase by code point (probed 2026-10-07 against SQL Server 2025).")]
+    public void BinaryCollation_SortTies()
+        => AreEqual("B,a,a,b", new Simulation().ExecuteScalar(
+            "select string_agg(v, ',') within group (order by v) from (values (cast('a' as varchar(5)) collate Latin1_General_BIN), ('a'), ('B'), ('b')) x(v)"));
 }

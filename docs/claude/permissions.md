@@ -26,7 +26,7 @@ Logins are enforced as connection credentials at both front doors (TDS endpoint 
 **`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + a `Permission` enum + a `PermissionState` enum (Grant / GrantWithGrantOption / Deny / Revoke, projecting the `G`/`W`/`D`/`R` state codes).
 Canonical rows draw their `permission_name` and 4-char `type` code from `PermissionCatalog` at projection; off-catalog names (`Permission.Other`) carry their raw text on `PermissionName` and are never matched by a permission check.
 `PermissionChecker` compares the enum throughout (closure walk, DENY precedence, covering/scope walk, read/write/DDL fixed-role virtual grants) — no permission-name string comparison remains on any check path; `HAS_PERMS_BY_NAME` / GRANT parsing resolve the incoming name to the enum once at the boundary via `Permission.Resolve` (a zero-alloc span switch, a `PermissionCatalog` static extension member).
-The catalog surfaces per-enum lookups as extension members (`permission.CanonicalName` / `.CanonicalTypeCode` / `.Category` / `.Covering(class)`, `state.Code` / `.Description`); row-shaped concerns live on `DatabasePermission` itself (`IsFor` securable+permission identity, `DisplayName` / `DisplayTypeCode` projection).
+The catalog surfaces per-enum lookups as extension members (`permission.CanonicalName` / `.CanonicalTypeCode` / `.Covering(class)`, `state.Code` / `.Description`); row-shaped concerns live on `DatabasePermission` itself (`IsFor` securable+permission identity, `DisplayName` / `DisplayTypeCode` projection).
 
 Both live on `Database`:
 - `Database.Principals` — `ConcurrentDictionary<string, DatabasePrincipal>` keyed by name
@@ -373,7 +373,7 @@ So a schema `SELECT` or `db_datareader` reveals the schema's tables and views bu
 Visibility is **object-grain**: one permission on the object reveals *all* its column / index / parameter / constraint rows, and a trigger's visibility follows its parent table / view.
 
 **Definitions** are a second, narrower gate over a visible row: `sys.sql_modules.definition`, `INFORMATION_SCHEMA.ROUTINES` / `VIEWS`, `OBJECT_DEFINITION`, `sp_helptext` (Msg 15197 rather than the text) and `sys.dm_sql_referenced_entities` need the owner, or `VIEW DEFINITION` / `ALTER` / `CONTROL` / `TAKE OWNERSHIP` on the object, so `SELECT` or `EXECUTE` alone shows the row with a NULL definition.
-`sys.sql_expression_dependencies` keeps only the rows whose referencing object's definition the principal may see.
+`sys.sql_expression_dependencies` shows its rows only to a principal holding `VIEW DEFINITION` on the database itself — one on the referencing module, or owning it, shows nothing (probed 2026-10-07 against SQL Server 2025).
 
 **Principals, permissions and types** are filtered too, each by its own rule (`PermissionChecker.VisiblePrincipals` / `VisibleGrantees` / `CanViewTypeMetadata`): `sys.database_principals` shows the catalog principals and fixed roles, the principal's own closure, what it owns and what it holds a permission on, plus every user / role / application role when it holds that kind's `ALTER ANY`; `sys.database_role_members` follows the principal visibility, `sys.database_permissions` shows only the closure's own rows short of the same `ALTER ANY` widening, and `sys.types` / `sys.table_types` show a user-defined type to its owner or a holder of any permission on it.
 `database VIEW DEFINITION` lifts all three.

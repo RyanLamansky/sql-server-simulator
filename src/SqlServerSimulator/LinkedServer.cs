@@ -91,13 +91,6 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     public readonly DateTime CreateDate = createDate;
 
     /// <summary>
-    /// A <c>SQL Server</c> product: real enables remote login and RPC out for
-    /// it, where another product gets neither (probed 2026-09-26 against SQL
-    /// Server 2025).
-    /// </summary>
-    public bool IsSqlServerProduct => string.Equals(this.SrvProduct, "SQL Server", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
     /// <c>sp_serveroption … 'rpc out'</c>: whether <c>EXEC … AT</c> and a
     /// four-part procedure call may reach the server (Msg 7411 otherwise).
     /// Seeded on for a <c>SQL Server</c> product only.

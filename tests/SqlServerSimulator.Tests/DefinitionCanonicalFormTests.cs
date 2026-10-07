@@ -132,8 +132,20 @@ public sealed class DefinitionCanonicalFormTests
             """));
 
     [TestMethod]
-    public void AnUnrenderedShape_KeepsItsSourceText()
-        => AreEqual("({fn ucase(b)})", ComputedDefinition("{fn ucase(b)}"));
+    [DataRow("{fn ucase(b)}", "({fn ucase(b)})")]
+    [DataRow("({fn ucase(b)})", "({fn ucase(b)})")]
+    [DataRow("({fn ucase(b)}) + (')')", "(({fn ucase(b)}) + (')'))")]
+    [DataRow("({fn ucase('[(')})", "({fn ucase('[(')})")]
+    public void AnUnrenderedShape_KeepsItsSourceText_InOneParenPair(string expression, string expected)
+        => AreEqual(expected, ComputedDefinition(expression));
+
+    [TestMethod]
+    [Description("A type's static method keeps its name as written after its bracketed type (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("geography::Point(1, 2, 4326)", "([geography]::Point((1),(2),(4326)))")]
+    [DataRow("geometry::STGeomFromText('POINT (1 2)', 0)", "([geometry]::STGeomFromText('POINT (1 2)',(0)))")]
+    [DataRow("hierarchyid::Parse('/1/')", "([hierarchyid]::Parse('/1/'))")]
+    public void StaticTypeMethod(string expression, string expected)
+        => AreEqual(expected, ComputedDefinition(expression));
 
     private static object? ComputedDefinition(string expression)
     {

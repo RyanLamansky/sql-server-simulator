@@ -3005,8 +3005,17 @@ partial class SimulatedSqlException
     /// is legal). Probe-confirmed verbatim, including the option name echoed as
     /// the statement spelled it and the generic "INDEX statement" framing.
     /// </summary>
-    internal static SimulatedSqlException InvalidUsageOfIndexOption(string optionName, string statement = "INDEX") =>
-        new($"Invalid usage of the option {optionName} in the {statement} statement.", 153, 15, 1);
+    internal static SimulatedSqlException InvalidUsageOfIndexOption(string optionName, string statement = "INDEX", byte state = 1) =>
+        new($"Invalid usage of the option {optionName} in the {statement} statement.", 153, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 6333: <c>CREATE [PRIMARY] XML INDEX … WITH
+    /// (DROP_EXISTING = ON)</c> naming no XML index of the table, state 201
+    /// for the primary form and 203 for a secondary one (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlIndexNotFoundToDrop(bool primary, string indexName, string writtenTableName) =>
+        new($"Could not find {(primary ? "PRIMARY XML" : "XML")} index named '{indexName}' on table '{writtenTableName}'", 6333, 16, primary ? (byte)201 : (byte)203);
 
     /// <summary>
     /// Mimics SQL Server error 1914 state 2: <c>CREATE INDEX</c> naming a
@@ -3657,14 +3666,6 @@ partial class SimulatedSqlException
         new("Cannot disable access to the guest user in master or tempdb.", 15182, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 15151: an unknown principal name was referenced
-    /// (GRANT/REVOKE/DENY ... TO &lt;unknown&gt;, ALTER ROLE ... ADD MEMBER &lt;unknown&gt;,
-    /// CREATE USER ... FROM LOGIN &lt;unknown&gt;, etc.). Probe-confirmed wording.
-    /// </summary>
-    internal static SimulatedSqlException CannotFindPrincipal(string name) =>
-        new($"Cannot find the user, login, role, or principal '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
-
-    /// <summary>
     /// Mimics SQL Server error 15023: <c>CREATE USER name</c> or <c>CREATE ROLE name</c>
     /// when a principal of that name already exists in the database. Probe-confirmed
     /// wording (the message is identical for the two CREATE cases; SQL Server uses
@@ -3685,8 +3686,7 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 15151 for <c>ALTER LOGIN</c> / <c>DROP LOGIN</c>
-    /// on a nonexistent login. Same number as <see cref="CannotFindPrincipal"/>
-    /// but a distinct verb-bearing login wording — probe-confirmed against SQL
+    /// on a nonexistent login, in its verb-bearing login wording — probe-confirmed against SQL
     /// Server 2025: <c>Cannot alter the login 'x', because it does not exist
     /// or you do not have permission.</c> (and the same with "drop").
     /// </summary>

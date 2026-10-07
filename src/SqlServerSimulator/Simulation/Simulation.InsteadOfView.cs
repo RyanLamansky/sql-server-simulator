@@ -80,10 +80,10 @@ partial class Simulation
             context, shapeTable, allowInserted: true, allowDeleted: true, new ViewOutputShape(columns, read: null, insertedRefused: static _ => true));
         RejectClientOutputOnTriggeredTarget(batch, view, TriggerActions.Update, targetName.ToString(), output is { HasTarget: false });
 
+        // A FROM was read ahead of the SET list's consumers; an UPDATE naming
+        // the view with one arrives through the joined-target path.
         if (from is not null)
             context.RestoreCheckpoint(from.After);
-        else if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-            throw SimulatedSqlException.InsteadOfViewInJoinedUpdate(view.Name);
 
         if (IsWhereCurrentOf(context))
         {

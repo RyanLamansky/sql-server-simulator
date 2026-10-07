@@ -97,6 +97,8 @@ public sealed class FormatCultureTests
     [DataRow("format(cast(1e15 as float), 'R')", "1E+15")]
     [DataRow("format(cast(16777217 as real), 'G')", "1.677722E+07")]
     [DataRow("format(cast(123456.789 as real), 'N3')", "123,456.800")]
+    [DataRow("format(1.5e30, 'N0')", "1,500,000,000,000,000,000,000,000,000,000")]
+    [DataRow("format(-7e36, 'N2')", "-7,000,000,000,000,000,000,000,000,000,000,000,000.00")]
     public void Floats_RoundAtFifteenDigitsFirst(string expression, string expected) => AssertFormats(expression, expected);
 
     [TestMethod]

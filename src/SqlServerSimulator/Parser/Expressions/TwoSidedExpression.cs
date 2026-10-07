@@ -423,31 +423,27 @@ internal abstract class TwoSidedExpression : Expression
                 right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
         }
 
+        // Both operands are numbers by now, so each switch's last arm is the
+        // one category left: integer.
         return left.Type.Category switch
         {
             SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
-            SqlTypeCategory.Decimal => right.Type.Category switch
-            {
-                SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
-                SqlTypeCategory.Decimal or SqlTypeCategory.Integer or SqlTypeCategory.Money => DecimalArithmetic(left, right, op),
-                _ => throw UnsupportedNumericPair(left, right, op),
-            },
+            SqlTypeCategory.Decimal => right.Type.Category == SqlTypeCategory.Approximate
+                ? ApproximateArithmetic(left, right, op)
+                : DecimalArithmetic(left, right, op),
             SqlTypeCategory.Money => right.Type.Category switch
             {
                 SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
                 SqlTypeCategory.Decimal => DecimalArithmetic(left, right, op),
-                SqlTypeCategory.Money or SqlTypeCategory.Integer => MoneyArithmetic(left, right, op),
-                _ => throw UnsupportedNumericPair(left, right, op),
+                _ => MoneyArithmetic(left, right, op),
             },
-            SqlTypeCategory.Integer => right.Type.Category switch
+            _ => right.Type.Category switch
             {
                 SqlTypeCategory.Approximate => ApproximateArithmetic(left, right, op),
                 SqlTypeCategory.Decimal => DecimalArithmetic(left, right, op),
                 SqlTypeCategory.Money => MoneyArithmetic(left, right, op),
-                SqlTypeCategory.Integer => PureIntegerArithmetic(left, right, op, compute),
-                _ => throw UnsupportedNumericPair(left, right, op),
+                _ => PureIntegerArithmetic(left, right, op, compute),
             },
-            _ => throw UnsupportedNumericPair(left, right, op),
         };
     }
 
@@ -527,9 +523,6 @@ internal abstract class TwoSidedExpression : Expression
         : type == SqlType.Int32 ? int.MinValue
         : type == SqlType.BigInt ? long.MinValue
         : null;
-
-    private static NotSupportedException UnsupportedNumericPair(SqlValue left, SqlValue right, char op) =>
-        new($"Operator '{op}' currently supports only integer operands; got {left.Type} and {right.Type}.");
 
     /// <summary>
     /// Decimal arithmetic. The result-type computation is delegated to

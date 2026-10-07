@@ -1047,6 +1047,17 @@ internal sealed class AggregateExpression : Expression
         return $"{name}({distinct}{operand}{separator})";
     }
 
+    /// <summary>
+    /// The operands the aggregate's value is computed from: a <c>WITHIN GROUP</c>
+    /// ordering only arranges them, so <c>STRING_AGG(k, ',') WITHIN GROUP
+    /// (ORDER BY masked)</c> reads unmasked (probed 2026-10-07 against SQL
+    /// Server 2025), while an approximate percentile's ordering is its operand
+    /// too and masks.
+    /// </summary>
+    internal override ExpressionNode?[]? MaskValueChildren => this.OrderBy is null
+        ? null
+        : [this.KeyExpression, this.Operand, this.Separator, .. this.ClrArguments?.Skip(1) ?? []];
+
     internal override void Describe(NodeShape shape)
     {
         _ = shape.Local(this.Kind).Local(this.Distinct).Local(this.JsonNulls).Local(this.ReturningJson).Child(this.KeyExpression).Child(this.Operand).Child(this.Separator).Local(this.OrderBy?.Count ?? -1);

@@ -312,5 +312,40 @@ public sealed class PermissionStatementTests
         _ = sim.ExecuteNonQuery("revoke select on dbo.t from u2; drop user u2");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_permissions where grantee_principal_id not in (select principal_id from sys.database_principals)"));
     }
-}
 
+    [TestMethod]
+    public void RenamingAFixedRole_Raises15150()
+        => new Simulation().AssertSqlError("alter role db_owner with name = zz", 15150, "Cannot alter the role 'db_owner'.");
+
+    [TestMethod]
+    public void ServerRoleMemberThatDoesNotExist_Raises15151()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError("alter server role dbcreator drop member nope", 15151, "Cannot drop the server principal 'nope', because it does not exist or you do not have permission.");
+        sim.AssertSqlError("alter server role dbcreator add member nope", 15151, "Cannot add the server principal 'nope', because it does not exist or you do not have permission.");
+    }
+
+    [TestMethod]
+    [Description("A principal securable's class word settles which permissions apply before the name resolves (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("grant select on user::nosuch to u1", 102, "Incorrect syntax near 'SELECT'.")]
+    [DataRow("grant select on role::nosuch to u1", 102, "Incorrect syntax near 'SELECT'.")]
+    [DataRow("grant control on user::nosuch to u1", 15151, "Cannot find the user 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("deny all on user::nosuch to r1", 15151, "Cannot find the user 'nosuch', because it does not exist or you do not have permission.")]
+    public void PrincipalSecurable_PermissionClassBeforeName(string sql, int number, string message)
+        => new Simulation().AssertSqlError("create role r1; create user u1 without login; " + sql, number, message);
+
+    [TestMethod]
+    [Description("ALL is Msg 4623 on a securable other than the database or an object, once the securable resolves (probed 2026-10-07 against SQL Server 2025).")]
+    [DataRow("grant all on schema::dbo to u1")]
+    [DataRow("grant all on type::dbo.tt to u1")]
+    [DataRow("grant all on role::r1 to u1")]
+    [DataRow("grant all privileges on user::u1 to r1")]
+    [DataRow("grant all, control on user::u1 to r1")]
+    [DataRow("revoke all on user::u1 from r1")]
+    public void AllPermission_OnOtherClasses_Raises4623(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create role r1; create user u1 without login; create type dbo.tt from int");
+        sim.AssertSqlError(sql, 4623, "The all permission has been deprecated and is not available for this class of entity");
+    }
+}

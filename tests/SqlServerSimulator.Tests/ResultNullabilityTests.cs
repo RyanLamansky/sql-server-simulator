@@ -329,6 +329,32 @@ public sealed class ResultNullabilityTests
         => AreEqual(expected, ProjectsNullable(projection), projection);
 
     /// <summary>
+    /// The finer date and time sources: a target at least as precise carries
+    /// every value (probed 2026-10-07 against SQL Server 2025 through
+    /// <c>sys.dm_exec_describe_first_result_set</c>).
+    /// </summary>
+    [TestMethod]
+    [DataRow("t3", "t7", false)]
+    [DataRow("t3", "d23", false)]
+    [DataRow("t3", "o3", false)]
+    [DataRow("t7", "d23", false)]
+    [DataRow("t3", "dt", true)]
+    [DataRow("d23", "d27", false)]
+    [DataRow("d27", "d23", false)]
+    [DataRow("d23", "o7", false)]
+    [DataRow("d27", "o3", false)]
+    [DataRow("o3", "o7", false)]
+    [DataRow("o7", "o3", false)]
+    [DataRow("sd", "o3", false)]
+    [DataRow("d", "o3", false)]
+    public void ArmConversion_FineDateTimeSources(string first, string second, bool expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (d date not null, dt datetime not null, sd smalldatetime not null, t3 time(3) not null, t7 time(7) not null,
+                d23 datetime2(3) not null, d27 datetime2(7) not null, o3 datetimeoffset(3) not null, o7 datetimeoffset(7) not null);
+            select is_nullable from sys.dm_exec_describe_first_result_set(N'select case when 1 = 1 then {first} else {second} end from t', null, 0)
+            """), $"{first} > {second}");
+
+    /// <summary>
     /// Which condition shapes real folds: every predicate that answers from its
     /// own operands, and not the subquery shapes.
     /// </summary>

@@ -506,4 +506,21 @@ public sealed class IndexedViewTests
         _ = sim.ExecuteNonQuery("begin tran; create unique clustered index cx on dbo.v (val); rollback");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.v')"));
     }
+
+    [TestMethod]
+    [DataRow("drop view dbo.v")]
+    [DataRow("drop index cx on dbo.v")]
+    [DataRow("alter view dbo.v with schemabinding as select a, count_big(*) n from dbo.t group by a")]
+    public void RolledBackDdl_LeavesTheViewMaintained(string ddl)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int not null)",
+            "create view dbo.v with schemabinding as select a, count_big(*) n from dbo.t group by a",
+            "create unique clustered index cx on dbo.v (a)");
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand($"begin tran; exec('{ddl.Replace("'", "''", StringComparison.Ordinal)}'); rollback").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert t values (1), (1), (2)").ExecuteNonQuery();
+        AreEqual("1:2,2:1", connection.CreateCommand("select string_agg(concat(a, ':', n), ',') within group (order by a) from dbo.v with (noexpand)").ExecuteScalar());
+    }
 }

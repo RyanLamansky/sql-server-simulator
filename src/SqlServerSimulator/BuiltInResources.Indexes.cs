@@ -789,12 +789,13 @@ internal static partial class BuiltInResources
                 foreach (var identity in table.IndexIdentities())
                     yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity), Simulation.FilegroupOf(table, identity), table);
                 // XML and spatial indexes follow at their own index-id ranges,
-                // with every option at its default (probed 2026-09-26 against
-                // SQL Server 2025).
+                // a spatial one with every option at its default and an XML
+                // one with the options its WITH list set (probed 2026-09-26
+                // and 2026-10-07 against SQL Server 2025).
                 // An XML index lands where the table's rows are, a partition
                 // scheme included (probed 2026-10-05 against SQL Server 2025).
                 foreach (var xmlIndex in table.XmlIndexes.OrderBy(index => index.IndexId))
-                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId));
+                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId), xml: xmlIndex);
                 foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
                     yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc, disabled: spatialIndex.IsDisabled);
                 foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
@@ -908,7 +909,7 @@ internal static partial class BuiltInResources
                 identity.Index is { IsHypothetical: true } ? trueBit : falseBit);
         }
 
-        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc, SqlValue? dataSpace = null, bool disabled = false) =>
+        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc, SqlValue? dataSpace = null, bool disabled = false, XmlIndex? xml = null) =>
             BuildIndexRow(
                 name: SqlValue.FromSystemName(name),
                 objectId: objectId,
@@ -923,7 +924,13 @@ internal static partial class BuiltInResources
                 filterDefinition: nullFilter,
                 ignoreDupKey: falseBit,
                 isDisabled: disabled ? trueBit : falseBit,
-                falseBit, trueBit, trueBit, SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
+                xml is { IsPadded: true } ? trueBit : falseBit,
+                xml is { AllowRowLocks: false } ? falseBit : trueBit,
+                xml is { AllowPageLocks: false } ? falseBit : trueBit,
+                SqlValue.FromByte(xml?.FillFactor ?? 0),
+                nullCompressionDelay,
+                falseBit,
+                falseBit);
 
         SqlValue[] BuildIndexRow(
             SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,

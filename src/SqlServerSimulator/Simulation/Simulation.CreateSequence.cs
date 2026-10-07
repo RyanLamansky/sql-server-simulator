@@ -358,17 +358,6 @@ partial class Simulation
         return value > int.MaxValue || value < int.MinValue ? throw SimulatedSqlException.SyntaxErrorNear(context) : (long)value;
     }
 
-    /// <summary>
-    /// Reads an <c>ALTER SEQUENCE</c> option's value, refusing one outside
-    /// <paramref name="type"/>'s range as Msg 11708 naming
-    /// <paramref name="argument"/>.
-    /// </summary>
-    private static Int128 ReadSequenceArgument(ParserContext context, SqlType type, string argument)
-    {
-        var value = ReadSignedIntegerLiteral(context, out var fractional);
-        return fractional || IsOutsideSequenceType(type, value) ? throw SimulatedSqlException.SequenceArgumentOutOfRange(argument) : value;
-    }
-
     /// <summary>Whether <paramref name="value"/> falls outside a sequence of <paramref name="type"/>'s range.</summary>
     private static bool IsOutsideSequenceType(SqlType type, Int128 value)
     {

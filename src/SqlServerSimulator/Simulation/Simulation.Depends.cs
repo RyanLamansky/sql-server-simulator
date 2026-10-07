@@ -147,13 +147,17 @@ partial class Simulation
                 var type = SpDependsTypeLabel(resolved.ObjectTypeCode);
                 // A statement using the whole object — a DELETE, SELECT 1 FROM t
                 // — lists it with no column, beside the columns others reach.
-                if (reference.Columns.Count == 0 || reference.WholeSelected || reference.WholeUpdated)
+                // A schema-bound view or function lists the object itself too,
+                // as selected, where a computed column or CHECK doesn't
+                // (probed 2026-10-07 against SQL Server 2025).
+                var boundModule = reference.IsSchemaBound && entity.ObjectTypeCode.TrimEnd() is "V" or "FN" or "IF" or "TF";
+                if (reference.Columns.Count == 0 || reference.WholeSelected || reference.WholeUpdated || boundModule)
                 {
                     rows.Add([
                         name,
                         type,
                         reference.WholeUpdated ? SpDependsYes : SpDependsNo,
-                        reference.WholeSelected ? SpDependsSelected : SpDependsNotSelected,
+                        reference.WholeSelected || boundModule ? SpDependsSelected : SpDependsNotSelected,
                         SqlValue.Null(SqlType.SystemName),
                     ]);
                     if (reference.Columns.Count == 0)
@@ -184,8 +188,9 @@ partial class Simulation
     /// <summary>
     /// A security policy's predicate as <c>sp_depends</c> reports it: each
     /// object the predicate names with a column-less row, then a row per
-    /// column it reads, all selected, the policy's predicates together listed
-    /// once each in name order (probed 2026-10-04 against SQL Server 2025).
+    /// column it reads in column order, all selected; the rows sort by object
+    /// name and keep each predicate's together, a second predicate repeating
+    /// what the first listed (probed 2026-10-07 against SQL Server 2025).
     /// </summary>
     private static void SpDependsPolicyRows(ModuleDependencies.Entity entity, List<SqlValue[]> rows)
     {
@@ -193,24 +198,15 @@ partial class Simulation
         {
             if (reference.Resolved is not { } resolved)
                 continue;
-            var name = $"{reference.SchemaName ?? Database.DefaultSchemaName}.{reference.EntityName}";
+            var name = SqlValue.FromSystemName($"{reference.SchemaName ?? Database.DefaultSchemaName}.{reference.EntityName}");
             var type = SpDependsTypeLabel(resolved.ObjectTypeCode);
-            AddRow(name, type, null);
+            rows.Add([name, type, SpDependsNo, SpDependsSelected, SqlValue.Null(SqlType.SystemName)]);
             foreach (var column in reference.Columns)
-                AddRow(name, type, column.Name);
+                rows.Add([name, type, SpDependsNo, SpDependsSelected, SqlValue.FromSystemName(column.Name)]);
         }
-        rows.Sort(static (a, b) =>
-        {
-            var byName = string.CompareOrdinal(a[0].AsString, b[0].AsString);
-            return byName != 0 ? byName : a[4].IsNull ? (b[4].IsNull ? 0 : -1) : b[4].IsNull ? 1 : string.CompareOrdinal(a[4].AsString, b[4].AsString);
-        });
-
-        void AddRow(string name, SqlValue type, string? column)
-        {
-            if (rows.Exists(row => row[0].AsString == name && (column is null ? row[4].IsNull : !row[4].IsNull && row[4].AsString == column)))
-                return;
-            rows.Add([SqlValue.FromSystemName(name), type, SpDependsNo, SpDependsSelected, column is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(column)]);
-        }
+        var ordered = rows.OrderBy(static row => row[0].AsString, StringComparer.Ordinal).ToList();
+        rows.Clear();
+        rows.AddRange(ordered);
     }
 
     /// <summary>

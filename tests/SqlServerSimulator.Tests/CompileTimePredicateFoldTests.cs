@@ -66,6 +66,7 @@ public sealed class CompileTimePredicateFoldTests
     [DataRow("select a from t where not (a = 2 or null = 1)", 0)]
     [DataRow("select a from t where not (null = 1 or null = 2)", 0)]
     [DataRow("select a from t where not not (a = 2 or null = 1)", 1)]
+    [DataRow("select a from t where not (not (null = 1 or null = 2))", 0)]
     public void NotOverOr_AsksWhetherTheOperandCanBeFalse(string sql, int expected)
         => AreEqual(expected, RowCount(Seeded(), sql));
 
