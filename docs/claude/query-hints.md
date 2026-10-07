@@ -207,7 +207,8 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 - **Join-hint feasibility through `APPLY` and semi-joins** — real refuses `OPTION (HASH JOIN)` over a `CROSS APPLY` or an `EXISTS` whose correlation isn't an equality once decorrelated, and some `RIGHT LOOP JOIN`s, as its decorrelation and join reordering decide; those are left alone here.
   Not chased: the shapes follow real's rewrites, not the query as written.
 - **Msg 8625 from dynamic SQL run by `sp_executesql`** after `EXEC (…)` ran the same text: real's cached plan sends none, where the simulator's separate compile sends it once more.
-- **Table hints after a table-valued function** (`dbo.f() WITH (NOLOCK)`, Msg 102 / Msg 1018 on real) and `EXEC (…) WITH RECOMPILE` (Msg 102 on real) are accepted.
+- **`EXEC (…) WITH RECOMPILE`** runs here, where real raises Msg 102 at `recompile` (re-probed 2026-10-07 against SQL Server 2025).
+- **Table hints after a table-valued function** are refused, not always with real's message: `dbo.f() WITH (NOLOCK)`, and the hint written ahead of an alias, are Msg 319 here and Msg 102 near `)` on real, and `dbo.f() (NOLOCK)` is Msg 102 near `nolock` here and real's Msg 317 (probed 2026-10-07 against SQL Server 2025).
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.

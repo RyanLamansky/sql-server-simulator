@@ -399,10 +399,10 @@ This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weigh
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
 The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family, which return no plans, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
+- **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family, which return no plans, and `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **A binder report's ORDER BY Msg 209** for a name two select items share, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
+- **A binder report's names after a type check in the same term**, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 
 ## Quirks (modeled, not byte-identical to SQL Server)
 

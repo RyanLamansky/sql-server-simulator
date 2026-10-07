@@ -273,7 +273,7 @@ The failure is a `SimulatedErrorOutcome` marked `RaisedWhileCompiling`, with no 
 In-process, the failure is an error like any other, so `ExecuteReader` raises it with the rest of the batch's errors (see [`errors.md`](errors.md#the-message-stream)).
 
 **Not modeled yet.**
-- A body whose column no longer exists fails on real too, sending its whole binder report twice; here such a body inlines.
+- A body whose column no longer exists fails on real too, sending its whole binder report twice, attributed to the function, ahead of the query's own Msg 207; here the query's Msg 207 goes out alone (probed 2026-10-07 against SQL Server 2025).
 - Real sends nothing for a deferred statement over an empty `#temp` table created in the batch, where one over an empty permanent table does; both send here.
 - A statement whose `GROUP BY` raises Msg 164 reports it alone here, where real reports the earlier calls' failures first.
 

@@ -306,8 +306,6 @@ public sealed class JsonTypeTests
     public void Functions_ModifyReturnsCanonicalJson()
     {
         var sim = new Simulation();
-        // Real refuses an append path beside another JSON_MODIFY over json
-        // in one select list (Msg 13656), so each edit runs on its own.
         AreEqual("{\"a\":1,\"b\":\"x\"}", sim.ExecuteScalar("declare @j json = '{\"a\":1}'; select cast(json_modify(@j, '$.b', 'x') as nvarchar(max))"));
         AreEqual("{}", sim.ExecuteScalar("declare @j json = '{\"a\":1}'; select cast(json_modify(@j, '$.a', null) as nvarchar(max))"));
         AreEqual("{\"a\":[1,2]}", sim.ExecuteScalar("declare @k json = '{\"a\":[1]}'; select cast(json_modify(@k, 'append $.a', 2) as nvarchar(max))"));

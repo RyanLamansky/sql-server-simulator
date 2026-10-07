@@ -478,7 +478,7 @@ A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / 
 **Not modeled yet.**
 The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`.
 An `INSERT … SELECT` over two denied objects raises the target's INSERT denial with the source's, where real names only the source.
-Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
+`ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event for a server-scope DDL trigger, among the server-level events [`triggers.md`](triggers.md#not-modeled-yet-1) lists.
 
 ### Legacy security procedures
 
