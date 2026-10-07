@@ -134,11 +134,16 @@ Probed 2026-10-07 against SQL Server 2025 with a raw TDS client, all modeled:
   A length shorter than the bytes takes its prefix, and one longer than they are, or a packet too short to carry it, is **Msg 4002** at state 2.
   Written, the statement sends its DONE and the batch goes on.
 - Any other request is not the data: **Msg 4022**, ending the batch, the request's own text unread and the batch's remaining output answering it instead.
-  An attention ends the batch with Msg 3621 and a DONE carrying both the attention and the error bit; a transaction-manager request ends the session with Msg 4014, the transaction's rollback, Msg 3621 and Msg 596.
+  An attention ends the batch with Msg 3621 and a DONE carrying both the attention and the error bit; a transaction-manager request ends the session with Msg 4014, the transaction's rollback, Msg 3621 and Msg 596 — from inside a `TRY`, Msg 3621 ahead of the rollback and the waiting statement's own DONE closing it, which with nothing to roll back closes the response.
 - `UPDATETEXT BULK` judges its offset and deletion length once the data have come, so Msg 7116 / 7135 follow the bulk packet.
 - Data written in the statement — a literal, a variable, `NULL`, the copy form's source — is **Msg 185** as the batch compiles, for `UPDATETEXT BULK` too.
 
-In process no bulk-load packet can follow, so the connection's next command meets Msg 4022, as SqlClient's next command would against real.
+- **A bulk form nested in a block, a `TRY` or `CATCH`, an `IF`, a `WHILE`, a procedure or dynamic SQL suspends the batch there**, a loop's at every pass, since those stream their statements' outcomes (see [`control-flow.md`](control-flow.md#statement-terminating-vs-batch-aborting-errors-unified-continue-on-error)).
+  A `TRY` around it catches Msg 4022 and 4002 at the statement's line — in the procedure, for one a call ran — and the `CATCH`'s output answers the request that brought no data; the waiting statement's DONE goes first.
+- **Suspended inside a call, the response ends as one must**: the last DONEINPROC becomes a DONE, or a nested call's exit a DONEPROC.
+  The response resuming it renders at batch level until the call the batch made returns — a DONE where a DONEINPROC would go, a nested call's exit a DONEPROC with no RETURNSTATUS, `NOCOUNT` clearing a count bit where it would drop a DONE — and the outermost call's exit closes with its RETURNSTATUS and DONEPROC as usual (`TdsSession.ResponseScopes`).
+
+In process no bulk-load packet can follow, so the connection's next command meets Msg 4022, as SqlClient's next command would against real, and a transaction call — `BeginTransaction`, `Commit`, `Rollback`, `Save`, each the transaction-manager request SqlClient would send in the data's place — ends the session with Msg 4014, Msg 3621 and Msg 596, closing the connection.
 The suspended batch is parked on the connection (`SimulatedDbConnection.ParkedBulkText`) and resumed by whichever request comes next; the statement then runs a second time from its first token to write what arrived (see `SimulatedBulkTextRequest`).
 
 ### Errors abort as under `XACT_ABORT`
@@ -149,7 +154,7 @@ Probed 2026-10-07 against SQL Server 2025, with and without an open transaction,
   A column no pointer addresses is Msg 7125 (state 4); a pointer that can't hold `binary(16)` is Msg 7122 — anything but `binary`, `varbinary`, `char` or `varchar` of at least 16 (`max` fails too), a binary literal shorter than 16 bytes included — save that a write takes an integer, whose value is Msg 7125 at state 5 as it runs.
   A character literal or `NULL` as the pointer is a syntax error at it.
 - **A pointer's value is its bytes cut to the first 16**, a character value's in its code page, so a short `varbinary` or one wider than 16 reaches Msg 7123 rendering what was read.
-- **A `WRITETEXT` or `UPDATETEXT` error as it runs aborts as under `XACT_ABORT`** — the pointer's value (Msg 7123, 7133, the integer's 7125), the offset and length (Msg 7116, 7135), the copy form's source type (Msg 518, read after the source's pointer) and the bulk forms' data (Msg 4022, 4002): uncaught it ends the batch and rolls an open transaction back, the rollback's ENVCHANGE ahead of Msg 3621, which follows at line 1 whatever line the statement was on; caught it dooms the transaction, which the batch's end then rolls back with Msg 3998.
+- **A `WRITETEXT` or `UPDATETEXT` error as it runs aborts as under `XACT_ABORT`** — the pointer's value (Msg 7123, 7133, the integer's 7125), the offset and length (Msg 7116, 7135), the copy form's source type (Msg 518, read after the source's pointer) and the bulk forms' data (Msg 4022, 4002): uncaught it ends the batch and rolls an open transaction back, the rollback's ENVCHANGE ahead of Msg 3621, which follows at line 1 whatever line the statement was on — in a procedure it ran in as well (`SimulatedSqlException.EndedTextWrite`); caught it dooms the transaction, which the batch's end then rolls back with Msg 3998.
   The caught statement's DONE carries no count.
 - **`READTEXT`'s run-time errors** (Msg 7123, 7124, 7133, 7116) end only their statement and leave a transaction committable.
 
@@ -186,9 +191,8 @@ Msg 7133 is what forces the classic initialization dance: a cell that has never 
 
 ## Not modeled yet
 
-- **A bulk form inside a block, a `TRY`, an `IF` or a `WHILE`, a module body or dynamic SQL, or on a MARS session** raises `NotSupportedException`.
-  Those statements send their outcomes with the statement enclosing them, which has nowhere to suspend; real suspends there too, and a `TRY` around the statement catches Msg 4022 and 4002 (probed 2026-10-07 against SQL Server 2025).
-- **An in-process transaction call while a bulk form waits** — `BeginTransaction`, `Commit`, `Rollback` — runs, where SqlClient's transaction-manager request would end the session with Msg 4014.
+- **A bulk form in a trigger, in a procedure an RPC, `INSERT … EXEC` or `WITH RESULT SETS` calls, or on a MARS session** raises `NotSupportedException`.
+  Those bodies send their outcomes with the statement that ran them, which has nowhere to suspend — a trigger's is a DML statement still writing; real suspends inside a trigger too, the firing statement's DONE and the rest of the batch following the data, and a `TRY` around the firing statement catches the trigger's Msg 4022 (probed 2026-10-07 against SQL Server 2025).
 - **`TEXTPTR` in a joined `UPDATE` / `DELETE`, a write through a join view, or a `MERGE`** raises `NotSupportedException`: those statements' row resolvers don't carry a row locator.
   A single-target `UPDATE` / `DELETE` and every read path do.
 - **`READTEXT` / `WRITETEXT` / `UPDATETEXT` through a view or a `#temp` table** resolve like any other `table.column` reference, so a view name reaches the view's own object rather than the base table's column and reports Msg 7125.

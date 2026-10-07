@@ -328,6 +328,25 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
+    /// A transaction-manager request — the in-process <c>BeginTransaction</c>,
+    /// <c>Commit</c>, <c>Rollback</c> or <c>Save</c> stands in for one —
+    /// arriving while a bulk form waits for its data ends the session, as on
+    /// real: Msg 4014, Msg 3621 and Msg 596, the waiting batch abandoned and
+    /// its transaction rolled back (probed 2026-10-07 against SQL Server
+    /// 2025, whatever the statement sat in).
+    /// </summary>
+    internal void RefuseTransactionRequestWhileBulkTextWaits()
+    {
+        if (this.ParkedBulkText is null)
+            return;
+        var fatal = SimulatedSqlException.NetworkInputFatal();
+        fatal.ResolveDiagnostics(1, 0, "");
+        var ended = SimulatedSqlException.FromErrors([.. fatal.Errors, SimulatedSqlException.AttentionStatementTerminatedMessage(this), .. SimulatedSqlException.SessionKilled().Errors]);
+        this.Close();
+        throw ended;
+    }
+
+    /// <summary>
     /// The requests this session is serving (see <see cref="SessionRequest"/>)
     /// that are still running or still outstanding: over TDS, the MARS
     /// requests received and not yet fully answered — executing, waiting for
@@ -581,6 +600,19 @@ public sealed class SimulatedDbConnection : DbConnection
         request.StatementStartIndex = session.StatementStartIndex;
         request.RequestStartUtc = session.RequestStartUtc;
         request.CurrentCommand = session.CurrentCommand;
+        request.OpenTryFrames = this.OpenTryFrames;
+        request.EnclosingCatchError = this.EnclosingCatchError;
+        request.NestingLevel = this.NestingLevel;
+        this.OpenTryFrames = 0;
+        this.EnclosingCatchError = null;
+        this.NestingLevel = 0;
+        request.ImpersonationFrames = finished ? null : this.Security.TakeRequestFrames();
+        request.ModuleTempTables = finished ? null : this.TakeModuleTempTables();
+        if (this.PendingMessages.Count != 0)
+        {
+            request.PendingMessages = [.. this.PendingMessages];
+            this.PendingMessages.Clear();
+        }
         // A transaction the request's batch began goes with it; a
         // transaction-manager request runs no batch.
         if (!finished && request.Cancellation is not null && this.CurrentTransaction is { } open && open.TransactionId > this.TransactionIdAtExecutionStart)
@@ -609,6 +641,26 @@ public sealed class SimulatedDbConnection : DbConnection
         session.StatementStartIndex = request.StatementStartIndex;
         session.RequestStartUtc = request.RequestStartUtc;
         session.CurrentCommand = request.CurrentCommand ?? session.CurrentCommand;
+        this.OpenTryFrames = request.OpenTryFrames;
+        this.EnclosingCatchError = request.EnclosingCatchError;
+        this.NestingLevel = request.NestingLevel;
+        if (request.ImpersonationFrames is { } frames)
+        {
+            request.ImpersonationFrames = null;
+            this.Security.RestoreRequestFrames(frames);
+        }
+        if (request.ModuleTempTables is { } tables)
+        {
+            request.ModuleTempTables = null;
+            foreach (var table in tables)
+                this.ReinstateTempTable(table);
+        }
+        if (request.PendingMessages is { } queued)
+        {
+            request.PendingMessages = null;
+            foreach (var message in queued)
+                this.PendingMessages.Enqueue(message);
+        }
         if (request.Transaction is { Ended: false } own)
         {
             request.DisplacedTransaction = this.CurrentTransaction;
@@ -666,7 +718,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// The error a request starting now meets because of another still
     /// running, or null: Msg 3980 while one is sending a DML statement's
-    /// <c>OUTPUT</c> rows, Msg 3989 while one works on a transaction another
+    /// <c>OUTPUT</c> rows, Msg 15386 once after one changed the session's
+    /// security context, Msg 3989 while one works on a transaction another
     /// request ended under it.
     /// </summary>
     internal SimulatedSqlException? RefuseNewRequest()
@@ -684,6 +737,11 @@ public sealed class SimulatedDbConnection : DbConnection
                     continue;
                 if (request.HoldsSession)
                     return SimulatedSqlException.RequestWhileSessionBusy();
+                if (request.ChangedSecurityContext)
+                {
+                    request.ChangedSecurityContext = false;
+                    return SimulatedSqlException.SecurityContextChangingInAnotherBatch();
+                }
                 abandoned |= this.abandonedTransactionId != 0 && request.EnlistedTransactionId == this.abandonedTransactionId;
             }
             if (abandoned)
@@ -1589,6 +1647,38 @@ public sealed class SimulatedDbConnection : DbConnection
         this.TempTables[table.Name] = table;
     }
 
+    /// <summary>
+    /// Takes the local temp tables a module scope created off the session, for
+    /// a request stepping aside inside a module call: they are that call's,
+    /// and another request doesn't see them (probed 2026-10-07 against SQL
+    /// Server 2025). A session-scope table the request's batch created stays.
+    /// </summary>
+    private List<HeapTable>? TakeModuleTempTables()
+    {
+        if (this.TempTables.IsEmptyLockFree())
+            return null;
+        List<HeapTable>? taken = null;
+        foreach (var (_, hidden) in this.shadowedTempTables)
+        {
+            foreach (var table in hidden)
+            {
+                if (table.TempScopeId != 0)
+                    (taken ??= []).Add(table);
+            }
+        }
+        foreach (var (_, table) in this.TempTables)
+        {
+            if (table.TempScopeId != 0)
+                (taken ??= []).Add(table);
+        }
+        if (taken is not null)
+        {
+            foreach (var table in taken)
+                this.RemoveTempTable(table);
+        }
+        return taken;
+    }
+
     private void Shadow(HeapTable table)
     {
         if (!this.shadowedTempTables.TryGetValue(table.Name, out var hidden))
@@ -2390,6 +2480,7 @@ public sealed class SimulatedDbConnection : DbConnection
             throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
         if (isolationLevel == IsolationLevel.Unspecified)
             isolationLevel = IsolationLevel.ReadCommitted;
+        this.RefuseTransactionRequestWhileBulkTextWaits();
         this.RefuseApiRequest();
         if (this.OtherRequestsOutstanding())
             throw AtLineOne(SimulatedSqlException.NewTransactionWhileRequestsRunning());

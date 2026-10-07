@@ -65,12 +65,12 @@ partial class Simulation
     /// DONE counting the rows it wrote, as real does only while reporting.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> StatisticsReport(
-        BatchContext batch, IoStatistics? io, List<SimulatedStatementOutcome> outcomes, bool timed, StatementClock clock, bool isCall, string? moduleName)
+        BatchContext batch, IoStatistics? io, List<SimulatedStatementOutcome> outcomes, bool streamedOwnOutcome, bool streamedQuery, bool timed, StatementClock clock, bool isCall, string? moduleName)
     {
         if ((io is null || io.IsEmpty) && !timed)
             yield break;
-        var ownOutcome = false;
-        var query = false;
+        var ownOutcome = streamedOwnOutcome;
+        var query = streamedQuery;
         foreach (var outcome in outcomes)
         {
             ownOutcome |= outcome is SimulatedQueryResult or SimulatedNonQuery;

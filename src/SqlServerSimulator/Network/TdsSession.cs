@@ -984,11 +984,43 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// DONEINPROC, which it is inside a procedure, trigger or dynamic-SQL
     /// scope and throughout an RPC.
     /// </summary>
-    private readonly struct RenderedOutcome(SimulatedStatementOutcome outcome, bool inProc)
+    private readonly struct RenderedOutcome(SimulatedStatementOutcome outcome, bool inProc, bool withoutStatus = false)
     {
         public readonly SimulatedStatementOutcome Outcome = outcome;
         public readonly bool InProc = inProc;
+
+        /// <summary>
+        /// Whether a scope's exit, rendered as a DONEPROC, sends no
+        /// RETURNSTATUS ahead of it: a nested one a resumed response renders
+        /// at batch level (see <see cref="ResponseScopes.Resumed"/>).
+        /// </summary>
+        public readonly bool WithoutStatus = withoutStatus;
     }
+
+    /// <summary>
+    /// The procedure and dynamic-SQL scopes a response's outcomes are inside.
+    /// </summary>
+    private sealed class ResponseScopes
+    {
+        /// <summary>The scopes the response's outcomes entered and haven't left.</summary>
+        public int Entered;
+
+        /// <summary>
+        /// The scopes the batch was inside when a bulk form suspended it,
+        /// which the response resuming it is inside until it leaves them. Real
+        /// renders that response at batch level throughout — a DONE where a
+        /// DONEINPROC would go, a nested scope's exit a DONEPROC with no
+        /// RETURNSTATUS, <c>NOCOUNT</c> dropping no DONE — until the outermost
+        /// call returns (probed 2026-10-07 against SQL Server 2025).
+        /// </summary>
+        public int Resumed;
+    }
+
+    /// <summary>
+    /// The scopes a suspended batch was inside, for the response resuming it
+    /// (<see cref="ResponseScopes.Resumed"/>); 0 outside one.
+    /// </summary>
+    private int resumedScopes;
 
     /// <summary>
     /// The outcomes that put a token on the wire, each with where it renders.
@@ -999,29 +1031,45 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// SQL Server 2025). Filtering ahead of the writer is what lets the more
     /// bit read "another token follows".
     /// </summary>
-    private static IEnumerable<RenderedOutcome> RenderedOutcomes(IEnumerable<SimulatedStatementOutcome> outcomes, bool rpc)
+    private static IEnumerable<RenderedOutcome> RenderedOutcomes(IEnumerable<SimulatedStatementOutcome> outcomes, bool rpc, ResponseScopes scopes)
     {
-        var depth = 0;
         foreach (var outcome in outcomes)
         {
             switch (outcome)
             {
                 case SimulatedProcScopeBoundary { IsEnter: true }:
-                    depth++;
+                    scopes.Entered++;
+                    continue;
+                case SimulatedProcScopeBoundary when scopes.Resumed > 0:
+                    if (scopes.Entered > 0)
+                        scopes.Entered--;
+                    else
+                        scopes.Resumed--;
+                    yield return scopes.Resumed > 0 || scopes.Entered > 0
+                        ? new(outcome, inProc: false, withoutStatus: true)
+                        : new(outcome, outcome.InModule || rpc);
                     continue;
                 case SimulatedProcScopeBoundary exit:
-                    depth = Math.Max(depth - 1, 0);
-                    var nested = depth > 0 || exit.InModule || rpc;
+                    scopes.Entered = Math.Max(scopes.Entered - 1, 0);
+                    var nested = scopes.Entered > 0 || exit.InModule || rpc;
                     if (nested && exit.CountSuppressed == true && !exit.EndedByError)
                         continue;
                     yield return new(outcome, nested);
                     continue;
+                case SimulatedReturnStatus when scopes.Resumed > 0:
+                    yield return new(outcome, scopes.Entered > 0 || scopes.Resumed > 1);
+                    continue;
                 case SimulatedReturnStatus:
                     // Rendered where the exit it precedes would be.
-                    yield return new(outcome, depth > 1 || outcome.InModule || rpc);
+                    yield return new(outcome, scopes.Entered > 1 || outcome.InModule || rpc);
                     continue;
             }
-            var inProc = depth > 0 || outcome.InModule || rpc;
+            if (scopes.Resumed > 0)
+            {
+                yield return new(outcome, inProc: false);
+                continue;
+            }
+            var inProc = scopes.Entered > 0 || outcome.InModule || rpc;
             if (inProc && outcome is SimulatedNonQuery { CountSuppressed: true })
                 continue;
             yield return new(outcome, inProc);
@@ -1042,7 +1090,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private async ValueTask<bool> StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
     {
-        using var outcomes = RenderedOutcomes(simulation.CreateResultSetsForCommand(command, continueOnError: true), trailingTokensFollow).GetEnumerator();
+        var scopes = new ResponseScopes { Resumed = this.resumedScopes };
+        this.resumedScopes = 0;
+        using var outcomes = RenderedOutcomes(simulation.CreateResultSetsForCommand(command, continueOnError: true), trailingTokensFollow, scopes).GetEnumerator();
 
         var hasOutcome = outcomes.MoveNext();
         // Whether the last token written closes with a DONE; when it doesn't,
@@ -1174,7 +1224,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 this.WriteTransactionEnvChanges(writer, exitEvents);
                 if ((exitStatus & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
-                if (!rendered.InProc && exit.ReturnStatus is int returnStatus)
+                if (!rendered.InProc && !rendered.WithoutStatus && exit.ReturnStatus is int returnStatus)
                     writer.WriteReturnStatus(returnStatus);
                 writer.WriteDoneToken(rendered.InProc ? Tds.TokenDoneInProc : Tds.TokenDoneProc, exitStatus, 0, StatementDoneKind.Execute);
                 closed = true;
@@ -1334,15 +1384,27 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // without one (probed 2026-09-28 against SQL Server 2025). A mid-batch
         // USE's ENVCHANGE must likewise precede the final DONE.
         var flushedTrailing = this.FlushInfoMessages(writer);
+        // A bulk form suspended the batch: the response resuming it starts
+        // inside the scopes this one ended in.
+        var suspendedInScope = false;
+        if (this.connection!.ParkedBulkText is { } parked)
+        {
+            parked.OpenScopes = scopes.Entered + scopes.Resumed;
+            suspendedInScope = parked.OpenScopes > 0;
+        }
         if (!trailingTokensFollow && (flushedTrailing || !closed))
         {
             this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDoneToken(doneToken, unclosedError ? Tds.DoneError : Tds.DoneFinal, 0, StatementDoneKind.Batch);
         }
         // A statement's DONE went out expecting the next statement to send
-        // something, which it didn't: that DONE ends the response.
+        // something, which it didn't: that DONE ends the response — a
+        // DONEINPROC as the DONE, or the DONEPROC of a scope's exit, real ends
+        // a response a bulk form suspended inside a call with.
         else if (!trailingTokensFollow)
         {
+            if (suspendedInScope)
+                writer.EndFinalDoneInScope();
             _ = writer.TryCloseFinalDone(this.WriteSessionEnvChangesIfAny);
         }
 

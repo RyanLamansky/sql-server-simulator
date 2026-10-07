@@ -93,6 +93,7 @@ partial class Simulation
             : throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal("");
         var cookie = cookieSlot is null ? null : System.Security.Cryptography.RandomNumberGenerator.GetBytes(ApplicationRoleCookieLength);
         ApplyExecuteAs(context.Connection, context.CurrentDatabase, isLogin, targetName, new ExecuteAsGuard(context.CurrentDatabase.Name, noRevert, cookie));
+        NoteSecurityContextChanged(context.Connection);
         if (cookieSlot is { } slot && cookie is not null)
             slot.Value = Storage.SqlValue.FromVarbinary(cookie).CoerceTo(slot.DeclaredType);
     }
@@ -256,7 +257,26 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
         var presented = presentedValue is { IsNull: false } value ? value.AsBytes : null;
+        var depth = context.Connection.Security.ImpersonationDepth;
         context.Connection.Security.Revert(context.CurrentDatabase.Name, presented);
+        if (context.Connection.Security.ImpersonationDepth != depth)
+            NoteSecurityContextChanged(context.Connection);
+    }
+
+    /// <summary>
+    /// Records a change a batch's own <c>EXECUTE AS</c>, <c>REVERT</c> or
+    /// <c>SETUSER</c> made to the session's security context, outside any
+    /// module: the context every request of the session runs in, and which
+    /// the next request beginning while this one still runs is refused over
+    /// (Msg 15386, probed 2026-10-07 against SQL Server 2025). One inside a
+    /// module stays the request's own.
+    /// </summary>
+    private static void NoteSecurityContextChanged(SimulatedDbConnection connection)
+    {
+        if (connection.NestingLevel != 0)
+            return;
+        connection.Security.SessionFrames = connection.Security.ImpersonationDepth;
+        _ = connection.ExecutingRequest?.ChangedSecurityContext = true;
     }
 
     /// <summary>
@@ -286,9 +306,11 @@ partial class Simulation
         if (targetName is null)
         {
             context.Connection.Security.RevertTo(0);
+            NoteSecurityContextChanged(context.Connection);
             return;
         }
         ApplyExecuteAs(context.Connection, context.CurrentDatabase, isLogin: false, targetName, default);
+        NoteSecurityContextChanged(context.Connection);
     }
 
     /// <summary>

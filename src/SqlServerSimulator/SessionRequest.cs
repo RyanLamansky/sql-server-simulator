@@ -134,6 +134,28 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
     public DateTime RequestStartUtc;
     public string? CurrentCommand;
 
+    // What the request's open TRY and CATCH blocks hold on the connection
+    // while it is parked inside them: another request runs outside them.
+    public int OpenTryFrames;
+    public Parser.CaughtError? EnclosingCatchError;
+
+    /// <summary>The messages the request queued and hadn't sent as it was parked; null for none.</summary>
+    public SimulatedError[]? PendingMessages;
+
+    // What the request's module calls hold on the connection while it is
+    // parked inside one: another request runs outside them.
+    public int NestingLevel;
+    public SecurityPrincipalFrame[]? ImpersonationFrames;
+    public List<Storage.HeapTable>? ModuleTempTables;
+
+    /// <summary>
+    /// Set when the request's batch changes the session's security context
+    /// (<c>EXECUTE AS</c>, <c>REVERT</c>, <c>SETUSER</c> outside a module),
+    /// until the next request to begin is refused over it with Msg 15386
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    public bool ChangedSecurityContext;
+
     /// <summary>
     /// A transaction the request's batch began by SQL text, while it is
     /// parked: real scopes it to the batch, so no other request sees it

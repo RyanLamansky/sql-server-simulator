@@ -118,6 +118,16 @@ partial class SimulatedSqlException
         new("The request failed to run because the batch is aborted, this can be caused by abort signal sent from client, or another request is running in the same session, which makes the session busy.", 3980, 16, 1);
 
     /// <summary>
+    /// Msg 15386: a request beginning on a MARS connection while another
+    /// request's batch has changed the session's security context — an
+    /// <c>EXECUTE AS</c>, <c>REVERT</c> or <c>SETUSER</c> outside a module —
+    /// and is still running; the next request after it runs in the changed
+    /// context (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SecurityContextChangingInAnotherBatch() =>
+        new("Another batch in the session is changing security context, new batch is not allowed to start.", 15386, 16, 1);
+
+    /// <summary>
     /// Msg 1222 — fired when a lock acquisition exceeds the session's
     /// configured <c>@@LOCK_TIMEOUT</c>. Single, fixed wording regardless of
     /// the lock kind that timed out (probed against SQL Server 2025); the

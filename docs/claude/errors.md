@@ -43,7 +43,7 @@ The informational messages a system procedure prints from its own body take the 
 ## The message stream
 
 Every informational message — `PRINT`, a severity-0-10 `RAISERROR`, and the engine's own (Msg 3621, 8153, 5701, 5703, 11729, the procedures' severity-10 texts) — is a `SimulatedInfoOutcome` in the outcome stream, placed where real sends its INFO token.
-The engine queues one on `SimulatedDbConnection.PendingMessages` as it happens, and the dispatch loop places the queue ahead of the statement's own outcomes.
+The engine queues one on `SimulatedDbConnection.PendingMessages` as it happens, and the dispatch loop places the queue ahead of the statement's own outcomes — for a statement that streams what it runs (a block, `TRY`, `IF`, `WHILE`, a call), ahead of the next outcome it sends, so a system procedure's header goes out with the result set it heads.
 Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 - **One event per message**, fired as the reader reaches it: during `ExecuteReader` for what precedes the first result set, during `NextResult` for what follows.

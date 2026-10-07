@@ -123,7 +123,8 @@ internal sealed partial class TdsSession
     /// it. An attention ends the batch where it waits, with Msg 3621 and a
     /// DONE carrying both the attention and the error bit; a
     /// transaction-manager request ends the session, with Msg 4014, the
-    /// transaction's rollback, Msg 3621 and Msg 596.
+    /// transaction's rollback, Msg 3621 and Msg 596 — inside a <c>TRY</c>,
+    /// Msg 3621 ahead of the rollback and the statement's DONE closing it.
     /// </summary>
     /// <returns>Whether the session goes on.</returns>
     private async ValueTask<bool> ResumeBulkTextAsync(SimulatedBulkTextRequest parked, TdsMessage message, TdsTokenWriter writer, CancellationToken cancellationToken)
@@ -152,15 +153,34 @@ internal sealed partial class TdsSession
                 }
                 break;
             case Tds.PacketTransactionManager:
+                // Inside a TRY the statement closes with its own DONE once the
+                // session is doomed, ahead of the rollback; with nothing to roll
+                // back that DONE closes the response (probed 2026-10-07 against
+                // SQL Server 2025).
                 connection.AbandonParkedBulkText();
                 var fatal = SimulatedSqlException.NetworkInputFatal();
                 fatal.ResolveDiagnostics(1, 0, "");
                 WriteErrors(writer, fatal);
+                var rolledBack = connection.CurrentTransaction is not null;
                 connection.CurrentTransaction?.EndRollback();
-                this.WriteTransactionEnvChanges(writer);
-                writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
-                WriteErrors(writer, SimulatedSqlException.SessionKilled());
-                writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError | Tds.DoneServerError, 0, StatementDoneKind.Batch);
+                if (parked.InTry)
+                {
+                    writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
+                    if (rolledBack)
+                    {
+                        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneMore | Tds.DoneError, 0, parked.StatementKind);
+                        this.WriteTransactionEnvChanges(writer);
+                    }
+                    WriteErrors(writer, SimulatedSqlException.SessionKilled());
+                    writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError | Tds.DoneServerError, 0, rolledBack ? StatementDoneKind.Batch : parked.StatementKind);
+                }
+                else
+                {
+                    this.WriteTransactionEnvChanges(writer);
+                    writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
+                    WriteErrors(writer, SimulatedSqlException.SessionKilled());
+                    writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError | Tds.DoneServerError, 0, StatementDoneKind.Batch);
+                }
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                 await connection.CloseAsync().ConfigureAwait(false);
                 return false;
@@ -169,6 +189,7 @@ internal sealed partial class TdsSession
         }
 
         this.watchedRequest = connection.BeginRequest();
+        this.resumedScopes = parked.OpenScopes;
         await this.ExecuteBatchTextAsync(parked.CommandText, writer, cancellationToken).ConfigureAwait(false);
         await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
         return connection.State != System.Data.ConnectionState.Closed;

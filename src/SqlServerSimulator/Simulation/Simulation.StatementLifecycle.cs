@@ -101,6 +101,16 @@ partial class Simulation
         private readonly bool compound;
 
         /// <summary>
+        /// Whether the statement sends what its statements produce as each
+        /// produces it (<see cref="BatchContext.StreamingFrames"/>): a block, a
+        /// <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c> or a procedure or
+        /// dynamic-SQL call that runs, nested only in statements that stream
+        /// too. One walked without running sends nothing a client could read
+        /// meanwhile, so its outcomes gather as a simple statement's do.
+        /// </summary>
+        public readonly bool Streams;
+
+        /// <summary>
         /// Whether the statement reports its own statistics, which a function
         /// or view body's inline into its caller's.
         /// </summary>
@@ -145,6 +155,21 @@ partial class Simulation
         private FunctionBodyShape? shape;
         private bool opensConditional;
         private bool resumedAtStatementEnd;
+
+        /// <summary>Whether a streaming statement's body is still running (<see cref="StartStreaming"/>).</summary>
+        private bool streamOpen;
+
+        /// <summary>
+        /// The procedure scopes a streaming statement has sent the opening of
+        /// and not the close, which its ending reads as it would its own.
+        /// </summary>
+        private int streamedOpenScopes;
+
+        /// <summary>Whether a streaming statement sent a result set or a count of its own (see <see cref="StatisticsReport"/>).</summary>
+        public bool StreamedOwnOutcome;
+
+        /// <summary>Whether a streaming statement sent a result set.</summary>
+        public bool StreamedQuery;
 
         /// <summary>The statement is walked without running under <c>SET NOEXEC ON</c> (<see cref="BatchContext.FramesUnderNoExec"/>).</summary>
         private readonly bool walksUnderNoExec;
@@ -220,6 +245,13 @@ partial class Simulation
             this.IsCall = this.FramesStatement && IsProcedureCall(batch.Parser, atBatchStart);
             this.compound = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.If or Keyword.While }
                 || (batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Begin } && StatementDoneKindOf(batch.Parser) is null);
+            // An atomic block's work commits or rolls back as one, and only a
+            // natively compiled module, whose call gathers its outcomes, holds one.
+            this.Streams = !batch.IsSkipping && batch.SendsAsStatementsEnd
+                && batch.BindErrors is null && batch.CreateTimeBindErrors is null && !batch.CreateTimeBinding
+                && (this.compound
+                    ? PeekAfterLead(batch.Parser) is not UnquotedString { ContextualKeyword: ContextualKeyword.Atomic }
+                    : IsProcedureCall(batch.Parser, atBatchStart));
             // SET STATISTICS TIME reports each statement that closes with a DONE,
             // and a procedure call after its body (probed 2026-09-28 against SQL
             // Server 2025); a function or view body inlines into its caller's.
@@ -297,7 +329,7 @@ partial class Simulation
             // while a scalar UDF's / multi-statement TVF's body binds at CREATE.
             // An IF / WHILE brackets its contained statements so none of them can
             // satisfy the last-statement rule; the nested dispatch has completed by
-            // Leave, since Run materializes every outcome.
+            // Leave, which a streaming statement reaches once its body has ended.
             this.shape = batch.FunctionBodyShape;
             this.opensConditional = this.shape is not null && NoteFunctionBodyStatement(batch, this.shape);
             var inlining = batch.Parser.Token switch
@@ -380,14 +412,16 @@ partial class Simulation
         /// (<see cref="Ending"/>); anything else propagates.
         /// </summary>
         /// <remarks>
-        /// The statement's outcomes are materialized, not yielded, because an
-        /// iterator can't catch around a <c>yield</c>. Materialization is cheap
-        /// — every statement produces few outcomes and a SELECT already
+        /// A simple statement's outcomes are materialized, not yielded, because
+        /// an iterator can't catch around a <c>yield</c>. Materialization is
+        /// cheap — such a statement produces few outcomes and a SELECT already
         /// materializes its rows before yielding its result set — and it fills
         /// <paramref name="outcomes"/> as the statement produces them, so what
-        /// a failing statement sent before its error — a body's messages and
-        /// result sets ahead of the error that ended it — still reaches the
-        /// client first, as real streams it.
+        /// a failing statement sent before its error still reaches the client
+        /// first, as real streams it. A statement that runs others — a block,
+        /// a <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c>, a call — streams them
+        /// instead (<see cref="Streams"/>, <see cref="StreamNext"/>), which is
+        /// what lets the request pause between them.
         /// </remarks>
         public void Run(Simulation simulation, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart)
         {
@@ -442,6 +476,115 @@ partial class Simulation
         }
 
         /// <summary>
+        /// Starts a <see cref="Streams"/> statement's body, whose outcomes
+        /// <see cref="StreamNext"/> then reads one at a time for the caller to
+        /// send as they come.
+        /// </summary>
+        /// <remarks>
+        /// The body reaches only what <see cref="Run"/> does around a compound
+        /// statement or a call: no database DDL refusal or implicit
+        /// transaction opens at either.
+        /// </remarks>
+        public IEnumerator<SimulatedStatementOutcome> StartStreaming(Simulation simulation, BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
+        {
+            this.streamOpen = true;
+            batch.StreamingFrames++;
+            return simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart).GetEnumerator();
+        }
+
+        /// <summary>
+        /// Moves a streaming statement's <paramref name="body"/> to its next
+        /// outcome. Once the body has ended — completed, or raised an error,
+        /// which is settled and routed as <see cref="Run"/> settles one — the
+        /// statement <see cref="Leave"/>s and this answers false.
+        /// </summary>
+        /// <remarks>
+        /// The error is caught around the move rather than around the
+        /// <c>yield</c> that sends each outcome, which an iterator can't hold
+        /// in a <c>try</c> with a <c>catch</c>: what the body sent before its
+        /// error has reached the client already, ahead of it, as real streams
+        /// it.
+        /// </remarks>
+        public bool StreamNext(Simulation simulation, BatchContext batch, IEnumerator<SimulatedStatementOutcome> body, bool requireSemicolonBeforeCte, bool atBatchStart)
+        {
+            var more = false;
+            try
+            {
+                try
+                {
+                    more = body.MoveNext();
+                    if (!more)
+                    {
+                        if (batch.CurrentStatement.PendingCompileRefusal is { } heldRefusal && !batch.CurrentStatement.BindsDeferredSource)
+                            throw heldRefusal;
+                        simulation.FireDdlTriggers(batch);
+                    }
+                }
+                catch (SimulatedSqlException thrown)
+                {
+                    more = false;
+                    if (batch.CurrentStatement.PendingCompileRefusal is { } pending && batch.IsSkipping && !DefersWithItsStatement(batch, thrown))
+                        thrown = pending;
+                    this.RouteError(batch, this.SettleError(simulation, batch, thrown, requireSemicolonBeforeCte, atBatchStart));
+                }
+            }
+            finally
+            {
+                if (!more)
+                    this.EndStream(batch);
+            }
+            return more;
+        }
+
+        /// <summary>
+        /// Notes an outcome a streaming statement's body sends, as the
+        /// statement's ending would read it among its own, and stamps it as
+        /// <see cref="Complete"/> stamps one the statement produced.
+        /// </summary>
+        public void NoteStreamed(BatchContext batch, SimulatedStatementOutcome outcome)
+        {
+            switch (outcome)
+            {
+                case SimulatedProcScopeBoundary boundary:
+                    this.streamedOpenScopes += boundary.IsEnter ? 1 : -1;
+                    break;
+                case SimulatedQueryResult query:
+                    this.StreamedOwnOutcome = this.StreamedQuery = true;
+                    if (query.OriginLine == 0)
+                    {
+                        query.OriginLine = batch.CurrentStatement.StartLine + batch.LineOffset;
+                        query.OriginProcedure = batch.ErrorProcedureName;
+                    }
+                    break;
+                case SimulatedNonQuery:
+                    this.StreamedOwnOutcome = true;
+                    break;
+            }
+            outcome.CountSuppressed ??= batch.Connection.NoCount;
+        }
+
+        /// <summary>
+        /// Ends a streaming statement's body, <see cref="Leave"/>ing once:
+        /// as <see cref="StreamNext"/> reaches its end, or when the client
+        /// abandons the batch while it runs.
+        /// </summary>
+        public void EndStream(BatchContext batch)
+        {
+            if (!this.streamOpen)
+                return;
+            this.streamOpen = false;
+            batch.StreamingFrames--;
+            this.Leave(batch);
+        }
+
+        /// <summary>
+        /// How many procedure or dynamic-SQL scopes the statement opened and
+        /// didn't close, among <paramref name="outcomes"/> and what it streamed.
+        /// </summary>
+        private readonly int OpenScopes(List<SimulatedStatementOutcome> outcomes) =>
+            OpenProcScopes(outcomes) + this.streamedOpenScopes;
+
+        /// <summary>
         /// Completes an error the statement raised before anything judges where
         /// it goes: the statement's whole binder report, the line and procedure
         /// the error is attributed to, and the rollbacks real performs before
@@ -492,6 +635,8 @@ partial class Simulation
                 ex.EndedFunctionWrite = true;
             if (batch.CalledFunctionBody && batch.UdfFrame is not null && !batch.IsSkipping)
                 ex.RaisedRunningFunctionBody = true;
+            if (batch.CurrentStatement.WritesText && !batch.IsSkipping)
+                ex.EndedTextWrite = true;
             if (!batch.SuppressDiagnosticsResolution)
             {
                 var diagnosticLine = ex.Class == 15 && !ex.RaisedByRaiserror
@@ -870,16 +1015,16 @@ partial class Simulation
                 {
                     errorOutcome.DoneKind = StatementDoneKind.Batch;
                 }
-                else if (this.IsCall && continuedError.RaisedBySystemProcedure && OpenProcScopes(outcomes) == 1)
+                else if (this.IsCall && continuedError.RaisedBySystemProcedure && this.OpenScopes(outcomes) == 1)
                 {
                     errorOutcome.DoneKind = StatementDoneKind.RaisError;
                     closedScopes = [ScopeExit(batch, continuedError.SystemProcedureReturnCode)];
                 }
-                else if (this.IsCall || OpenProcScopes(outcomes) > 0)
+                else if (this.IsCall || this.OpenScopes(outcomes) > 0)
                 {
                     errorOutcome.DoneKind = StatementDoneKind.ClosedByScope;
                     closedScopes = [];
-                    CloseAbandonedProcScopes(batch, [.. outcomes], closedScopes, this.IsCall, endedByError: true);
+                    CloseAbandonedProcScopes(batch, this.OpenScopes(outcomes), closedScopes, this.IsCall, endedByError: true);
                 }
                 else
                 {
@@ -990,9 +1135,9 @@ partial class Simulation
             // (probed 2026-09-28 against SQL Server 2025).
             if (this.FramesStatement)
             {
-                if (this.IsCall || OpenProcScopes(outcomes) > 0)
+                if (this.IsCall || this.OpenScopes(outcomes) > 0)
                 {
-                    CloseAbandonedProcScopes(batch, [.. outcomes], outcomes, this.IsCall, endedByError: false);
+                    CloseAbandonedProcScopes(batch, this.OpenScopes(outcomes), outcomes, this.IsCall, endedByError: false);
                 }
                 else if (this.StartDoneKind is not null)
                 {

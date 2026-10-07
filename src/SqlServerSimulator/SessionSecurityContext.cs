@@ -140,6 +140,37 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     public int ImpersonationDepth => this.impersonation.Count;
 
     /// <summary>
+    /// How many frames at the bottom of the stack a batch's own <c>EXECUTE
+    /// AS</c> pushed outside any module: the session's context, which each
+    /// of its MARS requests runs in, where the frames above it — a module's,
+    /// or an <c>EXECUTE AS</c> a module body ran — belong to the request whose
+    /// call pushed them (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    public int SessionFrames;
+
+    /// <summary>
+    /// Takes the frames above <see cref="SessionFrames"/> off the stack for a
+    /// request stepping aside inside a module call, null when there are none.
+    /// </summary>
+    public SecurityPrincipalFrame[]? TakeRequestFrames()
+    {
+        var count = this.impersonation.Count - this.SessionFrames;
+        if (count <= 0)
+            return null;
+        var frames = this.impersonation.GetRange(this.SessionFrames, count).ToArray();
+        this.impersonation.RemoveRange(this.SessionFrames, count);
+        this.Generation++;
+        return frames;
+    }
+
+    /// <summary>Puts back the frames <see cref="TakeRequestFrames"/> took, for the request resuming.</summary>
+    public void RestoreRequestFrames(SecurityPrincipalFrame[] frames)
+    {
+        this.impersonation.AddRange(frames);
+        this.Generation++;
+    }
+
+    /// <summary>
     /// The active application role's name, or <see langword="null"/> when none
     /// is set. An <c>sp_setapprole</c> activation replaces the session's
     /// database principal wholesale (the login stays, so <c>SYSTEM_USER</c> /
@@ -245,6 +276,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         if (guard.Cookie is { } issued ? cookie is null || !issued.AsSpan().SequenceEqual(cookie) : cookie is not null)
             throw SimulatedSqlException.RevertNeedsMatchingCookie();
         this.impersonation.RemoveAt(this.impersonation.Count - 1);
+        this.SessionFrames = Math.Min(this.SessionFrames, this.impersonation.Count);
         this.Generation++;
     }
 
@@ -256,5 +288,6 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
             this.impersonation.RemoveAt(this.impersonation.Count - 1);
             this.Generation++;
         }
+        this.SessionFrames = Math.Min(this.SessionFrames, this.impersonation.Count);
     }
 }

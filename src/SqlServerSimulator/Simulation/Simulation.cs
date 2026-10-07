@@ -2206,17 +2206,60 @@ public sealed partial class Simulation
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
+        // A statement inside a block, a TRY, an IF or a WHILE is a point a
+        // MARS request steps aside at, as one at a batch's own level is —
+        // what the statements before it queued going out first.
+        if (batch.FramedStatementDepth > 0 && batch.YieldsBetweenStatements && !batch.IsSkipping && batch.SendsAsStatementsEnd)
+        {
+            foreach (var message in DrainPendingMessages(batch.Connection))
+                yield return message;
+            yield return new SimulatedStatementBoundary();
+            if (batch.CancelledAtStatementBoundary())
+                yield break;
+        }
+
         var lifecycle = new StatementLifecycle(batch, atBatchStart);
         lifecycle.Enter(batch);
         List<SimulatedStatementOutcome> outcomes = [];
         batch.FramedStatementDepth++;
-        try
+        if (lifecycle.Streams)
         {
-            lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+            // A compound statement or a call sends what its statements produce
+            // as each produces it, which is what lets the request pause
+            // between them.
+            IEnumerator<SimulatedStatementOutcome>? body = null;
+            try
+            {
+                body = lifecycle.StartStreaming(this, batch, requireSemicolonBeforeCte, atBatchStart);
+                while (lifecycle.StreamNext(this, batch, body, requireSemicolonBeforeCte, atBatchStart))
+                {
+                    // What the body queued goes out ahead of what it sends
+                    // next, as a statement's queued messages precede its
+                    // outcomes.
+                    foreach (var message in DrainPendingMessages(batch.Connection))
+                        yield return message;
+                    var streamed = body.Current;
+                    lifecycle.NoteStreamed(batch, streamed);
+                    yield return streamed;
+                }
+            }
+            finally
+            {
+                body?.Dispose();
+                lifecycle.EndStream(batch);
+                batch.FramedStatementDepth--;
+            }
         }
-        finally
+        else
         {
-            batch.FramedStatementDepth--;
+            try
+            {
+                lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+            }
+            finally
+            {
+                batch.FramedStatementDepth--;
+            }
         }
         // A statement compiling as it runs sends its inlining failures ahead of
         // everything it sends, unless the compile itself failed — a binder
@@ -2281,7 +2324,7 @@ public sealed partial class Simulation
         // A statement that turns STATISTICS TIME on or off reports no time,
         // having started or ended without it.
         var timed = lifecycle.TimedCall || (lifecycle.TimedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
-        foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, timed && connection.StatisticsTime, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
+        foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, lifecycle.StreamedOwnOutcome, lifecycle.StreamedQuery, timed && connection.StatisticsTime, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
             yield return notice;
 
         // A WRITETEXT BULK has its data once the batch resumes, and runs again
@@ -2416,7 +2459,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
-        || (batch.CurrentStatement.WritesText && error.Number is 518 or 4002 or 4022 or 7116 or 7123 or 7125 or 7133 or 7135)
+        || ((batch.CurrentStatement.WritesText || error.EndedTextWrite) && error.Number is 518 or 4002 or 4022 or 7116 or 7123 or 7125 or 7133 or 7135)
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127) && !error.RefusedRecompilingDeferred
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite || batch.Connection.FiringTriggers.Count > 0)

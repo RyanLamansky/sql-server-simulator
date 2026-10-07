@@ -663,9 +663,11 @@ internal sealed partial class BatchContext
     public bool ContinueOnError;
 
     /// <summary>
-    /// Whether the top-level dispatch puts a <see cref="SimulatedStatementBoundary"/>
-    /// ahead of each statement but the first, for the TDS endpoint to let the
-    /// session's other MARS requests run there (see
+    /// Whether the dispatch puts a <see cref="SimulatedStatementBoundary"/>
+    /// ahead of each statement but the first — a block's, a <c>TRY</c>'s, an
+    /// <c>IF</c>'s or a <c>WHILE</c>'s included while every statement enclosing
+    /// it streams (<see cref="StreamingFrames"/>) — for the TDS endpoint to let
+    /// the session's other MARS requests run there (see
     /// <see cref="SimulatedDbCommand.YieldsBetweenStatements"/>).
     /// </summary>
     public bool YieldsBetweenStatements;
@@ -674,11 +676,34 @@ internal sealed partial class BatchContext
     /// How many statements are running inside one another: 1 while a
     /// statement the batch's own dispatch loop reached runs, more inside a
     /// block, a <c>TRY</c>, an <c>IF</c> or a <c>WHILE</c>, whose statements
-    /// run while the enclosing one does. Only a statement at 1 sends its
-    /// outcomes as it ends rather than with an enclosing one, which is what
-    /// lets a <c>WRITETEXT BULK</c> suspend the batch there.
+    /// run while the enclosing one does.
     /// </summary>
     public int FramedStatementDepth;
+
+    /// <summary>
+    /// How many of the <see cref="FramedStatementDepth"/> statements send what
+    /// their statements produce as each produces it rather than once they
+    /// end: a block, a <c>TRY</c>, an <c>IF</c> or a <c>WHILE</c> that runs.
+    /// Where every statement enclosing one streams, what it sends reaches the
+    /// client before the statements after it run, so the request can pause
+    /// there — for another MARS request, or for a <c>WRITETEXT BULK</c>'s data.
+    /// </summary>
+    public int StreamingFrames;
+
+    /// <summary>
+    /// Whether what this batch sends reaches the client as it is produced: a
+    /// command's own batch, and a procedure's or dynamic batch's whose call
+    /// streams its outcomes (see <c>Simulation.InvokeProcedure</c>), where any
+    /// other body's outcomes gather with the statement that ran it.
+    /// </summary>
+    public bool CallerStreams;
+
+    /// <summary>
+    /// Whether every statement enclosing the one about to dispatch streams
+    /// (<see cref="StreamingFrames"/>), so what the statement sends reaches the
+    /// client as it ends.
+    /// </summary>
+    public bool SendsAsStatementsEnd => this.CallerStreams && this.FramedStatementDepth == this.StreamingFrames;
 
     /// <summary>
     /// The suspended <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> whose
@@ -1598,6 +1623,7 @@ internal sealed partial class BatchContext
 
     public BatchContext(SimulatedDbCommand command)
     {
+        this.CallerStreams = true;
         this.NoExecActive = command.Connection!.NoExec;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);

@@ -691,6 +691,97 @@ public sealed class MarsTests
     }
 
     /// <summary>
+    /// A request steps aside inside a block, a <c>TRY</c>, a <c>CATCH</c>, an
+    /// <c>IF</c> or a <c>WHILE</c> as it does between its batch's statements:
+    /// the statement after a large result set there runs once the client has
+    /// read it, and another request run meanwhile sees neither that
+    /// statement's write nor the open blocks' error (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin select id, pad from big order by id; update big set v = 7 where id = 1 end")]
+    [DataRow("if 1 = 0 select 1 else begin select id, pad from big order by id; update big set v = 7 where id = 1 end")]
+    [DataRow("declare @i int = 0; while @i < 1 begin select id, pad from big order by id; update big set v = 7 where id = 1; set @i += 1 end")]
+    [DataRow("begin try select id, pad from big order by id; update big set v = 7 where id = 1 end try begin catch end catch")]
+    [DataRow("begin try declare @z int = 1 / 0 end try begin catch select id, pad from big order by id; update big set v = 7 where id = 1 end catch")]
+    public async Task LaterStatementInACompoundStatement_RunsOnceTheClientHasReadTheSelectBeforeIt(string sql)
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using var batch = new SqlCommand(sql, connection);
+        await using var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        await using (var look = new SqlCommand("select v from big where id = 1; select isnull(error_number(), -1)", connection))
+        await using (var looked = await look.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await looked.ReadAsync(TestContext.CancellationToken));
+            AreEqual(0, looked.GetInt32(0));
+            IsTrue(await looked.NextResultAsync(TestContext.CancellationToken));
+            IsTrue(await looked.ReadAsync(TestContext.CancellationToken));
+            AreEqual(-1, looked.GetInt32(0));
+        }
+        IsNull(await this.DrainAsync(reader));
+
+        await using var after = new SqlCommand("select v from big where id = 1", connection);
+        AreEqual(7, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A request steps aside inside a procedure or dynamic-SQL call too, and
+    /// another request run meanwhile runs outside the call: at nesting level
+    /// 0, as the session's identity rather than the module's
+    /// <c>EXECUTE AS</c>, without the module's <c>#temp</c> tables (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec pbig")]
+    [DataRow("exec ('select id, pad from big order by id; update big set v = 7 where id = 1')")]
+    [DataRow("exec sp_executesql N'select id, pad from big order by id; update big set v = 7 where id = 1'")]
+    public async Task LaterStatementInACall_RunsOnceTheClientHasReadTheSelectBeforeIt(string sql)
+    {
+        var simulation = WideRows();
+        Wire.ExecInProc(simulation, "create user u1 without login; grant select, update on big to u1");
+        Wire.ExecInProc(simulation, "create proc pbig with execute as 'u1' as create table #inproc (x int); select id, pad from big order by id; update big set v = 7 where id = 1");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using var batch = new SqlCommand(sql, connection);
+        await using var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        await using (var look = new SqlCommand("select concat((select v from big where id = 1), '|', @@nestlevel, '|', user_name(), '|', isnull(object_id('tempdb..#inproc'), -1))", connection))
+            AreEqual("0|0|dbo|-1", await look.ExecuteScalarAsync(TestContext.CancellationToken));
+        IsNull(await this.DrainAsync(reader));
+
+        await using var after = new SqlCommand("select v from big where id = 1", connection);
+        AreEqual(7, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A batch's own <c>EXECUTE AS</c> changes the session's context: the next
+    /// request to begin while the batch still runs is refused with Msg 15386,
+    /// and the one after runs in the changed context (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task ExecuteAsInARunningBatch_RefusesTheNextRequestOnce()
+    {
+        var simulation = WideRows();
+        Wire.ExecInProc(simulation, "create user u1 without login; grant select on big to u1");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using var batch = new SqlCommand("execute as user = 'u1'; select id, pad from big order by id; revert", connection);
+        await using var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        await using var look = new SqlCommand("select user_name()", connection);
+        AreEqual(15386, (await ThrowsExactlyAsync<SqlException>(() => look.ExecuteScalarAsync(TestContext.CancellationToken))).Number);
+        AreEqual("u1", await look.ExecuteScalarAsync(TestContext.CancellationToken));
+        IsNull(await this.DrainAsync(reader));
+    }
+
+    /// <summary>
     /// A cancel while the client is still reading a <c>SELECT</c> ends its
     /// batch there: the statements after it never run (probed 2026-10-06
     /// against SQL Server 2025).

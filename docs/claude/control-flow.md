@@ -288,6 +288,13 @@ The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnErro
 
 **The seam** is the catch in `StatementLifecycle.Run` (`Simulation.StatementLifecycle.cs`), one phase of the per-statement lifecycle `DispatchOneStatement` drives.
 Its materialize-then-catch wrapper (a) rolls back on deadlock class 13, (b) defers name-resolution errors in skip mode, (c) records the error into a `CATCH` frame when `TryFrameDepth > 0`.
+
+**A statement that runs others streams them instead.**
+A block, a `TRY`, an `IF`, a `WHILE` and a procedure or dynamic-SQL call that run (`StatementLifecycle.Streams`) send each outcome as their statements produce it, catching around each move of the body (`StreamNext`) rather than around the `yield` an iterator can't hold in a `try` with a `catch`; the error then settles and routes exactly as `Run`'s does, its ending reading what already went out from a summary (open procedure scopes, whether a result set or a count went out).
+That is what lets a request pause between them — for another MARS request ([`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets)) or for a bulk form's data ([`legacy-lob.md`](legacy-lob.md)) — and it holds only while every statement enclosing one streams (`BatchContext.StreamingFrames`, `CallerStreams`).
+Skip mode, the compile walk and a module bind still gather, as does every simple statement, and a call whose outcomes something else consumes — an `INSERT … EXEC`, `WITH RESULT SETS`, an RPC's procedure, a trigger or function body — gathers its body's too.
+Messages a streaming body queued go out ahead of the next outcome it sends, as a gathered statement's precede all of its own.
+A new path that runs a body by collecting its outcomes into a list is a place no request can pause inside; one that streams them must restore what the body changed on the session in a `finally` the client abandoning the batch reaches too.
 Continuation adds: when `TryFrameDepth == 0` and `ContinueOnError` is set, a statement-terminating error is captured into a local and — after the `finally` — the cursor is advanced to the next statement boundary (the same recovery scan the TRY-caught and deferred-name paths use), `@@ERROR` (`connection.LastErrorNumber`) is set to the error number, and a `SimulatedErrorOutcome` carrying the exception (and a **`RowReturning`** flag, below) is `yield return`ed before `yield break`.
 This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — those are TRY/CATCH-only state; outside a TRY the error goes to the client, not a CATCH block.
 

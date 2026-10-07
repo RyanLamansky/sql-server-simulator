@@ -522,7 +522,8 @@ partial class Simulation
         RefuseProcedureFromFunctionBody(batch, procedure.Name);
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym,
-            framesScope: batch.Connection.FramesEveryStatement && !insertExecSource, recompile: recompile);
+            framesScope: batch.Connection.FramesEveryStatement && !insertExecSource, recompile: recompile,
+            streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;

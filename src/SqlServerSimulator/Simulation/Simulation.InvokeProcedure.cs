@@ -43,6 +43,15 @@ partial class Simulation
     /// <c>exec p</c> reports <c>p</c> and <c>exec DBO.P</c> reports
     /// <c>DBO.P</c> (probe-confirmed against SQL Server 2025, 2026-09-23).
     /// </para>
+    /// <para>
+    /// A call whose outcomes reach the client as it produces them
+    /// (<paramref name="streams"/>) sends what a T-SQL body produces as each
+    /// statement ends, so the request can pause inside the body as it does
+    /// between its batch's statements; otherwise the body's outcomes gather,
+    /// and go out once it has ended. Either way the session's state reverts
+    /// as the body ends, whether it completes, fails or the client abandons
+    /// the batch partway through it.
+    /// </para>
     /// </remarks>
     internal IEnumerable<SimulatedStatementOutcome> InvokeProcedure(
         BatchContext outerBatch,
@@ -52,7 +61,8 @@ partial class Simulation
         string attributionName,
         Synonym? viaSynonym = null,
         bool framesScope = false,
-        bool recompile = false)
+        bool recompile = false,
+        bool streams = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -308,6 +318,17 @@ partial class Simulation
         // (probed 2026-09-28 against SQL Server 2025).
         var endedUnderImplicitTransactions = connection.ImplicitTransactions;
         BatchContext? innerBatch = null;
+        // What the body's run changed on the session, given back as it ends.
+        var bodyEntered = false;
+        var savedImpersonationDepth = 0;
+        var savedQuotedIdentifiers = false;
+        var savedAnsiNulls = false;
+        var savedTextSize = 0;
+        var savedNoCount = false;
+        SimulatedDbConnection.SessionOptionScope savedOptions = default;
+        var compiles = false;
+        IEnumerator<SimulatedStatementOutcome>? streamed = null;
+        SimulatedDbCommand? bodyCommand = null;
         // The body binds and runs in the procedure's own database, which is
         // the session's unless the call named it with a three-part name.
         var moduleScope = ModuleDatabaseScope.Enter(connection, procedure.Schema.Database);
@@ -317,10 +338,10 @@ partial class Simulation
             // Module WITH EXECUTE AS: push the impersonation frame around the body
             // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal,
             // Msg 15517 here if missing). The frame is active while the body
-            // materializes below (eager) so its scalars observe the impersonated
-            // identity; it unwinds on body exit — the empty-body branch below and
-            // the non-empty branch's finally each revert to this depth.
-            var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+            // runs so its scalars observe the impersonated identity; it unwinds
+            // on body exit — the empty-body branch below and the finally each
+            // revert to this depth.
+            savedImpersonationDepth = connection.Security.ImpersonationDepth;
             PushProcedureExecuteAsFrame(connection, procedure, procedure.Schema.Database);
             if (procedure.ClrEntry is { } clrEntry)
             {
@@ -334,9 +355,8 @@ partial class Simulation
             }
             else
             {
-                using var bodyCommand = new SimulatedDbCommand(this, connection);
 #pragma warning disable CA2100 // procedure.BodyText is the simulator's own captured body span
-                bodyCommand.CommandText = procedure.BodyText;
+                bodyCommand = new SimulatedDbCommand(this, connection) { CommandText = procedure.BodyText };
 #pragma warning restore CA2100
 
                 // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
@@ -344,9 +364,9 @@ partial class Simulation
                 // child parser) is what carries it to everything else that reads the
                 // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
                 // Restored in the finally below; see docs/claude/grammar.md.
-                var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+                savedQuotedIdentifiers = connection.QuotedIdentifiers;
                 connection.QuotedIdentifiers = procedure.UsesQuotedIdentifier;
-                var savedAnsiNulls = connection.AnsiNulls;
+                savedAnsiNulls = connection.AnsiNulls;
                 connection.AnsiNulls = procedure.UsesAnsiNulls;
                 innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
                 {
@@ -368,30 +388,31 @@ partial class Simulation
                     if (param.IsCursor)
                         innerBatch.CursorVariables[param.Name] = null;
                 }
+                bodyEntered = true;
                 connection.NestingLevel++;
                 // SET TEXTSIZE issued inside a proc body reverts at proc exit
                 // (probe-confirmed 2026-07-19), like the standard SET options;
                 // the body's result sets keep their production-time cap via the
                 // dispatch loop's per-statement ClientTextSize stamp.
-                var savedTextSize = connection.TextSize;
+                savedTextSize = connection.TextSize;
                 // SET NOCOUNT reverts at proc exit the same way (probe-confirmed);
                 // the counts the body's own statements reported were already
                 // stamped as it produced them.
-                var savedNoCount = connection.NoCount;
+                savedNoCount = connection.NoCount;
                 // XACT_ABORT / ROWCOUNT / DATEFIRST revert the same way, and unlike
                 // the six ANSI toggles the body's own SET does take effect while it
                 // runs (probe-confirmed for all three).
-                var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
+                savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
                 enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
-                // Materialize outcomes to a list so the try/finally cleanup
-                // (NestingLevel decrement, OUTPUT param writeback, return-code
-                // assignment) runs even when the iterator is partially consumed.
-                // An error that ends the body keeps what the body sent before it,
-                // which reaches the caller ahead of the error.
                 // STATISTICS TIME reports the body's compile on every call,
                 // ahead of what the body sends, at its last statement's line
-                // (probed 2026-09-28 against SQL Server 2025).
-                var compiles = connection.StatisticsTime && ReportsStatistics(outerBatch);
+                // (probed 2026-09-28 against SQL Server 2025), so a body it
+                // reports gathers its outcomes.
+                compiles = connection.StatisticsTime && ReportsStatistics(outerBatch);
+                innerBatch.CallerStreams = streams && !compiles;
+                innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && innerBatch.CallerStreams;
+                // An error that ends the body keeps what the body sent before
+                // it, which reaches the caller ahead of the error.
                 try
                 {
                     // The body compiles as the call is about to run it, unless
@@ -409,37 +430,57 @@ partial class Simulation
                     }
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
-                    foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
-                        outcomes.Add(outcome);
+                    if (innerBatch.CallerStreams)
+                    {
+                        streamed = DispatchStatementsUntil(innerBatch, endKeyword: null).GetEnumerator();
+                    }
+                    else
+                    {
+                        foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                            outcomes.Add(outcome);
+                    }
                 }
                 catch (SimulatedSqlException ex)
                 {
                     bodyError = ex;
                 }
-                finally
-                {
-                    if (compiles)
-                        outcomes.Insert(0, new SimulatedInfoOutcome(CompileTime(innerBatch, clock: null, innerBatch.LastTopLevelStatementLine + innerBatch.LineOffset, attributionName)));
-                    connection.NestingLevel--;
-                    endedUnderImplicitTransactions = connection.ImplicitTransactions;
-                    connection.QuotedIdentifiers = savedQuotedIdentifiers;
-                    connection.AnsiNulls = savedAnsiNulls;
-                    connection.TextSize = savedTextSize;
-                    connection.NoCount = savedNoCount;
-                    savedOptions.Restore(connection);
-                    // Local temp tables the body created are dropped at proc exit
-                    // (SQL Server's module-scoped lifetime — so a re-entrant call
-                    // re-creates them without a Msg 2714 collision).
-                    innerBatch.DropScopedTempTables();
-                    // Unwind the module's EXECUTE AS frame on body exit (including
-                    // a body error), before control and the OUTPUT / return-code
-                    // writeback return to the caller's security context.
-                    connection.Security.RevertTo(savedImpersonationDepth);
-                }
+            }
+
+            if (streamed is not null)
+            {
+                if (framesScope)
+                    yield return new SimulatedProcScopeBoundary(isEnter: true);
+                foreach (var outcome in outcomes)
+                    yield return outcome;
+                outcomes.Clear();
+                while (NextBodyOutcome(streamed, ref bodyError))
+                    yield return streamed.Current;
             }
         }
         finally
         {
+            streamed?.Dispose();
+            if (bodyEntered)
+            {
+                if (compiles)
+                    outcomes.Insert(0, new SimulatedInfoOutcome(CompileTime(innerBatch!, clock: null, innerBatch!.LastTopLevelStatementLine + innerBatch.LineOffset, attributionName)));
+                connection.NestingLevel--;
+                endedUnderImplicitTransactions = connection.ImplicitTransactions;
+                connection.QuotedIdentifiers = savedQuotedIdentifiers;
+                connection.AnsiNulls = savedAnsiNulls;
+                connection.TextSize = savedTextSize;
+                connection.NoCount = savedNoCount;
+                savedOptions.Restore(connection);
+                // Local temp tables the body created are dropped at proc exit
+                // (SQL Server's module-scoped lifetime — so a re-entrant call
+                // re-creates them without a Msg 2714 collision).
+                innerBatch!.DropScopedTempTables();
+                // Unwind the module's EXECUTE AS frame on body exit (including
+                // a body error), before control and the OUTPUT / return-code
+                // writeback return to the caller's security context.
+                connection.Security.RevertTo(savedImpersonationDepth);
+            }
+            bodyCommand?.Dispose();
             identityScope.Exit(IdentityScopeKind.Procedure);
             moduleScope.Exit();
         }
@@ -524,7 +565,7 @@ partial class Simulation
         // A call its caller frames brackets the body in scope markers, the
         // exit carrying the return status (probed 2026-09-28 against SQL
         // Server 2025); one an error ended is closed by the calling statement.
-        if (framesScope)
+        if (framesScope && streamed is null)
             yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
@@ -540,6 +581,25 @@ partial class Simulation
         }
         if (framesScope)
             yield return ScopeExit(outerBatch, procFrame.ReturnCode ?? procFrame.StatusWithoutReturnValue);
+    }
+
+    /// <summary>
+    /// Moves a streaming body to its next outcome, an error that ends the
+    /// body landing on <paramref name="bodyError"/> — caught around the move,
+    /// since the iterator sending each outcome can't catch around its
+    /// <c>yield</c>.
+    /// </summary>
+    private static bool NextBodyOutcome(IEnumerator<SimulatedStatementOutcome> body, ref SimulatedSqlException? bodyError)
+    {
+        try
+        {
+            return body.MoveNext();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            bodyError = ex;
+            return false;
+        }
     }
 
     /// <summary>

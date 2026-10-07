@@ -288,7 +288,7 @@ partial class Simulation
         // return status.
         if (isCall)
         {
-            CloseAbandonedProcScopes(batch, [.. outcomes], outcomes, isCall: true, endedByError: false);
+            CloseAbandonedProcScopes(batch, OpenProcScopes(outcomes), outcomes, isCall: true, endedByError: false);
             return;
         }
         if (CompilesParameterized(batch, start))
@@ -329,15 +329,15 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Closes, into <paramref name="closing"/>, the scopes an error abandoned
-    /// among <paramref name="produced"/> — at least one for a procedure call,
-    /// whose DONEPROC real sends even when the call failed before its body
-    /// began — with no return status, and with the error bit unless a
-    /// <c>TRY</c> caught the error (probed 2026-09-28 against SQL Server 2025).
+    /// Closes, into <paramref name="closing"/>, the <paramref name="abandoned"/>
+    /// scopes an error left open — at least one for a procedure call, whose
+    /// DONEPROC real sends even when the call failed before its body began —
+    /// with no return status, and with the error bit unless a <c>TRY</c>
+    /// caught the error (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
-    private static void CloseAbandonedProcScopes(BatchContext batch, List<SimulatedStatementOutcome> produced, List<SimulatedStatementOutcome> closing, bool isCall, bool endedByError)
+    private static void CloseAbandonedProcScopes(BatchContext batch, int abandoned, List<SimulatedStatementOutcome> closing, bool isCall, bool endedByError)
     {
-        var open = Math.Max(OpenProcScopes(produced), isCall ? 1 : 0);
+        var open = Math.Max(abandoned, isCall ? 1 : 0);
         var inModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
         for (var i = 0; i < open; i++)
         {

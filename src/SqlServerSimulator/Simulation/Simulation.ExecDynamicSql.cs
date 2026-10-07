@@ -149,7 +149,7 @@ partial class Simulation
         try
         {
             var dynamicBatch = linkedServerName is null
-                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null)
+                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null, streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource)
                 : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
             foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
                 yield return outcome;
@@ -436,20 +436,25 @@ partial class Simulation
         // batch runs — `EXEC other.sys.sp_executesql` is the idiom for running
         // dynamic SQL in another database (probed 2026-10-02 against SQL
         // Server 2025).
+        // A call whose outcomes reach the client as they are produced sends
+        // the batch's as it runs; the status and the OUTPUT writeback follow.
+        var streams = batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource;
         var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared, viaSystemProcedure: true, tableVariables: tableArguments,
             runsIn: calledInDatabase is null ? null
                 : this.Databases.TryGetValue(calledInDatabase, out var calledIn) ? calledIn
-                : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase));
+                : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase),
+            streams: streams);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? failure = null;
-        try
+        using (var sent = (resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets)).GetEnumerator())
         {
-            foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
-                outcomes.Add(outcome);
-        }
-        catch (SimulatedSqlException ex)
-        {
-            failure = ex;
+            while (NextBodyOutcome(sent, ref failure))
+            {
+                if (streams)
+                    yield return sent.Current;
+                else
+                    outcomes.Add(sent.Current);
+            }
         }
 
         // Writeback: sp_executesql's OUTPUT params copy the dynamic batch's
@@ -913,7 +918,9 @@ partial class Simulation
     /// procedure counting as one (<paramref name="viaSystemProcedure"/>;
     /// probed 2026-10-02 against SQL Server 2025: <c>@@NESTLEVEL</c> reads 2
     /// in an <c>EXEC('…')</c> a level-1 procedure runs, 3 in its
-    /// <c>sp_executesql</c>).
+    /// <c>sp_executesql</c>). A call whose outcomes reach the client as it
+    /// produces them (<paramref name="streams"/>) sends the batch's as each of
+    /// its statements ends, as <c>InvokeProcedure</c> does a body's.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> ExecuteDynamicBatch(
         BatchContext outerBatch,
@@ -921,7 +928,8 @@ partial class Simulation
         Dictionary<string, VariableSlot>? preDeclaredVariables,
         bool viaSystemProcedure = false,
         Database? runsIn = null,
-        Dictionary<string, HeapTable>? tableVariables = null)
+        Dictionary<string, HeapTable>? tableVariables = null,
+        bool streams = false)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -964,37 +972,61 @@ partial class Simulation
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? batchError = null;
         var compiled = false;
+        IEnumerator<SimulatedStatementOutcome>? streamed = null;
         try
         {
-            // Dynamic SQL is a batch of its own and compiles as one; an error
-            // compiling it is the EXEC's own, and the caller carries on.
-            var compileContext = CompileContextFor(innerBatch, dynCommand);
-            StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
-            if (this.CompileBatch(compileContext, key: null, out var inliningFailures) is { } compileError)
+            try
             {
-                compileError.EndedCalledBatch = true;
-                throw compileError;
-            }
-            compiled = true;
-            innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
-            innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
-            outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));
-            if (compileClock is not null)
-                outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));
+                // Dynamic SQL is a batch of its own and compiles as one; an error
+                // compiling it is the EXEC's own, and the caller carries on.
+                var compileContext = CompileContextFor(innerBatch, dynCommand);
+                StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
+                if (this.CompileBatch(compileContext, key: null, out var inliningFailures) is { } compileError)
+                {
+                    compileError.EndedCalledBatch = true;
+                    throw compileError;
+                }
+                compiled = true;
+                innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+                innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
+                outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));
+                if (compileClock is not null)
+                    outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));
 
-            // An error that ends the batch keeps what the batch sent before
-            // it, which reaches the caller ahead of the error.
-            var parser = innerBatch.Parser;
-            parser.MoveNextOptional();
-            foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
-                outcomes.Add(outcome);
-        }
-        catch (SimulatedSqlException ex) when (compiled)
-        {
-            batchError = ex;
+                // An error that ends the batch keeps what the batch sent before
+                // it, which reaches the caller ahead of the error.
+                var parser = innerBatch.Parser;
+                parser.MoveNextOptional();
+                innerBatch.CallerStreams = streams;
+                innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && streams;
+                if (streams)
+                {
+                    streamed = DispatchStatementsUntil(innerBatch, endKeyword: null).GetEnumerator();
+                }
+                else
+                {
+                    foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                        outcomes.Add(outcome);
+                }
+            }
+            catch (SimulatedSqlException ex) when (compiled)
+            {
+                batchError = ex;
+            }
+
+            if (streamed is not null)
+            {
+                yield return new SimulatedProcScopeBoundary(isEnter: true);
+                foreach (var outcome in outcomes)
+                    yield return outcome;
+                outcomes.Clear();
+                while (NextBodyOutcome(streamed, ref batchError))
+                    yield return streamed.Current;
+            }
         }
         finally
         {
+            streamed?.Dispose();
             connection.NestingLevel -= nestingLevels;
             // A USE inside the dynamic batch binds for that batch only — the
             // caller resumes on the database it was on (probe-confirmed for
@@ -1030,7 +1062,8 @@ partial class Simulation
         // The scope returns the status a procedure without a RETURN value
         // would (probed 2026-09-28 against SQL Server 2025); one an error ended
         // is closed by the calling statement, with no status.
-        yield return new SimulatedProcScopeBoundary(isEnter: true);
+        if (streamed is null)
+            yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
         if (batchError is not null)

@@ -251,6 +251,22 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     private bool FinalDoneBuffered => this.finalDoneAt >= 0 && this.finalDoneAt + DoneTokenLength == this.length;
 
     /// <summary>
+    /// Turns the response's last token, while it is still the last thing
+    /// buffered, from a DONEINPROC into the DONE — or a scope exit's into the
+    /// DONEPROC — a response must end with: a response a bulk form suspended
+    /// inside a procedure or dynamic-SQL call ends with one, as real's does
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    public void EndFinalDoneInScope()
+    {
+        if (!this.FinalDoneBuffered || this.buffer[this.finalDoneAt] != Tds.TokenDoneInProc)
+            return;
+        this.buffer[this.finalDoneAt] = BinaryPrimitives.ReadUInt16LittleEndian(this.buffer.AsSpan(this.finalDoneAt + 3)) == StatementDoneKind.Execute
+            ? Tds.TokenDoneProc
+            : Tds.TokenDone;
+    }
+
+    /// <summary>
     /// Sets the more bit on the response's closing DONE token while it is
     /// still the last thing buffered and unsent, so tokens can follow it;
     /// false when there is no such token.

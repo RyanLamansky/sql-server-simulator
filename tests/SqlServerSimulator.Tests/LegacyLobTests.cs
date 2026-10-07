@@ -727,16 +727,181 @@ public sealed class LegacyLobTests
     }
 
     /// <summary>
-    /// A statement a block, an <c>IF</c> or a <c>TRY</c> runs sends its
-    /// outcomes with the statement enclosing it, so a bulk form there can't
-    /// suspend its batch.
+    /// A bulk form in a block, an <c>IF</c> or a <c>WHILE</c> suspends its
+    /// batch there, so the connection's next command meets its Msg 4022 and
+    /// the rest of the batch never runs.
     /// </summary>
     [TestMethod]
-    [DataRow("if 1 = 1 writetext bulk t.tx @p")]
-    [DataRow("begin writetext bulk t.tx @p end")]
-    [DataRow("begin try updatetext bulk t.tx @p 0 0 end try begin catch end catch")]
-    public void BulkForm_Nested_IsNotModeled(string statement) =>
-        _ = Throws<NotSupportedException>(() => new Simulation().Also(LobFixture).ExecuteNonQuery($"declare @p varbinary(16) = (select textptr(tx) from t where id = 1); {statement}"));
+    [DataRow("if 1 = 1 writetext bulk t.tx @p; insert t (id) values (3)")]
+    [DataRow("begin insert t (id) values (3); writetext bulk t.tx @p; insert t (id) values (4) end")]
+    [DataRow("declare @i int = 0; while @i < 2 begin updatetext bulk t.tx @p 0 0; set @i += 1; insert t (id) values (3 + @i) end")]
+    public void BulkForm_Nested_TheNextCommandMeetsMsg4022(string statement)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"declare @p varbinary(16) = (select textptr(tx) from t where id = 1); {statement}";
+        _ = command.ExecuteNonQuery();
+
+        command.CommandText = "insert t (id) values (9)";
+        AreEqual(4022, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+        command.CommandText = "select count(*) from t where id <> 3";
+        AreEqual(2, command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A <c>TRY</c> around a waiting bulk form catches its Msg 4022, reported
+    /// at the statement's line, and what the rest of the batch sends answers
+    /// the command that met it; the error dooms an open transaction, which
+    /// the batch's end rolls back.
+    /// </summary>
+    [TestMethod]
+    public void BulkForm_InATry_ItsMsg4022IsCaught()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        const string Batch = """
+            declare @p varbinary(16) = (select textptr(tx) from t where id = 1);
+            begin try
+                writetext bulk t.tx @p;
+                select 'unreached'
+            end try
+            begin catch
+                select concat(error_number(), '|', error_line(), '|', xact_state(), '|', @@trancount)
+            end catch
+            """;
+        command.CommandText = Batch;
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 'unread'";
+        AreEqual("4022|3|1|0", command.ExecuteScalar());
+
+        command.CommandText = "begin tran; insert t (id) values (3); " + Batch;
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 'unread'";
+        var ex = Throws<SimulatedSqlException>(command.ExecuteScalar);
+        AreEqual(3998, ex.Number);
+        command.CommandText = "select concat(@@trancount, '|', (select count(*) from t))";
+        AreEqual("0|2", command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A transaction call while a bulk form waits is a transaction-manager
+    /// request SqlClient would send in the data's place, which ends the
+    /// session: Msg 4014, Msg 3621 and Msg 596, the connection closed and the
+    /// transaction rolled back (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin")]
+    [DataRow("commit")]
+    [DataRow("rollback")]
+    [DataRow("save")]
+    public void BulkForm_ATransactionCallWhileItWaits_EndsTheSession(string call)
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        var transaction = call == "begin" ? null : connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "insert t (id) values (3); declare @p varbinary(16) = (select textptr(tx) from t where id = 1); begin try writetext bulk t.tx @p end try begin catch end catch";
+        _ = command.ExecuteNonQuery();
+
+        var ex = Throws<SimulatedSqlException>(() =>
+        {
+            switch (call)
+            {
+                case "begin":
+                    _ = connection.BeginTransaction();
+                    break;
+                case "commit":
+                    transaction!.Commit();
+                    break;
+                case "rollback":
+                    transaction!.Rollback();
+                    break;
+                default:
+                    transaction!.Save("s");
+                    break;
+            }
+        });
+        CollectionAssert.AreEqual(new[] { 4014, 3621, 596, 0 }, ex.Errors.Select(error => error.Number).ToArray());
+        AreEqual(1, ex.LineNumber);
+        AreEqual(System.Data.ConnectionState.Closed, connection.State);
+        AreEqual(call == "begin" ? 3 : 2, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    /// <summary>
+    /// A bulk form in a procedure or dynamic SQL suspends the batch inside the
+    /// call: the next command meets its Msg 4022 at the statement's line in
+    /// the procedure, and a <c>TRY</c> around the call catches it.
+    /// </summary>
+    [TestMethod]
+    public void BulkForm_InAProcedureOrDynamicSql_SuspendsTheBatchInsideTheCall()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        _ = simulation.ExecuteNonQuery("""
+            create proc pw as
+            declare @p varbinary(16) = (select textptr(tx) from t where id = 1);
+            select 1;
+            writetext bulk t.tx @p;
+            insert t (id) values (4)
+            """);
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec pw; insert t (id) values (5)";
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 'unread'";
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(4022, ex.Number);
+        AreEqual(4, ex.LineNumber);
+        AreEqual("pw", ex.Procedure);
+        AreEqual(3621, ex.Errors[^1].Number);
+
+        command.CommandText = "begin try exec pw end try begin catch select concat(error_number(), '|', error_line(), '|', error_procedure()) end catch";
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 'unread'";
+        AreEqual("4022|4|pw", command.ExecuteScalar());
+
+        command.CommandText = "exec ('declare @p varbinary(16) = (select textptr(tx) from t where id = 1); writetext bulk t.tx @p'); insert t (id) values (6)";
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "select 'unread'";
+        AreEqual(4022, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+
+        command.CommandText = "select string_agg(id, ',') within group (order by id) from t";
+        AreEqual("1,2", command.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A text write's error ending a procedure is followed by Msg 3621 at
+    /// line 1, as one at the batch's level is (probed 2026-10-07 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void WriteError_InAProcedure_IsFollowedByMsg3621()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        _ = simulation.ExecuteNonQuery("create proc pbad as select 1; writetext t.tx 0x00000000000000000000000000000000 'x'; select 2");
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("exec pbad; select 3"));
+        CollectionAssert.AreEqual(new[] { 7123, 3621 }, ex.Errors.Select(error => error.Number).ToArray());
+        AreEqual(1, ex.Errors[^1].LineNumber);
+    }
+
+    /// <summary>
+    /// A trigger's statements run inside the statement that fired it, so a
+    /// bulk form in one can't suspend the batch.
+    /// </summary>
+    [TestMethod]
+    public void BulkForm_InATrigger_IsNotModeled()
+    {
+        var simulation = new Simulation().Also(LobFixture);
+        _ = simulation.ExecuteNonQuery("create table u (id int)");
+        _ = simulation.ExecuteNonQuery("create trigger tu on u after insert as declare @p varbinary(16) = (select textptr(tx) from t where id = 1); writetext bulk t.tx @p");
+        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("insert u values (1)"));
+    }
 }
 
 internal static class LegacyLobTestExtensions

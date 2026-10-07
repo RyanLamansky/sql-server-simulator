@@ -369,6 +369,99 @@ public sealed class InProcessMarsTests
     /// there: the statements after it never run (probed 2026-10-06 against
     /// SQL Server 2025).
     /// </summary>
+    /// <summary>
+    /// A batch pauses inside a block, a <c>TRY</c>, a <c>CATCH</c>, an
+    /// <c>IF</c> or a <c>WHILE</c> as it does between its own statements: the
+    /// statement after a large result set there runs once the reader has read
+    /// it, and another command run meanwhile sees neither that statement's
+    /// write nor the open blocks' error (probed 2026-10-07 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin select id, pad from big order by id; update big set v = 7 where id = 1 end")]
+    [DataRow("if 1 = 0 select 1 else begin select id, pad from big order by id; update big set v = 7 where id = 1 end")]
+    [DataRow("declare @i int = 0; while @i < 1 begin select id, pad from big order by id; update big set v = 7 where id = 1; set @i += 1 end")]
+    [DataRow("begin try select id, pad from big order by id; update big set v = 7 where id = 1 end try begin catch end catch")]
+    [DataRow("begin try declare @z int = 1 / 0 end try begin catch select id, pad from big order by id; update big set v = 7 where id = 1 end catch")]
+    public void LaterStatementInACompoundStatement_RunsOnceTheReaderHasReadTheSelectBeforeIt(string batch)
+    {
+        using var connection = Seeded();
+        using var command = connection.CreateCommand(batch);
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(0, Scalar(connection, "select v from big where id = 1"));
+        AreEqual(-1, Scalar(connection, "select isnull(error_number(), -1)"));
+        while (reader.Read())
+        {
+        }
+        AreEqual(7, Scalar(connection, "select v from big where id = 1"));
+        IsNull(Drain(reader));
+    }
+
+    /// <summary>
+    /// A batch pauses inside a procedure or dynamic-SQL call too, and another
+    /// command run meanwhile runs outside the call: at nesting level 0, as
+    /// the session's own identity rather than the module's <c>EXECUTE AS</c>,
+    /// with the module's settings and <c>#temp</c> tables out of its sight
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec pbig")]
+    [DataRow("exec ('select id, pad from big order by id; update big set v = 7 where id = 1')")]
+    [DataRow("exec sp_executesql N'select id, pad from big order by id; update big set v = 7 where id = 1'")]
+    public void LaterStatementInACall_RunsOnceTheReaderHasReadTheSelectBeforeIt(string batch)
+    {
+        using var connection = Seeded();
+        using (var create = connection.CreateCommand("create user u1 without login; grant select, update on big to u1"))
+            _ = create.ExecuteNonQuery();
+        using (var create = connection.CreateCommand("create proc pbig with execute as 'u1' as set dateformat dmy; create table #inproc (x int); select id, pad from big order by id; update big set v = 7 where id = 1"))
+            _ = create.ExecuteNonQuery();
+        using var command = connection.CreateCommand(batch);
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("0|0|dbo|mdy|-1", Scalar(connection, "select concat((select v from big where id = 1), '|', @@nestlevel, '|', user_name(), '|', (select date_format from sys.dm_exec_requests where session_id = @@spid and request_id = current_request_id()), '|', isnull(object_id('tempdb..#inproc'), -1))"));
+        while (reader.Read())
+        {
+        }
+        AreEqual(7, Scalar(connection, "select v from big where id = 1"));
+        IsNull(Drain(reader));
+    }
+
+    /// <summary>
+    /// A batch's own <c>EXECUTE AS</c> or <c>REVERT</c> changes the session's
+    /// context: the next command to begin while the batch still runs is
+    /// refused with Msg 15386, and the one after runs in the changed context
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ExecuteAsInARunningBatch_RefusesTheNextCommandOnce()
+    {
+        using var connection = Seeded();
+        using (var create = connection.CreateCommand("create user u1 without login; grant select on big to u1"))
+            _ = create.ExecuteNonQuery();
+        using (var command = connection.CreateCommand("execute as user = 'u1'; select id, pad from big order by id; revert; select id, pad from big order by id"))
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            var refused = Refused(() => Scalar(connection, "select user_name()"));
+            AreEqual(15386, refused.Number);
+            AreEqual("Another batch in the session is changing security context, new batch is not allowed to start.", refused.Message);
+            AreEqual("u1", Scalar(connection, "select user_name()"));
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(15386, Refused(() => Scalar(connection, "select user_name()")).Number);
+            AreEqual("dbo", Scalar(connection, "select user_name()"));
+            IsNull(Drain(reader));
+        }
+
+        using (var command = connection.CreateCommand("if 1 = 0 execute as user = 'u1'; select id, pad from big order by id"))
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual("dbo", Scalar(connection, "select user_name()"));
+        }
+    }
+
     [TestMethod]
     public void CancelWhileReadingASelect_TheStatementsAfterItNeverRun()
     {

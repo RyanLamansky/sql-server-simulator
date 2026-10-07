@@ -335,19 +335,24 @@ partial class Simulation
 
     /// <summary>
     /// The request a bulk form's first run ends with, once its column and
-    /// pointer have checked out. Only a statement the batch's own dispatch
-    /// loop runs can suspend the batch; the statements a block, a
-    /// <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c> or a module body runs send
-    /// their outcomes with the statement enclosing them.
+    /// pointer have checked out. A statement whose outcomes reach the client
+    /// as it ends can suspend the batch — one at the batch's own level, or in
+    /// a block, a <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c> or a procedure or
+    /// dynamic-SQL call, which stream theirs
+    /// (<see cref="BatchContext.StreamingFrames"/>,
+    /// <see cref="BatchContext.CallerStreams"/>).
     /// </summary>
     private static SimulatedBulkTextRequest AwaitBulkText(BatchContext batch, string statement)
     {
-        if (batch.FramedStatementDepth != 1 || !batch.ContinueOnError || batch.YieldsBetweenStatements
-            || batch.ProcFrame is not null || batch.TriggerFrame is not null || batch.UdfFrame is not null)
+        if (batch.FramedStatementDepth != batch.StreamingFrames + 1 || !batch.CallerStreams || batch.YieldsBetweenStatements)
         {
-            throw new NotSupportedException($"{statement} BULK inside a block, TRY, IF, WHILE, procedure, trigger or dynamic SQL, or on a MARS session, isn't modeled.");
+            throw new NotSupportedException($"{statement} BULK where its batch can't suspend — in a trigger or a function, in a procedure an RPC, INSERT … EXEC or WITH RESULT SETS calls, or on a MARS session — isn't modeled.");
         }
-        return new SimulatedBulkTextRequest();
+        return new SimulatedBulkTextRequest
+        {
+            InTry = batch.TryFrameDepth > 0,
+            StatementKind = statement == "WRITETEXT" ? StatementDoneKind.WriteText : StatementDoneKind.UpdateText,
+        };
     }
 
     /// <summary>

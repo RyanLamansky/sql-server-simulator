@@ -389,6 +389,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     {
         using var culture = CultureScope.Engine();
         this.ZombieCheck();
+        this.Owner.RefuseTransactionRequestWhileBulkTextWaits();
         this.Owner.RefuseApiRequest();
         this.apiCompleted = true;
         if (this.target.TranCount > 1)
@@ -412,6 +413,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
         using var culture = CultureScope.Engine();
         if (this.apiCompleted)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        if (!this.target.Ended)
+            this.Owner.RefuseTransactionRequestWhileBulkTextWaits();
         this.apiCompleted = true;
         if (!this.target.Ended)
             this.target.EndRollback();
@@ -430,6 +433,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         using var culture = CultureScope.Engine();
         this.ZombieCheck();
         RejectEmptyName(savepointName);
+        this.Owner.RefuseTransactionRequestWhileBulkTextWaits();
         this.Owner.RefuseApiRequest();
         this.Owner.RefuseApiTransactionOperation(this.target, state: 2);
         this.target.SetSavepointByName(savepointName);
@@ -464,6 +468,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         using var culture = CultureScope.Engine();
         this.ZombieCheck();
         RejectEmptyName(savepointName);
+        this.Owner.RefuseTransactionRequestWhileBulkTextWaits();
         this.target.RollbackByName(savepointName);
     }
 

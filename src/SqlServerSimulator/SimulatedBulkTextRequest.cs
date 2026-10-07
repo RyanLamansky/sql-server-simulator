@@ -32,4 +32,20 @@ sealed class SimulatedBulkTextRequest() : SimulatedStatementOutcome(-1)
     /// answers with Msg 4002.
     /// </summary>
     public bool StreamEndedEarly;
+
+    /// <summary>
+    /// Whether the waiting statement sits in a <c>TRY</c> block, which changes
+    /// how a transaction-manager request's end of the session closes it.
+    /// </summary>
+    public bool InTry;
+
+    /// <summary>The kind the waiting statement's DONE names.</summary>
+    public ushort StatementKind = StatementDoneKind.WriteText;
+
+    /// <summary>
+    /// How many procedure or dynamic-SQL scopes the TDS response that ended
+    /// here was inside, which the response resuming it renders at batch level
+    /// until they close.
+    /// </summary>
+    public int OpenScopes;
 }
