@@ -74,18 +74,16 @@ internal static class LockDmvs
         var sim = batch.Connection.Simulation;
         var locks = sim.LockManager;
         var dbId = SqlValue.FromInt32(database.Id);
-        // Real describes an OBJECT resource by 256 spaces, not by name — the
-        // object is resource_associated_entity_id (probed 2026-09-30 against
-        // SQL Server 2025).
-        var objectDescription = new string(' ', 256);
+        // Real describes an OBJECT resource by no text at all, not by name —
+        // the object is resource_associated_entity_id (probed 2026-09-30
+        // against SQL Server 2025).
+        var objectDescription = string.Empty;
         var grantStatus = SqlValue.FromNVarchar("GRANT");
         var waitStatus = SqlValue.FromNVarchar("WAIT");
         var objectType = SqlValue.FromNVarchar("OBJECT");
         var ridType = SqlValue.FromNVarchar("RID");
-        // Real reports a key lock as resource_type KEY with a hash of the
-        // anchoring index key; the simulator prints the key itself (see
-        // KeyLockGroup.Describe), so the type matches and the description
-        // doesn't, save the infinity anchor's.
+        // Real reports a key lock as resource_type KEY described by a hash of
+        // the index key (KeyLockGroup.Describe).
         var keyType = SqlValue.FromNVarchar("KEY");
 
         var waitsByResource = SnapshotWaiters(sim, out var keyWaits);
@@ -94,8 +92,7 @@ internal static class LockDmvs
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus, SchemaLocksBesideDataLock(locks, t)))
-                    yield return row;
+                // The schema and data locks are one resource, real's object lock.
                 foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
                 var folded = FoldRowLocksIntoKeyLocks(locks, t);
@@ -103,11 +100,11 @@ internal static class LockDmvs
                     yield return row;
                 foreach (var (_, group) in t.KeyLockGroups)
                 {
-                    foreach (var row in EmitRowsForResource(locks, keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
+                    foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
                     foreach (var kv in group.Anchors)
                     {
-                        foreach (var row in EmitRowsForResource(locks, keyType, dbId, KeyLockGroup.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
+                        foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
                             yield return row;
                     }
                 }
@@ -164,6 +161,13 @@ internal static class LockDmvs
                 yield return row;
         }
     }
+
+    /// <summary>
+    /// A <c>resource_description</c> value as real's view holds it: blank-padded
+    /// to the column's 256 characters whatever the resource type (probed
+    /// 2026-10-07 against SQL Server 2025, every row's <c>DATALENGTH</c> 512).
+    /// </summary>
+    private static SqlValue Description(string text) => SqlValue.FromNVarchar(text.PadRight(256));
 
     // 32-bit FNV-1a over the resource name's UTF-16 code units, for the
     // hash slot of an APPLICATION resource_description.
@@ -289,6 +293,10 @@ internal static class LockDmvs
             }
         }
 
+        // A key a session deleted and inserted again is two rows here, at two
+        // addresses, and one key lock on real, whose index keeps the key in
+        // place: each key a session holds shows once per index.
+        var shown = new HashSet<(KeyLockGroup? Group, string Description, int Spid, string Mode, bool Waiting)>();
         foreach (var (address, resource) in rows)
         {
             var holders = locks.HoldersOf(resource);
@@ -299,19 +307,24 @@ internal static class LockDmvs
                 ? DescribeImageKey(table, rowGroup, image)
                 : $"{address.PageIndex}:{address.SlotIndex}";
             foreach (var row in EmitRowsForResource(locks, rowType, dbIdVal, description, table.ObjectId, resource, waitersByResource, grantStatus, waitStatus, folded))
-                yield return row;
+            {
+                if (rowGroup is null || shown.Add((rowGroup, description, row[6].AsInt32, row[4].AsString, row[5].AsString == "WAIT")))
+                    yield return row;
+            }
             foreach (var hold in holders)
             {
                 if (hold.Mode != LockMode.Exclusive)
                     continue;
                 var spid = SqlValue.FromInt32(hold.Owner.Spid);
-                foreach (var key in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
+                foreach (var (group, key) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
                 {
+                    if (!shown.Add((group, key, hold.Owner.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
+                        continue;
                     yield return
                     [
                         keyType,
                         dbIdVal,
-                        SqlValue.FromNVarchar(key),
+                        Description(key),
                         SqlValue.FromInt64(table.ObjectId),
                         SqlValue.FromNVarchar(ModeAbbreviation(LockMode.Exclusive)),
                         grantStatus,
@@ -331,7 +344,7 @@ internal static class LockDmvs
             [
                 keyType,
                 dbIdVal,
-                SqlValue.FromNVarchar(key),
+                Description(key),
                 SqlValue.FromInt64(table.ObjectId),
                 SqlValue.FromNVarchar(ModeAbbreviation(waitMode)),
                 waitStatus,
@@ -359,10 +372,10 @@ internal static class LockDmvs
     /// <see cref="EmitRowLocks"/>). A key the session holds a key lock on
     /// already is reported by that lock's own row.
     /// </summary>
-    private static List<string> IndexKeysWritten(
+    private static List<(KeyLockGroup Group, string Description)> IndexKeysWritten(
         BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live)
     {
-        var keys = new List<string>();
+        var keys = new List<(KeyLockGroup Group, string Description)>();
         var locks = batch.Connection.Simulation.LockManager;
         var pre = table.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryGetValue(address, out var entry) ? entry.Image : null;
         var inserted = ReferenceEquals(resource.InsertedBy, owner);
@@ -412,8 +425,8 @@ internal static class LockDmvs
                         return;
                 }
             }
-            if (!keys.Contains(description))
-                keys.Add(description);
+            if (!keys.Contains((group, description)))
+                keys.Add((group, description));
         }
     }
 
@@ -424,7 +437,7 @@ internal static class LockDmvs
         var components = new SqlValue[group.Ordinals.Length];
         for (var i = 0; i < components.Length; i++)
             components[i] = RowDecoder.DecodeColumn(table.StoredColumns, image, group.Ordinals[i], table.Heap);
-        return KeyLockGroup.Describe(new Parser.SqlValueKey(components));
+        return group.Describe(new Parser.SqlValueKey(components));
     }
 
     private static IEnumerable<SqlValue[]> EmitRowsForResource(
@@ -442,14 +455,21 @@ internal static class LockDmvs
         // Empty-resource fast path: nothing held or waiting → no rows.
         if (resource.Holders.Count == 0 && !waitersByResource.ContainsKey(resource))
             yield break;
-        var descVal = SqlValue.FromNVarchar(description);
+        var descVal = Description(description);
         var entityVal = SqlValue.FromInt64(entityId);
         // GRANT rows from current holders. A U its holder has since taken X
         // over is real's lock converted, reported as the X alone.
-        foreach (var hold in locks.HoldersOf(resource))
+        var holders = locks.HoldersOf(resource);
+        foreach (var hold in holders)
         {
             var mode = hold.Mode;
             if (mode == LockMode.Update && HoldsExclusive(locks, resource, hold.Owner))
+                continue;
+            // A statement's Sch-S is real's compile-time lock, which real's
+            // view shows only while nothing else of the session's stands on the
+            // object: an executing read's IS, a write's IX and a redefinition's
+            // Sch-M, granted or waiting, each show alone.
+            if (mode == LockMode.SchemaStability && HoldsOrSeeksAnotherMode(holders, waitersByResource, resource, hold.Owner))
                 continue;
             if (folded is not null && folded.TryGetValue((resource, hold.Owner, mode), out var reported))
             {
@@ -489,18 +509,22 @@ internal static class LockDmvs
         }
     }
 
-    // Real's object lock is one resource; the simulator's two meet in a
-    // statement redefining the table (BatchContext.AcquireTableRedefinitionLock),
-    // whose Sch-M then shows once, on the data lock that outlives the statement.
-    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? SchemaLocksBesideDataLock(LockManager locks, HeapTable table)
+    private static bool HoldsOrSeeksAnotherMode(LockResource.Hold[] holders, Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource, LockResource resource, SessionToken owner)
     {
-        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
-        foreach (var hold in locks.HoldersOf(table.TableDataLock))
+        foreach (var hold in holders)
         {
-            if (hold.Mode == LockMode.SchemaModification)
-                (folded ??= [])[(table.SchemaLock, hold.Owner, LockMode.SchemaModification)] = null;
+            if (hold.Mode != LockMode.SchemaStability && ReferenceEquals(hold.Owner, owner))
+                return true;
         }
-        return folded;
+        if (waitersByResource.TryGetValue(resource, out var waiters))
+        {
+            foreach (var waiter in waiters)
+            {
+                if (ReferenceEquals(waiter.Session, owner))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static bool HoldsExclusive(LockManager locks, LockResource resource, SessionToken owner)
@@ -516,22 +540,30 @@ internal static class LockDmvs
     /// <summary>
     /// Returns the SPID of one connection currently holding
     /// <paramref name="resource"/> with a mode incompatible with
-    /// <paramref name="waiter"/>'s wait — that's the blocker
-    /// <c>sys.dm_os_waiting_tasks</c> attributes the wait to. Returns
-    /// <c>null</c> when nothing blocks (a race against grant — the
-    /// waiter's about to unblock).
+    /// <paramref name="waiter"/>'s wait, or failing that of the request queued
+    /// ahead of it that it waits behind — that's the blocker
+    /// <c>sys.dm_os_waiting_tasks</c> attributes the wait to, as real names a
+    /// Sch-M still waiting for the Sch-S request queued behind it (probed
+    /// 2026-10-07 against SQL Server 2025). Returns <c>null</c> when nothing
+    /// blocks (a race against grant — the waiter's about to unblock).
     /// </summary>
     internal static int? FindFirstBlocker(LockResource resource, SimulatedDbConnection waiter)
     {
         if (waiter.WaitingForMode is not { } mode)
             return null;
-        foreach (var hold in waiter.Simulation.LockManager.HoldersOf(resource))
+        var locks = waiter.Simulation.LockManager;
+        foreach (var hold in locks.HoldersOf(resource))
         {
             if (ReferenceEquals(hold.Owner, waiter.Session))
                 continue;
             if (LockManager.IsCompatible(hold.Mode, mode))
                 continue;
             return hold.Owner.Spid;
+        }
+        foreach (var (owner, waiting) in locks.QueuedAheadOf(resource, waiter.Session))
+        {
+            if (!LockManager.IsCompatible(waiting, mode))
+                return owner.Spid;
         }
         return null;
     }
@@ -615,18 +647,19 @@ internal static class LockDmvs
             {
                 foreach (var (_, t) in schema.HeapTables)
                 {
-                    if (ReferenceEquals(t.SchemaLock, resource))
-                        return $"OBJECT: {t.Name}";
                     if (ReferenceEquals(t.TableDataLock, resource))
-                        return $"OBJECT (data): {t.Name}";
-                    foreach (var kv in t.RowLocks)
+                        return $"OBJECT: {t.Name}";
+                    if (resource.RowAddress is { } address && ReferenceEquals(resource.OwningTable, t))
                     {
-                        if (ReferenceEquals(kv.Value, resource))
-                            return $"RID: {t.Name} {kv.Key.PageIndex}:{kv.Key.SlotIndex}";
+                        // A clustered table's row lock is real's lock on its key.
+                        return KeyLockGroup.RowGroupOf(t) is { } rowGroup
+                            && (t.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex) ?? PreImageOf(t, address, sim.LockManager.HoldersOf(resource))) is { } image
+                            ? $"KEY: {t.Name} {DescribeImageKey(t, rowGroup, image)}"
+                            : $"RID: {t.Name} {address.PageIndex}:{address.SlotIndex}";
                     }
                     if (resource.KeyGroup is { } group && ReferenceEquals(group.Table, t))
                     {
-                        return $"KEY: {t.Name} {KeyLockGroup.Describe(resource.AnchorKey)}";
+                        return $"KEY: {t.Name} {group.Describe(resource.AnchorKey)}";
                     }
                 }
             }

@@ -800,10 +800,18 @@ partial class Simulation
         else if (positionedCursor is null && Selection.MutationPlanStarts(table, where))
             RunUpdateStartupConstants(context, table, where is null ? [] : [where], assignments);
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, positionedCursor is not null);
+        // A write wholly through a seek of the clustered key waits in X, as
+        // real's plan writes through that seek without reading ahead. Only
+        // another session's write in flight makes the walk wait at all; a
+        // shared reader is waited out by the X the row is then written under.
+        var contended = positionedCursor is null && sourceView is null && where is not null && !readsNoRow
+            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
+        var targetWait = contended && Selection.WhereIsClusteredKeySeek(table, where!) ? LockMode.Exclusive : LockMode.Update;
+        var throughIndex = contended && targetWait == LockMode.Update ? Selection.MutationSeekIndex(table, where!) : null;
         // A seek chose its rows from the images they carried; one a wait here
         // let settle may carry another.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
-            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null)
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null, targetWait, throughIndex)
             && where is not null)
         {
             rowSource = MutationRowSource(table, where, context.Batch);
@@ -827,7 +835,7 @@ partial class Simulation
             // Judged as another session's write leaves it: the walk waits out,
             // in U, a row that session holds.
             var rowBytes = scannedBytes;
-            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes)
+            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes, targetWait, throughIndex)
                 || JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
             {
                 continue;
@@ -839,7 +847,7 @@ partial class Simulation
         if (positionedCursor is null && !readsNoRow)
         {
             if (!table.SupersededKeyImages.IsEmptyLockFree())
-                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null);
+                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null, targetWait, throughIndex);
             if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
                 context.Batch.TargetKeyReinserted = true;
         }
@@ -1285,8 +1293,11 @@ partial class Simulation
     /// <see cref="HeapTable.SupersededKeyImages"/> for emptiness first, a
     /// lock-free read, so a statement with no such write in flight on
     /// <paramref name="table"/> doesn't build <paramref name="priorQualifies"/>.
+    /// <paramref name="mode"/> is the walk's wait, U or X, and
+    /// <paramref name="throughIndex"/> the nonclustered index its seek reads
+    /// through (<see cref="BatchContext.AwaitTargetRowWriters"/>).
     /// </summary>
-    private static bool AwaitSupersededTargetRows(BatchContext batch, HeapTable table, Func<(int Page, int Slot), byte[], bool> priorQualifies)
+    private static bool AwaitSupersededTargetRows(BatchContext batch, HeapTable table, Func<(int Page, int Slot), byte[], bool> priorQualifies, LockMode mode = LockMode.Update, KeyLockGroup? throughIndex = null)
     {
         if (batch.IsSkipping || batch.SupersededTargetRows(table) is not { } superseded)
             return false;
@@ -1306,7 +1317,7 @@ partial class Simulation
             }
             if (qualifies)
             {
-                _ = batch.AwaitSupersededTargetRow(table, resource);
+                _ = batch.AwaitSupersededTargetRow(table, resource, mode, throughIndex, priorImage);
                 matched = true;
             }
         }

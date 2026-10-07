@@ -75,7 +75,7 @@ partial class Simulation
         RecordTableDdlUndo(context, table);
         table.SettleIndexIds();
         foreach (var index in dropped)
-            _ = table.Indexes.Remove(index);
+            table.RemoveIndex(index);
         return true;
     }
 

@@ -250,10 +250,18 @@ partial class Simulation
             RunUpdateStartupConstants(context, table, [where], []);
         }
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, positionedCursor is not null);
+        // A write wholly through a seek of the clustered key waits in X, as
+        // real's plan writes through that seek without reading ahead. Only
+        // another session's write in flight makes the walk wait at all; a
+        // shared reader is waited out by the X the row is then written under.
+        var contended = positionedCursor is null && sourceView is null && where is not null && !readsNoRow
+            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
+        var targetWait = contended && Selection.WhereIsClusteredKeySeek(table, where!) ? LockMode.Exclusive : LockMode.Update;
+        var throughIndex = contended && targetWait == LockMode.Update ? Selection.MutationSeekIndex(table, where!) : null;
         // A seek chose its rows from the images they carried; one a wait here
         // let settle may carry another.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
-            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _))
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _), targetWait, throughIndex)
             && where is not null)
         {
             rowSource = MutationRowSource(table, where, context.Batch);
@@ -269,7 +277,7 @@ partial class Simulation
 
             // Judged as another session's write leaves it, as UPDATE's are.
             var rowBytes = scannedBytes;
-            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes)
+            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes, targetWait, throughIndex)
                 || !JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
             {
                 continue;
@@ -281,7 +289,7 @@ partial class Simulation
         if (positionedCursor is null && !readsNoRow)
         {
             if (!table.SupersededKeyImages.IsEmptyLockFree())
-                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _));
+                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _), targetWait, throughIndex);
             if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
                 context.Batch.TargetKeyReinserted = true;
         }

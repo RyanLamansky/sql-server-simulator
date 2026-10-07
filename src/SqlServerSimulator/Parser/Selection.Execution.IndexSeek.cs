@@ -3402,6 +3402,137 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Whether <paramref name="where"/> is wholly a seek of
+    /// <paramref name="table"/>'s clustered key — equalities on a leading run
+    /// of its columns, then at most one more column bounded by a range, each
+    /// against a value the row doesn't supply, and nothing else — the shape
+    /// real's plan writes through the seek itself rather than reading the row
+    /// first, so a single-table UPDATE or DELETE of it waits on another
+    /// session's row in X rather than U (probed 2026-10-07 against SQL Server
+    /// 2025: <c>WHERE k = 5</c>, <c>k &gt;= 5</c> and <c>a = 1 AND b &gt;= 2</c>
+    /// wait <c>LCK_M_X</c>; a residual predicate, a range ahead of another
+    /// column, <c>k IN (1, 5)</c> and a scan wait <c>LCK_M_U</c>).
+    /// </summary>
+    internal static bool WhereIsClusteredKeySeek(HeapTable table, BooleanExpression where)
+    {
+        if (KeyLockGroup.RowGroupOf(table) is not { } clustered)
+            return false;
+        var source = BuildBaseTableSeekSource(table, table.Name);
+        var conjuncts = new List<BooleanExpression>();
+        where.CollectConjuncts(conjuncts);
+        var equal = new HashSet<int>();
+        var ranged = new HashSet<int>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue: false, planSources: null, out var ordinal, out _)
+                    && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue: false, planSources: null, out ordinal, out _))
+                {
+                    return false;
+                }
+                _ = equal.Add(ordinal);
+            }
+            else if (conjunct.TryGetRangeOperands(out left, out _, out right))
+            {
+                if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue: false, planSources: null, out var ordinal, out _)
+                    && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue: false, planSources: null, out ordinal, out _))
+                {
+                    return false;
+                }
+                _ = ranged.Add(ordinal);
+            }
+            else if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
+                && TryIdentifyIndexableColumn(source, value, out var betweenOrdinal)
+                && IsStableValueSide(lower, source, allowCorrelatedColumnValue: false, planSources: null)
+                && IsStableValueSide(upper, source, allowCorrelatedColumnValue: false, planSources: null))
+            {
+                _ = ranged.Add(betweenOrdinal);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        var keys = clustered.Ordinals;
+        var prefix = 0;
+        while (prefix < keys.Length && equal.Contains(keys[prefix]))
+            prefix++;
+        var seeked = keys.AsSpan(0, prefix);
+        foreach (var ordinal in equal)
+        {
+            if (!seeked.Contains(ordinal))
+                return false;
+        }
+        foreach (var ordinal in ranged)
+        {
+            if (!seeked.Contains(ordinal) && (prefix == keys.Length || keys[prefix] != ordinal))
+                return false;
+        }
+        return prefix != 0 || ranged.Contains(keys[0]);
+    }
+
+    /// <summary>
+    /// The key lock group of the nonclustered index or key a single-table
+    /// write's seek (<see cref="SeekMutationTarget"/>) reaches its rows
+    /// through — chosen as that seek chooses, the longest equality prefix and
+    /// then a leading range — or null when it seeks the clustered key, unions
+    /// seeks or scans. Real reads such a row's index key under U before it
+    /// waits on the row (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal static KeyLockGroup? MutationSeekIndex(HeapTable table, BooleanExpression where)
+    {
+        var source = BuildBaseTableSeekSource(table, table.Name);
+        var conjuncts = new List<BooleanExpression>();
+        where.CollectConjuncts(conjuncts);
+        var equalities = new Dictionary<int, Expression[]>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: false)
+                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: false);
+                continue;
+            }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
+        }
+        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
+
+        object? owner = null;
+        if (equalities.Count != 0)
+        {
+            var bestLen = 0;
+            var bestContinues = false;
+            foreach (var key in table.KeyConstraints)
+                Consider(key, key.StorageOrdinals);
+            foreach (var index in table.Indexes)
+                Consider(index, [.. index.KeyColumns.Select(static column => column.StorageOrdinal)]);
+
+            void Consider(object candidate, int[] ordinals)
+            {
+                var len = 0;
+                while (len < ordinals.Length && equalities.ContainsKey(ordinals[len]))
+                    len++;
+                var continues = len > 0 && len < ordinals.Length && bounds.ContainsKey(ordinals[len]);
+                if (len > bestLen || (len == bestLen && len > 0 && continues && !bestContinues))
+                    (bestLen, bestContinues, owner) = (len, continues, candidate);
+            }
+        }
+        else if (FindRangeLeadingOrdinal(table, bounds) is { } ordinal)
+        {
+            owner = table.KeyConstraints.Find(key => key.StorageOrdinals is [var first, ..] && first == ordinal)
+                ?? (object?)table.Indexes.Find(index => index.KeyColumns is [var first, ..] && first.StorageOrdinal == ordinal);
+        }
+        return owner switch
+        {
+            KeyConstraint { IsClustered: false } or Storage.Index { IsClustered: false } => KeyLockGroup.For(table, owner),
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// A per-source-row target seeker for a MERGE whose <c>ON</c> carries a
     /// seekable equality on the target's leading key / index prefix — returns
     /// <c>null</c> when no such equality exists (caller keeps its

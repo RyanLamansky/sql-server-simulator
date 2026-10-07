@@ -38,13 +38,46 @@ public sealed class WriterLockFidelityTests
         "create view c1s as select k, v from c1",
     ];
 
-    // A session's row and key locks: type, mode, and a KEY's description.
-    private static string RowAndKeyLocks(DbConnection connection, int? spid = null) =>
-        (string)connection.CreateCommand($"""
-            select isnull(string_agg(concat(resource_type, ' ', request_mode, iif(request_status = 'WAIT', ' WAIT', ''), iif(resource_type = 'KEY', ' ' + resource_description, '')), ', ')
-                within group (order by resource_type, request_mode, resource_description), '')
+    // A session's row and key locks: type, mode, and a KEY's description,
+    // read back from real's hash as the key it describes.
+    private static string RowAndKeyLocks(DbConnection connection, int? spid = null)
+    {
+        using var command = connection.CreateCommand($"""
+            select resource_type, request_mode, request_status, resource_description
             from sys.dm_tran_locks where request_session_id = {spid?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "@@spid"} and resource_type in ('KEY', 'RID')
-            """).ExecuteScalar()!;
+            """);
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+        {
+            var type = reader.GetString(0);
+            rows.Add($"{type} {reader.GetString(1)}{(reader.GetString(2) == "WAIT" ? " WAIT" : "")}{(type == "KEY" ? " " + KeyOf(reader.GetString(3).TrimEnd()) : "")}");
+        }
+        rows.Sort(StringComparer.Ordinal);
+        return string.Join(", ", rows);
+    }
+
+    // The keys these tests lock, by the description SQL Server 2025 gives
+    // each: its hash of the index row's key (probed 2026-10-07).
+    private static string KeyOf(string description) => description switch
+    {
+        "(30b7763ed433)" => "(9)",
+        "(40fd182c0dd9)" => "(7)",
+        "(59855d342c69)" => "(5)",
+        "(61a06abd401c)" => "(2)",
+        "(75233ce2f320)" => "(150)",
+        "(8194443284a0)" => "(1)",
+        "(98ec012aa510)" => "(3)",
+        "(9f502deadad2)" => "(300)",
+        "(a0c936a3c965)" => "(4)",
+        "(af5579654878)" => "(200)",
+        "(b53a24a58f2a)" => "(5,5)",
+        "(b9b173bbe8d5)" => "(6)",
+        "(c62f6866c539)" => "(7,3)",
+        "(c9fb1da9313f)" => "(8)",
+        "(e2338e2f4a9f)" => "(1,1)",
+        _ => description,
+    };
 
     private static int Spid(DbConnection connection) => (short)connection.CreateCommand("select @@spid").ExecuteScalar()!;
 
@@ -77,6 +110,7 @@ public sealed class WriterLockFidelityTests
     [DataRow("insert c5 values (9, 1, 9)", "KEY U (1)", DisplayName = "IGNORE_DUP_KEY duplicate ignored")]
     [DataRow("insert hu values (3, 3)", "KEY RangeS-U (5), KEY RangeX-X (3), RID X", DisplayName = "IGNORE_DUP_KEY heap UNIQUE insert")]
     [DataRow("update c5 set u = 3 where k = 5", "KEY X (3), KEY X (5), KEY X (5)", DisplayName = "IGNORE_DUP_KEY index update takes no range")]
+    [DataRow("delete c1 where k = 1; insert c1 values (1, 7)", "KEY X (1)", DisplayName = "Key deleted and inserted again, one lock")]
     public void WrittenRow_LocksItsIndexKeys(string write, string expected)
     {
         var simulation = new Simulation();
@@ -132,6 +166,16 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from d1 join c1 on c1.k = d1.k where d1.k = 5", "KEY U WAIT (5)", DisplayName = "Joined UPDATE seeking its target by the join key")]
     [DataRow("update c1 set v = 50 where k = 5", "delete c1 from d1 join c1 on c1.k = d1.k where d1.k = 5", "KEY U WAIT (5)", DisplayName = "Joined DELETE seeking its target by the join key")]
     [DataRow("update c1 set v = 50 where k = 5", "update c1v set v = v + 1 where k = 5", "KEY U WAIT (5)", DisplayName = "UPDATE through a join view seeking its target")]
+    [DataRow("update c3 set v = 50 where k = 5", "update c3 set v = 9 where n = 5", "KEY U (5,5), KEY U WAIT (5)", DisplayName = "UPDATE seeking an index, holding its key")]
+    [DataRow("update c3 set v = 50 where k = 5", "delete c3 where n >= 5", "KEY U (5,5), KEY U WAIT (5)", DisplayName = "DELETE range-seeking an index, holding its key")]
+    [DataRow("update c3 set n = 6 where k = 5", "update c3 set v = 9 where n = 5", "KEY U WAIT (5,5)", DisplayName = "UPDATE seeking an index key the other write moved")]
+    [DataRow("delete c3 where k = 5", "update c3 set v = 9 where n = 5", "KEY U WAIT (5,5)", DisplayName = "UPDATE seeking an index key the other write deleted")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 where k = 5", "KEY X WAIT (5)", DisplayName = "UPDATE through its clustered seek")]
+    [DataRow("update c1 set v = 50 where k = 5", "delete c1 where k >= 5", "KEY X WAIT (5)", DisplayName = "DELETE through its clustered range seek")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 where k = 5 and v + 0 = 5", "KEY U WAIT (5)", DisplayName = "UPDATE seeking with a residual predicate")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 where k in (1, 5)", "KEY U WAIT (5)", DisplayName = "UPDATE seeking an IN list")]
+    [DataRow("delete c1 where k = 5; insert c1 values (5, 50)", "update c1 set v = 9 where k = 5", "KEY X WAIT (5)", DisplayName = "UPDATE through its seek of a key deleted and inserted again")]
+    [DataRow("delete c1 where k = 5; insert c1 values (5, 50)", "update c1 set v = 9 from c1 join d1 on c1.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE of a key deleted and inserted again")]
     [DataRow("insert c5 values (3, 7, 3)", "insert c5 values (4, 7, 4)", "KEY U WAIT (7)", DisplayName = "IGNORE_DUP_KEY second insert of a key")]
     [DataRow("insert c5 values (3, 3, 3)", "insert c5 values (4, 4, 4)", "KEY RangeS-U WAIT (5)", DisplayName = "IGNORE_DUP_KEY insert into the same gap")]
     public async Task SecondWriter_WaitsWhereRealWaits(string first, string second, string expected)
@@ -197,7 +241,8 @@ public sealed class WriterLockFidelityTests
     /// <summary>
     /// A writer meeting a row another session deleted, or rewrote so the
     /// write's own predicate or seek no longer reaches it, waits for that
-    /// session and, once it rolls back, writes the restored row.
+    /// session and, once it rolls back, writes the restored row — in U, or in
+    /// X through its own seek of the clustered key.
     /// </summary>
     [TestMethod]
     [DataRow("delete c1 where k = 5", "update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k", "c1", "1:2 5:6", DisplayName = "Joined UPDATE over a delete")]
@@ -224,7 +269,7 @@ public sealed class WriterLockFidelityTests
         using var observer = simulation.CreateOpenConnection();
         _ = holder.CreateCommand("begin tran; " + hidingWrite).ExecuteNonQuery();
         var blocked = StartBlocked(writer, write, observer);
-        Contains(" U WAIT", RowAndKeyLocks(observer, Spid(writer)));
+        Contains(write == "update c1 set v = v + 1 where k = 5" ? " X WAIT" : " U WAIT", RowAndKeyLocks(observer, Spid(writer)));
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
         await blocked;
         AreEqual(expected, simulation.ExecuteScalar($"select string_agg(concat(k, ':', v), ' ') within group (order by k) from {table}"));

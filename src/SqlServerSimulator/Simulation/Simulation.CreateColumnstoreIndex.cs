@@ -160,15 +160,16 @@ partial class Simulation
             index.Partitioning = PlacementFor(context.Batch, table, index.WrittenDataSpace);
             index.FilegroupId = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
         }
+        LockTableForIndexBuild(context.Batch, table, isClustered);
         if (replaced is not null)
         {
             index.IndexId = replaced.IndexId;
-            table.Indexes[table.Indexes.IndexOf(replaced)] = index;
+            table.ReplaceIndex(replaced, index);
         }
         else
         {
             table.SettleIndexIds();
-            table.Indexes.Add(index);
+            table.AddIndex(index);
         }
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");

@@ -88,6 +88,29 @@ public sealed class KeyReinsertConcurrencyTests
         _ = reader.CreateCommand("commit; set transaction isolation level read committed").ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// A heap has no index order to keep a key's place, so a repeatable-read
+    /// scan waiting on one row passes a key another transaction deletes and
+    /// inserts again into a slot the scan has already read, and counts one row
+    /// short; the next scan meets it. Real's heap scan does the same (probed
+    /// 2026-10-07 against SQL Server 2025: 8 rows summing 45, then 9).
+    /// </summary>
+    [TestMethod]
+    public async Task RepeatableReadHeapScan_PassesAKeyReinsertedBehindIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table hp (k int constraint uq_hp unique, v int); insert hp select value, value from generate_series(1, 10); delete hp where k = 2");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update hp set v = v where k = 5").ExecuteNonQuery();
+        var blocked = await sim.StartBlocked(reader, "set transaction isolation level repeatable read; begin tran; select sum(v) from hp; select count(*) from hp", TestContext.CancellationToken);
+        _ = writer.CreateCommand("delete hp where k = 8; insert hp values (8, 8); commit").ExecuteNonQuery();
+
+        CollectionAssert.AreEqual(new object[] { 45, 9 }, await blocked);
+        _ = reader.CreateCommand("commit; set transaction isolation level read committed").ExecuteNonQuery();
+    }
+
     [TestMethod]
     public async Task ScanMeetingADeleteThatRollsBack_ReadsTheRestoredRow()
     {

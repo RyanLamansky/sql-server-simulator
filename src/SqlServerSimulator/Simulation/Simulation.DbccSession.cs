@@ -108,7 +108,7 @@ partial class Simulation
         static bool HoldsWriteLock(Simulation simulation, List<HeapTable> tables, SessionToken session)
         {
             lock (simulation.LockManager.gate)
-                return tables.Exists(table => IsWriteHold(table.TableDataLock, session) || IsWriteHold(table.SchemaLock, session));
+                return tables.Exists(table => IsWriteHold(table.TableDataLock, session));
         }
 
         static bool IsWriteHold(LockResource resource, SessionToken session) =>

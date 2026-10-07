@@ -1235,9 +1235,14 @@ partial class Simulation
                     throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "FOREIGN KEY", state: 6);
                 if (table.FullTextIndex is { } fullText && context.Batch.CurrentDatabase.Collation.Equals(indexName, fullText.KeyIndexName))
                     throw SimulatedSqlException.FullTextKeyIndexDropped(table.Indexes[i].Name, tableName.ToString(), state: 2);
+                // Real drops an index under the table's Sch-M (probed
+                // 2026-10-07 against SQL Server 2025: LCK_M_SCH_M behind an
+                // open insert, held to the transaction's end).
+                if (!context.Batch.IsSkipping)
+                    context.Batch.AcquireTableRedefinitionLock(table);
                 if (options.MoveTo is { } moveTo)
                     table.FilegroupId = FilegroupFor(context.Batch, table, new Schemas.DataSpaceClause(moveTo, null));
-                table.Indexes.RemoveAt(i);
+                table.RemoveIndex(table.Indexes[i]);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;
             }

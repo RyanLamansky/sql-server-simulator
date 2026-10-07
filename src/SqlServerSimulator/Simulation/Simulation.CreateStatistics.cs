@@ -169,8 +169,17 @@ partial class Simulation
             filterOrdinals);
         created.Statistics.HasPersistedSample = options.PersistSample;
         created.Statistics.AutoDrop = options.AutoDrop;
-        table.UserStatistics.Add(created);
-        RecordDdlUndo(context, () => _ = table.UserStatistics.Remove(created));
+        // A new list rather than an append, so a reader enumerating the old
+        // one meanwhile — CREATE STATISTICS takes no lock that keeps one off,
+        // as real's doesn't — isn't disturbed; a statistic a query
+        // auto-creates is added under the same lock.
+        lock (table)
+            table.UserStatistics = [.. table.UserStatistics, created];
+        RecordDdlUndo(context, () =>
+        {
+            lock (table)
+                table.UserStatistics = table.UserStatistics.FindAll(statistic => statistic != created);
+        });
         table.NoteStatisticsCreated(statisticsName, context.CurrentDatabase.Collation);
 
         // Building the statistic evaluates a computed column over every row
@@ -229,8 +238,17 @@ partial class Simulation
             if (index < 0)
                 throw SimulatedSqlException.CannotDropStatistics(written.ToString());
             var dropped = table.UserStatistics[index];
-            table.UserStatistics.RemoveAt(index);
-            RecordDdlUndo(context, () => table.UserStatistics.Insert(Math.Min(index, table.UserStatistics.Count), dropped));
+            lock (table)
+                table.UserStatistics = table.UserStatistics.FindAll(statistic => statistic != dropped);
+            RecordDdlUndo(context, () =>
+            {
+                lock (table)
+                {
+                    var restored = new List<UserStatistic>(table.UserStatistics);
+                    restored.Insert(Math.Min(index, restored.Count), dropped);
+                    table.UserStatistics = restored;
+                }
+            });
             RecordDdlEvent(context, "DROP_STATISTICS", EventSchemaName(tableName), written.Leaf, "STATISTICS", table.Name, "TABLE");
         }
         return true;

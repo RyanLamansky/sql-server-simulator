@@ -506,6 +506,26 @@ internal sealed class LockManager
     }
 
     /// <summary>
+    /// A copy of the requests queued on <paramref name="resource"/> ahead of
+    /// <paramref name="waiter"/>'s, oldest first, taken under the gate — every
+    /// queued request when <paramref name="waiter"/> isn't queued.
+    /// </summary>
+    public List<(SessionToken Owner, LockMode Mode)> QueuedAheadOf(LockResource resource, SessionToken waiter)
+    {
+        var ahead = new List<(SessionToken Owner, LockMode Mode)>();
+        lock (this.gate)
+        {
+            foreach (var (owner, mode) in resource.Queue ?? [])
+            {
+                if (ReferenceEquals(owner, waiter))
+                    break;
+                ahead.Add((owner, mode));
+            }
+        }
+        return ahead;
+    }
+
+    /// <summary>
     /// Non-blocking compatibility probe: returns true if any holder other
     /// than <paramref name="excludingOwner"/> holds <paramref name="resource"/>
     /// in a mode incompatible with <paramref name="probedMode"/>. Used by the
@@ -610,23 +630,24 @@ internal sealed class LockManager
     /// Past the holders, a request also waits behind an earlier waiter it
     /// conflicts with (<see cref="LockResource.Queue"/>) — every waiter, for a
     /// request not yet queued — unless its session already holds the
-    /// resource, a conversion, which real grants ahead of the queue.
+    /// resource, a conversion, which real grants ahead of the queue
+    /// (<see cref="Converts"/>).
     /// </remarks>
     [MethodImpl(Tiering.OptimizeFirstCall)]
     private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner, bool queued)
     {
-        var converts = false;
+        var held = HeldBy.None;
         foreach (var hold in resource.Holders)
         {
             if (ReferenceEquals(hold.Owner, owner))
             {
-                converts = true;
+                held |= hold.Mode == LockMode.SchemaStability ? HeldBy.SchemaStability : HeldBy.Other;
                 continue;
             }
             if (!IsCompatible(hold.Mode, mode))
                 return false;
         }
-        if (!converts && resource.Queue is { Count: > 0 } queue)
+        if ((held & HeldBy.Other) == 0 && resource.Queue is { Count: > 0 } queue)
         {
             foreach (var (waiter, waiting) in queue)
             {
@@ -636,7 +657,7 @@ internal sealed class LockManager
                         break;
                     continue;
                 }
-                if (!IsCompatible(waiting, mode))
+                if (!IsCompatible(waiting, mode) && !Converts(held, waiting))
                     return false;
             }
         }
@@ -812,26 +833,54 @@ internal sealed class LockManager
     private static List<SessionToken> Blockers(LockResource resource, LockMode mode, SessionToken requester)
     {
         var blockers = new List<SessionToken>();
-        var converts = false;
+        var held = HeldBy.None;
         foreach (var hold in resource.Holders)
         {
             if (ReferenceEquals(hold.Owner, requester))
-                converts = true;
+                held |= hold.Mode == LockMode.SchemaStability ? HeldBy.SchemaStability : HeldBy.Other;
             else if (!IsCompatible(hold.Mode, mode))
                 blockers.Add(hold.Owner);
         }
-        if (!converts && resource.Queue is { Count: > 0 } queue)
+        if ((held & HeldBy.Other) == 0 && resource.Queue is { Count: > 0 } queue)
         {
             foreach (var (waiter, waiting) in queue)
             {
                 if (ReferenceEquals(waiter, requester))
                     break;
-                if (!IsCompatible(waiting, mode))
+                if (!IsCompatible(waiting, mode) && !Converts(held, waiting))
                     blockers.Add(waiter);
             }
         }
         return blockers;
     }
+
+    /// <summary>What a requester already holds on the resource it asks for.</summary>
+    [Flags]
+    private enum HeldBy
+    {
+        None = 0,
+
+        /// <summary>Only Sch-S, a statement's own schema stability.</summary>
+        SchemaStability = 1,
+
+        /// <summary>A data, intent or Sch-M lock: real's conversion, granted ahead of every queued request.</summary>
+        Other = 2,
+    }
+
+    /// <summary>
+    /// Whether a requester holding <paramref name="held"/> goes ahead of a
+    /// request queued in <paramref name="waiting"/>. A data or intent hold is
+    /// real's conversion and goes ahead of all of them. A statement's Sch-S
+    /// is the simulator's own, held through execution where real holds it only
+    /// while compiling: it goes ahead only of a request that waits for that
+    /// Sch-S itself — a Sch-M, which could never be granted first, so queueing
+    /// behind it is a deadlock real doesn't meet — and keeps its turn behind
+    /// any other, as real's execution-time request does (probed 2026-10-03
+    /// against SQL Server 2025: a <c>TABLOCK</c> read waits behind a waiting
+    /// <c>TABLOCKX</c>).
+    /// </summary>
+    private static bool Converts(HeldBy held, LockMode waiting) =>
+        (held & HeldBy.Other) != 0 || ((held & HeldBy.SchemaStability) != 0 && !IsCompatible(LockMode.SchemaStability, waiting));
 
     /// <summary>
     /// Static compatibility matrix. Schema family (Sch-S / Sch-M),

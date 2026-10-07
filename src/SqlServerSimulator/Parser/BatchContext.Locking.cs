@@ -58,14 +58,15 @@ internal sealed partial class BatchContext
     /// <summary>
     /// The Sch-M a statement that redefines <paramref name="table"/> or
     /// rewrites its rows wholesale — <c>ALTER TABLE</c>, <c>TRUNCATE</c>,
-    /// <c>SWITCH</c> — takes: on its schema lock for the statement, and on its
-    /// data lock to the transaction's end, which waits out every transaction
-    /// still holding the table's intent lock and holds new readers and writers
-    /// off until this one settles, as real's object Sch-M does (probed
-    /// 2026-10-01 against SQL Server 2025: a <c>TRUNCATE</c> behind an open
-    /// insert waits <c>LCK_M_SCH_M</c> on the object until it commits).
-    /// Without the second, the statement swapped the rows out from under an
-    /// open writer, whose rollback then wrote into pages that were gone.
+    /// <c>SWITCH</c> — takes on the table's one object lock, for the statement
+    /// and, on a table that takes data locks, to the transaction's end, which
+    /// waits out every transaction still holding the table's intent lock and
+    /// holds new readers and writers off until this one settles, as real's
+    /// object Sch-M does (probed 2026-10-01 against SQL Server 2025: a
+    /// <c>TRUNCATE</c> behind an open insert waits <c>LCK_M_SCH_M</c> on the
+    /// object until it commits). Without the transaction's hold, the statement
+    /// swapped the rows out from under an open writer, whose rollback then
+    /// wrote into pages that were gone.
     /// </summary>
     public void AcquireTableRedefinitionLock(HeapTable table)
     {
@@ -521,25 +522,47 @@ internal sealed partial class BatchContext
     /// A memory-optimized table's target read waits for nothing: a row
     /// another session writes is a conflict the write itself meets.
     /// </summary>
-    public TargetRowHold AwaitTargetRow(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes)
+    public TargetRowHold AwaitTargetRow(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes) =>
+        this.AwaitTargetRowIn(table, pageIndex, slotIndex, ref rowBytes, LockMode.Update);
+
+    // AwaitTargetRow waiting in mode: U for a read ahead of the write, X for a
+    // write through its own seek (Selection.WhereIsClusteredKeySeek). A read
+    // through a nonclustered index holds U on the row's key there while it
+    // waits on the row, as real's does (Selection.MutationSeekIndex).
+    private TargetRowHold AwaitTargetRowIn(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes, LockMode mode, KeyLockGroup? throughIndex = null)
     {
         if (table.IsMemoryOptimized
             || (Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
             || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
             || !Simulation.IsLockableTable(table)
-            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, LockMode.Update, this.Connection.Session))
+            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.Session))
         {
             return TargetRowHold.None;
         }
-        this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Update, countForEscalation: false);
+        var session = this.Connection.Session;
+        LockResource? indexKey = null;
+        if (throughIndex is not null && throughIndex.TryReadKey(rowBytes, out var key))
+        {
+            indexKey = throughIndex.GetOrCreate(key);
+            this.AcquireOnTable(table, indexKey, LockMode.Update, session);
+        }
+        try
+        {
+            this.AcquireRowLock(table, pageIndex, slotIndex, mode, countForEscalation: false);
+        }
+        finally
+        {
+            if (indexKey is not null)
+                this.Connection.Simulation.LockManager.Release(indexKey, LockMode.Update, session);
+        }
         if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is not { } current)
         {
-            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update);
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, mode);
             this.NoteVanishedTargetRow(table, rowBytes);
             return TargetRowHold.Gone;
         }
         rowBytes = current;
-        return TargetRowHold.Update;
+        return mode == LockMode.Exclusive ? TargetRowHold.Exclusive : TargetRowHold.Update;
     }
 
     /// <summary>
@@ -554,11 +577,24 @@ internal sealed partial class BatchContext
     /// same two rows forty times, single-table or joined, meet none). False
     /// when the row was deleted while the walk waited.
     /// </summary>
-    public bool AwaitTargetRowWriters(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes)
+    /// <param name="table">The target.</param>
+    /// <param name="pageIndex">The row's page.</param>
+    /// <param name="slotIndex">The row's slot.</param>
+    /// <param name="rowBytes">The row as read, and as it stands after a wait.</param>
+    /// <param name="mode">
+    /// U, or X for a write through its own seek of the clustered key
+    /// (<see cref="Selection.WhereIsClusteredKeySeek"/>).
+    /// </param>
+    /// <param name="throughIndex">
+    /// The nonclustered index the walk's seek reaches the row through
+    /// (<see cref="Selection.MutationSeekIndex"/>), whose key is held in U
+    /// while the row is waited on; null for any other read.
+    /// </param>
+    public bool AwaitTargetRowWriters(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes, LockMode mode = LockMode.Update, KeyLockGroup? throughIndex = null)
     {
-        var hold = this.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
-        if (hold == TargetRowHold.Update)
-            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update, countedForEscalation: false);
+        var hold = this.AwaitTargetRowIn(table, pageIndex, slotIndex, ref rowBytes, mode, throughIndex);
+        if (hold is TargetRowHold.Update or TargetRowHold.Exclusive)
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, mode, countedForEscalation: false);
         return hold != TargetRowHold.Gone;
     }
 
@@ -637,12 +673,47 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
-    /// Waits in U for the session holding <paramref name="resource"/>, the X
-    /// on a row it rewrote or deleted, as real's target read meets that row;
-    /// true when there was someone to wait for.
+    /// Waits in <paramref name="mode"/> — U, or X for a write through its own
+    /// seek — for the session holding <paramref name="resource"/>, the X on a
+    /// row it rewrote or deleted, as real's target read meets that row; true
+    /// when there was someone to wait for.
     /// </summary>
-    public bool AwaitSupersededTargetRow(HeapTable table, LockResource resource) =>
-        this.AwaitRowWriters(table, resource, LockMode.Update);
+    /// <param name="table">The target.</param>
+    /// <param name="resource">The row lock the other session holds.</param>
+    /// <param name="mode">The walk's wait, U or X.</param>
+    /// <param name="throughIndex">
+    /// The nonclustered index the walk's seek reaches the row through, or null.
+    /// Real meets a write that took the row out of that index, or moved its
+    /// key there, on the index key's own lock, which is where the wait is
+    /// reported; past any other write it holds U on the key while it waits on
+    /// the row.
+    /// </param>
+    /// <param name="priorImage">The row as it stood before the other session's write.</param>
+    public bool AwaitSupersededTargetRow(HeapTable table, LockResource resource, LockMode mode = LockMode.Update, KeyLockGroup? throughIndex = null, byte[]? priorImage = null)
+    {
+        if (throughIndex is null || priorImage is null || !throughIndex.TryReadKey(priorImage, out var key)
+            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.Session))
+        {
+            return this.AwaitRowWriters(table, resource, mode);
+        }
+        if (resource.RowAddress is not { } address
+            || table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex) is not { } live
+            || throughIndex.RowChanges(priorImage, live))
+        {
+            return this.AwaitRowWriters(table, resource, mode, throughIndex.Describe(key));
+        }
+        var session = this.Connection.Session;
+        var indexKey = throughIndex.GetOrCreate(key);
+        this.AcquireOnTable(table, indexKey, LockMode.Update, session);
+        try
+        {
+            return this.AwaitRowWriters(table, resource, mode);
+        }
+        finally
+        {
+            this.Connection.Simulation.LockManager.Release(indexKey, LockMode.Update, session);
+        }
+    }
 
     /// <summary>Gives back what <paramref name="hold"/> took on a row the statement then turned away.</summary>
     public void ReleaseTargetRow(HeapTable table, int pageIndex, int slotIndex, TargetRowHold hold)
@@ -1015,7 +1086,7 @@ internal sealed partial class BatchContext
         if (holders is not null)
         {
             foreach (var resource in holders)
-                _ = this.AwaitRowWriters(table, resource, mode, reportedKey ? probe : null);
+                _ = this.AwaitRowWriters(table, resource, mode, reportedKey ? DescribeUniqueKey(table, storageOrdinals, probe) : null);
         }
     }
 
@@ -1037,7 +1108,7 @@ internal sealed partial class BatchContext
         foreach (var (page, slot, _) in HeapSeekCache.For(table.Heap).MatchingRows(table.Heap, table.StoredColumns, storageOrdinals, commons, probe))
         {
             if (table.RowLocks.TryGetValue((page, slot), out var resource))
-                waited |= this.AwaitRowWriters(table, resource, mode, reportedKey ? probe : null);
+                waited |= this.AwaitRowWriters(table, resource, mode, reportedKey ? DescribeUniqueKey(table, storageOrdinals, probe) : null);
         }
         return waited;
     }
@@ -1052,6 +1123,15 @@ internal sealed partial class BatchContext
         && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
         && this.AwaitRowWriters(table, resource, LockMode.Exclusive);
 
+    // A unique key's lock description, as its own index's key lock reads.
+    private static string DescribeUniqueKey(HeapTable table, int[] storageOrdinals, SqlValueKey probe)
+    {
+        var types = new SqlType[storageOrdinals.Length];
+        for (var i = 0; i < types.Length; i++)
+            types[i] = table.StoredColumns[storageOrdinals[i]].Type;
+        return KeyLockHash.Describe(probe, types, KeyLockUniquifier.None);
+    }
+
     /// <summary>
     /// Blocks until no other session holds the row lock
     /// <paramref name="resource"/> incompatibly with S — the transient
@@ -1061,14 +1141,14 @@ internal sealed partial class BatchContext
 
     // True when there was someone to wait for. A wait for a key some row
     // carries names the key, for the lock DMVs.
-    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared, SqlValueKey? waitingOnKey = null)
+    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared, string? waitingOnKey = null)
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
         if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
             return false;
         var session = connection.Session;
-        session.WaitingOnKey = waitingOnKey is { } key ? KeyLockGroup.Describe(key) : null;
+        session.WaitingOnKey = waitingOnKey;
         try
         {
             this.AcquireOnTable(table, resource, mode, session);

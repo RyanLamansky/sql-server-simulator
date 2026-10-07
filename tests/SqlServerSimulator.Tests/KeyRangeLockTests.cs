@@ -327,8 +327,9 @@ public sealed class KeyRangeLockTests
             select count(*) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeS-S' and request_status = 'GRANT'
             """).ExecuteScalar());
-        AreEqual("(20)|(30)", reader.CreateCommand("""
-            select string_agg(resource_description, '|') within group (order by resource_description) from sys.dm_tran_locks where resource_type = 'KEY'
+        // Keys 20 and 30, described by real's hash of each (SQL Server 2025's own descriptions).
+        AreEqual("(286fc18d83ea)|(8034b699f2c9)", reader.CreateCommand("""
+            select string_agg(rtrim(resource_description), '|') within group (order by resource_description) from sys.dm_tran_locks where resource_type = 'KEY'
             """).ExecuteScalar());
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
@@ -503,8 +504,9 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
 
-        AreEqual("(1,2)|(1,5)|(1,9)", reader.CreateCommand("""
-            select string_agg(resource_description, '|') within group (order by resource_description) from sys.dm_tran_locks
+        // Keys (1, 2), (1, 5) and (1, 9), described by real's hash of each.
+        AreEqual("(0207a0a08e23)|(3a229729e256)|(5310bc231a0c)", reader.CreateCommand("""
+            select string_agg(rtrim(resource_description), '|') within group (order by resource_description) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeS-S'
             """).ExecuteScalar());
 

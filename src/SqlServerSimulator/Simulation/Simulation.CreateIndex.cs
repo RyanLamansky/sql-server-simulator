@@ -10,6 +10,24 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// The lock an index build takes on its table: a nonclustered index's S,
+    /// which waits out an open writer and holds new writers off to the
+    /// transaction's end while readers go on, and a clustered one's Sch-M,
+    /// which rebuilds the table (probed 2026-10-07 against SQL Server 2025:
+    /// <c>LCK_M_S</c> and <c>LCK_M_SCH_M</c> behind an open insert, a reader
+    /// in an open transaction delaying neither nonclustered build). Taking
+    /// none, as once, let the build change the table's index list under a
+    /// concurrent read.
+    /// </summary>
+    private static void LockTableForIndexBuild(BatchContext batch, HeapTable table, bool clustered)
+    {
+        if (clustered)
+            batch.AcquireTableRedefinitionLock(table);
+        else if (IsLockableTable(table))
+            batch.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
+    }
+
+    /// <summary>
     /// Parses <c>CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX name ON
     /// table (col [ASC | DESC] [, …]) [INCLUDE (col [, …])] [WHERE filter]
     /// [WITH (option [, …])]</c>. Cursor on entry: any of <c>UNIQUE</c> /
@@ -326,6 +344,7 @@ partial class Simulation
             return true;
         }
 
+        LockTableForIndexBuild(context.Batch, table, isClustered);
         index.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, table.Columns, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isClustered, rejectFixedOverflow: true);
         if (index.KeyMayExceedLimit)
         {
@@ -365,12 +384,12 @@ partial class Simulation
         if (replaced is not null)
         {
             index.IndexId = replaced.IndexId;
-            table.Indexes[table.Indexes.IndexOf(replaced)] = index;
+            table.ReplaceIndex(replaced, index);
         }
         else
         {
             table.SettleIndexIds();
-            table.Indexes.Add(index);
+            table.AddIndex(index);
         }
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         // Building an index builds its statistic; a clustered one rebuilds
@@ -523,7 +542,7 @@ partial class Simulation
 
             if (pending.IsColumnstore)
             {
-                table.Indexes.Add(ResolveInlineColumnstoreIndex(batch, table, pending, objectIds?[position] ?? batch.CurrentDatabase.AllocateObjectId()));
+                table.AddIndex(ResolveInlineColumnstoreIndex(batch, table, pending, objectIds?[position] ?? batch.CurrentDatabase.AllocateObjectId()));
                 continue;
             }
 
@@ -567,7 +586,7 @@ partial class Simulation
                 pending.Options);
             if (!table.IsTableVariable && !table.IsTypeTable)
                 PlaceNewIndex(batch, table, index);
-            table.Indexes.Add(index);
+            table.AddIndex(index);
             table.NoteStatisticsCreated(index.Name, batch.CurrentDatabase.Collation);
         }
     }

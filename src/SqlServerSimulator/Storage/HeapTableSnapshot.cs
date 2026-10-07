@@ -165,10 +165,10 @@ internal sealed class HeapTableSnapshot
         foreach (var (key, keyName, isNotTrusted, isDisabled) in this.foreignKeyState)
             (key.Name, key.IsNotTrusted, key.IsDisabled) = (keyName, isNotTrusted, isDisabled);
 
-        Refill(table.Indexes, this.indexes);
+        table.Indexes = [.. this.indexes];
         for (var i = 0; i < this.indexes.Length; i++)
             (this.indexes[i].Name, this.indexes[i].IgnoreDupKey, this.indexes[i].IsDisabled, this.indexes[i].FillFactor, this.indexes[i].IsPadded) = this.indexState[i];
-        Refill(table.UserStatistics, this.userStatistics);
+        table.UserStatistics = [.. this.userStatistics];
         Refill(table.XmlIndexes, this.xmlIndexes);
         Refill(table.SpatialIndexes, this.spatialIndexes);
         Refill(table.JsonIndexes, this.jsonIndexes);

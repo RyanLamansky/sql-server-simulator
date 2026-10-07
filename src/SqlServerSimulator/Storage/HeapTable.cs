@@ -85,6 +85,7 @@ internal sealed class HeapTable : SchemaObject
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
         this.PeriodColumns = periodColumns;
+        this.TableDataLock = this.SchemaLock;
         this.TableDataLock.OwningTable = this;
         this.AdoptColumnSet();
 
@@ -576,8 +577,35 @@ internal sealed class HeapTable : SchemaObject
     /// non-UNIQUE entries are catalog-only (visible through
     /// <c>sys.indexes</c> / <c>sys.index_columns</c>) since the simulator
     /// has no B-tree storage.
+    /// <para>
+    /// Copied on write (<see cref="AddIndex"/>, <see cref="ReplaceIndex"/>,
+    /// <see cref="RemoveIndex"/>), never changed in place: a nonclustered
+    /// index builds under the table's S, as real's does, which lets another
+    /// session's statement read the table — and walk this list — as the
+    /// index is added. Changed in place, that walk once failed with "Collection
+    /// was modified" under a concurrent <c>CREATE INDEX</c>.
+    /// </para>
     /// </summary>
-    public readonly List<Index> Indexes = [];
+    public List<Index> Indexes = [];
+
+    /// <summary>Publishes <see cref="Indexes"/> with <paramref name="index"/> added.</summary>
+    public void AddIndex(Index index) => this.Indexes = [.. this.Indexes, index];
+
+    /// <summary>Publishes <see cref="Indexes"/> with <paramref name="index"/> in <paramref name="replaced"/>'s place.</summary>
+    public void ReplaceIndex(Index replaced, Index index)
+    {
+        var indexes = new List<Index>(this.Indexes);
+        indexes[indexes.IndexOf(replaced)] = index;
+        this.Indexes = indexes;
+    }
+
+    /// <summary>Publishes <see cref="Indexes"/> without <paramref name="index"/>.</summary>
+    public void RemoveIndex(Index index)
+    {
+        var indexes = new List<Index>(this.Indexes);
+        _ = indexes.Remove(index);
+        this.Indexes = indexes;
+    }
 
     /// <summary>
     /// Hypothetical indexes (<c>CREATE INDEX … WITH STATISTICS_ONLY = n</c>):
@@ -591,7 +619,11 @@ internal sealed class HeapTable : SchemaObject
 
     /// <summary>
     /// <c>CREATE STATISTICS</c>-declared standalone statistics, in creation
-    /// order. Catalog-only — see <see cref="UserStatistic"/>.
+    /// order. Catalog-only — see <see cref="UserStatistic"/>. Replaced whole
+    /// on every change rather than changed in place, since a query's read
+    /// auto-creates statistics and a <c>CREATE STATISTICS</c> holds no lock
+    /// that keeps another session's read off; a walk of it once failed with
+    /// "Collection was modified".
     /// </summary>
     public List<UserStatistic> UserStatistics = [];
 
@@ -897,10 +929,22 @@ internal sealed class HeapTable : SchemaObject
     /// takes, the S or X a statement's row and key locks escalate to (the
     /// threshold lives in <see cref="Parser.LockEscalationTally"/>), and what
     /// <c>WITH (TABLOCK)</c> / <c>WITH (TABLOCKX)</c> take directly.
-    /// Distinct from <see cref="SchemaObject.SchemaLock"/> — the schema lock
-    /// only takes Sch-S / Sch-M; this one takes IS / IX / SIX / S / U / X.
+    /// <para>
+    /// The same resource as <see cref="SchemaObject.SchemaLock"/>, as real's
+    /// object lock is one resource carrying Sch-S / Sch-M beside the intent and
+    /// table modes. A session already holding the object — an open writer's
+    /// IX — converts, so its next statement's Sch-S goes ahead of a
+    /// redefinition queued for Sch-M, while a newcomer's Sch-S waits behind it
+    /// (probed 2026-10-07 against SQL Server 2025: the writer reads on, the
+    /// newcomer waits <c>LCK_M_SCH_S</c>); a reader holding Sch-S converts to
+    /// IS the same way rather than deadlock with the queued Sch-M. Two
+    /// resources, as it once was, let the redefinition hold the schema half
+    /// while it waited for the data half, so the open writer's next statement
+    /// deadlocked with it, and the data half's Sch-M, held to the transaction's
+    /// end, didn't stop another batch compiling over the table.
+    /// </para>
     /// </summary>
-    public readonly LockResource TableDataLock = new();
+    public readonly LockResource TableDataLock;
 
     /// <summary>Iterates the rows in allocation order, paging through the underlying <see cref="Heap"/>.</summary>
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();

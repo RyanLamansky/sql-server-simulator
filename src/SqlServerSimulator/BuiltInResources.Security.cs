@@ -16,7 +16,7 @@ internal static partial class BuiltInResources
             views["sys." + name] = new CatalogView(name, columns, (batch, database) => filtered(batch, database, CatalogFilter.None), filteredRowGenerator: filtered, pushdownColumns: pushdownColumns);
         var charFour = CharSqlType.Get(4, Collation.Catalog, Coercibility.Implicit);
         // sys.dm_tran_locks: per-Hold rows across every schema-bound
-        // SchemaLock, every HeapTable.TableDataLock, and every per-row
+        // SchemaLock (a table's is its TableDataLock), and every per-row
         // entry in HeapTable.RowLocks. GRANT entries come from
         // LockResource.Holders; WAIT entries from connection registry's
         // WaitingOnResource / WaitingForMode. Shipped column subset is
