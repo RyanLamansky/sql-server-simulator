@@ -14,8 +14,8 @@ namespace SqlServerSimulator.Parser;
 /// entry applies the journal delta (<see cref="Heap.SnapshotSeekJournalSince"/>)
 /// rather than rebuilding — the "no warm-up" path. A full rebuild happens only when
 /// the requested prefix differs, the journal can't cover the delta (a large bulk
-/// mutation trimmed it, or a rollback / TRUNCATE invalidated it), or the heap was
-/// never journaled.
+/// mutation trimmed it, or a TRUNCATE invalidated it), or the heap was never
+/// journaled. A rolled-back write journals its reversal, so it replays too.
 /// <para>
 /// Attached per-<see cref="Heap"/> through a <see cref="ConditionalWeakTable{TKey,TValue}"/>
 /// keyed on the heap, so it costs nothing until first seeked and is collected with

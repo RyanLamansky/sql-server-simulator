@@ -249,7 +249,8 @@ internal sealed class Heap
 
     /// <summary>
     /// Monotonic counter bumped by every <see cref="Insert"/>,
-    /// <see cref="DeleteAt"/>, and <see cref="UpdateAt"/>; the forwarding
+    /// <see cref="DeleteAt"/>, and <see cref="UpdateAt"/>, and by the rollback
+    /// of each (<see cref="JournalUndoneRowWrite"/>); the forwarding
     /// UPDATE path may bump multiple times (its internal Insert + Delete each
     /// contribute) and that's fine — read-side equality-seek caches (see
     /// <c>Selection.Execution.IndexSeek.cs</c>) only check whether anything
@@ -330,11 +331,12 @@ internal sealed class Heap
     /// rather than rebuild from a full scan on every mutation — the "no warm-up"
     /// path. Null until <see cref="ActivateSeekJournal"/> runs on the first seek
     /// against this heap, so a never-queried (write-only) table pays nothing.
-    /// Trimmed to <see cref="MaxSeekJournalEvents"/>; older events fall off and
+    /// Trimmed to <see cref="SeekJournalCapacity"/>; older events fall off and
     /// advance <see cref="seekJournalDroppedThroughGen"/>, which forces a full
     /// rebuild for any cache that fell too far behind (a large bulk mutation, or
-    /// a heap that wasn't seeked for a long time). A rollback or ALTER clears it
-    /// via <see cref="InvalidateSeekJournal"/>.
+    /// a heap that wasn't seeked for a long time). A rolled-back row write
+    /// journals its reversal (<see cref="JournalUndoneRowWrite"/>); a TRUNCATE
+    /// or a restored ALTER clears it via <see cref="InvalidateSeekJournal"/>.
     /// <para>
     /// Guarded by <see cref="latch"/>, under which every writer advances
     /// <see cref="MutationGeneration"/> and records its event, so a snapshot
@@ -348,7 +350,7 @@ internal sealed class Heap
     /// <summary>
     /// Index of the oldest live event in <see cref="seekJournal"/>: trimming
     /// advances it rather than shifting the list, and the dead prefix is
-    /// dropped once it reaches <see cref="MaxSeekJournalEvents"/>. Events are
+    /// dropped once it reaches <see cref="SeekJournalCapacity"/>. Events are
     /// in generation order, so a reader binary-searches its starting point
     /// (<see cref="FirstSeekJournalEventAfter"/>) instead of walking the whole
     /// journal for the few events past its generation.
@@ -372,7 +374,16 @@ internal sealed class Heap
     /// </summary>
     internal volatile bool SeekJournalActive;
 
-    private const int MaxSeekJournalEvents = 512;
+    /// <summary>
+    /// How many events <see cref="seekJournal"/> keeps: a sixty-fourth of the
+    /// rows, and never fewer than 512. A cache replays a delta up to that
+    /// length rather than rebuilding from a scan of every row, which is the
+    /// cheaper way for any delta well short of the table — a multi-row write
+    /// rolled back journals twice its row count. The bound keeps what the
+    /// journal's row images hold small beside the table, since every event
+    /// it keeps holds its images alive.
+    /// </summary>
+    internal int SeekJournalCapacity => Math.Max(512, this.RowCount >> 6);
 
     /// <summary>
     /// Turns on the seek journal (idempotent) and returns the current
@@ -455,9 +466,10 @@ internal sealed class Heap
     /// <summary>
     /// Drops the entire journal and advances <see cref="seekJournalDroppedThroughGen"/>
     /// to the current generation, so every existing cache rebuilds on its next
-    /// seek. Called when a rollback rewinds heap state without producing
-    /// reversing journal events (<see cref="UndoLog"/> mutates pages directly),
-    /// and by ALTER paths that rewrite the heap's columns underneath the cache.
+    /// seek. Called where heap state changes wholesale rather than row by row:
+    /// a <c>TRUNCATE</c> and its rollback, which swap the page list, and a
+    /// rollback restoring a heap an <c>ALTER</c> replaced. A rolled-back row
+    /// write journals its reversal instead (<see cref="JournalUndoneRowWrite"/>).
     /// Journaling stays active — the rebuild re-bases the cache cleanly.
     /// </summary>
     internal void InvalidateSeekJournal()
@@ -471,17 +483,70 @@ internal sealed class Heap
         this.seekJournalHead = 0;
     }
 
+    /// <summary>
+    /// The row a visible address reads as, following a forwarding pointer, or
+    /// null when the address holds no live row — the before and after image of
+    /// a rolled-back row write (<see cref="UndoLog.RollbackTo"/>). Unlike
+    /// <see cref="ReadSlotBytes"/>, a tombstoned slot reads as null. Under the
+    /// latch.
+    /// </summary>
+    internal byte[]? VisibleRowImage((int Page, int Slot) address)
+    {
+        Debug.Assert(this.latch.IsHeldByCurrentThread, "A rollback reads the row it rewinds under the latch.");
+        var page = this.Pages[address.Page];
+        if (page.IsSlotTombstoned(address.Slot))
+            return null;
+        if (!page.IsSlotForwarded(address.Slot))
+            return page.ReadSlotBytes(address.Slot);
+        var (targetPage, targetSlot) = page.ReadForwardTarget(address.Slot);
+        return this.Pages[targetPage].IsSlotTombstoned(targetSlot) ? null : this.Pages[targetPage].ReadSlotBytes(targetSlot);
+    }
+
+    /// <summary>
+    /// Advances <see cref="MutationGeneration"/> past a rolled-back row write and
+    /// journals what the rollback did to the row at <paramref name="address"/>:
+    /// a restored row is an insert, a removed one a delete, a rewound one an
+    /// update — so a seek cache replays the rollback as it replays a write,
+    /// rather than rebuilding from a scan. Runs under the latch hold that
+    /// undid the write, so no reader sees the rewound row at a generation whose
+    /// journal lacks it. <paramref name="before"/> and <paramref name="after"/>
+    /// are the <see cref="VisibleRowImage"/> either side of the undo, read only
+    /// while the journal is active.
+    /// </summary>
+    internal void JournalUndoneRowWrite((int Page, int Slot) address, byte[]? before, byte[]? after)
+    {
+        Debug.Assert(this.latch.IsHeldByCurrentThread, "A rollback journals the row it rewinds under the latch.");
+        this.MutationGeneration++;
+        if (!this.SeekJournalActive)
+            return;
+        switch ((before, after))
+        {
+            case (null, { }):
+                this.RecordSeekJournalEvent(SeekJournalKind.Insert, address.Page, address.Slot, oldImage: null, after);
+                break;
+            case ({ }, null):
+                this.RecordSeekJournalEvent(SeekJournalKind.Delete, address.Page, address.Slot, before, newImage: null);
+                break;
+            case ({ }, { }):
+                this.RecordSeekJournalEvent(SeekJournalKind.Update, address.Page, address.Slot, before, after);
+                break;
+            default:
+                break;
+        }
+    }
+
     private void RecordSeekJournalEvent(SeekJournalKind kind, int page, int slot, byte[]? oldImage, byte[]? newImage)
     {
         if (this.seekJournal is not { } journal)
             return;
         journal.Add(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
-        while (journal.Count - this.seekJournalHead > MaxSeekJournalEvents)
+        var capacity = this.SeekJournalCapacity;
+        while (journal.Count - this.seekJournalHead > capacity)
         {
             this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal[this.seekJournalHead].Generation);
             journal[this.seekJournalHead++] = default;
         }
-        if (this.seekJournalHead >= MaxSeekJournalEvents)
+        if (this.seekJournalHead >= capacity)
         {
             journal.RemoveRange(0, this.seekJournalHead);
             this.seekJournalHead = 0;
@@ -575,7 +640,12 @@ internal sealed class Heap
             this.RowModifications++;
         }
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
-        undoLog?.RecordInsert(this, pageIndex, slotIndex);
+        if (undoLog is not null)
+        {
+            undoLog.RecordInsert(this, pageIndex, slotIndex);
+            if (journalEvent)
+                undoLog.MarkRowWrite(undoLog.Position - 1, (pageIndex, slotIndex));
+        }
         if (journalEvent && this.SeekJournalActive)
             this.RecordSeekJournalEvent(SeekJournalKind.Insert, pageIndex, slotIndex, oldImage: null, newImage: row.ToArray());
         return (pageIndex, slotIndex);
@@ -963,7 +1033,9 @@ internal sealed class Heap
         using var latch = this.EnterLatch();
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         _ = this.RootedNullLobCells?.TryRemove((pageIndex, slotIndex), out _);
+        var firstUndoEntry = undoLog?.Position ?? 0;
         this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
+        undoLog?.MarkRowWrite(firstUndoEntry, (pageIndex, slotIndex));
     }
 
     /// <summary>
@@ -1083,6 +1155,7 @@ internal sealed class Heap
         // Insert / old-target Delete the relocating paths run are NOT journaled.
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         var oldImage = this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
+        var firstUndoEntry = undoLog?.Position ?? 0;
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
             this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
@@ -1092,6 +1165,7 @@ internal sealed class Heap
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         if (oldImage is not null)
             this.RecordSeekJournalEvent(SeekJournalKind.Update, pageIndex, slotIndex, oldImage, newRow.ToArray());
+        undoLog?.MarkRowWrite(firstUndoEntry, (pageIndex, slotIndex));
     }
 
     private void UpdateDirect(HeapPage page, int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded)

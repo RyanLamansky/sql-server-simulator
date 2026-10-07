@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace SqlServerSimulator.Storage;
 
@@ -115,6 +117,21 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     public void RecordForwardedPointerDelete(Heap heap, int pageIndex, int slotIndex, (int Page, int Slot) target) =>
         this.entries.Add(new ForwardedPointerDelete(heap, pageIndex, slotIndex, target));
 
+    /// <summary>
+    /// Closes one visible row write — an insert, a delete or an update of the
+    /// row at <paramref name="visibleRow"/> — whose entries run from
+    /// <paramref name="firstEntry"/> to the end of the log: a forwarded row's
+    /// write records two or three entries at physical addresses, none of them
+    /// the visible one. <see cref="RollbackTo"/> undoes the group under one
+    /// latch hold and journals what it did to the visible row.
+    /// </summary>
+    public void MarkRowWrite(int firstEntry, (int Page, int Slot) visibleRow)
+    {
+        var last = this.entries[^1];
+        last.VisibleRow = visibleRow;
+        last.RowWriteLength = this.entries.Count - firstEntry;
+    }
+
     public void RecordTempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) =>
         this.entries.Add(new TempTableCreation(owner, name));
 
@@ -223,32 +240,73 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         if (position >= this.entries.Count)
             return;
 
-        // Undo rewinds heap state by mutating pages directly — it produces no
-        // reversing seek-journal events and doesn't advance MutationGeneration,
-        // so a seek cache built mid-transaction would otherwise carry the
-        // rolled-back rows. Each entry's heap journal is invalidated under the
-        // same latch hold as its rewind, so the next seek rebuilds from the
-        // rewound state (the rollback safety valve for the incrementally-
-        // maintained equality-seek cache). Invalidating once the whole log was
-        // unwound instead left a window in which a seek read the cache at the
-        // generation it was built for while the heap already held a restored
-        // row the cache lacked: a concurrent scan's key order missed the row.
-        for (var i = this.entries.Count - 1; i >= position; i--)
+        // Undo rewinds heap state by mutating pages directly, so each row
+        // write's group is undone under one latch hold that also journals the
+        // reversal (Heap.JournalUndoneRowWrite): a seek cache replays it like
+        // any write instead of rebuilding from a scan, and no reader sees the
+        // rewound row at a generation whose journal lacks it. Two cases
+        // invalidate the journal under the hold instead: an entry that changes
+        // heap state wholesale (a TRUNCATE), and a heap whose undone row writes
+        // outnumber what its journal keeps, whose replay would find it trimmed.
+        // Invalidating once the whole log was unwound left a window in which a
+        // seek read the cache at the generation it was built for while the
+        // heap already held a restored row the cache lacked: a concurrent
+        // scan's key order missed the row.
+        var overrun = this.HeapsOverrunningSeekJournal(position);
+        for (var i = this.entries.Count - 1; i >= position;)
         {
             var entry = this.entries[i];
-            if (entry.AffectedHeap is { } heap)
+            if (entry.RowWriteLength != 0)
+            {
+                Debug.Assert(i - entry.RowWriteLength + 1 >= position, "A rollback marker never falls inside one row write.");
+                var heap = entry.AffectedHeap!;
+                using var latch = heap.EnterLatch();
+                var journaled = heap.SeekJournalActive && overrun?.Contains(heap) != true;
+                var before = journaled ? heap.VisibleRowImage(entry.VisibleRow) : null;
+                for (var end = i - entry.RowWriteLength; i > end; i--)
+                    this.entries[i].Undo(reclamation);
+                if (journaled || !heap.SeekJournalActive)
+                    heap.JournalUndoneRowWrite(entry.VisibleRow, before, journaled ? heap.VisibleRowImage(entry.VisibleRow) : null);
+                else
+                    heap.InvalidateSeekJournal();
+            }
+            else if (entry.AffectedHeap is { } heap)
             {
                 using var latch = heap.EnterLatch();
                 entry.Undo(reclamation);
                 heap.InvalidateSeekJournal();
+                i--;
             }
             else
             {
                 entry.Undo(reclamation);
+                i--;
             }
         }
 
         this.entries.RemoveRange(position, this.entries.Count - position);
+    }
+
+    // The heaps whose row writes past `position` outnumber the events their
+    // seek journal keeps; null when no heap's can (the log is shorter than the
+    // smallest journal).
+    private HashSet<Heap>? HeapsOverrunningSeekJournal(int position)
+    {
+        if (this.entries.Count - position <= 512)
+            return null;
+        var counts = new Dictionary<Heap, int>();
+        for (var i = position; i < this.entries.Count; i++)
+        {
+            if (this.entries[i] is { RowWriteLength: not 0, AffectedHeap: { } heap })
+                CollectionsMarshal.GetValueRefOrAddDefault(counts, heap, out _)++;
+        }
+        HashSet<Heap>? overrun = null;
+        foreach (var (heap, count) in counts)
+        {
+            if (count > heap.SeekJournalCapacity)
+                _ = (overrun ??= []).Add(heap);
+        }
+        return overrun;
     }
 
     /// <summary>
@@ -360,10 +418,19 @@ internal sealed class UndoLog(LobReclamation? reclamation)
 
         /// <summary>
         /// The heap this entry mutates, or null for entries that touch no heap
-        /// (temp-table DDL). <see cref="RollbackTo"/> uses it to invalidate the
-        /// heap's seek journal under the latch hold its undo runs in.
+        /// (temp-table DDL). <see cref="RollbackTo"/> journals or invalidates
+        /// the heap's seek journal under the latch hold its undo runs in.
         /// </summary>
         public virtual Heap? AffectedHeap => null;
+
+        /// <summary>
+        /// On the last entry of a row write's group (<see cref="MarkRowWrite"/>),
+        /// the group's entry count, with the visible row it wrote in
+        /// <see cref="VisibleRow"/>; 0 on every other entry.
+        /// </summary>
+        public int RowWriteLength;
+
+        public (int Page, int Slot) VisibleRow;
 
         /// <summary>
         /// Runs when the enclosing transaction commits. Default no-op; the

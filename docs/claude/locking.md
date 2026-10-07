@@ -595,7 +595,7 @@ The pieces, each closing a race the randomized stress harness found as a lost up
   A write tests key locks and then takes the row's X, two acquisitions where real's key lock is one; a SERIALIZABLE reader locking the key between them found the row unlocked and read it, and the write then changed it under the reader's lock.
   A write that finds a key lock appeared once it holds the X gives the row back and waits for the key (`BatchContext.AcquireRowLockTxScoped`).
 - **The seek cache across a rollback.**
-  A rollback rewinds pages without journaling, so it invalidates the heap's seek journal under the latch hold of each entry it undoes (`UndoLog.RollbackTo`); invalidating once the whole log was undone let a scan read the cache at its old generation while the heap already held a restored row the cache lacked.
+  A rollback journals each row write's reversal under the latch hold that undoes it (`UndoLog.RollbackTo`, see [`indexes.md`](indexes.md#equality-seek-acceleration)); invalidating once the whole log was undone let a scan read the cache at its old generation while the heap already held a restored row the cache lacked.
 
 A heap (no clustered index) follows a key through its first unique key, but its scan reads in allocation order, places no ghosts, and passes a row whose key was deleted and inserted again at an address it already passed; what real's heap scan does with that shape is unprobed (see [Concurrency stress findings](#concurrency-stress-findings)).
 

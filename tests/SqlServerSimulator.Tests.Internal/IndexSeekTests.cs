@@ -941,30 +941,244 @@ public sealed class IndexSeekTests
         IsEmpty(rows);
     }
 
-    [TestMethod]
-    public void RolledBackInsert_InvalidatesJournal_RebuildsAndExcludes()
+    // ---- a rollback journals its reversal, so the next seek replays it rather
+    // than rebuilding the cache from a scan. ----
+
+    // Runs setup, warms the cache, runs each of `steps` as its own batch
+    // (swallowing a batch's error, for statement-level rollback), then traces
+    // `probe`. The steps' own seeks keep the cache current, so the probe's
+    // trace shows what the last step's rollback left it.
+    private static (List<string> Trace, List<object?> Rows) WarmStepsProbe(string setup, string warm, string[] steps, string probe)
     {
-        // Rollback rewinds the heap by mutating pages directly (no reversing
-        // journal events), so it invalidates the journal — the next seek must
-        // rebuild from the rewound state and not surface the rolled-back row.
         var c = new Simulation().CreateDbConnection();
         c.Open();
-        Exec(c, TableT);
-        _ = ReadVal(c, "select val from t where id = 1");
-        Exec(c, "begin tran");
-        Exec(c, "insert t values (4, 40)");
-        Exec(c, "rollback");
+        Exec(c, setup);
+        _ = ReadVal(c, warm);
+        foreach (var step in steps)
+        {
+            try
+            {
+                Exec(c, step);
+            }
+            catch (SimulatedSqlException)
+            {
+            }
+        }
         IndexSeekDiagnostics.Sink = [];
         try
         {
-            var rows = ReadRows(c, "select val from t where id = 4");
-            Contains("CacheBuild", IndexSeekDiagnostics.Sink);
-            DoesNotContain("CacheReplay", IndexSeekDiagnostics.Sink);
-            IsEmpty(rows);
+            return (IndexSeekDiagnostics.Sink, ReadRows(c, probe));
         }
         finally
         {
             IndexSeekDiagnostics.Sink = null;
+        }
+    }
+
+    // A heap with a nonclustered index on k: an UPDATE growing pad forwards
+    // the row, and growing it again retargets the forward.
+    private const string ForwardingHeap = """
+        create table h (id int not null, k int not null, pad varchar(8000) not null);
+        create index ix_k on h (k);
+        insert h values (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c')
+        """;
+
+    [TestMethod]
+    public void RolledBackInsert_ReplaysReversal_Excludes()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            TableT, "select val from t where id = 1", ["begin tran; insert t values (4, 40); rollback"], "select val from t where id = 4");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void RolledBackDelete_ReplaysReversal_RowBack()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            TableT, "select val from t where id = 1", ["begin tran; delete t where id = 2; rollback"], "select val from t where id = 2");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("50", string.Join(",", rows));
+    }
+
+    [TestMethod]
+    public void RolledBackKeyUpdate_ReplaysReversal_RowUnderOldKeyOnly()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            TableT, "select val from t where id = 1",
+            ["begin tran; update t set id = 99 where id = 2; rollback"],
+            "select val from t where id in (2, 99)");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("50", string.Join(",", rows));
+    }
+
+    /// <summary>
+    /// A key deleted and inserted again in one transaction lands at a new
+    /// address; the rollback removes the new row and restores the old, so the
+    /// key's bucket ends with exactly the original row.
+    /// </summary>
+    [TestMethod]
+    public void RolledBackReinsertedKey_ReplaysReversal_OriginalRowOnly()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            TableT, "select val from t where id = 1",
+            ["begin tran; delete t where id = 2; insert t values (2, 77); rollback"],
+            "select val from t where id = 2");
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("50", string.Join(",", rows));
+    }
+
+    [TestMethod]
+    public void RolledBackSavepoint_ReplaysReversal_KeepsEarlierWrite()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, TableT);
+        _ = ReadVal(c, "select val from t where id = 1");
+        Exec(c, "begin tran; insert t values (4, 40); save tran s; delete t where id = 1; insert t values (5, 50); rollback tran s");
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            AreEqual("5,40", string.Join(",", ReadRows(c, "select val from t where id in (1, 4, 5) order by val")));
+            DoesNotContain("CacheBuild", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+        Exec(c, "rollback");
+        AreEqual("5", string.Join(",", ReadRows(c, "select val from t where id in (1, 4, 5)")));
+    }
+
+    /// <summary>
+    /// A multi-row INSERT failing on a duplicate key part way undoes the rows it
+    /// already wrote (statement-level rollback), and the cache follows.
+    /// </summary>
+    [TestMethod]
+    public void FailedStatement_ReplaysReversal_RowsItWroteGone()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            TableT, "select val from t where id = 1",
+            ["insert t select value, value * 10 from generate_series(4, 8) union all select 1, 0"],
+            "select count(*) from t where id in (4, 5, 6, 7, 8)");
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("0", string.Join(",", rows));
+    }
+
+    [TestMethod]
+    public void RolledBackForwardingUpdates_ReplayReversal_KeysAsBefore()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            ForwardingHeap, "select id from h where k = 10",
+            [
+                "begin tran; update h set k = 11, pad = replicate('x', 3000) where k = 10; update h set k = 12, pad = replicate('y', 6000) where k = 11; rollback",
+                "begin tran; update h set pad = replicate('z', 3000) where k = 20; commit",
+                "begin tran; update h set k = 21, pad = replicate('w', 5000) where k = 20; delete h where k = 21; rollback",
+            ],
+            "select id from h where k in (10, 11, 12, 20, 21) order by id");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("1,2", string.Join(",", rows));
+    }
+
+    [TestMethod]
+    public void RolledBackDeleteOfForwardedRow_ReplaysReversal_RowBack()
+    {
+        var (trace, rows) = WarmStepsProbe(
+            ForwardingHeap, "select id from h where k = 10",
+            ["update h set pad = replicate('x', 3000) where k = 30", "begin tran; delete h where k = 30; rollback"],
+            "select len(pad) from h where k = 30");
+        Contains("CacheReplay", trace);
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("3000", string.Join(",", rows));
+    }
+
+    /// <summary>
+    /// The unique-key guard and the foreign-key check read the same cache: a
+    /// rolled-back delete's key is a duplicate again, and a rolled-back
+    /// parent is a parent again.
+    /// </summary>
+    [TestMethod]
+    public void RolledBackDelete_KeyAndForeignKeyChecksSeeTheRowBack()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table p (id int not null primary key);
+            create table ch (id int not null primary key, pid int not null references p (id));
+            insert p values (1), (2)
+            """);
+        Exec(c, "insert ch values (1, 1)");
+        Exec(c, "begin tran; delete p where id = 2; rollback");
+        var duplicate = Throws<SimulatedSqlException>(() => Exec(c, "insert p values (2)"));
+        AreEqual(2627, duplicate.Number);
+        Exec(c, "insert ch values (2, 2)");
+        Exec(c, "begin tran; insert p values (3); rollback");
+        var orphan = Throws<SimulatedSqlException>(() => Exec(c, "insert ch values (3, 3)"));
+        AreEqual(547, orphan.Number);
+    }
+
+    /// <summary>
+    /// Random writes, savepoints, rollbacks and failing statements over a
+    /// forwarding heap: after every step each seek answers what a scan of the
+    /// same rows answers.
+    /// </summary>
+    [TestMethod]
+    public void RandomRollbacks_SeekAgreesWithScan()
+    {
+        var random = new Random(20261007);
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table h (id int not null, k int not null, pad varchar(8000) not null);
+            create index ix_k on h (k);
+            create unique index ux_id on h (id);
+            insert h select value, value % 7, 'p' from generate_series(1, 40)
+            """);
+        var nextId = 41;
+        var depth = 0;
+        for (var step = 0; step < 400; step++)
+        {
+            var k = random.Next(9);
+            var sql = random.Next(12) switch
+            {
+                0 => $"insert h values ({nextId++}, {k}, 'n')",
+                1 => $"delete h where k = {k} and id % 3 = {random.Next(3)}",
+                2 => $"update h set k = {random.Next(9)} where k = {k} and id % 2 = 0",
+                3 => $"update h set pad = replicate('g', {random.Next(1, 6000)}) where k = {k}",
+                4 => $"insert h values ({nextId}, {k}, 'a'), ({random.Next(1, nextId)}, {k}, 'dup')",
+                5 => $"delete h where k = {k}; insert h values ({nextId++}, {k}, 'r')",
+                6 => depth == 0 ? "begin tran" : "save tran s",
+                7 => depth == 0 ? "begin tran" : "rollback tran s",
+                8 => depth == 0 ? "begin tran" : "rollback",
+                9 => depth == 0 ? "begin tran" : "commit",
+                _ => $"update h set k = k + 1 where k = {k}",
+            };
+            depth = sql switch
+            {
+                "begin tran" => 1,
+                "rollback" or "commit" => 0,
+                _ => depth,
+            };
+            if (sql == "rollback tran s")
+                sql = "if @@trancount > 0 save tran s; rollback tran s";
+            try
+            {
+                Exec(c, sql);
+            }
+            catch (SimulatedSqlException)
+            {
+            }
+            for (var probe = 0; probe < 10; probe++)
+            {
+                AreEqual(
+                    string.Join(",", ReadRows(c, $"select id from h where k + 0 = {probe} order by id")),
+                    string.Join(",", ReadRows(c, $"select id from h where k = {probe} order by id")),
+                    $"k = {probe} after step {step}: {sql}");
+            }
         }
     }
 

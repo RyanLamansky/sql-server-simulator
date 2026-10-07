@@ -89,6 +89,7 @@ What it covers spans files:
   Commit's `MarkSlotReclaimable` and a compaction reached from another session's insert both rewrite slot directory entries, which is why the undo log takes it too.
 - **The seek journal** (`Heap.seekJournal`).
   A writer advances `MutationGeneration` and records its event under the latch, and a seek cache snapshots both under it; with a lock of its own, a snapshot could read a generation whose event wasn't queued yet and step the cache past an insert it never replayed — which is how the clustered variant lost rows that were physically present, a key-order scan following the cache missing them.
+  A rollback advances the generation and journals each row write's reversal under the hold that undoes it, the same way.
 - **What an insert publishes with its row.**
   `Simulation.InsertRow` runs the row's X lock and its version-store entry inside the latch (`Heap.Insert`'s hook), before any reader can see the slot; the key-range test, which can wait, runs first, outside it.
   Taking the X after the row was visible let a READ COMMITTED reader meet an uncommitted insert with nothing locked yet, and a snapshot read it as committed long ago.
