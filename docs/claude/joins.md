@@ -143,7 +143,7 @@ That is why `IS NULL` is *not* a pushable shape: pushing the anti-join idiom's `
 **Eligible body** — a plain SELECT-project-filter: no DISTINCT, no TOP / OFFSET / FETCH, no window, no ORDER BY, not a set-op branch.
 Each reads the row set as a whole, so a filter one level up would see a different one.
 A **`GROUP BY` body** qualifies too, for the conjuncts naming an output column that projects one of its **grouping columns** unchanged (`GroupingColumnProjections`): such a filter removes whole groups, and a group the enclosing statement was going to discard contributes to no other group's aggregate — nor to any other group's HAVING, which is evaluated per group.
-A grouping *expression* (`GROUP BY MONTH(d)`) is not such a column and declines, since the filter above names the expression's value rather than anything the body's rows carry; so does an aggregate output column.
+A grouping *expression* projected as written (`SELECT MONTH(d) AS m … GROUP BY MONTH(d)`) qualifies the same way, the pushed conjunct reading the expression over each row — its value is what puts the row in its group (`GroupingColumnProjections`, matched on the containment rule's `GroupingKey`); a projection merely *containing* it (`MONTH(d) + 1`), one drawing a per-call value, and an aggregate output column decline.
 A join body qualifies (the conjunct lands in its WHERE and its own narrowing takes over), as does a body carrying its own WHERE — the pushed conjuncts append *after* it, so the body's own filter still decides first per row.
 That ordering is what keeps the push from changing which rows an operand is evaluated over: real, whose own pushdown carries no such guarantee, raises **Msg 245** for `SELECT code FROM (SELECT code FROM t WHERE ISNUMERIC(code) = 1) d WHERE code = 5` over a non-numeric row the inner filter excluded (probe-confirmed), where the simulator answers the row — the same answer it gave before the push existed.
 The eligibility is recorded at parse as a `PredicatePushdown` delegate on the plan, which is also how every non-body `LateralPlan` (a TVF, VALUES, OPENJSON, PIVOT, a catalog view, a linked-server query) declines: it carries none.
@@ -163,6 +163,7 @@ A filter written above a `GROUP BY` body reaches it by name; a filter written on
 `ReduceGroupedBodiesByJoinKeys` (same file, run between the push above and the materialization below) closes that: for a still-deferred grouped source equi-joined on one of its grouping columns, it collects the **distinct values the partner side carries in the joined column** and pushes them below the body's grouping as a membership predicate — real's semi-join reduction.
 Measured on WWI's `Customers c JOIN (SELECT CustomerID, SUM(…) FROM Invoices ⋈ InvoiceLines GROUP BY CustomerID) d ON d.CustomerID = c.CustomerID`: filtered to one customer **156 ms → 1.4 ms** (live 3.3 ms), filtered to thirty **200 ms → 31 ms** (live 61 ms), and the joined-UPDATE spelling of the same shape **164 ms → 10 ms** (live 63 ms).
 A partner whose keys are most of the table reduces to itself and is neutral — the WWI report shape filtered to 459 of 663 customers measures the same either way.
+A body joined on a grouping *expression* reduces the same way, the key set filtering the expression's value: a point join to `SELECT cust_id / 1000 AS bucket, SUM(amount) … GROUP BY cust_id / 1000` over 200k rows went 48 → 32 ms (measured 2026-10-07; real 9.7 ms) — what remains is the scan, since nothing seeks an expression.
 
 **Legality.** The reduction is *implied by the join* rather than added to it, so unlike the pushdown above it needs no residual copy: the equi-join `ON` stays exactly as written, and for every surviving tuple the body's key equals the partner's, so a body row whose key no partner row carries can match nothing.
 The partner may itself be narrowed here by the enclosing WHERE (the same seek `NarrowJoinSources` applies, run here and discarded — that pass runs on its own later), which is sound for that pass's own reason: those conjuncts stay residual over the whole result, so a partner row they exclude belongs to no surviving tuple.
@@ -190,16 +191,19 @@ INNER and CROSS joins commute and their ON conjuncts are WHERE-equivalent, so th
 Row *order* can change, which is legal without an ORDER BY.
 Column resolution is name-based and rejects an ambiguous unqualified name outright (Msg 209), so it is order-independent too.
 
+It reorders the chain's **commuting prefix** — the leading run of `Inner` joins with an `ON` and `Cross` joins without one, up to the first outer join, `APPLY` or parenthesized group.
+Whatever follows joins the prefix's rows as a whole, a set no order inside the prefix changes, so the tail keeps its slots and its joins; its ON clauses bind by name, wherever the prefix's sources land.
 It engages only when every one of these holds:
 
-- Every join is `Inner` with an `ON` or `Cross` without one, and none is a parenthesized group.
-- Every ON conjunct decomposes into an equality between two **distinct** sources' bare column references, with a key-type pair the runtime `=` could promote — the level-independent counterpart of `TryExtractEquiKey`.
-  A single-source filter conjunct, a non-equi conjunct, or an OR in an ON declines the whole reorder.
-- No source carries a `LateralPlan` (moving it would change how often it runs) or is a skip-mode placeholder, and no two sources share an exposed name.
+- The prefix holds at least two sources.
+- Every prefix ON conjunct is either an equality between two **distinct** sources' bare column references with a key-type pair the runtime `=` could promote — an **edge** of the join graph, the level-independent counterpart of `TryExtractEquiKey` — or a conjunct that can move (`SourcesReadByMovableConjunct`): its value depends only on the row it is handed (`ParallelSafe` — no subquery, whose names the walk doesn't see, no module or sequence call) and every column it names binds to a prefix source or to an enclosing query.
+  A movable conjunct (`ON a.k = b.k AND b.flag = 1`, a non-equality between two sources) re-attaches at the step that places the last source it reads, or the first join when it reads only the driver or none; anything else declines the whole reorder.
+- No prefix source carries a `LateralPlan` (moving it would change how often it runs), no source is a skip-mode placeholder, and no two sources share an exposed name.
 - There is a reason to move: a driver (below), or a `Cross` level.
   A pure INNER chain with no driver keeps its written order outright.
 
-**The driver** is the best **non-leftmost** narrowed source seeking at most `SeekOuterRowCap` rows.
+**The driver** is the best **non-leftmost** narrowed prefix source (`CanDrive`): one seeking at most `SeekOuterRowCap` rows, or up to `SeekOuterBufferCap` where the written driver reads `SeekInnerRowsPerOuterRow` times more — the ratio at which `EquiJoinSeekOrHash` keeps seeking the next link, so the narrowed outer still seeks where the written one would have scanned.
+The written driver's count is its own seek's, or its table's row count when nothing narrowed it; a prefiltered written driver (whose lazy stream has no count) admits only the 128-row rule.
 Several narrowed sources compete on the seek's own candidate count (ties break on the written order); a narrowed leftmost that seeks at least as few already drives, and a wider narrowing leaves the leftmost driving rather than trading a small outer's per-outer seeks for a large one's hash probes.
 A chain with a `Cross` level and no such driver drives from its leftmost source.
 
@@ -219,6 +223,8 @@ On WWI, a four-table comma list written out of join order (`InvoiceLines, Custom
 A materialized derived table (see below) can be a reorder *member* — its rows are fixed for the enumeration — but never the driver, since only a seek-narrowed base table drives.
 
 Measured on the WWI six-table chain filtered on its fourth source (`WHERE c.CustomerID = 90`): **246 ms → 1.4 ms** (live 7.4 ms), the same chain filtered on its last source **233 ms → 15.6 ms** (live 51 ms), and the hand-reordered control **57 ms → 10.8 ms**.
+
+Measured 2026-10-07 on a generated `line` (200k) ⋈ `ord` (200k) ⋈ `cust` (20k) chain filtered on `c.id = 77`, medians against the live reference: a single-source ON conjunct (`… AND o.status = 3`) **122 → 0.09 ms** (live 0.39), the chain followed by a `LEFT JOIN region` **130 → 0.09 ms** (live 0.37), and both together **140 → 0.12 ms** (live 0.37); a `cust` narrowed to 500 rows by `c.region = 5` driving `ord` (200k) **25 → 3.0 ms** (live 12.9), and driving `ord` and then `line` **128 → 75 ms** (live 13.7) — each now drives from `cust`, the order real's plan returns its rows in.
 
 The original equi-join win still stands — with ≥1 equi-key the inner is indexed by the promoted keys and probed once per left row, O(L + R) vs the nested loop's O(L × R) (an AdventureWorks 9-table view drops from a multi-minute hang to sub-second).
 

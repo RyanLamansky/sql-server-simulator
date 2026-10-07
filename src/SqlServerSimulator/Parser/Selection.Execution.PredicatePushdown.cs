@@ -250,10 +250,11 @@ partial class Selection
     /// <summary>
     /// Rebinds every template that can be rebound, dropping the rest; null when
     /// none survives. <paramref name="slotColumn"/> answers what the body reads
-    /// at an output ordinal (null declines that template).
+    /// at an output ordinal — a column, or a grouped body's grouping expression
+    /// — or null, which declines that template.
     /// </summary>
     private static List<BooleanExpression>? RebindTemplates(
-        List<BooleanExpression> templates, Func<int, Reference?> slotColumn)
+        List<BooleanExpression> templates, Func<int, Expression?> slotColumn)
     {
         List<BooleanExpression>? bound = null;
         foreach (var template in templates)
@@ -293,9 +294,9 @@ partial class Selection
     /// removes whole groups, and a group the enclosing statement was going to
     /// discard anyway contributes to no other group's aggregate (nor to any
     /// other group's HAVING, which is evaluated per group). A grouping
-    /// <em>expression</em> — <c>GROUP BY MONTH(d)</c> — is not such a column and
-    /// declines, since the filter above names the expression's value, not
-    /// anything the body's rows carry.
+    /// <em>expression</em> projected as written — <c>SELECT MONTH(d) … GROUP BY
+    /// MONTH(d)</c> — qualifies the same way, the conjunct then reading the
+    /// expression over each row: its value is what puts the row in its group.
     /// </summary>
     private sealed class AggregatePushdown(
         SqlType[] schema,
@@ -310,7 +311,7 @@ partial class Selection
         List<WindowExpression> windows,
         SqlType[] windowOperandTypes,
         SqlType[] windowResultTypes,
-        Reference?[] groupingColumns)
+        Expression?[] groupingColumns)
     {
         public readonly SqlType[] Schema = schema;
         public readonly string[] ColumnNames = columnNames;
@@ -328,11 +329,11 @@ partial class Selection
         public readonly SqlType[] WindowResultTypes = windowResultTypes;
 
         /// <summary>
-        /// Per output ordinal, the body column a pushed conjunct may filter on —
-        /// non-null only where the projection is a plain column reference that
-        /// is also one of the body's grouping columns.
+        /// Per output ordinal, what a pushed conjunct filters the body's rows on
+        /// — non-null only where the projection is one of the body's grouping
+        /// columns or grouping expressions (see <see cref="GroupingColumnProjections"/>).
         /// </summary>
-        public readonly Reference?[] GroupingColumns = groupingColumns;
+        public readonly Expression?[] GroupingColumns = groupingColumns;
     }
 
     /// <summary>
@@ -379,21 +380,31 @@ partial class Selection
     }
 
     /// <summary>
-    /// Per output ordinal, the body column an enclosing conjunct may filter a
-    /// grouped body on: the projection has to be a plain column reference
-    /// (identity or rename) that resolves to a FROM source, and one of the
-    /// body's grouping expressions has to be a reference resolving to that same
-    /// source column. Returns null when no ordinal qualifies, which is what
-    /// declines a body grouped only by expressions.
+    /// Per output ordinal, what an enclosing conjunct may filter a grouped body
+    /// on: a plain column projection (identity or rename) of a column one of the
+    /// body's grouping expressions reads bare, or a projection matching a
+    /// grouping expression (<see cref="GroupingKey"/>) that reads a column and
+    /// draws no per-call value — its value is fixed by the row, so a filter on
+    /// it removes whole groups. Returns null when no ordinal qualifies.
     /// </summary>
-    private static Reference?[]? GroupingColumnProjections(
+    private static Expression?[]? GroupingColumnProjections(
         List<Expression> expressions, FromSource[] sources, FromClause fromClause)
     {
-        Reference?[]? columns = null;
+        Expression?[]? columns = null;
+        HashSet<ShapeKey>? expressionKeys = null;
         for (var i = 0; i < expressions.Count; i++)
         {
             if (UnwrapDirectRef(expressions[i]) is not { } projected)
+            {
+                var written = Peel(expressions[i]);
+                if (written is not (Value or AggregateExpression or WindowExpression) && written.ReadsAnyColumn() && !VolatileProjection.DrawsPerCall(written))
+                {
+                    expressionKeys ??= GroupingExpressionKeys(sources, fromClause);
+                    if (expressionKeys.Contains(GroupingKey(sources, written)))
+                        (columns ??= new Expression?[expressions.Count])[i] = written;
+                }
                 continue;
+            }
             var (source, column) = FindSourceColumn(sources, projected.ReferencedName);
             if (source < 0)
                 continue;
@@ -401,13 +412,25 @@ partial class Selection
             {
                 if (grouping is not Reference key || FindSourceColumn(sources, key.ReferencedName) != (source, column))
                     continue;
-                columns ??= new Reference?[expressions.Count];
+                columns ??= new Expression?[expressions.Count];
                 columns[i] = projected;
                 break;
             }
         }
 
         return columns;
+    }
+
+    /// <summary>The structural keys of a body's grouping expressions that aren't bare column references.</summary>
+    private static HashSet<ShapeKey> GroupingExpressionKeys(FromSource[] sources, FromClause fromClause)
+    {
+        HashSet<ShapeKey> keys = [];
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+        {
+            if (Peel(grouping) is not (Reference or Value) and var expression)
+                _ = keys.Add(GroupingKey(sources, expression));
+        }
+        return keys;
     }
 
     /// <summary>

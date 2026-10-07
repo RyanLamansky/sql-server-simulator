@@ -462,15 +462,19 @@ internal abstract class Expression : ExpressionNode
                                 }
                                 context.RestoreCheckpoint(checkpoint);
                             }
-                            else if (JsonModify.ReceiverType(expression, context) is XmlSqlType)
+                            else
                             {
                                 // An xml receiver has the five methods,
                                 // spelled in lower case, and nothing else
                                 // (probed 2026-10-02 against SQL Server 2025).
+                                // The argument list is asked first: the
+                                // receiver's type is a scope search, which
+                                // every `alias.column` would otherwise pay.
                                 var checkpoint = context.SaveCheckpoint();
-                                if (context.GetNextOptional() is Operator { Character: '(' })
-                                    throw SimulatedSqlException.NotAValidFunctionPropertyOrField(name.Value);
+                                var isCall = context.GetNextOptional() is Operator { Character: '(' };
                                 context.RestoreCheckpoint(checkpoint);
+                                if (isCall && JsonModify.ReceiverType(expression, context) is XmlSqlType)
+                                    throw SimulatedSqlException.NotAValidFunctionPropertyOrField(name.Value);
                             }
                             // Spatial instance-method shape: <expr>.STDistance(args) /
                             // .STAsText() / .ToString() / ... — broad accept-list

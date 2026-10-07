@@ -1045,7 +1045,10 @@ internal sealed partial class Selection
 
         // WHERE conjuncts, plus the ON conjuncts of inner joins — for an inner
         // join the two are interchangeable, so an ON equality narrows the
-        // generator exactly as safely as a WHERE one. An outer join's ON is
+        // generator exactly as safely as a WHERE one. A CROSS / comma level
+        // supplies no NULLs either, so a WHERE equality narrows a source it
+        // joins (SMO's `master.sys.databases AS dtb, sys.tables AS tbl …
+        // WHERE tbl.name = @p`). An outer join's ON is
         // deliberately excluded here: dropping rows from the null-supplying
         // side turns matched rows into null-extended ones, and the residual
         // predicate that makes every other narrowing safe cannot undo that.
@@ -1056,7 +1059,7 @@ internal sealed partial class Selection
         innerJoined[0] = true;
         for (var i = 0; i < joins.Length && i + 1 < sources.Length; i++)
         {
-            if (joins[i].Kind != JoinKind.Inner)
+            if (joins[i].Kind is not (JoinKind.Inner or JoinKind.Cross))
                 continue;
             innerJoined[i + 1] = innerJoined[i];
             joins[i].OnPredicate?.CollectConjuncts(conjuncts);

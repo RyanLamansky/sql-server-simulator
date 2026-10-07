@@ -30,6 +30,17 @@ partial class Selection
     internal Func<RowNumberBound, Selection?>? RowNumberBoundPushdown;
 
     /// <summary>
+    /// A view reference's counterpart of <see cref="RowNumberBoundPushdown"/>:
+    /// the body isn't parsed until the reference executes, so which output
+    /// column is its row number isn't known here, and the reference takes every
+    /// bound the enclosing WHERE puts on any of its columns, offering them to
+    /// the body's own <see cref="RowNumberBoundPushdown"/> once it is parsed
+    /// (<c>Simulation.InvokeView</c>). Set only on the plan
+    /// <see cref="ForView"/> builds.
+    /// </summary>
+    internal Func<List<RowNumberBound>, Selection>? ViewRowNumberBoundPushdown;
+
+    /// <summary>
     /// An enclosing statement's constant bound on a derived table's row-number
     /// column: the body's output <see cref="Ordinal"/> the bound was written
     /// against, and the inclusive row-number window
@@ -75,7 +86,9 @@ partial class Selection
         FromSource[]? rewritten = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (sources[i].LateralPlan is not { RowNumberBoundPushdown: { } bind })
+            var bind = sources[i].LateralPlan?.RowNumberBoundPushdown;
+            var bindView = sources[i].LateralPlan?.ViewRowNumberBoundPushdown;
+            if (bind is null && bindView is null)
                 continue;
             if (conjuncts is null)
             {
@@ -84,9 +97,19 @@ partial class Selection
                     excluder.CollectConjuncts(conjuncts);
             }
 
-            foreach (var bound in CollectRowNumberBounds(conjuncts, sources, i, batch))
+            var bounds = CollectRowNumberBounds(conjuncts, sources, i, batch);
+            if (bindView is not null)
             {
-                if (bind(bound) is not { } bounded)
+                if (bounds.Count == 0)
+                    continue;
+                rewritten ??= (FromSource[])sources.Clone();
+                rewritten[i] = sources[i].WithPushedPlan(bindView(bounds));
+                continue;
+            }
+
+            foreach (var bound in bounds)
+            {
+                if (bind!(bound) is not { } bounded)
                     continue;
                 rewritten ??= (FromSource[])sources.Clone();
                 rewritten[i] = sources[i].WithPushedPlan(bounded);
@@ -413,6 +436,13 @@ partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
+        if (TryScanInRowNumberOrder(sources, joins, window, excluders, Math.Min(lower - 1, upper), batch, outerResolver, out var inOrder, out var skipped))
+        {
+            foreach (var row in ProjectRowNumberWindowInOrder(inOrder, joins, expressions, excluders, window, lower, upper, skipped, batch, outerResolver))
+                yield return row;
+            yield break;
+        }
+
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
 
@@ -501,15 +531,130 @@ partial class Selection
             yield return projected;
         }
     }
+
+    /// <summary>
+    /// The ordered-scan route for a bound with no <c>PARTITION BY</c> over one
+    /// base table: when the window's ORDER BY is a key order the table can be
+    /// walked in (<see cref="TryApplyOrderedScan"/> — an index or key prefix,
+    /// NOT NULL columns, one direction) and those columns, with any the body's
+    /// WHERE pins to one value, hold a unique key, the rows arrive already
+    /// numbered, so the bound is a row count: the scan passes the first
+    /// <paramref name="skip"/> rows over unread where no residual WHERE stands
+    /// between, and stops after the window's last row — real's Top over an
+    /// ordered index scan. Without a unique key two rows could tie, and the
+    /// ordered view's order within a key isn't the arrival order the ranking
+    /// sort breaks ties by, so the order continues with the clustered key —
+    /// as a non-unique index's own order does on real.
+    /// </summary>
+    private static bool TryScanInRowNumberOrder(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        WindowExpression window,
+        List<BooleanExpression> excluders,
+        int skip,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        out FromSource[] ordered,
+        out int skipped)
+    {
+        ordered = sources;
+        skipped = 0;
+        if (window.PartitionBy.Length != 0 || sources.Length != 1 || joins.Length != 0 || sources[0].BackingTable is not { } table)
+            return false;
+        var unique = new HashSet<int>();
+        foreach (var spec in window.OrderBy)
+        {
+            if (spec.Expr is not { } key || !TryIdentifyIndexableColumn(sources[0], key, out var ordinal))
+                return false;
+            _ = unique.Add(ordinal);
+        }
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+        foreach (var (pinned, _) in CollectSingleValuePins(sources[0], conjuncts))
+            _ = unique.Add(pinned);
+
+        // Ties rank in arrival order, which for a scan of a table with a unique
+        // clustered key is that key's order — so continuing the window's order
+        // with the key ranks them exactly as the sort would. A WHERE could seek
+        // the rows in some other order, so only an unfiltered body takes it.
+        (int[], bool[])? tiebreak = null;
+        if (!HoldsUniqueKey(table, unique))
+        {
+            if (excluders.Count != 0 || ClusteredScan.Key(table) is not ({ } clustered, { } descending, true))
+                return false;
+            tiebreak = (clustered, descending);
+        }
+        if (!TryApplyOrderedScan(sources, joins, [.. window.OrderBy], excluders, skip, batch, outerResolver, out ordered, out skipped, tiebreak))
+            return false;
+        WindowStrategyDiagnostics.Sink?.Add($"RowNumberOrderedScan({table.Name},skipped {skipped})");
+        return true;
+    }
+
+    /// <summary>
+    /// Projects the rows numbered <c>[<paramref name="lower"/>,
+    /// <paramref name="upper"/>]</c> off a source already in the window's
+    /// order (<see cref="TryScanInRowNumberOrder"/>), whose first
+    /// <paramref name="skipped"/> rows the scan passed over; reading stops at
+    /// the window's last row.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> ProjectRowNumberWindowInOrder(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        List<BooleanExpression> excluders,
+        WindowExpression window,
+        int lower,
+        int upper,
+        int skipped,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var memo = new SourceColumnMemo();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveSource = null!;
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
+        var rowRuntime = new RuntimeContext(resolveSource, batch);
+
+        long rowNumber = skipped;
+        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+        {
+            currentTuple = tuple;
+            var include = true;
+            foreach (var excluder in excluders)
+            {
+                if (excluder.Run(rowRuntime) != true)
+                {
+                    include = false;
+                    break;
+                }
+            }
+            if (!include)
+                continue;
+            if (++rowNumber > upper)
+                yield break;
+            if (rowNumber < lower)
+                continue;
+
+            window.BindResult(batch, SqlValue.FromInt64(rowNumber));
+            var projected = new SqlValue[expressions.Count];
+            for (var j = 0; j < expressions.Count; j++)
+                projected[j] = expressions[j].Run(rowRuntime);
+            yield return projected;
+        }
+    }
 }
 
 /// <summary>
 /// Opt-in, test-only capture of the window-execution strategy a query settles
 /// on. Off by default (<see cref="Sink"/> is null) and imposes only a per-plan
-/// null check — never a per-row cost. The single writer is
-/// <c>Selection.BoundRowNumberBodies</c>, at the exact point it binds a
-/// derived table's <c>ROW_NUMBER()</c> body to an enclosing statement's row
-/// number bound, so the trace can't drift from the real decision. Used by the
+/// null check — never a per-row cost. The writers sit at the exact points a
+/// decision is taken, so the trace can't drift from it:
+/// <c>Selection.BoundRowNumberBodies</c> binding a derived table's
+/// <c>ROW_NUMBER()</c> body to an enclosing statement's row-number bound,
+/// <c>Simulation.InvokeView</c> binding a view's, and
+/// <c>Selection.TryScanInRowNumberOrder</c> walking a bounded body's key
+/// order. Used by the
 /// internal regression tests that guard against a silent loss of the bounded
 /// per-partition selection (a perf regression the correctness suite wouldn't
 /// catch, since the bound is result-transparent) and against it engaging for a
@@ -519,7 +664,9 @@ internal static class WindowStrategyDiagnostics
 {
     /// <summary>
     /// Per-thread decision log: <c>RowNumberBound(source,lower..upper)</c> when a
-    /// windowed body is bound to a row-number window. A test assigns a fresh
+    /// windowed body is bound to a row-number window, and
+    /// <c>RowNumberOrderedScan(table,skipped n)</c> when it walks a key order
+    /// instead of ranking. A test assigns a fresh
     /// list, drives a query to completion on the same thread (execution is
     /// synchronous and in-process), then inspects the entries. Null disables
     /// capture.

@@ -196,13 +196,13 @@ internal sealed class ObjectProperty : Expression
     /// Finds the schema that owns <paramref name="obj"/>, or returns
     /// <c>null</c> if the object isn't reachable through the database's
     /// per-schema dictionaries. Used by OBJECTPROPERTYEX's <c>SchemaId</c>
-    /// property; the lookup is linear (no back-pointer on <see cref="SchemaObject"/>).
+    /// property; one dictionary lookup per schema (no back-pointer on <see cref="SchemaObject"/>).
     /// </summary>
     internal static Schema? FindOwningSchema(Database database, SchemaObject obj)
     {
         foreach (var (_, schema) in database.Schemas)
         {
-            if (schema.SchemaObjects().Contains(obj))
+            if (schema.Holds(obj))
                 return schema;
         }
         return null;

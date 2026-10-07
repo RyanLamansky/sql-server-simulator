@@ -1063,10 +1063,15 @@ public sealed partial class Simulation
     /// stale, and invalidates <see cref="CatalogRows"/>. Called by the
     /// Create / Drop / Alter dispatch arm and by <c>ImportBacpac</c>.
     /// </summary>
-    internal void BumpSchemaVersion()
+    /// <param name="catalogUnchanged">
+    /// True for a change no cached catalog rowset reflects — DDL over temp
+    /// tables alone — which keeps <see cref="CatalogRows"/> standing.
+    /// </param>
+    internal void BumpSchemaVersion(bool catalogUnchanged = false)
     {
         _ = Interlocked.Increment(ref this.SchemaVersion);
-        this.CatalogRows.Invalidate();
+        if (!catalogUnchanged)
+            this.CatalogRows.Invalidate();
     }
 
     /// <summary>
@@ -2630,6 +2635,48 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Whether the DDL statement that began at <paramref name="start"/> changed
+    /// temp tables alone — <c>CREATE TABLE #t …</c>, or <c>DROP TABLE [IF
+    /// EXISTS]</c> over a list of <c>#</c> / <c>##</c> names. Reads the
+    /// statement's leading tokens again and restores the cursor.
+    /// </summary>
+    private static bool ChangedOnlyTempTables(ParserContext parser, ParserContext.Checkpoint start)
+    {
+        var end = parser.SaveCheckpoint();
+        parser.RestoreCheckpoint(start);
+        try
+        {
+            if (parser.Token is not ReservedKeyword { Keyword: Keyword.Create or Keyword.Drop } lead
+                || !parser.MoveNext() || parser.Token is not ReservedKeyword { Keyword: Keyword.Table }
+                || !parser.MoveNext())
+            {
+                return false;
+            }
+            if (lead.Keyword == Keyword.Create)
+                return IsTempName(parser.Token) && !(parser.MoveNext() && parser.Token is Operator { Character: '.' });
+            if (parser.Token is ReservedKeyword { Keyword: Keyword.If }
+                && (!parser.MoveNext() || parser.Token is not ReservedKeyword { Keyword: Keyword.Exists } || !parser.MoveNext()))
+            {
+                return false;
+            }
+            while (IsTempName(parser.Token))
+            {
+                if (!parser.MoveNext() || parser.Token is not Operator { Character: ',' or '.' } separator)
+                    return true;
+                if (separator.Character == '.' || !parser.MoveNext())
+                    return false;
+            }
+            return false;
+        }
+        finally
+        {
+            parser.RestoreCheckpoint(end);
+        }
+
+        static bool IsTempName(Token? token) => token is Name { Span: ['#', ..] };
+    }
+
+    /// <summary>
     /// Whether the statement at <paramref name="parser"/>'s cursor is object
     /// DDL or a permission statement — <c>CREATE</c>, <c>ALTER</c>,
     /// <c>DROP</c>, <c>TRUNCATE</c>, <c>UPDATE STATISTICS</c>, <c>GRANT</c>,
@@ -2751,6 +2798,7 @@ public sealed partial class Simulation
 
         SimulatedStatementOutcome? outcome;
         int? rowCount = null;
+        var ddlStart = context.SaveCheckpoint();
         switch (context.Token)
         {
             // A query expression written in parentheses is a SELECT statement
@@ -3060,7 +3108,9 @@ public sealed partial class Simulation
                 rowCount = 0;
                 if (!batch.IsSkipping)
                 {
-                    BumpSchemaVersion();
+                    // No cached catalog rowset lists a temp table: tempdb's
+                    // views read through their generators.
+                    BumpSchemaVersion(catalogUnchanged: ChangedOnlyTempTables(context, ddlStart));
                     if (connection.CurrentTransaction is { } ddlTransaction)
                     {
                         lock (ddlTransaction.CatalogChanges)

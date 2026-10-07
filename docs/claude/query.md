@@ -620,8 +620,9 @@ Oracle: `ApproxAggregateTests`.
 
 ### Streaming accumulation, and where an error surfaces
 
-A query with **one grouping set** — no GROUP BY at all, or a plain GROUP BY — reads each input row exactly once and accumulates straight off the enumeration.
-`ROLLUP` / `CUBE` / `GROUPING SETS` partition the same rows several ways, so they still buffer the WHERE-passing rows: the second set can't re-read a stream the first consumed.
+Every grouped query accumulates straight off the enumeration, reading each input row once.
+`ROLLUP` / `CUBE` / `GROUPING SETS` keep one group map per set and hand each WHERE-passing row to every map in turn, so each set still sees the rows in input order and its aggregates match what a per-set pass over a buffer gave.
+Measured 2026-10-07, `ROLLUP (status, amount / 100)` over 200k rows: 135 → 113 ms median (real 9.5 ms at DOP 8); the per-set key and operand evaluation is what remains.
 
 That is also the shape real runs: its plan pipelines the Filter into the Stream / Hash Aggregate rather than materializing between them, so **an aggregate operand that raises on an early row preempts a WHERE that would have raised on a later one**.
 Over a table whose first row zeroes the divisor and whose last row's text isn't numeric, `SELECT SUM(1 / a) FROM t WHERE CAST(s AS int) > 0` reports **Msg 8134** (divide by zero), not the conversion error — probe-confirmed against SQL Server 2025, and the one observable difference the streaming shape makes.
@@ -892,7 +893,7 @@ Past 4096 sets the query is Msg 10703 — `CUBE` over twelve columns is the larg
 The legacy `GROUP BY <cols> WITH ROLLUP` / `WITH CUBE` modifier is equivalent to `GROUP BY ROLLUP(<cols>)` / `CUBE(<cols>)` — after the column list parses to its single Cartesian set, `RollupExpansion` / `CubeExpansion` re-expand it in place (probe-confirmed the row output matches the function forms).
 `FromClause.AllGroupingExpressions` is the union (first-seen order) used by GROUPING() validation.
 
-The aggregate executor (`Selection.Execution.Aggregate.cs`) **buffers** WHERE-filtered rows once (snapshotting each tuple because `EnumerateJoinedRows` reuses a single shared array in-place) then iterates each grouping set, partitioning the buffer per set's columns and accumulating fresh aggregators per group.
+The aggregate executor (`Selection.Execution.Aggregate.cs`) accumulates each WHERE-filtered row into one group map per grouping set as it is read (see [Streaming accumulation](#streaming-accumulation-and-where-an-error-surfaces)), then walks the sets in order, each partitioned by its own columns with fresh aggregators per group.
 The projection's column resolver returns typed NULL for columns that aren't in the current set but appear in another set's columns — that's the subtotal/total-row semantic.
 Without GROUP BY the executor synthesizes a single empty grouping set `[[]]` and runs one implicit group; same code path covers `GROUPING SETS(())` and the bare **`GROUP BY ()`** form (the empty grouping set = grand total over all rows, one aggregate row).
 `ParseGroupByItem` distinguishes `GROUP BY ()` (a `(` immediately followed by `)` → the empty fragment `[[]]`) from `GROUP BY (expr)` (a parenthesized grouping key) via a checkpoint peek.
@@ -1065,6 +1066,26 @@ A lower bound with no upper one declines: every row of the partition would still
 
 Past **4096** rows the heap stands down for the buffer [Top-N selection](#top-n-selection) falls back to, which selects the bound's window rather than sorting the partition, and projects only that window.
 Measured 2026-09-30, `rn BETWEEN 100001 AND 100050` over 150k rows ordered by an unindexed `nvarchar`: 546 ms → 127 ms median (88 ms minimum), real 40 ms.
+Re-measured 2026-10-07 on the same shape: 83 ms against real's 31 ms; more than half of it is garbage collection of the per-row tuple and key copies the buffer holds.
+
+**A partitionless window over a key order reads the rows already numbered.**
+When the window has no `PARTITION BY`, the body reads one base table, and its ORDER BY is a key order the table can be walked in — the [ORDER BY elimination](indexes.md#order-by-elimination) shapes: an index or key prefix, NOT NULL columns, one direction — `TryScanInRowNumberOrder` walks that order instead (traced `RowNumberOrderedScan`), counting rows as they pass the body's WHERE, passing the first `lower − 1` over unread where no WHERE stands between, and stopping after the window's last row: real's Top over an ordered index scan.
+The walk numbers rows exactly as the ranking sort would only when no two of them tie, so the order columns, with any the body's WHERE pins to one value, must hold a unique key.
+A non-unique index qualifies too when the table's clustered key is unique and the body has no WHERE: ties rank in arrival order, which for a clustered table is that key's, so the order continues with the clustered key — the order real's own non-unique index keeps (`ORDER BY iname` over `ix_pg_iname` is an ordered index scan feeding the Top, probed 2026-10-07 against SQL Server 2025).
+A body WHERE could seek its rows in another order, so that case keeps the sort.
+Measured 2026-10-07 over the 150k-row table, medians of three interleaved Release runs (real, its plan an ordered scan with a Top):
+
+| shape | before | after | real |
+|---|---|---|---|
+| `ORDER BY id` (primary key), `rn BETWEEN 100001 AND 100050` | 50 ms | **4.2 ms** | 9.2 ms |
+| `ORDER BY id DESC`, `rn > 120000 AND rn <= 120025` (CTE) | 55 ms | **3.7 ms** | 9.0 ms |
+| `ORDER BY iname` (non-unique index), `rn BETWEEN 100001 AND 100050` | 84 ms | **5.2 ms** | 9.0 ms |
+| `ORDER BY id`, `rn BETWEEN 101 AND 150` | 13.9 ms | **0.08 ms** | 0.67 ms |
+
+**A view's body takes the bound too.**
+A view isn't parsed until its reference executes, so the reference can't know which output column is its row number: `ForView`'s plan carries `ViewRowNumberBoundPushdown`, which takes *every* bound the enclosing WHERE puts on any of its columns, and `Simulation.InvokeView` offers them in turn to the parsed body's own pushdown, the first naming the body's row-number column binding (traced `RowNumberBound(<view>,…)`).
+A chain of views needs nothing more: the ordinary predicate push carries the conjunct into the outer body, whose own execution then bounds the view below it.
+Measured 2026-10-07 over the same table (before → after, real): `ORDER BY id` deep page 204 → **3.5 ms** (9.2), shallow page 209 → **0.18 ms** (0.72), `PARTITION BY grp … rn = 1` over 500 groups 320 → **37 ms** (23), the same view joined to 20 groups for `rn <= 3` 354 → **52 ms** (12), the unindexed deep page 654 → **109 ms** (53).
 
 **Ties, and why the ranking sort is total.** A heap can only reproduce a full sort's answer against an order with no ties in it, so both paths order a partition by the window's ORDER BY keys **and then by the row's own arrival position**.
 That settles which member of a tie group takes which number; a bare `List<int>.Sort` introsort would pick arbitrarily above its insertion-sort threshold and stably below it — not even consistent with itself across partition sizes.

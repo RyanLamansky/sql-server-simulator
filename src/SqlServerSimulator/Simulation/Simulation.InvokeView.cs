@@ -46,13 +46,25 @@ partial class Simulation
     /// base tables' hidden browse columns after the recorded ones (see
     /// <see cref="ParserContext.BrowseFlatten"/>), counted in <paramref name="columnCount"/>.
     /// </param>
+    /// <param name="rowNumberBounds">
+    /// The row-number windows the referencing statement's WHERE pins on the
+    /// reference's columns, offered in turn to a <c>ROW_NUMBER()</c> body once
+    /// it is parsed; the first naming its row-number column bounds it. Null for
+    /// an ordinary reference.
+    /// </param>
     internal IEnumerable<byte[]> InvokeView(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null, InheritedSystemTime? systemTime = null, bool browseFlatten = false)
+        BatchContext outerBatch,
+        View view,
+        int columnCount,
+        List<BooleanExpression>? pushedPredicates = null,
+        InheritedSystemTime? systemTime = null,
+        bool browseFlatten = false,
+        List<Selection.RowNumberBound>? rowNumberBounds = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
-        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten);
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten, rowNumberBounds);
         return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
@@ -237,7 +249,13 @@ partial class Simulation
     }
 
     private IEnumerable<byte[]> InvokeViewCore(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates, InheritedSystemTime? systemTime, bool browseFlatten)
+        BatchContext outerBatch,
+        View view,
+        int columnCount,
+        List<BooleanExpression>? pushedPredicates,
+        InheritedSystemTime? systemTime,
+        bool browseFlatten,
+        List<Selection.RowNumberBound>? rowNumberBounds)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -292,6 +310,21 @@ partial class Simulation
             var effective = pushedPredicates is null
                 ? bodySelection
                 : bodySelection.PredicatePushdown?.Invoke(pushedPredicates) ?? bodySelection;
+            // A row-number bound reaches the body the same way: a ROW_NUMBER()
+            // body takes the bound written against the column it projects the
+            // row number at, which the reference reads at the same position.
+            if (rowNumberBounds is not null && effective.RowNumberBoundPushdown is { } bindRowNumber)
+            {
+                foreach (var bound in rowNumberBounds)
+                {
+                    if (bound.Ordinal < columnCount && bindRowNumber(bound) is { } bounded)
+                    {
+                        effective = bounded;
+                        WindowStrategyDiagnostics.Sink?.Add($"RowNumberBound({view.Name},{bound.Lower}..{bound.Upper})");
+                        break;
+                    }
+                }
+            }
             // A level over a partitioned view a write reads for one member
             // reads only that member's branch, in the view's own types.
             Selection? memberBranch = null;

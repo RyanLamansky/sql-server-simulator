@@ -468,6 +468,153 @@ public sealed class WindowTopNBoundTests
             "select id from (select id, row_number() over (order by k, id) as rn from t) x where {rn} <= 4097"));
     }
 
+    // ---- a partitionless window walked in key order ----
+
+    /// <summary>
+    /// 3000 rows whose <c>k</c> ties in runs of three, indexed non-uniquely, over
+    /// a clustered key, and the same rows in a heap.
+    /// </summary>
+    private static SimulatedDbConnection OpenIndexed()
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, """
+            create table t (id int not null primary key, k int not null, s nvarchar(10) not null);
+            create index ix_k on t (k);
+            create table h (id int not null, k int not null);
+            create index ix_hk on h (k);
+            declare @i int = 1;
+            while @i <= 3000 begin
+                insert t values ((@i * 7) % 3001, (@i * 13 % 3000) / 3, concat('s', @i % 10));
+                insert h values (@i, (@i * 13 % 3000) / 3);
+                set @i += 1;
+            end
+            """);
+        return connection;
+    }
+
+    [TestMethod]
+    public void ClusteredKeyOrder_DeepPage_Agrees()
+    {
+        using var connection = OpenIndexed();
+        AreEqual("2001|2050|50", string.Join('|', Summary(BoundedMatchesUnbounded(
+            connection,
+            "select id from (select id, row_number() over (order by id) as rn from t) x where {rn} between 2001 and 2050"))));
+    }
+
+    [TestMethod]
+    public void ClusteredKeyOrder_Descending_Agrees()
+    {
+        using var connection = OpenIndexed();
+        HasCount(25, BoundedMatchesUnbounded(
+            connection,
+            "select id, k from (select id, k, row_number() over (order by id desc) as rn from t) x where {rn} > 100 and {rn} <= 125"));
+    }
+
+    [TestMethod]
+    public void NonUniqueIndexOrder_RanksTiesInClusteredKeyOrder_Agrees()
+    {
+        using var connection = OpenIndexed();
+        // A bound of 100 cuts a run of three equal k values: the tie the
+        // ordered scan settles by the clustered key, as arrival does.
+        HasCount(10, BoundedMatchesUnbounded(
+            connection,
+            "select id, k from (select id, k, row_number() over (order by k) as rn from t) x where {rn} between 91 and 100"));
+    }
+
+    [TestMethod]
+    public void NonUniqueIndexOrder_Descending_Agrees()
+    {
+        using var connection = OpenIndexed();
+        HasCount(10, BoundedMatchesUnbounded(
+            connection,
+            "select id, k from (select id, k, row_number() over (order by k desc) as rn from t) x where {rn} between 91 and 100"));
+    }
+
+    [TestMethod]
+    public void NonUniqueIndexOrder_UnderABodyWhere_Agrees()
+    {
+        using var connection = OpenIndexed();
+        HasCount(10, BoundedMatchesUnbounded(
+            connection,
+            "select id, k from (select id, k, row_number() over (order by k) as rn from t where s <> N's3') x where {rn} between 91 and 100"));
+    }
+
+    [TestMethod]
+    public void PinnedEqualityThenKeyOrder_Agrees()
+    {
+        using var connection = OpenIndexed();
+        HasCount(2, BoundedMatchesUnbounded(
+            connection,
+            "select id from (select id, row_number() over (order by id) as rn from t where k = 500) x where {rn} between 2 and 9"));
+    }
+
+    [TestMethod]
+    public void HeapNonUniqueIndexOrder_Agrees()
+    {
+        using var connection = OpenIndexed();
+        HasCount(10, BoundedMatchesUnbounded(
+            connection,
+            "select id, k from (select id, k, row_number() over (order by k) as rn from h) x where {rn} between 91 and 100"));
+    }
+
+    [TestMethod]
+    public void KeyOrderWindowPastTheEnd_ReturnsTheTail()
+    {
+        using var connection = OpenIndexed();
+        HasCount(10, BoundedMatchesUnbounded(
+            connection,
+            "select id from (select id, row_number() over (order by id) as rn from t) x where {rn} between 2991 and 3100"));
+    }
+
+    // ---- a view's ROW_NUMBER() body ----
+
+    [TestMethod]
+    public void ViewBody_Agrees()
+    {
+        using var connection = OpenTied();
+        Exec(connection, "create view v as " + TiedBody);
+        HasCount(16, BoundedMatchesUnbounded(connection, "select g, id, tag from v where {rn} <= 2"));
+    }
+
+    [TestMethod]
+    public void ViewBodyThroughAViewChain_Agrees()
+    {
+        using var connection = OpenTied();
+        Exec(connection, "create view v as " + TiedBody);
+        Exec(connection, "create view w as select g, id, rn from v");
+        HasCount(8, BoundedMatchesUnbounded(connection, "select g, id from w where {rn} = 1"));
+    }
+
+    [TestMethod]
+    public void ViewBodyJoined_Agrees()
+    {
+        using var connection = OpenTied();
+        Exec(connection, "create view v as " + TiedBody);
+        HasCount(8, BoundedMatchesUnbounded(
+            connection,
+            "select p.label, v.id from peer p join v on v.g = p.g where {rn} <= 2"));
+    }
+
+    [TestMethod]
+    public void ViewBodyBoundOnAnotherColumn_Agrees()
+    {
+        using var connection = OpenTied();
+        Exec(connection, "create view v as " + TiedBody);
+        HasCount(2, BoundedMatchesUnbounded(connection, "select g, id from v where id <= 20 and {rn} = 1 and g < 2"));
+    }
+
+    [TestMethod]
+    public void ViewBodyOverAKeyOrder_Agrees()
+    {
+        using var connection = OpenIndexed();
+        Exec(connection, "create view v as select id, k, row_number() over (order by id) as rn from t");
+        HasCount(50, BoundedMatchesUnbounded(connection, "select id, k from v where {rn} between 1001 and 1050"));
+    }
+
+    /// <summary>The first row, the last row and the count, pipe-joined, of a single-column result.</summary>
+    private static string[] Summary(List<string> rows) => [rows[0], rows[^1], rows.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)];
+
     // ---- transaction / concurrency shapes the narrowing must not disturb ----
 
     [TestMethod]

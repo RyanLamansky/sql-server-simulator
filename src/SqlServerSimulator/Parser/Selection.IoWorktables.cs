@@ -136,7 +136,7 @@ internal sealed partial class Selection
         }
         foreach (var index in table.Indexes)
         {
-            if (index.IsUnique && index.Filter is null && Array.TrueForAll(index.KeyColumns, column => columns.Contains(column.StorageOrdinal)))
+            if (index is { IsUnique: true, Filter: null, IsDisabled: false } && Array.TrueForAll(index.KeyColumns, column => columns.Contains(column.StorageOrdinal)))
                 return true;
         }
         return false;

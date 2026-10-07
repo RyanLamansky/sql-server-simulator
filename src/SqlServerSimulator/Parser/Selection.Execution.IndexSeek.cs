@@ -1039,6 +1039,12 @@ internal sealed partial class Selection
     /// unread and reports it in <paramref name="skipped"/>, leaving the caller
     /// the rest of the OFFSET to apply.
     /// </para>
+    /// <para>
+    /// <paramref name="tiebreak"/> continues the order with key columns (storage
+    /// ordinals, each with its own direction) the ORDER BY doesn't name, for a
+    /// caller that needs ties in that key's order; a direction differing from
+    /// the ORDER BY's declines like any mixed-direction sort.
+    /// </para>
     /// </summary>
     private static bool TryApplyOrderedScan(
         FromSource[] sources,
@@ -1049,7 +1055,8 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         out FromSource[] orderedSources,
-        out int skipped)
+        out int skipped,
+        (int[] Ordinals, bool[] Descending)? tiebreak = null)
     {
         orderedSources = sources;
         skipped = 0;
@@ -1082,6 +1089,19 @@ internal sealed partial class Selection
             {
                 return false;
             }
+        }
+        if (tiebreak is var (tiebreakOrdinals, tiebreakDescending))
+        {
+            List<int> continued = [.. orderOrds];
+            for (var i = 0; i < tiebreakOrdinals.Length; i++)
+            {
+                if (continued.Contains(tiebreakOrdinals[i]))
+                    continue;
+                if (tiebreakDescending[i] != descending)
+                    return false;
+                continued.Add(tiebreakOrdinals[i]);
+            }
+            orderOrds = [.. continued];
         }
 
         var conjuncts = new List<BooleanExpression>();
@@ -1499,16 +1519,27 @@ internal sealed partial class Selection
 
     // The storage-ordinal sequence of every key / index, keys first. Used to
     // match an ORDER BY (after pinned-column stripping) against a leading prefix.
+    // A non-unique index over a table with a unique clustered key continues
+    // with that key's columns, the row locator real orders such an index by.
     private static IEnumerable<int[]> EnumerateKeyOrdinals(HeapTable table)
     {
         foreach (var key in table.KeyConstraints)
             yield return key.StorageOrdinals;
+        var locator = ClusteredScan.Key(table) is { Unique: true } clustered ? clustered.Ordinals : [];
         foreach (var index in table.Indexes)
         {
-            var ordinals = new int[index.KeyColumns.Length];
-            for (var i = 0; i < ordinals.Length; i++)
-                ordinals[i] = index.KeyColumns[i].StorageOrdinal;
-            yield return ordinals;
+            List<int> ordinals = new(index.KeyColumns.Length + locator.Length);
+            foreach (var column in index.KeyColumns)
+                ordinals.Add(column.StorageOrdinal);
+            if (!index.IsUnique && !index.IsClustered)
+            {
+                foreach (var ordinal in locator)
+                {
+                    if (!ordinals.Contains(ordinal))
+                        ordinals.Add(ordinal);
+                }
+            }
+            yield return [.. ordinals];
         }
     }
 
@@ -1879,8 +1910,13 @@ internal sealed partial class Selection
         // prefiltered source doesn't have (its stream is lazy and counting it
         // would materialize the table). With nothing seeked, only a chain whose
         // written order leaves a CROSS level the WHERE could connect reorders.
+        // The written driver's row count is known when the seek narrowed it or
+        // nothing did; a prefiltered one could yield anything up to its table.
         var current = narrowed ?? sources;
-        return ReorderJoinChain(current, joins, conjuncts, seekedCandidates) ?? (current, joins);
+        var writtenDriverRows = seekedCandidates is { } counts && counts[0] >= 0 ? counts[0]
+            : ReferenceEquals(current[0], sources[0]) && IsSeekNarrowingTarget(sources[0]) ? sources[0].BackingTable!.Heap.RowCount
+            : -1;
+        return ReorderJoinChain(current, joins, conjuncts, seekedCandidates, writtenDriverRows) ?? (current, joins);
     }
 
     /// <summary>
@@ -1935,17 +1971,20 @@ internal sealed partial class Selection
         && source.HeapPlan is { SerializableRangeMode: null, RowTxScoped: false };
 
     /// <summary>
-    /// Reorders a chain of <b>INNER equi-joins and <c>CROSS</c> / comma
+    /// Reorders the leading run of a chain's <b>INNER and <c>CROSS</c> / comma
     /// levels</b> so it drives from the source the WHERE narrowed hardest and
     /// joins every later source on an equality, instead of folding in whatever
     /// order the query happens to name its sources. Returns <c>null</c> —
     /// leaving the written order — for anything outside that shape, and when
-    /// the written order is already the one the rules below pick.
+    /// the written order is already the one the rules below pick. The joins
+    /// after that run — an outer join, an APPLY, a parenthesized group — keep
+    /// their slots: they read the run's rows as a whole, a set its order
+    /// doesn't change.
     /// <para>
     /// INNER and CROSS joins commute and their ON conjuncts are WHERE-equivalent,
     /// so the conjunction of every ON conjunct applied over the cross product is
     /// the result whatever order the sources fold in: any permutation that
-    /// keeps each conjunct's two sources both placed by the step it attaches to
+    /// keeps every source a conjunct reads placed by the step it attaches to
     /// produces the same rows. Row <em>order</em> can change, which is legal
     /// without an ORDER BY. Column resolution is name-based and rejects an
     /// ambiguous unqualified name outright (Msg 209), so it is order-independent
@@ -1963,13 +2002,13 @@ internal sealed partial class Selection
     /// on, so the attachment can only drop tuples the WHERE drops anyway.
     /// </para>
     /// <para>
-    /// The driver is a <em>non-leftmost</em> narrowed source seeking at most
-    /// <see cref="SeekOuterRowCap"/> rows — the regime where
-    /// <see cref="EquiJoinSeekOrHash"/> keeps seeking the next link per outer
-    /// row, which is what collapses a deep chain filtered in the middle. A wider
-    /// narrowing leaves the leftmost source driving rather than trading a small
-    /// outer's per-outer seeks for a large one's hash probes, and a pure INNER
-    /// chain with no such driver keeps its written order outright.
+    /// The driver is a <em>non-leftmost</em> narrowed source <see cref="CanDrive"/>
+    /// admits — the regime where <see cref="EquiJoinSeekOrHash"/> keeps seeking
+    /// the next link per outer row, which is what collapses a deep chain
+    /// filtered in the middle. A wider narrowing leaves the leftmost source
+    /// driving rather than trading a small outer's per-outer seeks for a large
+    /// one's hash probes, and a pure INNER chain with no such driver keeps its
+    /// written order outright.
     /// </para>
     /// <para>
     /// Placement is greedy from the driver: at each step the sources connected
@@ -1984,25 +2023,33 @@ internal sealed partial class Selection
     /// </para>
     /// </summary>
     private static (FromSource[] Sources, JoinSpec[] Joins)? ReorderJoinChain(
-        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, int[]? seekedCandidates)
+        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, int[]? seekedCandidates, long writtenDriverRows)
     {
+        // The commuting prefix: the leading run of INNER and CROSS levels.
+        // Whatever joins after it — an outer join, an APPLY, a parenthesized
+        // group — joins the prefix's rows as a whole, a set no order inside the
+        // prefix changes.
+        var count = 1;
         var hasCross = false;
         foreach (var join in joins)
         {
             if (join.GroupCount != 1)
-                return null;
+                break;
             if (join.Kind == JoinKind.Cross && join.OnPredicate is null)
                 hasCross = true;
             else if (join.Kind != JoinKind.Inner || join.OnPredicate is null)
-                return null;
+                break;
+            count++;
         }
+        if (count < 2)
+            return null;
 
         var driver = -1;
         if (seekedCandidates is not null)
         {
-            for (var i = 1; i < sources.Length; i++)
+            for (var i = 1; i < count; i++)
             {
-                if (seekedCandidates[i] is < 0 or > SeekOuterRowCap)
+                if (!CanDrive(seekedCandidates[i], writtenDriverRows))
                     continue;
                 if (driver < 0 || seekedCandidates[i] < seekedCandidates[driver])
                     driver = i;
@@ -2026,7 +2073,7 @@ internal sealed partial class Selection
             // it would change how often it runs; a placeholder belongs to a
             // skipped statement. Two sources sharing an exposed name would make
             // a qualified reference bind to whichever comes first.
-            if (sources[i].LateralPlan is not null || sources[i].IsPlaceholder || sources[i].Qualifier is null)
+            if ((i < count && sources[i].LateralPlan is not null) || sources[i].IsPlaceholder || sources[i].Qualifier is null)
                 return null;
             for (var j = i + 1; j < sources.Length; j++)
             {
@@ -2035,19 +2082,28 @@ internal sealed partial class Selection
             }
         }
 
+        // Every ON conjunct of an INNER chain is WHERE-equivalent. An equality
+        // between two sources' columns is an edge of the join graph; any other
+        // conjunct — a filter on one source, a non-equality between two —
+        // rides along to the step that places the last source it reads.
+        var prefix = sources[..count];
         var edges = new List<JoinEdge>();
+        var residuals = new List<(BooleanExpression Conjunct, List<int> Sources)>();
         var conjuncts = new List<BooleanExpression>();
-        foreach (var join in joins)
+        for (var level = 0; level < count - 1; level++)
         {
-            if (join.OnPredicate is null)
+            if (joins[level].OnPredicate is not { } on)
                 continue;
             conjuncts.Clear();
-            join.OnPredicate.CollectConjuncts(conjuncts);
+            on.CollectConjuncts(conjuncts);
             foreach (var conjunct in conjuncts)
             {
-                if (!TryExtractEquiEdge(conjunct, sources, out var edge))
+                if (TryExtractEquiEdge(conjunct, prefix, out var edge))
+                    edges.Add(edge);
+                else if (SourcesReadByMovableConjunct(conjunct, prefix) is { } read)
+                    residuals.Add((conjunct, read));
+                else
                     return null;
-                edges.Add(edge);
             }
         }
 
@@ -2057,12 +2113,11 @@ internal sealed partial class Selection
             // conjunct becomes one edge however many places carry it.
             foreach (var conjunct in whereConjuncts)
             {
-                if (!edges.Exists(edge => ReferenceEquals(edge.Conjunct, conjunct)) && TryExtractEquiEdge(conjunct, sources, out var edge))
+                if (!edges.Exists(edge => ReferenceEquals(edge.Conjunct, conjunct)) && TryExtractEquiEdge(conjunct, prefix, out var edge))
                     edges.Add(edge);
             }
         }
 
-        var count = sources.Length;
         var order = new int[count];
         var placedAt = new int[count];
         Array.Fill(placedAt, -1);
@@ -2077,7 +2132,7 @@ internal sealed partial class Selection
             {
                 if (placedAt[candidate] >= 0 || !ConnectsToPlacedSources(edges, placedAt, candidate))
                     continue;
-                var preservesRows = JoinPreservesRowCount(sources, edges, placedAt, candidate);
+                var preservesRows = JoinPreservesRowCount(prefix, edges, placedAt, candidate);
                 if (best < 0 || (preservesRows && !bestPreservesRows))
                     (best, bestPreservesRows) = (candidate, preservesRows);
             }
@@ -2102,18 +2157,23 @@ internal sealed partial class Selection
         // Each conjunct attaches at the step that places the later of its two
         // sources — which is the step that first makes both readable, whether
         // that step's own source is one of them or the pair was completed
-        // earlier in the written order.
+        // earlier in the written order. A conjunct reading only the driver, or
+        // no source at all, attaches at the first join.
         var stepPredicates = new BooleanExpression?[count];
+        void Attach(int step, BooleanExpression conjunct) =>
+            stepPredicates[step] = stepPredicates[step] is { } existing ? BooleanExpression.And(existing, conjunct) : conjunct;
         foreach (var edge in edges)
+            Attach(Math.Max(placedAt[edge.LeftSource], placedAt[edge.RightSource]), edge.Conjunct);
+        foreach (var (conjunct, read) in residuals)
         {
-            var step = Math.Max(placedAt[edge.LeftSource], placedAt[edge.RightSource]);
-            stepPredicates[step] = stepPredicates[step] is { } existing
-                ? BooleanExpression.And(existing, edge.Conjunct)
-                : edge.Conjunct;
+            var step = 1;
+            foreach (var source in read)
+                step = Math.Max(step, placedAt[source]);
+            Attach(step, conjunct);
         }
 
-        var reorderedSources = new FromSource[count];
-        var reorderedJoins = new JoinSpec[count - 1];
+        var reorderedSources = (FromSource[])sources.Clone();
+        var reorderedJoins = (JoinSpec[])joins.Clone();
         reorderedSources[0] = sources[order[0]];
         for (var step = 1; step < count; step++)
         {
@@ -2125,6 +2185,55 @@ internal sealed partial class Selection
 
         JoinDiagnostics.Sink?.Add($"Reorder({string.Join(",", order)})");
         return (reorderedSources, reorderedJoins);
+    }
+
+    /// <summary>
+    /// Whether a source the seek narrowed to <paramref name="candidates"/> rows
+    /// may drive the chain in place of a written driver reading
+    /// <paramref name="writtenDriverRows"/> (−1 when unknown): always within
+    /// <see cref="SeekOuterRowCap"/>, and up to <see cref="SeekOuterBufferCap"/>
+    /// where the written driver is <see cref="SeekInnerRowsPerOuterRow"/> times
+    /// larger — the ratio <see cref="EquiJoinSeekOrHash"/> keeps seeking the
+    /// next link at, so the narrowed outer still seeks where the written one
+    /// would have scanned.
+    /// </summary>
+    private static bool CanDrive(int candidates, long writtenDriverRows) =>
+        candidates >= 0
+        && (candidates <= SeekOuterRowCap
+            || (candidates <= SeekOuterBufferCap && writtenDriverRows >= 0 && (long)candidates * SeekInnerRowsPerOuterRow <= writtenDriverRows));
+
+    /// <summary>
+    /// The prefix sources an ON conjunct that isn't a join-graph edge reads,
+    /// when it can move to another step of an INNER chain: its value depends
+    /// on nothing but the row it is handed (<see cref="BooleanExpression.ParallelSafe"/>
+    /// — no subquery, which could read a source by a name this walk doesn't
+    /// see, and no module or sequence call), and every column it names binds to
+    /// one of <paramref name="prefix"/> or to an enclosing query. Null when it
+    /// can't move, which keeps the written order.
+    /// </summary>
+    private static List<int>? SourcesReadByMovableConjunct(BooleanExpression conjunct, FromSource[] prefix)
+    {
+        if (!conjunct.ParallelSafe)
+            return null;
+        List<int> read = [];
+        var movable = true;
+        conjunct.VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
+        {
+            if (!movable)
+                return;
+            switch (ResolvesLocally(prefix, name))
+            {
+                case null:
+                    movable = false;
+                    break;
+                case true:
+                    var source = FindSourceColumn(prefix, name).SourceIndex;
+                    if (!read.Contains(source))
+                        read.Add(source);
+                    break;
+            }
+        }));
+        return movable ? read : null;
     }
 
     /// <summary>
@@ -2172,8 +2281,9 @@ internal sealed partial class Selection
     /// between two different FROM sources — the level-independent counterpart of
     /// <see cref="TryExtractEquiKey"/>, which classifies relative to one join
     /// level. Anything else (a single-source filter, a non-equality, a
-    /// computed operand, a key pair the runtime <c>=</c> couldn't promote)
-    /// declines, which declines the whole reorder.
+    /// computed operand, a key pair the runtime <c>=</c> couldn't promote) is no
+    /// edge, and rides along only if <see cref="SourcesReadByMovableConjunct"/>
+    /// lets it move.
     /// </summary>
     private static bool TryExtractEquiEdge(BooleanExpression conjunct, FromSource[] sources, [NotNullWhen(true)] out JoinEdge? edge)
     {

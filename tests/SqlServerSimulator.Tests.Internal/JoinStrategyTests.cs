@@ -340,13 +340,34 @@ public sealed class JoinStrategyTests
             "select r.id from r join q on q.id > r.q_id join p on p.id = q.p_id where p.id = 5")));
 
     /// <summary>
-    /// A single-source conjunct in an ON clause isn't an edge either — the
-    /// reorder declines rather than re-homing it.
+    /// A single-source conjunct in an ON clause isn't an edge, but over an
+    /// INNER chain it is WHERE-equivalent: it rides along to the step that
+    /// places its source, and the chain still drives from the narrowed one.
     /// </summary>
     [TestMethod]
-    public void SingleSourceOnConjunct_DeclinesTheReorder()
+    public void SingleSourceOnConjunct_RidesToItsSourcesStep()
+        => AreEqual("Reorder(2,1,0)", ReorderOf(CaptureStrategies(ChainSetup,
+            "select r.id from r join q on q.id = r.q_id and q.id % 2 = 0 join p on p.id = q.p_id and p.id > 0 where p.id = 5")));
+
+    /// <summary>
+    /// A conjunct holding a subquery can't move: a name inside the subquery
+    /// isn't one the reorder sees, so it could land at a step whose tuple
+    /// lacks the source it reads.
+    /// </summary>
+    [TestMethod]
+    public void SubqueryOnConjunct_DeclinesTheReorder()
         => IsNull(ReorderOf(CaptureStrategies(ChainSetup,
-            "select r.id from r join q on q.id = r.q_id join p on p.id = q.p_id and p.id > 0 where p.id = 5")));
+            "select r.id from r join q on q.id = r.q_id and exists (select 1 from p p2 where p2.id = r.q_id) join p on p.id = q.p_id where p.id = 5")));
+
+    /// <summary>
+    /// The INNER prefix ahead of an outer join commutes on its own: the outer
+    /// join reads the prefix's rows as a whole, which no order inside it
+    /// changes.
+    /// </summary>
+    [TestMethod]
+    public void InnerPrefixBeforeAnOuterJoin_Reorders()
+        => AreEqual("Reorder(2,1,0)", ReorderOf(CaptureStrategies(ChainSetup,
+            "select r.id from r join q on q.id = r.q_id join p on p.id = q.p_id left join q q2 on q2.id = r.q_id where p.id = 5")));
 
     /// <summary>
     /// An ON clause naming none of its own level's columns leaves that source

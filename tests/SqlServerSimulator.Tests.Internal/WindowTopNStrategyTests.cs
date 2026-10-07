@@ -195,6 +195,61 @@ public sealed class WindowTopNStrategyTests
         }
     }
 
+    [TestMethod]
+    public void ViewBody_BindsAtTheView()
+    {
+        using var connection = Open();
+        Exec(connection, "create view v as select g, id, row_number() over (partition by g order by k, id) as rn from t");
+        Contains("RowNumberBound(v,1..2)", Run(connection, "select g, id from v where rn <= 2").Trace);
+    }
+
+    [TestMethod]
+    public void ViewBoundOnAnotherColumn_Declines()
+    {
+        using var connection = Open();
+        Exec(connection, "create view v as select g, id, row_number() over (partition by g order by k, id) as rn from t");
+        DoesNotContain("RowNumberBound(v,1..3)", Run(connection, "select g, id from v where id <= 3").Trace);
+    }
+
+    [TestMethod]
+    public void ThroughAViewChain_BindsAtTheInnerView()
+    {
+        using var connection = Open();
+        Exec(connection, "create view v as select g, id, row_number() over (partition by g order by k, id) as rn from t");
+        Exec(connection, "create view w as select id, rn from v");
+        Contains("RowNumberBound(v,1..1)", Run(connection, "select id from w where rn = 1").Trace);
+    }
+
+    [TestMethod]
+    public void PartitionlessKeyOrder_ScansInOrderAndPassesTheLeadingRowsOver() =>
+        Contains(
+            "RowNumberOrderedScan(t,skipped 100)",
+            TraceOf("select id from (select id, row_number() over (order by id) as rn from t) x where rn between 101 and 110"));
+
+    [TestMethod]
+    public void NonUniqueIndexOrder_ContinuesWithTheClusteredKey()
+    {
+        using var connection = Open();
+        Exec(connection, "create index ix_k on t (k)");
+        Contains(
+            "RowNumberOrderedScan(t,skipped 10)",
+            Run(connection, "select id from (select id, row_number() over (order by k) as rn from t) x where rn between 11 and 20").Trace);
+    }
+
+    [TestMethod]
+    public void NonUniqueIndexOrderUnderABodyWhere_KeepsTheBoundedSort()
+    {
+        using var connection = Open();
+        Exec(connection, "create index ix_k on t (k)");
+        var trace = Run(connection, "select id from (select id, row_number() over (order by k) as rn from t where g > 0) x where rn <= 5").Trace;
+        Contains("RowNumberBound(x,1..5)", trace);
+        IsFalse(trace.Exists(entry => entry.StartsWith("RowNumberOrderedScan(", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public void PartitionedWindow_KeepsTheBoundedSort() =>
+        IsFalse(TraceOf(Shape("rn = 1")).Exists(entry => entry.StartsWith("RowNumberOrderedScan(", StringComparison.Ordinal)));
+
     // ---- the bound declines ----
 
     [TestMethod]

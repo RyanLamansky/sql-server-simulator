@@ -63,7 +63,18 @@ partial class Selection
     /// Whether a browse statement flattens the body, whose hidden browse
     /// columns then trail the view's own in <paramref name="columns"/>.
     /// </param>
-    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null, ForSystemTimeClause? systemTime = null, bool browseFlatten = false)
+    /// <param name="rowNumberBounds">
+    /// The row-number windows an enclosing WHERE pins on this reference's
+    /// columns (see <see cref="ViewRowNumberBoundPushdown"/>), offered to the
+    /// body once it is parsed; null for an ordinary reference.
+    /// </param>
+    internal static Selection ForView(
+        View view,
+        HeapColumn[]? columns = null,
+        List<BooleanExpression>? pushedPredicates = null,
+        ForSystemTimeClause? systemTime = null,
+        bool browseFlatten = false,
+        List<RowNumberBound>? rowNumberBounds = null)
     {
         columns ??= view.OutputColumns;
         var schema = new SqlType[columns.Length];
@@ -79,10 +90,11 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) => RowSecurity.FilterViewRows(
-                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten), outerBatch))
+                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten, rowNumberBounds), outerBatch))
         {
             PredicatePushdown = templates => ForView(
-                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten),
+                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten, rowNumberBounds),
+            ViewRowNumberBoundPushdown = bounds => ForView(view, columns, pushedPredicates, systemTime, browseFlatten, bounds),
             // Whether the body groups can't be known here — it isn't parsed
             // until the reference executes — but CREATE VIEW already classified
             // it: the updatability rejection names the aggregate / GROUP BY

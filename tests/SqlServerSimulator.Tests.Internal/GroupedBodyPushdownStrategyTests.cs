@@ -108,13 +108,26 @@ public sealed class GroupedBodyPushdownStrategyTests
             "create view vg as select cid, sum(total) as s from ord group by cid"));
 
     /// <summary>
-    /// A grouping <em>expression</em> offers no column to filter on: the body
-    /// keeps its scan.
+    /// A grouping <em>expression</em> moves below the grouping as a filter on
+    /// the expression, which no index positions on: the body keeps its scan.
     /// </summary>
     [TestMethod]
     public void BodyGroupedByAnExpression_KeepsItsScan() =>
         DoesNotContain("Seek(ord)", Trace(
             "select g, s from (select cid / 10 as g, sum(total) s from ord group by cid / 10) d where d.g = 1"));
+
+    /// <summary>
+    /// A partner joined on a grouping expression reduces the body to its keys
+    /// of it — the expression's value fixes the group as a column's does.
+    /// </summary>
+    [TestMethod]
+    public void JoinOnAGroupingExpression_ReducesTheBody() =>
+        AssertReduced(1, Trace("select c.cid, d.s from cust c join (select cid / 10 as g, sum(total) s from ord group by cid / 10) d on d.g = c.cat where c.cid = 10"));
+
+    /// <summary>A projection over the grouping expression is another value, and reduces nothing.</summary>
+    [TestMethod]
+    public void JoinOnAnExpressionOverTheGroupingExpression_KeepsTheBodyWhole() =>
+        AssertNotReduced(Trace("select c.cid, d.s from cust c join (select cid / 10 + 1 as g, sum(total) s from ord group by cid / 10) d on d.g = c.cat where c.cid = 10"));
 
     /// <summary>An aggregate output column isn't a grouping column either.</summary>
     [TestMethod]

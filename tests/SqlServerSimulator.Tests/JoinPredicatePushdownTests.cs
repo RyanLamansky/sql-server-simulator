@@ -154,6 +154,53 @@ public sealed class JoinPredicatePushdownTests
             """));
 
     /// <summary>
+    /// A single-source ON conjunct rides along to the step that places its
+    /// source: orders 21 and 22 total 30 and 40, so only order 22's two lines
+    /// (qty 7 and 8) survive <c>o.ord_total &gt; 35</c>.
+    /// </summary>
+    [TestMethod]
+    public void SingleSourceOnConjunct_StillFiltersAfterTheReorder()
+        => AreEqual(15, Sales().ExecuteScalar("""
+            select sum(l.qty) from line l
+            join ord o on o.ord_id = l.ord_id and o.ord_total > 35
+            join cust c on c.cust_id = o.cust_id and c.cust_name <> 'zz'
+            where c.cust_id = 2
+            """));
+
+    /// <summary>
+    /// A conjunct reading two sources that isn't an equality rides along to the
+    /// step that places the later of them.
+    /// </summary>
+    [TestMethod]
+    public void NonEquiOnConjunctBesideAnEdge_StillFiltersAfterTheReorder()
+        => AreEqual(21, Sales().ExecuteScalar("""
+            select sum(l.qty) from line l
+            join ord o on o.ord_id = l.ord_id and l.qty > o.ord_total / 10 + 2
+            join cust c on c.cust_id = o.cust_id
+            where c.cust_id = 2
+            """));
+
+    /// <summary>
+    /// The INNER prefix ahead of a LEFT join reorders on its own, and the outer
+    /// join still NULL-extends what it can't match: customer 2's four lines,
+    /// each against item 100 alone.
+    /// </summary>
+    [TestMethod]
+    public void InnerPrefixBeforeALeftJoin_KeepsTheNullExtension()
+    {
+        var rows = Rows(Sales(), """
+            select l.line_id, i.item_name
+            from line l
+            join ord o on o.ord_id = l.ord_id
+            join cust c on c.cust_id = o.cust_id
+            left join item i on i.item_id = l.item_id and i.item_id = 100
+            where c.cust_id = 2
+            order by l.line_id
+            """);
+        CollectionAssert.AreEqual((string[])["5|w", "6|", "7|", "8|"], rows);
+    }
+
+    /// <summary>
     /// An ON conjunct whose two sources are <em>both</em> already placed when its
     /// own level is reached has to re-attach at the step that completed the pair,
     /// not be dropped: <c>o.cust_id = c.cust_id</c> is written on region's level

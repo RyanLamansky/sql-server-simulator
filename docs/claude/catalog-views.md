@@ -32,6 +32,7 @@ Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as 
   The decision is compiled into the shared plan; the comparand *value* is resolved per execution (a variable / parameter that differs between runs re-evaluates each time — plan-cache safe).
   It composes with materialize-once: the pushed-down plan is what the `MaterializeUncorrelatedDeferredSources` pass runs once.
 - **Which conjuncts count.** WHERE conjuncts, plus the ON conjuncts of **inner** joins — for an inner join the two are interchangeable, so an ON equality narrows the generator exactly as safely.
+  A source joined by a `CROSS` / comma level counts as inner-joined too, since it supplies no NULLs: SMO's per-table query is `FROM master.sys.databases AS dtb, sys.tables AS tbl INNER JOIN … WHERE tbl.name = @p …`, and without it `tbl` drove the whole query's joins over every table.
   An `IN` list or OR of equalities over one key column seeks each value, merged back into the view's order.
   A WHERE conjunct never narrows a source reachable only through an outer join: dropping rows from a null-supplying side turns matched rows into null-extended ones, which the residual filter cannot undo.
   A LEFT join's **own** ON conjunct reading only its right side does narrow that side — a right row failing it can match no left row, and the join re-checks the whole ON regardless — but only where that ON has no equi-join key, since a key lets the join probe the whole view's persisted index, which a narrowed copy loses.
@@ -55,7 +56,7 @@ Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as 
 - **Diagnostics.**
   `CatalogPushdownDiagnostics.Sink` (opt-in `[ThreadStatic]`, mirroring `IndexSeekDiagnostics`) records `Seek(view.column)` on a narrowed scan, `SeekEmpty(view.column)` on a NULL comparand, `Scan(view)` when a view runs its full generator, `CacheBuild(view)` / `CacheHit(view)` for the row cache, and `IndexJoin(view)` when a hash join probes a cached rowset's index.
   `CatalogPushdownTests` (internal) asserts the path fired (or correctly didn't); `CatalogPushdownResultTests` (public) asserts result parity.
-- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): the transitive hop is one level and doesn't chain across three sources; an equality on an expression over a column (`SCHEMA_NAME(t.schema_id) = @s`) isn't a seek.
+- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): the transitive hop is one level and doesn't chain across three sources; an equality on an expression over a column (`SCHEMA_NAME(t.schema_id) = @s`) isn't a seek; and `sys.partitions` / `sys.sequences` aren't in the row cache (their DML-moved state has no cheap stamp, where `sys.identity_columns` has one), so a statement joining them regenerates them.
 
 **Statement-scoped materialization (perf).**
 A catalog view the row cache can't serve and that *isn't* narrowed to a seek is still projected only once per statement: the first read that drains the sequence to completion stores the encoded rows on `StatementContext.CatalogViewRows`, keyed by view and target database, and every later read in the same statement is served from there.
@@ -760,6 +761,8 @@ The read-permission check runs on every read, cached or not.
 **Invalidation.**
 Every rowset belongs to a generation of `CatalogRowCache.Invalidate` calls, and a read under a later one starts a fresh generation.
 `Simulation.BumpSchemaVersion` invalidates, so every CREATE / ALTER / DROP, `sp_rename`, a rolled-back DDL (the undo log's schema-change entry bumps), and a bacpac import do.
+The exception is DDL that changes temp tables alone — `CREATE TABLE #t`, `DROP TABLE [IF EXISTS]` over a list of `#` / `##` names (`ChangedOnlyTempTables`, which reads the statement's leading tokens again), and `SELECT … INTO #t` — since no cached rowset lists a temp table, tempdb's views reading through their generators.
+SMO's per-table property batch creates and drops five temp tables, so before this every one of its executions regenerated each cached view it then read.
 The statements that change what a cacheable view projects without passing the DDL arm invalidate for themselves: `SELECT … INTO` (a new table), `ENABLE` / `DISABLE TRIGGER` (`is_disabled`), `UPDATE STATISTICS` (`no_recompute`), and every system procedure except the read-only ones `Simulation.LeavesCatalogUnchanged` lists (so the rules-and-defaults binders, the extended-property procedures, `sp_settriggerorder` and `sp_refreshview` invalidate, and a procedure added later invalidates until it is listed).
 A view with one column ordinary DML moves carries a `CatalogView.LiveStamp`, read on every hit: `sys.identity_columns`' stamp is every identity column's last value, so an insert regenerates that view alone.
 The views whose DML-moved state has no cheap stamp stay out — `sys.partitions` (row counts, including per-partition shares), `sys.sequences` (`current_value`) — as do the principal, permission and role views and the dynamic management views.
@@ -786,6 +789,18 @@ The views whose DML-moved state has no cheap stamp stay out — `sys.partitions`
 | `sys.columns ⋈ sys.types` for one table ×30 | 2.3 ms | 0.6 ms | 8.4 ms |
 
 The SMO queries are the ones SMO 172 sent while enumerating tables, columns, indexes, foreign keys and checks, captured from the reference's plan cache; the EF Core ones are the provider's own migration and scaffolding text.
+
+Re-measured 2026-10-07 with SMO 172.76's own batches, re-captured from the reference's plan cache with every `Table` property initialized (`SetDefaultInitFields(typeof(Table), true)`), over a regenerated 300-table, 3,340-column database of the same shape; interleaved Release runs, medians:
+
+| Query | Before | After | Live |
+|---|---:|---:|---:|
+| Column property bag (one column) ×30 | 20 ms | 18 ms | 19 ms |
+| Table properties (five temp tables + a fifteen-source join) ×30 | 6,452 ms | 264 ms | 374 ms |
+| Table properties, whole database | 471 ms | 338 ms | 520 ms |
+| Columns of one table ×30 | 0.6 ms | 0.6 ms | 14 ms |
+
+The per-table batch had three costs stacked: the temp-table DDL emptying the row cache (above), the comma-joined `tbl` never seeking (see **Which conjuncts count**), so the `LEFT JOIN sys.database_principals … ON principal_id = ISNULL(tbl.principal_id, OBJECTPROPERTY(tbl.object_id, 'OwnerId'))` nested loop evaluated `OBJECTPROPERTY` for every table × principal, and `OBJECTPROPERTY`'s owning-schema lookup walking every schema's objects (now a dictionary probe per schema, `Schema.Holds`).
+What remains is parsing: the batch's DDL bumps the schema version, so its statements never reach the plan cache, and the select's hundred-odd `alias.column` references each asked two receiver-type questions (an xml method, a spatial property) that searched every column of the fifteen-source scope — the xml one is now asked only ahead of an argument list, the spatial one only where some source carries a spatial column.
 Overall the set went from 53.9 s to 0.85 s against the reference's 2.0 s (0.8 s without its one slow `INFORMATION_SCHEMA` query).
 The worst per-table SMO query was a `LEFT JOIN` to `sys.all_objects` on a computed name, a nested loop over every object per index row; with the table narrowed by its name seek it loops over three rows.
 The constraint-inventory query that motivated the cache, re-measured on the Insite.Commerce import, went from ~310 ms to ~125 ms against the reference's ~68 ms.

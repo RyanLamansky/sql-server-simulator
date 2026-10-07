@@ -99,6 +99,26 @@ public sealed class CatalogRowCacheTraceTests
     }
 
     [TestMethod]
+    public void TempTableDdl_KeepsTheCache()
+    {
+        // A temp table lives in tempdb, whose views are never cached, so
+        // creating and dropping one — SMO's per-table batches do it five times
+        // over — leaves the user database's rowsets standing.
+        var connection = Open("create table t (a int); select count(*) from sys.tables");
+        Execute(connection, "create table #w (a int); select a into #x from #w; drop table #w, #x; drop table if exists #y");
+        Contains("CacheHit(tables)", Trace(connection, "select count(*) from sys.tables"));
+        Execute(connection, "create table #w (a int); drop table #w, t");
+        Contains("CacheBuild(tables)", Trace(connection, "select count(*) from sys.tables"));
+    }
+
+    [TestMethod]
+    public void CommaJoinedCatalogView_SeeksOnItsWhereEquality()
+    {
+        var connection = Open("create table t (a int); create table u (a int)");
+        Contains("Seek(tables.name)", Trace(connection, "select tbl.name from master.sys.databases dtb, sys.tables tbl where tbl.name = N'u' and dtb.name = db_name()"));
+    }
+
+    [TestMethod]
     public void TempdbRead_BypassesTheCache()
     {
         var connection = Open("create table #t (a int)");

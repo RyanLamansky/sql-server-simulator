@@ -22,6 +22,18 @@ public sealed class CatalogRowCacheTests
     }
 
     [TestMethod]
+    public void TempTableDdl_ThenAPermanentTable_AfterARead_Appears()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table a (id int)");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables"));
+        _ = sim.ExecuteNonQuery("create table #t (id int); drop table #t; select 1 as c into #u; drop table #u; create table b (id int)");
+        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.tables"));
+        _ = sim.ExecuteNonQuery("create table #t (id int); drop table #t, b");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables"));
+    }
+
+    [TestMethod]
     public void SelectInto_AfterARead_Appears()
     {
         var sim = new Simulation();

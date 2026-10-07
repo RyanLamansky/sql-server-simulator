@@ -1966,13 +1966,29 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void EqualityOnOtherIndexedColumn_DeclinesOrderElimination_PrefersSeek()
+    public void EqualityOnNonUniqueIndex_SeeksInClusteredKeyOrder()
     {
-        // status has its own index — the equality seek on it beats an ordered
-        // scan of the whole table, so order elimination declines and the result
-        // still comes back correctly ordered.
+        // A non-unique index over a clustered table is ordered by its key and
+        // then the clustered key, so pinning status leaves the rows in id
+        // order: real's ordered index seek, no sort (probed 2026-10-07 against
+        // SQL Server 2025).
         var (trace, rows) = Run("""
             create table t (id int not null primary key, status int not null);
+            create index ix on t (status);
+            insert t values (3, 9), (1, 9), (2, 7)
+            """, "select id from t where status = 9 order by id");
+        Contains("OrderedScan(t)", trace);
+        AreEqual("1,3", Seq(rows));
+    }
+
+    [TestMethod]
+    public void EqualityOnOtherIndexedColumnOfAHeap_DeclinesOrderElimination_PrefersSeek()
+    {
+        // Without a clustered key the index's rows carry no order past status,
+        // so the equality seek on it beats an ordered scan of the whole table:
+        // order elimination declines and the result still comes back ordered.
+        var (trace, rows) = Run("""
+            create table t (id int not null primary key nonclustered, status int not null);
             create index ix on t (status);
             insert t values (3, 9), (1, 9), (2, 7)
             """, "select id from t where status = 9 order by id");

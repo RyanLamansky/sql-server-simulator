@@ -132,8 +132,10 @@ partial class Simulation
         VersionStore.NoteDefinitionChange(batch, destTable);
         if (!(isLocalTemp ? batch.Connection.TryAddTempTable(destTable) : destination.TryAdd(leaf, destTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
-        // The new table joins the catalog views without passing the DDL arm.
-        batch.Connection.Simulation.CatalogRows.Invalidate();
+        // The new table joins the catalog views without passing the DDL arm —
+        // a permanent one does, since no cached catalog rowset lists a temp table.
+        if (schema is not null)
+            batch.Connection.Simulation.CatalogRows.Invalidate();
         // A local temp created via SELECT INTO inside a module body is dropped
         // when that module exits (probe-confirmed, same as CREATE TABLE #t).
         if (isLocalTemp)

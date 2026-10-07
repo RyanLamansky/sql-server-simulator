@@ -133,11 +133,11 @@ internal sealed partial class Selection
         SqlValue resolveColumn(MultiPartName name) => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
         var rowRuntime = new RuntimeContext(resolveColumn, batch);
 
-        // One grouping set — no GROUP BY at all, or a plain GROUP BY — reads
-        // each input row exactly once, so the groups are built straight off the
-        // enumeration and nothing is buffered. ROLLUP / CUBE / GROUPING SETS
-        // partition the same rows several ways and still buffer, since the
-        // second set can't re-read a stream the first consumed.
+        // The groups are built straight off the enumeration and nothing is
+        // buffered. One grouping set — no GROUP BY at all, or a plain GROUP BY
+        // — keeps one group map; ROLLUP / CUBE / GROUPING SETS keep one per
+        // set and hand each row to every one in turn, so each set still sees
+        // the rows in input order.
         //
         // Streaming is also what real does: its plan pipelines Filter into
         // Stream/Hash Aggregate, so an aggregate operand that raises on an
@@ -147,7 +147,18 @@ internal sealed partial class Selection
         // numeric reports Msg 8134, not the conversion error).
         var streaming = effectiveSets.Count == 1;
         var streamedGroups = streaming ? NewGroupMap(effectiveSets[0]) : null;
-        var buffered = streaming ? null : new List<byte[]?[]>();
+        Dictionary<SqlValueKey, GroupState>[]? setGroups = null;
+        GroupState?[]? setWholeInputs = null;
+        if (!streaming)
+        {
+            setGroups = new Dictionary<SqlValueKey, GroupState>[effectiveSets.Count];
+            setWholeInputs = new GroupState?[effectiveSets.Count];
+            for (var s = 0; s < setGroups.Length; s++)
+            {
+                setGroups[s] = NewGroupMap(effectiveSets[s]);
+                setWholeInputs[s] = ungroupedState;
+            }
+        }
 
         // Past ParallelRowThreshold rows the per-row consumer work — WHERE,
         // grouping key, aggregate operands, and the decoding all three trigger
@@ -224,13 +235,11 @@ internal sealed partial class Selection
                     continue;
                 }
 
-                // `EnumerateJoinedRows` mutates a single shared tuple array in
-                // place across iterations, so each buffered row gets snapshotted
-                // (the inner byte[] references are immutable, only the outer array
-                // slots get rewritten by the join driver).
-                var snapshot = new byte[]?[tuple.Length];
-                Array.Copy(tuple, snapshot, tuple.Length);
-                buffered!.Add(snapshot);
+                for (var s = 0; s < setGroups!.Length; s++)
+                {
+                    ungroupedState = setWholeInputs![s];
+                    Accumulate(setGroups[s], effectiveSets[s], tuple, tupleIsShared: true, feedsAggregates);
+                }
             }
 
             if (parallel is not null && !parallel.TryComplete(streamedGroups!))
@@ -525,20 +534,7 @@ internal sealed partial class Selection
             currentGroupingSet = groupingSet;
             if (projectionGroupingKeys is not null)
                 currentSetKeys = Array.ConvertAll(groupingSet, grouping => GroupingKey(sources, Peel(grouping)));
-            Dictionary<SqlValueKey, GroupState> groups;
-            if (streamedGroups is not null)
-            {
-                groups = streamedGroups;
-            }
-            else
-            {
-                groups = NewGroupMap(groupingSet);
-                foreach (var tuple in buffered!)
-                {
-                    currentTuple = tuple;
-                    Accumulate(groups, groupingSet, tuple, tupleIsShared: false);
-                }
-            }
+            var groups = streamedGroups ?? setGroups![setIndex];
 
             // The whole-input group exists over no rows only when GROUP BY is
             // absent: a written empty set — `GROUP BY ()`, or the grand total

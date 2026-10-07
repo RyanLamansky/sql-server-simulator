@@ -117,14 +117,32 @@ public sealed class GroupedBodyReductionTests
     }
 
     /// <summary>
-    /// A grouping <em>expression</em> is not a grouping column: the filter names
-    /// the expression's value, which no row of the body's input carries, so the
-    /// push declines and the answer is the one the body always gave.
+    /// A grouping <em>expression</em> projected as written moves below the
+    /// grouping as a filter on the expression itself: its value is what puts a
+    /// row in its group, so the filter still removes whole groups.
     /// </summary>
     [TestMethod]
     public void GroupedBody_GroupedByAnExpression_AnswersTheSameRows() =>
         CollectionAssert.AreEqual((string[])["1|300"], Rows(
             Sales(), "select g, s from (select cid / 10 as g, sum(total) s from ord group by cid / 10) d where d.g = 1"));
+
+    /// <summary>
+    /// A projection that only contains the grouping expression is a different
+    /// value, and stays above the grouping — answering what it always did.
+    /// </summary>
+    [TestMethod]
+    public void GroupedBody_ProjectingAnExpressionOverTheGroupingExpression_AnswersTheSameRows() =>
+        CollectionAssert.AreEqual((string[])["2|300"], Rows(
+            Sales(), "select g, s from (select cid / 10 + 1 as g, sum(total) s from ord group by cid / 10) d where d.g = 2"));
+
+    /// <summary>
+    /// Under ROLLUP the grand-total row carries NULL in the expression's column,
+    /// which the filter rejects either way.
+    /// </summary>
+    [TestMethod]
+    public void RollupGroupedByAnExpression_FilteredOnIt_AnswersTheLeafGroup() =>
+        CollectionAssert.AreEqual((string[])["1|300"], Rows(
+            Sales(), "select g, s from (select cid / 10 as g, sum(total) s from ord group by rollup(cid / 10)) d where d.g = 1"));
 
     /// <summary>An aggregate output column isn't pushable either, and answers unchanged.</summary>
     [TestMethod]
@@ -212,6 +230,15 @@ public sealed class GroupedBodyReductionTests
     public void NullPartnerKey_JoinedToAGroupedBody_KeepsOnlyTheMatchedRow() =>
         CollectionAssert.AreEqual((string[])["10|300"], Rows(
             Sales(), $"select o.cid, d.s from ord o join {Body} d on d.cid = o.cid where o.oid in (1, 5) order by o.oid"));
+
+    /// <summary>
+    /// A body joined on a grouping expression is reduced to the partner's keys
+    /// of it, and answers the joined group.
+    /// </summary>
+    [TestMethod]
+    public void JoinOnAGroupingExpression_AnswersTheJoinedGroup() =>
+        CollectionAssert.AreEqual((string[])["10|300", "20|300"], Rows(
+            Sales(), "select c.cid, d.s from cust c join (select cid / 10 as g, sum(total) s from ord group by cid / 10) d on d.g = c.cat where c.cat = 1 order by c.cid"));
 
     /// <summary>
     /// A ROLLUP body's subtotal row carries NULL in the grouping column, which
