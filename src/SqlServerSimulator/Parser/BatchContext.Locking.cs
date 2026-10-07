@@ -20,9 +20,11 @@ internal sealed partial class BatchContext
     /// e.g. <c>FROM t a JOIN t b</c>) is handled inside
     /// <see cref="LockResource"/> via per-owner counting; this list just
     /// tracks every acquisition by reference so Release runs the matching
-    /// number of times.
+    /// number of times, under the owner it was taken by — a session bound to a
+    /// transaction other sessions share takes its locks under their shared
+    /// owner, which the statement can stop being before it ends.
     /// </summary>
-    public readonly List<(LockResource Resource, LockMode Mode)> StatementSchemaLocks = [];
+    public readonly List<(LockResource Resource, LockMode Mode, SessionToken Owner)> StatementSchemaLocks = [];
 
     /// <summary>
     /// Tables the current statement resolved with a <c>NOWAIT</c> table hint.
@@ -51,8 +53,10 @@ internal sealed partial class BatchContext
     {
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
-        this.StatementSchemaLocks.Add((resource, mode));
+        var owner = connection.LockOwner;
+        connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
+        this.StatementSchemaLocks.Add((resource, mode, owner));
+        connection.CurrentTransaction?.NoteDatabase(resource);
     }
 
     /// <summary>
@@ -93,11 +97,17 @@ internal sealed partial class BatchContext
     {
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: true));
         var connection = this.Connection;
-        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
+        var owner = connection.LockOwner;
+        connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
-            tx.HeldLocks.Add((resource, mode));
+        {
+            tx.HeldLocks.Add((resource, mode, owner));
+            tx.NoteDatabase(resource);
+        }
         else
-            this.StatementSchemaLocks.Add((resource, mode));
+        {
+            this.StatementSchemaLocks.Add((resource, mode, owner));
+        }
     }
 
     /// <summary>
@@ -384,7 +394,7 @@ internal sealed partial class BatchContext
                 || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } lockedImage
                 || !this.KeyLockRefusesWrite(table, lockedImage, purpose)
                 || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
-                || this.Connection.Simulation.LockManager.HoldCount(held, mode, this.Connection.Session) > 1)
+                || this.Connection.Simulation.LockManager.HoldCount(held, mode, this.Connection.LockOwner) > 1)
             {
                 return;
             }
@@ -404,7 +414,7 @@ internal sealed partial class BatchContext
                 && (purpose != RowLockPurpose.UpdatePreImage || group.IsRowGroup)
                 && group.TryReadKey(image, out var key)
                 && group.Find(key) is { } resource
-                && manager.HasIncompatibleHolderOtherThan(resource, LockMode.Exclusive, connection.Session))
+                && manager.HasIncompatibleHolderOtherThan(resource, LockMode.Exclusive, connection.LockOwner))
             {
                 return true;
             }
@@ -429,7 +439,7 @@ internal sealed partial class BatchContext
     {
         if (this.EscalatedModeOf(table) == LockMode.Exclusive)
             return;
-        table.GetOrCreateRowLock(pageIndex, slotIndex).InsertedBy = this.Connection.Session;
+        table.GetOrCreateRowLock(pageIndex, slotIndex).InsertedBy = this.Connection.LockOwner;
         this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Exclusive, underLatch: true);
     }
 
@@ -439,11 +449,12 @@ internal sealed partial class BatchContext
             return;
         var connection = this.Connection;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
-        this.AcquireOnTable(table, resource, mode, connection.Session, sweepAbandoned: !underLatch, conflictIsDelete);
+        var owner = connection.LockOwner;
+        this.AcquireOnTable(table, resource, mode, owner, sweepAbandoned: !underLatch, conflictIsDelete);
         if (connection.CurrentTransaction is { } activeTx)
-            activeTx.HeldLocks.Add((resource, mode));
+            activeTx.HeldLocks.Add((resource, mode, owner));
         else
-            this.StatementSchemaLocks.Add((resource, mode));
+            this.StatementSchemaLocks.Add((resource, mode, owner));
         // A memory-optimized table's row locks only detect write conflicts,
         // so they never escalate.
         if (countForEscalation && !table.IsMemoryOptimized)
@@ -535,11 +546,11 @@ internal sealed partial class BatchContext
             || (Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
             || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
             || !Simulation.IsLockableTable(table)
-            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.Session))
+            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.LockOwner))
         {
             return TargetRowHold.None;
         }
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         LockResource? indexKey = null;
         if (throughIndex is not null && throughIndex.TryReadKey(rowBytes, out var key))
         {
@@ -641,13 +652,14 @@ internal sealed partial class BatchContext
             : (group.GetOrCreate(cache.NextKeyAbove(heap, table.StoredColumns, heap, group.Ordinals, group.Commons, probe)), LockMode.RangeSharedUpdate);
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        if (manager.IsHeldBy(resource, mode, connection.Session))
+        var owner = connection.LockOwner;
+        if (manager.IsHeldBy(resource, mode, owner))
             return;
-        this.AcquireOnTable(table, resource, mode, connection.Session);
+        this.AcquireOnTable(table, resource, mode, owner);
         if (connection.CurrentTransaction is { } tx)
-            tx.HeldLocks.Add((resource, mode));
+            tx.HeldLocks.Add((resource, mode, owner));
         else
-            this.StatementSchemaLocks.Add((resource, mode));
+            this.StatementSchemaLocks.Add((resource, mode, owner));
     }
 
     /// <summary>
@@ -660,7 +672,7 @@ internal sealed partial class BatchContext
     {
         if (table.SupersededKeyImages.IsEmptyLockFree() || !Simulation.IsLockableTable(table) || table.IsMemoryOptimized)
             return null;
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         List<((int Page, int Slot) Address, byte[] PriorImage, LockResource Lock)>? rows = null;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
@@ -692,7 +704,7 @@ internal sealed partial class BatchContext
     public bool AwaitSupersededTargetRow(HeapTable table, LockResource resource, LockMode mode = LockMode.Update, KeyLockGroup? throughIndex = null, byte[]? priorImage = null)
     {
         if (throughIndex is null || priorImage is null || !throughIndex.TryReadKey(priorImage, out var key)
-            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.Session))
+            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, mode, this.Connection.LockOwner))
         {
             return this.AwaitRowWriters(table, resource, mode);
         }
@@ -702,7 +714,7 @@ internal sealed partial class BatchContext
         {
             return this.AwaitRowWriters(table, resource, mode, throughIndex.Describe(key));
         }
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         var indexKey = throughIndex.GetOrCreate(key);
         this.AcquireOnTable(table, indexKey, LockMode.Update, session);
         try
@@ -780,11 +792,11 @@ internal sealed partial class BatchContext
             return;
         var connection = this.Connection;
         var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
-        var index = held.LastIndexOf((resource, mode));
+        var index = held.LastIndexOf((resource, mode, connection.LockOwner));
         if (index < 0)
             return;
         held.RemoveAt(index);
-        connection.Simulation.LockManager.Release(resource, mode, connection.Session);
+        connection.Simulation.LockManager.Release(resource, mode, connection.LockOwner);
         if (countedForEscalation && this.CurrentStatement.LockTallies is { } tallies && tallies.TryGetValue(table, out var tally) && !tally.RowsKeyLocked)
             tally.Count--;
     }
@@ -812,7 +824,7 @@ internal sealed partial class BatchContext
         {
             return;
         }
-        table.SupersededKeyImages.GetOrAdd(connection.Session, static _ => new())[(pageIndex, slotIndex)] = (image, resource);
+        table.SupersededKeyImages.GetOrAdd(connection.LockOwner, static _ => new())[(pageIndex, slotIndex)] = (image, resource);
     }
 
     /// <summary>
@@ -832,7 +844,7 @@ internal sealed partial class BatchContext
         List<LockResource>? holders = null;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
-            if (ReferenceEquals(owner, connection.Session))
+            if (ReferenceEquals(owner, connection.LockOwner))
                 continue;
             foreach (var (address, (_, resource)) in images)
             {
@@ -925,7 +937,7 @@ internal sealed partial class BatchContext
         var commons = new SqlType[ordinals.Length];
         for (var i = 0; i < ordinals.Length; i++)
             commons[i] = schema[ordinals[i]].Type;
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
             if (ReferenceEquals(owner, session))
@@ -982,7 +994,7 @@ internal sealed partial class BatchContext
             key = priorKey;
         if (!table.SupersededKeyImages.IsEmptyLockFree())
         {
-            var session = this.Connection.Session;
+            var session = this.Connection.LockOwner;
             foreach (var (owner, images) in table.SupersededKeyImages)
             {
                 if (ReferenceEquals(owner, session) || !images.TryGetValue((pageIndex, slotIndex), out var superseded))
@@ -1009,7 +1021,7 @@ internal sealed partial class BatchContext
     public void NoteKeyPutBack(HeapTable table, ReadOnlySpan<byte> image)
     {
         if (table.SupersededKeyImages.IsEmptyLockFree()
-            || !table.SupersededKeyImages.TryGetValue(this.Connection.Session, out var own)
+            || !table.SupersededKeyImages.TryGetValue(this.Connection.LockOwner, out var own)
             || RowIdentityKey(table) is not var (ordinals, commons))
         {
             return;
@@ -1038,7 +1050,7 @@ internal sealed partial class BatchContext
     {
         if (table.SupersededKeyImages.IsEmptyLockFree())
             return false;
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         List<LockResource>? holders = null;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
@@ -1074,7 +1086,7 @@ internal sealed partial class BatchContext
         List<LockResource>? holders = null;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
-            if (ReferenceEquals(owner, connection.Session))
+            if (ReferenceEquals(owner, connection.LockOwner))
                 continue;
             foreach (var (_, (image, resource)) in images)
             {
@@ -1145,9 +1157,9 @@ internal sealed partial class BatchContext
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
+        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.LockOwner))
             return false;
-        var session = connection.Session;
+        var session = connection.LockOwner;
         session.WaitingOnKey = waitingOnKey;
         try
         {
@@ -1233,15 +1245,15 @@ internal sealed partial class BatchContext
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
         var mode = exclusive ? LockMode.Exclusive : LockMode.Shared;
-        if (manager.TryAcquire(table.TableDataLock, mode, connection.Session, 0) is not (LockAcquireOutcome.Granted or LockAcquireOutcome.GrantedAfterWait))
+        if (manager.TryAcquire(table.TableDataLock, mode, connection.LockOwner, 0) is not (LockAcquireOutcome.Granted or LockAcquireOutcome.GrantedAfterWait))
             return false;
 
         var tx = connection.CurrentTransaction;
         var held = tx?.HeldLocks ?? this.StatementSchemaLocks;
-        held.Add((table.TableDataLock, mode));
-        ReleaseEscalated(held, table, mode, manager, connection.Session);
+        held.Add((table.TableDataLock, mode, connection.LockOwner));
+        ReleaseEscalated(held, table, mode, manager, connection.LockOwner);
         if (tx is not null)
-            ReleaseEscalated(this.StatementSchemaLocks, table, mode, manager, connection.Session);
+            ReleaseEscalated(this.StatementSchemaLocks, table, mode, manager, connection.LockOwner);
 
         if (tx is null)
             (this.CurrentStatement.EscalatedTables ??= new(ReferenceEqualityComparer.Instance))[table] = mode;
@@ -1255,12 +1267,14 @@ internal sealed partial class BatchContext
     // Drops the holds a table lock in `mode` covers from `held`: every row and
     // key lock on the table an X covers, only the S-family ones an S does, and
     // the table's intent lock the escalated mode subsumes.
-    private static void ReleaseEscalated(List<(LockResource Resource, LockMode Mode)> held, HeapTable table, LockMode mode, LockManager manager, SessionToken session)
+    private static void ReleaseEscalated(List<(LockResource Resource, LockMode Mode, SessionToken Owner)> held, HeapTable table, LockMode mode, LockManager manager, SessionToken session)
     {
         var exclusive = mode == LockMode.Exclusive;
         for (var i = held.Count - 1; i >= 0; i--)
         {
-            var (resource, heldMode) = held[i];
+            var (resource, heldMode, owner) = held[i];
+            if (!ReferenceEquals(owner, session))
+                continue;
             var covered = ReferenceEquals(resource, table.TableDataLock)
                 ? heldMode == LockMode.IntentShared || (exclusive && heldMode == LockMode.IntentExclusive)
                 : ReferenceEquals(resource.OwningTable, table)
@@ -1325,10 +1339,10 @@ internal sealed partial class BatchContext
         this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, this.noWaitTables.Contains(table));
         var connection = this.Connection;
         var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
-        var index = held.IndexOf((table.TableDataLock, LockMode.IntentShared));
+        var index = held.IndexOf((table.TableDataLock, LockMode.IntentShared, connection.LockOwner));
         if (index >= 0)
         {
-            connection.Simulation.LockManager.Release(table.TableDataLock, LockMode.IntentShared, connection.Session);
+            connection.Simulation.LockManager.Release(table.TableDataLock, LockMode.IntentShared, connection.LockOwner);
             held.RemoveAt(index);
         }
     }
@@ -1401,7 +1415,7 @@ internal sealed partial class BatchContext
 
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        var session = connection.Session;
+        var session = connection.LockOwner;
         var noWait = this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table);
         var acquired = 0;
         foreach (var (key, requestMode, rids, lookup) in requests)
@@ -1471,7 +1485,7 @@ internal sealed partial class BatchContext
         }
         if (unlockedWhenClean
             && !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(
-                resource, mode, this.Connection.Session, holder => ChangedWhileOpen(table, holder)))
+                resource, mode, this.Connection.LockOwner, holder => ChangedWhileOpen(table, holder)))
         {
             return true;
         }
@@ -1482,7 +1496,7 @@ internal sealed partial class BatchContext
     // holder is a statement running outside one — which is when real's READ
     // COMMITTED read takes the S that meets its lock.
     private static bool ChangedWhileOpen(HeapTable table, SessionToken holder) =>
-        holder.TryResolveOwner()?.CurrentTransaction is not { } transaction
+        holder.TryResolveActing()?.CurrentTransaction is not { } transaction
         || Volatile.Read(ref table.Heap.LastModifiedEpoch) >= transaction.BeginEpoch;
 
     // Waits until no other session holds `resource` incompatibly with `mode`
@@ -1492,12 +1506,12 @@ internal sealed partial class BatchContext
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
+        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.LockOwner))
             return true;
         if (skipIfBlocked)
             return false;
-        this.AcquireOnTable(table, resource, mode, connection.Session);
-        manager.Release(resource, mode, connection.Session);
+        this.AcquireOnTable(table, resource, mode, connection.LockOwner);
+        manager.Release(resource, mode, connection.LockOwner);
         return true;
     }
 
@@ -1536,10 +1550,10 @@ internal sealed partial class BatchContext
         _ = this.TestKeyLock(table, resource, LockMode.RangeInsertNull, skipIfBlocked: false);
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HoldsRangeMode(resource, connection.Session))
+        if (!manager.HoldsRangeMode(resource, connection.LockOwner))
             return;
         var split = group.GetOrCreate(key);
-        if (!manager.IsHeldBy(split, LockMode.RangeExclusiveExclusive, connection.Session))
+        if (!manager.IsHeldBy(split, LockMode.RangeExclusiveExclusive, connection.LockOwner))
             this.AcquireTransactionLock(split, LockMode.RangeExclusiveExclusive);
     }
 
@@ -1688,7 +1702,7 @@ internal sealed partial class BatchContext
             foreach (var (pageIndex, slotIndex, read, sequence) in heap.EnumerateSlots())
             {
                 io?.Enter(pageIndex, ref lastPage);
-                var resolved = Storage.VersionStore.ReadSnapshotSlot(table, (pageIndex, slotIndex), read, sequence, sx, batch.Connection.Session);
+                var resolved = Storage.VersionStore.ReadSnapshotSlot(table, (pageIndex, slotIndex), read, sequence, sx, batch.Connection.LockOwner);
                 if (resolved is null)
                     continue;
                 addresses?.Record(resolved, pageIndex, slotIndex);
@@ -1701,7 +1715,7 @@ internal sealed partial class BatchContext
             {
                 if (heap.TryReadSlot(address.PageIndex, address.SlotIndex, out _, out _))
                     continue;
-                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(chain, sx, batch.Connection.Session);
+                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(chain, sx, batch.Connection.LockOwner);
                 if (resolved is null)
                     continue;
                 addresses?.Record(resolved, address.PageIndex, address.SlotIndex);
@@ -1844,10 +1858,10 @@ internal sealed partial class BatchContext
                     // the registration or read its cutoff before this stamp
                     // existed, so it can't drop a version the snapshot reads.
                     var transactionId = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx);
-                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(transactionId, simulation.CurrentTransactionCommitId, connection.Spid);
+                    simulation.ActiveSnapshotTxs[tx.LockOwner] = new ActiveSnapshotRegistration(transactionId, simulation.CurrentTransactionCommitId, connection.Spid);
                     var snapshotXid = simulation.CurrentTransactionCommitId;
                     tx.SnapshotXid = snapshotXid;
-                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(transactionId, snapshotXid, connection.Spid);
+                    simulation.ActiveSnapshotTxs[tx.LockOwner] = new ActiveSnapshotRegistration(transactionId, snapshotXid, connection.Spid);
                 }
                 return tx.SnapshotXid;
             }
@@ -1880,7 +1894,7 @@ internal sealed partial class BatchContext
     {
         if (this.RcsiStatementSnapshotXid is { } taken)
             return taken;
-        var session = this.Connection.Session;
+        var session = this.Connection.LockOwner;
         if (Volatile.Read(ref session.StatementSnapshotXid) == long.MaxValue)
             _ = Interlocked.Exchange(ref session.StatementSnapshotXid, simulation.CurrentTransactionCommitId);
         var stamp = simulation.CurrentTransactionCommitId;
@@ -1921,7 +1935,7 @@ internal sealed partial class BatchContext
             // this pair most often meets is another UPDLOCK reader's row-U.
             if (plan.SkipBlockedRows
                 && ((table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
-                        && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection.Session))
+                        && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection.LockOwner))
                     || (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
                         && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } image
                         && !this.TestRowKeyLock(table, image, mode, skipIfBlocked: true))))
@@ -1960,7 +1974,7 @@ internal sealed partial class BatchContext
             return;
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        var session = connection.Session;
+        var session = connection.LockOwner;
         var heap = table.Heap;
         // A key the row is rewritten off while the lock is waited for leaves
         // the lock on a key it no longer carries: lock the one it carries then.
@@ -2018,15 +2032,15 @@ internal sealed partial class BatchContext
         if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
             return true;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.Session))
+        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.LockOwner))
             return true;
         if (plan.SkipBlockedRows)
             return false;
         // Wait for the row's writers to drain. Transient acquire-release
         // matches real SQL Server's RC pattern: "block until committed,
         // then release immediately."
-        this.AcquireOnTable(table, resource, LockMode.Shared, connection.Session);
-        manager.Release(resource, LockMode.Shared, connection.Session);
+        this.AcquireOnTable(table, resource, LockMode.Shared, connection.LockOwner);
+        manager.Release(resource, LockMode.Shared, connection.LockOwner);
         return true;
     }
 
@@ -2060,8 +2074,8 @@ internal sealed partial class BatchContext
         // the LIFO discipline matches structured-locking convention.
         for (var i = this.StatementSchemaLocks.Count - 1; i >= 0; i--)
         {
-            var (resource, mode) = this.StatementSchemaLocks[i];
-            manager.Release(resource, mode, connection.Session);
+            var (resource, mode, owner) = this.StatementSchemaLocks[i];
+            manager.Release(resource, mode, owner);
         }
         this.StatementSchemaLocks.Clear();
         this.noWaitTables.Clear();

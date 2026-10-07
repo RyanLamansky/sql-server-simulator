@@ -22,6 +22,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.UndoLog = new(simulation.LobReclamation);
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
+        this.LockOwner = connection.Session;
         connection.LastBegunTransactionId = this.TransactionId;
         connection.RecordTransactionEvent(TransactionEvent.Begin, this);
     }
@@ -40,6 +41,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.UndoLog = enlisted.UndoLog;
         this.TransactionId = enlisted.TransactionId;
         this.target = enlisted;
+        this.LockOwner = enlisted.LockOwner;
     }
 
     internal readonly Simulation simulation;
@@ -224,7 +226,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// Server keeps locks across savepoint rollback — probe-confirmed
     /// via the EF SaveChanges path).
     /// </summary>
-    internal readonly List<(LockResource Resource, LockMode Mode)> HeldLocks = [];
+    internal readonly List<(LockResource Resource, LockMode Mode, SessionToken Owner)> HeldLocks = [];
 
     /// <summary>
     /// Transaction-owned application locks (<c>sp_getapplock @LockOwner =
@@ -509,8 +511,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
-        this.Owner.CurrentTransaction = null;
-        this.Ended = true;
+        this.ReleaseMembers();
         this.Owner.RecordTransactionEvent(TransactionEvent.Commit, this);
     }
 
@@ -534,8 +535,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
-        this.Owner.CurrentTransaction = null;
-        this.Ended = true;
+        this.ReleaseMembers();
         this.Owner.RecordTransactionEvent(cause, this);
         this.Owner.NoteTransactionRolledBack(this);
     }
@@ -581,6 +581,349 @@ public sealed class SimulatedDbTransaction : DbTransaction
     }
 
     /// <summary>
+    /// The owner this transaction's locks and uncommitted writes are held
+    /// under: the session that began it, which every session bound to it, or
+    /// enlisted in it as a loopback server's, shares (see
+    /// <see cref="SimulatedDbConnection.LockOwner"/>) — so none of them blocks
+    /// on another's locks, and each reads the others' writes as its own, as
+    /// real's bound sessions share one lock space (probed 2026-10-07 against
+    /// SQL Server 2025). Replaced by a token of its own when that session
+    /// leaves while others stay, its holds moving with it.
+    /// </summary>
+    internal SessionToken LockOwner;
+
+    /// <summary>
+    /// The sessions taking part in the transaction once a second one has
+    /// joined it — the one that began it first while it stays — and null
+    /// before; back to null once only that one is left.
+    /// </summary>
+    internal List<SimulatedDbConnection>? Members;
+
+    /// <summary>The transaction, while sessions share it; null otherwise.</summary>
+    internal SimulatedDbTransaction? WhenShared => this.Members is null ? null : this;
+
+    /// <summary>
+    /// The member whose <c>@@TRANCOUNT</c> <see cref="TranCount"/> holds: the
+    /// one running, or the one that ran last. Each other keeps its own in
+    /// <see cref="SimulatedDbConnection.BoundTranCount"/>.
+    /// </summary>
+    private SimulatedDbConnection? runner;
+
+    /// <summary>
+    /// The token <c>sp_getbindtoken</c> hands out for the transaction, the same
+    /// for every call while it lasts (probed 2026-10-07 against SQL Server
+    /// 2025); null until one is asked for.
+    /// </summary>
+    internal string? BindToken;
+
+    /// <summary>
+    /// The databases whose tables the transaction has locked anything in,
+    /// whose shared database lock real holds to the transaction's end — a
+    /// read under READ COMMITTED's included, whose own locks are gone with its
+    /// statement (probed 2026-10-07 against SQL Server 2025). Replaced whole on
+    /// each change, since another session's lock DMV reads it.
+    /// </summary>
+    internal Database[] TouchedDatabases = [];
+
+    /// <summary>Notes the database of the table <paramref name="resource"/> locks, if it locks one.</summary>
+    internal void NoteDatabase(LockResource resource)
+    {
+        if (resource.OwningTable?.OwningDatabase is { } database && Array.IndexOf(this.TouchedDatabases, database) < 0)
+            this.TouchedDatabases = [.. this.TouchedDatabases, database];
+    }
+
+    /// <summary>Serializes the members' runs and every change to <see cref="Members"/>.</summary>
+    private readonly object membersGate = new();
+
+    /// <summary>Whether <paramref name="connection"/> is the member whose count <see cref="TranCount"/> holds.</summary>
+    internal bool IsRunBy(SimulatedDbConnection connection) => ReferenceEquals(this.runner ?? this.Owner, connection);
+
+    /// <summary>
+    /// The first session still in the transaction when <paramref name="connection"/>
+    /// shares it with another, whose lock workspace real lists the database
+    /// locks of all of them under; null for a transaction no one shares.
+    /// </summary>
+    internal SimulatedDbConnection? FirstMember(SimulatedDbConnection connection)
+    {
+        var members = this.Members;
+        if (members is null)
+            return null;
+        lock (this.membersGate)
+            return members.Contains(connection) && members.Count > 0 ? members[0] : null;
+    }
+
+    /// <summary>
+    /// Brings <paramref name="connection"/> into the transaction as
+    /// <paramref name="membership"/> says, on a <c>@@TRANCOUNT</c> of its own
+    /// starting at 1. Waits until no other member is running, unless the
+    /// caller runs inside one — a loopback server's session enlisting in its
+    /// caller's transaction — and makes the newcomer the running member when
+    /// <paramref name="running"/>, as <c>sp_bindsession</c>'s caller is.
+    /// </summary>
+    internal void Attach(SimulatedDbConnection connection, TransactionMembership membership, bool running)
+    {
+        lock (this.membersGate)
+        {
+            if (this.Ended)
+                return;
+            if (this.Members is null)
+            {
+                this.Members = [this.Owner];
+                this.runner = this.Owner;
+            }
+            this.Members.Add(connection);
+            connection.CurrentTransaction = this;
+            connection.SharedLockOwner = this.LockOwner;
+            connection.Membership = membership;
+            connection.BoundTranCount = 1;
+            if (!running)
+                return;
+            this.WaitForOtherMembers(connection, running: true);
+            // Another member may have ended it meanwhile, taking this one out.
+            if (!this.Ended)
+                this.RunAs(connection);
+        }
+    }
+
+    /// <summary>
+    /// Takes <paramref name="connection"/> out of the transaction, which goes
+    /// on for the members left: <c>sp_bindsession</c> with no token, a bound
+    /// session closing, a loopback server's call returning (probed 2026-10-07
+    /// against SQL Server 2025: the transaction outlives the session that began
+    /// it). When that session leaves, its holds and uncommitted writes pass to
+    /// a token of the transaction's own, since the session goes on to work of
+    /// its own under its token. Ending the last member's part ends nothing:
+    /// the caller rolls back a transaction no one is left in, which this
+    /// answers false for.
+    /// </summary>
+    internal bool Detach(SimulatedDbConnection connection)
+    {
+        lock (this.membersGate)
+        {
+            if (this.Members is not { } members || !members.Contains(connection))
+                return true;
+            // The holds move only between other members' statements, whose
+            // locks are being taken under the owner they leave.
+            if (ReferenceEquals(connection.Session, this.LockOwner))
+                this.WaitForOtherMembers(connection, running: false);
+            _ = members.Remove(connection);
+            if (ReferenceEquals(this.runner, connection))
+            {
+                connection.BoundTranCount = this.TranCount;
+                this.runner = null;
+            }
+            ReleaseMember(connection);
+            if (members.Count == 0)
+                return false;
+            if (ReferenceEquals(connection.Session, this.LockOwner))
+                this.PassLockOwnership();
+            else if (ReferenceEquals(this.LockOwner.RunningMember, connection.Session))
+                this.LockOwner.RunningMember = members[0].Session;
+            if (members.Count == 1 && ReferenceEquals(members[0], this.Owner) && ReferenceEquals(this.LockOwner, this.Owner.Session))
+            {
+                // Only the session that began it is left: no one shares it.
+                if (this.runner is null)
+                    this.TranCount = this.Owner.BoundTranCount;
+                this.runner = null;
+                this.Members = null;
+                this.LockOwner.RunningMember = null;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The session that began the transaction leaves while others stay: its
+    /// holds, the rows it deleted or rewrote, its uncommitted row versions and
+    /// its snapshot registration move to a token of the transaction's own,
+    /// acting as the first member left. That session is between requests —
+    /// its own <c>sp_bindsession</c>, or its session ending — so none of its
+    /// statement's locks is among them.
+    /// </summary>
+    private void PassLockOwnership()
+    {
+        var from = this.LockOwner;
+        var to = new SessionToken(from.Spid) { RunningMember = this.Members![0].Session };
+        this.simulation.LockManager.TransferHolds(this.HeldLocks, from, to);
+        HashSet<HeapTable> tables = new(ReferenceEqualityComparer.Instance);
+        for (var i = 0; i < this.HeldLocks.Count; i++)
+        {
+            var (resource, mode, owner) = this.HeldLocks[i];
+            if (ReferenceEquals(owner, from))
+                this.HeldLocks[i] = (resource, mode, to);
+            if (resource.OwningTable is { } table)
+                _ = tables.Add(table);
+        }
+        foreach (var table in tables)
+        {
+            if (table.SupersededKeyImages.TryRemove(from, out var images))
+                table.SupersededKeyImages[to] = images;
+        }
+        foreach (var entry in this.PendingVersionEntries)
+        {
+            lock (entry.Table.RowVersionsGate)
+            {
+                if (entry.Heap.RowVersions.TryGetValue(entry.NewRid, out var chain) && ReferenceEquals(chain.WriterSession, from))
+                    chain.WriterSession = to;
+            }
+        }
+        if (this.SnapshotXid is not null && this.simulation.ActiveSnapshotTxs.TryRemove(from, out var registration))
+            this.simulation.ActiveSnapshotTxs[to] = registration;
+        this.LockOwner = to;
+        foreach (var member in this.Members!)
+            member.SharedLockOwner = to;
+        from.RunningMember = null;
+    }
+
+    /// <summary>
+    /// Takes <paramref name="connection"/>'s part out of the transaction, its
+    /// own count kept for nothing: the transaction no longer names it.
+    /// </summary>
+    private static void ReleaseMember(SimulatedDbConnection connection)
+    {
+        connection.CurrentTransaction = null;
+        connection.SharedLockOwner = null;
+        connection.Membership = TransactionMembership.None;
+    }
+
+    /// <summary>
+    /// The transaction ends: every session in it leaves it, and each but
+    /// the one that ended it reports so with Msg 3926 at its next batch, as
+    /// real's does (probed 2026-10-07 against SQL Server 2025). A loopback
+    /// server's enlisted session hears nothing — its call returns into the
+    /// caller.
+    /// </summary>
+    private void ReleaseMembers()
+    {
+        lock (this.membersGate)
+        {
+            // Under the gate, so no session attaches to it once it has ended.
+            this.Ended = true;
+            if (this.Members is not { } members)
+            {
+                if (ReferenceEquals(this.Owner.CurrentTransaction, this))
+                    this.Owner.CurrentTransaction = null;
+                return;
+            }
+            var ender = this.runner ?? this.Owner;
+            foreach (var member in members)
+            {
+                if (!ReferenceEquals(member.CurrentTransaction, this))
+                    continue;
+                if (!ReferenceEquals(member, ender) && member.Membership != TransactionMembership.Enlisted)
+                    member.EndedUnderBinding = this;
+                ReleaseMember(member);
+            }
+            this.LockOwner.RunningMember = null;
+        }
+    }
+
+    /// <summary>
+    /// Begins a stretch of <paramref name="connection"/>'s execution in the
+    /// shared transaction: waits until no other member is running — real runs
+    /// them side by side, but they share one undo log and lock owner here —
+    /// and swaps its <c>@@TRANCOUNT</c> in. Returns the member that was
+    /// running, for <see cref="LeaveExecution"/> to hand back to when this
+    /// stretch ran inside it.
+    /// </summary>
+    internal SimulatedDbConnection? EnterExecution(SimulatedDbConnection connection)
+    {
+        lock (this.membersGate)
+        {
+            if (this.Members is not { } members || !members.Contains(connection))
+                return null;
+            var previous = this.runner;
+            this.WaitForOtherMembers(connection, running: true);
+            this.RunAs(connection);
+            return previous;
+        }
+    }
+
+    /// <summary>
+    /// Ends a stretch <see cref="EnterExecution"/> began: keeps the member's
+    /// count, and hands the transaction back to <paramref name="previous"/>
+    /// when the stretch ran inside it — a loopback server's call returning
+    /// into its caller.
+    /// </summary>
+    internal void LeaveExecution(SimulatedDbConnection connection, SimulatedDbConnection? previous)
+    {
+        lock (this.membersGate)
+        {
+            if (this.Members is { } members && previous is not null && !ReferenceEquals(previous, connection)
+                && Volatile.Read(ref previous.Session.ExecutingStretches) > 0 && members.Contains(previous))
+            {
+                this.RunAs(previous);
+            }
+            Monitor.PulseAll(this.membersGate);
+        }
+    }
+
+    /// <summary>
+    /// Makes <paramref name="connection"/> the running member: its count into
+    /// <see cref="TranCount"/>, the last runner's back to its own, and the
+    /// shared owner acting as it.
+    /// </summary>
+    private void RunAs(SimulatedDbConnection connection)
+    {
+        if (!ReferenceEquals(this.runner, connection))
+        {
+            if (this.runner is { } last)
+                last.BoundTranCount = this.TranCount;
+            this.TranCount = connection.BoundTranCount;
+            this.runner = connection;
+        }
+        this.LockOwner.RunningMember = connection.Session;
+    }
+
+    /// <summary>
+    /// Waits, holding <see cref="membersGate"/> between slices, until no member
+    /// but <paramref name="connection"/> is running — a member running on this
+    /// thread is the one this execution is nested in, and doesn't count. A
+    /// <paramref name="running"/> connection, waiting to run, observes its
+    /// cancellation as a lock wait does and doesn't count as running while it
+    /// waits, so a member waiting on it can go first.
+    /// </summary>
+    private void WaitForOtherMembers(SimulatedDbConnection connection, bool running)
+    {
+        var thread = Environment.CurrentManagedThreadId;
+        while (true)
+        {
+            var busy = false;
+            foreach (var member in this.Members!)
+            {
+                if (!ReferenceEquals(member, connection) && Volatile.Read(ref member.Session.ExecutingStretches) > 0
+                    && member.Session.CurrentExecutingThreadId != thread)
+                {
+                    busy = true;
+                    break;
+                }
+            }
+            if (!busy)
+                return;
+            if (!running)
+            {
+                _ = Monitor.Wait(this.membersGate, 25);
+                continue;
+            }
+            _ = Interlocked.Decrement(ref connection.Session.ExecutingStretches);
+            try
+            {
+                _ = Monitor.Wait(this.membersGate, 25);
+            }
+            finally
+            {
+                _ = Interlocked.Increment(ref connection.Session.ExecutingStretches);
+            }
+            if (connection.ExecutionCancellationToken.IsCancellationRequested)
+            {
+                throw connection.ExecutionTimedOut
+                    ? SimulatedSqlException.ExecutionTimeoutExpired()
+                    : SimulatedSqlException.CommandCancelled();
+            }
+        }
+    }
+
+    /// <summary>
     /// Under <c>SET CURSOR_CLOSE_ON_COMMIT ON</c>, closes the cursors this
     /// transaction opened that are still open — static ones included — as a
     /// <c>COMMIT</c> or <c>ROLLBACK</c> ends it; a rollback to a savepoint
@@ -600,7 +943,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     private void UnregisterActiveSnapshot()
     {
         if (this.SnapshotXid is not null)
-            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this.Owner.Session, out _);
+            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this.LockOwner, out _);
     }
 
     /// <summary>
@@ -617,8 +960,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
         var manager = this.simulation.LockManager;
         for (var i = this.HeldLocks.Count - 1; i >= 0; i--)
         {
-            var (resource, mode) = this.HeldLocks[i];
-            manager.Release(resource, mode, this.Owner.Session);
+            var (resource, mode, owner) = this.HeldLocks[i];
+            manager.Release(resource, mode, owner);
         }
         this.HeldLocks.Clear();
         // Transaction-owned application locks release with the transaction —
@@ -628,6 +971,23 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.EscalatedTables.Clear();
         this.SharedEscalatedTables.Clear();
     }
+}
+
+/// <summary>
+/// How a session takes part in a transaction another session began, as
+/// <c>sys.dm_tran_session_transactions</c> reports it (probed 2026-10-07
+/// against SQL Server 2025).
+/// </summary>
+internal enum TransactionMembership : byte
+{
+    /// <summary>The session's own transaction, or none: <c>is_local</c> 1, <c>is_bound</c> 0.</summary>
+    None,
+
+    /// <summary>Bound through <c>sp_bindsession</c>: <c>is_local</c> 0, <c>is_bound</c> 1.</summary>
+    Bound,
+
+    /// <summary>A loopback server's session a remote call enlisted: <c>is_local</c> 0, <c>is_bound</c> 0.</summary>
+    Enlisted,
 }
 
 /// <summary>A server transaction's beginning or ending, as the TDS endpoint reports it.</summary>
@@ -641,4 +1001,16 @@ internal enum TransactionEvent : byte
 
     /// <summary>A rollback a <c>ROLLBACK</c> statement or request made.</summary>
     StatementRollback,
+}
+
+/// <summary>
+/// A token <c>sp_getbindtoken</c> handed out: the transaction it names, held
+/// weakly, and the session that began that transaction, whose presence decides
+/// how <c>sp_bindsession</c> answers once the transaction has ended.
+/// </summary>
+internal sealed class BindTokenIssue(WeakReference<SimulatedDbTransaction> transaction, SessionToken issuer)
+{
+    public readonly WeakReference<SimulatedDbTransaction> Transaction = transaction;
+
+    public readonly SessionToken Issuer = issuer;
 }

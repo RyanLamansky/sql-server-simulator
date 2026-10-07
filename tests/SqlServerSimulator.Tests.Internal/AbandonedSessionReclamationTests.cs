@@ -69,7 +69,7 @@ public sealed class AbandonedSessionReclamationTests
         Exec(observer, "CREATE TABLE dbo.t (id int PRIMARY KEY, v int); INSERT dbo.t VALUES (1, 1), (2, 2)");
 
         _ = Abandon(simulation, "BEGIN TRANSACTION; UPDATE dbo.t SET v = 99 WHERE id = 1; INSERT dbo.t VALUES (3, 3)");
-        AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks"), null));
+        AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
 
         AreEqual(1, simulation.ReclaimAbandonedSessions());
 
@@ -77,7 +77,7 @@ public sealed class AbandonedSessionReclamationTests
         // undone, the insert is gone, and every lock it held is released.
         AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
         AreEqual(2, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM dbo.t"), null));
-        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
     }
 
     [TestMethod]
@@ -246,7 +246,7 @@ public sealed class AbandonedSessionReclamationTests
         // A late finalizer on an already-reclaimed session must not re-run the
         // teardown (a second lock release would be an unmatched one).
         AreEqual(0, simulation.ReclaimAbandonedSessions());
-        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
     }
 
     [TestMethod]
@@ -258,7 +258,7 @@ public sealed class AbandonedSessionReclamationTests
         Exec(observer, "CREATE TABLE dbo.t (id int PRIMARY KEY, v int); INSERT dbo.t VALUES (1, 1)");
 
         var session = LeakConnection(simulation);
-        AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks"), null));
+        AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
 
         // The whole point of the SessionToken indirection: nothing global holds
         // the connection any more, so the GC can finalize it. Before it, the
@@ -271,7 +271,7 @@ public sealed class AbandonedSessionReclamationTests
         AreEqual(1, simulation.ReclaimAbandonedSessions());
         IsTrue(session.Reclaimed);
         AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
-        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
         AreEqual(DBNull.Value, Scalar(observer, "SELECT OBJECT_ID('tempdb..##gcleaked')"));
     }
 

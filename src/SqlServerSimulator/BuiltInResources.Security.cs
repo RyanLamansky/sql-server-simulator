@@ -20,18 +20,19 @@ internal static partial class BuiltInResources
         // entry in HeapTable.RowLocks. GRANT entries come from
         // LockResource.Holders; WAIT entries from connection registry's
         // WaitingOnResource / WaitingForMode. Shipped column subset is
-        // the most commonly read seven fields; the full real-SQL-Server
+        // the most commonly read eight fields; the full real-SQL-Server
         // shape has ~18 columns most apps never touch.
         Sys("dm_tran_locks",
         [
             new("resource_type", SqlType.NVarchar, 60, false),
+            new("resource_subtype", SqlType.NVarchar, 60, false),
             new("resource_database_id", SqlType.Int32, null, false),
             new("resource_description", SqlType.NVarchar, 256, false),
             new("resource_associated_entity_id", SqlType.BigInt, null, true),
             new("request_mode", SqlType.NVarchar, 60, false),
             new("request_status", SqlType.NVarchar, 60, false),
             new("request_session_id", SqlType.Int32, null, false),
-        ], LockDmvs.EnumerateDmTranLocks);
+        ], LockDmvs.EnumerateDmTranLocksView);
 
         // sys.dm_os_waiting_tasks: one row per currently-waiting
         // connection. session_id / blocking_session_id are smallint

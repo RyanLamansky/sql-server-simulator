@@ -241,7 +241,7 @@ internal static partial class BuiltInResources
                 loginTime,
                 loginTime,
                 zeroSmall,
-                SqlValue.FromInt16((short)(connection.CurrentTransaction?.TranCount ?? 0)),
+                SqlValue.FromInt16((short)connection.OpenTransactionCount),
                 nchar(30, self ? "runnable" : "sleeping"),
                 SqlValue.FromBinary(BinarySqlType.Get(86), DeriveLoginSid(login)),
                 nchar(128, connection.ClientHostName),

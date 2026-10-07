@@ -1539,7 +1539,7 @@ internal static partial class BuiltInResources
                     : inWaitFor ? "WAITFOR"
                     : null;
                 var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
-                var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - session.WaitStartedTicks));
+                var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - (lockWait is not null && connection.WaitRecord is { } record ? record.WaitStartedTicks : session.WaitStartedTicks)));
                 var start = session.RequestStartUtc == default ? connection.LoginTimeUtc : session.RequestStartUtc;
                 yield return RequestRow(
                     simulation, connection, now, runningId, start,
@@ -1547,7 +1547,7 @@ internal static partial class BuiltInResources
                     session.CurrentCommand, session.BatchText, session.StatementStartIndex,
                     waitType, waitMillis, blocker,
                     lockWait is var (describedResource, _) ? LockDmvs.DescribeResource(simulation, describedResource) : "",
-                    SessionSettings.Capture(connection), connection.CurrentTransaction?.TranCount ?? 0, connection.NestingLevel);
+                    SessionSettings.Capture(connection), connection.OpenTransactionCount, connection.NestingLevel);
             }
             for (; next < parked.Length; next++)
                 yield return RequestRow(simulation, connection, now, parked[next]);
@@ -1768,7 +1768,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(2),
                 SqlValue.FromInt16(databaseId),
                 SqlValue.FromInt32(1),
-                SqlValue.FromInt32(connection.CurrentTransaction?.TranCount ?? 0),
+                SqlValue.FromInt32(connection.OpenTransactionCount),
                 zeroBig,
                 SqlValue.Null(SqlType.UniqueIdentifier),
             ];

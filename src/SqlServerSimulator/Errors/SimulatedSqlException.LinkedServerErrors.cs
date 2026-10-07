@@ -163,6 +163,30 @@ partial class SimulatedSqlException
         ]));
 
     /// <summary>
+    /// The provider giving up on a query its linked server's session couldn't
+    /// run — on a loopback server, one waiting on a lock its caller holds, for
+    /// instance an <c>OPENQUERY</c> or four-part read of a row the caller's
+    /// open transaction wrote, which doesn't enlist in it: the provider's
+    /// Msg 7412, then Msg 7399 and Msg 7320 quoting the query, ending the
+    /// batch and rolling the transaction back as under <c>XACT_ABORT</c>
+    /// (probed 2026-10-07 against SQL Server 2025, after the server's
+    /// <c>query timeout</c> elapsed).
+    /// </summary>
+    internal static SimulatedSqlException ProviderQueryTimeout(BatchContext batch, LinkedServer server, string query)
+    {
+        batch.Connection.PendingMessages.Enqueue(ProviderMessage(batch, server, "Query timeout expired"));
+        List<SimulatedError> entries =
+        [
+            .. new SimulatedSqlException($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" reported an error. Execution terminated by the provider because a resource limit was reached.", 7399, 16, 1).Errors,
+            .. new SimulatedSqlException($"Cannot execute the query \"{query}\" against OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". ", 7320, 16, 2).Errors,
+        ];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+    }
+
+    /// <summary>
     /// <paramref name="error"/> carrying the provider's account of it, a
     /// <see cref="ProviderMessage"/>, ahead of its own entries — for a refusal
     /// raised before the statement runs, or one that ends the batch, which a

@@ -61,15 +61,93 @@ internal static class LockDmvs
     };
 
     /// <summary>
-    /// Yields one row per granted or waiting lock across every schema
-    /// object + every per-row LockResource in the simulator. Walks
-    /// schemas / heap tables / views / functions / procedures / sequences
-    /// / table types / triggers; for each holder appends a <c>GRANT</c>
-    /// row, for each waiter (resolved via the connection registry's
-    /// <see cref="SimulatedDbConnection.WaitingOnResource"/>) appends a
-    /// <c>WAIT</c> row.
+    /// Yields one row per granted or waiting lock across the server — every
+    /// database's schema objects, row locks, key locks and application locks —
+    /// then the <c>DATABASE</c> rows: each session's shared lock on its current
+    /// database, on the databases of the execution contexts it is nested in,
+    /// and on every database it holds or awaits a lock in, master and tempdb
+    /// excepted (probed 2026-10-07 against SQL Server 2025). Sessions sharing a
+    /// transaction share one lock workspace, whose database locks real lists
+    /// once each, under the first session still in it.
     /// </summary>
     internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch, Database database)
+    {
+        _ = database;
+        var sim = batch.Connection.Simulation;
+        var connections = sim.SnapshotConnections();
+        var workspaces = new Dictionary<int, int>();
+        var databaseLocks = new SortedSet<(int Spid, int DatabaseId)>();
+        foreach (var connection in connections)
+        {
+            if (connection.State != System.Data.ConnectionState.Open)
+                continue;
+            var workspace = WorkspaceSpid(connection);
+            workspaces[connection.Spid] = workspace;
+            AddDatabaseLock(databaseLocks, workspace, connection.CurrentDatabase);
+            foreach (var enclosing in connection.EnclosingDatabases)
+                AddDatabaseLock(databaseLocks, workspace, enclosing);
+            if (connection.CurrentTransaction is { } transaction)
+            {
+                foreach (var touched in transaction.TouchedDatabases)
+                    AddDatabaseLock(databaseLocks, workspace, touched);
+            }
+        }
+
+        var ordered = new List<Database>();
+        foreach (var (_, each) in sim.Databases)
+            ordered.Add(each);
+        ordered.Sort(static (a, b) => a.Id.CompareTo(b.Id));
+        foreach (var each in ordered)
+        {
+            foreach (var row in EnumerateDatabaseLocks(batch, each))
+            {
+                if (row[6].AsInt32 is var spid && workspaces.TryGetValue(spid, out var workspace))
+                    AddDatabaseLock(databaseLocks, workspace, each);
+                yield return row;
+            }
+        }
+
+        var databaseType = SqlValue.FromNVarchar("DATABASE");
+        var shared = SqlValue.FromNVarchar(ModeAbbreviation(LockMode.Shared));
+        var grant = SqlValue.FromNVarchar("GRANT");
+        var noEntity = SqlValue.FromInt64(0);
+        foreach (var (spid, databaseId) in databaseLocks)
+            yield return [databaseType, SqlValue.FromInt32(databaseId), Description(""), noEntity, shared, grant, SqlValue.FromInt32(spid)];
+
+        static void AddDatabaseLock(SortedSet<(int, int)> locks, int spid, Database held)
+        {
+            if (held.Name is not (Simulation.MasterDatabaseName or Simulation.TempdbDatabaseName))
+                _ = locks.Add((spid, held.Id));
+        }
+    }
+
+    /// <summary>
+    /// The rows of <c>sys.dm_tran_locks</c> itself: <see cref="EnumerateDmTranLocks"/>'s,
+    /// with the <c>resource_subtype</c> column real carries second, empty for
+    /// every resource the simulator locks (probed 2026-10-07 against SQL Server
+    /// 2025, a <c>DATABASE</c> row's included).
+    /// </summary>
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocksView(BatchContext batch, Database database)
+    {
+        var noSubtype = SqlValue.FromNVarchar("");
+        foreach (var row in EnumerateDmTranLocks(batch, database))
+            yield return [row[0], noSubtype, row[1], row[2], row[3], row[4], row[5], row[6]];
+    }
+
+    /// <summary>
+    /// The session a <c>DATABASE</c> lock of <paramref name="connection"/> is
+    /// listed under: its own, or for a session in a transaction other sessions
+    /// share — bound through <c>sp_bindsession</c>, or a loopback server's
+    /// session enlisted in it — the first session still in it, whose workspace
+    /// holds the database locks of all of them (probed 2026-10-07 against SQL
+    /// Server 2025: a bound session's database lock shows under the session
+    /// that began the transaction, and under its own once that one has left).
+    /// </summary>
+    private static int WorkspaceSpid(SimulatedDbConnection connection) =>
+        connection.CurrentTransaction?.FirstMember(connection) is { } first ? first.Spid : connection.Spid;
+
+    /// <summary>The lock rows of <paramref name="database"/>'s resources.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateDatabaseLocks(BatchContext batch, Database database)
     {
         var sim = batch.Connection.Simulation;
         var locks = sim.LockManager;
@@ -204,7 +282,7 @@ internal static class LockDmvs
             {
                 SqlValue.FromInt16((short)conn.Spid),
                 SqlValue.FromNVarchar(WaitType(mode)),
-                SqlValue.FromNVarchar(conn.Session.WaitingOnKey is { } key && resource.OwningTable is { } keyed ? $"KEY: {keyed.Name} {key}" : DescribeResource(sim, resource)),
+                SqlValue.FromNVarchar(conn.WaitRecord?.WaitingOnKey is { } key && resource.OwningTable is { } keyed ? $"KEY: {keyed.Name} {key}" : DescribeResource(sim, resource)),
                 blockerSpid is int bSpid ? SqlValue.FromInt16((short)bSpid) : SqlValue.Null(SqlType.SmallInt),
             };
         }
@@ -226,7 +304,7 @@ internal static class LockDmvs
         {
             if (conn.WaitingOnResource is not { } resource)
                 continue;
-            if (conn.Session.WaitingOnKey is { } key)
+            if (conn.WaitRecord?.WaitingOnKey is { } key)
             {
                 (keyWaits ??= []).Add((conn, resource, key));
                 continue;
@@ -315,10 +393,10 @@ internal static class LockDmvs
             {
                 if (hold.Mode != LockMode.Exclusive)
                     continue;
-                var spid = SqlValue.FromInt32(hold.Owner.Spid);
+                var spid = SqlValue.FromInt32(hold.Owner.Acting.Spid);
                 foreach (var (group, key) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
                 {
-                    if (!shown.Add((group, key, hold.Owner.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
+                    if (!shown.Add((group, key, hold.Owner.Acting.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
                         continue;
                     yield return
                     [
@@ -485,7 +563,7 @@ internal static class LockDmvs
                 entityVal,
                 SqlValue.FromNVarchar(ModeAbbreviation(mode)),
                 grantStatus,
-                SqlValue.FromInt32(hold.Owner.Spid),
+                SqlValue.FromInt32(hold.Owner.Acting.Spid),
             };
         }
         // WAIT rows from connections blocked on this resource.
@@ -520,7 +598,7 @@ internal static class LockDmvs
         {
             foreach (var waiter in waiters)
             {
-                if (ReferenceEquals(waiter.Session, owner))
+                if (ReferenceEquals(waiter.LockOwner, owner))
                     return true;
             }
         }
@@ -554,16 +632,16 @@ internal static class LockDmvs
         var locks = waiter.Simulation.LockManager;
         foreach (var hold in locks.HoldersOf(resource))
         {
-            if (ReferenceEquals(hold.Owner, waiter.Session))
+            if (ReferenceEquals(hold.Owner, waiter.LockOwner))
                 continue;
             if (LockManager.IsCompatible(hold.Mode, mode))
                 continue;
-            return hold.Owner.Spid;
+            return hold.Owner.Acting.Spid;
         }
-        foreach (var (owner, waiting) in locks.QueuedAheadOf(resource, waiter.Session))
+        foreach (var (owner, waiting) in locks.QueuedAheadOf(resource, waiter.LockOwner))
         {
             if (!LockManager.IsCompatible(waiting, mode))
-                return owner.Spid;
+                return owner.Acting.Spid;
         }
         return null;
     }

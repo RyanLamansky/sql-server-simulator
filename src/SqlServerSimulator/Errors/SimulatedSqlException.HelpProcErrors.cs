@@ -120,12 +120,41 @@ partial class SimulatedSqlException
         new("Cannot get a transaction token if there is no transaction active. Reissue the statement after a transaction has been started", 3921, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
-    /// Mimics SQL Server's Msg 3909 — an <c>sp_bindsession</c> token that names
-    /// no transaction, which ends the batch (probed 2026-10-04 against SQL
-    /// Server 2025).
+    /// Mimics SQL Server's Msg 3909 — an <c>sp_bindsession</c> token that is no
+    /// token, which ends the batch: state 1 for one shorter than a token's 32
+    /// characters, 3 for one of nothing but its padding character, and 2 for
+    /// any other no transaction was given (probed 2026-10-04 and 2026-10-07
+    /// against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException BindTokenIsInvalid() =>
-        new("Session binding token is invalid.", 3909, 16, 1) { TerminatesBatch = true };
+    internal static SimulatedSqlException BindTokenIsInvalid(byte state) =>
+        new("Session binding token is invalid.", 3909, 16, state) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 3922 — an <c>sp_bindsession</c> token whose
+    /// transaction has ended and whose session has gone, or the caller's own
+    /// token once binding has made it leave its transaction (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BindTransactionDoesNotExist() =>
+        new("Cannot enlist in the transaction because the transaction does not exist.", 3922, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server's informational Msg 3924 — <c>sp_bindsession</c>
+    /// called by a session already in a transaction, which it leaves before
+    /// binding: its own is rolled back (probed 2026-10-07 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedError SessionDefectedFromTransactionMessage(SimulatedDbConnection connection) =>
+        new(@class: 0, lineNumber: 1, message: "The session was enlisted in an active user transaction while trying to bind to a new transaction. The session has defected from the previous user transaction.", number: 3924, procedure: "sp_bindsession", server: connection.DataSource, source: "SqlServerSimulator", state: 1);
+
+    /// <summary>
+    /// Mimics SQL Server's informational Msg 3926 — the first batch a session
+    /// runs after another session it shared a transaction with, through
+    /// <c>sp_bindsession</c>, committed or rolled it back (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError TransactionEndedByAnotherSessionMessage(SimulatedDbConnection connection) =>
+        new(@class: 0, lineNumber: 1, message: "The transaction active in this session has been committed or aborted by another session.", number: 3926, procedure: "", server: connection.DataSource, source: "SqlServerSimulator", state: 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 15300 — <c>sp_helprotect</c>'s

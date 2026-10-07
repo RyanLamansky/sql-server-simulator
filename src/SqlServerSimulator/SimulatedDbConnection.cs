@@ -752,7 +752,11 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     private void RollBackTransactions()
     {
-        this.CurrentTransaction?.EndRollback();
+        // A transaction other sessions share goes on without this one (probed
+        // 2026-10-07 against SQL Server 2025: it outlives the session that
+        // began it).
+        if (this.CurrentTransaction is { } open && (open.Members is null || !open.Detach(this)))
+            open.EndRollback();
         SessionRequest[] pending;
         lock (this.requestsGate)
             pending = [.. this.pendingRequests];
@@ -1374,11 +1378,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// the snapshot is consistent) to spot a wait-for-graph cycle that
     /// includes this connection.
     /// </summary>
-    internal LockResource? WaitingOnResource
-    {
-        get => this.Session.WaitingOnResource;
-        set => this.Session.WaitingOnResource = value;
-    }
+    internal LockResource? WaitingOnResource => this.WaitRecord?.WaitingOnResource;
 
     /// <summary>
     /// Mode this connection is currently waiting to acquire on
@@ -1387,7 +1387,87 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>LCK_M_&lt;mode&gt;</c> (e.g. <c>LCK_M_X</c>, <c>LCK_M_S</c>) and
     /// through <c>sys.dm_tran_locks.request_mode</c> for WAIT-status rows.
     /// </summary>
-    internal LockMode? WaitingForMode => this.Session.WaitingForMode;
+    internal LockMode? WaitingForMode => this.WaitRecord?.WaitingForMode;
+
+    /// <summary>
+    /// The token a lock wait of this session is recorded on — its
+    /// <see cref="LockOwner"/>, whose waits are this session's while it is
+    /// the one running under it — or null while another session bound to the
+    /// same transaction is.
+    /// </summary>
+    internal SessionToken? WaitRecord
+    {
+        get
+        {
+            var owner = this.LockOwner;
+            return ReferenceEquals(owner.Acting, this.Session) ? owner : null;
+        }
+    }
+
+    /// <summary>
+    /// The token this session's locks, and its uncommitted writes, are held
+    /// under: its own <see cref="Session"/>, or while it is bound to a
+    /// transaction other sessions share — through <c>sp_bindsession</c>, or
+    /// as a loopback server's session enlisted in its caller's — the owner
+    /// those sessions share (<see cref="SimulatedDbTransaction.LockOwner"/>),
+    /// so none of them blocks on another's locks or reads another's writes as
+    /// uncommitted.
+    /// </summary>
+    internal SessionToken LockOwner => this.SharedLockOwner ?? this.Session;
+
+    /// <summary>
+    /// The shared owner <see cref="LockOwner"/> names while this session is
+    /// attached to a transaction other sessions share; null otherwise.
+    /// </summary>
+    internal SessionToken? SharedLockOwner;
+
+    /// <summary>
+    /// How this session takes part in a transaction other sessions share, as
+    /// <c>sys.dm_tran_session_transactions</c> reports it.
+    /// </summary>
+    internal TransactionMembership Membership;
+
+    /// <summary>
+    /// This session's own <c>@@TRANCOUNT</c> in a shared transaction while
+    /// another member runs: each bound session nests on its own count, and
+    /// any one's outermost <c>COMMIT</c> commits the transaction for all
+    /// (probed 2026-10-07 against SQL Server 2025). The running member's
+    /// count is <see cref="SimulatedDbTransaction.TranCount"/>.
+    /// </summary>
+    internal int BoundTranCount;
+
+    /// <summary>
+    /// The shared transaction another member committed or rolled back while
+    /// this session was attached, which its next batch reports with the
+    /// informational Msg 3926; null when there is none to report.
+    /// </summary>
+    internal SimulatedDbTransaction? EndedUnderBinding;
+
+    /// <summary>
+    /// The databases of the execution contexts this session's running batch
+    /// is nested in — a dynamic batch's caller, a module body's — each held
+    /// in a shared lock as its current database is, while the nested one
+    /// runs (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    /// <remarks>Replaced whole on each change, since another session's lock DMV reads it.</remarks>
+    internal Database[] EnclosingDatabases = [];
+
+    /// <summary>Notes that a nested execution context leaves <paramref name="enclosing"/> to run in another database.</summary>
+    internal void EnterNestedDatabase(Database enclosing) => this.EnclosingDatabases = [.. this.EnclosingDatabases, enclosing];
+
+    /// <summary>Returns from the innermost nested execution context <see cref="EnterNestedDatabase"/> noted.</summary>
+    internal void LeaveNestedDatabase() => this.EnclosingDatabases = this.EnclosingDatabases[..^1];
+
+    /// <summary>
+    /// <c>@@TRANCOUNT</c> as another session's report reads it: the running
+    /// member's count from the transaction, a bound member's own otherwise.
+    /// </summary>
+    internal int OpenTransactionCount => this.CurrentTransaction switch
+    {
+        null => 0,
+        { Members: not null } shared when !shared.IsRunBy(this) => this.BoundTranCount,
+        var own => own.TranCount,
+    };
 
     /// <summary>
     /// The database this session is pointed at. Defaults to the entry named

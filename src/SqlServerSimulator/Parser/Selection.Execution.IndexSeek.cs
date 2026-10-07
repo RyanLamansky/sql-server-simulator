@@ -704,7 +704,7 @@ internal sealed partial class Selection
     {
         if (table.SupersededKeyImages.IsEmptyLockFree())
             return null;
-        var session = batch.Connection.Session;
+        var session = batch.Connection.LockOwner;
         List<(byte[] Image, LockResource Lock)>? deleted = null;
         foreach (var (owner, images) in table.SupersededKeyImages)
         {
@@ -3665,7 +3665,7 @@ internal sealed partial class Selection
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += seeks;
         var lastPage = -1;
-        var reader = batch.Connection.Session;
+        var reader = batch.Connection.LockOwner;
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
 

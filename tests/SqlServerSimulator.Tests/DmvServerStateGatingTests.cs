@@ -190,7 +190,7 @@ public sealed class DmvServerStateGatingTests
     {
         var sim = Seeded();
         using var idle = sim.CreateOpenConnection();
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_locks"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_locks where resource_type <> 'DATABASE'"));
         IsGreaterThanOrEqualTo(2, Convert.ToInt32(sim.ExecuteScalar("select count(*) from sys.dm_exec_sessions")));
     }
 

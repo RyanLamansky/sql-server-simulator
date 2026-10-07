@@ -52,7 +52,7 @@ public sealed class KeyLockAnchorTests
         _ = holding.CreateCommand(holder).ExecuteNonQuery();
         var locks = (string?)holding.CreateCommand("""
             select string_agg(concat(resource_type, ' ', request_mode, ' x', n), ', ') within group (order by resource_type, request_mode)
-            from (select resource_type, request_mode, count(*) n from sys.dm_tran_locks where request_session_id = @@spid group by resource_type, request_mode) g
+            from (select resource_type, request_mode, count(*) n from sys.dm_tran_locks where request_session_id = @@spid and resource_type <> 'DATABASE' group by resource_type, request_mode) g
             """).ExecuteScalar() ?? "";
         _ = holding.CreateCommand("if @@trancount > 0 rollback").ExecuteNonQuery();
         return locks;

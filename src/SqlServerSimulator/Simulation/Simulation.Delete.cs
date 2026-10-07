@@ -663,7 +663,7 @@ partial class Simulation
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
             context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             if (table.RowLocks.TryGetValue((pageIndex, slotIndex), out var rowLock))
-                rowLock.DeletedBy = context.Connection.Session;
+                rowLock.DeletedBy = context.Connection.LockOwner;
             if (VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
                 VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, VersionWriteKind.Delete);
         }

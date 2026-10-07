@@ -302,8 +302,8 @@ partial class Simulation
             return 0;
         foreach (var hold in connection.Simulation.LockManager.HoldersOf(resource))
         {
-            if (!ReferenceEquals(hold.Owner, connection.Session) && !LockManager.IsCompatible(hold.Mode, mode))
-                return hold.Owner.Spid;
+            if (!ReferenceEquals(hold.Owner, connection.LockOwner) && !LockManager.IsCompatible(hold.Mode, mode))
+                return hold.Owner.Acting.Spid;
         }
 
         return 0;

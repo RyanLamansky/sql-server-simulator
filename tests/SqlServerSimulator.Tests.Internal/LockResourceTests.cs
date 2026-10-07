@@ -191,7 +191,7 @@ public sealed class LockResourceTests
         b.CurrentExecutingThreadId = -1; // foreign thread — avoids the same-thread short-circuit
         sim.LockManager.Acquire(r1, LockMode.Exclusive, caller.Session, 0);
         sim.LockManager.Acquire(r2, LockMode.Exclusive, b.Session, 0);
-        b.WaitingOnResource = r1;
+        b.Session.WaitingOnResource = r1;
         b.Session.WaitingForMode = LockMode.Exclusive;
         try
         {
@@ -202,7 +202,7 @@ public sealed class LockResourceTests
         }
         finally
         {
-            b.WaitingOnResource = null;
+            b.Session.WaitingOnResource = null;
             b.Session.WaitingForMode = null;
             sim.LockManager.Release(r2, LockMode.Exclusive, b.Session);
             sim.LockManager.Release(r1, LockMode.Exclusive, caller.Session);

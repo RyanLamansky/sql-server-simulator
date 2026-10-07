@@ -120,7 +120,7 @@ internal sealed class AppLockTest : Expression
         }
 
         var wouldGrant = resource is null
-            || !connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, probeMode, connection.Session);
+            || !connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, probeMode, connection.LockOwner, holder => !ReferenceEquals(holder, connection.Session));
         return SqlValue.FromInt16((short)(wouldGrant ? 1 : 0));
     }
 

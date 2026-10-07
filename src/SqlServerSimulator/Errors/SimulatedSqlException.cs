@@ -210,6 +210,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool DoomsWhenUncaught { get; private init; }
 
     /// <summary>
+    /// Set on a Msg 1205 raised because the lock a request waits for is held by
+    /// a session running on the same thread — a loopback linked server's query
+    /// waiting on its caller's lock, a wait real's provider sits out until its
+    /// query timeout (see <see cref="ProviderQueryTimeout"/>).
+    /// </summary>
+    internal bool WaitsOnOwnThread { get; private init; }
+
+    /// <summary>
     /// When <see langword="true"/>, this is a cancellation (a
     /// <c>CommandTimeout</c> expiry or a caller's cancel) observed inside a
     /// running statement rather than between two. It ends the batch and no

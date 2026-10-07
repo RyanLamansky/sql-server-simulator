@@ -98,7 +98,7 @@ The hinted tables are recorded on the `BatchContext` when the source's data lock
 
 ## Lock-owner / lock-scope model
 
-Lock owner is always the session — a `SessionToken`, reached from a connection as `connection.Session` (see [Abandoned-session reclamation](#abandoned-session-reclamation) for why the recorded owner is the token and not the connection).
+Lock owner is the session — a `SessionToken`, reached from a connection as `connection.LockOwner`, which is `connection.Session` (see [Abandoned-session reclamation](#abandoned-session-reclamation) for why the recorded owner is the token and not the connection) save while the session shares a transaction with others (see [Sessions sharing a transaction](#sessions-sharing-a-transaction)).
 Scope (when the lock releases) depends on the mode and surrounding transaction state:
 
 | Acquired at                   | Scope                                 |
@@ -128,6 +128,31 @@ The symptom is a later Sch-M — an `ALTER`, a startup re-applying its programma
 `ModuleCreationLockLeakTests` walks every module kind, created and invoked, and asserts `sys.dm_tran_locks` is empty; a new body-inspection site that forgets the release fails there rather than in a consumer's startup.
 Transaction-scoped locks live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` / `Rollback()` / dispose-implicit-rollback.
 Savepoint partial rollbacks (`ROLLBACK TRAN <savepoint>`) do NOT release locks — matches real SQL Server (probe-confirmed).
+
+### Sessions sharing a transaction
+
+`sp_bindsession` binds a session to the transaction an `sp_getbindtoken` token names, and a loopback linked server's remote call inside a transaction runs its session in the caller's (see [`linked-servers.md`](linked-servers.md#transactions)).
+Probed 2026-10-07 against SQL Server 2025, the sessions share one transaction and one lock space:
+- each reads the others' uncommitted rows and writes over their locks without waiting, while a third session waits on all of them;
+- each nests on a `@@TRANCOUNT` of its own, and any one's outermost `COMMIT`, or `ROLLBACK`, ends the transaction for all — the others hear the informational Msg 3926 at their next batch;
+- a session leaving (`sp_bindsession NULL`, closing) leaves the transaction to the rest, even the one that began it;
+- `sys.dm_tran_locks` lists the transaction's locks under the member that ran last, and its database locks — one per database — under the first member still in it;
+- `sys.dm_tran_session_transactions` lists every member: the one that began it local, a bound one bound, a loopback's enlisted session neither, `enlist_count` 1 only for a member running a request.
+
+The shared lock space is one lock owner: the members' `LockOwner` is the transaction's (`SimulatedDbTransaction.LockOwner`), the token of the session that began it, so a member's locks, uncommitted rows, deleted-key registrations, row versions and snapshot registration are all the same owner's and every "own write" rule holds across the members unchanged.
+Nothing moves when a session binds, since the joining session takes the owner the transaction already has, so the session that began it takes and releases under its own token throughout and an unshared transaction's path is untouched.
+When the session that began the transaction leaves while others stay, its holds pass to a token of the transaction's own (`PassLockOwnership`, `LockManager.TransferHolds`), since the leaving session goes on to work of its own under its token.
+A statement's locks are released under the owner they were taken under (`StatementSchemaLocks` records it), since a statement can end the shared transaction, or bind, partway.
+
+The owner token records the wait of whichever member is running (`SessionToken.RunningMember`, read through `Acting`): its cancellation, its deadlock priority, its executing thread, and the `@@SPID` the lock DMVs report.
+That is sound because members run **one at a time**: each stretch of a member's execution waits until no other member is running (`SimulatedDbTransaction.EnterExecution`, from `Simulation.MoveNextAsMember`), save a loopback server's session running inside its caller on the caller's thread, and swaps its `@@TRANCOUNT` into the transaction's.
+
+Divergences:
+- **Real runs the members side by side** (probed: one's insert completing during the other's long query), where here one waits for the other's statement.
+  A member waiting on another session's lock holds the others off meanwhile; real lets them run, and in that probe left the waiting member's request waiting past the lock's release, until its command timed out.
+- **A session whose transaction another member ended stays listed** in `sys.dm_tran_session_transactions` on real until its next batch; here it leaves at once.
+- **A SCROLL_LOCKS cursor's locks and a session's own application locks** stay its session's, so they block another member.
+- **The token's bits** aren't real's encoding: it has real's alphabet (`-` through `l`) and fixed characters, the rest drawn.
 
 ## Abandoned-session reclamation
 
@@ -481,19 +506,21 @@ Per-isolation reader behavior:
 
 ## Diagnostic DMVs
 
-- **`sys.dm_tran_locks`** — one row per held / waiting lock across every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks` (and the row locks of rows a session deleted, found through `HeapTable.SupersededKeyImages`), and every key-lock anchor in `HeapTable.KeyLockGroups`.
+- **`sys.dm_tran_locks`** — one row per held / waiting lock across every database — every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks` (and the row locks of rows a session deleted, found through `HeapTable.SupersededKeyImages`), and every key-lock anchor in `HeapTable.KeyLockGroups`.
   A row lock reports `KEY` on a clustered table, whose row real locks by its key, described by that key, and `RID` on a heap; a row lock and a key-range lock one session holds on the same clustered key fold into one row in the combined mode (see [Divergences](#divergences)), as do a U and the X its holder took over it.
   A key a session deleted and inserted again is two rows at two addresses here and one key on real, which keeps the key in place, so it reports once per index (probed 2026-10-07 against SQL Server 2025).
   A statement's Sch-S stands for real's compile-time lock, so the view leaves it out beside anything else the session holds or waits for on the object — a read's IS, a write's IX, a redefinition's Sch-M — as real shows that one request (probed 2026-10-07 against SQL Server 2025: a waiting reader's IS, a waiting redefinition's Sch-M); a `NOLOCK` read shows its Sch-S.
   Beside a written row's own lock the view reports the index key locks real takes with it, which the simulator folds into the row's X (`LockDmvs.EmitRowLocks` carries the rule): an inserted or deleted row's key in every index it is in, an updated row's old and new key in every index whose row the update changed, a moved clustered key's old key, and a filtered index only where its filter admits the image (probed 2026-10-01 against SQL Server 2025 over heaps and clustered tables with unique, non-unique, filtered and `INCLUDE` indexes).
   A uniqueness or foreign-key check waiting on the row that carries a unique key reports its wait on that key (`SessionToken.WaitingOnKey`), as real waits on the key's own lock.
-  Column subset: `resource_type` (`OBJECT` / `RID` / `KEY`), `resource_database_id`, `resource_description`, `resource_associated_entity_id` (`object_id`), `request_mode` (`Sch-S` / `Sch-M` / `IS` / `IX` / `SIX` / `S` / `U` / `X` / `RangeS-S` / `RangeS-U` / `RangeX-X` / `RangeI-N`), `request_status` (`GRANT` / `WAIT`), `request_session_id`.
+  Column subset: `resource_type` (`OBJECT` / `RID` / `KEY` / `APPLICATION` / `DATABASE`), `resource_subtype` (empty for every one), `resource_database_id`, `resource_description`, `resource_associated_entity_id` (`object_id`), `request_mode` (`Sch-S` / `Sch-M` / `IS` / `IX` / `SIX` / `S` / `U` / `X` / `RangeS-S` / `RangeS-U` / `RangeX-X` / `RangeI-N`), `request_status` (`GRANT` / `WAIT`), `request_session_id`.
   Every row's `resource_description` is blank-padded to the column's 256 characters, as real's are, an OBJECT row's empty one included — the object is `resource_associated_entity_id` — and `resource_database_id` is the database's own id (probed 2026-09-30 and 2026-10-07 against SQL Server 2025).
-  Not modeled yet: the `DATABASE` row real lists for each session's shared lock on its current database, and the hash slot of an `APPLICATION` description, which is FNV-1a here rather than real's (probed 2026-10-07 against SQL Server 2025).
+  A `DATABASE` row is real's shared lock of a session's workspace, an `S` with entity 0 (probed 2026-10-07 against SQL Server 2025): one on its current database, master and tempdb excepted; one on the database of each execution context it is nested in — a dynamic batch's `USE`, a procedure in another database — beside the enclosing ones (`SimulatedDbConnection.EnclosingDatabases`); one on each database it holds or awaits a lock in; and, in a transaction, one on each database whose tables the transaction locked anything in, kept to its end (`SimulatedDbTransaction.TouchedDatabases`).
+  The rows are synthesized as the view runs rather than taken, so nothing waits on them.
+  Not modeled yet: a `DATABASE` row for a database whose catalog views alone a statement read (`msdb.sys.objects`), which takes no lock here, and the hash slot of an `APPLICATION` description, which is FNV-1a here rather than real's (probed 2026-10-07 against SQL Server 2025).
   Row generator at `LockDmvs.EnumerateDmTranLocks`.
 - **`sys.dm_os_waiting_tasks`** — one row per currently-blocked connection: `session_id` (waiter's SPID), `wait_type` (`LockDmvs.WaitType`, real's names: `LCK_M_X`, `LCK_M_SCH_M`, `LCK_M_RS_U`, `LCK_M_RIn_NL` …), `resource_description`, `blocking_session_id` (one conflicting holder's SPID, or with none the request queued ahead that the wait is behind, as real names a waiting Sch-M for the Sch-S queued behind it — probed 2026-10-07 against SQL Server 2025).
   Row generator at `LockDmvs.EnumerateDmOsWaitingTasks`.
-  Waiter / mode state lives in `SimulatedDbConnection.WaitingOnResource` / `WaitingForMode`, written when the wait begins and cleared once the acquisition leaves.
+  Waiter / mode state lives on the token the wait is recorded on (`SimulatedDbConnection.WaitRecord`, the session's lock owner while it is the one acting for it), written when the wait begins and cleared once the acquisition leaves.
 
 Neither DMV holds the manager's gate across the enumeration — concurrent acquires / releases may shift the result between rows — but each resource's holders are copied under it (`LockManager.HoldersOf`): copying the list another session was appending to threw, or handed back a half-written hold whose owner was null.
 That gate-free walk is why the waiter registration spans the **whole** wait rather than each `Monitor.Wait` slice: a waiter that cleared and re-set it around every slice reads as idle for the length of its own between-slice re-check, and the re-checking thread can be descheduled there while holding the gate.
@@ -769,6 +796,8 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 - **`sys.dm_tran_active_snapshot_database_transactions`**: one row per active SI tx with `tx.SnapshotXid != null`.
 - **`sys.dm_tran_active_transactions`** / **`sys.dm_tran_session_transactions`** / **`sys.dm_tran_current_transaction`** (probed 2026-09-25 against SQL Server 2025): each session's user transaction under its `CURRENT_TRANSACTION_ID()`, named as its outermost BEGIN named it (`user_transaction` otherwise), plus the querying statement's autocommit transaction, named for the statement and read-only for a SELECT.
   A nested BEGIN still reads `open_transaction_count` 1, as real's does; `dm_tran_current_transaction` reports a SNAPSHOT transaction's stamp and the commit counter as the version sequence.
+  `enlist_count` is 1 for a session running a request in its transaction and 0 for an idle one, and a transaction sessions share is listed once in `dm_tran_active_transactions` and per session in `dm_tran_session_transactions` (probed 2026-10-07 against SQL Server 2025; see [Sessions sharing a transaction](#sessions-sharing-a-transaction)).
+  Not modeled yet: the descriptor's first four bytes, which count the transactions the session has begun — its autocommit ones included — where here they read 1.
   Real's system transactions (worktables, the version-store cleanup) aren't listed.
   Columns: `transaction_id` (synthesized from object hash code), `transaction_sequence_num` (= `tx.SnapshotXid`), `commit_sequence_num` (NULL — tx is still in flight), `session_id` (= `tx.connection.Spid`), `is_snapshot` (always true — RCSI per-statement snapshots aren't tracked, matching real server behavior for this DMV), `first_snapshot_sequence_num` (NULL), `max_version_chain_traversed` / `average_version_chain_traversed` / `elapsed_time_seconds` (0 — simulator doesn't instrument those).
 

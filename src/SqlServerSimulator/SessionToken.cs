@@ -128,6 +128,13 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public bool ChosenAsDeadlockVictim;
 
+    /// <summary>
+    /// How many stretches of execution of the session's requests are under
+    /// way (<c>Simulation.CreateResultSetsForCommand</c>), which a session
+    /// bound to the same transaction waits out before running.
+    /// </summary>
+    public int ExecutingStretches;
+
     /// <summary>Set while the session sleeps in a <c>WAITFOR</c>, which <c>sys.dm_exec_requests</c> reports as its wait.</summary>
     public bool InWaitFor;
 
@@ -159,9 +166,33 @@ internal sealed class SessionToken(int spid)
     public bool Reclaimed;
 
     /// <summary>
+    /// For the lock owner the sessions bound to one transaction share
+    /// (<see cref="SimulatedDbTransaction.LockOwner"/>), the member session
+    /// running under it, or the one that ran last; null for a session's own
+    /// token. Only one member runs at a time, so the wait this token records
+    /// is that member's, and real reports the transaction's locks under the
+    /// member that last ran (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    public SessionToken? RunningMember;
+
+    /// <summary>
+    /// The session acting for this token: itself, or for a shared lock owner
+    /// the member running under it — whose <c>@@SPID</c> the lock DMVs report,
+    /// whose command a wait observes, and whose thread is executing.
+    /// </summary>
+    public SessionToken Acting => this.RunningMember ?? this;
+
+    /// <summary>
     /// The connection this token belongs to, or <c>null</c> once it has been
     /// collected.
     /// </summary>
     public SimulatedDbConnection? TryResolveOwner() =>
         this.Owner is { } weak && weak.TryGetTarget(out var connection) ? connection : null;
+
+    /// <summary>
+    /// The connection of the session <see cref="Acting"/> for this token —
+    /// whose command a lock wait observes and whose transaction a hold
+    /// belongs to — or <c>null</c> once it has been collected.
+    /// </summary>
+    public SimulatedDbConnection? TryResolveActing() => this.Acting.TryResolveOwner();
 }

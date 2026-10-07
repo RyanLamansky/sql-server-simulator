@@ -421,6 +421,80 @@ public class LinkedServerWriteTests
         AreEqual(1, connection.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
+    // A loopback server linked as SELF over a table t holding rows 1 and 2.
+    private static Simulation LoopbackOverRows()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 10), (2, 20)");
+        sim.AddRemoteSimulation("SELF", sim);
+        _ = sim.ExecuteNonQuery("exec sp_addlinkedserver 'SELF', 'SQL Server'");
+        _ = sim.ExecuteNonQuery("create procedure p as begin select concat(@@trancount, '|', (select count(*) from t)); insert t values (9, 90) end");
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("exec SELF.simulated.dbo.p")]
+    [DataRow("exec ('select concat(@@trancount, ''|'', (select count(*) from simulated.dbo.t)); insert simulated.dbo.t values (9, 90)') at SELF")]
+    public void Loopback_RemoteCallInTransaction_RunsInTheCallersTransaction(string call)
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        AreEqual("1|3", connection.CreateCommand("begin tran; insert t values (3, 30); " + call).ExecuteScalar());
+        AreEqual("1|4", connection.CreateCommand("select concat(@@trancount, '|', (select count(*) from t))").ExecuteScalar());
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+        _ = connection.CreateCommand("begin tran; " + call + "; commit").ExecuteNonQuery();
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void Loopback_EnlistedSession_IsListedNeitherLocalNorBound()
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        var listed = (string)connection.CreateCommand("""
+            begin tran;
+            exec ('select string_agg(concat(case session_id when ? then ''caller'' else ''server'' end, '':'', enlist_count, '':'', cast(is_local as int), '':'', cast(is_bound as int)), ''|'') within group (order by case session_id when ? then 0 else 1 end) from sys.dm_tran_session_transactions', @@spid, @@spid) at SELF
+            """).ExecuteScalar()!;
+        AreEqual("caller:1:1:0|server:1:0:0", listed);
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void Loopback_RemoteCallNestedBeginAndCommit_KeepTheCallersTransaction()
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("begin tran; exec ('begin tran; insert simulated.dbo.t values (6, 60); commit; select @@trancount') at SELF").ExecuteScalar());
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void OpenQuery_RunsInATransactionOfItsOwn_RolledBack()
+    {
+        var sim = LoopbackOverRows();
+        AreEqual("1|1", sim.ExecuteScalar("select concat(tc, '|', xs) from openquery(SELF, 'set nocount on; insert simulated.dbo.t values (5, 50); select @@trancount tc, xact_state() xs')"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("select @c = c from openquery(SELF, 'select count(*) c from simulated.dbo.t')")]
+    [DataRow("select @c = count(*) from SELF.simulated.dbo.t")]
+    public void Loopback_ReadOfTheCallersUncommittedRow_IsTheProvidersTimeout(string read)
+    {
+        var sim = LoopbackOverRows();
+        using var connection = sim.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand($"declare @c int; begin tran; insert t values (3, 30); {read}; select 1").ExecuteNonQuery());
+        AreEqual("7399,7320,7412", string.Join(',', error.Errors.Cast<SimulatedError>().Select(entry => entry.Number)));
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual("7320|-1|1", connection.CreateCommand($"""
+            declare @c int; begin tran; insert t values (3, 30);
+            begin try {read} end try begin catch select concat(error_number(), '|', xact_state(), '|', @@trancount) end catch;
+            rollback
+            """).ExecuteScalar());
+    }
+
     [TestMethod]
     public void ReadInLocalTransaction_NeedsNoPromotion()
         => AreEqual(0, Linked("create table t (id int)").Local.ExecuteScalar("begin tran; select count(*) from OTHER.simulated.dbo.t; commit"));

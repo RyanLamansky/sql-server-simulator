@@ -18,9 +18,11 @@ internal static partial class BuiltInResources
         var nullBinary = SqlValue.Null(SqlType.Varbinary);
         var zero = SqlValue.FromInt32(0);
         var active = SqlValue.FromInt32(2);
+        // Sessions sharing a transaction list it once.
+        var listed = new HashSet<long>();
         foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
         {
-            if (connection.CurrentTransaction is not { } transaction)
+            if (connection.CurrentTransaction is not { } transaction || !listed.Add(transaction.TransactionId))
                 continue;
             yield return [
                 SqlValue.FromInt64(transaction.TransactionId),
@@ -48,12 +50,20 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.dm_tran_session_transactions</c>: one per session with
     /// a user transaction, however deeply nested (real reports
     /// <c>open_transaction_count</c> 1 under a nested BEGIN). The descriptor
-    /// is real's shape: 1 then the session id, each a little-endian int.
+    /// is real's shape, a count then the session id, each a little-endian
+    /// int; real's count is of the transactions the session has begun, read
+    /// as 1 here.
+    /// A transaction sessions share lists each of them: the one that began it
+    /// local, one bound through <c>sp_bindsession</c> bound, a loopback
+    /// server's session a remote call enlisted neither; and
+    /// <c>enlist_count</c> counts the request each is running in it, 0 for an
+    /// idle session (probed 2026-10-07 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDmTranSessionTransactions(Parser.BatchContext batch, Database database)
     {
         _ = database;
         var one = SqlValue.FromInt32(1);
+        var zero = SqlValue.FromInt32(0);
         var bitOn = SqlValue.FromBoolean(true);
         var bitOff = SqlValue.FromBoolean(false);
         foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
@@ -67,7 +77,12 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(connection.Spid),
                 SqlValue.FromInt64(transaction.TransactionId),
                 SqlValue.FromBinary(SqlType.GetBinary(8), descriptor),
-                one, bitOn, bitOn, bitOff, bitOff, one,
+                connection.Session.CurrentExecutingThreadId is not null ? one : zero,
+                bitOn,
+                connection.Membership == TransactionMembership.None ? bitOn : bitOff,
+                bitOff,
+                connection.Membership == TransactionMembership.Bound ? bitOn : bitOff,
+                one,
             ];
         }
     }

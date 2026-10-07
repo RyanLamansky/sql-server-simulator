@@ -54,6 +54,7 @@ internal readonly struct ModuleDatabaseScope
             security.Push(new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, effective.LoginName, effective.IsDatabaseScoped));
         }
         connection.CurrentDatabase = database;
+        connection.EnterNestedDatabase(current);
         return new(connection, current, depth);
     }
 
@@ -63,6 +64,7 @@ internal readonly struct ModuleDatabaseScope
         if (this.connection is null)
             return;
         this.connection.CurrentDatabase = this.enteredFrom!;
+        this.connection.LeaveNestedDatabase();
         this.connection.Security.RevertTo(this.impersonationDepth);
     }
 

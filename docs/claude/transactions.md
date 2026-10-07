@@ -28,6 +28,7 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   Not logged yet: an indexed view's own index, full-text catalogs and indexes, assemblies, and `ALTER DATABASE`.
 - Locking + MVCC: full 8-mode matrix, row-X writers + row-mode readers per hints/iso, RR/SER/UPDLOCK/XLOCK/TABLOCK/HOLDLOCK/REPEATABLEREAD/NOLOCK/READPAST hints, per-statement escalation at real's threshold, Msg 1205 deadlock / Msg 1222 timeout, SNAPSHOT + RCSI (version chains + GC + DMVs).
   See [`locking.md`](locking.md).
+- **Sessions can share one transaction** — bound through `sp_bindsession`, or a loopback linked server's call enlisted in its caller's — each nesting on a `@@TRANCOUNT` of its own, any one's outermost `COMMIT` or `ROLLBACK` ending it for all, the others hearing Msg 3926 at their next batch; see [`locking.md`](locking.md#sessions-sharing-a-transaction).
 - Table-variable mutations use a statement-only undo log disjoint from the tx-scoped one, so `ROLLBACK TRAN` skips `@t` (the `CurrentTableVarUndoLog` / `CurrentUndoLog` split on `BatchContext`).
 - **One transaction spans every database it wrote to.**
   The undo log is per-connection and its entries reference their `Heap` directly, so a write through a three-part name rolls back with the rest of the transaction with no extra routing; `@@TRANCOUNT` / `XACT_STATE()` never reflect the crossing (probe-confirmed).

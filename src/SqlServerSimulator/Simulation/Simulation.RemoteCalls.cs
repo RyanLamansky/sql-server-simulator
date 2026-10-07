@@ -23,7 +23,7 @@ partial class Simulation
     private static IEnumerable<SimulatedStatementOutcome> ExecuteAtLinkedServer(BatchContext batch, string serverName, string text, List<ProcArgument> arguments, bool insertExecSource)
     {
         var server = ResolveRpcServer(batch, serverName);
-        RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
+        var enlisting = RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
 
         var (remoteText, placeholders) = BindPlaceholders(text);
         // The provider refuses an empty text, and arguments that don't match
@@ -51,7 +51,7 @@ partial class Simulation
                 outputs.Add((parameter, slot));
         }
 
-        var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, out var refusal);
+        var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, enlisting, out var refusal);
         foreach (var outcome in outcomes)
             yield return outcome;
         if (refusal is not null)
@@ -69,7 +69,7 @@ partial class Simulation
     private static IEnumerable<SimulatedStatementOutcome> InvokeRemoteProcedure(BatchContext batch, MultiPartName procName, List<ProcArgument> arguments, string? returnCodeVar, bool insertExecSource)
     {
         var server = ResolveRpcServer(batch, procName[0]);
-        RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
+        var enlisting = RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
 
         // A name leaving the database and schema both empty is the bare
         // procedure name on the server (probed 2026-10-06 against SQL Server
@@ -119,7 +119,7 @@ partial class Simulation
         // The session starts in the procedure's database, where real runs its
         // body whatever database the call arrives in.
         var database = procName[1].Length > 0 ? procName[1] : null;
-        var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), out var refusal);
+        var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), enlisting, out var refusal);
         foreach (var outcome in outcomes)
             yield return outcome;
         if (refusal is not null)
@@ -152,21 +152,25 @@ partial class Simulation
     /// <c>INSERT … EXEC</c>, whose statement is one — enlists the server while
     /// its <c>remote proc transaction promotion</c> option is on, which a remote
     /// server's coordinator refuses out of the box (Msg 7391). A loopback's
-    /// call runs outside the transaction instead (probed 2026-09-28 against
-    /// SQL Server 2025); with the option off every call does.
+    /// call inside a transaction runs in the caller's transaction instead, the
+    /// transaction this returns: the server's session reads <c>@@TRANCOUNT</c>
+    /// 1, reads the caller's uncommitted rows without waiting on their locks,
+    /// and its writes commit or roll back with the caller's (probed 2026-10-05
+    /// and 2026-10-07 against SQL Server 2025); with the option off every call
+    /// runs outside it.
     /// </summary>
-    private static void RequireRemoteCallOutsideTransaction(BatchContext batch, LinkedServer server, bool insertExecSource)
+    private static SimulatedDbTransaction? RequireRemoteCallOutsideTransaction(BatchContext batch, LinkedServer server, bool insertExecSource)
     {
         if (!server.RemoteProcTransactionPromotion)
-            return;
+            return null;
         // Not even a loopback's call promotes a transaction holding a
         // savepoint (probed 2026-10-05 against SQL Server 2025).
         if (batch.Connection.CurrentTransaction is { HasSavepoint: true })
             throw SimulatedSqlException.CannotPromoteWithSavepoint();
         if (server.IsLoopback(batch.Connection.Simulation))
-            return;
+            return batch.Connection.CurrentTransaction;
         if (batch.Connection.CurrentTransaction is null && !insertExecSource)
-            return;
+            return null;
         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.DistributedTransactionRefusedMessage(batch, server));
         throw SimulatedSqlException.DistributedTransactionUnavailable(server);
     }
@@ -194,7 +198,7 @@ partial class Simulation
     /// raises it after the outcomes ahead of it.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "EXEC … AT sends the caller's own text by design; a procedure call's text is built from bracket-escaped identifiers. It runs against a sibling in-process Simulation.")]
-    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, out SimulatedSqlException? refusal)
+    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, SimulatedDbTransaction? enlisting, out SimulatedSqlException? refusal)
     {
         refusal = null;
         var outcomes = new List<SimulatedStatementOutcome>();
@@ -212,58 +216,70 @@ partial class Simulation
         command.CommandText = text;
         foreach (var parameter in parameters)
             _ = command.Parameters.Add(parameter);
-        foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
+        // The call runs in the caller's transaction, as a session of its own.
+        enlisting?.Attach(connection, TransactionMembership.Enlisted, running: false);
+        try
         {
-            if (refusal is not null)
-                break;
-            // The parameterized batch a procedure call runs in repeats the
-            // procedure's Msg 266, which the call itself sends once.
-            if (procedure is not null && outcome is SimulatedErrorOutcome { Exception.Number: 266 } && outcomes is [.., SimulatedErrorOutcome { Exception.Number: 266 }])
-                continue;
-            switch (outcome)
+            foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
             {
-                case SimulatedErrorOutcome failure:
-                    lastCount = 0;
-                    // The provider hands back no rowset for the statement that
-                    // failed.
-                    if (outcomes is [.., SimulatedSqlResultSet { RecordsAffected: <= 0 } failed] && !failed.RowBytes.Any())
-                        outcomes.RemoveAt(outcomes.Count - 1);
-                    var (messages, error) = SimulatedSqlException.RelayedRemoteEntries(failure.Exception, procedure, endsBatch: false);
-                    foreach (var message in messages)
-                        outcomes.Add(new SimulatedInfoOutcome(message));
-                    if (error is not null)
-                        outcomes.Add(new SimulatedErrorOutcome(error));
+                if (refusal is not null)
                     break;
-                // The notice the server follows a failed write with arrives
-                // ahead of the error it follows, at state 1, as the rest of
-                // the error's entries do.
-                case SimulatedInfoOutcome { Message.Number: 3621 } notice when outcomes is [.., SimulatedErrorOutcome]:
-                    var entry = notice.Message;
-                    outcomes.Insert(outcomes.Count - 1, new SimulatedInfoOutcome(
-                        new SimulatedError(entry.Class, entry.LineNumber, entry.Message, entry.Number, procedure ?? entry.Procedure, entry.Server, entry.Source, state: 1)));
-                    break;
-                // The provider refuses a rowset with an xml column, which ends
-                // the batch after what the server sent ahead of it.
-                case SimulatedSqlResultSet result when Array.Exists(result.Schema, static type => type.PairClass == TypePairClass.Xml):
-                    refusal = SimulatedSqlException.XmlInRemoteCallRowset();
-                    break;
-                case SimulatedSqlResultSet result:
-                    var (providerSchema, providerRows) = RemoteWrite.AsProviderRowset(result.Schema, result.RowBytes);
-                    byte[][] rows = [.. providerRows];
-                    outcomes.Add(new SimulatedSqlResultSet(providerSchema, result.ColumnNames, rows, result.RecordsAffected)
-                    {
-                        ColumnNullability = result.ColumnNullability,
-                    });
-                    lastCount = rows.Length;
-                    break;
-                default:
-                    // A count the server's NOCOUNT withholds reaches the
-                    // provider as none (probed 2026-10-05 against SQL Server 2025).
-                    if (outcome is SimulatedNonQuery { RecordsAffected: >= 0 } counted)
-                        lastCount = connection.NoCount ? 0 : counted.RecordsAffected;
-                    outcomes.Add(outcome);
-                    break;
+                // The parameterized batch a procedure call runs in repeats the
+                // procedure's Msg 266, which the call itself sends once.
+                if (procedure is not null && outcome is SimulatedErrorOutcome { Exception.Number: 266 } && outcomes is [.., SimulatedErrorOutcome { Exception.Number: 266 }])
+                    continue;
+                switch (outcome)
+                {
+                    case SimulatedErrorOutcome failure:
+                        lastCount = 0;
+                        // The provider hands back no rowset for the statement that
+                        // failed.
+                        if (outcomes is [.., SimulatedSqlResultSet { RecordsAffected: <= 0 } failed] && !failed.RowBytes.Any())
+                            outcomes.RemoveAt(outcomes.Count - 1);
+                        var (messages, error) = SimulatedSqlException.RelayedRemoteEntries(failure.Exception, procedure, endsBatch: false);
+                        foreach (var message in messages)
+                            outcomes.Add(new SimulatedInfoOutcome(message));
+                        if (error is not null)
+                            outcomes.Add(new SimulatedErrorOutcome(error));
+                        break;
+                    // The notice the server follows a failed write with arrives
+                    // ahead of the error it follows, at state 1, as the rest of
+                    // the error's entries do.
+                    case SimulatedInfoOutcome { Message.Number: 3621 } notice when outcomes is [.., SimulatedErrorOutcome]:
+                        var entry = notice.Message;
+                        outcomes.Insert(outcomes.Count - 1, new SimulatedInfoOutcome(
+                            new SimulatedError(entry.Class, entry.LineNumber, entry.Message, entry.Number, procedure ?? entry.Procedure, entry.Server, entry.Source, state: 1)));
+                        break;
+                    // The provider refuses a rowset with an xml column, which ends
+                    // the batch after what the server sent ahead of it.
+                    case SimulatedSqlResultSet result when Array.Exists(result.Schema, static type => type.PairClass == TypePairClass.Xml):
+                        refusal = SimulatedSqlException.XmlInRemoteCallRowset();
+                        break;
+                    case SimulatedSqlResultSet result:
+                        var (providerSchema, providerRows) = RemoteWrite.AsProviderRowset(result.Schema, result.RowBytes);
+                        byte[][] rows = [.. providerRows];
+                        outcomes.Add(new SimulatedSqlResultSet(providerSchema, result.ColumnNames, rows, result.RecordsAffected)
+                        {
+                            ColumnNullability = result.ColumnNullability,
+                        });
+                        lastCount = rows.Length;
+                        break;
+                    default:
+                        // A count the server's NOCOUNT withholds reaches the
+                        // provider as none (probed 2026-10-05 against SQL Server 2025).
+                        if (outcome is SimulatedNonQuery { RecordsAffected: >= 0 } counted)
+                            lastCount = connection.NoCount ? 0 : counted.RecordsAffected;
+                        outcomes.Add(outcome);
+                        break;
+                }
             }
+        }
+        finally
+        {
+            // The call returns, and its session leaves the caller's
+            // transaction, which goes on.
+            if (enlisting is not null && ReferenceEquals(connection.CurrentTransaction, enlisting))
+                _ = enlisting.Detach(connection);
         }
         if (lastCount is int count)
             batch.Connection.LastStatementRowCount = count;

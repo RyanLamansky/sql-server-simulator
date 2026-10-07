@@ -1018,8 +1018,8 @@ partial class Simulation
             // is the conflict it is on real (probed 2026-09-28 against SQL
             // Server 2025).
             var hist = table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex)
-                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.Session)
-                : Storage.VersionStore.ResolveChangedLiveSlotForSnapshot(kv.Value, sx, batch.Connection.Session);
+                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.LockOwner)
+                : Storage.VersionStore.ResolveChangedLiveSlotForSnapshot(kv.Value, sx, batch.Connection.LockOwner);
             if (hist is null)
                 continue;
             var fullValues = DecodeFullRow(table, hist);

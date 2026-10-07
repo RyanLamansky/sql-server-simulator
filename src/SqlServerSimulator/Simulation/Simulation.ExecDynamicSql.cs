@@ -946,6 +946,7 @@ partial class Simulation
         var enteredDatabase = connection.CurrentDatabase;
         if (runsIn is not null)
             connection.CurrentDatabase = runsIn;
+        connection.EnterNestedDatabase(enteredDatabase);
         // SET NOCOUNT inside the dynamic batch binds for that batch only, the
         // same module scope USE and temp tables get (probe-confirmed for both
         // EXEC('…') and sp_executesql).
@@ -1001,6 +1002,7 @@ partial class Simulation
             // sp_MSforeachdb's `USE [?]` idiom run each command against its
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
+            connection.LeaveNestedDatabase();
             identityScope.Exit(IdentityScopeKind.Procedure);
             connection.NoCount = enteredNoCount;
             endedUnderImplicitTransactions = connection.ImplicitTransactions;

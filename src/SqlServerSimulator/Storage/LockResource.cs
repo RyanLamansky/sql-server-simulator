@@ -180,8 +180,15 @@ internal enum LockAcquireOutcome
     /// <summary>The timeout elapsed while conflicting holders remained.</summary>
     TimedOut,
 
-    /// <summary>The caller was chosen as the deadlock victim (same-thread conflict or wait-for cycle).</summary>
+    /// <summary>The caller was chosen as the deadlock victim of a wait-for cycle.</summary>
     Deadlocked,
+
+    /// <summary>
+    /// The caller can never be granted: a conflicting holder runs on its own
+    /// thread, which the wait would block — a deadlock the caller is the victim
+    /// of.
+    /// </summary>
+    DeadlockedOnOwnThread,
 
     /// <summary>
     /// The command was cancelled while waiting — its <c>CommandTimeout</c>
@@ -310,11 +317,13 @@ internal sealed class LockManager
             case LockAcquireOutcome.TimedOut:
                 throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource, mode));
             case LockAcquireOutcome.Deadlocked:
-                throw SimulatedSqlException.TransactionDeadlocked(owner.Spid, TimeoutState(resource, mode));
+                throw SimulatedSqlException.TransactionDeadlocked(owner.Acting.Spid, TimeoutState(resource, mode));
+            case LockAcquireOutcome.DeadlockedOnOwnThread:
+                throw SimulatedSqlException.TransactionDeadlocked(owner.Acting.Spid, TimeoutState(resource, mode), waitsOnOwnThread: true);
             case LockAcquireOutcome.Cancelled:
                 // The same -2 / 0 split the command surface makes: a
                 // CommandTimeout is Msg -2, a caller's Cancel() is Msg 0.
-                throw owner.TryResolveOwner()?.ExecutionTimedOut == true
+                throw owner.TryResolveActing()?.ExecutionTimedOut == true
                     ? SimulatedSqlException.ExecutionTimeoutExpired()
                     : SimulatedSqlException.CommandCancelled();
         }
@@ -376,7 +385,7 @@ internal sealed class LockManager
             // signal. Taken from the session rather than threaded through
             // every caller: a lock wait is the session's, so the session is
             // where the answer already lives.
-            var cancellation = owner.TryResolveOwner()?.ExecutionCancellationToken ?? CancellationToken.None;
+            var cancellation = owner.TryResolveActing()?.ExecutionCancellationToken ?? CancellationToken.None;
 
             try
             {
@@ -394,7 +403,7 @@ internal sealed class LockManager
                     // is the executor for both the caller and a conflicting
                     // holder; no progress possible.
                     if (IsConflictingHolderOnSameThread(resource, mode, owner))
-                        return LockAcquireOutcome.Deadlocked;
+                        return LockAcquireOutcome.DeadlockedOnOwnThread;
 
                     // Cross-thread cycle detection. Walk the wait-for graph
                     // from each conflicting holder; if any walk reaches the
@@ -677,6 +686,80 @@ internal sealed class LockManager
         return true;
     }
 
+    /// <summary>
+    /// Moves one acquisition of each of <paramref name="locks"/> from
+    /// <paramref name="from"/> to <paramref name="to"/>, as a transaction's
+    /// locks pass to the owner the sessions bound to it share: nothing is
+    /// released, so no waiter is woken, and the per-table counts follow the
+    /// hold entries — one more where both owners now hold the mode, one fewer
+    /// where the two merge.
+    /// </summary>
+    public void TransferHolds(List<(LockResource Resource, LockMode Mode, SessionToken Owner)> locks, SessionToken from, SessionToken to)
+    {
+        lock (this.gate)
+        {
+            foreach (var (resource, mode, owner) in locks)
+            {
+                if (!ReferenceEquals(owner, from))
+                    continue;
+                var source = resource.Holders.FindIndex(hold => ReferenceEquals(hold.Owner, from) && hold.Mode == mode);
+                if (source < 0)
+                    continue;
+                var removed = false;
+                var moved = resource.Holders[source];
+                moved.Count--;
+                if (moved.Count == 0)
+                {
+                    resource.Holders.RemoveAt(source);
+                    removed = true;
+                }
+                else
+                {
+                    resource.Holders[source] = moved;
+                }
+                var target = resource.Holders.FindIndex(hold => ReferenceEquals(hold.Owner, to) && hold.Mode == mode);
+                if (target >= 0)
+                {
+                    var merged = resource.Holders[target];
+                    merged.Count++;
+                    resource.Holders[target] = merged;
+                    if (removed)
+                        CountHoldEntry(resource, mode, -1);
+                }
+                else
+                {
+                    resource.Holders.Add(new LockResource.Hold(to, mode, 1));
+                    if (!removed)
+                        CountHoldEntry(resource, mode, +1);
+                }
+                if (ReferenceEquals(resource.InsertedBy, from))
+                    resource.InsertedBy = to;
+                if (ReferenceEquals(resource.DeletedBy, from))
+                    resource.DeletedBy = to;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keeps the per-table counts a hold entry of <paramref name="mode"/>
+    /// contributes to (<see cref="TryGrant"/> and <see cref="Release"/>), for a
+    /// <see cref="TransferHolds"/> that adds or merges an entry.
+    /// </summary>
+    private static void CountHoldEntry(LockResource resource, LockMode mode, int delta)
+    {
+        if (resource.OwningTable is not { } table)
+            return;
+        if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
+            _ = Interlocked.Add(ref table.ActiveDataWriters, delta);
+        else if (mode == LockMode.Update)
+            _ = Interlocked.Add(ref table.ActiveUpdateLocks, delta);
+        if (resource.KeyGroup is { } group)
+        {
+            _ = Interlocked.Add(ref group.Holds, delta);
+            _ = Interlocked.Add(ref table.ActiveKeyRangeLocks, delta);
+        }
+    }
+
     /// <summary>How many acquisitions of <paramref name="mode"/> by <paramref name="owner"/> on <paramref name="resource"/> are outstanding.</summary>
     public int HoldCount(LockResource resource, LockMode mode, SessionToken owner)
     {
@@ -754,7 +837,7 @@ internal sealed class LockManager
                 continue;
             if (IsCompatible(hold.Mode, mode))
                 continue;
-            if (hold.Owner.CurrentExecutingThreadId == myThread)
+            if (hold.Owner.Acting.CurrentExecutingThreadId == myThread)
                 return true;
         }
         return false;
@@ -794,7 +877,7 @@ internal sealed class LockManager
         return null;
     }
 
-    private static int PriorityOf(SessionToken session) => session.TryResolveOwner()?.DeadlockPriority ?? 0;
+    private static int PriorityOf(SessionToken session) => session.TryResolveActing()?.DeadlockPriority ?? 0;
 
     /// <summary>
     /// DFS step: is <paramref name="blocker"/> transitively waiting on a

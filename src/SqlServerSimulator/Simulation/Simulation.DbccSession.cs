@@ -100,7 +100,7 @@ partial class Simulation
             bool changedCatalog;
             lock (transaction.CatalogChanges)
                 changedCatalog = transaction.CatalogChanges.Contains(database);
-            if (changedCatalog || transaction.UndoLog.Changes(heaps, isTempdb) || HoldsWriteLock(simulation, tables, connection.Session))
+            if (changedCatalog || transaction.UndoLog.Changes(heaps, isTempdb) || HoldsWriteLock(simulation, tables, connection.LockOwner))
                 oldest = (connection, transaction);
         }
         return oldest;

@@ -822,8 +822,8 @@ partial class SimulatedSqlException
     /// <c>*</c>). An operator whose converted operand is a column reports
     /// <see cref="DisallowedImplicitConversionFromColumn"/> instead.
     /// </summary>
-    internal static SimulatedSqlException ImplicitConversionNotAllowed(string source, string target) =>
-        new($"Implicit conversion from data type {source} to {target} is not allowed. Use the CONVERT function to run this query.", 257, 16, 3);
+    internal static SimulatedSqlException ImplicitConversionNotAllowed(string source, string target, byte state = 3) =>
+        new($"Implicit conversion from data type {source} to {target} is not allowed. Use the CONVERT function to run this query.", 257, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 260: the column-operand form of

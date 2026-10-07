@@ -30,7 +30,7 @@ public sealed class ModuleCreationLockLeakTests
     }
 
     private static int ResidualLocks(Simulation sim)
-        => (int)sim.ExecuteScalar("select count(*) from sys.dm_tran_locks")!;
+        => (int)sim.ExecuteScalar("select count(*) from sys.dm_tran_locks where resource_type <> 'DATABASE'")!;
 
     // Each case creates one module over the same two tables (and, where a body
     // can call one, the leaf scalar function), then asserts nothing is held.

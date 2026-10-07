@@ -151,9 +151,18 @@ A read inside an ordinary transaction doesn't enlist.
 
 **Out of the box no coordinator accepts it**, so none is modeled as committing: a remote server refuses with **Msg 7391** at the statement's line, after the coordinator's own refusal as Msg 7412 (`The partner transaction manager has disabled its support for remote/network transactions.`), and a loopback with **Msg 3910** (`Transaction context in use by another session.`) at line 1.
 Both end the batch and roll the transaction back as under `XACT_ABORT`, and a `TRY` that catches either finds the transaction doomed.
-A loopback's remote *call* inside a transaction runs outside it here, with no error; with `remote proc transaction promotion` off every server's does — see [Not modeled yet](#not-modeled-yet) for what real does with a loopback's.
 Committing across two `Simulation`s would need a coordinator that real's defaults don't provide, so modeling the refusal is the faithful choice rather than a stopgap.
 `SimulatedDbTransaction.IsDistributed` carries the `DISTRIBUTED` keyword.
+
+**A loopback's remote call** — `EXEC … AT` or a procedure call — inside a transaction runs in the caller's transaction instead, its session enlisted in it as a bound session is (probed 2026-10-05 and 2026-10-07 against SQL Server 2025): `@@TRANCOUNT` reads 1 inside, nesting on a count of its own, the call reads the caller's uncommitted rows without waiting on their locks, and its writes commit or roll back with the caller's.
+`sys.dm_tran_session_transactions` lists its session neither local nor bound, and its database lock is the caller's workspace's.
+The call's session joins the caller's transaction for the call and leaves it as the call returns (`SimulatedDbTransaction.Attach` / `Detach`, from `RunRemoteCall`) — see [`locking.md`](locking.md#sessions-sharing-a-transaction) for the shared lock owner.
+With `remote proc transaction promotion` off, every server's call runs outside the transaction.
+
+**A loopback read doesn't enlist**, so an `OPENQUERY` or four-part read of a row the caller's open transaction holds waits on the caller's lock, which real sits out until the provider's query timeout and then ends with the provider's Msg 7412 (`Query timeout expired`), Msg 7399 and Msg 7320 quoting the query, ending the batch and rolling the transaction back as under `XACT_ABORT` (probed 2026-10-07 against SQL Server 2025).
+The query here runs on the caller's own thread, where the wait could never end, so it raises the same errors at once (`SimulatedSqlException.ProviderQueryTimeout`).
+
+**`OPENQUERY`'s query runs in a transaction of its own**, which the provider rolls back once the rows are read: it reads `@@TRANCOUNT` 1 and `XACT_STATE()` 1 inside or outside the caller's transaction, `sys.dm_tran_active_transactions` names it `user_transaction`, and a write the query makes doesn't last (probed 2026-10-07 against SQL Server 2025).
 
 ## What's modeled
 
@@ -171,6 +180,9 @@ Committing across two `Simulation`s would need a coordinator that real's default
 - **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
 - **A conversion a four-part read's query applies** (`CAST(a AS int)`) fails locally at the statement's line, where real remotes it and relays the error at line 1 (probed 2026-10-06 against SQL Server 2025); which expressions real sends to the server is its optimizer's choice — not chased.
 - **The system objects a schema rowset lists are the simulator's own**: real's `sp_tables_ex` lists 74 system tables and 628 system views in a user database, and `master`'s `spt_*` objects, which `sys.all_objects` here doesn't carry (see [`catalog-views.md`](catalog-views.md)).
+- **An enlisted call's own `ROLLBACK`** ends the caller's transaction here, which the caller then hears as Msg 3926; real's caller reads `@@TRANCOUNT` 1 afterwards (probed 2026-10-07 against SQL Server 2025).
+- **Each enlisted call opens a session of its own**, where real's provider reuses one session, one `@@SPID`, for every call of a transaction.
+- **The provider's timeout of a loopback read** follows an empty result set's metadata here, where real sends none, and quotes the simulator's own query text for a four-part read, where real's provider sends its own (`SELECT … "Tbl1002"`).
 - **The `#temp` note's second copy**: real recompiles a statement reading a temporary table the batch itself created and sends its Msg 2701 again as the statement runs, where the simulator sends it once, as the batch compiles.
 
 ## Not modeled yet
@@ -182,8 +194,8 @@ Committing across two `Simulation`s would need a coordinator that real's default
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`**.
   The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
-- **A loopback's remote call inside a transaction** runs in the caller's transaction on real, as a session bound to it — `@@TRANCOUNT` reads 1 inside it, it reads the caller's uncommitted rows without waiting on their locks, and a `ROLLBACK` undoes its writes, for a procedure call and `EXEC … AT` alike (probed 2026-10-05 and 2026-10-06) — where here it runs outside it; `OPENQUERY`'s query reads `@@TRANCOUNT` 1 on real too.
-  Modeling it means a remote session sharing the caller's transaction, undo log and lock ownership, which the session model has no binding for yet.
+- **A loopback's `INSERT … EXEC … AT` outside a transaction** runs in the insert's own statement transaction on real, reading `@@TRANCOUNT` 1; here it runs outside any (probed 2026-10-07 against SQL Server 2025).
+- **An `OPENQUERY` after an enlisted call** in the same transaction meets the provider's reused session on real, which raises Msg 3971 (`The server failed to resume the transaction.`) and rolls the transaction back (probed 2026-10-07 against SQL Server 2025); here it reads as any `OPENQUERY` does.
 
 ## sys.servers shape
 

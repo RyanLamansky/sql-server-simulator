@@ -427,38 +427,56 @@ internal sealed class RemoteWrite
     /// query names binds in its own database; <paramref name="browse"/> runs it
     /// under <c>SET NO_BROWSETABLE ON</c>, which reports each column's base
     /// table and appends the key columns a cursor finds rows by.
+    /// <paramref name="ownTransaction"/> runs it in a transaction of its own
+    /// that is rolled back once the rows are read, as the provider runs an
+    /// <c>OPENQUERY</c>'s: the query reads <c>@@TRANCOUNT</c> 1, and a write it
+    /// makes doesn't last (probed 2026-10-07 against SQL Server 2025). A query
+    /// left waiting on a lock <paramref name="caller"/>'s session holds — on a
+    /// loopback server, outside its caller's transaction — is the provider's
+    /// timeout (<see cref="SimulatedSqlException.ProviderQueryTimeout"/>).
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query is the caller's own pass-through text or a SELECT over identifiers the parser validated, bracket-escaped; it runs against a sibling in-process Simulation.")]
-    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false)
+    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false, bool ownTransaction = false, BatchContext? caller = null)
     {
         using var connection = server.OpenSession(database);
         connection.NoBrowseTable = browse;
         // Describing a query, as the provider does before running it, reads
         // its first rowset's shape without running a statement.
         connection.FmtOnly = describeOnly;
+        using var own = ownTransaction ? connection.BeginTransaction() : null;
         using var command = connection.CreateCommand();
+        command.Transaction = own;
         command.CommandText = query;
         SimulatedSqlResultSet? first = null;
         byte[][] rows = [];
-        foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
+        try
         {
-            switch (outcome)
+            foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
             {
-                case SimulatedSqlResultSet result when first is null:
-                    // Buffered before the session closes.
-                    first = result;
-                    rows = [.. result.RowBytes];
-                    break;
-                case SimulatedSqlResultSet:
-                    return Buffered(first, rows, failure: null);
-                case SimulatedErrorOutcome error when first is null:
-                    throw error.Exception;
-                case SimulatedErrorOutcome error:
-                    // An error the server raised reading the rows reaches the
-                    // reader after the rows ahead of it, relayed, and ends the
-                    // batch (probed 2026-10-05 against SQL Server 2025).
-                    return Buffered(first, rows, error.Exception);
+                switch (outcome)
+                {
+                    case SimulatedSqlResultSet result when first is null:
+                        // Buffered before the session closes.
+                        first = result;
+                        rows = [.. result.RowBytes];
+                        break;
+                    case SimulatedSqlResultSet:
+                        return Buffered(first, rows, failure: null);
+                    case SimulatedErrorOutcome { Exception.WaitsOnOwnThread: true } when caller is not null:
+                        throw SimulatedSqlException.ProviderQueryTimeout(caller, server, query);
+                    case SimulatedErrorOutcome error when first is null:
+                        throw error.Exception;
+                    case SimulatedErrorOutcome error:
+                        // An error the server raised reading the rows reaches the
+                        // reader after the rows ahead of it, relayed, and ends the
+                        // batch (probed 2026-10-05 against SQL Server 2025).
+                        return Buffered(first, rows, error.Exception);
+                }
             }
+        }
+        catch (SimulatedSqlException waiting) when (waiting.WaitsOnOwnThread && caller is not null)
+        {
+            throw SimulatedSqlException.ProviderQueryTimeout(caller, server, query);
         }
         return first is null ? null : Buffered(first, rows, failure: null);
     }

@@ -53,7 +53,7 @@ partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (_, _) => StreamRemoteRows(server, databaseName, schemaName, leafName, columns, self!.UnfetchedRemoteColumns))
+            rowSource: (batch, _) => StreamRemoteRows(batch, server, databaseName, schemaName, leafName, columns, self!.UnfetchedRemoteColumns))
         {
             ReadsRemoteTable = true,
         };
@@ -73,13 +73,14 @@ partial class Selection
     /// per remote query" semantic of real SQL Server's linked-server
     /// pipeline.
     /// </summary>
-    private static IEnumerable<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns, bool[]? unfetched)
+    private static IEnumerable<byte[]> StreamRemoteRows(BatchContext batch, LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns, bool[]? unfetched)
     {
         if (RemoteWrite.RunRemoteQuery(
             server,
             string.Create(CultureInfo.InvariantCulture, $"SELECT {RemoteWrite.ColumnList(columns, unfetched)} FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
             databaseName,
-            browse: false) is not { } result)
+            browse: false,
+            caller: batch) is not { } result)
         {
             return [];
         }
@@ -362,7 +363,7 @@ partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (_, _) => StreamOpenQueryRows(server, queryText));
+            rowSource: (batch, _) => StreamOpenQueryRows(batch, server, queryText));
 
     /// <summary>
     /// Runs the pass-through query on the remote and captures the first
@@ -417,8 +418,8 @@ partial class Selection
     /// connection disposes). Only the first result set is returned, matching
     /// OPENQUERY's semantics.
     /// </summary>
-    private static IEnumerable<byte[]> StreamOpenQueryRows(LinkedServer server, string queryText) =>
-        RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
+    private static IEnumerable<byte[]> StreamOpenQueryRows(BatchContext batch, LinkedServer server, string queryText) =>
+        RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false, ownTransaction: true, caller: batch) is { } result
             ? RemoteWrite.AsProviderRowset(result.Schema, result.RowBytes).Rows
             : [];
 }

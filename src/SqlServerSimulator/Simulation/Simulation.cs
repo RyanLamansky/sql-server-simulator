@@ -808,6 +808,34 @@ public sealed partial class Simulation
     internal readonly ConcurrentDictionary<SessionToken, ActiveSnapshotRegistration> ActiveSnapshotTxs = new();
 
     /// <summary>
+    /// Every token <c>sp_getbindtoken</c> has handed out, for
+    /// <c>sp_bindsession</c> to find its transaction by — weakly, so a
+    /// transaction an abandoned session left open is no more pinned than its
+    /// session (see <see cref="SessionToken"/>).
+    /// </summary>
+    internal readonly ConcurrentDictionary<string, BindTokenIssue> BindTokens = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// <paramref name="transaction"/>'s bind token, drawn the first time a
+    /// session asks for it: 32 characters from real's alphabet, <c>-</c>
+    /// through <c>l</c>, in real's shape — 22 drawn, <c>5---</c>, 4 drawn,
+    /// <c>--</c> (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal string IssueBindToken(SimulatedDbTransaction transaction)
+    {
+        if (transaction.BindToken is { } issued)
+            return issued;
+        Span<char> token = stackalloc char[32];
+        for (var i = 0; i < token.Length; i++)
+            token[i] = (char)RandomNumberGenerator.GetInt32('-', 'm');
+        "5---".AsSpan().CopyTo(token[22..]);
+        "--".AsSpan().CopyTo(token[30..]);
+        var text = new string(token);
+        this.BindTokens[text] = new BindTokenIssue(new WeakReference<SimulatedDbTransaction>(transaction), transaction.Owner.Session);
+        return transaction.BindToken = text;
+    }
+
+    /// <summary>
     /// Random 12-byte tail (raw bytes [4..15] of the produced GUID) for
     /// <see cref="GenerateNewSequentialId"/>. Filled once at construction —
     /// stands in for SQL Server's "MAC address + boot timestamp" anchor that
@@ -841,6 +869,13 @@ public sealed partial class Simulation
     /// fields and reaches its connection only weakly.
     /// </remarks>
     internal readonly HashSet<SessionToken> Sessions = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Whether <paramref name="session"/> is still one of the simulation's sessions.</summary>
+    internal bool HasSession(SessionToken session)
+    {
+        lock (this.Sessions)
+            return this.Sessions.Contains(session) && session.TryResolveOwner() is { State: System.Data.ConnectionState.Open };
+    }
 
     /// <summary>When a LOB chain a write gave up may go to another row (see <see cref="Storage.LobReclamation"/>).</summary>
     internal readonly LobReclamation LobReclamation;
@@ -1217,9 +1252,17 @@ public sealed partial class Simulation
                     yield break;
                 }
             }
+            // A transaction this session shared that another session ended
+            // since its last batch is reported ahead of anything this one does
+            // (probed 2026-10-07 against SQL Server 2025).
+            if (command.Connection is { EndedUnderBinding: not null } notified)
+            {
+                notified.EndedUnderBinding = null;
+                yield return new SimulatedInfoOutcome(SimulatedSqlException.TransactionEndedByAnotherSessionMessage(notified));
+            }
             using (var outcomes = this.CreateResultSetsForCommandCore(command, continueOnError).GetEnumerator())
             {
-                while (outcomes.MoveNext())
+                while (MoveNextAsMember(command.Connection, outcomes))
                 {
                     var outcome = outcomes.Current;
                     if (request is not null)
@@ -1315,6 +1358,33 @@ public sealed partial class Simulation
     }
 
     private int statementsInFlight;
+
+    /// <summary>
+    /// Runs one stretch of <paramref name="connection"/>'s execution — up to
+    /// its next outcome — counted in
+    /// <see cref="SessionToken.ExecutingStretches"/>, and in a
+    /// transaction other sessions share, as its running member (see
+    /// <see cref="SimulatedDbTransaction.EnterExecution"/>).
+    /// </summary>
+    private static bool MoveNextAsMember(SimulatedDbConnection? connection, IEnumerator<SimulatedStatementOutcome> outcomes)
+    {
+        if (connection is null)
+            return outcomes.MoveNext();
+        _ = Interlocked.Increment(ref connection.Session.ExecutingStretches);
+        var shared = connection.CurrentTransaction?.WhenShared;
+        SimulatedDbConnection? previous = null;
+        try
+        {
+            previous = shared?.EnterExecution(connection);
+            return outcomes.MoveNext();
+        }
+        finally
+        {
+            _ = Interlocked.Decrement(ref connection.Session.ExecutingStretches);
+            // A session sp_bindsession bound during the stretch leaves it too.
+            (shared ?? connection.CurrentTransaction?.WhenShared)?.LeaveExecution(connection, previous);
+        }
+    }
 
     /// <summary>
     /// Rolls back a transaction a MARS batch began by SQL text and left open —

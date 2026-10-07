@@ -279,7 +279,9 @@ partial class Simulation
     /// the session's transaction, written to a variable passed <c>OUTPUT</c>
     /// (Msg 591 otherwise), with return code 1 as real's extended procedure
     /// answers; outside a transaction Msg 3921 (probed 2026-10-04 against SQL
-    /// Server 2025). Each token is fresh, as real's are.
+    /// Server 2025). The token is the transaction's, the same for every call
+    /// and every session bound to it, and a new transaction's is new (probed
+    /// 2026-10-07).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpGetBindToken(BatchContext batch, string? returnCode)
     {
@@ -291,12 +293,10 @@ partial class Simulation
         RequireSystemProcedureShape("sp_getbindtoken", arguments, ["out_token"], required: 1);
         if (arguments[0].OutputSlot is not { } output)
             throw SimulatedSqlException.BindTokenParameterNotOutput();
-        if (batch.Connection.CurrentTransaction is null)
+        if (batch.Connection.CurrentTransaction is not { } transaction)
             throw SimulatedSqlException.NoTransactionForBindToken();
-        Span<char> token = stackalloc char[32];
-        for (var i = 0; i < token.Length; i++)
-            token[i] = (char)System.Security.Cryptography.RandomNumberGenerator.GetInt32('0', '_');
-        output.Value = Parser.Expressions.Cast.ApplyCoercion(SqlValue.FromVarchar(new string(token)), output.DeclaredType, output.DeclaredMaxLength);
+        var token = batch.Connection.Simulation.IssueBindToken(transaction);
+        output.Value = Parser.Expressions.Cast.ApplyCoercion(SqlValue.FromVarchar(token), output.DeclaredType, output.DeclaredMaxLength);
         if (returnCode is not null)
         {
             var slot = batch.GetVariableSlot(returnCode);
@@ -305,10 +305,17 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>EXEC sp_bindsession @bind_token</c>: a NULL or empty token does
-    /// nothing, and any other is Msg 3909 (probed 2026-10-04 against SQL
-    /// Server 2025). Sessions never share a transaction here, so a token
-    /// <c>sp_getbindtoken</c> handed out is refused the same way.
+    /// <c>EXEC sp_bindsession @bind_token</c>: binds the session to the
+    /// transaction a <c>sp_getbindtoken</c> token names, which it then shares
+    /// with every session bound to it — its locks, its uncommitted writes and
+    /// its fate, each session nesting on a <c>@@TRANCOUNT</c> of its own — and
+    /// a NULL or empty token unbinds the session, the transaction going on for
+    /// the others (probed 2026-10-07 against SQL Server 2025). A session
+    /// already in a transaction leaves it first with Msg 3924, rolling its own
+    /// back. A token of a transaction that has ended binds nothing, silently,
+    /// while the session that began it remains and isn't the caller, and is
+    /// Msg 3922 otherwise; anything else is Msg 3909, and a token not passed
+    /// as <c>varchar</c> Msg 257.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpBindSession(BatchContext batch)
     {
@@ -316,8 +323,47 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         RequireSystemProcedureShape("sp_bindsession", arguments, ["bind_token"], required: 1);
-        var token = CatalogStringArg(arguments[0]);
-        if (!string.IsNullOrEmpty(token))
-            throw SimulatedSqlException.BindTokenIsInvalid();
+        var argument = arguments[0];
+        if (!argument.IsDefault && !argument.IsUntypedNull && argument.Value.Type is not VarcharSqlType)
+            throw SimulatedSqlException.ImplicitConversionNotAllowed(argument.Value.Type.SqlServerName, "varchar", state: 5);
+        var connection = batch.Connection;
+        var token = CatalogStringArg(argument);
+        if (string.IsNullOrEmpty(token))
+        {
+            LeaveTransaction(connection);
+            yield break;
+        }
+        if (token.Length < 32)
+            throw SimulatedSqlException.BindTokenIsInvalid(state: 1);
+        if (!connection.Simulation.BindTokens.TryGetValue(token, out var issue))
+            throw SimulatedSqlException.BindTokenIsInvalid(token.AsSpan(0, 32).IndexOfAnyExcept('-') < 0 ? (byte)3 : (byte)2);
+        if (connection.CurrentTransaction is not null)
+        {
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.SessionDefectedFromTransactionMessage(connection));
+            LeaveTransaction(connection);
+        }
+        if (!issue.Transaction.TryGetTarget(out var transaction) || transaction.Ended)
+        {
+            if (ReferenceEquals(issue.Issuer, connection.Session) || !connection.Simulation.HasSession(issue.Issuer))
+                throw SimulatedSqlException.BindTransactionDoesNotExist();
+            yield break;
+        }
+        transaction.Attach(connection, TransactionMembership.Bound, running: true);
+        // Ended by another member while this one waited its turn.
+        if (transaction.Ended)
+            connection.EndedUnderBinding = null;
+    }
+
+    /// <summary>
+    /// Takes <paramref name="connection"/> out of the transaction it is in: one
+    /// it shares goes on for the others, and one no one else is left in rolls
+    /// back.
+    /// </summary>
+    private static void LeaveTransaction(SimulatedDbConnection connection)
+    {
+        if (connection.CurrentTransaction is not { } transaction)
+            return;
+        if (transaction.Members is null || !transaction.Detach(connection))
+            transaction.EndRollback();
     }
 }

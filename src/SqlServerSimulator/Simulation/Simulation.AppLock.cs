@@ -82,7 +82,10 @@ public partial class Simulation
         var resourceName = AppLock.NormalizeResource(args.Resource.CoerceTo(SqlType.NVarchar).AsString);
         var resource = batch.CurrentDatabase.GetOrCreateApplicationLock(principalId, resourceName);
 
-        var outcome = connection.Simulation.LockManager.TryAcquire(resource, mode, connection.Session, timeout);
+        // A transaction's lock is held by the owner the sessions bound to it
+        // share, a session's by the session alone.
+        var owner = isTransaction ? connection.LockOwner : connection.Session;
+        var outcome = connection.Simulation.LockManager.TryAcquire(resource, mode, owner, timeout);
         var code = outcome switch
         {
             LockAcquireOutcome.Granted => 0,
@@ -99,7 +102,7 @@ public partial class Simulation
                 // The generic HeldLocks entry is what releases the manager
                 // hold at transaction end; the app-lock ledger carries the
                 // identity for the owner-scoped views.
-                transaction!.HeldLocks.Add((resource, mode));
+                transaction!.HeldLocks.Add((resource, mode, owner));
                 transaction.TransactionAppLocks.Add(hold);
             }
             else
@@ -163,7 +166,7 @@ public partial class Simulation
             throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName));
 
         var hold = ledger[bestIndex];
-        connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, connection.Session);
+        var owner = connection.Session;
         ledger.RemoveAt(bestIndex);
         if (isTransaction)
         {
@@ -173,11 +176,13 @@ public partial class Simulation
             {
                 if (ReferenceEquals(transaction.HeldLocks[i].Resource, hold.LockResource) && transaction.HeldLocks[i].Mode == hold.Mode)
                 {
+                    owner = transaction.HeldLocks[i].Owner;
                     transaction.HeldLocks.RemoveAt(i);
                     break;
                 }
             }
         }
+        connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, owner);
 
         SetAppLockReturnCode(batch, returnCodeVariableName, 0);
     }

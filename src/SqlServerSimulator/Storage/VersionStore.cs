@@ -167,7 +167,7 @@ internal static class VersionStore
         // reading the chain between the two meets a live row the write hasn't
         // changed yet.
         chain.PendingEntries = pendingEntries;
-        chain.WriterSession = batch.Connection.Session;
+        chain.WriterSession = batch.Connection.LockOwner;
         pendingEntries.Add(new PendingVersionEntry
         {
             Table = table,
@@ -565,7 +565,7 @@ internal static class VersionStore
             return;
         if (!table.Heap.RowVersions.TryGetValue(rid, out var chain))
             return;
-        if (chain.LiveXmin <= sx && (chain.WriterSession is null || ReferenceEquals(chain.WriterSession, connection.Session)))
+        if (chain.LiveXmin <= sx && (chain.WriterSession is null || ReferenceEquals(chain.WriterSession, connection.LockOwner)))
             return;
         // A memory-optimized row's conflict dooms the transaction through the
         // error's own class rather than rolling it back here.
