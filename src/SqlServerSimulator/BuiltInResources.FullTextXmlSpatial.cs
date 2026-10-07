@@ -10,23 +10,67 @@ internal static partial class BuiltInResources
     /// <c>sys.fulltext_languages</c> (probe-confirmed against the reference).
     /// Static reference data — the same registry every database exposes.
     /// </summary>
-    internal static readonly (int Lcid, string Name)[] FullTextLanguages =
+    internal static readonly (int Lcid, string Name, Guid WordBreaker, string WordBreakerPath)[] FullTextLanguages =
     [
-        (0, "Neutral"), (1025, "Arabic"), (1026, "Bulgarian"), (1027, "Catalan"),
-        (1028, "Traditional Chinese"), (1029, "Czech"), (1030, "Danish"), (1031, "German"),
-        (1032, "Greek"), (1033, "English"), (1035, "Finnish"), (1036, "French"),
-        (1037, "Hebrew"), (1038, "Hungarian"), (1039, "Icelandic"), (1040, "Italian"),
-        (1041, "Japanese"), (1042, "Korean"), (1043, "Dutch"), (1044, "Bokmål"),
-        (1045, "Polish"), (1046, "Brazilian"), (1048, "Romanian"), (1049, "Russian"),
-        (1050, "Croatian"), (1051, "Slovak"), (1053, "Swedish"), (1054, "Thai"),
-        (1055, "Turkish"), (1056, "Urdu"), (1057, "Indonesian"), (1058, "Ukrainian"),
-        (1060, "Slovenian"), (1061, "Estonian"), (1062, "Latvian"), (1063, "Lithuanian"),
-        (1066, "Vietnamese"), (1081, "Hindi"), (1086, "Malay - Malaysia"), (1093, "Bengali (India)"),
-        (1094, "Punjabi"), (1095, "Gujarati"), (1097, "Tamil"), (1098, "Telugu"),
-        (1099, "Kannada"), (1100, "Malayalam"), (1102, "Marathi"), (2052, "Simplified Chinese"),
-        (2057, "British English"), (2068, "Norwegian"), (2070, "Portuguese"), (2074, "Serbian (Latin)"),
-        (2117, "Bangla"), (3076, "Chinese (Hong Kong SAR, PRC)"), (3082, "Spanish"), (3098, "Serbian (Cyrillic)"),
-        (4100, "Chinese (Singapore)"), (5124, "Chinese (Macao SAR)"), (9242, "Serbian (Sr-Latin)"),
+        (0, "Neutral", new("9faed859-0b30-4434-ae65-412e14a16fb8"), "MSWB7.dll"),
+        (1025, "Arabic", new("04cc0dae-b6f8-4086-9b92-635f41b538c0"), "CMICArabicWordBreaker.dll"),
+        (1026, "Bulgarian", new("a7f66238-8693-4016-b146-650e93b8797e"), "MSWB7.dll"),
+        (1027, "Catalan", new("75eadc14-5867-45a8-8ce0-de646f7bfe51"), "MSWB7.dll"),
+        (1028, "Traditional Chinese", new("e9b1df65-08f1-438b-8277-ef462b23a792"), "MSWB70404.dll"),
+        (1029, "Czech", new("468bfc77-3876-4a47-a6ff-f5f6e8ea7968"), "MSWB7.dll"),
+        (1030, "Danish", new("4645f4f2-6359-4d81-bfb5-dafbf89812b4"), "MSWB7.dll"),
+        (1031, "German", new("dfa00c33-bf19-482e-a791-3c785b0149b4"), "MSWB7.dll"),
+        (1032, "Greek", new("0f7679e0-1386-493c-af00-dac67b1b16b1"), "MSWB7.dll"),
+        (1033, "English", new("9faed859-0b30-4434-ae65-412e14a16fb8"), "MSWB7.dll"),
+        (1035, "Finnish", new("08f2f5a6-65ff-44dd-8000-e9343f8fbc07"), "MSWB7.dll"),
+        (1036, "French", new("97c2e40b-f712-4084-8dfb-1806c8a87037"), "MSWB7.dll"),
+        (1037, "Hebrew", new("f40e93a1-9670-48c6-b814-1b0566a19ab5"), "MSWB7.dll"),
+        (1038, "Hungarian", new("e1539a26-c204-405a-9afd-a516b849f91b"), "MSWB7.dll"),
+        (1039, "Icelandic", new("78475969-900b-4cc2-9746-b9c3b9e45fc2"), "MSWB7.dll"),
+        (1040, "Italian", new("f1589d2a-d2a3-4c27-ae23-ef5686ffe4f8"), "MSWB7.dll"),
+        (1041, "Japanese", new("04096682-6ece-4e9e-90c1-52d81f0422ed"), "MSWB70011_v2.dll"),
+        (1042, "Korean", new("737fc9b5-bc66-4953-b7db-b79a72a592a5"), "korwbrkr.dll"),
+        (1043, "Dutch", new("69483c30-a9af-4552-8f84-a0796ad5285b"), "MSWB7.dll"),
+        (1044, "Bokmål", new("2259c480-d589-47e0-94d2-f2e532d24fcc"), "MSWB7.dll"),
+        (1045, "Polish", new("0d5ebea3-b982-46b9-9378-4c238262c12c"), "MSWB7.dll"),
+        (1046, "Brazilian", new("77b475a5-3793-4e7f-b809-00420fda7e8b"), "MSWB7.dll"),
+        (1048, "Romanian", new("b3b2ed45-b065-4a63-9ee3-2fbaa7c0229b"), "MSWB7.dll"),
+        (1049, "Russian", new("aaa3d3bd-6de7-4317-91a0-d25e7d3babc3"), "MSWB7.dll"),
+        (1050, "Croatian", new("6c59738a-8ed1-4d39-b1cf-d5dc09a5a7ec"), "MSWB7.dll"),
+        (1051, "Slovak", new("5c820763-3d0a-4c2a-88d8-0c2f9ae37c2c"), "MSWB7.dll"),
+        (1053, "Swedish", new("2799d0dd-0ab5-4e6d-b9dd-f2787225de8d"), "MSWB7.dll"),
+        (1054, "Thai", new("f70c0935-6e9f-4ef1-9f06-7876536db900"), "MSWB7001E.dll"),
+        (1055, "Turkish", new("54a12380-e78e-4980-bd96-2ef7076b5bb0"), "MSWB7.dll"),
+        (1056, "Urdu", new("933788fc-63cd-40b2-b3d1-c7503eb1e2dd"), "MSWB7.dll"),
+        (1057, "Indonesian", new("5e0c37fb-d90f-48ee-89f2-fc9d2e6d330c"), "MSWB7.dll"),
+        (1058, "Ukrainian", new("f7d519cd-2d4b-40f6-b2fc-67fe005fe83a"), "MSWB7.dll"),
+        (1060, "Slovenian", new("fb1374d7-07b3-4c77-a65a-f5fac04b87e7"), "MSWB7.dll"),
+        (1061, "Estonian", new("dd14498e-8503-46dc-bb94-c35fbe98e60c"), "MSWB7.dll"),
+        (1062, "Latvian", new("fb37b80e-ce48-40f1-8440-d76748c44db7"), "MSWB7.dll"),
+        (1063, "Lithuanian", new("7130526b-a1ce-4221-b8dc-6413e92a772c"), "MSWB7.dll"),
+        (1066, "Vietnamese", new("f5e89069-8a90-4b80-ab15-e92aa29b75ee"), "MSWB7.dll"),
+        (1081, "Hindi", new("aa5bee8c-8c4f-458a-9ecc-95bc16c74aa6"), "MSWB7.dll"),
+        (1086, "Malay - Malaysia", new("3a7d6bb6-f0f9-4b54-855b-2012989e098e"), "MSWB7.dll"),
+        (1093, "Bengali (India)", new("1d9b4138-3171-4a01-aa2a-bb935e929280"), "MSWB7.dll"),
+        (1094, "Punjabi", new("8e868f6f-d2c3-416a-b2a4-2993067e4252"), "MSWB7.dll"),
+        (1095, "Gujarati", new("57ccb731-789e-4c65-8cea-e0cdc399a0e1"), "MSWB7.dll"),
+        (1097, "Tamil", new("2f1ea773-6adb-4e52-ad2e-13c3b04ccdfc"), "MSWB7.dll"),
+        (1098, "Telugu", new("9630d05d-4f9a-44e4-a7b5-20f7c8c04c99"), "MSWB7.dll"),
+        (1099, "Kannada", new("58974a06-30bb-4800-9715-b3b12a6e2e43"), "MSWB7.dll"),
+        (1100, "Malayalam", new("fd6a88d5-6e25-4380-ac2d-23f0c40c854b"), "MSWB7.dll"),
+        (1102, "Marathi", new("95354b74-5a61-4811-8be7-fac674c7476d"), "MSWB7.dll"),
+        (2052, "Simplified Chinese", new("e0831c90-bab0-4ca5-b9bd-ea254b538dac"), "MSWB70804.dll"),
+        (2057, "British English", new("9faed859-0b30-4434-ae65-412e14a16fb8"), "MSWB7.dll"),
+        (2068, "Norwegian", new("2259c480-d589-47e0-94d2-f2e532d24fcc"), "MSWB7.dll"),
+        (2070, "Portuguese", new("77b475a5-3793-4e7f-b809-00420fda7e8b"), "MSWB7.dll"),
+        (2074, "Serbian (Latin)", new("ec677e4c-41fe-4ff9-8ca3-a449e63745be"), "MSWB7.dll"),
+        (2117, "Bangla", new("1d9b4138-3171-4a01-aa2a-bb935e929280"), "MSWB7.dll"),
+        (3076, "Chinese (Hong Kong SAR, PRC)", new("e9b1df65-08f1-438b-8277-ef462b23a792"), "MSWB70404.dll"),
+        (3082, "Spanish", new("0914ea43-45a5-4d15-834f-10199cdf8793"), "MSWB7.dll"),
+        (3098, "Serbian (Cyrillic)", new("ec677e4c-41fe-4ff9-8ca3-a449e63745be"), "MSWB7.dll"),
+        (4100, "Chinese (Singapore)", new("e0831c90-bab0-4ca5-b9bd-ea254b538dac"), "MSWB70804.dll"),
+        (5124, "Chinese (Macao SAR)", new("e9b1df65-08f1-438b-8277-ef462b23a792"), "MSWB70404.dll"),
+        (9242, "Serbian (Sr-Latin)", new("ec677e4c-41fe-4ff9-8ca3-a449e63745be"), "MSWB7.dll"),
     ];
 
     private static void RegisterFullTextXmlSpatial(Dictionary<string, CatalogView> views)
@@ -141,6 +185,25 @@ internal static partial class BuiltInResources
             new("property_int_id", SqlType.Int32, null, false),
             new("property_description", SqlType.NVarchar, 512, true),
         ], static (_, _) => EmptyCatalogRows);
+
+        // sys.fulltext_document_types: the document filters the instance
+        // registers (probed 2026-10-06).
+        var catalogDefault = Collation.Get("SQL_Latin1_General_CP1_CI_AS");
+        Sys("fulltext_document_types",
+        [
+            new("document_type", NVarcharSqlType.Get(128, catalogDefault, Coercibility.Implicit), 128, false),
+            new("class_id", SqlType.UniqueIdentifier, null, false),
+            new("path", NVarcharSqlType.Get(260, catalogDefault, Coercibility.Implicit), 260, true),
+            new("version", NVarcharSqlType.Get(128, catalogDefault, Coercibility.Implicit), 128, false),
+            new("manufacturer", NVarcharSqlType.Get(128, catalogDefault, Coercibility.Implicit), 128, true),
+        ], static (_, _) => FullTextDocumentTypes.Select(static type => new[]
+        {
+            SqlValue.FromNVarchar(type.DocumentType),
+            SqlValue.FromGuid(type.ClassId),
+            SqlValue.FromNVarchar(type.Path),
+            SqlValue.FromNVarchar(type.Version),
+            SqlValue.FromNVarchar("Microsoft Corporation"),
+        }));
 
         // sys.fulltext_languages: the per-LCID full-text language registry
         // (the 59 languages a stock SQL Server 2025 instance ships, probed
@@ -365,12 +428,7 @@ internal static partial class BuiltInResources
             new("cells_per_object", SqlType.Int32, null, true),
         ], EnumerateSysSpatialIndexTessellations);
 
-        // sys.spatial_reference_systems: real SQL Server seeds this view with
-        // ~390 rows of authoritative SRID definitions (EPSG / ESRI). The
-        // simulator surfaces an empty view — the column shape matches probe
-        // and the catalog is reachable, but no SRID rows pre-populate. This
-        // keeps applications that reference the view's schema from breaking
-        // without the byte-tonnage of the WKT-laden seed data.
+        // sys.spatial_reference_systems: real's 393 SRID definitions, verbatim.
         Sys("spatial_reference_systems",
         [
             new("spatial_reference_id", SqlType.Int32, null, true),
@@ -751,7 +809,19 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysSpatialReferenceSystems(Parser.BatchContext batch, Database database)
     {
-        _ = batch;
-        yield break;
+        _ = (batch, database);
+        var text = NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_CI_AI"), Coercibility.Implicit);
+        var name = NVarcharSqlType.Get(128, Collation.Get("Latin1_General_CI_AI"), Coercibility.Implicit);
+        foreach (var system in Storage.Spatial.SpatialReferenceSystem.All)
+        {
+            yield return [
+                SqlValue.FromInt32(system.Srid),
+                SqlValue.FromNVarchar(name, system.AuthorityName),
+                SqlValue.FromInt32(system.AuthoritySrid),
+                SqlValue.FromNVarchar(text, system.WellKnownText),
+                SqlValue.FromNVarchar(name, system.UnitOfMeasure),
+                SqlValue.FromDouble(system.UnitConversionFactor),
+            ];
+        }
     }
 }

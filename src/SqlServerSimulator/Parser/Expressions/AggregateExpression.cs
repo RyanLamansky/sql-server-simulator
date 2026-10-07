@@ -311,7 +311,8 @@ internal sealed class AggregateExpression : Expression
             else
                 throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
         }
-        if (IsUntypedNullLiteral(operand))
+        // A spatial aggregate is a CLR method taking its type, so an untyped NULL converts to it and the aggregate reads NULL.
+        if (kind != AggregateKind.SpatialAggregate && IsUntypedNullLiteral(operand))
             throw UntypedNullOperand(kind);
     }
 

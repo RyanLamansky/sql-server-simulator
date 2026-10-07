@@ -179,7 +179,7 @@ The rules below were fitted with a differential of 4,334 `CONTAINS` / `FREETEXT`
   Each operand needs its own occurrence, so `NEAR((requires, requires), 0)` needs the word twice, adjacent.
 - **A star prefixes every part of the word it ends**, and every term at those positions: `"red-hot*"` finds `reds hotter`, `"the*"` finds `theory`, and `"07/26/*"` reaches `nn79` through `07`'s companion `nn7`.
   A starred phrase holding an unstarred noise word matches nothing (`"word of mou*"`).
-- **`FORMSOF(INFLECTIONAL, …)` expands a single-letter noise word** (`x` to `x's`), which then has to match, while a longer one stays out as in a phrase — so `FORMSOF(INFLECTIONAL, "vitamin b complex")` finds nothing and `FORMSOF(INFLECTIONAL, "word of mouth")` finds the phrase; a single digit has no forms, so its leaf matches nothing.
+- **`FORMSOF(INFLECTIONAL, …)` expands a single-letter noise word** (`x` to `x's`), which then has to match, and a noise word the lexicon inflects (`see` to `saw` and `seen`), while a longer one without forms stays out as in a phrase — so `FORMSOF(INFLECTIONAL, "vitamin b complex")` finds nothing and `FORMSOF(INFLECTIONAL, "word of mouth")` finds the phrase; a single digit has no forms, so its leaf matches nothing.
 
 ### Languages
 
@@ -238,11 +238,17 @@ Probe-confirmed: `FREETEXT(body, 'quick geese')` returns the rows holding either
 
 ### The stemmer
 
-`FullTextLexicon.Stem` reduces both the query term and the indexed term to one key, so they match when the keys agree.
+`FullTextLexicon.Stems` reduces both the query term and the indexed term to one key — two for a form two lemmas share — so they match when a key agrees.
 Rules: strip a possessive `'s` / `'`, then one of `-ies` / `-ied` → `y`, the `-sses` / `-shes` / `-ches` / `-xes` / `-zes` and `-oes` / `-ies` plurals, plain `-s`, or verbal `-ing` / `-ed` with the doubled-consonant undo and the silent-`e` restore.
 An irregular table sits ahead of the rules, carrying the strong verbs, the irregular plurals (`child` / `children`, `mouse` / `mice`, `foot` / `feet`), the Latin and Greek pairs (`analysis` / `analyses`, `index` / `indices`, `datum` / `data`, `matrix` / `matrices`), and the `-f` / `-ves` family.
 
 A 68-word differential — one word per row, `FREETEXT` for each — put the simulator on real's answer for every word but one class, and `Inflectional_Equivalence_Classes_Match_Reference` pins twenty of them.
+
+A surface form real's lexicon files under two lemmas reaches both, and an inflection of either stays with its own (probed 2026-10-06 against SQL Server 2025): `leaves` reaches `leaf` and `leave` through the two irregular rows it sits in, and an irregular form that is a lemma of its own — `saw`, `found`, `left`, `lives`, the `-ing` nouns such as `building`, about fifty in all, read off `sys.dm_fts_parser` listings that include their own plurals — reaches its own paradigm beside its irregular one, so `saw` finds `sawing` and `seen` while `sawing` doesn't find `seen`, and `buildings` finds `building` but not `build`.
+A stem ending in a single `s` restores its silent `e` (`based` → `base`, `used` → `use`) unless it is one of the few that never had one (`focus`, `bias`).
+Two dozen accented spellings the lexicon files under their plain lemma — `café`, `naïve`, `régime`, `jalapeño` — reach it and its inflections on an accent-sensitive catalog in both directions, where `résumé` stays apart from `resume`; each pair was confirmed by search.
+A noise word the irregular table holds (`see`, `is`, `be`) never reaches the index but still reaches its forms, so `FREETEXT(b, 'see')` finds `saw` and `seen`.
+Over 194 searches built on these classes, both predicates, the simulator returns real's rows for all but eight (see [Not modeled yet](#not-modeled-yet)).
 
 `sys.dm_fts_parser` lists a word's forms as those the stemmer maps back to it: the irregular row, or the regular plural, past and gerund with the two possessives — `run` gets real's exact five, `ran`, `run's`, `running`, `runs`, `runs'`.
 Real consults a part-of-speech lexicon and lists only the paradigms a word has, so `red` gets no verb forms there where the simulator lists `redded` and `redding`.
@@ -251,7 +257,8 @@ Real consults a part-of-speech lexicon and lists only the paradigms a word has, 
 
 Real's out-of-the-box thesaurus is empty — the shipped files hold commented-out samples — and `FORMSOF(THESAURUS, IE)`, `NT5` and `jog`, the sample entries, each expand to nothing but themselves (probed 2026-09-29).
 The simulator models that: `FORMSOF(THESAURUS, …)` and `FREETEXT`'s thesaurus pass match the written word only.
-Populating a thesaurus means editing XML files in the server's install tree and loading them with `sys.sp_fulltext_load_thesaurus_file`, which isn't modeled; see [Not modeled yet](#not-modeled-yet).
+`sys.sp_fulltext_load_thesaurus_file @lcid [, @loadOnlyIfNotLoaded]` reloads a language's file, which changes nothing a search sees: it succeeds for the 53 full-text languages that ship a file, and for Finnish, Hungarian, Estonian, Norwegian, Bangla, Serbian (Sr-Latin), NULL or an LCID with no language raises error 30050, which real rethrows as Msg 50000 from `sys.sp_fulltext_rethrow_error` with return code 30050; inside a transaction it is Msg 15002 (probed 2026-10-06 against SQL Server 2025).
+Populating a thesaurus means editing XML files in the server's install tree, which no statement reaches; see [Not modeled yet](#not-modeled-yet).
 
 ### `CONTAINSTABLE` / `FREETEXTTABLE`
 
@@ -307,8 +314,6 @@ State 3 is what an operator keyword standing in *operand* position produces — 
   Every language breaks by the English rules with its own stoplist, which real matches only for neutral and British English.
   The rest carry locale rules — German reads `33,667.95` with a decimal comma, splits `d'angelo`, and knows no English month or meridiem — so on 400 English-text inputs per language the parser's output matched real's for 24–33% of them (German, French, Spanish, Italian, Dutch, Brazilian Portuguese, Russian); searched as a German column, the same differential's conditions returned real's rows for 94.7% of 505.
 - **Other languages' morphology** — see [Languages](#languages).
-- **The stemmer holds one lemma per surface form.**
-  Real's expansion can span two: `leaves` reaches `leaf` *and* `leave`, where the simulator picks `leaf`.
 - **`sys.dm_fts_parser` for an accented term** reports the lower-cased term, where real's `display_term` reconstructs it from its keyword (`σοφΊα`) and its `keyword` encodes the accents apart.
 - **`RANK` values** — see above.
 - **No crawl lag** — see above.
@@ -350,11 +355,19 @@ An unrecognized property name returns NULL `int` (probe-confirmed convention); n
 `Parser/Expressions/FullTextCatalogProperty.cs`.
 Returns an `int` property of a full-text catalog resolved by name against `Database.FullTextCatalogs` (probe-confirmed return type).
 
-Two properties are computed from the data the catalog's indexes cover, the same way a search reads it: **`ItemCount`** is the number of indexed rows and **`UniqueKeyCount`** the number of distinct non-stopword terms in them.
+Two properties are computed from the data the catalog's indexes cover, the same way a search reads it: **`ItemCount`** is the number of indexed rows and **`UniqueKeyCount`** each index's distinct non-stopword terms plus the `END OF FILE` key an index holding any row carries — a row of NULLs included — summed over the catalog's indexes, so a term two tables share counts twice (probed 2026-10-06 against SQL Server 2025).
 Both are non-zero on a populated catalog on real (a probe catalog covering 307 rows reported `ItemCount` 307 and `UniqueKeyCount` 271).
 **`AccentSensitivity`** reflects the catalog's DDL-captured `ACCENT_SENSITIVITY` option (`FullTextCatalog.IsAccentSensitive`, defaulting `1` / accent-sensitive).
 The remaining properties report the idle answers real gives a settled catalog, since nothing here is crawled in the background — `IndexSize`, `PopulateStatus`, `PopulateCompletionAge`, `MergeStatus`, `ImportStatus`, `LogSize` all `0`, which is what the same probe read back for the ones it could reach.
 An unknown catalog name or unrecognized property returns NULL; property names are case-insensitive.
+
+## System procedures
+
+`Simulation.FullTextProcs.cs` (probed 2026-10-06 against SQL Server 2025).
+The deprecated reports — `sp_help_fulltext_catalogs [@fulltext_catalog_name]`, `sp_help_fulltext_tables [@fulltext_catalog_name] [, @table_name]` and `sp_help_fulltext_columns [@table_name] [, @column_name]` — list the current database's catalogs (with their table counts), indexed tables (with the key index's first column) and indexed columns (with language and `TYPE COLUMN`) in object id order.
+A table named in another database lists nothing; one that doesn't resolve, or a system object, is Msg 15009, a view Msg 15218, a missing catalog Msg 7641 — whose database slot real fills with the database name's first character — and a column the table lacks Msg 15104, each from the line real's raises it on.
+`sp_help_fulltext_system_components { 'all' | 'wordbreaker' | 'filter' | 'protocol handler' } [, @param]` lists the 59 word breakers and 110 document filters, its list preceded by the count of the table real gathers it into and, given a `@param`, followed by an empty list of the catalogs using the component; any other type, or `'all'` with a `@param`, is Msg 15600.
+`sp_fulltext_database { 'enable' | 'disable' }` sets the database's full-text flag (`is_fulltext_enabled`, `DATABASEPROPERTYEX`, `sp_helpdb`), which leaves catalogs, indexes and searches alone but makes the three reports Msg 15601 — as they always are in master, model and tempdb, where the procedure itself is Msg 9966.
 
 ## Not modeled yet
 
@@ -362,14 +375,13 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one.
 - **The index keyword DMVs** — `sys.dm_fts_index_keywords`, `…_by_document`, `…_position_by_document` and `…_by_property` — which the breaker already has what it takes to answer.
-- **`sys.sp_fulltext_load_thesaurus_file`** and a populated thesaurus.
-  Probed 2026-09-29: the procedure succeeds silently for a known LCID, refuses to run inside a transaction, and for an unknown or NULL LCID rethrows real's error 30050 (`Both the thesaurus file for lcid '9999' and the global thesaurus could not be loaded.`) as a user error from `sys.sp_fulltext_rethrow_error`.
-  A thesaurus of one's own is XML edited into the server's install tree, which no statement reaches.
-- **Document filters beyond the plain-text, HTML and XML ones** — an Office or PDF document, which real on Windows filters through its installed iFilters, contributes nothing; the `sys.fulltext_document_types` view isn't modeled.
+- **A populated thesaurus** — a thesaurus of one's own is XML edited into the server's install tree, which no statement reaches and no probe here may write, so its expansion and replacement sets have no oracle.
+- **Document filters beyond the plain-text, HTML and XML ones** — an Office or PDF document, which real on Windows filters through its installed iFilters, contributes nothing; `sys.fulltext_document_types` and `sp_help_fulltext_system_components 'filter'` list real's 110 registered filters all the same.
 - **Other languages' breakers and morphologies** — see [Divergences](#divergences).
-- **The deprecated `sp_help_fulltext_catalogs`, `sp_help_fulltext_tables`, `sp_help_fulltext_columns` and `sp_help_fulltext_system_components`** are Msg 2812; real's report the catalog view rows, and its catalog procedure raises Msg 15601 in a database whose full-text flag is off (probed 2026-10-05 against SQL Server 2025).
-- **Accented forms in the inflectional lexicon** — real's English lexicon lists `café` among `cafe`'s forms and `naïve` among `naive`'s, so `FREETEXT(b, 'cafe')` finds `café` on an accent-sensitive catalog, but not `résumé` for `resume` (probed 2026-10-05 against SQL Server 2025); the stemmer here folds no accents.
-- **`UniqueKeyCount`** reads one less than real's over the probe corpus's twelve rows (85 against 86), a term real keys that the breaker here doesn't separate.
+- **The `_cursor` forms of the deprecated help procedures** (`sp_help_fulltext_catalogs_cursor` and its siblings) are Msg 2812.
+- **The rest of the part-of-speech lexicon** (probed 2026-10-06 against SQL Server 2025): real inflects nearly every noise word — `use` finds `used`, `after` finds `afters`, a pronoun reaches its case forms (`he`, `him`, `his`) — where only the irregular table's lemmas expand here; it reads some `-ed` forms as adjectives of their own (`exposed` finds `expose` but not `exposé`); it strips a three-letter plural (`ams` finds `am`); and it lists every paradigm a lemma has in `sys.dm_fts_parser` (`leaf` gets `leafed`, `foot` gets `footing`), where the stemmer here matches those forms but lists only the row.
+  A search whose expansion reaches a noise word (`FREETEXT(b, 'saw')`, through `see`) reports real's noise-word informational message there, which the simulator doesn't.
+- **A help procedure's conversion failure** — `sp_fulltext_load_thesaurus_file 'abc'` is Msg 8114 at state 1 on real and state 5 here, the state the system-procedure binder probed elsewhere.
 - **`sp_describe_first_result_set` over a rowset** calls `KEY` and `RANK` updatable, where real's `is_updateable` is 0.
 - **A predicate compared to a value** (`CONTAINS(body, 'x') = 1`) is Msg 102 near `1` here and near `=` on real.
 - **`ALTER TABLE … ALTER COLUMN` of the key index's column** names the key as `The object` in its Msg 5074, where real names it `The index` once a full-text index uses it.

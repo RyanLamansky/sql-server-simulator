@@ -37,15 +37,13 @@ internal readonly struct SpatialVector(double x, double y, double z)
 }
 
 /// <summary>
-/// The WGS 84 reference ellipsoid every modeled <c>geography</c> SRID resolves
-/// to, and the two scalar fields the round-earth measures are built from: the
-/// quadratic form whose level set <i>is</i> the surface, and the area of the
-/// zone between the equator and a parallel.
+/// The reference ellipsoid the round-earth measures run on — WGS 84 unless a
+/// measurement enters another SRID's (<see cref="Enter"/>) — and the two scalar
+/// fields the round-earth measures are built from: the quadratic form whose
+/// level set <i>is</i> the surface, and the area of the zone between the
+/// equator and a parallel.
 /// </summary>
 /// <remarks>
-/// <para>Real carries a per-SRID ellipsoid (a unit-sphere SRID measures the
-/// same polygon in radians squared); the simulator measures every geography
-/// value on WGS 84.</para>
 /// <para><see cref="AreaBelow"/> is the antiderivative of the surface element
 /// <c>a²(1-e²)cosφ / (1-e²sin²φ)²</c> in latitude, so the area of an ellipsoidal
 /// region is a line integral of it around the boundary — see
@@ -65,26 +63,51 @@ internal static class SpatialEllipsoid
     /// <summary>Radians to degrees as real converts them; see <see cref="RadiansPerDegree"/>.</summary>
     public const double DegreesPerRadian = 180 / Math.PI;
 
+    /// <summary>The ellipsoid a measurement on this thread has entered, or null for WGS 84.</summary>
+    [ThreadStatic]
+    private static SpatialDatum? entered;
+
+    private static SpatialDatum Datum => entered ?? SpatialDatum.Wgs84;
+
+    /// <summary>
+    /// Runs the round-earth arithmetic on <paramref name="datum"/>'s ellipsoid
+    /// until the returned scope is disposed; null keeps WGS 84.
+    /// </summary>
+    public static DatumScope Enter(SpatialDatum? datum)
+    {
+        var previous = entered;
+        entered = datum;
+        return new DatumScope(previous);
+    }
+
+    /// <summary>Restores the ellipsoid a scope replaced.</summary>
+    internal readonly struct DatumScope(SpatialDatum? previous) : IDisposable
+    {
+        private readonly SpatialDatum? previous = previous;
+
+        public void Dispose() => entered = this.previous;
+    }
+
     /// <summary>Semi-major axis, metres.</summary>
-    public const double SemiMajor = 6378137.0;
+    public static double SemiMajor => Datum.SemiMajor;
 
-    public const double Flattening = 1.0 / 298.257223563;
+    public static double Flattening => Datum.Flattening;
 
-    public const double SemiMinor = SemiMajor * (1 - Flattening);
+    public static double SemiMinor => Datum.SemiMinor;
 
-    public const double EccentricitySquared = 1 - (SemiMinor * SemiMinor / (SemiMajor * SemiMajor));
+    public static double EccentricitySquared => Datum.EccentricitySquared;
 
-    public static readonly double Eccentricity = Math.Sqrt(EccentricitySquared);
+    public static double Eccentricity => Datum.Eccentricity;
 
     /// <summary>
     /// Area of the zone from the equator to the north pole, per radian of
     /// longitude — the closing constant a ring encircling a pole needs, and a
     /// quarter of <see cref="SurfaceArea"/> over π.
     /// </summary>
-    public static readonly double PolarZone = AreaBelow(Math.PI / 2);
+    public static double PolarZone => Datum.PolarZone;
 
     /// <summary>Total surface area, metres squared.</summary>
-    public static readonly double SurfaceArea = 4 * Math.PI * PolarZone;
+    public static double SurfaceArea => Datum.SurfaceArea;
 
     /// <summary>Geodetic (longitude, latitude) in degrees to the surface point in geocentric Cartesian metres.</summary>
     public static SpatialVector ToCartesian(SpatialCoordinate point)
@@ -121,12 +144,7 @@ internal static class SpatialEllipsoid
     /// Area between the equator and latitude <paramref name="latitude"/>
     /// (radians) per radian of longitude, signed with the latitude.
     /// </summary>
-    public static double AreaBelow(double latitude)
-    {
-        var sin = Math.Sin(latitude);
-        return SemiMajor * SemiMajor * (1 - EccentricitySquared)
-            * ((sin / (2 * (1 - (EccentricitySquared * sin * sin)))) + (Math.Atanh(Eccentricity * sin) / (2 * Eccentricity)));
-    }
+    public static double AreaBelow(double latitude) => Datum.AreaBelow(latitude);
 
     /// <summary>Longitude difference folded into (-π, π] — the sweep an edge takes, never the long way round.</summary>
     public static double ShortestLongitudeDelta(double from, double to)
@@ -168,4 +186,49 @@ internal static class GaussLegendre
     /// <summary>Panels a composite rule needs to cover <paramref name="span"/> at the named granularity.</summary>
     public static int PanelsFor(double span, double granularity, int cap) =>
         Math.Clamp((int)Math.Ceiling(Math.Abs(span) / granularity), 1, cap);
+}
+
+/// <summary>
+/// One reference ellipsoid — its semi-major axis in metres and its flattening,
+/// as a <c>sys.spatial_reference_systems</c> row's WKT names them — with the
+/// quantities the round-earth arithmetic derives from them.
+/// </summary>
+internal sealed class SpatialDatum
+{
+    /// <summary>WGS 84, which SRID 4326 and every SRID before this model carried measure on.</summary>
+    public static readonly SpatialDatum Wgs84 = new(6378137.0, 1.0 / 298.257223563);
+
+    public readonly double SemiMajor;
+    public readonly double Flattening;
+    public readonly double SemiMinor;
+    public readonly double EccentricitySquared;
+    public readonly double Eccentricity;
+    public readonly double PolarZone;
+    public readonly double SurfaceArea;
+
+    /// <summary>An ellipsoid from its semi-major axis and flattening; a flattening of 0 is a sphere.</summary>
+    public SpatialDatum(double semiMajor, double flattening)
+    {
+        this.SemiMajor = semiMajor;
+        this.Flattening = flattening;
+        this.SemiMinor = semiMajor * (1 - flattening);
+        this.EccentricitySquared = 1 - (this.SemiMinor * this.SemiMinor / (semiMajor * semiMajor));
+        this.Eccentricity = Math.Sqrt(this.EccentricitySquared);
+        this.PolarZone = AreaBelow(Math.PI / 2);
+        this.SurfaceArea = 4 * Math.PI * this.PolarZone;
+    }
+
+    /// <summary>
+    /// Area between the equator and latitude <paramref name="latitude"/>
+    /// (radians) per radian of longitude, signed with the latitude; on a sphere
+    /// the eccentric term's limit, <c>a² sin φ</c>.
+    /// </summary>
+    public double AreaBelow(double latitude)
+    {
+        var sin = Math.Sin(latitude);
+        return this.Eccentricity == 0
+            ? this.SemiMajor * this.SemiMajor * sin
+            : this.SemiMajor * this.SemiMajor * (1 - this.EccentricitySquared)
+                * ((sin / (2 * (1 - (this.EccentricitySquared * sin * sin)))) + (Math.Atanh(this.Eccentricity * sin) / (2 * this.Eccentricity)));
+    }
 }

@@ -185,7 +185,7 @@ internal sealed class FullTextTermNode : FullTextNode
 
     private bool Holds(FullTextDocument document, string term, bool prefix, int position) =>
         prefix ? document.HoldsPrefix(term, position)
-        : this.inflectional ? document.HoldsStem(FullTextLexicon.Stem(term), position)
+        : this.inflectional ? HoldsStems(document, FullTextLexicon.Stems(term), position)
         : document.HoldsExact(term, position);
 
     /// <summary>Every position holding one of the element's terms, ascending.</summary>
@@ -201,8 +201,22 @@ internal sealed class FullTextTermNode : FullTextNode
 
     private List<int> PositionsOf(FullTextDocument document, string term, bool prefix) =>
         prefix ? document.Prefixed(term)
-        : this.inflectional ? document.Stemmed(FullTextLexicon.Stem(term))
+        : this.inflectional ? StemmedPositions(document, FullTextLexicon.Stems(term))
         : document.Exact(term);
+
+    private static bool HoldsStems(FullTextDocument document, (string Primary, string? Secondary) stems, int position) =>
+        document.HoldsStem(stems.Primary, position) || (stems.Secondary is { } secondary && document.HoldsStem(secondary, position));
+
+    /// <summary>The positions holding either of a term's stems, ascending.</summary>
+    private static List<int> StemmedPositions(FullTextDocument document, (string Primary, string? Secondary) stems)
+    {
+        var primary = document.Stemmed(stems.Primary);
+        if (stems.Secondary is not { } secondary || document.Stemmed(secondary) is not { Count: > 0 } other)
+            return primary;
+        var merged = new SortedSet<int>(primary);
+        merged.UnionWith(other);
+        return [.. merged];
+    }
 
     /// <summary>
     /// How many times this leaf occurs — the <c>tf</c> the rank model reads.

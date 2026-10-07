@@ -163,6 +163,7 @@ Probe-confirmed semantics (SQL Server 2025):
   The cap is `ceil(candidateCount * pct / 100)` — probe-confirmed ceiling: `50 PERCENT` of 3 rows → 2, `33.3 PERCENT` of 10 → 4, `2 PERCENT` of 10 → 1, `0 PERCENT` → 0, `100 PERCENT` → all.
 - **Interactions.**
   `OUTPUT` emits exactly the capped set; `@@ROWCOUNT` reflects the cap.
+  A single-table `UPDATE` with a row-count `TOP` stops reading rows once it has them, so a SET value only a later row would raise never runs (probed 2026-10-06 against SQL Server 2025: `UPDATE TOP (1) t SET g.STSrid = 55` past a row whose `g` is NULL); a `PERCENT` cap and the joined forms still compute every qualifying row's values first.
   `UPDATE TOP … ORDER BY` is Msg 156 on the reference (ORDER BY isn't part of the DML grammar) — the simulator raises Msg 102 at the trailing `ORDER` for the same effect (no ORDER BY acceptance on DML).
 - **Validation timing.**
   A written constant is judged while compiling, so `TOP (-1)`, `TOP (1.5)` or `TOP (101) PERCENT` reports alone, with no Msg 3621 (probed 2026-09-28 against SQL Server 2025); `ParseDmlTopClause` checks it.

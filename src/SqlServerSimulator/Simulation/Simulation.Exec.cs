@@ -55,7 +55,8 @@ partial class Simulation
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
         "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
-        or "sp_executesql" or "sp_fkeys" or "sp_getapplock" or "sp_help" or "sp_helpconstraint" or "sp_helpdb"
+        or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
+        or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
         or "sp_getbindtoken" or "sp_helpdbfixedrole" or "sp_helpdevice" or "sp_helpfilegroup" or "sp_helpntgroup" or "sp_helprole"
         or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
         or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_query_store_clear_hints"
@@ -328,6 +329,12 @@ partial class Simulation
             "sp_helplinkedsrvlogin" => Uncounted(InvokeSpHelpLinkedSrvLogin(batch, calledAs)),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource, procName.Count >= 3 ? procName[procName.Count - 3] : null),
             "sp_fkeys" => Uncounted(InvokeSpFkeys(batch)),
+            "sp_fulltext_database" => InvokeSpFullTextDatabase(batch, calledAs),
+            "sp_fulltext_load_thesaurus_file" => InvokeSpFullTextLoadThesaurusFile(batch, calledAs),
+            "sp_help_fulltext_catalogs" => InvokeSpHelpFullTextCatalogs(batch, calledAs),
+            "sp_help_fulltext_columns" => InvokeSpHelpFullTextColumns(batch, calledAs),
+            "sp_help_fulltext_system_components" => InvokeSpHelpFullTextSystemComponents(batch, calledAs),
+            "sp_help_fulltext_tables" => InvokeSpHelpFullTextTables(batch, calledAs),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
             "sp_getbindtoken" => InvokeSpGetBindToken(batch, returnCodeVar),
             "sp_help" => Uncounted(InvokeSpHelp(batch, CalledName(procName))),

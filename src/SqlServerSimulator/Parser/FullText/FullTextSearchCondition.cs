@@ -92,6 +92,9 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
             if (stoplist && language.IsNoise(term.Text))
             {
                 sawStopword = true;
+                // A noise word the lexicon inflects still reaches its forms.
+                if (language.EnglishMorphology && FullTextLexicon.HasIrregularForms(term.Text) && seen.Add(term.Text))
+                    alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: true));
                 continue;
             }
             if (seen.Add(term.Text))
@@ -363,6 +366,14 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     // matches nothing; a longer one (`of`) has no forms and
                     // stays out.
                     elements.Add(new FullTextElement(offset, [.. FullTextLexicon.InflectionalForms(singleCharacter)], prefix: false, wildcard: false));
+                    continue;
+                }
+                // So does one the lexicon inflects (`see` → `saw`, `seen`):
+                // the word itself never reaches the index, so its stem finds
+                // just its forms.
+                if (morphological && all.Find(FullTextLexicon.HasIrregularForms) is { } inflected)
+                {
+                    elements.Add(new FullTextElement(offset, [inflected], prefix: false, wildcard: false));
                     continue;
                 }
                 elements.Add(new FullTextElement(offset, [], prefix: false, wildcard: true));

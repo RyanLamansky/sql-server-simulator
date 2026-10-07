@@ -102,5 +102,6 @@ The text stops at the repeated exception-type line, before the stack frames real
 `.Read` / `.Write` raise `NotSupportedException` if encountered.
 
 **Not modeled yet**: a written string converted into a `hierarchyid` column of a permanent table (`INSERT t (h) SELECT 'bad'`) fails at state 1 on real, which folds the written constant as the batch compiles, as a spatial or CLR type's `Parse` does ([`clr-assemblies.md`](clr-assemblies.md)); it is state 2 here (probed 2026-10-06 against SQL Server 2025).
+A `hierarchyid` column's member in an `UPDATE`'s SET list (`SET n.Foo = 1`) is Msg 4104 here, where real reads it as the CLR type's member and reports Msg 6592 for a name the type lacks, as it does for a spatial column's (probed 2026-10-06 against SQL Server 2025).
 
 The conversion from bytes refuses one ending in a zero byte (`0x00`, `0x0000`, `0x5800`) with that 24000 failure — a variable, a column write, `DATALENGTH` alike — and `TRY_CAST` answers NULL; other malformed bytes (`0xFF`, `0x01`) pass the conversion and fail when a method or the client decodes them (probed 2026-10-06 against SQL Server 2025).

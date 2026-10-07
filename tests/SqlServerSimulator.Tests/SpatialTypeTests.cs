@@ -165,17 +165,14 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void CreateView_WithUnmodeledSpatialMethod_Succeeds_FailsAtExecute()
+    public void CreateView_WithGmlMethod_Evaluates()
     {
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create table dbo.loc (id int, g geography)",
             "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
-            "create view dbo.v_hull as select id, g.AsGml() as hull from dbo.loc");
-        // View created successfully — the spatial method call parsed cleanly.
-        AreEqual("v_hull", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_hull')"));
-        // ...but execute fails, since GML has no evaluation.
-        _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select hull from dbo.v_hull"));
+            "create view dbo.v_gml as select id, g.AsGml() as gml from dbo.loc");
+        AreEqual("<Point xmlns=\"http://www.opengis.net/gml\"><pos>0 0</pos></Point>", sim.ExecuteScalar("select cast(gml as nvarchar(max)) from dbo.v_gml"));
     }
 
     [TestMethod]
@@ -243,14 +240,9 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void SysSpatialReferenceSystems_EmptyByDefault()
-        => AreEqual(0, new Simulation().ExecuteScalar("select count(*) from sys.spatial_reference_systems"));
-
-    [TestMethod]
     public void SysSpatialReferenceSystems_ColumnsAreReachable()
     {
         var sim = new Simulation();
-        // Column shape probe: SELECT should succeed even with no rows.
         _ = sim.ExecuteScalar("select count(spatial_reference_id) + count(authority_name) + count(well_known_text) from sys.spatial_reference_systems");
     }
 

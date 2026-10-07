@@ -9,6 +9,30 @@ namespace SqlServerSimulator;
 // reads in IntelliSense.
 partial class SimulatedSqlException
 {
+    /// <summary>Mimics SQL Server's Msg 15601: an <c>sp_help_fulltext_*</c> procedure in a database <c>sp_fulltext_database</c> disabled.</summary>
+    internal static SimulatedSqlException FullTextNotEnabledForDatabase() =>
+        new("Full-Text Search is not enabled for the current database. Use sp_fulltext_database to enable Full-Text Search. "
+            + "The functionality to disable and enable full-text search for a database is deprecated. Please change your application.", 15601, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 9966: <c>sp_fulltext_database</c> in master, tempdb or model.</summary>
+    internal static SimulatedSqlException FullTextInSystemDatabase() =>
+        new("Cannot use full-text search in master, tempdb, or model database.", 9966, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 15104: <c>sp_help_fulltext_columns</c> naming a column its table lacks.</summary>
+    internal static SimulatedSqlException NoTableWithColumn(string tableName, string columnName) =>
+        new($"You do not own a table named '{tableName}' that has a column named '{columnName}'.", 15104, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 15218: a full-text help procedure naming a view.</summary>
+    internal static SimulatedSqlException ObjectIsNotATable(string objectName) =>
+        new($"Object '{objectName}' is not a table.", 15218, 16, 1);
+
+    /// <summary>
+    /// The Msg 50000 <c>sys.sp_fulltext_rethrow_error</c> raises for <c>sp_fulltext_load_thesaurus_file</c>'s
+    /// error 30050, quoting it whole: an LCID with no thesaurus file, NULL included (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ThesaurusNotLoaded(string lcid) =>
+        new($"Error 30050, Level 16, State 1, Procedure sys.sp_fulltext_load_thesaurus_file, Line 41, Message: Both the thesaurus file for lcid '{lcid}' and the global thesaurus could not be loaded.", 50000, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server's Msg 7601 — the table (or view) named by the
     /// predicate carries no full-text index at all, named as the FROM clause

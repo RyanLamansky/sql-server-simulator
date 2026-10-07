@@ -611,12 +611,16 @@ internal sealed partial class Database
     /// Per-database full-text catalogs. Populated by
     /// <c>CREATE FULLTEXT CATALOG</c>; drained by
     /// <c>DROP FULLTEXT CATALOG</c>; surfaced by
-    /// <c>sys.fulltext_catalogs</c>. The simulator has no full-text search
-    /// engine; this dict exists for AW model.xml round-trip + catalog-view
-    /// visibility — query-time CONTAINS / FREETEXT predicates raise
-    /// <see cref="NotSupportedException"/> rather than evaluate.
+    /// <c>sys.fulltext_catalogs</c>.
     /// </summary>
     public readonly ConcurrentDictionary<string, FullTextCatalog> FullTextCatalogs;
+
+    /// <summary>
+    /// Set by <c>sp_fulltext_database 'disable'</c>, cleared by <c>'enable'</c>: the database then reports
+    /// <c>is_fulltext_enabled</c> 0 and the <c>sp_help_fulltext_*</c> procedures refuse it (Msg 15601), while its
+    /// catalogs, indexes and searches carry on (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public bool FullTextDisabled;
 
     private int nextFullTextCatalogId;
 

@@ -210,6 +210,17 @@ partial class Simulation
                 break;
             }
 
+            // A spatial column's member: `SET loc.STSrid = …` re-stamps the
+            // value, and anything else is refused as it compiles.
+            if (setTarget.Count == 2 && !Selection.QualifierIsDmlTarget(context.CurrentDatabase, leadingIdent, setTarget)
+                && SpatialSetTargetType(context, leadingIdent, leadingView, setTarget[0]) is { } spatialColumnType)
+            {
+                rawAssignments.Add((setTarget[0], ParseSpatialMutation(context, new Reference(leadingIdent.WithAddedPart(setTarget[0])), setTarget[0], spatialColumnType, columnName)));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
+
             // A CLR user-defined type column's property, field or mutator
             // method: `SET col.X = …` or `SET col.Mutate(…)`.
             if (setTarget.Count == 2 && context.Token is Operator { Character: '(' or '=' }
@@ -496,6 +507,75 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The spatial type of the SET list's target column <paramref name="columnName"/>: a view
+    /// target's own column, or else through the resolver the list's values bind with — the target
+    /// table's, or the pre-read FROM clause's for the alias form; null for any other column or none.
+    /// </summary>
+    private static SpatialSqlType? SpatialSetTargetType(ParserContext context, MultiPartName leadingIdent, View? leadingView, string columnName)
+    {
+        if (leadingView is not null)
+        {
+            var collation = context.CurrentDatabase.Collation;
+            return Array.Find(ViewColumnsFor(context.Batch, leadingView, leadingIdent), column => collation.Equals(column.Name, columnName))?.Type as SpatialSqlType;
+        }
+        if (context.OuterTypeResolver is not { } resolve)
+            return null;
+        try
+        {
+            return resolve(new MultiPartName(columnName)) as SpatialSqlType;
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Parses a SET clause naming a member of the spatial column <paramref name="receiverName"/>,
+    /// entered on the token after the member's name. Only <c>STSrid</c> takes an assignment, plain
+    /// or compound; real refuses every other property (Msg 6595), a name the type lacks (Msg 6592),
+    /// and any method call, none of which is a mutator (Msg 6201, or Msg 6506 for a name that is no
+    /// method), all while the batch compiles — after a syntax error later in the clause (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static SpatialSridMutation ParseSpatialMutation(ParserContext context, Reference receiver, string receiverName, SpatialSqlType type, string memberName)
+    {
+        if (context.Token is Operator { Character: '(' })
+        {
+            if (context.GetNextRequired() is not Operator { Character: ')' })
+            {
+                _ = Expression.Parse(context);
+                while (context.Token is Operator { Character: ',' })
+                {
+                    context.MoveNextRequired();
+                    _ = Expression.Parse(context);
+                }
+                if (context.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            context.MoveNextOptional();
+            if (TryConsumeAssignmentOperator(context) is not null)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            throw SpatialMethodCall.IsMethodOf(memberName, type.IsGeography)
+                ? SimulatedSqlException.ClrNotMutator(memberName, type.ClrTypeName, "Microsoft.SqlServer.Types")
+                : SimulatedSqlException.ClrMethodNotFound(memberName, type.ClrTypeName, "Microsoft.SqlServer.Types", state: 10);
+        }
+
+        if (TryConsumeAssignmentOperator(context) is not char assignOp)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var rhs = Expression.Parse(context);
+        if (!memberName.Equals("STSrid", StringComparison.Ordinal))
+        {
+            throw SpatialMethodCall.IsPropertyOf(memberName, type.IsGeography)
+                ? SimulatedSqlException.ClrPropertyReadOnly(memberName, type.ClrTypeName)
+                : SimulatedSqlException.ClrPropertyNotFound(memberName, type.ClrTypeName);
+        }
+        var srid = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, SpatialMethodCall.Property(receiver, memberName), rhs, context);
+        return new SpatialSridMutation(receiver, receiverName, type, srid);
+    }
+
+    /// <summary>
     /// Whether <c>col.modify(…)</c> is the <c>json</c> type's mutator rather
     /// than xml's: the column's own type says so where the target is known.
     /// The alias form names its target only in the FROM clause, which parses
@@ -730,8 +810,14 @@ partial class Simulation
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
+        // A row-count TOP stops the walk once it has its rows, so a SET value
+        // only a later row would raise never runs (probed 2026-10-06 against
+        // SQL Server 2025: `UPDATE TOP (1) t SET g.STSrid = 55` past a NULL g).
+        var rowCap = top is { Percent: false } countLimit && !readsNoRow ? Selection.ResolveDmlTopCap(countLimit, int.MaxValue, context.Batch) : int.MaxValue;
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
+            if (affected.Count >= rowCap)
+                break;
             context.Batch.PollCancellation();
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
             // cursor is sitting on, identified by its stable heap address.

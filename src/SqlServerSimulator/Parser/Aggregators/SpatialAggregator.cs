@@ -123,7 +123,7 @@ internal sealed class SpatialAggregator(SpatialAggregateMethod method, SpatialSq
 
     private static readonly double MinimumCapRadius = Math.Sqrt(3) * 1e-9;
 
-    private const double PolarCurvatureRadius = SpatialEllipsoid.SemiMajor * SpatialEllipsoid.SemiMajor / SpatialEllipsoid.SemiMinor;
+    private static double PolarCurvatureRadius => SpatialEllipsoid.SemiMajor * SpatialEllipsoid.SemiMajor / SpatialEllipsoid.SemiMinor;
 
     private SpatialShape All() => SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. this.members]);
 }

@@ -827,10 +827,10 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public readonly List<FromSource[]> EnclosingScopes = [];
 
     /// <summary>
-    /// The columns a <c>CREATE TABLE</c> list has declared so far, by name,
-    /// while the list parses and the host enabled CLR — how a computed column
-    /// or a CHECK tells a CLR type column's member (<c>p.X</c>) from a
-    /// two-part column name, with no query scope to ask.
+    /// The columns a <c>CREATE TABLE</c> list has declared so far, or an
+    /// <c>ALTER TABLE … ADD</c> target's, by name, while the list parses — how a computed column
+    /// or a CHECK tells a CLR type column's member (<c>p.X</c>) or a spatial column's
+    /// property (<c>loc.Lat</c>) from a two-part column name, with no query scope to ask.
     /// </summary>
     public Func<MultiPartName, SqlType?>? DeclaredColumnTypes;
 

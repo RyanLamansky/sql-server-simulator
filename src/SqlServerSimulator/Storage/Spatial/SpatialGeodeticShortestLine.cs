@@ -110,7 +110,7 @@ internal static class SpatialGeodeticShortestLine
     }
 
     /// <summary>The ellipsoid's smallest radius of curvature, the meridian's at the equator, less a margin.</summary>
-    private const double TightestRadius = SpatialEllipsoid.SemiMinor * SpatialEllipsoid.SemiMinor / SpatialEllipsoid.SemiMajor * 0.9;
+    private static double TightestRadius => SpatialEllipsoid.SemiMinor * SpatialEllipsoid.SemiMinor / SpatialEllipsoid.SemiMajor * 0.9;
 
     private static void Collect(SpatialShape shape, List<Piece> pieces, Dictionary<(double, double, double), SpatialCoordinate> vertices)
     {

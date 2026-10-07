@@ -311,6 +311,7 @@ partial class Simulation
         using (context.EnterNextValueForScope(NextValueForScope.Nested))
         using (ParserScope.Enter(ref context.InScalarDefinition, true))
         using (ParserScope.Enter(ref context.AggregateCollector, checkAggregates))
+        using (ParserScope.Enter(ref context.DeclaredColumnTypes, context.Batch.TryResolveTable(tableName, out var declaringTable) ? DeclaredColumnTypesOf(context, declaringTable.Columns, null) : null))
         {
             predicate = BooleanExpression.Parse(context);
         }

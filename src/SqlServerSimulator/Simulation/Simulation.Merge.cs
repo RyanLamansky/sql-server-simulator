@@ -1244,6 +1244,14 @@ partial class Simulation
                     columnName = setTarget[0];
                     rhs = JsonModify.ParseMethod(context, new Reference(new MultiPartName(targetAlias).WithAddedPart(columnName)), columnName);
                 }
+                else if (setTarget.Count == 2 && sourceView is null
+                    && !context.Batch.CurrentDatabase.Collation.Equals(setTarget[0], targetAlias)
+                    && Array.Find(destinationTable.Columns, c => context.Batch.CurrentDatabase.Collation.Equals(c.Name, setTarget[0])) is { Type: SpatialSqlType spatialType })
+                {
+                    // A spatial column's `col.STSrid = …`, as in an UPDATE.
+                    columnName = setTarget[0];
+                    rhs = ParseSpatialMutation(context, new Reference(new MultiPartName(targetAlias).WithAddedPart(columnName)), columnName, spatialType, setTarget.Leaf);
+                }
                 else
                 {
                     if (context.Token is not Operator { Character: '=' })
@@ -1395,6 +1403,15 @@ partial class Simulation
             }
             throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
+
+        // A spatial column's property (`inserted.loc.STSrid`) tells itself
+        // apart from a three-part column name by the pseudo-tables' types.
+        var collation = context.Batch.CurrentDatabase.Collation;
+        using var pseudoColumns = ParserScope.Enter(ref context.OuterTypeResolver, name =>
+            name.Count == 2 && BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED")
+                && Array.Find(targetColumns, column => collation.Equals(column.Name, name.Leaf)) is { } column
+                ? column.Type
+                : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString()));
 
         do
         {

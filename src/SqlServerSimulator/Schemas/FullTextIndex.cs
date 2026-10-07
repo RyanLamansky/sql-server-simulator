@@ -10,12 +10,6 @@ namespace SqlServerSimulator.Schemas;
 /// <c>CREATE FULLTEXT INDEX ON table (col [LANGUAGE n][, ...]) KEY INDEX
 /// unique_index_name [ON catalog]</c>.
 /// </summary>
-/// <remarks>
-/// Like <see cref="FullTextCatalog"/>, this exists for catalog-view
-/// round-trip + AW model.xml load. The simulator never indexes column
-/// values for text search; CONTAINS / FREETEXT / CONTAINSTABLE /
-/// FREETEXTTABLE all raise <see cref="NotSupportedException"/>.
-/// </remarks>
 internal sealed class FullTextIndex(
     int catalogId,
     string keyIndexName,

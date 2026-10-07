@@ -98,7 +98,7 @@ internal static class FullTextLexicon
     /// </summary>
     private static readonly string[][] IrregularForms =
     [
-        ["be", "am", "is", "are", "was", "were", "been", "being"],
+        ["be", "am", "is", "are", "was", "were", "been", "being", "aren't", "isn't", "wasn't", "weren't"],
         ["begin", "began", "begun", "beginning", "begins"],
         ["break", "broke", "broken", "breaking", "breaks"],
         ["bring", "brought", "bringing", "brings"],
@@ -108,7 +108,7 @@ internal static class FullTextLexicon
         ["child", "children"],
         ["choose", "chose", "chosen", "choosing", "chooses"],
         ["come", "came", "coming", "comes"],
-        ["do", "does", "did", "done", "doing"],
+        ["do", "does", "did", "done", "doing", "didn't", "doesn't", "don't"],
         ["draw", "drew", "drawn", "drawing", "draws"],
         ["drive", "drove", "driven", "driving", "drives"],
         ["eat", "ate", "eaten", "eating", "eats"],
@@ -122,7 +122,7 @@ internal static class FullTextLexicon
         ["go", "went", "gone", "going", "goes"],
         ["goose", "geese"],
         ["grow", "grew", "grown", "growing", "grows"],
-        ["have", "has", "had", "having"],
+        ["have", "has", "had", "having", "hadn't", "hasn't", "haven't"],
         ["hear", "heard", "hearing", "hears"],
         ["hold", "held", "holding", "holds"],
         ["keep", "kept", "keeping", "keeps"],
@@ -163,6 +163,7 @@ internal static class FullTextLexicon
         ["analysis", "analyses"],
         ["appendix", "appendices"],
         ["axis", "axes"],
+        ["ax", "axe", "axes", "axed", "axing"],
         ["basis", "bases"],
         ["bus", "buses", "bused", "busing", "busses"],
         ["calf", "calves"],
@@ -190,40 +191,169 @@ internal static class FullTextLexicon
     ];
 
     /// <summary>
-    /// Every irregular surface form mapped to its lemma, so both the query term
-    /// and the indexed term reduce to the same key.
+    /// The irregular surface forms that are lemmas of their own as well, each
+    /// mapped to that lemma, whose expansion real's lexicon unions with their
+    /// irregular one: <c>saw</c> reaches <c>see</c> and <c>sawing</c>,
+    /// <c>lives</c> both <c>life</c> and <c>living</c>, <c>building</c> both
+    /// <c>build</c> and <c>buildings</c> — probe-anchored against
+    /// <c>sys.dm_fts_parser</c> on SQL Server 2025 (2026-10-06), each listing
+    /// its own plural, past or gerund. An inflection of one reaches that
+    /// lemma alone, so <c>buildings</c> doesn't reach <c>build</c>.
     /// </summary>
-    private static readonly FrozenDictionary<string, string> IrregularLemmas = BuildIrregularLemmas();
-
-    private static FrozenDictionary<string, string> BuildIrregularLemmas()
+    private static readonly FrozenDictionary<string, string> SelfLemmas = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        ["am"] = "am",
+        ["analyses"] = "analyse",
+        ["are"] = "are",
+        ["bases"] = "base",
+        ["beginning"] = "beginning",
+        ["being"] = "being",
+        ["breaking"] = "breaking",
+        ["building"] = "building",
+        ["calves"] = "calve",
+        ["chose"] = "chose",
+        ["coming"] = "coming",
+        ["diagnoses"] = "diagnose",
+        ["doing"] = "doing",
+        ["drawing"] = "drawing",
+        ["drove"] = "drove",
+        ["falling"] = "falling",
+        ["feeling"] = "feeling",
+        ["fell"] = "fell",
+        ["felt"] = "felt",
+        ["finding"] = "finding",
+        ["found"] = "found",
+        ["given"] = "given",
+        ["going"] = "going",
+        ["halves"] = "halve",
+        ["hearing"] = "hearing",
+        ["holding"] = "holding",
+        ["keeping"] = "keeping",
+        ["known"] = "known",
+        ["leaving"] = "leaving",
+        ["left"] = "left",
+        ["lives"] = "live",
+        ["making"] = "making",
+        ["meaning"] = "meaning",
+        ["meeting"] = "meeting",
+        ["met"] = "met",
+        ["people"] = "people",
+        ["ran"] = "ran",
+        ["reading"] = "reading",
+        ["sat"] = "sat",
+        ["saw"] = "saw",
+        ["saying"] = "saying",
+        ["shelves"] = "shelve",
+        ["singing"] = "singing",
+        ["sitting"] = "sitting",
+        ["spoke"] = "spoke",
+        ["standing"] = "standing",
+        ["taking"] = "taking",
+        ["teaching"] = "teaching",
+        ["thieves"] = "thieve",
+        ["thought"] = "thought",
+        ["understanding"] = "understanding",
+        ["winning"] = "winning",
+        ["writing"] = "writing",
+    }.ToFrozenDictionary(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The accented spellings real's English lexicon files under their plain
+    /// lemma, so an inflectional search for either reaches the other and
+    /// their inflections on an accent-sensitive catalog — <c>cafe</c> finds
+    /// <c>café</c> and <c>cafés</c>, where <c>resume</c> doesn't find
+    /// <c>résumé</c> (probed 2026-10-06 against SQL Server 2025, each pair
+    /// confirmed by search).
+    /// </summary>
+    private static readonly FrozenDictionary<string, string> AccentedLemmas = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["café"] = "cafe",
+        ["château"] = "chateau",
+        ["crêpe"] = "crepe",
+        ["début"] = "debut",
+        ["décor"] = "decor",
+        ["dénouement"] = "denouement",
+        ["détente"] = "detente",
+        ["divorcée"] = "divorcee",
+        ["éclair"] = "eclair",
+        ["élite"] = "elite",
+        ["entrée"] = "entree",
+        ["exposé"] = "expose",
+        ["façade"] = "facade",
+        ["fête"] = "fete",
+        ["jalapeño"] = "jalapeno",
+        ["matinée"] = "matinee",
+        ["naïve"] = "naive",
+        ["plié"] = "plie",
+        ["précis"] = "precis",
+        ["première"] = "premiere",
+        ["purée"] = "puree",
+        ["régime"] = "regime",
+        ["soirée"] = "soiree",
+        ["vicuña"] = "vicuna",
+    }.ToFrozenDictionary(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Every irregular surface form mapped to its lemma, so both the query term
+    /// and the indexed term reduce to the same key — to both lemmas for a form
+    /// two rows share (<c>leaves</c>: <c>leave</c> and <c>leaf</c>).
+    /// </summary>
+    private static readonly FrozenDictionary<string, (string Primary, string? Secondary)> IrregularLemmas = BuildIrregularLemmas();
+
+    private static FrozenDictionary<string, (string Primary, string? Secondary)> BuildIrregularLemmas()
+    {
+        var map = new Dictionary<string, (string Primary, string? Secondary)>(StringComparer.Ordinal);
         foreach (var row in IrregularForms)
         {
             foreach (var form in row)
-                map[form] = row[0];
+                map[form] = map.TryGetValue(form, out var earlier) && earlier.Primary != row[0] ? (earlier.Primary, row[0]) : (row[0], null);
         }
         return map.ToFrozenDictionary(StringComparer.Ordinal);
     }
 
     /// <summary>
-    /// Reduces a term to the key an inflectional match compares on: the
-    /// irregular lemma when the term has one, otherwise the term with its
-    /// possessive and one regular suffix removed. Both sides of a
-    /// <c>FREETEXT</c> / <c>FORMSOF(INFLECTIONAL, …)</c> comparison stem through
-    /// this, so <c>running</c> and <c>ran</c> both reach <c>run</c> and
-    /// <c>mice</c> reaches <c>mouse</c>.
+    /// The key an inflectional match compares on — see <see cref="Stems"/>,
+    /// whose primary key this is.
     /// </summary>
-    public static string Stem(string term)
+    public static string Stem(string term) => Stems(term).Primary;
+
+    /// <summary>
+    /// Reduces a term to the keys an inflectional match compares on: the
+    /// irregular lemma when the term has one (two for a form two lemmas share,
+    /// or for a form that is a lemma of its own as well), otherwise the term
+    /// with its possessive and one regular suffix removed, an accented
+    /// spelling the lexicon knows folded to its plain lemma. Both sides of a
+    /// <c>FREETEXT</c> / <c>FORMSOF(INFLECTIONAL, …)</c> comparison stem
+    /// through this and match when a key is shared, so <c>running</c> and
+    /// <c>ran</c> both reach <c>run</c>, <c>mice</c> reaches <c>mouse</c>, and
+    /// <c>saw</c> reaches <c>see</c> and <c>sawing</c> while those two don't
+    /// reach each other.
+    /// </summary>
+    public static (string Primary, string? Secondary) Stems(string term)
     {
         var word = StripPossessive(term);
-        if (IrregularLemmas.TryGetValue(word, out var lemma))
-            return lemma;
+        if (IrregularLemmas.TryGetValue(word, out var lemmas))
+            return lemmas.Secondary is null && SelfLemmas.TryGetValue(word, out var own) ? (lemmas.Primary, own) : lemmas;
+        if (AccentedLemmas.TryGetValue(word, out var plain))
+            return (plain, null);
+        if (SibilantStems.Contains(word))
+            return (word, null);
         var reduced = StripRegularSuffix(word);
         // A regular strip can land on an irregular surface form
-        // (`children` → `children`, but `leaves` → `leave`), so ask again.
-        return IrregularLemmas.TryGetValue(reduced, out var reducedLemma) ? reducedLemma : reduced;
+        // (`children` → `children`, but `buildings` → `building`), so ask
+        // again — unless that form is a lemma of its own, whose inflection
+        // this is (`sawing` → `saw`, not `see`).
+        if (SelfLemmas.TryGetValue(reduced, out var reducedOwn))
+            return (reducedOwn, null);
+        return IrregularLemmas.TryGetValue(reduced, out var reducedLemmas) ? reducedLemmas
+            : AccentedLemmas.TryGetValue(reduced, out var reducedPlain) ? (reducedPlain, null)
+            : (reduced, null);
     }
+
+    /// <summary>Whether <paramref name="term"/> shares a key with <paramref name="key"/>'s.</summary>
+    private static bool SharesKey((string Primary, string? Secondary) term, (string Primary, string? Secondary) key) =>
+        term.Primary == key.Primary || term.Primary == key.Secondary
+        || (term.Secondary is not null && (term.Secondary == key.Primary || term.Secondary == key.Secondary));
 
     /// <summary>
     /// The inflectional forms <c>sys.dm_fts_parser</c> lists for a word under
@@ -242,8 +372,23 @@ internal static class FullTextLexicon
             if (!char.IsLetter(ch) && ch != '\'')
                 return [];
         }
-        var key = Stem(word);
+        var keys = Stems(word);
         var candidates = new SortedSet<string>(StringComparer.Ordinal);
+        AddCandidates(candidates, keys.Primary);
+        if (keys.Secondary is { } secondary)
+            AddCandidates(candidates, secondary);
+        List<string> forms = [];
+        foreach (var form in candidates)
+        {
+            if (form != word && SharesKey(Stems(form), keys))
+                forms.Add(form);
+        }
+        return forms;
+    }
+
+    /// <summary>The forms one key's paradigm offers: its irregular row, or the regular plural, past and gerund, with the two possessives.</summary>
+    private static void AddCandidates(SortedSet<string> candidates, string key)
+    {
         var irregular = false;
         foreach (var row in IrregularForms)
         {
@@ -263,13 +408,6 @@ internal static class FullTextLexicon
         }
         _ = candidates.Add(key + "'s");
         _ = candidates.Add(Plural(key) + "'");
-        List<string> forms = [];
-        foreach (var form in candidates)
-        {
-            if (form != word && Stem(form) == key)
-                forms.Add(form);
-        }
-        return forms;
     }
 
     /// <summary>
@@ -279,7 +417,15 @@ internal static class FullTextLexicon
     /// <c>FORMSOF(INFLECTIONAL, "vitamin b complex")</c> finds nothing and
     /// <c>FORMSOF(INFLECTIONAL, "word of mouth")</c> finds the phrase.
     /// </summary>
-    public static bool ExpandsAsNoise(string term) => term.Length == 1 && char.IsLetter(term[0]);
+    public static bool ExpandsAsNoise(string term) => (term.Length == 1 && char.IsLetter(term[0])) || HasIrregularForms(term);
+
+    /// <summary>
+    /// True for a word the irregular table holds — a noise word such as
+    /// <c>see</c> or <c>is</c> that real's lexicon still expands, so a search
+    /// for it reaches its forms the stoplist keeps (<c>saw</c>, <c>seen</c>;
+    /// probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public static bool HasIrregularForms(string term) => IrregularLemmas.ContainsKey(StripPossessive(term));
 
     private static bool IsVowel(char ch) => ch is 'a' or 'e' or 'i' or 'o' or 'u';
 
@@ -349,5 +495,16 @@ internal static class FullTextLexicon
     private static string RestoreVerbStem(string stem) =>
         stem.Length > 2 && stem[^1] == stem[^2] && stem[^1] is not ('l' or 's' or 'f' or 'z') ? stem[..^1]
         : stem.Length > 2 && stem[^1] is 'v' or 'c' or 'g' or 'u' ? stem + "e"
+        : stem.Length > 1 && stem[^1] == 's' && stem[^2] != 's' && !SibilantStems.Contains(stem) ? stem + "e"
         : stem;
+
+    /// <summary>
+    /// The stems ending in a single <c>s</c> that take <c>-ed</c> / <c>-ing</c>
+    /// without a silent <c>e</c> (<c>focused</c>, <c>biased</c>), where real's
+    /// lexicon otherwise restores one — <c>based</c> → <c>base</c>,
+    /// <c>used</c> → <c>use</c>, <c>rinsed</c> → <c>rinse</c> (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> SibilantStems = FrozenSet.ToFrozenSet(
+        ["alias", "atlas", "bias", "bonus", "canvas", "census", "chorus", "focus"], StringComparer.Ordinal);
 }

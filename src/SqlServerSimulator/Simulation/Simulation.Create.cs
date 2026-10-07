@@ -2065,22 +2065,71 @@ partial class Simulation
         List<PendingEdgeConstraint>? pendingEdgeConstraints = null)
     {
         // A computed column or CHECK reading a CLR type column's member
-        // (`x AS p.X`, `CHECK (p.Y > 0)`) binds the member off the column's
-        // declared type, which only the list parsed so far knows.
+        // (`x AS p.X`, `CHECK (p.Y > 0)`) or a spatial column's property
+        // (`lat AS loc.Lat`) binds the member off the column's declared type:
+        // a CLR type's as far as the list has parsed, a spatial one's anywhere
+        // in it. A qualifier naming the table itself is the column reading.
         bool parsed;
-        if (!context.Simulation.EnableClr)
+        var collation = context.CurrentDatabase.Collation;
+        var spatialColumns = ScanSpatialColumns(context);
+        SqlType? DeclaredType(MultiPartName name)
         {
-            parsed = ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+            if (name.Count != 1 || collation.Equals(name.Leaf, tableName))
+                return null;
+            if (heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf)) is { } declared)
+                return declared.Type;
+            return spatialColumns?.Find(column => collation.Equals(column.Name, name.Leaf)).Type;
         }
-        else
-        {
-            var collation = context.CurrentDatabase.Collation;
-            using var declaredColumns = ParserScope.Enter(ref context.DeclaredColumnTypes, name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null);
+        using (ParserScope.Enter(ref context.DeclaredColumnTypes, DeclaredType))
             parsed = ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
-        }
         if (parsed && pendingIndexes is not null && pendingIndexes.Exists(static index => index.IsClustered))
             YieldClusteringToInlineIndex(tableName, pendingKeys);
         return parsed;
+    }
+
+    /// <summary>
+    /// The spatial columns a table list declares anywhere in it, read ahead of
+    /// the list: a computed column or CHECK may read the property of a column
+    /// declared after it (<c>lat AS loc.Lat, loc geography</c>), and an inline
+    /// CHECK its own column's (probed 2026-10-06 against SQL Server 2025).
+    /// Entered and left on the list's <c>(</c>; null when there are none.
+    /// </summary>
+    private static List<(string Name, SqlType? Type)>? ScanSpatialColumns(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        List<(string Name, SqlType? Type)>? found = null;
+        var depth = 0;
+        var elementStart = true;
+        while (context.GetNextOptional() is { } token)
+        {
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' } when depth == 0:
+                    context.RestoreCheckpoint(checkpoint);
+                    return found;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case Operator { Character: ',' } when depth == 0:
+                    elementStart = true;
+                    continue;
+                case Name column when depth == 0 && elementStart:
+                    var afterName = context.SaveCheckpoint();
+                    if (context.GetNextOptional() is Name { Value: var typeName } && BuiltInToken.Equals(typeName, "GEOGRAPHY"))
+                        (found ??= []).Add((column.Value, SqlType.Geography));
+                    else if (context.Token is Name { Value: var otherName } && BuiltInToken.Equals(otherName, "GEOMETRY"))
+                        (found ??= []).Add((column.Value, SqlType.Geometry));
+                    else
+                        context.RestoreCheckpoint(afterName);
+                    break;
+            }
+            elementStart = false;
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return found;
     }
 
     /// <summary>

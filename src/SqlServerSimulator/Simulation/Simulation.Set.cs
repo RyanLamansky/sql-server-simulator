@@ -1137,7 +1137,7 @@ partial class Simulation
             return false;
         if (!member.Value.Equals("STSrid", StringComparison.Ordinal))
         {
-            throw SpatialMethodCall.IsKnownMemberName(member.Value)
+            throw SpatialMethodCall.IsPropertyOf(member.Value, spatial.IsGeography)
                 ? SimulatedSqlException.ClrPropertyReadOnly(member.Value, spatial.ClrTypeName)
                 : SimulatedSqlException.ClrPropertyNotFound(member.Value, spatial.ClrTypeName);
         }

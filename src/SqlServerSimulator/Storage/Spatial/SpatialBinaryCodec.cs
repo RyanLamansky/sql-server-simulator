@@ -266,40 +266,40 @@ internal static class SpatialBinaryCodec
     }
 
     /// <summary>
-    /// Encodes an instance. The <c>isValid</c> property bit is always set: the
-    /// simulator has no topological validator to clear it with, which is the
-    /// one documented byte-level divergence from real (see
-    /// <c>docs/claude/spatial.md</c>).
+    /// Encodes an instance, setting the <c>isValid</c> property bit only when the instance is valid for its type.
     /// </summary>
     /// <remarks>
     /// Real writes version 2 exactly when version 1 can't say what the
     /// instance is: a curved member anywhere, or — for <c>geography</c> — an
     /// instance no cap below a hemisphere holds, which also sets the
-    /// larger-than-a-hemisphere property bit. Version 2 gives every figure its
+    /// larger-than-a-hemisphere property bit, or one that isn't valid, whose hemisphere bit stays clear.
+    /// Version 2 gives every figure its
     /// own type attribute in place of version 1's ring roles, and closes with
     /// the segment table when a composite figure needs one.
+    /// A single point or single segment keeps its shortcut form in either version (probed 2026-10-06 against SQL Server 2025).
     /// </remarks>
     public static byte[] Encode(SpatialGeometry geometry, bool isGeography)
     {
         var root = geometry.Root;
         var hasZ = root.AnyHasZ;
         var hasM = root.AnyHasM;
-        var larger = isGeography && SpatialEnvelope.IsLargerThanAHemisphere(root);
-        var version2 = larger || root.IsCurved;
-        var properties = (byte)(IsValid | (hasZ ? HasZ : 0) | (hasM ? HasM : 0) | (larger ? IsLargerThanAHemisphere : 0));
+        var valid = geometry.IsValidFor(isGeography);
+        var larger = isGeography && valid && SpatialEnvelope.IsLargerThanAHemisphere(root);
+        var version = RequiresVersion2(root, isGeography, valid, larger) ? (byte)2 : (byte)1;
+        var properties = (byte)((valid ? IsValid : 0) | (hasZ ? HasZ : 0) | (hasM ? HasM : 0) | (larger ? IsLargerThanAHemisphere : 0));
 
-        if (!version2 && root.SinglePoint is { } single)
-            return EncodeShortcut(geometry.Srid, (byte)(properties | IsSinglePoint), [single], hasZ, hasM, isGeography);
-        if (!version2 && root.Type == SpatialShapeType.LineString && root.Figures.Length == 1 && root.Figures[0].Length == 2)
-            return EncodeShortcut(geometry.Srid, (byte)(properties | IsSingleLineSegment), root.Figures[0], hasZ, hasM, isGeography);
+        if (root.SinglePoint is { } single)
+            return EncodeShortcut(geometry.Srid, version, (byte)(properties | IsSinglePoint), [single], hasZ, hasM, isGeography);
+        if (root.Type == SpatialShapeType.LineString && root.Figures.Length == 1 && root.Figures[0].Length == 2)
+            return EncodeShortcut(geometry.Srid, version, (byte)(properties | IsSingleLineSegment), root.Figures[0], hasZ, hasM, isGeography);
 
         var points = new List<SpatialCoordinate>();
         var figures = new List<(byte Attribute, int Start)>();
         var shapes = new List<(int Parent, int Figure, byte Type)>();
         var segments = new List<SpatialSegmentType>();
-        Flatten(root, parent: -1, version2, points, figures, shapes, segments);
+        Flatten(root, parent: -1, version == 2, points, figures, shapes, segments);
 
-        var writer = new SpatialByteWriter(geometry.Srid, version2 ? (byte)2 : (byte)1, properties);
+        var writer = new SpatialByteWriter(geometry.Srid, version, properties);
         writer.WriteInt32(points.Count);
         foreach (var point in points)
             writer.WritePair(point, isGeography);
@@ -335,9 +335,22 @@ internal static class SpatialBinaryCodec
         return writer.ToArray();
     }
 
-    private static byte[] EncodeShortcut(int srid, byte properties, SpatialCoordinate[] points, bool hasZ, bool hasM, bool isGeography)
+    /// <summary>
+    /// Whether real serializes the instance as version 2, which is also the 110 that
+    /// <c>MinDbCompatibilityLevel()</c> reports: see <see cref="Encode"/>.
+    /// </summary>
+    public static bool RequiresVersion2(SpatialGeometry geometry, bool isGeography)
     {
-        var writer = new SpatialByteWriter(srid, 1, properties);
+        var valid = geometry.IsValidFor(isGeography);
+        return RequiresVersion2(geometry.Root, isGeography, valid, isGeography && valid && SpatialEnvelope.IsLargerThanAHemisphere(geometry.Root));
+    }
+
+    private static bool RequiresVersion2(SpatialShape root, bool isGeography, bool valid, bool larger) =>
+        root.IsCurved || larger || (isGeography && !valid);
+
+    private static byte[] EncodeShortcut(int srid, byte version, byte properties, SpatialCoordinate[] points, bool hasZ, bool hasM, bool isGeography)
+    {
+        var writer = new SpatialByteWriter(srid, version, properties);
         foreach (var point in points)
         {
             writer.WritePair(point, isGeography);

@@ -1185,10 +1185,10 @@ internal static partial class BuiltInResources
     /// <summary>
     /// <c>is_fulltext_enabled</c> / <c>DATABASEPROPERTYEX(…, 'IsFulltextEnabled')</c>:
     /// on for every database but master, model and tempdb (probed 2026-09-30
-    /// against SQL Server 2025).
+    /// against SQL Server 2025) until <c>sp_fulltext_database 'disable'</c> turns it off.
     /// </summary>
     internal static bool ReportsFullTextEnabled(Database database) =>
-        !BuiltInToken.EqualsAny(database.Name, "master", "model", "tempdb");
+        !BuiltInToken.EqualsAny(database.Name, "master", "model", "tempdb") && !database.FullTextDisabled;
 
     /// <summary>
     /// Rows for <c>sys.databases</c>. One row per <see cref="Database"/>

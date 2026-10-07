@@ -545,7 +545,7 @@ internal sealed class ObjectProperty : Expression
         };
     }
 
-    private static int FullTextKeyColumnId(HeapTable? table, FullTextIndex? index)
+    internal static int FullTextKeyColumnId(HeapTable? table, FullTextIndex? index)
     {
         if (table is null || index is null)
             return 0;

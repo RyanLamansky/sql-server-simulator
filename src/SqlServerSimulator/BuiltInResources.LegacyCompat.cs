@@ -126,6 +126,14 @@ internal static partial class BuiltInResources
         // which build and run the CREATE TYPE / DROP TYPE statement.
         "sp_addtype",
         "sp_droptype",
+        // The full-text procedures: the deprecated sp_help_fulltext_* reports,
+        // the database switch and the thesaurus reload.
+        "sp_fulltext_database",
+        "sp_fulltext_load_thesaurus_file",
+        "sp_help_fulltext_catalogs",
+        "sp_help_fulltext_columns",
+        "sp_help_fulltext_system_components",
+        "sp_help_fulltext_tables",
         // sp_tableoption / sp_indexoption: the pre-ALTER spellings of a table's
         // storage options and an index's locking options.
         "sp_tableoption",

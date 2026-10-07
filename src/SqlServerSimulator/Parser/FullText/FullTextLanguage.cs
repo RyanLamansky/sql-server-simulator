@@ -83,7 +83,7 @@ internal sealed class FullTextLanguage
         var trimmed = name.Trim();
         if (int.TryParse(trimmed, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var lcid))
             return IsKnown(lcid) ? lcid : throw SimulatedSqlException.FullTextInvalidLocale();
-        foreach (var (known, knownName) in BuiltInResources.FullTextLanguages)
+        foreach (var (known, knownName, _, _) in BuiltInResources.FullTextLanguages)
         {
             if (string.Equals(knownName, trimmed, StringComparison.OrdinalIgnoreCase))
                 return known;
@@ -108,7 +108,7 @@ internal sealed class FullTextLanguage
     private static FrozenDictionary<int, FullTextLanguage> BuildLanguages()
     {
         var words = new Dictionary<int, HashSet<string>>();
-        foreach (var (lcid, _) in BuiltInResources.FullTextLanguages)
+        foreach (var (lcid, _, _, _) in BuiltInResources.FullTextLanguages)
             words[lcid] = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (lcid, stopword) in SystemStopwords)
         {

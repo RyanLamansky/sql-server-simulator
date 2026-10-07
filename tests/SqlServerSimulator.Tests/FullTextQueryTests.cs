@@ -355,6 +355,74 @@ public sealed class FullTextQueryTests
         CollectionAssert.AreEqual(expected, matched);
     }
 
+    [TestMethod]
+    // A form two lemmas share, or one that is a lemma of its own, reaches both
+    // paradigms, while an inflection of either stays with its own; a noise
+    // word (`see`, `be`) never enters the index but still reaches its forms
+    // (probed 2026-10-06 against SQL Server 2025).
+    [DataRow("saw", "saw,sawing,sawed,seen")]
+    [DataRow("see", "saw,seen")]
+    [DataRow("sawing", "saw,sawing,sawed")]
+    [DataRow("leaves", "left,leave,leaving,leaves,leaf,leafs")]
+    [DataRow("leaf", "leaves,leaf,leafs")]
+    [DataRow("left", "left,leave,leaving,leaves,lefts")]
+    [DataRow("lives", "lives,life,live,living,lived")]
+    [DataRow("found", "found,find,founded,finding")]
+    [DataRow("buildings", "buildings,building")]
+    [DataRow("build", "building,build")]
+    [DataRow("based", "bases,base,based")]
+    [DataRow("biased", "bias,biased")]
+    [DataRow("be", "isn't,am")]
+    [DataRow("axe", "axes,axe,ax")]
+    public void Inflectional_Expansion_Spans_Every_Lemma_A_Form_Belongs_To(string search, string expectedWords)
+    {
+        string[] corpus =
+        [
+            "saw", "see", "sawing", "sawed", "seen", "left", "leave", "leaving", "leaves", "leaf", "leafs", "lefts",
+            "lives", "life", "live", "living", "lived", "found", "find", "founded", "finding", "buildings", "building", "build",
+            "bases", "base", "basis", "based", "bias", "biased", "isn't", "am", "axes", "axe", "ax", "axis",
+        ];
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create fulltext catalog ftcat as default",
+            "create table dbo.w (id int not null constraint pk_w primary key, t nvarchar(100))",
+            $"insert into dbo.w values {string.Join(", ", corpus.Select(static (word, i) => $"({i + 1}, N'{word.Replace("'", "''")}')"))}",
+            "create fulltext index on dbo.w (t language 1033) key index pk_w on ftcat");
+        foreach (var predicate in new[] { $"freetext(t, '{search}')", $"contains(t, 'FORMSOF(INFLECTIONAL, {search})')" })
+        {
+            using var reader = sim.ExecuteReader($"select t from dbo.w where {predicate} order by id");
+            List<string> matched = [];
+            while (reader.Read())
+                matched.Add(reader.GetString(0));
+            List<string> expected = [.. expectedWords.Split(',')];
+            expected.Sort((left, right) => Array.IndexOf(corpus, left).CompareTo(Array.IndexOf(corpus, right)));
+            CollectionAssert.AreEqual(expected, matched, predicate);
+        }
+    }
+
+    [TestMethod]
+    // The lexicon files these accented spellings under their plain lemma, on
+    // an accent-sensitive catalog, but not résumé under resume.
+    [DataRow("cafe", "café,cafés,cafe")]
+    [DataRow("cafés", "café,cafés,cafe")]
+    [DataRow("naive", "naïve,naive")]
+    [DataRow("regime", "régime")]
+    [DataRow("resume", "resume")]
+    public void Inflectional_Expansion_Reaches_The_Lexicons_Accented_Spellings(string search, string expectedWords)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create fulltext catalog ftcat with accent_sensitivity = on as default",
+            "create table dbo.w (id int not null constraint pk_w primary key, t nvarchar(100))",
+            "insert into dbo.w values (1, N'café'), (2, N'cafés'), (3, N'cafe'), (4, N'naïve'), (5, N'naive'), (6, N'régime'), (7, N'résumé'), (8, N'resume')",
+            "create fulltext index on dbo.w (t language 1033) key index pk_w on ftcat");
+        using var reader = sim.ExecuteReader($"select t from dbo.w where freetext(t, N'{search}') order by id");
+        List<string> matched = [];
+        while (reader.Read())
+            matched.Add(reader.GetString(0));
+        Assert.AreEqual(expectedWords, string.Join(',', matched));
+    }
+
     // ---- CONTAINSTABLE / FREETEXTTABLE ------------------------------------
 
     private static List<(object Key, int Rank)> TableRows(Simulation sim, string source)
@@ -677,13 +745,31 @@ public sealed class FullTextQueryTests
             "insert into dbo.w values (1, N'alpha beta'), (2, N'beta gamma'), (3, N'the and of')",
             "create fulltext index on dbo.w (t language 1033) key index pk_w on ftcat");
         Assert.AreEqual(3, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'ItemCount')"));
-        // alpha / beta / gamma; row 3 holds only stopwords, which never enter the index.
-        Assert.AreEqual(3, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'UniqueKeyCount')"));
+        // alpha / beta / gamma and the index's END OF FILE key; row 3 holds only stopwords, which never enter the index.
+        Assert.AreEqual(4, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'UniqueKeyCount')"));
         Assert.AreEqual(1, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'AccentSensitivity')"));
         Assert.AreEqual(0, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'PopulateStatus')"));
         _ = sim.ExecuteNonQuery("insert into dbo.w values (4, N'delta')");
         Assert.AreEqual(4, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'ItemCount')"));
-        Assert.AreEqual(4, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'UniqueKeyCount')"));
+        Assert.AreEqual(5, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'UniqueKeyCount')"));
+    }
+
+    [TestMethod]
+    public void UniqueKeyCount_Sums_Each_Index_With_Its_End_Of_File_Key()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create fulltext catalog ftcat as default",
+            "create table dbo.a (id int not null constraint pk_a primary key, t nvarchar(100), u nvarchar(100))",
+            "create table dbo.b (id int not null constraint pk_b primary key, t nvarchar(100))",
+            "create table dbo.c (id int not null constraint pk_c primary key, t nvarchar(100))",
+            "insert into dbo.a values (1, N'hello', N'world'), (2, NULL, NULL)",
+            "insert into dbo.b values (1, N'hello')",
+            "create fulltext index on dbo.a (t, u) key index pk_a on ftcat",
+            "create fulltext index on dbo.b (t) key index pk_b on ftcat",
+            "create fulltext index on dbo.c (t) key index pk_c on ftcat");
+        // a: hello, world, END OF FILE; b: hello again, END OF FILE; c holds no row and so no key.
+        Assert.AreEqual(5, sim.ExecuteScalar<int>("select fulltextcatalogproperty('ftcat', 'UniqueKeyCount')"));
     }
 
     [TestMethod]

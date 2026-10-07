@@ -111,8 +111,8 @@ internal sealed class SpatialWktReader
             SpatialShapeType.LineString => SpatialShape.Leaf(type, [ReadLineStringBody()]),
             SpatialShapeType.Polygon => SpatialShape.Leaf(type, ReadPolygonBody()),
             SpatialShapeType.MultiPoint => SpatialShape.Collection(type, ReadMultiPointBody()),
-            SpatialShapeType.MultiLineString => SpatialShape.Collection(type, ReadRepeated(static r => SpatialShape.Leaf(SpatialShapeType.LineString, [r.ReadLineStringBody()]))),
-            SpatialShapeType.MultiPolygon => SpatialShape.Collection(type, ReadRepeated(static r => SpatialShape.Leaf(SpatialShapeType.Polygon, r.ReadPolygonBody()))),
+            SpatialShapeType.MultiLineString => SpatialShape.Collection(type, ReadRepeated(static r => r.ReadEmptyMember(SpatialShapeType.LineString) ?? SpatialShape.Leaf(SpatialShapeType.LineString, [r.ReadLineStringBody()]))),
+            SpatialShapeType.MultiPolygon => SpatialShape.Collection(type, ReadRepeated(static r => r.ReadEmptyMember(SpatialShapeType.Polygon) ?? SpatialShape.Leaf(SpatialShapeType.Polygon, r.ReadPolygonBody()))),
             SpatialShapeType.CircularString => SpatialShape.Curve(type, [ReadCircularStringBody()], [SpatialFigureType.Arc], [null]),
             SpatialShapeType.CompoundCurve => ReadCompoundCurveBody(),
             SpatialShapeType.CurvePolygon => ReadCurvePolygonBody(),
@@ -370,22 +370,34 @@ internal sealed class SpatialWktReader
     /// MULTIPOINT admits both <c>((0 0), (1 1))</c> and the bare
     /// <c>(0 0, 1 1)</c>. The first element fixes the form for the rest —
     /// real reports a missing <c>(</c> on a bare element that follows a
-    /// parenthesized one.
+    /// parenthesized one — with an <c>EMPTY</c> member fixing nothing
+    /// (<c>MULTIPOINT (EMPTY, 1 2)</c>; probed 2026-10-06 against SQL Server 2025).
     /// </summary>
     private SpatialShape[] ReadMultiPointBody()
     {
         ExpectLiteral("(");
-        SkipWhitespace();
-        var parenthesized = this.position < this.text.Length && this.text[this.position] == '(';
-        var members = new List<SpatialShape> { ReadMultiPointMember(parenthesized) };
+        bool? parenthesized = null;
+        var members = new List<SpatialShape> { ReadMultiPointMember(ref parenthesized) };
         while (TryConsumeSeparator())
-            members.Add(ReadMultiPointMember(parenthesized));
+            members.Add(ReadMultiPointMember(ref parenthesized));
         ExpectLiteral(")");
         return [.. members];
     }
 
-    private SpatialShape ReadMultiPointMember(bool parenthesized) =>
-        SpatialShape.Leaf(SpatialShapeType.Point, [parenthesized ? ReadParenthesizedPoint() : [ReadCoordinate()]]);
+    private SpatialShape ReadMultiPointMember(ref bool? parenthesized)
+    {
+        if (ReadEmptyMember(SpatialShapeType.Point) is { } empty)
+            return empty;
+        parenthesized ??= this.position < this.text.Length && this.text[this.position] == '(';
+        return SpatialShape.Leaf(SpatialShapeType.Point, [parenthesized.Value ? ReadParenthesizedPoint() : [ReadCoordinate()]]);
+    }
+
+    /// <summary>An unlabelled Multi* member written <c>EMPTY</c>, which real accepts anywhere in the list; null for any other member.</summary>
+    private SpatialShape? ReadEmptyMember(SpatialShapeType type)
+    {
+        SkipWhitespace();
+        return TryConsumeKeyword("EMPTY") ? SpatialShape.Empty(type) : null;
+    }
 
     private SpatialShape[] ReadRepeated(Func<SpatialWktReader, SpatialShape> readMember)
     {
@@ -408,49 +420,60 @@ internal sealed class SpatialWktReader
 
     private SpatialCoordinate ReadCoordinate()
     {
-        var x = ReadNumber() ?? throw SimulatedSqlException.SpatialUnexpectedEndOfInput(this.isGeography);
-        var y = ReadNumber() ?? throw SimulatedSqlException.SpatialUnexpectedEndOfInput(this.isGeography);
+        var x = ReadNumber(allowNull: false)!.Value;
+        var y = ReadNumber(allowNull: false)!.Value;
         if (this.isGeography && (y < -90 || y > 90))
             throw SimulatedSqlException.SpatialLatitudeOutOfRange();
-        var z = AtOrdinateBoundary() ? null : ReadNumber();
-        var m = AtOrdinateBoundary() ? null : ReadNumber();
+        var z = AtOrdinateBoundary() ? null : ReadNumber(allowNull: true);
+        var m = AtOrdinateBoundary() ? null : ReadNumber(allowNull: true);
         return new SpatialCoordinate(x, y, z, m);
     }
 
-    /// <summary>True when the next non-whitespace character ends the coordinate — no further ordinate follows.</summary>
+    /// <summary>
+    /// True when the next non-whitespace character ends the coordinate — no further ordinate follows.
+    /// A <c>(</c> doesn't: real reads it as the start of a malformed ordinate (<c>POINT(1 2 (3)</c> reports <c>(3</c>).
+    /// </summary>
     private bool AtOrdinateBoundary()
     {
         SkipWhitespace();
-        return this.position >= this.text.Length || this.text[this.position] is ',' or ')' or '(';
+        return this.position >= this.text.Length || this.text[this.position] is ',' or ')';
     }
 
     /// <summary>
     /// Reads one ordinate. A literal <c>NULL</c> yields no value, which is how
     /// WKT expresses a missing Z alongside a present M
-    /// (<c>POINT(1 2 NULL 4)</c>).
+    /// (<c>POINT(1 2 NULL 4)</c>); <paramref name="allowNull"/> is false for X and Y, where real reports it as no number.
     /// </summary>
-    private double? ReadNumber()
+    /// <remarks>
+    /// The token shape is real's (probed 2026-10-06 against SQL Server 2025): the first character is taken whatever it is
+    /// except a <c>)</c>, so a stray <c>,</c> or <c>(</c> leads the token (<c>POINT(1,2)</c> reports <c>,2</c>), and the token then runs to
+    /// whitespace, <c>,</c> or <c>)</c> — not to <c>(</c>, so <c>POINT(1(2 3)</c> reports <c>1(2</c>.
+    /// Msg 24141 names the position after the token, or the last character's when the token runs to the end of the input,
+    /// and the length of the input with an empty token when nothing remains.
+    /// </remarks>
+    private double? ReadNumber(bool allowNull)
     {
         SkipWhitespace();
         var start = this.position;
+        if (start >= this.text.Length)
+            throw SimulatedSqlException.SpatialNumberExpected(this.isGeography, start, "");
+        if (this.text[start] == ')')
+            throw SimulatedSqlException.SpatialNumberExpected(this.isGeography, start, ")");
+
+        this.position++;
         while (this.position < this.text.Length
-            && this.text[this.position] is not ('(' or ')' or ',')
+            && this.text[this.position] is not (')' or ',')
             && !char.IsWhiteSpace(this.text[this.position]))
         {
             this.position++;
         }
 
-        if (this.position == start)
-        {
-            if (start >= this.text.Length)
-                throw SimulatedSqlException.SpatialUnexpectedEndOfInput(this.isGeography);
-            throw SimulatedSqlException.SpatialNumberExpected(this.isGeography, start, this.text.Substring(start, 1));
-        }
-
         var token = this.text[start..this.position];
-        return token.Equals("NULL", StringComparison.OrdinalIgnoreCase) ? null
-            : double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value
-            : throw SimulatedSqlException.SpatialNumberExpected(this.isGeography, this.position, token);
+        if (allowNull && token.Equals("NULL", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value
+            : throw SimulatedSqlException.SpatialNumberExpected(
+                this.isGeography, this.position == this.text.Length ? this.position - 1 : this.position, token);
     }
 
     private void SkipWhitespace()

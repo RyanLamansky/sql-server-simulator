@@ -153,6 +153,59 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SpatialWkbNotValid(bool isGeography) => SpatialFailure(
         isGeography, SpatialFormat, 24115, "The well-known binary (WKB) input is not valid.");
 
+    // GeomFromGml's refusals (probed 2026-10-06 against SQL Server 2025).
+
+    /// <summary>24128 — GML input holding more than one top-level element.</summary>
+    internal static SimulatedSqlException SpatialGmlMultipleTopLevel(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24128, "The Geography Markup Language (GML) input must have a single top-level tag.");
+
+    /// <summary>24129 — a top-level GML element that names no shape, or one outside the GML namespace.</summary>
+    internal static SimulatedSqlException SpatialGmlTopLevelTag(bool isGeography, string tag) => SpatialFailure(
+        isGeography, SpatialFormat, 24129,
+        $"The given XML instance is not valid because the top-level tag is {tag}. The top-level element of the input Geographic Markup Language (GML) must contain a Point, LineString, Polygon, MultiPoint, MultiGeometry, MultiCurve, MultiSurface, Arc, ArcString, CompositeCurve, PolygonPatch or FullGlobe (geography Data Type only) object.");
+
+    /// <summary>GML input with no element at all, which real's reader reports with no 24xxx code.</summary>
+    internal static SimulatedSqlException SpatialGmlNoElement(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 0, "One of the identified items was in an invalid format.");
+
+    /// <summary>24130 — an attribute anywhere in GML input, namespace declarations aside.</summary>
+    internal static SimulatedSqlException SpatialGmlAttribute(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24130, "The given XML instance contains attributes. Attributes in Geography Markup Language (GML) input are not permitted.");
+
+    /// <summary>24131 — a GML <c>pos</c> holding other than two coordinates.</summary>
+    internal static SimulatedSqlException SpatialGmlPosCount(bool isGeography, int count) => SpatialFailure(
+        isGeography, SpatialFormat, 24131,
+        $"The given pos element provides {count.ToString(CultureInfo.InvariantCulture)} coordinates. A pos element must contain exactly two coordinates.");
+
+    /// <summary>24132 — a GML <c>posList</c> holding an odd number of coordinates.</summary>
+    internal static SimulatedSqlException SpatialGmlPosListOdd(bool isGeography, int count) => SpatialFailure(
+        isGeography, SpatialFormat, 24132,
+        $"The posList element provided has {count.ToString(CultureInfo.InvariantCulture)} coordinates. The number of coordinates in a posList element must be an even number.");
+
+    /// <summary>24143 — a polygon ring's GML <c>posList</c> with no coordinates.</summary>
+    internal static SimulatedSqlException SpatialGmlPosListEmpty(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24143, "The posList element provided is empty.");
+
+    /// <summary>24216 — a GML <c>Arc</c> of other than three points.</summary>
+    internal static SimulatedSqlException SpatialGmlArcPointCount(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24216, "The arc must contain exactly 3 points.");
+
+    /// <summary>24126 — an infinite or NaN coordinate, which GML's numbers can spell.</summary>
+    internal static SimulatedSqlException SpatialCoordinateNotFinite(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24126, "Point coordinates cannot be infinite or not a number (NaN).");
+
+    /// <summary>
+    /// The <c>System.Xml.XmlException</c> real's GML reader raises where the
+    /// input's structure departs from its grammar, in .NET Framework's words;
+    /// <paramref name="innerType"/> names the inner exception a conversion
+    /// failure wraps, which the trailing type line reports.
+    /// </summary>
+    internal static SimulatedSqlException SpatialGmlXml(bool isGeography, string message, string innerType = "System.Xml.XmlException") =>
+        new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{(isGeography ? "geography" : "geometry")}\": \r\n"
+            + $"System.Xml.XmlException: {message}\r\n"
+            + (innerType == "System.Xml.XmlException" ? string.Empty : $"{innerType}: \r\n")
+            + "System.Xml.XmlException: \r\n.", 6522, 16, 1);
+
     /// <summary>24212 — a <c>CIRCULARSTRING</c> with a single point.</summary>
     internal static SimulatedSqlException SpatialCircularStringTooFewPoints(bool isGeography) => SpatialFailure(
         isGeography, SpatialFormat, 24212,

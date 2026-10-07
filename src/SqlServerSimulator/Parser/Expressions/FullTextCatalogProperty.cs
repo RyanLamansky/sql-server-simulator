@@ -77,18 +77,25 @@ internal sealed class FullTextCatalogProperty : Expression
     }
 
     /// <summary>
-    /// Distinct terms across everything the catalog indexes — real's
-    /// <c>UniqueKeyCount</c>. Stopwords are excluded because they never enter
-    /// an index that applies the stoplist.
+    /// Real's <c>UniqueKeyCount</c>: each index's distinct terms across its
+    /// columns, plus the <c>END OF FILE</c> key an index with any row holds —
+    /// a row of NULLs included — summed over the catalog's indexes, so a term
+    /// two tables share counts twice (probed 2026-10-06 against SQL Server
+    /// 2025). Stopwords are excluded because they never enter an index that
+    /// applies the stoplist.
     /// </summary>
     private static int CountDistinctTerms(RuntimeContext runtime, Schemas.FullTextCatalog catalog)
     {
+        var count = 0;
         var terms = new HashSet<string>(StringComparer.Ordinal);
         foreach (var table in IndexedTables(runtime, catalog.Id))
         {
             var index = table.FullTextIndex!;
+            terms.Clear();
+            var endOfFile = 0;
             foreach (var bytes in table.Heap.EnumerateRows())
             {
+                endOfFile = 1;
                 foreach (var column in index.Columns)
                 {
                     var ordinal = column.ColumnId - 1;
@@ -108,8 +115,9 @@ internal sealed class FullTextCatalogProperty : Expression
                     }
                 }
             }
+            count += terms.Count + endOfFile;
         }
-        return terms.Count;
+        return count;
     }
 
     private static IEnumerable<HeapTable> IndexedTables(RuntimeContext runtime, int catalogId)

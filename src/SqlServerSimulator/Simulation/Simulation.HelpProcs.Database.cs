@@ -201,7 +201,7 @@ partial class Simulation
         Flag((switches & DatabaseSwitches.AutoCreateStatistics) != 0, "IsAutoCreateStatistics");
         Flag((switches & DatabaseSwitches.AutoUpdateStatistics) != 0, "IsAutoUpdateStatistics");
         Flag((switches & DatabaseSwitches.CursorCloseOnCommit) != 0, "IsCloseCursorsOnCommitEnabled");
-        Flag(true, "IsFullTextEnabled");
+        Flag(BuiltInResources.ReportsFullTextEnabled(database), "IsFullTextEnabled");
         Flag((switches & DatabaseSwitches.LocalCursorDefault) != 0, "IsLocalCursorsDefault");
         Flag((switches & DatabaseSwitches.ConcatNullYieldsNull) != 0, "IsNullConcat");
         Flag((switches & DatabaseSwitches.NumericRoundAbort) != 0, "IsNumericRoundAbortEnabled");

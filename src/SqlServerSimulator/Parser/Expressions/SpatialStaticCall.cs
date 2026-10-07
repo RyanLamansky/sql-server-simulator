@@ -81,7 +81,7 @@ internal sealed class SpatialStaticCall : Expression
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        if (RequiredArgumentCount(methodName) is null && !methodName.Equals("GeomFromGml", StringComparison.OrdinalIgnoreCase))
+        if (RequiredArgumentCount(methodName) is null)
         {
             // A name the type has no static method by is real's CLR
             // method-not-found (probed 2026-10-05 against SQL Server 2025).
@@ -110,6 +110,7 @@ internal sealed class SpatialStaticCall : Expression
     private static int? RequiredArgumentCount(string method) =>
         method.Equals("Parse", StringComparison.OrdinalIgnoreCase) ? 1
         : method.Equals("Point", StringComparison.OrdinalIgnoreCase) ? 3
+        : method.Equals("GeomFromGml", StringComparison.OrdinalIgnoreCase) ? 2
         : method.EndsWith("FromText", StringComparison.OrdinalIgnoreCase)
             || method.EndsWith("FromWKB", StringComparison.OrdinalIgnoreCase) ? 2
         : null;
@@ -142,6 +143,15 @@ internal sealed class SpatialStaticCall : Expression
             return SqlValue.FromSpatial(
                 SpatialWkb.Read(binary.Value.AsBytes, srid, isGeography, RequiredKind(this.method)?.Type),
                 isGeography);
+        }
+
+        if (this.method.Equals("GeomFromGml", StringComparison.Ordinal))
+        {
+            var gml = Argument(runtime, 0);
+            var srid = Srid(runtime, 1, isGeography);
+            return gml is null
+                ? SqlValue.Null(this.type)
+                : SqlValue.FromSpatial(SpatialGml.Read(gml.Value.CoerceTo(SqlType.Xml).AsString, srid, isGeography), isGeography);
         }
 
         if (this.method.Equals("Point", StringComparison.Ordinal) && this.arguments.Length == 3)

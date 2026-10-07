@@ -54,7 +54,10 @@ internal sealed class FullTextDocument
             if (stoplist is not null && stoplist.IsNoise(term.Text))
                 continue;
             Append(this.exactPositions, term.Text, position);
-            Append(this.stemPositions, FullTextLexicon.Stem(term.Text), position);
+            var (stem, secondStem) = FullTextLexicon.Stems(term.Text);
+            Append(this.stemPositions, stem, position);
+            if (secondStem is not null)
+                Append(this.stemPositions, secondStem, position);
         }
     }
 

@@ -43,7 +43,10 @@ internal static class SpatialValidator
     /// <c>LINESTRING(0 0, 4 4, 2 2)</c> is not (probed 2026-09-28 against SQL
     /// Server 2025).
     /// </summary>
-    public static bool IsValid(SpatialShape shape) => IsValidSnapped(Snap(shape, SpatialPrecisionGrid.Over(shape)));
+    public static bool IsValid(SpatialShape shape) => IsValidSnapped(Snapped(shape));
+
+    /// <summary>The shape on the precision grid <see cref="IsValid"/> judges it on.</summary>
+    public static SpatialShape Snapped(SpatialShape shape) => Snap(shape, SpatialPrecisionGrid.Over(shape));
 
     private static SpatialShape Snap(SpatialShape shape, SpatialPrecisionGrid grid)
     {
@@ -74,7 +77,7 @@ internal static class SpatialValidator
     /// invalid where one written from its lowest corner is not (probed
     /// 2026-09-28 against SQL Server 2025).
     /// </summary>
-    private static bool EndsOnRefusedRepeat(SpatialCoordinate[] figure)
+    public static bool EndsOnRefusedRepeat(SpatialCoordinate[] figure)
     {
         if (figure.Length < 2 || PlanarPoint.From(figure[^1]) != PlanarPoint.From(figure[^2]))
             return false;
@@ -223,21 +226,94 @@ internal static class SpatialValidator
                 continue;
             if (EndsOnRefusedRepeat(figure))
                 return false;
-            var ring = Collapse(figure);
-            // Fewer than four surviving vertices, or a shoelace sum of zero,
-            // means the ring bounds nothing.
-            if (ring.Length < 4 || SpatialTopology.SignedRingArea(ring) == 0)
+            var collapsed = Collapse(figure);
+            if (collapsed.Length < 4)
                 return false;
-            var segments = new List<PlanarSegment>();
-            for (var i = 1; i < ring.Length; i++)
-                segments.Add(new(ring[i - 1], ring[i]));
-            if (!RingIsSimple(segments))
-                return false;
-            rings.Add(ring);
-            ringSegments.Add(segments);
+            // The exterior ring may revisit its own vertices, as long as what
+            // it closes off there are holes (see Lobes).
+            var lobes = rings.Count == 0 ? Lobes(collapsed) : null;
+            foreach (var ring in lobes ?? [collapsed])
+            {
+                // Fewer than four surviving vertices, or a shoelace sum of zero,
+                // means the ring bounds nothing.
+                if (ring.Length < 4 || SpatialTopology.SignedRingArea(ring) == 0)
+                    return false;
+                var segments = new List<PlanarSegment>();
+                for (var i = 1; i < ring.Length; i++)
+                    segments.Add(new(ring[i - 1], ring[i]));
+                if (!RingIsSimple(segments))
+                    return false;
+                rings.Add(ring);
+                ringSegments.Add(segments);
+            }
         }
         return rings.Count == 0
             || (RingsStayApart(ringSegments) && HolesSitInsideShell(ringSegments) && InteriorStaysConnected(ringSegments));
+    }
+
+    /// <summary>
+    /// The exterior ring split at the vertices it revisits, its main lobe first
+    /// and the lobes it closes off after it — null for a ring that revisits
+    /// none, and the ring whole when a lobe turns the main one's way, which the
+    /// simple-ring rule then refuses.
+    /// </summary>
+    /// <remarks>
+    /// Real reads a lobe wound against the ring's main one as a hole that
+    /// happens to meet its shell, which the ordinary ring rules then judge, so
+    /// <c>POLYGON((5 0, 10 0, 10 10, 0 10, 0 0, 5 0, 3 3, 7 3, 5 0))</c> is
+    /// valid while the same ring with its inner lobe wound the same way is not
+    /// (probed 2026-10-06 against SQL Server 2025) — the split the round-earth
+    /// validator makes, where a ring's winding names its interior anyway.
+    /// </remarks>
+    private static List<PlanarPoint[]>? Lobes(PlanarPoint[] ring)
+    {
+        var lobes = new List<PlanarPoint[]>();
+        var path = new List<PlanarPoint>(ring.Length);
+        var at = new Dictionary<PlanarPoint, int>();
+        // The closing repeat is the walk's return to its start, not a revisit.
+        for (var i = 0; i < ring.Length - 1; i++)
+        {
+            var point = ring[i];
+            if (at.TryGetValue(point, out var start))
+            {
+                var lobe = new PlanarPoint[path.Count - start + 1];
+                path.CopyTo(start, lobe, 0, path.Count - start);
+                lobe[^1] = point;
+                lobes.Add(lobe);
+                for (var drop = start + 1; drop < path.Count; drop++)
+                    _ = at.Remove(path[drop]);
+                path.RemoveRange(start + 1, path.Count - start - 1);
+                continue;
+            }
+            at[point] = path.Count;
+            path.Add(point);
+        }
+        if (lobes.Count == 0)
+            return null;
+        var last = new PlanarPoint[path.Count + 1];
+        path.CopyTo(last);
+        last[^1] = path[0];
+        lobes.Add(last);
+
+        // The main lobe encloses the most area; every other one has to turn
+        // the other way to be a hole rather than a second lobe of the shell.
+        var main = lobes[0];
+        foreach (var lobe in lobes)
+        {
+            if (Math.Abs(SpatialTopology.SignedRingArea(lobe)) > Math.Abs(SpatialTopology.SignedRingArea(main)))
+                main = lobe;
+        }
+        var winding = Math.Sign(SpatialTopology.SignedRingArea(main));
+        var ordered = new List<PlanarPoint[]>(lobes.Count) { main };
+        foreach (var lobe in lobes)
+        {
+            if (lobe == main)
+                continue;
+            if (Math.Sign(SpatialTopology.SignedRingArea(lobe)) == winding)
+                return [ring];
+            ordered.Add(lobe);
+        }
+        return ordered;
     }
 
     /// <summary>Drops consecutive repeats, which real tolerates in a ring while treating the collapsed run as the real geometry.</summary>

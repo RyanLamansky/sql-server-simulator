@@ -86,7 +86,9 @@ partial class Simulation
         }
 
         /// <summary>Parses one column definition, leaving the cursor on the token after it.</summary>
-        public void ParseOne(ParserContext context) =>
+        public void ParseOne(ParserContext context)
+        {
+            using var declared = ParserScope.Enter(ref context.DeclaredColumnTypes, DeclaredColumnTypesOf(context, this.Table.Columns, this.HeapColumns));
             ParseOneColumnIntoLists(
                 context,
                 this.Table.Name,
@@ -103,6 +105,19 @@ partial class Simulation
                 withValuesColumns: this.WithValuesColumns,
                 ordinalOffset: this.Table.Columns.Length,
                 existingColumns: this.Table.Columns);
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="ParserContext.DeclaredColumnTypes"/> of an <c>ALTER TABLE … ADD</c>: the table's
+    /// columns, then any the same statement adds ahead of the one parsing.
+    /// </summary>
+    private static Func<MultiPartName, SqlType?> DeclaredColumnTypesOf(ParserContext context, HeapColumn[] existing, List<HeapColumn?>? added)
+    {
+        var collation = context.CurrentDatabase.Collation;
+        return name => name.Count != 1 ? null
+            : (Array.Find(existing, column => collation.Equals(column.Name, name.Leaf))
+                ?? added?.Find(column => column is not null && collation.Equals(column.Name, name.Leaf)))?.Type;
     }
 
     /// <summary>

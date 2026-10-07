@@ -178,6 +178,15 @@ partial class Simulation
         var columns = view?.Columns ?? table.Columns;
         var expressions = new List<Expression>();
         var names = new List<string>();
+        // A spatial column's property (`inserted.loc.STSrid`) tells itself
+        // apart from a three-part column name by the pseudo-tables' types.
+        var enclosing = context.OuterTypeResolver;
+        SqlType PseudoColumnType(MultiPartName reference) =>
+            reference.Count == 2 && BuiltInToken.EqualsAny(reference.ImmediateQualifier, "INSERTED", "DELETED")
+                && Array.Find(columns, column => collation.Equals(column.Name, reference.Leaf)) is { } column
+                ? column.Type
+                : enclosing is not null ? enclosing(reference) : throw SimulatedSqlException.InvalidColumnName(reference);
+        using var pseudoColumns = ParserScope.Enter(ref context.OuterTypeResolver, PseudoColumnType);
         do
         {
             context.MoveNextRequired();
