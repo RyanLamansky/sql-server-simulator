@@ -4,7 +4,7 @@ Two per-`Simulation` reuse layers over a repeated `CommandText`, one stacked on 
 
 - **The plan cache** stores two kinds of plan.
   For a batch whose every top-level statement is a SELECT — the EF Core query shape — it stores the parsed `Selection` sequence, and a repeat call against the same text (with matching parameter types) skips tokenization and parsing entirely; only the row source executes.
-  For any other batch it stores a plan per top-level `INSERT … VALUES`, single-table `UPDATE`, single-table `DELETE` and `MERGE` from a `VALUES` list or a table — the EF Core modification shapes — and a repeat call walks the batch as usual but skips parsing those statements ([DML statement plans](#dml-statement-plans)).
+  For any other batch it stores a plan per top-level `INSERT`, `UPDATE`, `DELETE` and `MERGE` — EF Core's modification and bulk-update shapes, the joined forms, a write through a view, a query source and a statement holding a subquery included — and a repeat call walks the batch as usual but skips parsing those statements ([DML statement plans](#dml-statement-plans)).
 - **The token memo** stores the tokenized form of *any* command text.
   A repeat call re-parses but scans no characters and allocates no tokens.
   It is what serves the statements that have no plan to cache, it backs the first parse of a text the plan cache will go on to store, and it is what a DML statement plan jumps over.
@@ -31,7 +31,9 @@ The fresh parse overwrites the stale entry via the dictionary's indexer rather t
 
 Bump sites:
 
-- CREATE / DROP / ALTER (the dispatch arm in `DispatchOneStatementCore` — these three cases were peeled out of the unified arm specifically to host the bump).
+- CREATE / DROP / ALTER (the dispatch arm in `DispatchOneStatementCore` — these three cases were peeled out of the unified arm specifically to host the bump), except a `CREATE TABLE` or `DROP TABLE` naming only temp tables (`ChangedOnlyTempTables`).
+  Nothing cached depends on one: no plan holds a temp table (`HasSessionScopedReference`), no compile that looked one up or created one is remembered (`ResolvedTempTable`), and tempdb's catalog views read through their generators.
+  Bumping for one staled every session's plans whenever any session churned a temp table — a plan-cached point `SELECT` ran 3.1 µs alone and 19.5 µs with another session creating and dropping a `#temp` between its executions, re-parsing every time (measured 2026-10-08).
 - `Simulation.ImportBacpac` (new database adds schema).
 - `Simulation.AddRemoteSimulation` (changes what an active linked-server name will resolve to at the next `sp_addlinkedserver`).
 - `sp_addlinkedserver` / `sp_dropserver` (changes the active linked-server table, which four-part-name FROM clauses resolve against at parse time).
@@ -101,7 +103,7 @@ The flag name is intentionally general — what matters is "this plan can't be s
 
 A cache entry has to be a **re-executable artifact**: an object between "text" and "rows" that a second execution can run without the first one's parse.
 `Selection.Parse` returns a plan and `Selection.Execute` runs it; that split is what the SELECT sequence stores.
-`INSERT … VALUES`, single-table `UPDATE`, single-table `DELETE` and `MERGE` hand their parse to an execution half at a split point ([DML statement plans](#dml-statement-plans)), and that plan is what a DML entry stores.
+`INSERT`, `UPDATE`, `DELETE` and `MERGE` hand their parse to an execution half at a split point ([DML statement plans](#dml-statement-plans)), and that plan is what a DML entry stores.
 Every other statement family the dispatch switch routes to **parses and executes in a single interleaved pass**, so there is nothing to hold on to.
 
 | Statement kind | Plan cache | Why |
@@ -110,8 +112,8 @@ Every other statement family the dispatch switch routes to **parses and executes
 | `SELECT` (second and later, top-level) | **Admitted** | Cached as a sequence; the replay re-stamps each statement's own frame. |
 | `SELECT … ;` (trailing separators) | **Admitted** | The end-of-batch probe walks separators. |
 | Assignment-only `SELECT`, `SELECT … INTO` | Declined | Neither yields the result-set shape the entry models; both fall out before the accumulation point, which declines the batch by count. |
-| `INSERT … VALUES`, `UPDATE` / `DELETE` of one table (no `FROM`), `MERGE` into a table from a `VALUES` list or a table | **Admitted per statement** | In any batch, beside statements with no plan; the gates are [below](#what-a-dml-plan-declines). |
-| `INSERT … SELECT` / `EXEC` / `DEFAULT VALUES`, joined `UPDATE` / `DELETE`, DML through a view, `MERGE` from a query | Declined | The source query or the `FROM` clause is read as the statement parses; no split point exists. |
+| `INSERT … VALUES` / `SELECT` / `DEFAULT VALUES`, `UPDATE` / `DELETE` with or without a `FROM` clause, `MERGE` from a `VALUES` list, a table or a query — into a table or through a view, subqueries included | **Admitted per statement** | In any batch, beside statements with no plan; the gates are [below](#what-a-dml-plan-declines). |
+| `INSERT … EXEC`, a write through a view with an `OUTPUT` clause or a trigger down its chain, a write under a `WITH` prefix | Declined | `INSERT … EXEC` runs its source as it parses; the rest are [below](#what-a-dml-plan-declines). |
 | `SET` (the whole family), `DECLARE`, `SET @v` | Declined | A `SET` carries a session effect, not a plan; it parses every time (the pair EF emits costs about a microsecond with the token memo), and a batch holding one keeps its DML plans. |
 | DDL, `EXEC`, control flow, transactions, cursors | Declined | DDL bumps `SchemaVersion` (it invalidates rather than caches); control flow re-parses branches under skip semantics that are per-execution by construction; the rest have no plan object either. |
 
@@ -123,8 +125,18 @@ A DML plan is cached **per statement**, not per batch: `Simulation.dmlPlanSets` 
 The batch looks its set up once as it starts, and the dispatch loop runs as it always does — every `SET`, `DECLARE` and `SELECT` parses — until an `INSERT` / `UPDATE` / `DELETE` / `MERGE` arm reaches `RunDmlStatement`, which finds the entry for the statement starting at the cursor.
 
 **The split point.**
-Each of the four parsers builds its plan (`InsertPlan`, `UpdatePlan`, `DeletePlan`, `MergePlan`) where its last token is consumed and hands it to the execution half (`RunInsertValues`, `RunUpdate`, `RunDelete`, `RunMerge`) — on every execution, cached or not, so the fresh path and the replay run the same code.
-What moved to put that point where it is: `IDENTITY_INSERT` and an `INSTEAD OF INSERT` trigger's enabled state are read by the execution half, and neither raises, so the move reorders no error.
+Each parser builds its plan where its last token is consumed and hands it to the execution half — on every execution, cached or not, so the fresh path and the replay run the same code:
+
+| Statement | Plan | Execution half |
+|---|---|---|
+| `INSERT … VALUES` | `InsertPlan` | `RunInsertValues` |
+| `INSERT … SELECT`, `INSERT … DEFAULT VALUES` | `InsertSourcePlan` (the insert's plan and the source `Selection`) | `InsertSourceRows` |
+| `UPDATE` / `DELETE` of one target | `UpdatePlan` / `DeletePlan` | `RunUpdate` / `RunDelete` |
+| `UPDATE` / `DELETE` with a `FROM` clause | `JoinedUpdatePlan` / `JoinedDeletePlan` (the sources and joins as parsed, the target's slot) | `RunJoinedUpdate` / `RunJoinedDelete` |
+| `MERGE` | `MergePlan` | `RunMerge` |
+
+What moved to put each point where it is, none of it raising, so no move reorders an error: `IDENTITY_INSERT` and an `INSTEAD OF` trigger's enabled state are read by the execution half; a joined `UPDATE`'s write masks are applied there, as the single-target form's are; an `INSERT … SELECT`'s `TOP` / `SET ROWCOUNT` limit is settled there; and a parenthesized `INSERT` source reads its closing parentheses before the source runs rather than after, which only a syntax error the compile walk refuses first could observe.
+A joined write's execution half narrows, reorders and marks its write target on a copy of the plan's source array, so the plan's own stays as parsed; the target an `UPDATE t … FROM u` appends reads through a per-execution row source like any parsed one.
 A `MERGE`'s point is its required `;`, ahead of the permission checks, which were already the first thing its execution did.
 The execution half reads no tokens; a Debug build throws if the cursor moved past the recorded end while it ran.
 
@@ -140,29 +152,34 @@ Locks come before flags because a parse takes its locks before it reaches anythi
 
 **Why the parse half is safe to skip.**
 What a DML parse checks is either decided by the text and the schema — the same key and `SchemaVersion` decide it the same way, and a parse that raised records nothing — or read from the session.
-The session reads are handled one of three ways: moved into the execution half (above), repeated from the recording (locks, flags, and the one permission check a parse makes, `INSERT`'s on its target), or gated so they can't differ (below).
+The session reads are handled one of three ways: moved into the execution half (above), repeated from the recording (locks, flags, and the permission checks a parse makes — `INSERT`'s on its target or view and the view's broken ownership chain, a joined write's `SELECT` on each source and its verb on the target, an `INSERT … SELECT` source's reads — each a `CompiledPermissionCheck`), or gated so they can't differ (below).
 Nothing a plan holds depends on the principal that parsed it ([below](#principal-independence)).
 `DmlPlanReplayTests` (public API) is the differential: each test runs a text several times against one simulation, the later runs replaying, and against a second whose plan cache is emptied before every run, and compares the transcripts — result sets, row counts, every error's number, class, state, line and message, info messages and the table afterwards — over constraint, conversion, truncation (either message, as `VERBOSE_TRUNCATION_WARNINGS` picks), `NOT NULL`, foreign-key, duplicate-key, divide-by-zero and trigger-rollback errors, `XACT_ABORT`, `IDENTITY_INSERT`, `SET ROWCOUNT` and trigger state flipped between runs, a `TOP (@n)` that trims the parsed tuples, identity, rowversion, sequence-default and computed values, a schema change under `OUTPUT INSERTED.*`, explicit transactions, `TRY` / `CATCH`, error lines deep in a batch, Query Store's record of the runs, another session's lock and 8 concurrent replayers — and for `MERGE`, the EF shapes' errors, a trigger rollback under `OUTPUT … INTO @inserted0`, an upsert from a table under `TOP (@n)` and `SET ROWCOUNT`, an `INSTEAD OF` trigger created and toggled between runs, `OUTPUT … INTO` a table whose schema changes, and 8 sessions replaying one plan into their own table variables.
+The shapes the joined, view, subquery and source-query plans added run the same differential: `ExecuteUpdate`'s and `ExecuteDelete`'s errors and row counts, a joined write's partners changing between runs under `OUTPUT` of partner columns and `SET ROWCOUNT`, a target the `FROM` clause omits, the joined forms under either `XACT_ABORT` in a transaction, subqueries in `WHERE` and `SET` (Msg 512 and a zero divisor among them), `INSERT … SELECT`'s truncation, overflow, identity, `TOP (@n)` and sequence draws, FROM-less and set-operation sources, `DEFAULT VALUES`, a `MERGE` from a query's multiple matches, writes through a `WITH CHECK OPTION` view, row-level security under a session context flipped between runs, two principals in alternation over a masked `INSERT … SELECT`, a partner table only one may read and a view whose broken ownership chain only one may write through, and 8 sessions replaying one joined `UPDATE`.
 
 ### What a DML plan declines
 
 Checked per statement, since an earlier statement in the batch can change what the key was taken under (`MayCacheDmlPlan`):
 
-- The batch has a plan-cache key (so the READ COMMITTED and session-option gates [above](#the-entry-is-a-statement-sequence) hold), and the statement is top-level, not skipping, not being read again for a binder report, and not in a module, trigger or procedure body.
+- The batch has a plan-cache key (so the READ COMMITTED and session-option gates [above](#the-entry-is-a-statement-sequence) hold), and the statement is top-level, not skipping, not being read again for a binder report, not in a module, trigger or procedure body, and not under a `WITH` prefix, whose common table expressions parse ahead of the statement's own recording.
 - `QUOTED_IDENTIFIER`, `DATEFORMAT`, `ANSI_NULLS`, `CONCAT_NULL_YIELDS_NULL` and the database still equal the key's; the isolation level and the gated options are read live.
 - Any principal: the plans are principal-independent ([below](#principal-independence)), so a restricted principal, an `EXECUTE AS` frame and an application role replay what another principal recorded, and a masked column changes nothing.
 
 And per shape, at the split point (`NoteDmlPlan` plus each parser's `admitted`):
 
-- A plain table in the session's own database: not a view, a table variable, a `#temp` table (any session-scoped reference in the statement), a TVP, a linked server's table, or a table whose writes check the session's SET options (an indexed view, a filtered index, a persisted computed column — `RequiresCorrectSetOptions`).
-- No nested query: a subquery holds closures over the parse (`ParserContext.QueriesParsed` counts them), and no `.modify()` / CLR mutator or variable assignment in an `UPDATE`'s `SET` list, for the same reason.
+- A table in the session's own database, or a stored view writing through to its one base table (`AdmitsDmlPlan`): not a table variable, a `#temp` table (any session-scoped reference in the statement), a TVP, a linked server's table, or a table whose writes check the session's SET options (an indexed view, a filtered index, a persisted computed column — `RequiresCorrectSetOptions`).
+  A view qualifies only with no `OUTPUT` clause, whose view columns read through the parsing batch (`SingleBaseViewReader`), and with no trigger, enabled or not, on it or on a view down its chain (`ViewChainHasTrigger`), since which way a write through a view routes is settled while parsing from its `INSTEAD OF` triggers' enabled state.
+- A subquery, a derived table and a `MERGE`'s query source replay: their plans are the objects a cached `SELECT` holds, and the scopes a DML statement installs for its own columns while they parse hold the database, never the parse (`TargetColumnTypeResolver`, `UpdateTargetTypeResolver`, `MergeColumnScope`), since a nested query keeps the scope it parsed under — the capture audit refused every one that held the `ParserContext` or the batch.
+- No `.modify()` / CLR mutator or variable assignment in an `UPDATE`'s `SET` list.
+- For `INSERT … SELECT`, a target no security policy names: the write binds the policy's predicates ahead of the source's parse (`RowSecurity.NoteWrite`), which a replay wouldn't repeat in that place.
 - An `OUTPUT … INTO` target that is a table variable the batch declares or a table passing the same checks as the statement's own; and a client `OUTPUT` only on a table with no trigger at all, since Msg 334 is settled while parsing and `ENABLE TRIGGER` doesn't bump the schema version.
   A table variable belongs to its batch, so the plan holds its name and each execution writes the executing batch's (`OutputTarget`): every batch running the same text declares it the same way, which keeps the parse's column mapping right for each.
   A table-valued parameter is declined, its type standing outside the key.
-- For `MERGE`: a `VALUES` source or a table in the session's database (a query source is a nested query; a CTE-prefixed `MERGE` doesn't reach the cache), a table target rather than a view, no `INSTEAD OF` trigger on the target, enabled or not — which actions such triggers take is settled while parsing from their enabled state (Msg 5316) — and no `.modify()` in an `UPDATE SET`.
+- For `MERGE`: a `VALUES` list, a query, or a table in the session's database as the source, a target as above, no `INSTEAD OF` trigger on the target table, enabled or not — which actions such triggers take is settled while parsing from their enabled state (Msg 5316) — and no `.modify()` in an `UPDATE SET`.
 - No `WHERE CURRENT OF` and no `XACT_STATE()` (whose mark is a per-statement object).
 
 EF Core's shapes for a table with triggers — `DECLARE @inserted0 TABLE`, then an `INSERT` or `MERGE … OUTPUT … INTO @inserted0` and a `SELECT` from it, and `UPDATE … ; SELECT @@ROWCOUNT` — all replay their DML; the `SELECT` over the table variable parses each time.
+So do `ExecuteUpdate` and `ExecuteDelete`'s `UPDATE [b] SET … FROM [Blogs] AS [b] WHERE …` and `DELETE FROM [b] FROM [Blogs] AS [b] WHERE …`, a navigation's `EXISTS` subquery or join included.
 
 ## The token memo
 
@@ -316,7 +333,8 @@ The shared-plan contract has its own section of tests there: parameterized TOP /
 `PlanCacheSessionTests` (public API) replays one text across connections: a replay meeting another session's lock after its compiler was disposed times out rather than raising `ObjectDisposedException`, it doesn't read past the compiler's own uncommitted write or another session's `TABLOCKX` insert, it waits with its own lock timeout and honors `NOWAIT`, its `UPDLOCK` read holds for its own transaction and releases outside one, an RCSI replay reads its own statement's snapshot, `FOR SYSTEM_TIME AS OF @p` reads each execution's parameter, and the session-setting differential above.
 `PlanCacheRetentionTests` (Tests.Internal) pins that an abandoned connection whose SELECT became a cached plan is still finalized and reclaimed.
 
-`Simulation.DmlPlanHits` and `DmlPlanRecordings` back `DmlPlanCacheTests` (Tests.Internal): EF Core's insert, update-batch, delete, `MERGE` and trigger-table shapes (`OUTPUT … INTO @inserted0` included) and a `MERGE` from a table replay statement by statement; a `MERGE` from a query, through a view, into a table variable or onto a table with an `INSTEAD OF` trigger, a client `OUTPUT` on a triggered table, a subquery, `INSERT … SELECT`, a `#temp` target, a statement inside a block, another isolation level and a key option changed mid-batch all re-parse, while an impersonated principal replays; a schema change re-parses once and then replays again, `FREEPROCCACHE` drops the plans, parameter types keep separate plans, and an abandoned connection that recorded a plan is still reclaimed.
+`Simulation.DmlPlanHits` and `DmlPlanRecordings` back `DmlPlanCacheTests` (Tests.Internal): EF Core's insert, update-batch, delete, `MERGE`, trigger-table, `ExecuteUpdate` and `ExecuteDelete` shapes (`OUTPUT … INTO @inserted0` included), a `MERGE` from a table, from a query and through a view, a subquery and a correlated `EXISTS`, `INSERT … SELECT` (parenthesized too) and `DEFAULT VALUES`, the joined forms (a target the `FROM` clause omits included) and a write through a view replay statement by statement; a `MERGE` into a table variable or onto a table with an `INSTEAD OF` trigger, a client `OUTPUT` on a triggered table, a write through a view with a trigger or an `OUTPUT` clause, an `INSERT … SELECT` into a table a security policy names, a `#temp` target, a statement under a `WITH` prefix or inside a block, another isolation level and a key option changed mid-batch all re-parse, while an impersonated principal replays; a schema change re-parses once and then replays again, `FREEPROCCACHE` drops the plans, parameter types keep separate plans, and an abandoned connection that recorded a plan is still reclaimed.
+`PlanCacheTests.TempTableChurnOnAnotherSession_LeavesPlansStanding` pins that another session's temp-table `CREATE` / `DROP` leaves a `SELECT` and a DML plan replaying.
 Whether a replay reports what a fresh parse reports is `DmlPlanReplayTests`' ([above](#dml-statement-plans)).
 
 `Simulation.TokenMemo`'s `Hits` / `Misses` / `Count` back `TokenMemoTests`: a repeated DML batch is served on its second execution, a text carrying every token shape replays identically, each `QUOTED_IDENTIFIER` setting gets its own entry while a text that *flips* it mid-batch is never served, a tokenizer error reports the same message on every execution, the back-and-forth-lookahead shape memoizes what it parsed, a procedure body is served across invocations, and 8 workers share one sequence with no divergence.
@@ -478,7 +496,7 @@ The saving is the statement's parse, a fixed cost per statement plus a share per
 
 **The compile walk needs no plan.**
 A batch that compiled cleanly is remembered under its key and schema version (`compiledBatches`), and a repeat of it skips the walk outright, so a repeated `MERGE` batch parses its statement once per run, not twice — a thread-time profile of the 10-row identity batch puts `CompileBatch` under 1%.
-The walk still runs where the memo can't help — a first execution, a batch that resolved a `#temp` table, one holding an `OPTION (RECOMPILE)` inlining failure — and there a plan recorded by a run would rarely exist yet; the walk also binds on a throwaway context whose statements record nothing, so it stays a parse.
+The walk still runs where the memo can't help — a first execution, a batch that looked up or created a `#temp` table, one holding an `OPTION (RECOMPILE)` inlining failure — and there a plan recorded by a run would rarely exist yet; the walk also binds on a throwaway context whose statements record nothing, so it stays a parse (see [below](#the-compile-walk-against-the-run) for what that costs and why the run doesn't reuse it).
 
 ### Plans for every principal
 
@@ -603,10 +621,58 @@ Kept, each measured by alternating builds one case per process:
 
 Measured flat and dropped: the name memo (`SourceColumnMemo`) starting its scan after its last hit, and again growing by doubling over immutable entries (allocation −4% per statement, time unchanged in replay and in process) — the sampler put an eighth of graph updates' simulator time in it, which was its safe-point bias rather than the memo's work; building the eight non-default Latin1 weight tables lazily (2 ms); and moving `BuiltInResources`' other large tables out of its initializer, worth ~7 ms on the first catalog read, left in the backlog.
 
+### Joined, view, subquery and source-query plans
+
+ADO.NET against a 1,000-row `Blogs` (clustered on `Id`) and a 5,000-row `Posts` indexed on `BlogId`, one case per process, 3 s warm-up then 3 s timed (median of 0.25 s blocks), three processes per build alternating the build at the previous commit (A) and this one (B), the median of the three (measured 2026-10-08):
+
+| Shape | A | B | Δ |
+|---|---|---|---|
+| EF Core `ExecuteUpdate`, one row by key (`UPDATE [b] SET … FROM [Blogs] AS [b] WHERE [b].[Id] = @p0`) | 144.9 µs | 6.5 µs | −96% |
+| EF Core `ExecuteDelete`, one row by key | 639 µs | 7.0 µs | −99% |
+| `ExecuteDelete` over a navigation (`… WHERE [v].[Id] = @p0 AND EXISTS (…)`) | 702 µs | 9.5 µs | −99% |
+| Two-table joined `UPDATE`, one target row | 21.4 µs | 9.3 µs | −56% |
+| Two-table joined `DELETE`, one target row | 25.4 µs | 10.3 µs | −60% |
+| `UPDATE … SET v = (SELECT COUNT(*) …)` by key | 25.5 µs | 8.7 µs | −66% |
+| `INSERT … SELECT` of one row | 16.0 µs | 5.6 µs | −65% |
+| `MERGE` from a grouped query | 47.1 µs | 9.8 µs | −79% |
+| `UPDATE` through a one-table view | 7.6 µs | 6.1 µs | −20% |
+| `UPDATE … WHERE Id IN (SELECT …)` (Django's related-filter shape) | 185 µs | 164 µs | −11% |
+| A single-table `UPDATE` by key, plan-cached in both | 5.64 µs | 5.63 µs | none |
+
+The `ExecuteUpdate` / `ExecuteDelete` collapse is mostly the [lone-target seek](dml.md#joined-row-sources) — the alias form scanned the whole table, about 14 µs with the seek alone — and the plan takes the rest; the `DELETE` cases scan a 5,000-row table at A.
+The other shapes save their parse, a fifth to four fifths of the statement.
+The `IN (<query>)` update saves its parse but still judges all 1,000 target rows, which is [a backlog item](backlog.md#complex-query-execution--perf-residuals).
+
+**A temp table churned beside cached plans.**
+The same method, with a second session running `create table #x (a int); drop table #x` between each timed execution (untimed): a plan-cached point `SELECT` 19.5 → 3.4 µs (3.1 µs with no churn) and the single-table `UPDATE` 12.1 → 6.0 µs, since a temp table's DDL no longer stales every plan ([above](#invalidation-simulationschemaversion)).
+
+**The suites.**
+The sqllogictest replays, the two builds alternating twice: `refs/random` 50.3 / 52.0 s at A against 49.5 / 51.5 s at B, `refs/index` 66.0 / 65.6 s against 64.4 / 66.3 s — flat, its texts being unique.
+EF Core 10.0.2's functional classes in process (`EFSIM_INPROC=1`, the two builds alternating twice, wall time of the class run): bulk updates 13.2 / 12.7 → 12.9 / 12.8 s, graph updates 22.9 / 23.1 → 22.9 / 23.0 s, Northwind miscellaneous 38.4 / 38.1 → 38.1 / 38.2 s, every outcome the same — each test there sends its statement once, so neither a cached plan nor a remembered compile has a second run to serve.
+
+### The compile walk against the run
+
+A throwaway build that skipped `CompileBatch` outright bounds what sharing the walk's parse with the run could win (one process per case, 2 s warm-up then 2 s timed, measured 2026-10-08):
+
+| Batch | Walk and run | Run alone | Walk's share |
+|---|---|---|---|
+| Ad hoc point `SELECT` (a distinct text each execution) | 21.6 µs | 12.7 µs | 41% |
+| Ad hoc two-table join and aggregate | 52.8 µs | 33.3 µs | 37% |
+| Ad hoc single-row `UPDATE` | 13.0 µs | 8.8 µs | 32% |
+| A repeated batch creating, filling, reading and dropping a `#temp` | 84.9 µs | 45.6 µs | 46% |
+| A repeated `EXEC sp_executesql` | 21.2 µs | 14.8 µs | 30% |
+| A repeated parameterized EF batch (`UPDATE … ; SELECT …`) | 19.9 µs | 18.8 µs | 5% |
+| A repeated procedure call, as text or as an RPC | 26.0 / 23.4 µs | 26.7 / 23.5 µs | none |
+
+The last two already skip the walk (`compiledBatches`, `ModulePlan`), paying at most the memo's lookup, and the repeated `sp_executesql` now does too: remembering a dynamic batch's compile (`DynamicBatchKey`) took it from 21.7 to 15.3 µs, the bound.
+The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped or shared there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why, and for the split of a trivial `SELECT`'s ~9.5 µs parse.
+Those rows didn't move (ad hoc `SELECT` 21.3 → 21.5 µs, join 51.6 → 51.2 µs, `UPDATE` 13.0 → 13.0 µs, the `#temp` batch 81.6 → 80.6 µs).
+
 ## Not modeled / future
 
-- **DML plans for the declined shapes** — `INSERT … SELECT`, a `MERGE` from a query, the joined `UPDATE` / `DELETE` forms, DML through a view, and a statement holding a subquery.
-  Each needs its own split point, and a subquery's plan its closures moved off the parse (the `OuterTypeResolver` a nested query captures reaches the `ParserContext`).
+- **DML plans for the declined shapes** — a write through a view with an `OUTPUT` clause (its view-column reader holds the parsing batch) or a trigger down its chain, `INSERT … EXEC`, a write under a `WITH` prefix, and an `INSERT … SELECT` into a table a security policy names (its predicate bind would become a recorded step).
+- **Plans inside procedure, trigger and dynamic-SQL bodies.**
+  Neither layer caches a statement below the top level, so a procedure body re-parses every statement on every call (a two-statement body: ~26 µs a call, measured 2026-10-08) though its compile is remembered (`ModulePlan`); the per-statement DML plans would carry over once a body's batch had a key of its own — the module and its schema version — and the module-body gates in `MayCacheDmlPlan` were settled.
 - **`SET` / `DECLARE` as recordable effects**, which is what a batch mixing them with a SELECT would need to cache as a SELECT sequence; the DML statement plans don't need it, since they sit beside statements that still parse.
 - LRU eviction, for both layers (the cap is hard FIFO-ish, and a one-shot migration script run first can fill it ahead of the steady-state working set).
 - Parameter-sniffing-style value-dependent plan selection (the simulator has no cost-based optimizer, so this doesn't apply).

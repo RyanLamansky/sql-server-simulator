@@ -1100,14 +1100,6 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     }
 
     /// <summary>
-    /// How many queries — statements, subqueries, derived tables — this parse
-    /// has entered through <see cref="Selection.Parse"/>. A DML statement whose
-    /// parse entered one holds a nested plan with closures over the parse, so
-    /// its plan isn't cached (see <see cref="DmlStatementPlan"/>).
-    /// </summary>
-    public int QueriesParsed;
-
-    /// <summary>
     /// Whether this parse walks a token sequence it shares or is collecting
     /// one — the precondition for recording where a statement ends so a later
     /// parse of the same text can jump there (<see cref="CanJumpTo"/>).

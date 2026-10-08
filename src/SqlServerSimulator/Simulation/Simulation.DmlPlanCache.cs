@@ -8,7 +8,7 @@ partial class Simulation
     /// <summary>
     /// The DML statement plans cached per command text, beside
     /// <see cref="planCache"/>'s SELECT sequences and keyed the same way. A set
-    /// holds one plan per top-level <c>INSERT … VALUES</c>, <c>UPDATE</c>,
+    /// holds one plan per top-level <c>INSERT</c>, <c>UPDATE</c>,
     /// <c>DELETE</c> or <c>MERGE</c> in the text, so a batch mixing them with statements that
     /// have no plan (<c>SET NOCOUNT ON</c>, a <c>DECLARE</c>) still skips
     /// parsing the ones that do. Capped and cleared as the plan cache is.
@@ -64,7 +64,7 @@ partial class Simulation
         // earlier statements set still stands for the batch afterwards.
         var enteredSessionScoped = batch.HasSessionScopedReference;
         batch.HasSessionScopedReference = false;
-        var recording = batch.DmlPlanRecording = new DmlPlanRecording { QueriesParsedAtStart = context.QueriesParsed };
+        var recording = batch.DmlPlanRecording = new DmlPlanRecording();
         batch.ReplayLockLog = [];
 #if DEBUG
         recording.PrincipalWatch = PlanCacheCaptureAudit.WatchPrincipalReads(batch.Connection.Security);
@@ -113,13 +113,15 @@ partial class Simulation
 
     /// <summary>
     /// Whether the statement at the cursor may run from, or record, a cached
-    /// plan: a top-level statement of a batch the plan cache keys, under the
+    /// plan: a top-level statement of a batch the plan cache keys — not under a
+    /// <c>WITH</c> prefix, whose common table expressions parse ahead of the
+    /// statement's recording — under the
     /// settings its key was taken with — a statement earlier in the batch may
     /// have changed one — and none of the settings the cache stays out of.
     /// Any principal qualifies: a plan holds nothing that depends on who parsed
     /// it, since the permission checks and the masks run in the execution half
     /// or replay from the recording as the executing principal (see
-    /// <see cref="PermissionEnforcement.CheckWhileParsing"/>), and the one
+    /// <see cref="PermissionEnforcement.CheckWhileParsing(BatchContext, CompiledPermissionCheck)"/>), and the one
     /// principal-dependent binding — the default schema an unqualified name
     /// searches — is a key component.
     /// </summary>
@@ -136,6 +138,7 @@ partial class Simulation
             || batch.UdfFrame is not null
             || batch.ProcFrame is not null
             || batch.TriggerFrame is not null
+            || context.CteBindings is not null
             || !context.HoldsTokenSequence)
         {
             return false;
@@ -182,10 +185,8 @@ partial class Simulation
         recording.Declined = true;
         if (!admitted
             || locks is null
-            || context.QueriesParsed != recording.QueriesParsedAtStart
             || batch.HasSessionScopedReference
             || statement.RemoteWrite is not null
-            || statement.RemoteWriteAlias is not null
             || statement.TransactionMark is not null
             || statement.BindsDeferredSource)
         {

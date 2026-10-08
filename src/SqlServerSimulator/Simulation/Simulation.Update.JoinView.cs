@@ -44,7 +44,7 @@ partial class Simulation
         // view's own output columns — same contract as the single-base path,
         // so an unknown column or an unresolved collation reports before any
         // row is read.
-        var typeResolver = Selection.ViewOutputColumnTypeResolver(batch, view);
+        var typeResolver = Selection.ViewOutputColumnTypeResolver(batch.CurrentDatabase, view);
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(batch, typeResolver));
 

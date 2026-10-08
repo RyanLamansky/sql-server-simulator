@@ -278,20 +278,40 @@ public sealed partial class Simulation
     /// parameter) and so demand a separate cached plan.
     /// </summary>
     private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
-        => string.IsNullOrEmpty(command.CommandText)
+        => string.IsNullOrEmpty(command.CommandText) || command.Connection is not { } connection
             ? null
-            : command.Connection is { CurrentDatabase: { } currentDb } connection
-                && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
-                && !connection.NoBrowseTable
-                // A replayed plan opens no implicit transaction and runs under
-                // NOEXEC / PARSEONLY / FMTONLY, each of which a parse settles.
-                && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
-                // A replay reports no STATISTICS IO / TIME, and a compile that
-                // reports its time has to run.
-                && !connection.StatisticsIo && !connection.StatisticsTime
-                && BuildPlanCacheParameterSignature(command) is { } sig
-                    ? new PlanCacheKey(command.CommandText, currentDb.Name, connection.Security.EffectiveDefaultSchemaName(currentDb), sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
-                    : null;
+            : BuildPlanCacheParameterSignature(command) is { } sig
+                ? PlanCacheKeyFor(connection, command.CommandText, sig)
+                : null;
+
+    /// <summary>
+    /// The key a dynamic batch's compile is remembered under (see
+    /// <see cref="CompileBatch"/>): its text, and in place of a command's
+    /// parameter signature <paramref name="declarations"/> — how the batch was
+    /// called and, for <c>sp_executesql</c>, its parameter definitions, which
+    /// settle every type its variables start with — so no top-level command's
+    /// key can match it. Null where the plan cache's own gates say no.
+    /// </summary>
+    private static PlanCacheKey? DynamicBatchKey(SimulatedDbConnection connection, string text, string declarations) =>
+        connection.InsertExecTargetTypes is null ? PlanCacheKeyFor(connection, text, "\0" + declarations) : null;
+
+    /// <summary>
+    /// <paramref name="text"/>'s key under the session's current settings, or
+    /// null where caching can't apply: no current database, a session outside
+    /// the default READ COMMITTED, or one of the options a parse settles.
+    /// </summary>
+    private static PlanCacheKey? PlanCacheKeyFor(SimulatedDbConnection connection, string text, string signature) =>
+        connection is { CurrentDatabase: { } currentDb }
+            && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
+            && !connection.NoBrowseTable
+            // A replayed plan opens no implicit transaction and runs under
+            // NOEXEC / PARSEONLY / FMTONLY, each of which a parse settles.
+            && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
+            // A replay reports no STATISTICS IO / TIME, and a compile that
+            // reports its time has to run.
+            && !connection.StatisticsIo && !connection.StatisticsTime
+                ? new PlanCacheKey(text, currentDb.Name, connection.Security.EffectiveDefaultSchemaName(currentDb), signature, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
+                : null;
 
     private static string? BuildPlanCacheParameterSignature(SimulatedDbCommand command)
     {

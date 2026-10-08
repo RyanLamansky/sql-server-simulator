@@ -398,10 +398,12 @@ partial class Simulation
         var table = target.BackingTable
             ?? throw new NotSupportedException("A joined UPDATE / DELETE whose target is an APPLY's derived table, a table value constructor or a rowset function isn't modeled, nor one whose OUTPUT clause bound a table its alias names.");
         FunctionBodyShape.NoteTableWrite(context.Batch, verb, table);
+        // Made while parsing, so a replay of the statement's cached plan makes
+        // them again in the same place.
         if (!context.Batch.IsSkipping)
         {
             CheckJoinedReadSources(context.Batch, sources, targetIndex);
-            PermissionEnforcement.CheckSchemaObject(context.Batch, verb, (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
+            PermissionEnforcement.CheckWhileParsing(context.Batch, verb, writtenName: null, (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
         }
         RejectIncorrectSetOptionsForWrite(table, context.Batch, verb);
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
@@ -533,13 +535,39 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The shape half of whether a DML statement's plan may be cached: a
-    /// table target (not a view), an <c>OUTPUT … INTO</c> target a plan can
-    /// hold, and nothing <see cref="BlocksDmlPlan"/> names — the client
-    /// <c>OUTPUT</c> half of it only when rows go to the client.
+    /// The shape half of whether a DML statement's plan may be cached: an
+    /// <c>OUTPUT … INTO</c> target a plan can hold, nothing
+    /// <see cref="BlocksDmlPlan"/> names (the client <c>OUTPUT</c> half of it
+    /// only when rows go to the client), and a table target or a stored view
+    /// written through to its one base table. A view needs no <c>OUTPUT</c>
+    /// clause, whose view columns read through the parsing batch, and no
+    /// trigger on it or down its chain, since which way a write through a view
+    /// routes is settled while parsing from its <c>INSTEAD OF</c> triggers'
+    /// enabled state, which no schema change records.
     /// </summary>
     private static bool AdmitsDmlPlan(BatchContext batch, HeapTable table, View? view, OutputProjection? output) =>
-        view is null
+        (view is null || (output is null && view is { UnstoredBody: null, PartitionedBase: null } && ReferenceEquals(view.BaseTable, table) && !ViewChainHasTrigger(batch, view)))
         && output is not { TargetBlocksDmlPlan: true }
         && !BlocksDmlPlan(batch, table, clientOutput: output is { HasTarget: false });
+
+    /// <summary>
+    /// Whether a DML trigger, enabled or not, is attached to
+    /// <paramref name="view"/> or to a view down the chain of single sources
+    /// its body reads.
+    /// </summary>
+    private static bool ViewChainHasTrigger(BatchContext batch, View view)
+    {
+        var level = view;
+        for (var depth = 0; ; depth++)
+        {
+            if (TriggersAttachedTo(batch, level).Length != 0)
+                return true;
+            if (LevelSourceView(level) is not { } next)
+                return false;
+            // A chain deeper than the walk is taken as carrying one.
+            if (depth == SimulatedDbConnection.MaxNestingLevel)
+                return true;
+            level = next;
+        }
+    }
 }

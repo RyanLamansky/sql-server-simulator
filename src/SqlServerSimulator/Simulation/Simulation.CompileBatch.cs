@@ -49,6 +49,11 @@ partial class Simulation
     /// the current schema, as a batch's and dynamic SQL's do; a module body's
     /// caller keeps its own compiled plan and decides instead.
     /// </param>
+    /// <param name="dynamicKey">
+    /// A dynamic batch's key (<see cref="DynamicBatchKey"/>), under which its
+    /// compile is remembered as a top-level batch's is under <paramref name="key"/>;
+    /// what a compile sends is still settled as for a batch without one.
+    /// </param>
     /// <returns>The error or errors that stop the batch, or <see langword="null"/> when it compiled.</returns>
     /// <remarks>
     /// Real keeps compiling the statements after one it defers, and so does the
@@ -57,11 +62,12 @@ partial class Simulation
     /// can't tell where that statement ended, so an error past it surfaces when
     /// its statement runs.
     /// </remarks>
-    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures, bool sendsOnce = true)
+    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures, bool sendsOnce = true, PlanCacheKey? dynamicKey = null)
     {
         inliningFailures = null;
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
-        if (key is { } cached && this.compiledBatches.TryGetValue(cached, out var compiledUnder) && compiledUnder == schemaVersion)
+        var remembered = key ?? dynamicKey;
+        if (remembered is { } cached && this.compiledBatches.TryGetValue(cached, out var compiledUnder) && compiledUnder == schemaVersion)
             return null;
 
         var errors = new List<SimulatedSqlException>();
@@ -141,7 +147,7 @@ partial class Simulation
                 connection.PendingMessages.Enqueue(message);
             }
         }
-        if (key is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
+        if (remembered is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))
                 this.compiledBatches[compiled] = schemaVersion;

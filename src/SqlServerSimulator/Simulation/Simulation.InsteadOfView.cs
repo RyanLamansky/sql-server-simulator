@@ -71,7 +71,7 @@ partial class Simulation
             updatedOrdinals.Add(ordinal);
         }
 
-        var typeResolver = from is null ? Selection.ViewOutputColumnTypeResolver(batch, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]);
+        var typeResolver = from is null ? Selection.ViewOutputColumnTypeResolver(batch.CurrentDatabase, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]);
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(batch, typeResolver));
 
@@ -191,7 +191,7 @@ partial class Simulation
                 : throw new NotSupportedException($"A positioned DELETE through '{view.Name}', whose INSTEAD OF DELETE trigger takes the write, isn't modeled with an OUTPUT clause or over a view with no single base table.");
         }
 
-        var where = ParseInsteadOfViewWhere(context, from is null ? Selection.ViewOutputColumnTypeResolver(batch, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]));
+        var where = ParseInsteadOfViewWhere(context, from is null ? Selection.ViewOutputColumnTypeResolver(batch.CurrentDatabase, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]));
         if (!batch.IsSkipping
             && PermissionEnforcement.SecurableFor(batch, targetName, view) is { } securable
             && PermissionEnforcement.Applies(batch, batch.DatabaseFor(securable)))

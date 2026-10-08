@@ -1951,7 +1951,10 @@ internal sealed partial class Selection
     private static (FromSource[] Sources, JoinSpec[] Joins, FromSource Target) NarrowMutationJoinSources(
         FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> narrowing, FromSource target, bool reorder, BatchContext batch)
     {
-        if (sources.Length < 2 || narrowing.Count == 0)
+        // A lone target narrows too: EF Core's ExecuteUpdate / ExecuteDelete
+        // write `UPDATE [b] … FROM [Blogs] AS [b] WHERE [b].[Id] = @p`, which
+        // otherwise read the whole table to write one row.
+        if (narrowing.Count == 0)
             return (sources, joins, target);
 
         var conjuncts = new List<BooleanExpression>();

@@ -39,6 +39,26 @@ public sealed class TempTableTests
         AreEqual(2, CountRows(conn, "#t"));
     }
 
+    /// <summary>
+    /// A temp table's CREATE moves no schema version, so a batch that named
+    /// one compiles again rather than reusing the compile it passed while the
+    /// table was missing: the second run's binder error stops it before its
+    /// first statement, as on SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void ABatchNamingATempTable_CompilesAgainstTheOneThatExistsWhenItRuns()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        const string batch = "select 1 as ran; select a from #t";
+        using (var reader = conn.CreateCommand(batch).ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(208, Throws<SimulatedSqlException>(() => reader.NextResult()).Number);
+        }
+        Exec(conn, "create table #t (b int)");
+        AreEqual(207, Throws<SimulatedSqlException>(() => conn.CreateCommand(batch).ExecuteReader()).Number);
+    }
+
     [TestMethod]
     public void PersistsAcrossBatchesInSameConnection()
     {

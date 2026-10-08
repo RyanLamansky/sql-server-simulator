@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -173,6 +174,55 @@ public sealed class BatchCompilationTests
         var ex = Fails(connection, $"print 'first'; {exec}; print 'after'");
         AreEqual(number, ex.Number);
         CollectionAssert.AreEqual(new[] { "first", "after" }, Messages(ex));
+    }
+
+    /// <summary>
+    /// A dynamic batch's compile is remembered under its text, the database,
+    /// the default schema, how it was called and its parameter definitions,
+    /// and goes stale with the schema, so a call differing in any of them
+    /// compiles again and its binder error still stops the dynamic batch
+    /// before its first statement.
+    /// </summary>
+    [TestMethod]
+    public void RepeatedDynamicBatch_CompilesAgainWhereItsInputsChange()
+    {
+        var (simulation, connection) = Open();
+        simulation.ExecuteBatches(
+            "create schema s",
+            "create table s.t (z int)",
+            "create database d2",
+            "create user su without login with default_schema = s; grant select, execute to su",
+            "use d2; exec ('create table t (z int)')");
+        const string exec = "exec ('print ''ran''; select a from t')";
+        const string executeSql = "exec sp_executesql N'print ''ran''; select @n + 1', N'@n {0}', @n = {1}";
+
+        // The error the call ends with, and whether the dynamic batch ran.
+        (int Number, bool Ran) Run(string sql)
+        {
+            try
+            {
+                _ = Scalar(connection, $"{sql}; print 'after'");
+                return (0, true);
+            }
+            catch (SimulatedSqlException error)
+            {
+                var messages = Messages(error);
+                AreEqual("after", messages[^1]);
+                return (error.Number, messages.Contains("ran"));
+            }
+        }
+
+        for (var run = 0; run < 2; run++)
+        {
+            AreEqual((0, true), Run(exec));
+            AreEqual((0, true), Run(string.Format(CultureInfo.InvariantCulture, executeSql, "int", "1")));
+        }
+        AreEqual((207, false), Run("use d2; " + exec + "; use simulated"));
+        AreEqual((207, false), Run("execute as user = 'su'; " + exec + "; revert"));
+        AreEqual((206, false), Run(string.Format(CultureInfo.InvariantCulture, executeSql, "xml", "'<x/>'")));
+        AreEqual((0, true), Run(exec));
+        simulation.ExecuteBatches("drop table t; create table t (b int)");
+        AreEqual((207, false), Run(exec));
     }
 
     [TestMethod]

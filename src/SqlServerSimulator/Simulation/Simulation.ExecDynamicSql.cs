@@ -149,7 +149,7 @@ partial class Simulation
         try
         {
             var dynamicBatch = linkedServerName is null
-                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null, streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource)
+                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null, streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource, declarations: "EXEC")
                 : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
             foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
                 yield return outcome;
@@ -443,7 +443,8 @@ partial class Simulation
             runsIn: calledInDatabase is null ? null
                 : this.Databases.TryGetValue(calledInDatabase, out var calledIn) ? calledIn
                 : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase),
-            streams: streams);
+            streams: streams,
+            declarations: "sp_executesql " + paramDefsText);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? failure = null;
         using (var sent = (resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets)).GetEnumerator())
@@ -920,7 +921,10 @@ partial class Simulation
     /// in an <c>EXEC('…')</c> a level-1 procedure runs, 3 in its
     /// <c>sp_executesql</c>). A call whose outcomes reach the client as it
     /// produces them (<paramref name="streams"/>) sends the batch's as each of
-    /// its statements ends, as <c>InvokeProcedure</c> does a body's.
+    /// its statements ends, as <c>InvokeProcedure</c> does a body's. A batch
+    /// that names its <paramref name="declarations"/> has its compile
+    /// remembered (<see cref="DynamicBatchKey"/>), so the same call again skips
+    /// it until a schema change, as a repeated top-level batch does.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> ExecuteDynamicBatch(
         BatchContext outerBatch,
@@ -929,7 +933,8 @@ partial class Simulation
         bool viaSystemProcedure = false,
         Database? runsIn = null,
         Dictionary<string, HeapTable>? tableVariables = null,
-        bool streams = false)
+        bool streams = false,
+        string? declarations = null)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -981,7 +986,8 @@ partial class Simulation
                 // compiling it is the EXEC's own, and the caller carries on.
                 var compileContext = CompileContextFor(innerBatch, dynCommand);
                 StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
-                if (this.CompileBatch(compileContext, key: null, out var inliningFailures) is { } compileError)
+                var dynamicKey = declarations is not null && tableVariables is null ? DynamicBatchKey(connection, dynCommand.CommandText, declarations) : null;
+                if (this.CompileBatch(compileContext, key: null, out var inliningFailures, dynamicKey: dynamicKey) is { } compileError)
                 {
                     compileError.EndedCalledBatch = !compileError.EndsCompileSilently;
                     throw compileError;

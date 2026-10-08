@@ -128,8 +128,8 @@ public sealed class DmlPlanCacheTests
             parameters: ("@d", 1)));
 
     [TestMethod]
-    public void MergeFromAQuery_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns(
+    public void MergeFromAQuery_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
             "merge t using (select id from p where id = @id) s on t.pid = s.id when matched then update set v = 0;",
             parameters: ("@id", 1)));
 
@@ -141,8 +141,8 @@ public sealed class DmlPlanCacheTests
             ("@n", "x")));
 
     [TestMethod]
-    public void MergeThroughAView_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns(
+    public void MergeThroughAView_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
             "merge tv using (values (@n, 1)) s (name, v) on tv.name = s.name when not matched then insert (name, v) values (s.name, s.v);",
             "create view tv as select name, v from t",
             ("@n", "x")));
@@ -158,12 +158,70 @@ public sealed class DmlPlanCacheTests
         => AreEqual(0, ReplaysOverThreeRuns("update t set v = 3 output inserted.v where id = @id", "create trigger t_after on t after update as return\ngo\ndisable trigger t_after on t", ("@id", 1)));
 
     [TestMethod]
-    public void Subquery_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("update t set v = (select max(v) from t) where id = @id", parameters: ("@id", 1)));
+    public void Subquery_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("update t set v = (select max(v) from t) where id = @id", parameters: ("@id", 1)));
 
     [TestMethod]
-    public void InsertSelect_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("insert into t (name, v) select name, v from t where id = @id", parameters: ("@id", 1)));
+    public void CorrelatedExists_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("delete t where id = @id and exists (select 1 from p where p.id = t.pid)", parameters: ("@id", 99)));
+
+    [TestMethod]
+    public void InsertSelect_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("insert into t (name, v) select name, v from t where id = @id", parameters: ("@id", 1)));
+
+    [TestMethod]
+    public void InsertParenthesizedSelect_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("insert into t (name, v) (select name, v from t where id = @id)", parameters: ("@id", 1)));
+
+    [TestMethod]
+    public void InsertDefaultValues_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("insert into d default values", "create table d (id int identity, at datetime2 default sysutcdatetime())"));
+
+    [TestMethod]
+    public void InsertSelectIntoATableWithASecurityPolicy_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "insert into t (name, v) select name, v from t where id = @id",
+            "create function dbo.allow (@v int) returns table with schemabinding as return select 1 as ok\ngo\ncreate security policy pol add block predicate dbo.allow(v) on dbo.t after insert",
+            ("@id", 1)));
+
+    [TestMethod]
+    public void EfExecuteUpdate_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("UPDATE [t0]\nSET [t0].[v] = @p\nFROM [t] AS [t0]\nWHERE [t0].[id] = @p0", parameters: [("@p", 7), ("@p0", 1)]));
+
+    [TestMethod]
+    public void EfExecuteDelete_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("DELETE FROM [t0]\nFROM [t] AS [t0]\nWHERE [t0].[id] = @p0", parameters: ("@p0", 99)));
+
+    [TestMethod]
+    public void JoinedUpdate_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("update t set v = @v from t join p on p.id = t.pid where p.id = 1", parameters: ("@v", 4)));
+
+    [TestMethod]
+    public void JoinedUpdateWhoseTargetTheFromClauseOmits_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("update t set v = @v from p where p.id = t.pid", parameters: ("@v", 4)));
+
+    [TestMethod]
+    public void JoinedDelete_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("delete t from t join p on p.id = t.pid where t.id = @id", parameters: ("@id", 99)));
+
+    [TestMethod]
+    public void UpdateThroughAView_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("update tv set v = @v where name = N'a'", "create view tv as select name, v from t", ("@v", 3)));
+
+    [TestMethod]
+    public void UpdateThroughAViewWithATrigger_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "update tv set v = @v where name = N'a'",
+            "create view tv as select name, v from t\ngo\ncreate trigger tv_instead on tv instead of insert as return\ngo\ndisable trigger tv_instead on tv",
+            ("@v", 3)));
+
+    [TestMethod]
+    public void UpdateThroughAViewWithOutput_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("update tv set v = @v output inserted.v where name = N'a'", "create view tv as select name, v from t", ("@v", 3)));
+
+    [TestMethod]
+    public void UnderACommonTableExpression_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("with c as (select id from p) update t set v = @v where pid in (select id from c)", parameters: ("@v", 3)));
 
     [TestMethod]
     public void TempTableTarget_Reparses()

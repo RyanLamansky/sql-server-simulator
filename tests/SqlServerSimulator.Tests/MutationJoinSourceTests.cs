@@ -358,6 +358,23 @@ public sealed class MutationJoinSourceTests
         AreEqual("1|100; 2|20; 3|300", TargetRows(sim));
     }
 
+    /// <summary>
+    /// A FROM clause naming only the target — EF Core's <c>ExecuteUpdate</c> /
+    /// <c>ExecuteDelete</c> shape — seeks the target's key too, so a row the
+    /// key excludes is never judged: real answers one row each with no
+    /// Msg 8134 for <c>id</c> 2's zero divisor (probed 2026-10-08 against
+    /// SQL Server 2025), as the single-table form does.
+    /// </summary>
+    [TestMethod]
+    public void LoneTarget_SeeksItsKey_SoAnExcludedRowIsNotJudged()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table u (id int primary key, v int not null); insert u values (1, 5), (2, 2), (3, 7)");
+        AreEqual(1, sim.ExecuteNonQuery("update t0 set v = 9 from u as t0 where 1 / (t0.v - 2) >= 0 and t0.id = 1"));
+        AreEqual(1, sim.ExecuteNonQuery("delete t0 from u as t0 where 1 / (t0.v - 2) >= 0 and t0.id = 3"));
+        AreEqual("1|9; 2|2", Rows(sim, "select id, v from u order by id"));
+    }
+
     // ---- the narrowed source drives ------------------------------------------
 
     /// <summary>

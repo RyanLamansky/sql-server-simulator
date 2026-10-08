@@ -124,23 +124,55 @@ internal sealed class ColumnReadTarget(Schemas.SchemaObject securable, Storage.H
 /// replay log (<see cref="BatchContext.ReplayLockLog"/>) beside the locks the
 /// parse takes, so a plan-cache replay, which parses nothing, makes it again
 /// at the same point as the replaying principal (see
-/// <see cref="PermissionEnforcement.CheckWhileParsing"/>). Holds only the
-/// securable and the name it was written as, if that decides the securable,
-/// so the plan it rides with stays the same for every principal.
+/// <see cref="PermissionEnforcement.CheckWhileParsing(BatchContext, CompiledPermissionCheck)"/>).
+/// Holds only the securable and the name it was written as, if that decides
+/// the securable — or the query whose reads are checked — so the plan it
+/// rides with stays the same for every principal.
 /// </summary>
-internal sealed class CompiledPermissionCheck(string permission, MultiPartName? writtenName, Schemas.SchemaObject resolved)
+internal sealed class CompiledPermissionCheck
 {
-    private readonly string permission = permission;
-    private readonly MultiPartName? writtenName = writtenName;
-    private readonly Schemas.SchemaObject resolved = resolved;
+    private readonly string? permission;
+    private readonly MultiPartName? writtenName;
+    private readonly Schemas.SchemaObject? resolved;
+    private readonly Selection? reads;
+    private readonly Schemas.SchemaObject? chainTarget;
+
+    public CompiledPermissionCheck(string permission, MultiPartName? writtenName, Schemas.SchemaObject resolved)
+    {
+        this.permission = permission;
+        this.writtenName = writtenName;
+        this.resolved = resolved;
+    }
+
+    /// <summary>The read permissions on everything <paramref name="reads"/> reads (<see cref="PermissionEnforcement.CheckReadSources"/>).</summary>
+    public CompiledPermissionCheck(Selection reads) => this.reads = reads;
+
+    private CompiledPermissionCheck(string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
+    {
+        this.permission = permission;
+        this.resolved = module;
+        this.chainTarget = target;
+    }
+
+    /// <summary>
+    /// <paramref name="permission"/> on each object down the chain from
+    /// <paramref name="module"/> to <paramref name="target"/> whose owner breaks
+    /// it (<see cref="PermissionEnforcement.CheckBrokenChainWrite"/>).
+    /// </summary>
+    public static CompiledPermissionCheck BrokenChainWrite(string permission, Schemas.SchemaObject module, Schemas.SchemaObject target) =>
+        new(permission, module, target);
 
     /// <summary>Makes the check as <paramref name="batch"/>'s effective principal.</summary>
     public void Run(BatchContext batch)
     {
-        if (this.writtenName is { } name)
-            PermissionEnforcement.CheckReference(batch, this.permission, name, this.resolved);
+        if (this.reads is { } query)
+            PermissionEnforcement.CheckReadSources(batch, query.ReferencedSecurables, query.ReadColumnsByObject);
+        else if (this.chainTarget is { } target)
+            PermissionEnforcement.CheckBrokenChainWrite(batch, this.permission!, this.resolved!, target);
+        else if (this.writtenName is { } name)
+            PermissionEnforcement.CheckReference(batch, this.permission!, name, this.resolved!);
         else
-            PermissionEnforcement.CheckSchemaObject(batch, this.permission, this.resolved);
+            PermissionEnforcement.CheckSchemaObject(batch, this.permission!, this.resolved!);
     }
 }
 
@@ -1038,9 +1070,18 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckWhileParsing(BatchContext batch, string permission, MultiPartName? writtenName, Schemas.SchemaObject resolved)
     {
+        if (!batch.IsSkipping)
+            CheckWhileParsing(batch, new CompiledPermissionCheck(permission, writtenName, resolved));
+    }
+
+    /// <summary>
+    /// <see cref="CheckWhileParsing(BatchContext, string, MultiPartName?, Schemas.SchemaObject)"/>
+    /// for a check already compiled.
+    /// </summary>
+    internal static void CheckWhileParsing(BatchContext batch, CompiledPermissionCheck check)
+    {
         if (batch.IsSkipping)
             return;
-        var check = new CompiledPermissionCheck(permission, writtenName, resolved);
         batch.ReplayLockLog?.Add(new ReplayedLock(check));
 #if DEBUG
         // The check reads the principal, which the replay reads again.

@@ -136,15 +136,12 @@ partial class Simulation
         var route = RouteViewWrite(context.Batch, destinationView, TriggerActions.Insert);
         if (route is DmlViewRoute.BaseTable or DmlViewRoute.JoinView)
             RejectCheckOptionOverRowLimit(destinationView, destinationName.ToString());
-        if (!context.Batch.IsSkipping)
-        {
-            PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
-            // An INSTEAD OF INSERT trigger writes nothing through the view, so
-            // the base table goes unchecked (probed 2026-09-27 against SQL
-            // Server 2025).
-            if (destinationView.BaseTable is { } baseTable && route != DmlViewRoute.InsteadOf)
-                PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "INSERT", destinationView, baseTable);
-        }
+        PermissionEnforcement.CheckWhileParsing(context.Batch, "INSERT", destinationName, destinationView);
+        // An INSTEAD OF INSERT trigger writes nothing through the view, so
+        // the base table goes unchecked (probed 2026-09-27 against SQL
+        // Server 2025).
+        if (destinationView.BaseTable is { } baseTable && route != DmlViewRoute.InsteadOf)
+            PermissionEnforcement.CheckWhileParsing(context.Batch, CompiledPermissionCheck.BrokenChainWrite("INSERT", destinationView, baseTable));
         return route switch
         {
             DmlViewRoute.InsteadOf => ProcessInsteadOfInsertOnView(destinationView, context, top, destinationName),
@@ -445,8 +442,22 @@ partial class Simulation
             return RunInsertValues(context, plan);
         }
 
-        List<SqlValue[]> sourceRows;
-        SimulatedSqlException? endedBody = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+        {
+            // `INSERT INTO t DEFAULT VALUES` — one row with every column
+            // defaulted. Clearing the destination list routes every column
+            // through the default / identity-allocation / implicit-NULL path
+            // below, so a NOT NULL column with no default hits the same
+            // constraint error an explicit all-defaults insert would.
+            context.MoveNextRequired();
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            var defaultsPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, [], output, top, valueTuples: null), source: null);
+            NoteDmlPlan(context, defaultsPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
+            return InsertSourceRows(context, defaultsPlan, sourceStamps: null);
+        }
+
         // A row's default drawing from a sequence its select list drew from
         // takes the value the select list drew (probed 2026-10-06 against SQL
         // Server 2025), so a SELECT source's draws are retained by row, as a
@@ -459,37 +470,30 @@ partial class Simulation
             batch.SequenceValuesByRow = [];
         try
         {
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+            RowSecurity.NoteWrite(context.Batch, destinationTable);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' })
             {
-                // `INSERT INTO t DEFAULT VALUES` — one row with every column
-                // defaulted. Clearing the destination list routes every column
-                // through the default / identity-allocation / implicit-NULL path
-                // below, so a NOT NULL column with no default hits the same
-                // constraint error an explicit all-defaults insert would.
-                context.MoveNextRequired();
-                if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextOptional();
-                destinationColumns = [];
-                sourceRows = [[]];
-            }
-            else
-            {
-                RowSecurity.NoteWrite(context.Batch, destinationTable);
-                sourceRows = context.Token switch
-                {
-                    ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, rowLimit: SourceRowLimit(top, context.Batch), rowStamps: sourceStamps),
-                    ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns, out endedBody),
-                    Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, SourceRowLimit(top, context.Batch), sourceStamps),
-                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                };
+                var selection = context.Token is Operator
+                    ? ParseParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable)
+                    : ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable);
+                var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null), selection);
+                // A replay skips the write's binding of the target's security
+                // predicates above, so only a target with none replays.
+                NoteDmlPlan(
+                    context,
+                    selectPlan,
+                    admitted: RowSecurity.For(context.Batch, destinationTable) is null && AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
+                return InsertSourceRows(context, selectPlan, sourceStamps);
             }
 
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var sourceRows = ExecuteExecSource(context, destinationColumns, out var endedBody);
             var written = InsertRows(
                 context,
                 new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
                 sourceRows,
-                valueTupleStamps: StampsByRow(sourceStamps));
+                valueTupleStamps: null);
             // The error that ended an executed body is the statement's, though it
             // wrote the rows the body returned before it.
             if (endedBody is not null)
@@ -504,6 +508,50 @@ partial class Simulation
             if (sourceStamps is not null)
                 batch.SequenceValuesByRow = null;
         }
+    }
+
+    /// <summary>
+    /// An <c>INSERT … SELECT</c>'s or <c>INSERT … DEFAULT VALUES</c>' parse:
+    /// the insert's own, and the source query, or none for one row of
+    /// defaults. <see cref="InsertSourceRows"/> executes it — once as the
+    /// statement parses, and again for each replay of a cached plan.
+    /// </summary>
+    private sealed class InsertSourcePlan(InsertPlan insert, Selection? source) : DmlStatementPlan
+    {
+        public readonly InsertPlan Insert = insert;
+        public readonly Selection? Source = source;
+
+        public override SimulatedStatementOutcome Run(ParserContext context)
+        {
+            var batch = context.Batch;
+            var sourceStamps = this.Source is not null && batch.SequenceValuesByRow is null ? new List<long>() : null;
+            if (sourceStamps is not null)
+                batch.SequenceValuesByRow = [];
+            try
+            {
+                return InsertSourceRows(context, this, sourceStamps);
+            }
+            finally
+            {
+                if (sourceStamps is not null)
+                    batch.SequenceValuesByRow = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The execution half of an <see cref="InsertSourcePlan"/>: reads the
+    /// source query's rows, retaining their stamps in
+    /// <paramref name="sourceStamps"/> when the statement draws them, then
+    /// writes them. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome InsertSourceRows(ParserContext context, InsertSourcePlan plan, List<long>? sourceStamps)
+    {
+        var insert = plan.Insert;
+        if (plan.Source is not { } selection)
+            return InsertRows(context, insert, [[]], valueTupleStamps: null);
+        var sourceRows = ReadSelectSource(context, selection, insert.DestinationColumns, insert.DestinationTable, SourceRowLimit(insert.Top, context.Batch), sourceStamps);
+        return InsertRows(context, insert, sourceRows, valueTupleStamps: StampsByRow(sourceStamps));
     }
 
     /// <summary>
@@ -1557,9 +1605,15 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Runs an <c>INSERT</c>'s SELECT source when it's written parenthesized —
-    /// <c>INSERT INTO t (cols) (SELECT …)</c> — consuming the wrapping parens
-    /// around the query <see cref="ExecuteSelectSource"/> reads.
+    /// <see cref="ParseParenthesizedSelectSource"/>, then <see cref="ReadSelectSource"/>.
+    /// </summary>
+    private static List<SqlValue[]> ExecuteParenthesizedSelectSource(ParserContext context, HeapColumn[] destinationColumns, bool hasExplicitColumnList) =>
+        ReadSelectSource(context, ParseParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList), destinationColumns);
+
+    /// <summary>
+    /// <see cref="ParseSelectSource"/> for a source written in parentheses —
+    /// <c>INSERT INTO t (cols) (SELECT …)</c> — which it reads through the
+    /// closing ones.
     /// </summary>
     /// <remarks>
     /// The parens are only reachable once an explicit column list has been
@@ -1570,14 +1624,12 @@ partial class Simulation
     /// accepted to any depth, matching the parenthesized query expression
     /// real's grammar takes here.
     /// </remarks>
-    private static List<SqlValue[]> ExecuteParenthesizedSelectSource(
+    private static Selection ParseParenthesizedSelectSource(
         ParserContext context,
         HeapColumn[] destinationColumns,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
-        HeapTable? destinationTable = null,
-        int? rowLimit = null,
-        List<long>? rowStamps = null)
+        HeapTable? destinationTable = null)
     {
         // Only the parentheses wrapping the whole source are the source's own:
         // in `(SELECT 1) UNION ALL (SELECT 2)` they open the first branch.
@@ -1591,7 +1643,7 @@ partial class Simulation
         // closing `)` as its terminator rather than as a stray token, and what
         // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
         // anything nested inside it keeps the ordinary rules.
-        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource, rowLimit, rowStamps);
+        var selection = ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource);
 
         while (depth > 0)
         {
@@ -1600,32 +1652,33 @@ partial class Simulation
             depth--;
             context.MoveNextOptional();
         }
-        return rows;
+        return selection;
     }
 
     /// <summary>
-    /// Parses and executes the <c>SELECT</c>-source side of <c>INSERT … SELECT</c>.
-    /// Validates the projection-count vs insert-list count at parse time
-    /// (Msg 120 / Msg 121, matching SQL Server's pre-execution diagnostic),
-    /// then buffers the result into a list of rows so the existing per-row
-    /// encode loop can run unchanged. Buffering also makes self-insert
-    /// (<c>INSERT t SELECT … FROM t</c>) safe — the source materializes
-    /// before any destination write.
+    /// <see cref="ParseSelectSource"/>, then <see cref="ReadSelectSource"/>.
     /// </summary>
-    private static List<SqlValue[]> ExecuteSelectSource(
+    private static List<SqlValue[]> ExecuteSelectSource(ParserContext context, HeapColumn[] destinationColumns, bool hasExplicitColumnList) =>
+        ReadSelectSource(context, ParseSelectSource(context, destinationColumns, hasExplicitColumnList), destinationColumns);
+
+    /// <summary>
+    /// Parses the <c>SELECT</c>-source side of <c>INSERT … SELECT</c> and makes
+    /// the checks real makes compiling it: the read permissions on what the
+    /// query reads, then the projection-count vs insert-list count (Msg 120 /
+    /// Msg 121, matching SQL Server's pre-execution diagnostic) and each
+    /// column's assignment rule. <see cref="ReadSelectSource"/> runs it.
+    /// </summary>
+    private static Selection ParseSelectSource(
         ParserContext context,
         HeapColumn[] destinationColumns,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
-        QueryPosition position = QueryPosition.InsertSource,
-        int? rowLimit = null,
-        List<long>? rowStamps = null)
+        QueryPosition position = QueryPosition.InsertSource)
     {
         var selection = Selection.Parse(context, new QueryScope(position, null));
 
-        if (!context.Batch.IsSkipping)
-            PermissionEnforcement.CheckReadSources(context.Batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+        PermissionEnforcement.CheckWhileParsing(context.Batch, new CompiledPermissionCheck(selection));
 
         // Msg 120 / 121 belong to the explicit-column-list form. Without one
         // the mismatch is measured against the table definition and reports
@@ -1665,12 +1718,28 @@ partial class Simulation
                 }
             }
         }
+        return selection;
+    }
 
-        // The arity checks above are binding, so they still run; running the
-        // query itself is not. A skipped statement's source SELECT must not
-        // surface a runtime error (a division by zero, a conversion failure)
-        // from a statement that conceptually never ran — least of all during
-        // CREATE-time module binding.
+    /// <summary>
+    /// Runs an <c>INSERT … SELECT</c>'s parsed source query and buffers its
+    /// rows so the per-row encode loop can run unchanged. Buffering also makes
+    /// self-insert (<c>INSERT t SELECT … FROM t</c>) safe — the source
+    /// materializes before any destination write.
+    /// </summary>
+    private static List<SqlValue[]> ReadSelectSource(
+        ParserContext context,
+        Selection selection,
+        HeapColumn[] destinationColumns,
+        HeapTable? destinationTable = null,
+        int? rowLimit = null,
+        List<long>? rowStamps = null)
+    {
+        // The arity checks are binding, so they ran as the source parsed;
+        // running the query itself is not. A skipped statement's source SELECT
+        // must not surface a runtime error (a division by zero, a conversion
+        // failure) from a statement that conceptually never ran — least of all
+        // during CREATE-time module binding.
         if (context.Batch.IsSkipping)
             return [];
 
@@ -1681,6 +1750,7 @@ partial class Simulation
         // that doesn't fold TRUE, a HAVING or TOP (0) leaves the conversion to
         // the row, so `SELECT 'toolong' WHERE 1 = 0` writes nothing and raises
         // nothing (probed 2026-10-06).
+        var expectedColumnCount = destinationColumns.Length;
         if (destinationTable is not null
             && (selection.StartsConstants || (context.Batch.CurrentStatement.FoldsConstantsAtCompile() && selection.IsBareConstantRow))
             && selection.ProjectionExpressions is { } projections)

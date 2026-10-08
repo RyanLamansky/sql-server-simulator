@@ -186,14 +186,13 @@ partial class Simulation
         bindErrors?.EnterClause(context.Token, BindClause.MergeOn);
         context.MoveNextRequired();
 
-        SqlType ResolveTypeBoth(MultiPartName name) => ResolveMergeColumnType(
-            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
+        var resolveTypeBoth = new MergeColumnScope(context.CurrentDatabase.Collation, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema).Both;
 
         // Walk the ON's expression tree with the two-sided resolver so any
         // column reference type-checks correctly at parse time.
         var onAggregates = new List<AggregateExpression>();
         BooleanExpression onPredicate;
-        using (ParserScope.Enter(ref context.OuterTypeResolver, ResolveTypeBoth))
+        using (ParserScope.Enter(ref context.OuterTypeResolver, resolveTypeBoth))
         // ON is one of the eight clauses Msg 11720 names, and a MERGE's ON
         // takes it like a join's (probe-confirmed).
         using (context.EnterNextValueForScope(NextValueForScope.Clause))
@@ -207,7 +206,7 @@ partial class Simulation
         // resolver, so a cross-collation comparison, a legacy-LOB string-scalar
         // argument or an unknown column reports while compiling the way real
         // does rather than once a candidate row pairs up.
-        onPredicate.Bind(context.Batch, ResolveTypeBoth);
+        onPredicate.Bind(context.Batch, resolveTypeBoth);
 
         // WHEN clauses.
         var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, destinationName.ToString(), targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
@@ -776,11 +775,11 @@ partial class Simulation
     }
 
     /// <summary>Whether <paramref name="name"/>'s qualifier is one of the two spellings of a MERGE side.</summary>
-    private static bool NamesMergeSide(ParserContext context, MultiPartName name, string alias, string otherSpelling) =>
-        context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, alias)
+    private static bool NamesMergeSide(Collation collation, MultiPartName name, string alias, string otherSpelling) =>
+        collation.Equals(name.ImmediateQualifier, alias)
         // An alias hides the target's own name: `MERGE t AS x … ON t.id = …`
         // is Msg 4104 (probed 2026-10-01 against SQL Server 2025).
-        || (context.Batch.CurrentDatabase.Collation.Equals(alias, otherSpelling) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, otherSpelling));
+        || (collation.Equals(alias, otherSpelling) && collation.Equals(name.ImmediateQualifier, otherSpelling));
 
     /// <summary>
     /// Types a column reference against the MERGE's own two sides: the target
@@ -790,7 +789,7 @@ partial class Simulation
     /// inside either binds to a MERGE column rather than failing to resolve.
     /// </summary>
     private static SqlType ResolveMergeColumnType(
-        ParserContext context,
+        Collation collation,
         MultiPartName name,
         string targetAlias,
         string defaultTargetName,
@@ -802,8 +801,7 @@ partial class Simulation
     {
         // A clause reading one side sees nothing of the other: the other side's
         // qualifier is as unbound as any unknown one (Msg 4104).
-        var collation = context.Batch.CurrentDatabase.Collation;
-        var namesTarget = scope != MergeNameScope.Source && NamesMergeSide(context, name, targetAlias, defaultTargetName);
+        var namesTarget = scope != MergeNameScope.Source && NamesMergeSide(collation, name, targetAlias, defaultTargetName);
         var namesSource = scope != MergeNameScope.Target && collation.Equals(name.ImmediateQualifier, sourceAlias);
         var unqualified = name.Count == 1;
         if (scope != MergeNameScope.Source && (namesTarget || unqualified))
@@ -839,6 +837,61 @@ partial class Simulation
     }
 
     /// <summary>
+    /// A <c>MERGE</c>'s two sides as the scopes its clauses' names bind in
+    /// (<see cref="ResolveMergeColumnType"/>), held apart from the parse: a
+    /// correlated subquery in a clause keeps the scope it parsed under, and a
+    /// cached plan must reach no parse.
+    /// </summary>
+    private sealed class MergeColumnScope(
+        Collation collation, string targetAlias, string defaultTargetName, HeapColumn[] targetColumns, string sourceAlias, string[] sourceColumnNames, SqlType[] sourceSchema)
+    {
+        private readonly Collation collation = collation;
+        private readonly string targetAlias = targetAlias, defaultTargetName = defaultTargetName, sourceAlias = sourceAlias;
+        private readonly HeapColumn[] targetColumns = targetColumns;
+        private readonly string[] sourceColumnNames = sourceColumnNames;
+        private readonly SqlType[] sourceSchema = sourceSchema;
+
+        public SqlType Both(MultiPartName name) => this.Resolve(name, MergeNameScope.Both);
+
+        public SqlType TargetOnly(MultiPartName name) => this.Resolve(name, MergeNameScope.Target);
+
+        public SqlType SourceOnly(MultiPartName name) => this.Resolve(name, MergeNameScope.Source);
+
+        /// <summary>
+        /// A NOT MATCHED BY SOURCE condition reads only the target: any other
+        /// name is Msg 5333, but for a miss qualified by the target, which
+        /// stays the ordinary Msg 207.
+        /// </summary>
+        public SqlType BySourceCondition(MultiPartName name)
+        {
+            try
+            {
+                return this.TargetOnly(name);
+            }
+            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(this.collation, name, this.targetAlias, this.defaultTargetName))
+            {
+                throw SimulatedSqlException.MergeBySourceConditionOutOfScope(name);
+            }
+        }
+
+        /// <summary>A NOT MATCHED condition reads only the source, as <see cref="BySourceCondition"/> the target (Msg 5334).</summary>
+        public SqlType NotMatchedCondition(MultiPartName name)
+        {
+            try
+            {
+                return this.SourceOnly(name);
+            }
+            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(this.collation, name, this.sourceAlias, this.sourceAlias))
+            {
+                throw SimulatedSqlException.MergeNotMatchedConditionOutOfScope(name);
+            }
+        }
+
+        private SqlType Resolve(MultiPartName name, MergeNameScope scope) => ResolveMergeColumnType(
+            this.collation, name, this.targetAlias, this.defaultTargetName, this.targetColumns, this.sourceAlias, this.sourceColumnNames, this.sourceSchema, scope);
+    }
+
+    /// <summary>
     /// Parses the 1+ WHEN clauses following MERGE's ON predicate.
     /// Enforces the grammar rules SQL Server probes confirmed:
     /// <list type="bullet">
@@ -868,38 +921,7 @@ partial class Simulation
         // user-facing column shape is OutputColumns; base shape otherwise.
         var targetColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
 
-        SqlType ResolveType(MultiPartName name) => ResolveMergeColumnType(
-            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
-        SqlType ResolveTargetOnly(MultiPartName name) => ResolveMergeColumnType(
-            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema, MergeNameScope.Target);
-        SqlType ResolveSourceOnly(MultiPartName name) => ResolveMergeColumnType(
-            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema, MergeNameScope.Source);
-
-        // A NOT MATCHED clause's condition reads only its own side: any other
-        // name is Msg 5333 / 5334, but for a miss qualified by that side, which
-        // stays the ordinary Msg 207.
-        SqlType ResolveBySourceCondition(MultiPartName name)
-        {
-            try
-            {
-                return ResolveTargetOnly(name);
-            }
-            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(context, name, targetAlias, defaultTargetName))
-            {
-                throw SimulatedSqlException.MergeBySourceConditionOutOfScope(name);
-            }
-        }
-        SqlType ResolveNotMatchedCondition(MultiPartName name)
-        {
-            try
-            {
-                return ResolveSourceOnly(name);
-            }
-            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(context, name, sourceAlias, sourceAlias))
-            {
-                throw SimulatedSqlException.MergeNotMatchedConditionOutOfScope(name);
-            }
-        }
+        var scope = new MergeColumnScope(context.CurrentDatabase.Collation, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
 
         while (context.Token is ReservedKeyword { Keyword: Keyword.When } whenToken)
         {
@@ -951,9 +973,9 @@ partial class Simulation
             });
             Func<MultiPartName, SqlType> conditionResolver = kind switch
             {
-                WhenClauseKind.Matched => ResolveType,
-                WhenClauseKind.NotMatchedByTarget => ResolveNotMatchedCondition,
-                _ => ResolveBySourceCondition,
+                WhenClauseKind.Matched => scope.Both,
+                WhenClauseKind.NotMatchedByTarget => scope.NotMatchedCondition,
+                _ => scope.BySourceCondition,
             };
 
             // Optional AND search_condition.
@@ -1002,9 +1024,9 @@ partial class Simulation
             // ordinary binder errors (probed 2026-09-28).
             var clause = ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
             {
-                WhenClauseKind.Matched => ResolveType,
-                WhenClauseKind.NotMatchedByTarget => ResolveSourceOnly,
-                _ => ResolveTargetOnly,
+                WhenClauseKind.Matched => scope.Both,
+                WhenClauseKind.NotMatchedByTarget => scope.SourceOnly,
+                _ => scope.TargetOnly,
             });
             // A family takes each action at most once.
             if (clauses.Exists(earlier => earlier.Kind == kind && earlier.Action == clause.Action))

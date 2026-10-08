@@ -2,12 +2,12 @@ namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// The parsed half of a DML statement, re-executable against any batch: what
-/// an <c>INSERT … VALUES</c>, <c>UPDATE</c>, <c>DELETE</c> or <c>MERGE</c>
-/// parse resolved (the target, its columns, the expressions, the
-/// <c>OUTPUT</c> projection), handed to the execution half that every run of
-/// the statement shares. A cached plan is one object executed by many
-/// commands, possibly at once, so under the shared-plan contract nothing an
-/// execution varies may live on it.
+/// an <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c> or <c>MERGE</c> parse
+/// resolved (the target, its columns, the expressions, a source query or a
+/// <c>FROM</c> clause's sources, the <c>OUTPUT</c> projection), handed to the
+/// execution half that every run of the statement shares. A cached plan is
+/// one object executed by many commands, possibly at once, so under the
+/// shared-plan contract nothing an execution varies may live on it.
 /// </summary>
 internal abstract class DmlStatementPlan
 {
@@ -26,12 +26,6 @@ internal abstract class DmlStatementPlan
 /// </summary>
 internal sealed class DmlPlanRecording
 {
-    /// <summary>
-    /// <see cref="ParserContext.QueriesParsed"/> as the statement began, so its
-    /// split point can tell whether it parsed a nested query.
-    /// </summary>
-    public int QueriesParsedAtStart;
-
     /// <summary>The plan, set when the statement's shape is one a replay reproduces.</summary>
     public DmlStatementPlan? Plan;
 

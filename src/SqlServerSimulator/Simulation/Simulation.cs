@@ -1114,17 +1114,14 @@ public sealed partial class Simulation
     /// Increments <see cref="SchemaVersion"/>, signaling that any cached
     /// <see cref="Selection"/> parsed under the prior version is potentially
     /// stale, and invalidates <see cref="CatalogRows"/>. Called by the
-    /// Create / Drop / Alter dispatch arm and by <c>ImportBacpac</c>.
+    /// Create / Drop / Alter dispatch arm — except for a temp table's own
+    /// <c>CREATE</c> and <c>DROP</c>, which nothing cached depends on — and by
+    /// <c>ImportBacpac</c>.
     /// </summary>
-    /// <param name="catalogUnchanged">
-    /// True for a change no cached catalog rowset reflects — DDL over temp
-    /// tables alone — which keeps <see cref="CatalogRows"/> standing.
-    /// </param>
-    internal void BumpSchemaVersion(bool catalogUnchanged = false)
+    internal void BumpSchemaVersion()
     {
         _ = Interlocked.Increment(ref this.SchemaVersion);
-        if (!catalogUnchanged)
-            this.CatalogRows.Invalidate();
+        this.CatalogRows.Invalidate();
     }
 
     /// <summary>
@@ -3329,9 +3326,14 @@ public sealed partial class Simulation
                 rowCount = 0;
                 if (!batch.IsSkipping)
                 {
-                    // No cached catalog rowset lists a temp table: tempdb's
-                    // views read through their generators.
-                    BumpSchemaVersion(catalogUnchanged: ChangedOnlyTempTables(context, ddlStart));
+                    // Creating or dropping a temp table moves nothing cached:
+                    // no plan holds one (HasSessionScopedReference), no compile
+                    // that named one is remembered (ResolvedTempTable), and no
+                    // cached catalog rowset lists one, tempdb's views reading
+                    // through their generators. Bumping for it would stale
+                    // every session's plans whenever any session churns one.
+                    if (!ChangedOnlyTempTables(context, ddlStart))
+                        BumpSchemaVersion();
                     if (connection.CurrentTransaction is { } ddlTransaction)
                     {
                         lock (ddlTransaction.CatalogChanges)

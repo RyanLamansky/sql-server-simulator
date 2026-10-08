@@ -122,7 +122,7 @@ partial class Simulation
             else
             {
                 using var scope = EnterTargetScope(context, targetName, table, sourceView);
-                where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
+                where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.CurrentDatabase, targetName, table, sourceView));
             }
         }
         Selection.ParseOptionalDmlOptionClause(context);
@@ -415,10 +415,53 @@ partial class Simulation
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
+        var plan = new JoinedDeletePlan(table, sources, joins, targetIndex, where, output, top);
+        NoteDmlPlan(context, plan, admitted: AdmitsDmlPlan(context.Batch, table, view: null, output));
+        return RunJoinedDelete(context, plan);
+    }
+
+    /// <summary>
+    /// A joined <c>DELETE</c>'s parse, which <see cref="RunJoinedDelete"/>
+    /// executes — once as the statement parses, and again for each replay of
+    /// a cached plan.
+    /// </summary>
+    private sealed class JoinedDeletePlan(
+        HeapTable table,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        int targetIndex,
+        BooleanExpression? where,
+        OutputProjection? output,
+        Selection.DmlTopLimit? top) : DmlStatementPlan
+    {
+        public readonly HeapTable Table = table;
+
+        /// <summary>The sources as parsed; each execution narrows and reorders a copy.</summary>
+        public readonly FromSource[] Sources = sources;
+        public readonly JoinSpec[] Joins = joins;
+        public readonly int TargetIndex = targetIndex;
+        public readonly BooleanExpression? Where = where;
+        public readonly OutputProjection? Output = output;
+        public readonly Selection.DmlTopLimit? Top = top;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunJoinedDelete(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of a joined <c>DELETE</c>: the join walk applying
+    /// WHERE per tuple and deduping its target rows by address, and the
+    /// commit. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunJoinedDelete(ParserContext context, JoinedDeletePlan plan)
+    {
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        var (table, where, output, top) = (plan.Table, plan.Where, plan.Output, plan.Top);
+        var sources = (FromSource[])plan.Sources.Clone();
+        var joins = plan.Joins;
+        var targetIndex = plan.TargetIndex;
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, context.Batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 

@@ -137,6 +137,33 @@ public sealed class PlanCacheTests
     }
 
     [TestMethod]
+    public void TempTableChurnOnAnotherSession_LeavesPlansStanding()
+    {
+        // A temp table's own CREATE and DROP move no schema version: nothing
+        // cached can hold one, so another session churning one between
+        // executions leaves this session's SELECT and DML plans replaying.
+        var (sim, connection) = OpenWithTable();
+        using (connection)
+        using (var other = sim.CreateDbConnection())
+        {
+            other.Open();
+            using var churn = other.CreateCommand();
+            churn.CommandText = "create table #x (a int); drop table #x; select 1 as k into ##y; drop table ##y";
+            using var update = connection.CreateCommand();
+            update.CommandText = "update t set val = val + 1 where id = 1";
+            for (var run = 0; run < 3; run++)
+            {
+                AreEqual(3, RunCount(connection, "select val from t"));
+                _ = update.ExecuteNonQuery();
+                _ = churn.ExecuteNonQuery();
+            }
+            AreEqual(2, sim.PlanCacheHits);
+            AreEqual(2, sim.DmlPlanHits);
+            AreEqual(13, RunScalar(connection, "select val from t where id = 1"));
+        }
+    }
+
+    [TestMethod]
     public void TableVariableReference_NotCached()
     {
         // A @t table-variable binding is per-BATCH, so any cached plan would

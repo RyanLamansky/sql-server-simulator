@@ -356,16 +356,20 @@ internal sealed partial class BatchContext
     private HashSet<string>? tempTablesCreatedWhileBinding;
 
     /// <summary>
-    /// Under <see cref="CreateTimeBinding"/>, notes that a statement — a
-    /// <c>CREATE TABLE</c> or <c>SELECT … INTO</c> — creates the temp table
-    /// <paramref name="name"/>, raising Msg 2714 state 1 for a second one: real
-    /// refuses a batch or module body that creates one temp table twice while
-    /// compiling it, even from opposite IF branches or with a <c>DROP</c>
-    /// between (probed 2026-09-26 against SQL Server 2025).
+    /// Notes that a statement — a <c>CREATE TABLE</c> or <c>SELECT … INTO</c>
+    /// — creates the temp table <paramref name="name"/>, which marks the batch
+    /// <see cref="ResolvedTempTable"/>, and under <see cref="CreateTimeBinding"/>
+    /// raises Msg 2714 state 1 for a second one: real refuses a batch or
+    /// module body that creates one temp table twice while compiling it, even
+    /// from opposite IF branches or with a <c>DROP</c> between (probed
+    /// 2026-09-26 against SQL Server 2025).
     /// </summary>
     public void NoteTempTableCreation(string name)
     {
-        if (!this.CreateTimeBinding || !(IsLocalTempName(name) || IsGlobalTempName(name)))
+        if (!(IsLocalTempName(name) || IsGlobalTempName(name)))
+            return;
+        this.ResolvedTempTable = true;
+        if (!this.CreateTimeBinding)
             return;
         if (!(this.tempTablesCreatedWhileBinding ??= new(BuiltInToken.Comparer)).Add(name))
             throw SimulatedSqlException.NameTakenEndingOnlyStatement(name, state: 1);
@@ -772,8 +776,10 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// Whether a name in this batch was looked up as a local or global temp
-    /// table, found or not. What it bound to is the session's, so a compile of
-    /// the batch says nothing about the next session's run of the same text.
+    /// table, found or not, or a statement creates one. What it bound to is the
+    /// session's, so a compile of the batch says nothing about the next
+    /// session's run of the same text — nor about this session's, since a temp
+    /// table's own <c>CREATE</c> and <c>DROP</c> move no schema version.
     /// </summary>
     public bool ResolvedTempTable;
 

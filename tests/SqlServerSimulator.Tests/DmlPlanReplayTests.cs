@@ -5,8 +5,9 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// A repeated <c>INSERT … VALUES</c>, <c>UPDATE</c>, <c>DELETE</c> or
-/// <c>MERGE</c> runs from a cached plan that skips its parse, so everything the statement reports has
+/// A repeated <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c> or <c>MERGE</c> —
+/// joined, through a view or holding a subquery included — runs from a cached
+/// plan that skips its parse, so everything the statement reports has
 /// to come out as a fresh parse of the same text reports it: its result sets,
 /// its row counts, its errors with their number, state and line, the order
 /// those arrive in, and what it leaves behind. Each test runs one text several
@@ -92,7 +93,8 @@ public sealed class DmlPlanReplayTests
     private static string Transcript(string setup, string text, string state, Run[] runs, bool freshEachRun)
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery(setup);
+        foreach (var batch in setup.Split("\ngo\n"))
+            _ = simulation.ExecuteNonQuery(batch);
         using var connection = simulation.CreateOpenConnection();
         var transcript = new StringBuilder();
         ((SimulatedDbConnection)connection).InfoMessage += (_, e) => transcript.Append("info ").Append(e.Errors[0].Number).Append(' ').AppendLine(e.Message);
@@ -664,6 +666,276 @@ public sealed class DmlPlanReplayTests
             for (var i = 0; i < iterations; i++)
             {
                 using var command = connection.CreateCommand("SET NOCOUNT ON;\nUPDATE [c] SET [v] = [v] + @d\nOUTPUT INSERTED.[v]\nWHERE [id] = @id;", ("@d", worker + 1), ("@id", worker));
+                AreEqual((i + 1) * (worker + 1), command.ExecuteScalar());
+            }
+        });
+        AreEqual(iterations * workers * (workers + 1) / 2, simulation.ExecuteScalar("select sum(v) from c"));
+    }
+    private const string Joined = """
+        create table p (id int primary key, rate int not null);
+        create table t (
+            id int identity primary key,
+            name nvarchar(5) not null,
+            v int not null check (v >= 0),
+            pid int null references p(id),
+            code char(3) null);
+        insert p values (1, 1), (2, 0), (3, 2);
+        insert t (name, v, pid) values (N'a', 1, 1), (N'b', 2, 2), (N'c', 3, 3), (N'd', 4, null);
+        create table log (id int, name nvarchar(5), v int);
+        """;
+
+    private const string JoinedState = "select id, name, v, pid, code, @@trancount from t order by id; select id, rate from p order by id; select id, name, v from log order by id, v";
+
+    [TestMethod]
+    public void EfExecuteUpdate_ErrorsAndRowCounts()
+        => AssertReplayMatchesFreshParse(Joined, "UPDATE [t0]\nSET [t0].[v] = [t0].[v] / @d + @add\nFROM [t] AS [t0]\nWHERE [t0].[id] >= @lo", JoinedState + "; select @@rowcount",
+            With(("@d", 1), ("@add", 1), ("@lo", 1)),
+            With(("@d", 0), ("@add", 1), ("@lo", 2)),
+            With(("@d", 1), ("@add", -100), ("@lo", 3)),
+            With(("@d", 2), ("@add", 0), ("@lo", 3)),
+            With(("@d", 1), ("@add", 5), ("@lo", 99)));
+
+    [TestMethod]
+    public void EfExecuteDelete_ForeignKeyViolationThenSuccess()
+        => AssertReplayMatchesFreshParse(Joined, "DELETE FROM [p0]\nFROM [p] AS [p0]\nWHERE [p0].[id] = @id", JoinedState,
+            With(("@id", 1)),
+            new Run("delete t where pid = 2", ("@id", 2)),
+            With(("@id", 9)),
+            new Run("update t set pid = null", ("@id", 3)));
+
+    [TestMethod]
+    public void JoinedUpdate_PartnersReadPerRun_OutputAndRowcount()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            "update t set v = t.v + p.rate * @k, code = cast(p.rate as char(3)) output deleted.v, inserted.v, p.rate from t join p on p.id = t.pid where p.rate >= @min",
+            JoinedState,
+            With(("@k", 1), ("@min", 1)),
+            new Run("update p set rate = 5 where id = 2", ("@k", 2), ("@min", 2)),
+            new Run("set rowcount 1", ("@k", 1), ("@min", 0)),
+            new Run("set rowcount 0", ("@k", -10), ("@min", 0)),
+            new Run("insert p values (4, 7); update t set pid = 4 where id = 4", ("@k", 1), ("@min", 6)));
+
+    [TestMethod]
+    public void JoinedUpdate_WhoseTargetTheFromClauseOmits()
+        => AssertReplayMatchesFreshParse(Joined, "update t set v = @v from p where p.id = t.pid and p.rate = @r", JoinedState,
+            With(("@v", 7), ("@r", 1)),
+            With(("@v", -1), ("@r", 2)),
+            new Run("update p set rate = 2 where id = 1", ("@v", 9), ("@r", 2)));
+
+    [TestMethod]
+    public void JoinedDelete_OutputsItsPartners()
+        => AssertReplayMatchesFreshParse(Joined, "delete t output deleted.id, deleted.name, p.rate from t join p on p.id = t.pid where p.rate = @r", JoinedState,
+            With(("@r", 0)),
+            new Run("insert t (name, v, pid) values (N'e', 5, 2), (N'f', 6, 1)", ("@r", 0)),
+            With(("@r", 1)),
+            With(("@r", 9)));
+
+    [TestMethod]
+    public void JoinedUpdates_InATransaction_UnderEitherXactAbort()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            "begin tran;\nupdate t set v = v + p.rate from t join p on p.id = t.pid;\nupdate t0 set v = v - @x from t as t0 where t0.id = 1;\nselect @@trancount, xact_state();\ncommit",
+            JoinedState,
+            With(("@x", 1)),
+            new Run("set xact_abort on", ("@x", 50)),
+            new Run("set xact_abort off", ("@x", 50)),
+            With(("@x", 0)));
+
+    [TestMethod]
+    public void Subqueries_InWhereAndSet()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            """
+            update t set v = (select max(v) from t) + @d where id in (select id from t where pid = @pid);
+            delete t where exists (select 1 from p where p.id = t.pid and p.rate = @r);
+            update t set code = (select cast(10 / rate as char(3)) from p where p.id = t.pid) where id = @id;
+            update t set name = (select name from t where v >= @v) where id = 1;
+            """,
+            JoinedState,
+            With(("@d", 1), ("@pid", 1), ("@r", 9), ("@id", 1), ("@v", 100)),
+            With(("@d", 2), ("@pid", 3), ("@r", 2), ("@id", 2), ("@v", 0)),
+            new Run("insert t (name, v, pid) values (N'e', 1, 2)", ("@d", -50), ("@pid", 2), ("@r", 0), ("@id", 5), ("@v", 3)),
+            With(("@d", 0), ("@pid", 9), ("@r", 1), ("@id", 1), ("@v", 2)));
+
+    [TestMethod]
+    public void InsertSelect_ConversionTruncationIdentityAndLimits()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            """
+            insert into log (id, name, v) select id, name, v * @m from t where v >= @min;
+            insert top (@n) into t (name, v) select name + @suffix, v from t where id <= @n2;
+            select scope_identity();
+            """,
+            JoinedState,
+            With(("@m", 1), ("@min", 2), ("@n", 1), ("@suffix", "x"), ("@n2", 2)),
+            With(("@m", 2), ("@min", 0), ("@n", 2), ("@suffix", "toolong"), ("@n2", 2)),
+            With(("@m", 2147483647), ("@min", 3), ("@n", 0), ("@suffix", ""), ("@n2", 9)),
+            new Run("set rowcount 1", ("@m", 3), ("@min", 1), ("@n", 5), ("@suffix", "y"), ("@n2", 9)),
+            new Run("set rowcount 0", ("@m", 1), ("@min", 99), ("@n", 3), ("@suffix", "z"), ("@n2", 2)));
+
+    [TestMethod]
+    public void InsertSelect_FromLessAndSetOperationSources()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            """
+            insert into log (id, name, v) select @id, @n, @v;
+            insert into log (id, name, v) select @id, @n, @v union all select id, name, v from t where id = @id;
+            insert into log (id, name, v) select @id + 10, @n, case when newid() is not null then 1 end;
+            """,
+            JoinedState,
+            With(("@id", 1), ("@n", "a"), ("@v", 1)),
+            With(("@id", 2), ("@n", "toolong"), ("@v", 2)),
+            With(("@id", 3), ("@n", "c"), ("@v", "x")),
+            With(("@id", 4), ("@n", "d"), ("@v", 4)));
+
+    [TestMethod]
+    public void InsertSelect_SequenceDrawsSharedWithDefaults()
+        => AssertReplayMatchesFreshParse(
+            "create sequence s as int start with 1; create table q (id int default next value for s, n int, k int); create table src (v int); insert src values (10), (20), (30)",
+            "insert into q (n, k) select next value for s, v from src where v <= @max",
+            "select id, n, k from q order by id",
+            With(("@max", 10)),
+            With(("@max", 30)),
+            new Run("alter sequence s restart with 100", ("@max", 20)));
+
+    [TestMethod]
+    public void InsertDefaultValues_NotNullAndIdentity()
+        => AssertReplayMatchesFreshParse(
+            "create table e (id int identity, n int not null); create table d (id int identity, n int not null default 7)",
+            "insert into d default values; insert into e default values; select scope_identity(), @@rowcount",
+            "select id, n from d order by id",
+            With(),
+            new Run("set xact_abort on"),
+            new Run("set xact_abort off"));
+
+    [TestMethod]
+    public void MergeFromAQuery_MultipleMatchesAndErrors()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            "merge t as tgt using (select id, rate from p where rate >= @min union all select id, rate from p where rate >= @dup) as src (id, rate) on tgt.pid = src.id when matched then update set v = src.rate * @k when not matched by source and tgt.pid is null then delete;",
+            JoinedState,
+            With(("@min", 0), ("@dup", 99), ("@k", 3)),
+            With(("@min", 1), ("@dup", 2), ("@k", 1)),
+            With(("@min", 2), ("@dup", 99), ("@k", -1)),
+            new Run("insert t (name, v, pid) values (N'z', 1, null)", ("@min", 0), ("@dup", 99), ("@k", 1)));
+
+    [TestMethod]
+    public void WritesThroughAView_CheckOptionAndVisibility()
+        => AssertReplayMatchesFreshParse(
+            Joined + "\ngo\ncreate view tv as select id, name, v, pid from t where v < 100 with check option",
+            """
+            update tv set v = v + @d where id = @id;
+            delete tv where id = @del;
+            insert tv (name, v, pid) values (@n, @v, null);
+            merge tv using (values (@id, @v)) s (id, v) on tv.id = s.id when matched then update set v = s.v;
+            """,
+            JoinedState,
+            With(("@d", 1), ("@id", 1), ("@del", 4), ("@n", "x"), ("@v", 5)),
+            With(("@d", 200), ("@id", 2), ("@del", 99), ("@n", "y"), ("@v", 6)),
+            new Run("update t set v = 150 where id = 3", ("@d", 1), ("@id", 3), ("@del", 3), ("@n", "z"), ("@v", 500)),
+            With(("@d", 0), ("@id", 1), ("@del", 1), ("@n", "toolong"), ("@v", 7)));
+
+    [TestMethod]
+    public void RowLevelSecurity_FiltersJoinedSubqueryAndInsertSelectReadsPerRun()
+        => AssertReplayMatchesFreshParse(
+            Joined + """
+
+            go
+            create function dbo.see (@pid int) returns table with schemabinding as return
+                select 1 as ok where @pid is null or @pid <> 2 or cast(session_context(N'all') as int) = 1
+            go
+            create security policy pol add filter predicate dbo.see(pid) on dbo.t
+            """,
+            """
+            update t0 set v = v + 1 from t as t0 where t0.v >= @min;
+            insert into log (id, name, v) select id, name, v from t where v >= @min;
+            delete t where id in (select id from t where v = @gone);
+            """,
+            "exec sp_set_session_context N'all', 1; " + JoinedState + "; exec sp_set_session_context N'all', 0",
+            new Run("exec sp_set_session_context N'all', 0", ("@min", 0), ("@gone", 2)),
+            new Run("exec sp_set_session_context N'all', 1", ("@min", 0), ("@gone", 99)),
+            new Run("exec sp_set_session_context N'all', 0", ("@min", 2), ("@gone", 3)),
+            new Run("exec sp_set_session_context N'all', 1", ("@min", 3), ("@gone", 4)));
+
+    private const string ReadPrincipals = """
+        create table m (id int primary key, s varchar(20) masked with (function = 'email()'));
+        insert m (id, s) values (1, 'ann@example.com'), (2, 'bob@example.com'), (3, 'cat@example.com');
+        create table k (id int primary key, s varchar(20) null);
+        insert k values (1, 'x'), (2, 'y');
+        create table hidden (id int primary key, v int);
+        insert hidden values (1, 10), (2, 20);
+        create user seer without login;
+        create user blind without login;
+        grant select on m to seer, blind;
+        grant unmask to seer;
+        grant select, insert, update, delete on k to seer, blind;
+        grant select on hidden to seer;
+        create user other without login;
+        go
+        create schema s2 authorization other;
+        go
+        create table s2.base (id int primary key, v int);
+        go
+        create view dbo.vb as select id, v from s2.base;
+        go
+        grant insert on dbo.vb to seer, blind;
+        grant insert on s2.base to seer;
+        """;
+
+    [TestMethod]
+    public void InsertSelect_MasksWhatEachPrincipalReads()
+        => AssertReplayMatchesFreshParse(
+            ReadPrincipals,
+            "insert k (id, s) select id + @o, s from m where id = @id",
+            "select id, s from k order by id",
+            As("blind", ("@o", 10), ("@id", 1)),
+            As("seer", ("@o", 10), ("@id", 2)),
+            As("blind", ("@o", 20), ("@id", 3)),
+            As("seer", ("@o", 20), ("@id", 1)));
+
+    [TestMethod]
+    public void JoinedUpdateAndSubquery_PartnerPermissionPerPrincipal()
+        => AssertReplayMatchesFreshParse(
+            ReadPrincipals,
+            "update k set s = cast(h.v as varchar(20)) from k join hidden h on h.id = k.id where k.id = @id; update k set s = 'z' where id in (select id from hidden where v > @v)",
+            "select id, s from k order by id",
+            As("blind", ("@id", 1), ("@v", 15)),
+            As("seer", ("@id", 2), ("@v", 15)),
+            As("blind", ("@id", 2), ("@v", 0)),
+            As("seer", ("@id", 1), ("@v", 0)));
+
+    [TestMethod]
+    public void InsertThroughAView_BrokenOwnershipChainPerPrincipal()
+        => AssertReplayMatchesFreshParse(
+            ReadPrincipals,
+            "insert dbo.vb (id, v) values (@id, @v)",
+            "revert; select id, v from s2.base order by id",
+            As("blind", ("@id", 1), ("@v", 1)),
+            As("seer", ("@id", 2), ("@v", 2)),
+            As("blind", ("@id", 3), ("@v", 3)),
+            As("seer", ("@id", 4), ("@v", 4)));
+
+    [TestMethod]
+    public void ConcurrentReplays_OfOneJoinedUpdatePlan_ApplyEveryIncrement()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table c (id int primary key, v int not null); create table f (id int primary key, w int not null)");
+        const int workers = 8, iterations = 200;
+        using (var setup = simulation.CreateOpenConnection())
+        {
+            for (var id = 0; id < workers; id++)
+            {
+                using var command = setup.CreateCommand("insert into c (id, v) values (@id, 0); insert into f (id, w) values (@id, @id + 1)", ("@id", id));
+                _ = command.ExecuteNonQuery();
+            }
+        }
+
+        _ = Parallel.For(0, workers, worker =>
+        {
+            using var connection = simulation.CreateOpenConnection();
+            for (var i = 0; i < iterations; i++)
+            {
+                using var command = connection.CreateCommand("UPDATE [c0] SET [c0].[v] = [c0].[v] + [f0].[w]\nOUTPUT INSERTED.[v]\nFROM [c] AS [c0] INNER JOIN [f] AS [f0] ON [f0].[id] = [c0].[id]\nWHERE [c0].[id] = @id;", ("@id", worker));
                 AreEqual((i + 1) * (worker + 1), command.ExecuteScalar());
             }
         });

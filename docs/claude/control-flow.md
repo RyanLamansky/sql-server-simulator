@@ -255,7 +255,8 @@ The walk holds the refusal on `StatementContext.PendingCompileRefusal` until the
 Met as the deferred statement runs, the refusal takes the statement's first line and ends the batch uncaught by a `TRY` in its scope, with no Msg 3621 (`RefusedRecompilingDeferred`); an untaken branch, which nothing compiles as the batch runs, raises nothing.
 
 A batch that compiled is remembered under its `PlanCacheKey` with the `SchemaVersion` it compiled under (`compiledBatches`), so a repeated text — every EF Core modification batch — skips the walk until DDL bumps the version.
-One that resolved a `#temp` isn't remembered, since what it bound to was the session's.
+A dynamic batch is remembered the same way, under its text and how it was called — `EXEC (…)`, or `sp_executesql` with its parameter definitions, which settle every type its variables start with (`DynamicBatchKey`) — so a repeated `sp_executesql` in a procedure compiles once per schema version, and what its compile sends still goes out the first time only.
+One that looked up or created a `#temp` isn't remembered, since what it bound to was the session's, and a temp table's own `CREATE` / `DROP` moves no schema version (see [`plan-cache.md`](plan-cache.md#invalidation-simulationschemaversion)).
 The three per-simulation caches keep their own entry counts: `ConcurrentDictionary.Count` takes every lock the dictionary has, and reading it on each fresh text cost more than the walk itself.
 
 One failure ends the compile with no message at all — a table variable defaulting to a sequence that doesn't exist yet — and reaches a caller only through an open `TRY` or `XACT_ABORT`, as the client's own severe error ([`sequences.md`](sequences.md#a-table-variables-default-ends-its-batchs-compile-silently)).

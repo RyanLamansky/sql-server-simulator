@@ -857,10 +857,10 @@ internal sealed partial class Selection
     /// the type declared there. Qualifiers are ignored, matching the per-row
     /// resolver the join-view UPDATE path builds; anything else is Msg 207.
     /// </summary>
-    internal static Func<MultiPartName, SqlType> ViewOutputColumnTypeResolver(BatchContext batch, Schemas.View view) =>
+    internal static Func<MultiPartName, SqlType> ViewOutputColumnTypeResolver(Database database, Schemas.View view) =>
         name =>
         {
-            var collation = batch.CurrentDatabase.Collation;
+            var collation = database.Collation;
             foreach (var column in view.OutputColumns)
             {
                 if (collation.Equals(column.Name, name.Leaf))
@@ -894,11 +894,16 @@ internal sealed partial class Selection
     /// <paramref name="targetName"/> is Msg 4104 ahead of the leaf lookup, per
     /// <see cref="QualifierIsDmlTarget"/>.
     /// </summary>
-    internal static Func<MultiPartName, SqlType> TargetColumnTypeResolver(BatchContext batch, MultiPartName targetName, HeapTable table, Schemas.View? sourceView) =>
+    /// <remarks>
+    /// The resolver holds the database rather than the batch: a subquery the
+    /// statement holds keeps its enclosing resolver, and a cached plan must
+    /// reach no batch (see <c>PlanCacheCaptureAudit</c>).
+    /// </remarks>
+    internal static Func<MultiPartName, SqlType> TargetColumnTypeResolver(Database database, MultiPartName targetName, HeapTable table, Schemas.View? sourceView) =>
         name =>
         {
-            var collation = batch.CurrentDatabase.Collation;
-            if (!QualifierIsDmlTarget(batch.CurrentDatabase, targetName, name))
+            var collation = database.Collation;
+            if (!QualifierIsDmlTarget(database, targetName, name))
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             if (sourceView is not null)
             {

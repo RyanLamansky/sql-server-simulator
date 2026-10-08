@@ -134,8 +134,7 @@ partial class Simulation
         var savedOuterTypeResolver = context.OuterTypeResolver;
         if (leadingTable is { } scopeTable && !joinedView)
         {
-            var enclosing = savedOuterTypeResolver;
-            context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(context.Batch, leadingIdent, scopeTable, name, enclosing);
+            context.OuterTypeResolver = UpdateTargetTypeResolver(context.CurrentDatabase, leadingIdent, scopeTable, savedOuterTypeResolver);
         }
         else if (preParsedFrom is { } preFrom)
         {
@@ -667,7 +666,7 @@ partial class Simulation
         // string-scalar argument and an unknown column all report here rather
         // than waiting for a row to reach the per-row resolver (so an empty
         // table and a module body at CREATE report them too).
-        var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView);
+        var targetTypeResolver = Selection.TargetColumnTypeResolver(context.CurrentDatabase, targetName, table, sourceView);
         RejectColumnSetBesideSparse(table, assignments);
         BindSetValues(context.Batch, table, assignments, targetTypeResolver, name =>
             sourceView is null
@@ -1092,8 +1091,7 @@ partial class Simulation
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);
         RejectColumnSetBesideSparse(table, assignments);
-        var setMasks = DataMasking.Applying(context.Batch, UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name)));
-        var enforceConstraints = !ReplacedByInsteadOfTrigger(context.Batch, table, sourceView: null);
+        var setMasks = UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name));
 
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
@@ -1113,10 +1111,66 @@ partial class Simulation
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
+        var plan = new JoinedUpdatePlan(table, assignments, setMasks, sources, joins, targetIndex, where, output, top);
+        NoteDmlPlan(
+            context,
+            plan,
+            admitted: !rawAssignments.Exists(assignment => assignment.ColumnName is null || assignment.Expr is AssignmentExpression or XmlModify or JsonModify or ClrTypeMutation)
+                && AdmitsDmlPlan(context.Batch, table, view: null, output));
+        return RunJoinedUpdate(context, plan);
+    }
+
+    /// <summary>
+    /// A joined <c>UPDATE</c>'s parse — its <c>FROM</c> sources and joins as
+    /// written, the target among them, the SET list and the predicate — which
+    /// <see cref="RunJoinedUpdate"/> executes, once as the statement parses
+    /// and again for each replay of a cached plan.
+    /// </summary>
+    private sealed class JoinedUpdatePlan(
+        HeapTable table,
+        List<(int Ordinal, Expression Expr)> assignments,
+        DataMask?[]? setMasks,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        int targetIndex,
+        BooleanExpression? where,
+        OutputProjection? output,
+        Selection.DmlTopLimit? top) : DmlStatementPlan
+    {
+        public readonly HeapTable Table = table;
+        public readonly List<(int Ordinal, Expression Expr)> Assignments = assignments;
+
+        /// <summary>As <see cref="UpdatePlan.SetMasks"/>.</summary>
+        public readonly DataMask?[]? SetMasks = setMasks;
+
+        /// <summary>The sources as parsed; each execution narrows and reorders a copy.</summary>
+        public readonly FromSource[] Sources = sources;
+        public readonly JoinSpec[] Joins = joins;
+        public readonly int TargetIndex = targetIndex;
+        public readonly BooleanExpression? Where = where;
+        public readonly OutputProjection? Output = output;
+        public readonly Selection.DmlTopLimit? Top = top;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunJoinedUpdate(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of a joined <c>UPDATE</c>: the join walk applying
+    /// WHERE per tuple and deduping its target rows by address, and the
+    /// commit. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunJoinedUpdate(ParserContext context, JoinedUpdatePlan plan)
+    {
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        var (table, assignments, where, output, top) = (plan.Table, plan.Assignments, plan.Where, plan.Output, plan.Top);
+        var sources = (FromSource[])plan.Sources.Clone();
+        var joins = plan.Joins;
+        var targetIndex = plan.TargetIndex;
+        var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
+        var enforceConstraints = !ReplacedByInsteadOfTrigger(context.Batch, table, sourceView: null);
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, context.Batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
@@ -1920,9 +1974,9 @@ partial class Simulation
     /// name the target table; anything else falls through to the enclosing
     /// scope, which is null at statement level and raises Msg 207 there.
     /// </summary>
-    private static SqlType ResolveUpdateTargetColumnType(BatchContext batch, MultiPartName targetName, HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
+    private static SqlType ResolveUpdateTargetColumnType(Database database, MultiPartName targetName, HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
     {
-        var qualifierIsTarget = Selection.QualifierIsDmlTarget(batch.CurrentDatabase, targetName, name);
+        var qualifierIsTarget = Selection.QualifierIsDmlTarget(database, targetName, name);
         if (qualifierIsTarget)
         {
             foreach (var column in table.Columns)
@@ -1938,6 +1992,15 @@ partial class Simulation
                 ? throw SimulatedSqlException.InvalidColumnName(name)
                 : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
+
+    /// <summary>
+    /// <see cref="ResolveUpdateTargetColumnType"/> as the scope an <c>UPDATE</c>'s
+    /// SET list parses under, built apart from the parse so it holds the
+    /// database rather than the parsing context: a subquery in the list keeps
+    /// it, and a cached plan must reach no parse.
+    /// </summary>
+    private static Func<MultiPartName, SqlType> UpdateTargetTypeResolver(Database database, MultiPartName targetName, HeapTable table, Func<MultiPartName, SqlType>? enclosing) =>
+        name => ResolveUpdateTargetColumnType(database, targetName, table, name, enclosing);
 
     /// <summary>
     /// Types a joined UPDATE's or DELETE's <c>ON</c> predicates while the
@@ -2214,14 +2277,15 @@ partial class Simulation
     /// SELECT-checks one joined FROM source against the securable it was written
     /// as — the synonym when the reference arrived through one, otherwise the
     /// backing table. Sources with neither (derived tables, views) are skipped;
-    /// their inner reads route through the standard read-source sink.
+    /// their inner reads route through the standard read-source sink. Made
+    /// while the statement parses (<see cref="PermissionEnforcement.CheckWhileParsing(BatchContext, CompiledPermissionCheck)"/>).
     /// </summary>
     private static void CheckSourceSelect(BatchContext batch, FromSource source)
     {
         if (source.ViaSynonym is { } synonym)
-            PermissionEnforcement.CheckSchemaObject(batch, "SELECT", synonym);
+            PermissionEnforcement.CheckWhileParsing(batch, "SELECT", writtenName: null, synonym);
         else if (source.BackingTable is { } backing)
-            PermissionEnforcement.CheckSchemaObject(batch, "SELECT", backing);
+            PermissionEnforcement.CheckWhileParsing(batch, "SELECT", writtenName: null, backing);
     }
 
     /// <summary>
@@ -2583,9 +2647,7 @@ partial class Simulation
             storedSchema: leadingTable.StoredColumns,
             storageOrdinals: leadingTable.StorageOrdinals,
             lobStore: leadingTable.Heap,
-            rows: plan.NoLockReader
-                ? leadingTable.Rows
-                : BatchContext.WrapWithRowConflictChecks(leadingTable, context.Batch, plan),
+            rows: plan.NoLockReader ? new UnlockedScanRows(leadingTable) : new LockCheckedScanRows(leadingTable, plan),
             backingTable: leadingTable,
             heapPlan: plan,
             autoElementName: leadingIdent.ToString(),
