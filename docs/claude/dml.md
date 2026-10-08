@@ -18,7 +18,7 @@ What stays per verb is where the verbs differ:
 
 ## UPDATE / DELETE
 - Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
-- **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / cross-column OR / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
+- **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / cross-column OR / range, a small `IN (SELECT …)` or an `EXISTS` correlating on one target column (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
   The mutation loop re-runs the full WHERE per row (residual filter) and X-locks only the rows it commits, so it's a pure narrowing; positioned (`WHERE CURRENT OF`) mutations keep the scan.
   See [`indexes.md`](indexes.md#update--delete-target-seeking).
   The multi-table (joined) form narrows its target with its other sources, a `FROM` clause naming the target alone included, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
@@ -334,7 +334,7 @@ Same set + reset rules: every DML statement updates the count; control-flow stat
 An `IF`'s condition resets it to 0 for the branch it chooses, whatever the condition queried (probed 2026-10-01 against SQL Server 2025).
 
 ## The parse / execute split
-`INSERT … VALUES` and the single-table `UPDATE` and `DELETE` build a plan (`InsertPlan` / `UpdatePlan` / `DeletePlan`) at the point their last token is consumed, and run it through an execution half (`RunInsertValues` / `RunUpdate` / `RunDelete`) that reads no tokens — on every execution, so the plan cache's replay of one ([`plan-cache.md`](plan-cache.md#dml-statement-plans)) runs the same code a fresh parse does.
+`INSERT … VALUES` and the single-table `UPDATE` and `DELETE` build a plan (`InsertPlan` / `UpdatePlan` / `DeletePlan`) at the point their last token is consumed, and run it through an execution half (`RunInsertValues` / `RunUpdate` / `RunDelete`) that reads no tokens — on every execution, so the plan cache's replay of one ([`plan-cache.md`](plan-cache.md#statement-plans)) runs the same code a fresh parse does.
 The split sits where the interleaved statement already stopped reading: `UPDATE` and `DELETE` start their execution with the permission checks and the SERIALIZABLE fence, and `INSERT` with evaluating the tuples, ahead of the checks real makes once the source is read (auto-generated columns, identity, ragged tuples), so no error changes place.
 Two session reads moved across it — `IDENTITY_INSERT` and whether an `INSTEAD OF INSERT` trigger is enabled are read as the `INSERT` runs rather than as it parses — and neither raises.
 An `INSERT` reading a `SELECT`, `EXEC` or `DEFAULT VALUES` source reads it as it parses and then writes through the same `InsertRows`.

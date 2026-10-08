@@ -369,6 +369,8 @@ Two properties make this a pure narrowing with no fidelity cost:
   Seeking touches strictly fewer rows but the *committed* set is identical, so the lock footprint is unchanged — no `RowTxScoped` / snapshot gate is needed (the loop reads live addresses, exactly as the scan it replaces does, and the separate snapshot-conflict pass over the version chain is untouched).
   Positioned mutations (`WHERE CURRENT OF`) leave `where` null and so keep the scan — the cursor already fixed a single row.
 
+A small uncorrelated `col IN (SELECT …)` and an `EXISTS` correlating on one target column seek too, from the values or keys their subquery produces — see [`subqueries.md`](subqueries.md#a-small-uncorrelated-in-set-drives-the-read).
+
 Measured: 2 000 point `UPDATE`s by PK over a 20 000-row table ran ~5.4× faster than the same updates filtered on an unindexed column (0.85 vs 4.54 ms/op); the ratio grows with table size, since the scan is O(rows) and the seek amortizes to ~O(1).
 
 The **joined** (`… FROM <sources>`) form takes a different route: its target is a base-table source like the others, read under a write-target lock plan that records each row's address, and every source goes through the read path's own WHERE pushdown — the equi-join's per-outer-row seek of the target included — see [`dml.md`](dml.md#joined-row-sources).

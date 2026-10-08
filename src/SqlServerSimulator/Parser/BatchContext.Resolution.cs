@@ -95,16 +95,19 @@ internal sealed partial class BatchContext
         // trigger body is in flight. 1-part names only (probe-confirmed:
         // qualified `dbo.inserted` raises Msg 208 in real SQL Server).
         // Pseudo-tables are batch-local materializations — no Sch-S needed
-        // (no DDL can target them).
+        // (no DDL can target them) — and belong to one firing, so a plan
+        // binding one can't serve the next.
         if (this.TriggerFrame is { } triggerFrame && name.Count == 1)
         {
             if (BuiltInToken.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
             {
+                this.HasSessionScopedReference = true;
                 table = ins;
                 return true;
             }
             if (BuiltInToken.Equals(name.Leaf, "deleted") && triggerFrame.Deleted is { } del)
             {
+                this.HasSessionScopedReference = true;
                 table = del;
                 return true;
             }
@@ -307,7 +310,7 @@ internal sealed partial class BatchContext
             }
 #if DEBUG
             // A key component (PlanCacheKey.DefaultSchemaName) that
-            // MayCacheDmlPlan re-checks per statement, so a parse reading it
+            // MayCacheStatementPlan re-checks per statement, so a parse reading it
             // decides nothing a principal with another default schema could
             // replay.
             using var excused = PlanCacheCaptureAudit.SuspendPrincipalWatch();

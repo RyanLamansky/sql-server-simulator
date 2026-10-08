@@ -162,6 +162,10 @@ Adopting rather than re-stamping also keeps the value live: because the body re-
 `StatementContext.UtcNow` is seeded at construction as the floor against that, so an un-inherited body batch still serves a live instant rather than year 1; the adoption on top of it is what makes the instant the *right* one.
 Regression coverage: `CurrentTimeFunctionTests`.
 
+**A body's statements replay from plans.**
+A procedure's, DML trigger's, scalar or multi-statement function's and dynamic batch's `SELECT` and DML statements run from the statement plans their first call recorded, keyed by the module ([`plan-cache.md`](plan-cache.md#module-bodies)); the body still dispatches statement by statement, so the freeze, the error attribution, `@@PROCID`, streaming and skip mode are the parsed body's.
+A statement reading a `#temp` table, a table variable, a TVP or a trigger's `inserted` / `deleted` parses on every call, and so does every statement of a call that compiles afresh (`WITH RECOMPILE`).
+
 ## The body-introducing `AS` is optional
 
 SQL Server's `CREATE FUNCTION` grammar takes the `AS` before a function body as **optional**, for all three function kinds — `RETURNS nvarchar(4000) BEGIN … END` creates the same scalar UDF as `RETURNS nvarchar(4000) AS BEGIN … END`, and the inline (`RETURNS TABLE RETURN (…)`) and multi-statement (`RETURNS @r TABLE (…) BEGIN … END`) forms take the same licence.

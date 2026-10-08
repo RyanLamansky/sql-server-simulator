@@ -993,6 +993,7 @@ partial class Simulation
                     throw compileError;
                 }
                 compiled = true;
+                this.AttachStatementPlans(innerBatch, dynamicKey);
                 innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
                 innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
                 outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));

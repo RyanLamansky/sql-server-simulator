@@ -4,12 +4,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// Represents a <c>@v = expr</c> projection element in a SELECT-assign:
-/// holds the live <see cref="VariableSlot"/> reference (mutated as the
-/// projection runs row-by-row) and the RHS source expression. <c>Run</c>
-/// has the side effect of writing to the slot via the standard CAST
-/// coercion path; the returned <see cref="SqlValue"/> is the post-coerce
-/// value but is never surfaced because SELECT-assign produces no result
-/// rows.
+/// holds the variable's name and declared type and the RHS source
+/// expression. <c>Run</c> has the side effect of writing to the executing
+/// batch's slot for the variable (mutated as the projection runs row-by-row)
+/// via the standard CAST coercion path; the returned <see cref="SqlValue"/>
+/// is the post-coerce value but is never surfaced because SELECT-assign
+/// produces no result rows. The slot is looked up as each row assigns it,
+/// as <see cref="VariableReference"/> reads it, so a cached plan assigns the
+/// variables of the batch replaying it.
 /// </summary>
 /// <remarks>
 /// Empty-result-keeps-prior-value (probe-confirmed) falls out naturally:
@@ -19,9 +21,15 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// — each row's <c>Run</c> overwrites the slot, so the final value is the
 /// last iterated row's RHS.
 /// </remarks>
-internal sealed class AssignmentExpression(VariableSlot slot, Expression source) : Expression
+internal sealed class AssignmentExpression(string variableName, VariableSlot slot, Expression source) : Expression
 {
-    public readonly VariableSlot Slot = slot;
+    /// <summary>The variable's name as written, which the executing batch's <see cref="BatchContext.GetVariableSlot"/> finds it by.</summary>
+    public readonly string VariableName = variableName;
+
+    /// <summary>The variable's declared type, as parsing found it.</summary>
+    public readonly SqlType DeclaredType = slot.DeclaredType;
+
+    private readonly int? declaredMaxLength = slot.DeclaredMaxLength;
 
     public readonly Expression Source = source;
 
@@ -34,11 +42,11 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Source.Run(runtime);
-        Cast.RejectRoundingUnderRoundAbort(value, this.Slot.DeclaredType, runtime.Batch);
-        var coerced = SqlValue.NameVariantBase(value, Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength), this.Source.ResultReportsNumeric);
+        Cast.RejectRoundingUnderRoundAbort(value, this.DeclaredType, runtime.Batch);
+        var coerced = SqlValue.NameVariantBase(value, Cast.ApplyCoercion(value, this.DeclaredType, this.declaredMaxLength), this.Source.ResultReportsNumeric);
         if (this.Mask is { } mask)
-            coerced = DataMasking.ForAssignment(runtime.Batch, mask, value, coerced, this.Slot.DeclaredType);
-        this.Slot.Assign(coerced);
+            coerced = DataMasking.ForAssignment(runtime.Batch, mask, value, coerced, this.DeclaredType);
+        runtime.Batch.GetVariableSlot(this.VariableName).Assign(coerced);
         return coerced;
     }
 
@@ -50,11 +58,11 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
         // an nvarchar one settles against the slot silently).
         var sourceType = this.Source.GetSqlType(batch, resolveColumnType);
         UnresolvedCollation.RequireAssignable(sourceType);
-        AssignmentRules.RequireAssignable(this.Source, sourceType, this.Slot.DeclaredType);
-        return this.Slot.DeclaredType;
+        AssignmentRules.RequireAssignable(this.Source, sourceType, this.DeclaredType);
+        return this.DeclaredType;
     }
 
-    internal override string DebugDisplay() => $"@{this.Slot.DeclaredType} = {this.Source.DebugDisplay()}";
+    internal override string DebugDisplay() => $"@{this.DeclaredType} = {this.Source.DebugDisplay()}";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.Slot).Child(this.Source);
+    internal override void Describe(NodeShape shape) => shape.Local(this.VariableName).Child(this.Source);
 }

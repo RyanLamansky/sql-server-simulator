@@ -228,8 +228,8 @@ public sealed class DmlPlanCacheTests
         => AreEqual(0, ReplaysOverThreeRuns("update #w set v = @v", "create table #w (v int); insert #w values (1)", ("@v", 2)));
 
     [TestMethod]
-    public void InsideABlock_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("if @v > 0 begin update t set v = @v where id = 1 end", parameters: ("@v", 2)));
+    public void InsideABlock_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("if @v > 0 begin update t set v = @v where id = 1 end", parameters: ("@v", 2)));
 
     [TestMethod]
     public void UnderAnotherIsolationLevel_Reparses()

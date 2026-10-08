@@ -1575,6 +1575,34 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// For an <c>EXISTS</c> whose body correlates on one equality with the
+    /// statement's own row (<see cref="Selection.SemiJoin"/>), answers the
+    /// correlation keys the body produces as an equality family on the outer
+    /// side, when <paramref name="subjectType"/> accepts that side as an
+    /// indexable column of the table being narrowed and there are at most
+    /// <paramref name="cap"/> of them — so a single-table <c>UPDATE</c> or
+    /// <c>DELETE</c> seeks the rows the body names rather than judging every
+    /// row. The keys come from the site's decorrelated key plan, built once
+    /// for the statement, which the per-row evaluation then probes in place of
+    /// running the body per row, as past its per-row threshold; the build
+    /// declines as that switch's does — on an error, a body reading the outer
+    /// row or a per-call-varying built-in — leaving the per-row path to decide.
+    /// The <c>EXISTS</c> conjunct stays in the residual WHERE, so a row the
+    /// seek selects is judged as before, and one it skips has no key the body
+    /// produced, which the predicate answers FALSE. Declines for every other
+    /// predicate.
+    /// </summary>
+    internal virtual bool TryMaterializeSemiJoinFamily(
+        BatchContext batch,
+        Func<Expression, SqlType?> subjectType,
+        int cap,
+        [NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+    {
+        pairs = null;
+        return false;
+    }
+
+    /// <summary>
     /// Exposes the operands and operator when this predicate is an ordering
     /// comparison (<c>&gt;</c> / <c>&gt;=</c> / <c>&lt;</c> / <c>&lt;=</c>);
     /// returns false otherwise. Lets the index-seek planner recognize a range
@@ -2306,6 +2334,24 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override string DebugDisplay() => "EXISTS (...)";
 
         internal override void Describe(NodeShape shape) => shape.Local(inner);
+
+        internal override bool TryMaterializeSemiJoinFamily(
+            BatchContext batch,
+            Func<Expression, SqlType?> subjectType,
+            int cap,
+            [NotNullWhen(true)] out List<(Expression Left, Expression Right)>? pairs)
+        {
+            pairs = null;
+            if (inner.SemiJoin is not { OuterKeys: [var outerKey], NullMatches: [false] } || subjectType(outerKey) is null)
+                return false;
+            var runtime = new RuntimeContext(static name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+            if (SemiJoinProbe.BuildNow(runtime, inner) is not { KeyCount: > 0 } index || index.KeyCount > cap)
+                return false;
+            pairs = new List<(Expression Left, Expression Right)>(index.KeyCount);
+            foreach (var key in index.Keys)
+                pairs.Add((outerKey, Value.NonLiteral(key.ComponentAt(0))));
+            return true;
+        }
 
         // No top-level Expression operands — the subquery's references are
         // unreachable from this validator (and a subquery in inline CHECK

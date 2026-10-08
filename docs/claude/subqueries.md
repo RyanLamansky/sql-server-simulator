@@ -107,6 +107,13 @@ NULL values are left out of the probes — they equi-match nothing — and the `
 
 Measured on WideWorldImporters (`Sales.Orders.CustomerID IN (SELECT … FROM Sales.Customers WHERE CustomerID IN (801, 802, 803))`): **17.3 ms → 0.2 ms**, against 1.4 ms live.
 
+**A write drives the same way.**
+A single-table `UPDATE` or `DELETE` (`Selection.SeekMutationTarget`) takes the same family from a small uncorrelated `col IN (SELECT …)`, and from an `EXISTS` whose body correlates on one equality with a column of the target: the site's decorrelated key plan ([above](#an-equi-correlated-body-switches-to-a-hash-semi--anti-join)) is built at once rather than past the per-row threshold (`SemiJoinProbe.BuildNow`), and its keys, at most 64 of them, become the target column's probes, while the per-row evaluation probes the same build.
+The build declines as the switch's does — an error, a body reading the outer row, a per-call-varying built-in — and so does a correlation with more than one key column or one matching NULLs, leaving the scan.
+The read path keeps the `EXISTS` per row, since driving a query from its keys would change the order its unordered rows come back in; a write's rows are judged in the order its plan reads them either way, and its `OUTPUT` follows real's plan rather than any order the statement guarantees.
+Django's related-filter `UPDATE … WHERE id IN (SELECT U0.id …)` updating one row of 1,000 went from 168 µs to 8.6 µs, and the same write as an `EXISTS` from 432 µs to 8.5 µs (measured 2026-10-08, ADO.NET, one case per process, median of three); over a target of 64 rows or fewer the subquery isn't run first, since there it cost more than it saved (a `DELETE` over an empty table, 3.8 → 4.7 µs).
+`SubqueryDrivenWriteTests` runs each shape against a keyed table and an unindexed copy and compares what the two send and leave behind.
+
 ### Divergences
 
 The materializing first execution reads the inner plan to completion, where the pre-existing per-row walk short-circuited on the first match.

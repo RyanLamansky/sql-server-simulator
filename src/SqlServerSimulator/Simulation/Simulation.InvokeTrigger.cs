@@ -470,6 +470,7 @@ partial class Simulation
                 // 2025).
                 if (frame.Trigger is { } compiled)
                 {
+                    innerBatch.StatementPlanModule = compiled;
                     if (this.CompileModuleBody(innerBatch, bodyDatabase, ref compiled.CompiledPlan, compiled.Parent, recompile: false, keepsPlan: true, out var compileError) is { } failures)
                         (outerBatch.PendingTriggerOutcomes ??= []).AddRange(CompileFailuresSent(innerBatch, failures));
                     if (compileError is not null)

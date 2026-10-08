@@ -60,7 +60,7 @@ public sealed partial class Simulation
     /// <summary>Test-observable: live count of entries in the plan cache.</summary>
     internal int PlanCacheCount => Volatile.Read(ref this.planCacheCount);
 
-    /// <summary>Cache key for <see cref="planCache"/> and <see cref="dmlPlanSets"/>. The schema-version
+    /// <summary>Cache key for <see cref="planCache"/> and <see cref="statementPlanSets"/>. The schema-version
     /// is intentionally NOT part of the key — it sits on the entry so a stale
     /// lookup overwrites in place rather than orphaning entries on every DDL.
     /// The session's QUOTED_IDENTIFIER setting IS part of the key: it changes
@@ -135,12 +135,12 @@ public sealed partial class Simulation
     /// dispatch order, plus the <see cref="SchemaVersion"/> active when they
     /// were parsed. Usually one; a batch of several top-level SELECTs caches
     /// as the sequence it is.</summary>
-    private sealed class PlanCacheEntry(Selection[] plans, ReplayedLock[][] locks, (int Start, int End)[] spans, long schemaVersionAtParse)
+    private sealed class PlanCacheEntry(Selection[] plans, ReplayedLock[][] locks, (int Start, int End, int Line)[] spans, long schemaVersionAtParse)
     {
         public readonly Selection[] Plans = plans;
 
-        /// <summary>Where each of <see cref="Plans"/> is written in the command, for its Query Store capture.</summary>
-        public readonly (int Start, int End)[] Spans = spans;
+        /// <summary>Where each of <see cref="Plans"/> is written in the command, for its Query Store capture, and the line it starts on, for its errors.</summary>
+        public readonly (int Start, int End, int Line)[] Spans = spans;
 
         /// <summary>The locks each of <see cref="Plans"/> took as it parsed, which its replay retakes.</summary>
         public readonly ReplayedLock[][] Locks = locks;
@@ -185,6 +185,43 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Completes an error a replayed <c>SELECT</c> raised as the dispatch loop
+    /// completes a parsed statement's (<c>StatementLifecycle.SettleError</c>):
+    /// redacted when a security predicate applied while it ran, attributed to
+    /// the statement's line, and with the rollbacks real performs before the
+    /// error reaches anyone — a deadlock victim's, the transaction-aborting
+    /// class's and <c>SET XACT_ABORT ON</c>'s.
+    /// </summary>
+    private static SimulatedSqlException SettleReplayedError(BatchContext batch, SimulatedSqlException thrown, int rowSecurityMarks)
+    {
+        var connection = batch.Connection;
+        var ex = connection.RowSecurityMarks != rowSecurityMarks && thrown.RedactedForRowSecurity() is { } redacted ? redacted : thrown;
+        ex.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+        if (!ex.RaisingScopeRecorded)
+        {
+            ex.RaisingScopeRecorded = true;
+            ex.RaisedByClientSelect = true;
+        }
+        if (ex.IsAttention && !ex.AttentionSettled)
+        {
+            ex.AttentionSettled = true;
+            connection.AttentionEndedWrite = false;
+        }
+        if (ex.Class == 13 && connection.CurrentTransaction is { } victim)
+        {
+            if (connection.OpenTryFrames > 0 && !victim.Doomed)
+                victim.UndoAsDeadlockVictim();
+            else
+                victim.EndRollback();
+        }
+        if (ex.AbortsTransaction)
+            connection.CurrentTransaction?.EndRollback();
+        ApplyXactAbortPromotion(connection, ex);
+        connection.LastStatementRowCount = 0;
+        return ex;
+    }
+
+    /// <summary>
     /// Empties the plan cache and the compiled-batch memo beside it — every
     /// entry, or with <paramref name="sqlHandle"/> those whose command text it
     /// hashes (<c>sys.dm_exec_requests.sql_handle</c>'s value) — and, for a
@@ -209,10 +246,10 @@ public sealed partial class Simulation
             if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.compiledBatchCount);
         }
-        foreach (var (key, _) in this.dmlPlanSets)
+        foreach (var (key, _) in this.statementPlanSets)
         {
-            if (Matches(key) && this.dmlPlanSets.TryRemove(key, out _))
-                _ = Interlocked.Decrement(ref this.dmlPlanSetCount);
+            if (Matches(key) && this.statementPlanSets.TryRemove(key, out _))
+                _ = Interlocked.Decrement(ref this.statementPlanSetCount);
         }
         if (sqlHandle is null)
         {
@@ -294,6 +331,34 @@ public sealed partial class Simulation
     /// </summary>
     private static PlanCacheKey? DynamicBatchKey(SimulatedDbConnection connection, string text, string declarations) =>
         connection.InsertExecTargetTypes is null ? PlanCacheKeyFor(connection, text, "\0" + declarations) : null;
+
+    /// <summary>
+    /// The key a module body's statement plans are filed under, taken as the
+    /// first of its statements that may have one asks
+    /// (<see cref="BatchContext.StatementPlanModule"/>): its text, and in place of a
+    /// command's parameter signature the module's object id — the module's
+    /// parameters, its schema and its creation-time settings settle what its
+    /// body binds to, and altering it moves the schema version every entry is
+    /// stamped with — so no command's or dynamic batch's key can match it.
+    /// Null where the plan cache's own gates say no.
+    /// </summary>
+    private static PlanCacheKey? ModuleBodyKey(SimulatedDbConnection connection, Schemas.SchemaObject module, string bodyText) =>
+        PlanCacheKeyFor(connection, bodyText, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"\u0001{module.ObjectId}"));
+
+    /// <summary>
+    /// Files <paramref name="body"/>'s statement plans under <paramref name="key"/>,
+    /// so a statement that ran there before replays its plan: a procedure's,
+    /// trigger's, function's or dynamic batch's, keyed by
+    /// <see cref="ModuleBodyKey"/> or <see cref="DynamicBatchKey"/> and taken
+    /// once the body's settings and database are in place.
+    /// </summary>
+    private void AttachStatementPlans(BatchContext body, PlanCacheKey? key)
+    {
+        if (key is not { } attached)
+            return;
+        body.PlanCacheKey = attached;
+        body.StatementPlans = this.statementPlanSets.TryGetValue(attached, out var plans) ? plans : null;
+    }
 
     /// <summary>
     /// <paramref name="text"/>'s key under the session's current settings, or
@@ -381,7 +446,7 @@ public sealed partial class Simulation
                 // RAND() draw and cached subquery results. StartLine mirrors
                 // the single-statement dispatch value for ERROR_LINE parity.
                 batch.CurrentStatement.UtcNow = DateTime.UtcNow;
-                batch.CurrentStatement.StartLine = 1;
+                batch.CurrentStatement.StartLine = entry.Spans[statement].Line;
                 batch.CurrentStatement.AutocommitTransactionId = 0;
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
@@ -425,6 +490,7 @@ public sealed partial class Simulation
                 var queryStoreIo = queryStore is not null ? connection.StatementIo = new IoStatistics() : null;
                 // As the dispatch loop's statements do (see LobReclamation).
                 var announcedReader = connection.Simulation.LobReclamation.Enter(connection.Session);
+                var rowSecurityMarks = connection.RowSecurityMarks;
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
@@ -477,7 +543,35 @@ public sealed partial class Simulation
                     yield return message;
                 yield return replayed;
                 if (cutShort is not null)
-                    ExceptionDispatchInfo.Throw(cutShort);
+                {
+                    // Settled and sent as the dispatch loop settles and sends
+                    // a parsed statement's error: the batch carries on past
+                    // one that ends only its statement, stops at one that ends
+                    // the batch, and propagates any other.
+                    var settled = SettleReplayedError(batch, cutShort, rowSecurityMarks);
+                    batch.BatchAborted = EndsBatch(settled);
+                    if (!batch.BatchAborted && !IsStatementTerminating(settled))
+                        ExceptionDispatchInfo.Throw(settled);
+                    connection.LastErrorNumber = settled.AtAtErrorNumber;
+                    var errorOutcome = new SimulatedErrorOutcome(settled);
+                    if (connection.FramesEveryStatement)
+                    {
+                        errorOutcome.DoneKind = batch.BatchAborted ? StatementDoneKind.Batch : StatementDoneKind.Select;
+                        errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
+                    }
+                    yield return errorOutcome;
+                    if (settled.FollowingMessage is { } following)
+                        yield return new SimulatedInfoOutcome(following, followsRows: true);
+                    if (IsStatementTerminationNoticed(batch, settled))
+                        yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch, settled), followsRows: true);
+                    batch.ReleaseStatementSchemaLocks();
+                    if (batch.BatchAborted)
+                        break;
+                    continue;
+                }
+                // A statement that succeeded clears @@ERROR, as the dispatch
+                // loop's does.
+                connection.LastErrorNumber = 0;
                 if (batch.CurrentStatement.NullEliminated && connection.AnsiWarnings)
                     yield return NullEliminatedWarning(batch);
                 foreach (var notice in ArithmeticNotices(batch))

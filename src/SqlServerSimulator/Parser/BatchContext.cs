@@ -824,28 +824,38 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Where each <see cref="PlanCacheSequence"/> entry's text starts and
     /// ends in the command, index for index — what a replay records the
-    /// statement's Query Store capture under.
+    /// statement's Query Store capture under — and the line it starts on,
+    /// which an error it raises reports.
     /// </summary>
-    public List<(int Start, int End)>? PlanCacheSequenceSpans;
+    public List<(int Start, int End, int Line)>? PlanCacheSequenceSpans;
 
     /// <summary>
-    /// The plan-cache key this batch runs under, when it has one; the DML
-    /// statements' plans are filed under it (<see cref="DmlPlans"/>).
+    /// The plan-cache key this batch or module body runs under, when it has
+    /// one; its statements' plans are filed under it (<see cref="StatementPlans"/>).
     /// </summary>
     public Simulation.PlanCacheKey? PlanCacheKey;
 
     /// <summary>
-    /// The DML statement plans cached for this batch's text, looked up once as
+    /// The statement plans cached for this batch's text, looked up once as
     /// the batch starts, or created by its first recording.
     /// </summary>
-    public DmlPlanSet? DmlPlans;
+    public StatementPlanSet? StatementPlans;
 
     /// <summary>
-    /// Armed around a top-level DML statement's parse when its plan may be
-    /// cached; the statement's split point fills it (see
-    /// <see cref="DmlPlanRecording"/>).
+    /// The procedure, trigger or function whose body this batch runs, until
+    /// the first statement that may have a plan takes the body's
+    /// <see cref="PlanCacheKey"/> from it (<c>Simulation.ModuleBodyKey</c>) —
+    /// so a body whose statements have none, a function's lone
+    /// <c>RETURN</c>, never builds one. Null once taken, and outside a module
+    /// body.
     /// </summary>
-    public DmlPlanRecording? DmlPlanRecording;
+    public Schemas.SchemaObject? StatementPlanModule;
+
+    /// <summary>
+    /// Armed around a DML statement's parse when its plan may be cached; the
+    /// statement's split point fills it (see <see cref="StatementPlanRecording"/>).
+    /// </summary>
+    public StatementPlanRecording? DmlPlanRecording;
 
     /// <summary>
     /// Records every lock acquisition, <c>NOWAIT</c> table and parse-time

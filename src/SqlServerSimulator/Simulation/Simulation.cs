@@ -1540,7 +1540,7 @@ public sealed partial class Simulation
             batch.PlanCacheParameterSignature = prepared.ParameterSignature;
             batch.PlanCacheSchemaVersion = schemaVersionAtStart;
             batch.PlanCacheKey = prepared;
-            batch.DmlPlans = this.dmlPlanSets.TryGetValue(prepared, out var dmlPlans) ? dmlPlans : null;
+            batch.StatementPlans = this.statementPlanSets.TryGetValue(prepared, out var statementPlans) ? statementPlans : null;
             // The batch resolves unqualified names through the default schema
             // its key was taken under, rather than reading the principal as it
             // parses.
@@ -3564,39 +3564,21 @@ public sealed partial class Simulation
         cutShort = null;
         var statementStart = context.SaveCheckpoint();
         context.ForBrowseSeen = false;
-        List<ReplayedLock>? replayLocks;
-        // A statement the plan cache may store records the locks
-        // its parse takes, which a replay takes again as its own
-        // session.
-        batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
-#if DEBUG
-        var principalWatch = batch.ReplayLockLog is not null ? PlanCacheCaptureAudit.WatchPrincipalReads(connection.Security) : null;
-#endif
+        // A statement plan replays where the parse would have run (see
+        // StatementPlanEntry); otherwise the statement parses, recording its
+        // plan when it may be cached and has none yet.
+        var cachesPlan = MayCacheStatementPlan(context);
+        var entry = cachesPlan ? this.CurrentStatementPlan(context, statementStart) : null;
         Selection selection;
-        try
+        ReplayedLock[]? replayLocks;
+        if (entry is { Query: { } cached } && this.ReplaysSelectParse(context, entry, statementStart))
         {
-            selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
-            // A trailing FOR BROWSE puts the one statement in browse
-            // mode, which decides its projection, so the statement is
-            // read again as a browse statement (probed 2026-09-26).
-            if (context.ForBrowseSeen && !connection.NoBrowseTable)
-            {
-                context.RestoreCheckpoint(statementStart);
-                selection = ParseSelectStatement(context, browse: true);
-            }
-            else if (connection.NoBrowseTable && selection.IsSetOperationResult)
-            {
-                selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
-            }
+            selection = cached;
+            replayLocks = entry.Locks;
         }
-        finally
+        else
         {
-            replayLocks = batch.ReplayLockLog;
-            batch.ReplayLockLog = null;
-#if DEBUG
-            if (principalWatch is not null)
-                batch.PrincipalReadWhileParsing ??= PlanCacheCaptureAudit.EndPrincipalWatch(principalWatch);
-#endif
+            selection = this.ParseSelectStatementRecording(batch, statementStart, cachesPlan && entry is null, out replayLocks);
         }
         // A value literal or a name left dangling after a complete
         // SELECT is always unconsumed trailing input — real SQL
@@ -3726,8 +3708,8 @@ public sealed partial class Simulation
             && !batch.HasSessionScopedReference)
         {
             (batch.PlanCacheSequence ??= []).Add(selection);
-            (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks is null ? [] : [.. replayLocks]);
-            (batch.PlanCacheSequenceSpans ??= []).Add((batch.CurrentStatement.StartIndex, context.PreviousTokenEnd));
+            (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks ?? []);
+            (batch.PlanCacheSequenceSpans ??= []).Add((batch.CurrentStatement.StartIndex, context.PreviousTokenEnd, batch.CurrentStatement.StartLine));
             if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
                 && IsAtEndOfBatch(context))
             {
@@ -3735,6 +3717,105 @@ public sealed partial class Simulation
             }
         }
         return outcome;
+    }
+
+    /// <summary>
+    /// Replays the parse of the <c>SELECT</c> statement at the cursor from
+    /// <paramref name="entry"/>: the cursor jumps to where the parse left it,
+    /// and the parse's locks and flags are taken again as this session. False,
+    /// the cursor back at <paramref name="start"/>, when the cursor can't jump
+    /// there or the schema locks the replay took waited out a definition
+    /// change, so the statement parses as it would have.
+    /// </summary>
+    private bool ReplaysSelectParse(ParserContext context, StatementPlanEntry entry, ParserContext.Checkpoint start)
+    {
+        if (!context.CanJumpTo(entry.End))
+            return false;
+        context.JumpTo(entry.End);
+        if (!entry.ReplayParse(context))
+        {
+            context.RestoreCheckpoint(start);
+            return false;
+        }
+        _ = Interlocked.Increment(ref this.SelectPlanHits);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses the <c>SELECT</c> statement at the cursor, answering in
+    /// <paramref name="replayLocks"/> the locks its parse took when the batch
+    /// may cache it. With <paramref name="records"/>, the parse is recorded as
+    /// the statement's plan (see <see cref="RunSelectStatement"/>) unless its
+    /// shape is one a replay can't reproduce — a <c>SELECT … INTO</c>, which
+    /// creates its table as it runs, or one reading what belongs to the
+    /// session.
+    /// </summary>
+    private Selection ParseSelectStatementRecording(BatchContext batch, ParserContext.Checkpoint statementStart, bool records, out ReplayedLock[]? replayLocks)
+    {
+        var context = batch.Parser;
+        var connection = batch.Connection;
+        // The statement-scoped flag is judged for this statement alone; what
+        // earlier statements set still stands for the batch afterwards.
+        var enteredSessionScoped = batch.HasSessionScopedReference;
+        var recording = records ? BeginStatementRecording(batch) : null;
+        if (recording is not null)
+        {
+            batch.HasSessionScopedReference = false;
+        }
+        else
+        {
+            // A statement the SELECT sequence cache may store records the
+            // locks its parse takes, which a replay takes again as its own
+            // session.
+            batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
+        }
+#if DEBUG
+        var principalWatch = recording is null && batch.ReplayLockLog is not null ? PlanCacheCaptureAudit.WatchPrincipalReads(connection.Security) : null;
+#endif
+        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
+        var database = context.CurrentDatabase;
+        try
+        {
+            var selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
+            // A trailing FOR BROWSE puts the one statement in browse
+            // mode, which decides its projection, so the statement is
+            // read again as a browse statement (probed 2026-09-26).
+            if (context.ForBrowseSeen && !connection.NoBrowseTable)
+            {
+                context.RestoreCheckpoint(statementStart);
+                selection = ParseSelectStatement(context, browse: true);
+            }
+            else if (connection.NoBrowseTable && selection.IsSetOperationResult)
+            {
+                selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
+            }
+            if (recording is not null)
+            {
+                // SELECT … INTO creates its table as it runs.
+                if (recording.TakeParse(context, batch.ReplayLockLog, batch.CurrentStatement) && selection.IntoTarget is null)
+                    recording.Query = selection;
+                else
+                    recording.Declined = true;
+            }
+            return selection;
+        }
+        finally
+        {
+            replayLocks = batch.ReplayLockLog is { } taken ? [.. taken] : null;
+            batch.ReplayLockLog = null;
+            batch.HasSessionScopedReference |= enteredSessionScoped;
+            if (recording is not null)
+            {
+                this.EndStatementRecording(batch, recording, statementStart, schemaVersion, database);
+#if DEBUG
+                batch.PrincipalReadWhileParsing ??= recording.PrincipalRead;
+#endif
+            }
+#if DEBUG
+            if (principalWatch is not null)
+                batch.PrincipalReadWhileParsing ??= PlanCacheCaptureAudit.EndPrincipalWatch(principalWatch);
+#endif
+        }
     }
 
     /// <summary>

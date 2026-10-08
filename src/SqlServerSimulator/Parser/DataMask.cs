@@ -207,8 +207,8 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
         for (var i = 0; i < expressions.Count; i++)
         {
             var mask = Of(expressions[i], columnMask, typeOf);
-            if (expressions[i] is AssignmentExpression { Slot: var slot } && batch.UdfFrame is { AnalyzesReturnMask: true })
-                slot.Mask = mask;
+            if (expressions[i] is AssignmentExpression { VariableName: var variable } && batch.UdfFrame is { AnalyzesReturnMask: true })
+                batch.GetVariableSlot(variable).Mask = mask;
             if (mask is not null)
             {
                 MarkErrorScope(expressions[i], mask);

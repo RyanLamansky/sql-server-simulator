@@ -126,7 +126,7 @@ partial class Simulation
             foreach (var (ordinal, expr) in assignments)
             {
                 if (ordinal >= 0)
-                    updated[ordinal] = CoerceForInsert(expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime), columns[ordinal]);
+                    updated[ordinal] = CoerceForInsert(expr is AssignmentExpression { VariableName: var assigned } ? batch.GetVariableSlot(assigned).Value : expr.Run(runtime), columns[ordinal]);
             }
             deletedRows.Add(row);
             insertedRows.Add(updated);

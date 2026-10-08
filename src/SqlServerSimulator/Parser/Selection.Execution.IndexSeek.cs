@@ -555,15 +555,21 @@ internal sealed partial class Selection
         return conjunct.TryMaterializeProbeFamily(
                 batch,
                 outerResolver ?? ThrowOnColumnReference,
-                subject => TryIdentifyIndexableColumn(source, subject, out var ordinal)
-                    && !equalities.ContainsKey(ordinal)
-                    && LeadsSomeKeyOrIndex(table, ordinal)
-                        ? source.StoredSchema[ordinal].Type
-                        : null,
+                subject => ProbeSubjectType(source, table, subject, equalities),
                 UnionSeekProbeCap,
                 out var family)
             && TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
     }
+
+    // The type of the column a materialized probe family would seek on: an
+    // indexable column of `source` leading some key or index of `table` that no
+    // equality pins yet; null for any other subject.
+    private static SqlType? ProbeSubjectType(FromSource source, HeapTable table, Expression subject, Dictionary<int, Expression[]> equalities) =>
+        TryIdentifyIndexableColumn(source, subject, out var ordinal)
+        && !equalities.ContainsKey(ordinal)
+        && LeadsSomeKeyOrIndex(table, ordinal)
+            ? source.StoredSchema[ordinal].Type
+            : null;
 
     // Whether a storage ordinal is the leading key column of some key / index —
     // the structural precondition a probe family needs to seek at all.
@@ -3369,16 +3375,17 @@ internal sealed partial class Selection
         var conjuncts = new List<BooleanExpression>();
         where.CollectConjuncts(conjuncts);
 
-        var equalities = new Dictionary<int, Expression[]>();
-        foreach (var conjunct in conjuncts)
+        // A small uncorrelated `col IN (SELECT …)` drives the write from its
+        // values as it drives a read, and so does an EXISTS correlating on one
+        // of the target's columns from the keys its body names — over a target
+        // holding more rows than the seeks could save reading, since running
+        // the subquery first costs more than judging a handful of rows
+        // (measured 2026-10-08: a DELETE over an empty table, 3.8 → 4.7 µs).
+        var drivesFromSubqueries = table.Heap.RowCount > UnionSeekProbeCap;
+        var equalities = CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue: false, probeTable: drivesFromSubqueries ? table : null, probeBatch: batch);
+        for (var i = 0; drivesFromSubqueries && i < conjuncts.Count; i++)
         {
-            if (conjunct.TryGetEqualityOperands(out var left, out var right))
-            {
-                _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: false)
-                    || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: false);
-                continue;
-            }
-            if (conjunct.TryGetEqualityFamily(out var family))
+            if (conjuncts[i].TryMaterializeSemiJoinFamily(batch, subject => ProbeSubjectType(source, table, subject, equalities), UnionSeekProbeCap, out var family))
                 _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
         }
 

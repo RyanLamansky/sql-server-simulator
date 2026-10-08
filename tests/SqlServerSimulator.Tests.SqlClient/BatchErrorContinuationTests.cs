@@ -41,6 +41,45 @@ public sealed class BatchErrorContinuationTests
     }
 
     [TestMethod]
+    public async Task CachedSelectSequence_RunsOnPastAnError_AsItsParsedRunDid()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var create = new SqlCommand("create table t (id int primary key, v int); insert t values (1, 1), (2, 2), (3, 3)", connection))
+            _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        // The first run parses the batch and caches both statements; the
+        // later ones replay them, and still run the second past the first's
+        // error and report it as the parsed run did.
+        var received = new List<string>();
+        connection.FireInfoMessageEventOnUserErrors = true;
+        connection.InfoMessage += (_, e) => received.AddRange(e.Errors.Cast<SqlError>().Select(error => $"{error.Number}@{error.LineNumber}"));
+        string? parsed = null;
+        for (var run = 0; run < 3; run++)
+        {
+            received.Clear();
+            var rows = new List<string>();
+            await using (var command = new SqlCommand("select id, 10 / (v - 2) from t order by id;\nselect count(*), @@error from t", connection))
+            await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+            {
+                do
+                {
+                    while (await reader.ReadAsync(TestContext.CancellationToken))
+                        rows.Add(string.Join(":", Enumerable.Range(0, reader.FieldCount).Select(i => Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+                }
+                while (await reader.NextResultAsync(TestContext.CancellationToken));
+            }
+            await using (var after = new SqlCommand("select @@error", connection))
+                rows.Add(Convert.ToString(await after.ExecuteScalarAsync(TestContext.CancellationToken), System.Globalization.CultureInfo.InvariantCulture)!);
+            var transcript = string.Join(",", rows) + " | " + string.Join(",", received);
+            parsed ??= transcript;
+            AreEqual(parsed, transcript);
+        }
+        AreEqual("1:-10,3:8134,0 | 8134@1", parsed);
+    }
+
+    [TestMethod]
     public async Task ProcedureBody_RunsOnPastAnError_MessagesArriveInOrder()
     {
         var simulation = new Simulation();

@@ -99,8 +99,11 @@ internal sealed class SemiJoinIndex
     /// </summary>
     private SqlValue[]? probeScratch;
 
-    /// <summary>How many distinct correlation keys the inner produced (test / diagnostic observability).</summary>
+    /// <summary>How many distinct correlation keys the inner produced.</summary>
     internal int KeyCount => this.groups.Count;
+
+    /// <summary>The distinct correlation keys the inner produced.</summary>
+    internal Dictionary<SqlValueKey, SemiJoinGroup?>.KeyCollection Keys => this.groups.Keys;
 
     /// <summary>Records a key with no value column — the <c>EXISTS</c> shape.</summary>
     internal void AddKey(SqlValueKey key) => _ = this.groups.TryAdd(key, null);
@@ -265,6 +268,27 @@ internal static class SemiJoinProbe
         return site.Index is { } built ? built
             : site.Declined || ++site.Evaluations <= PerRowEvaluationsBeforeBuild || StillWorthSeeking(shape, site) ? null
             : Build(runtime, shape, site);
+    }
+
+    /// <summary>
+    /// The structure for <paramref name="inner"/>'s site, built now whatever
+    /// the outer's size — for a write whose target is narrowed to the keys it
+    /// holds (<see cref="BooleanExpression.TryMaterializeSemiJoinFamily"/>),
+    /// whose per-row evaluations then probe it — or null when the plan is
+    /// ineligible or its site declined, now or before.
+    /// </summary>
+    internal static SemiJoinIndex? BuildNow(RuntimeContext runtime, Selection inner)
+    {
+        if (inner.SemiJoin is not { } shape)
+            return null;
+
+        var frame = runtime.Batch.CurrentStatement;
+        var memo = frame.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
+        if (!memo.TryGetValue(inner, out var entry))
+            memo[inner] = entry = new SemiJoinSite();
+
+        var site = (SemiJoinSite)entry;
+        return site.Index ?? (site.Declined ? null : Build(runtime, shape, site));
     }
 
     // Whether the per-row seek is still ahead of the build for an outer this

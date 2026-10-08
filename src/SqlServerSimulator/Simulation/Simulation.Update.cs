@@ -395,7 +395,7 @@ partial class Simulation
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(column.ToString());
                 context.MoveNextRequired();
                 var value = Expression.Parse(context);
-                rawAssignments.Add((column.Leaf, new AssignmentExpression(slot, columnOp == '='
+                rawAssignments.Add((column.Leaf, new AssignmentExpression(variable.Value, slot, columnOp == '='
                     ? value
                     : TwoSidedExpression.FromCompoundOp(columnOp, new Reference(column), value, context))));
                 return;
@@ -414,7 +414,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearText(assignOp + "=");
             context.RestoreCheckpoint(afterValue);
         }
-        rawAssignments.Add((null, new AssignmentExpression(slot, assignOp == '='
+        rawAssignments.Add((null, new AssignmentExpression(variable.Value, slot, assignOp == '='
             ? rhs
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variable, context), rhs, context))));
     }
@@ -2100,7 +2100,7 @@ partial class Simulation
                 assignments.Add((columnOrdinal, ColumnDefaultValue.Bind(table.Columns[columnOrdinal])));
                 continue;
             }
-            if (expr is AssignmentExpression { Slot.DeclaredType: var variableType })
+            if (expr is AssignmentExpression { DeclaredType: var variableType })
             {
                 var column = table.Columns[columnOrdinal];
                 if (variableType.SqlServerName != column.Type.SqlServerName)
@@ -2515,7 +2515,7 @@ partial class Simulation
             SqlValue raw;
             try
             {
-                raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
+                raw = expr is AssignmentExpression { VariableName: var assigned } ? context.Batch.GetVariableSlot(assigned).Value : expr.Run(runtime);
             }
             catch (SimulatedSqlException error) when (context.Batch.CurrentStatement.RemoteWrite is { Kind: RemoteWriteKind.Update, WrittenName: not null } remote && ReferenceEquals(remote.Proxy, table))
             {

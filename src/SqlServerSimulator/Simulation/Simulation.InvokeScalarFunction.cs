@@ -118,6 +118,7 @@ partial class Simulation
         try
         {
             PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, function.Schema.Database, functionOwner);
+            innerBatch.StatementPlanModule = function;
             var parser = innerBatch.Parser;
             parser.MoveNextOptional();
             foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))

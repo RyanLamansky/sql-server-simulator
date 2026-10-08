@@ -420,6 +420,11 @@ partial class Simulation
                     // and an error compiling it is the EXEC's own, as dynamic
                     // SQL's is.
                     var recompiles = recompile || procedure.RecompilesEveryCall;
+                    // A call that compiles the body afresh compiles each of
+                    // its statements too, so only one reusing the plan runs
+                    // them from their statement plans.
+                    if (!recompiles)
+                        innerBatch.StatementPlanModule = procedure;
                     if (this.CompileModuleBody(innerBatch, procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles, out var compileError) is { } failures)
                         outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
                     if (compileError is not null)

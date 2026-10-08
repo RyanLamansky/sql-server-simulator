@@ -20,17 +20,28 @@ internal abstract class DmlStatementPlan
 }
 
 /// <summary>
-/// Armed on the batch around a top-level DML statement's parse when the plan
-/// cache may keep its plan: the parse's split point fills it with the plan and
-/// what else the parse did that a replay has to do again.
+/// Armed on the batch around a statement's parse when the plan cache may keep
+/// its plan: a DML statement's split point fills it with the plan, a
+/// <c>SELECT</c>'s parse with its <see cref="Selection"/>, and either with what
+/// else the parse did that a replay has to do again.
 /// </summary>
-internal sealed class DmlPlanRecording
+internal sealed class StatementPlanRecording(int messagesAtStart)
 {
-    /// <summary>The plan, set when the statement's shape is one a replay reproduces.</summary>
+    /// <summary>The DML plan, set when the statement's shape is one a replay reproduces.</summary>
     public DmlStatementPlan? Plan;
+
+    /// <summary>The <c>SELECT</c> statement's plan, set when a replay reproduces it.</summary>
+    public Selection? Query;
 
     /// <summary>Set when the statement's parse settled on a shape a replay can't reproduce.</summary>
     public bool Declined;
+
+    /// <summary>
+    /// How many informational messages the session had queued as the parse
+    /// began: a parse that queues one — a warning real sends as it compiles the
+    /// statement — sends nothing on a replay, so it records no plan.
+    /// </summary>
+    public readonly int MessagesAtStart = messagesAtStart;
 
     /// <summary>Where the parse left the cursor: the token after the statement.</summary>
     public ParserContext.Checkpoint End;
@@ -38,7 +49,7 @@ internal sealed class DmlPlanRecording
     /// <summary>The locks the parse took and the permission checks it made, in order.</summary>
     public ReplayedLock[] Locks = [];
 
-    /// <summary>The statement-frame state the parse settled; see <see cref="DmlPlanEntry"/>.</summary>
+    /// <summary>The statement-frame state the parse settled; see <see cref="StatementPlanEntry"/>.</summary>
     public bool OpensTransaction, CallsUserFunction, ReadsPermanentObject, ReadsTemporaryObject, ReadsTableVariable;
 
     /// <summary>The client-bound <c>OUTPUT</c> shape the parse noted, if any.</summary>
@@ -51,19 +62,54 @@ internal sealed class DmlPlanRecording
     /// <summary>Where the parse first read its principal, if it did (see <see cref="PlanCacheCaptureAudit"/>).</summary>
     public string? PrincipalRead;
 #endif
+
+    /// <summary>
+    /// Takes what the parse ending at the cursor did besides building its plan
+    /// — where it stopped, the locks it took (<paramref name="locks"/>) and the
+    /// flags it set on <paramref name="statement"/> — or declines when that
+    /// includes something a replay wouldn't repeat. True when taken.
+    /// </summary>
+    public bool TakeParse(ParserContext context, List<ReplayedLock>? locks, StatementContext statement)
+    {
+        var batch = context.Batch;
+        this.Declined = true;
+        if (locks is null
+            || batch.HasSessionScopedReference
+            || batch.Connection.PendingMessages.Count != this.MessagesAtStart
+            || statement.RemoteWrite is not null
+            || statement.TransactionMark is not null
+            || statement.BindsDeferredSource
+            || statement.Recompiles)
+        {
+            return false;
+        }
+
+        this.Declined = false;
+        this.End = context.SaveCheckpoint();
+        this.Locks = [.. locks];
+        this.OpensTransaction = statement.OpensTransaction;
+        this.CallsUserFunction = statement.CallsUserFunction;
+        this.ReadsPermanentObject = statement.ReadsPermanentObject;
+        this.ReadsTemporaryObject = statement.ReadsTemporaryObject;
+        this.ReadsTableVariable = statement.ReadsTableVariable;
+        this.ClientOutputShape = statement.ClientOutputShape;
+        return true;
+    }
 }
 
 /// <summary>
-/// One cached DML statement: its <see cref="Plan"/>, where its text ends, and
-/// what its parse did besides building the plan — the locks it took and the
+/// One cached statement: its plan — a DML statement's <see cref="Plan"/> or a
+/// <c>SELECT</c>'s <see cref="Query"/> — where its text ends, and what its
+/// parse did besides building the plan — the locks it took and the
 /// statement-frame flags it set — which a replay repeats in that order before
-/// running the plan. An entry with no plan records that the statement parsed
-/// to a shape a replay can't reproduce, so later runs under the same schema
-/// parse it without recording again.
+/// running the plan. An entry with neither plan records that the statement
+/// parsed to a shape a replay can't reproduce, so later runs under the same
+/// schema parse it without recording again.
 /// </summary>
-internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersion, Database database)
+internal sealed class StatementPlanEntry(StatementPlanRecording recording, long schemaVersion, Database database)
 {
     public readonly DmlStatementPlan? Plan = recording.Plan;
+    public readonly Selection? Query = recording.Query;
     public readonly ParserContext.Checkpoint End = recording.End;
     public readonly ReplayedLock[] Locks = recording.Locks;
     private readonly bool opensTransaction = recording.OpensTransaction, callsUserFunction = recording.CallsUserFunction;
@@ -77,24 +123,35 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
     /// <summary>The database the statement parsed in.</summary>
     public readonly Database Database = database;
 
+    /// <summary>Whether the statement recorded no plan, its shape being one a replay can't reproduce.</summary>
+    public bool IsDeclined => this.Plan is null && this.Query is null;
+
     /// <summary>
-    /// Replays the statement against <paramref name="context"/>'s batch, whose
-    /// cursor already sits at <see cref="End"/>: the parse's locks and
-    /// permission checks as this session, then the flags its parse set on the
-    /// statement frame, then the execution half. The locks come first because
-    /// a parse takes them before it reaches anything that sets a flag — a lock
-    /// wait that ends the statement ends it with the frame the parse had at
-    /// that point.
+    /// Replays the DML statement against <paramref name="context"/>'s batch,
+    /// whose cursor already sits at <see cref="End"/>: what its parse did (see
+    /// <see cref="ReplayParse"/>), then the execution half.
     /// </summary>
     /// <remarks>
     /// Null, nothing run, when a definition change the locks waited out made
     /// the plan stale: the caller parses the statement instead.
     /// </remarks>
-    public SimulatedStatementOutcome? Replay(ParserContext context)
+    public SimulatedStatementOutcome? Replay(ParserContext context) =>
+        this.ReplayParse(context) ? this.Plan!.Run(context) : null;
+
+    /// <summary>
+    /// Repeats what the statement's parse did against <paramref name="context"/>'s
+    /// batch: the parse's locks and permission checks as this session, then the
+    /// flags its parse set on the statement frame. The locks come first because
+    /// a parse takes them before it reaches anything that sets one — a lock
+    /// wait that ends the statement ends it with the frame the parse had at
+    /// that point. False, with no flag set, when a definition change the locks
+    /// waited out made the plan stale.
+    /// </summary>
+    public bool ReplayParse(ParserContext context)
     {
         var batch = context.Batch;
         if (!batch.TakeReplayedLocks(this.Locks, this.SchemaVersion) || Volatile.Read(ref context.Connection.Simulation.SchemaVersion) != this.SchemaVersion)
-            return null;
+            return false;
         var statement = batch.CurrentStatement;
         if (this.opensTransaction)
             statement.MarkOpensTransaction();
@@ -104,28 +161,28 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
         statement.ReadsTableVariable |= this.readsTableVariable;
         if (this.clientOutputShape is { } shape)
             statement.ClientOutputShape = shape;
-        return this.Plan!.Run(context);
+        return true;
     }
 }
 
 /// <summary>
-/// The DML plans cached for one command text, keyed by where each statement
-/// starts in the text's memoized token sequence. Copy-on-write: a lookup reads
-/// whichever dictionary is published without locking, and a recording
-/// publishes a new one.
+/// The statement plans cached for one command text or module body, keyed by
+/// where each statement starts in the text's memoized token sequence.
+/// Copy-on-write: a lookup reads whichever dictionary is published without
+/// locking, and a recording publishes a new one.
 /// </summary>
-internal sealed class DmlPlanSet
+internal sealed class StatementPlanSet
 {
-    private volatile Dictionary<int, DmlPlanEntry> entries = [];
+    private volatile Dictionary<int, StatementPlanEntry> entries = [];
     private readonly Lock publishing = new();
 
     /// <summary>The plan cached for the statement starting at token ordinal <paramref name="start"/>, if any.</summary>
-    public DmlPlanEntry? Find(int start) => this.entries.TryGetValue(start, out var entry) ? entry : null;
+    public StatementPlanEntry? Find(int start) => this.entries.TryGetValue(start, out var entry) ? entry : null;
 
     /// <summary>Files <paramref name="entry"/> for the statement starting at <paramref name="start"/>, replacing any stale one.</summary>
-    public void Publish(int start, DmlPlanEntry entry)
+    public void Publish(int start, StatementPlanEntry entry)
     {
         lock (this.publishing)
-            this.entries = new Dictionary<int, DmlPlanEntry>(this.entries) { [start] = entry };
+            this.entries = new Dictionary<int, StatementPlanEntry>(this.entries) { [start] = entry };
     }
 }
