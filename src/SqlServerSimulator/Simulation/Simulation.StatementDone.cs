@@ -302,9 +302,10 @@ partial class Simulation
     /// <summary>
     /// The marker closing a procedure or dynamic-SQL scope that ran to its
     /// end, returning <paramref name="returnStatus"/>, as its caller
-    /// <paramref name="caller"/> sends it.
+    /// <paramref name="caller"/> sends it; a null status closes one whose
+    /// compile ended it silently, which real closes with no RETURNSTATUS.
     /// </summary>
-    internal static SimulatedProcScopeBoundary ScopeExit(BatchContext caller, int returnStatus) =>
+    internal static SimulatedProcScopeBoundary ScopeExit(BatchContext caller, int? returnStatus) =>
         new(isEnter: false, returnStatus: returnStatus)
         {
             DoneKind = StatementDoneKind.Execute,

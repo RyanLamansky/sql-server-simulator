@@ -2736,7 +2736,7 @@ partial class Simulation
                     }
                     else
                     {
-                        defaultExpression = ParseDefaultClauseExpression(context, tempTable: !isTableVariable && tableName.StartsWith('#'));
+                        defaultExpression = ParseDefaultClauseExpression(context, tempTable: !isTableVariable && tableName.StartsWith('#'), tableVariable: isTableVariable);
                     }
                     defaultDefinition = context.CanonicalDefinitionFrom(defaultStart, predicate: false) ?? $"({context.SourceTextFrom(defaultStart)})";
                     continue;
@@ -5212,10 +5212,11 @@ partial class Simulation
     /// named-constraint <c>… DEFAULT (v) FOR w</c>).
     /// </para>
     /// </remarks>
-    private static Expression ParseDefaultClauseExpression(ParserContext context, bool tempTable = false)
+    private static Expression ParseDefaultClauseExpression(ParserContext context, bool tempTable = false, bool tableVariable = false)
     {
         using var defaultClause = ParserScope.Enter(ref context.InDefaultClause, true);
         using var inTempdb = ParserScope.Enter(ref context.DefaultResolvesInTempdb, tempTable);
+        using var ofTableVariable = ParserScope.Enter(ref context.DefaultOfTableVariable, tableVariable);
         using var scalarOnly = context.EnterScalarOnlyOperand();
         var expression = Expression.Parse(context);
         return context.ScalarOnlyColumnReference is null

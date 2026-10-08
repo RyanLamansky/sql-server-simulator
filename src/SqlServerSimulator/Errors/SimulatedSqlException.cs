@@ -454,6 +454,54 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisedByClient;
 
     /// <summary>
+    /// Set on the failure that ends a batch's compile without a message: a
+    /// table variable's column defaulting to a sequence missing as the batch
+    /// compiles. The batch, procedure or dynamic batch whose compile met it
+    /// runs nothing and reports nothing; how far further it reaches is up to
+    /// the frame that ran that compile (<c>Simulation.EndedSilently</c> for a
+    /// top-level batch, <c>Simulation.CallerEndedBySilentCompile</c> for a
+    /// call).
+    /// </summary>
+    internal bool EndsCompileSilently { get; private init; }
+
+    /// <summary>
+    /// Set on an error that ends the batch from inside a <c>TRY</c> yet closes
+    /// the procedure and dynamic-SQL scopes opened within the <c>TRY</c>'s own
+    /// scope, as a call's error does, the outermost one's DONEPROC carrying
+    /// the error bit and ending the response, where another error ending the
+    /// batch closes it with the batch's own DONE alone (probed 2026-10-08
+    /// against SQL Server 2025). The scopes enclosing the <c>TRY</c>'s stay
+    /// unclosed (<see cref="ScopesKeptOpen"/>).
+    /// </summary>
+    internal bool ClosesAbandonedScopes { get; private init; }
+
+    /// <summary>
+    /// For a <see cref="ClosesAbandonedScopes"/> error, set once it has
+    /// propagated out to the scope holding the <c>TRY</c> it ended.
+    /// </summary>
+    internal bool ReachedTryScope;
+
+    /// <summary>
+    /// For a <see cref="ClosesAbandonedScopes"/> error, how many of the scopes
+    /// it propagated out of enclose the <c>TRY</c>'s, which no DONEPROC closes.
+    /// </summary>
+    internal int ScopesKeptOpen;
+
+    /// <summary>
+    /// Notes this error leaving a procedure or dynamic-SQL scope that
+    /// <paramref name="caller"/> called, for <see cref="ScopesKeptOpen"/>.
+    /// </summary>
+    internal void LeavingScopeInto(Parser.BatchContext caller)
+    {
+        if (!this.ClosesAbandonedScopes)
+            return;
+        if (this.ReachedTryScope)
+            this.ScopesKeptOpen++;
+        else if (caller.TryFrameDepth > 0)
+            this.ReachedTryScope = true;
+    }
+
+    /// <summary>
     /// Set on a non-schema-bound security predicate's binding failure met
     /// while the batch compiles: its leading Msg 208 doesn't defer with its
     /// statement as a missing object's does, and it ends the compile's report

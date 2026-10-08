@@ -9,12 +9,15 @@ partial class SimulatedSqlException
     /// severe-error Msg 0 (probed 2026-10-06 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ShutdownRefused() =>
-        new("A severe error occurred on the current command.  The results, if any, should be discarded.", 0, 11, 0)
+        new(SevereErrorMessage, 0, 11, 0)
         {
             AbortsTransaction = true,
             RaisedByClient = true,
             TerminatesBatch = true,
         };
+
+    /// <summary>The text of the class-11 Msg 0 SqlClient raises for a DONE carrying the error bit with no error ahead of it.</summary>
+    internal const string SevereErrorMessage = "A severe error occurred on the current command.  The results, if any, should be discarded.";
 
     /// <summary>Mimics SQL Server error 6101: a <c>KILL</c> session id outside 1 to 32767 (probed 2026-09-30 against SQL Server 2025).</summary>
     internal static SimulatedSqlException KillSessionIdNotValid(long sessionId) =>

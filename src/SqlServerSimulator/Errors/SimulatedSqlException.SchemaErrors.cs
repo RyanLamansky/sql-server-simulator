@@ -992,6 +992,42 @@ partial class SimulatedSqlException
         new("NEXT VALUE FOR function cannot be used within CASE, CHOOSE, COALESCE, IIF, ISNULL and NULLIF.", 11741, 15, 1);
 
     /// <summary>
+    /// A table variable's column defaulting to a sequence that doesn't exist as
+    /// the batch compiles — never created, or created by the same batch — which
+    /// real meets binding the declaration and answers with nothing at all: the
+    /// batch ends before anything in it runs, with no message, its DONE
+    /// carrying no error and <c>@@ERROR</c> left as it was (probed 2026-10-04
+    /// and 2026-10-08 against SQL Server 2025). Never sent as it stands; see
+    /// <see cref="EndsCompileSilently"/>.
+    /// </summary>
+    internal static SimulatedSqlException TableVariableDefaultSequenceMissing() =>
+        new(SevereErrorMessage, 0, 11, 0)
+        {
+            EndsCompileSilently = true,
+            RaisedByClient = true,
+        };
+
+    /// <summary>
+    /// What a procedure's or dynamic batch's silently failed compile
+    /// (<see cref="TableVariableDefaultSequenceMissing"/>) becomes once a
+    /// <c>TRY</c> is open around the call or <c>XACT_ABORT</c> is on: real
+    /// ends the caller's whole batch, no <c>CATCH</c> running, with a DONE
+    /// carrying the error bit and nothing ahead of it, which SqlClient reports
+    /// as its own class-11 Msg 0. Under <c>XACT_ABORT</c> the transaction rolls
+    /// back and that DONE is the batch's own; a <c>TRY</c> leaves the
+    /// transaction committable and the error bit on the DONEPROC closing the
+    /// outermost call (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CalledCompileEndedSilently(bool xactAbort) =>
+        new(SevereErrorMessage, 0, 11, 0)
+        {
+            AbortsTransaction = xactAbort,
+            ClosesAbandonedScopes = !xactAbort,
+            RaisedByClient = true,
+            TerminatesBatch = true,
+        };
+
+    /// <summary>
     /// Mimics SQL Server error 11730: a DEFAULT constraint's <c>NEXT VALUE
     /// FOR</c> named the sequence with a database part (probed 2026-10-02
     /// against SQL Server 2025).

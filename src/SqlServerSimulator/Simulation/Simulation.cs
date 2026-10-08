@@ -1580,6 +1580,12 @@ public sealed partial class Simulation
             StatementClock? compileClock = batch.Connection.StatisticsTime ? StatementClock.Start(batch.Connection) : null;
             if (this.CompileBatch(compileContext, cacheKey, out var inliningFailures) is { } compileError)
             {
+                if (compileError.EndsCompileSilently)
+                {
+                    if (EndedSilently(batch.Connection) is { } underXactAbort)
+                        yield return underXactAbort;
+                    yield break;
+                }
                 batch.Connection.LastErrorNumber = compileError.Number;
                 yield return new SimulatedErrorOutcome(compileError);
                 yield break;
@@ -1594,10 +1600,33 @@ public sealed partial class Simulation
             var context = batch.Parser;
             context.MoveNextOptional();
             var batchAborted = false;
-            foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
+            var endedSilently = false;
+            using (var statements = DispatchStatementsUntil(batch, endKeyword: null).GetEnumerator())
             {
-                batchAborted |= outcome is SimulatedErrorOutcome { Exception: var ended } && EndsBatch(ended);
-                yield return outcome;
+                while (true)
+                {
+                    // A module body binding as its CREATE runs ends the batch
+                    // silently as the batch's own compile does, real binding
+                    // the body with the batch.
+                    try
+                    {
+                        if (!statements.MoveNext())
+                            break;
+                    }
+                    catch (SimulatedSqlException silent) when (silent.EndsCompileSilently)
+                    {
+                        endedSilently = true;
+                        break;
+                    }
+                    batchAborted |= statements.Current is SimulatedErrorOutcome { Exception: var ended } && EndsBatch(ended);
+                    yield return statements.Current;
+                }
+            }
+            if (endedSilently)
+            {
+                if (EndedSilently(batch.Connection) is { } underXactAbort)
+                    yield return underXactAbort;
+                yield break;
             }
             // A transaction an XACT_ABORT-caught error doomed can survive to
             // here: the CATCH ran, the batch carried on, and nothing rolled it
@@ -2748,7 +2777,7 @@ public sealed partial class Simulation
     /// error is catchable (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
-        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !ex.IsAttention && !batch.CreateTimeBinding
+        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !ex.IsAttention && !ex.RaisedByClient && !batch.CreateTimeBinding
         && !(IsDeferredCompileError(ex) && !ex.EndedCalledBatch);
 
     /// <summary>

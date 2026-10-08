@@ -1033,6 +1033,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 case SimulatedProcScopeBoundary { IsEnter: true }:
                     scopes.Entered++;
                     continue;
+                case SimulatedProcScopeBoundary { Unsent: true }:
+                    scopes.Entered = Math.Max(scopes.Entered - 1, 0);
+                    continue;
                 case SimulatedProcScopeBoundary when scopes.Resumed > 0:
                     if (scopes.Entered > 0)
                         scopes.Entered--;

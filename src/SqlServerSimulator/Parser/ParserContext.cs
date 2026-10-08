@@ -379,6 +379,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool DefaultResolvesInTempdb;
 
     /// <summary>
+    /// True while a table variable's <c>DEFAULT</c> clause parses: a sequence
+    /// it names that doesn't exist ends the batch's compile without a message,
+    /// or, met as the declaration runs, is looked for again only as the default
+    /// draws (see <see cref="Expressions.NextValueFor"/>).
+    /// </summary>
+    public bool DefaultOfTableVariable;
+
+    /// <summary>
     /// True while a filtered index's or statistic's <c>WHERE</c> predicate
     /// parses. Its grammar takes only comparisons, so a value standing where a
     /// condition belongs (<c>WHERE (a)</c>) is the plain syntax error at the

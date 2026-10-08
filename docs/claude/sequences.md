@@ -69,10 +69,22 @@ Like a draw, a reserved range isn't handed back by a rollback.
 - `BatchContext.TryResolveSequence(MultiPartName)` — accepts 1-part names (falls back to `dbo`), 2-part (`schema.seq`), 3-part (`db.schema.seq`, db must match current).
 - `NEXT VALUE FOR` on a non-sequence object that exists as a table / view / etc. → **Msg 11726** (probe-confirmed wording uses the qualified `dbo.name` form); a variable after `FOR` is a syntax error at itself (probed 2026-10-04).
 - `DROP SEQUENCE` of a sequence a column default draws from is **Msg 3729** naming the default constraint, and `sys.sql_expression_dependencies` lists the default as referencing the sequence (probed 2026-10-04 against SQL Server 2025).
-- `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name"), at state 1 where real raises state 211 (probed 2026-10-04 against SQL Server 2025).
+- `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name") at state 211, in a query and a table's default alike (probed 2026-10-08 against SQL Server 2025).
 - A principal other than `dbo` needs `UPDATE` on the sequence (Msg 229), except in a column `DEFAULT`, which ownership chaining covers.
-- A `#temp` table's default resolves the name in tempdb, its schema defaulting to `dbo`, so a sequence of the user database is **Msg 208** at state 211 there (probed 2026-10-06 against SQL Server 2025); a table variable's default resolves in the current database.
+- A `#temp` table's default resolves the name in tempdb, its schema defaulting to `dbo`, so a sequence of the user database is **Msg 208** at state 211 there (probed 2026-10-06 against SQL Server 2025); a table variable's default resolves in the current database, as the next section has it.
 - `EXEC p NEXT VALUE FOR s` is **Msg 102** at `next`, which no argument begins with.
+
+## A table variable's default ends its batch's compile silently
+
+A table variable whose column defaults to a sequence that doesn't exist as the batch compiles — never created, created by the same batch, named in another database, or a catalog view such as `sys.objects` — ends that compile on real with nothing at all: no statement of the batch runs, the `CREATE SEQUENCE` beside it included, no message comes back, the DONE carries no error bit and `@@ERROR` keeps the value it had (probed 2026-10-04 and 2026-10-08 against SQL Server 2025).
+The simulator reproduces it from the compile walk (`BatchContext.SilentCompileEnd`, raised by `NextValueFor`), which reads the rest of the batch on: a syntax error anywhere in it is the batch's report instead, as are binder errors in the statements ahead of the declaration, while one behind it goes unreported.
+It is the `DECLARE` alone that looks the sequence up first — a name that resolves to a table is Msg 11726 and an existing sequence named with its database Msg 11730 there, as for a table's default — and an untaken branch's `DECLARE` compiles too.
+A sequence an earlier batch created is drawn as for a table, and one the batch drops after compiling is looked for again only as the default draws: an insert naming the column passes, and the first draw ends the batch with Msg 208 at state 211.
+
+Where the batch that fails is a procedure's or dynamic SQL's, the call ends alone: `EXEC('…')` and a procedure close their scope with no return status, leaving the caller's return variable as it was, and `sp_executesql` returns `@@ERROR`, which nothing changed; a procedure body that fails so at `CREATE` leaves no procedure.
+With a `TRY` open anywhere around the call or `XACT_ABORT` on, the caller's whole batch ends instead, no `CATCH` running, which SqlClient reports as its own class-11 Msg 0, `A severe error occurred on the current command` (`SimulatedSqlException.CalledCompileEndedSilently`); under `XACT_ABORT` the transaction rolls back and the batch's DONE carries the error bit, while under a `TRY` the transaction stays committable and the scopes opened inside the `TRY`'s own scope close, the inner ones clear and the outermost's DONEPROC with the bit, ending the response.
+A top-level batch under `XACT_ABORT` ends the same way, its transaction rolled back.
+A table's, a `#temp` table's and `ALTER TABLE … ADD DEFAULT`'s missing sequence is plain Msg 208, and a table type's default Msg 11719.
 
 ## `sys.sequences` catalog view
 
@@ -216,6 +228,4 @@ A `VALUES` row has no query block to rank it and draws as it would without the c
 
 ## Not modeled yet
 
-- **A table variable whose column defaults to a sequence missing as its batch compiles** — never created, or created earlier in the same batch — ends the whole batch on real with no message: nothing it would run runs, the `CREATE SEQUENCE` beside it included, and `@@ERROR` reads 0 in the next batch; run by `EXEC (…)`, the call ends the caller's batch too, which SqlClient reports as `A severe error occurred on the current command` (probed 2026-10-04, re-probed 2026-10-08 against SQL Server 2025).
-  Here a sequence the batch creates leaves the declaration unbound, so each later reference to the table variable is Msg 1087 as the batch compiles and a batch with none runs, while a sequence never created is Msg 208.
-  A sequence created by an earlier batch is drawn as for a table (the shape behind [Resolution / lookup](#resolution--lookup)'s note, probed 2026-10-06 and 2026-10-08).
+- **The Msg 223 after a table variable's Msg 11730** — real follows the refusal of an existing sequence named with its database with `Object ID … specified as a default for table ID …, column ID 1 is missing or not of type default.` at severity 11, naming the default's and the table variable's internal object ids (probed 2026-10-08 against SQL Server 2025); the simulator sends the Msg 11730 alone.

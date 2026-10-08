@@ -46,6 +46,13 @@ internal sealed class NextValueFor : Expression
     private readonly bool inDefault;
 
     /// <summary>
+    /// The name a table variable's default gave a sequence that was missing as
+    /// the declaration ran, which <see cref="Sequence"/> stands in for: drawing
+    /// is Msg 208 at state 211. Null for a sequence that resolved.
+    /// </summary>
+    private readonly MultiPartName? missingAtDraw;
+
+    /// <summary>
     /// The <c>ROW_NUMBER()</c> over this reference's <c>OVER (ORDER BY …)</c>,
     /// set once the clause parses: the row it ranks k takes the statement's
     /// k-th draw (probed 2026-10-04 against SQL Server 2025). Null without an
@@ -90,6 +97,21 @@ internal sealed class NextValueFor : Expression
         {
             ThrowIfRejectedHere(scope);
         }
+        if (context.DefaultOfTableVariable && context.InDefaultClause && !context.Batch.TryResolveSequence(sequenceName, out _) && !NamesAnotherObject(context.Batch, sequenceName))
+        {
+            // A table variable's default looks its sequence up before judging
+            // the name's database part, and a sequence missing then ends the
+            // batch's compile without a word (BatchContext.SilentCompileEnd);
+            // one dropped after the batch compiled is looked for again as the
+            // default draws, Msg 208 at state 211 then (probed 2026-10-08
+            // against SQL Server 2025).
+            if (context.Batch.CreateTimeBinding)
+                context.Batch.SilentCompileEnd ??= (SimulatedSqlException.TableVariableDefaultSequenceMissing(), context.Batch.CreateTimeBindErrors?.Count ?? 0);
+            this.Sequence = new Sequence(context.Batch.Parser.CurrentDatabase.Schemas[Database.DefaultSchemaName], sequenceName.Leaf, 0, default, SqlType.BigInt, 1, 1, long.MinValue, long.MaxValue, cycle: false);
+            this.missingAtDraw = sequenceName;
+            this.inDefault = true;
+            return;
+        }
         if (context.InDefaultClause && sequenceName.Count >= 3 && sequenceName[sequenceName.Count - 3] is { Length: > 0 })
             throw SimulatedSqlException.SequenceDatabaseNameInDefault();
         if (pendingRefusal is not null && !context.Batch.TryResolveSequence(sequenceName, out _))
@@ -115,12 +137,11 @@ internal sealed class NextValueFor : Expression
             // A synonym is a non-sequence object here even when its base IS a
             // sequence: probe-confirmed that real refuses NEXT VALUE FOR through
             // a synonym with the same Msg 11726.
-            if (context.Batch.TryResolveSynonym(sequenceName, out _) || context.Batch.TryResolveTable(sequenceName, out _)
-                || (context.Batch.TryResolveSchema(sequenceName, out var schema) && schema.HasNameInSharedNamespace(sequenceName.Leaf)))
-            {
+            // A missing sequence is Msg 208 at state 211 wherever it is named
+            // (probed 2026-10-08 against SQL Server 2025).
+            if (NamesAnotherObject(context.Batch, sequenceName))
                 throw SimulatedSqlException.ObjectIsNotASequence(sequenceName.ToString());
-            }
-            throw SimulatedSqlException.InvalidObjectName(sequenceName);
+            throw SimulatedSqlException.InvalidObjectName(sequenceName, 211);
         }
         this.Sequence = resolved;
         this.inDefault = context.InDefaultClause;
@@ -129,6 +150,11 @@ internal sealed class NextValueFor : Expression
         // gate); collecting here catches a reference at any nesting depth.
         context.SequenceCollector?.Add(resolved);
     }
+
+    /// <summary>Whether <paramref name="sequenceName"/> names an object other than a sequence, which is Msg 11726.</summary>
+    private static bool NamesAnotherObject(BatchContext batch, MultiPartName sequenceName) =>
+        batch.TryResolveSynonym(sequenceName, out _) || batch.TryResolveTable(sequenceName, out _)
+        || (batch.TryResolveSchema(sequenceName, out var schema) && schema.HasNameInSharedNamespace(sequenceName.Leaf));
 
     /// <summary>
     /// The sequence a <c>#temp</c> table's default names, which real looks
@@ -175,6 +201,8 @@ internal sealed class NextValueFor : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var batch = runtime.Batch;
+        if (this.missingAtDraw is { } missing)
+            throw SimulatedSqlException.InvalidObjectName(missing, 211);
         if (this.OverRank is { } rank)
             return this.DrawRanked(runtime, rank);
         if (batch.SequenceRowCache.TryGetValue(this.Sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)

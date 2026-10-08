@@ -202,6 +202,9 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
   A scalar argument (a literal, a variable) reports Msg 215 alone.
   `INDEX` is the one name real refuses outright in that form, wherever in the list it stands and whether or not an alias preceded the parens: **Msg 1018**, naming the hint as written and carrying real's own inconsistent capitalization (`… A WITH keyword and parenthesis are now required.`).
   A table variable takes no hint at all: a `WITH` after it ends the statement (Msg 319), and the parenthesized form is Msg 1018 for any hint name, Msg 102 for anything else (probed 2026-09-26).
+  A rowset function's call takes none either (probed 2026-10-05, 2026-10-07 and 2026-10-08 against SQL Server 2025).
+  Real reads a `WITH` right after the call, no alias between, as the start of a column schema like `OPENJSON`'s, so a hint is refused as a schema that doesn't parse: a reserved hint word where a column name belongs — `INDEX`, `HOLDLOCK` — is **Msg 1018** naming it, any other hint a column missing its type, **Msg 102** at what follows it (`WITH (NOLOCK)` near `)`, `WITH (NOLOCK, INDEX(ix))` near `,`), another reserved word Msg 156, and a schema that does parse (`WITH (a int)`) **Msg 319** at state 2, at line 12 wherever the statement stands (`Selection.RejectRowsetFunctionWith`, for user functions, `STRING_SPLIT`, `GENERATE_SERIES` and the other built-in rowsets, `OPENJSON`'s own schema taking the Msg 1018 too).
+  After an alias a `WITH` ends the statement (Msg 319), and a user function's parenthesized list is a column alias list, **Msg 317**, alias or none, save `INDEX` / `HOLDLOCK`'s Msg 1018.
 
 ## Not enforced
 
@@ -214,7 +217,7 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 - **Join-hint feasibility through `APPLY` and semi-joins** — real refuses `OPTION (HASH JOIN)` over a `CROSS APPLY` or an `EXISTS` whose correlation isn't an equality once decorrelated, and some `RIGHT LOOP JOIN`s, as its decorrelation and join reordering decide; those are left alone here.
   Not chased: the shapes follow real's rewrites, not the query as written.
 - **Msg 8625 from dynamic SQL run by `sp_executesql`** after `EXEC (…)` ran the same text: real's cached plan sends none, where the simulator's separate compile sends it once more.
-- **Table hints after a table-valued function** are refused, not always with real's message: `dbo.f() WITH (NOLOCK)`, and the hint written ahead of an alias, are Msg 319 here and Msg 102 near `)` on real, `dbo.f() WITH (INDEX(ix))` is Msg 319 here and real's Msg 1018 near `index`, and `dbo.f() (NOLOCK)` is Msg 102 near `nolock` here and real's Msg 317 (probed 2026-10-05 and 2026-10-07, re-probed 2026-10-08 against SQL Server 2025); a hint after the alias is Msg 319 on both, `x (NOLOCK)` Msg 317 on both.
+- **A table function's legacy `(NOLOCK)` form** — `STRING_SPLIT(…) (NOLOCK)` is Msg 102 near `nolock` here and real's Msg 195 state 15 (`'string_split' is not a recognized function name.`, probed 2026-10-08 against SQL Server 2025); a user function's is modeled (above).
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.

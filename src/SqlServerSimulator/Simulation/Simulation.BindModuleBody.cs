@@ -179,6 +179,8 @@ partial class Simulation
             }
         }
 
+        if (SettleSilentCompileEnd(bindBatch, bindErrors) is { } silent)
+            throw silent;
         SimulatedSqlException.DropBinderErrorsBehindDeclarations(bindErrors);
         if (bindErrors.Count > 0)
         {

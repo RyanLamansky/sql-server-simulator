@@ -419,6 +419,17 @@ internal sealed partial class BatchContext
     public List<SimulatedSqlException>? CreateTimeBindErrors;
 
     /// <summary>
+    /// Set by the first table-variable default the walk under
+    /// <see cref="CreateTimeBinding"/> met naming a sequence that doesn't exist
+    /// (<see cref="SimulatedSqlException.TableVariableDefaultSequenceMissing"/>),
+    /// with how many binder errors had been gathered by then. Real still parses
+    /// the rest of the text, whose syntax errors win, while binder errors after
+    /// it go unreported, so the walk reads on and its owner settles which
+    /// stands (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    public (SimulatedSqlException Failure, int BindErrorsBefore)? SilentCompileEnd;
+
+    /// <summary>
     /// The report one statement's binder errors gather into, non-null only
     /// while <c>Simulation.ReportEveryBindError</c> re-reads a statement whose
     /// bind failed: the sites that meet a name miss record it here and carry

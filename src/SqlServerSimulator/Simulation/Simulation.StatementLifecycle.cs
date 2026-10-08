@@ -459,7 +459,7 @@ partial class Simulation
                     // TRY / CATCH, and trips the Msg 3616 swallowed-error rule).
                     simulation.FireDdlTriggers(batch);
                 }
-                catch (SimulatedSqlException thrown)
+                catch (SimulatedSqlException thrown) when (!thrown.EndsCompileSilently)
                 {
                     // A refusal the walk held back for the statement's sources
                     // was raised ahead of whatever the statement met after it,
@@ -520,7 +520,7 @@ partial class Simulation
                         simulation.FireDdlTriggers(batch);
                     }
                 }
-                catch (SimulatedSqlException thrown)
+                catch (SimulatedSqlException thrown) when (!thrown.EndsCompileSilently)
                 {
                     more = false;
                     if (batch.CurrentStatement.PendingCompileRefusal is { } pending && batch.IsSkipping && !DefersWithItsStatement(batch, thrown))
@@ -1011,7 +1011,19 @@ partial class Simulation
             {
                 if (this.StartDoneKind is not null)
                     _ = FrameStatement(batch, outcomes, standInForNone: false);
-                if (batch.BatchAborted)
+                if (continuedError.ClosesAbandonedScopes)
+                {
+                    errorOutcome.DoneKind = StatementDoneKind.ClosedByScope;
+                    closedScopes = [];
+                    for (var kept = 0; kept < continuedError.ScopesKeptOpen; kept++)
+                        closedScopes.Add(new SimulatedProcScopeBoundary(isEnter: false) { Unsent = true });
+                    // The scopes inside the TRY's close clear, all but the
+                    // outermost, whose DONEPROC ends the response.
+                    var closing = this.OpenScopes(outcomes) - continuedError.ScopesKeptOpen;
+                    CloseAbandonedProcScopes(batch, closing - 1, closedScopes, isCall: false, endedByError: false);
+                    CloseAbandonedProcScopes(batch, Math.Min(closing, 1), closedScopes, isCall: false, endedByError: true);
+                }
+                else if (batch.BatchAborted)
                 {
                     errorOutcome.DoneKind = StatementDoneKind.Batch;
                 }

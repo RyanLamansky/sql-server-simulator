@@ -3415,37 +3415,91 @@ internal sealed partial class Selection
     /// </summary>
     internal static bool WhereIsClusteredKeySeek(HeapTable table, BooleanExpression where)
     {
-        if (KeyLockGroup.RowGroupOf(table) is not { } clustered)
-            return false;
         var source = BuildBaseTableSeekSource(table, table.Name);
         var conjuncts = new List<BooleanExpression>();
         where.CollectConjuncts(conjuncts);
+        return IsClusteredKeySeek(table, source, conjuncts, value => IsStableValueSide(value, source, allowCorrelatedColumnValue: false, planSources: null));
+    }
+
+    /// <summary>
+    /// <see cref="WhereIsClusteredKeySeek"/> for a joined UPDATE or DELETE,
+    /// whose plan real folds the same way when every source beside the target
+    /// is one row of constants — a one-row <c>VALUES</c>, a FROM-less
+    /// <c>SELECT</c>, a CTE or <c>APPLY</c> body of one — so that a column of
+    /// theirs is a constant too: the target's predicates, its inner joins'
+    /// <c>ON</c> conditions with the <c>WHERE</c>, then seek the clustered key
+    /// and the write waits in X (probed 2026-10-08 against SQL Server 2025).
+    /// A table, a table variable, a derived table reading one, two
+    /// <c>VALUES</c> rows, an outer join's <c>ON</c> and an <c>IN</c> or
+    /// <c>EXISTS</c> over the constants keep the read, which waits in U.
+    /// </summary>
+    internal static bool JoinedWriteIsClusteredKeySeek(HeapTable table, FromSource[] sources, int targetIndex, JoinSpec[] joins, BooleanExpression? where)
+    {
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (i != targetIndex && sources[i].LateralPlan is not { IsSingleConstantRow: true })
+                return false;
+        }
+        var target = sources[targetIndex];
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var join in joins)
+        {
+            if (join is { Kind: JoinKind.Inner, OnPredicate: { } on })
+                on.CollectConjuncts(conjuncts);
+        }
+        where?.CollectConjuncts(conjuncts);
+        // A comparison of the constants alone folds away.
+        _ = conjuncts.RemoveAll(conjunct =>
+            (conjunct.TryGetEqualityOperands(out var left, out var right) || conjunct.TryGetRangeOperands(out left, out _, out right))
+            && IsConstantAcrossJoin(left, sources, targetIndex) && IsConstantAcrossJoin(right, sources, targetIndex));
+        return IsClusteredKeySeek(table, target, conjuncts, value => IsConstantAcrossJoin(value, sources, targetIndex));
+    }
+
+    /// <summary>Whether <paramref name="value"/> is fixed across a joined write's walk: constants, variables and the one-row constant sources' columns.</summary>
+    private static bool IsConstantAcrossJoin(Expression value, FromSource[] sources, int targetIndex)
+    {
+        while (value.PureConversionOperand is { } inner)
+            value = inner;
+        return value switch
+        {
+            Value => true,
+            VariableReference => true,
+            Reference reference => FindSourceColumn(sources, reference.ReferencedName).SourceIndex is var at && at >= 0 && at != targetIndex,
+            TwoSidedExpression arithmetic => arithmetic.BothOperandsMatch(operand => IsConstantAcrossJoin(operand, sources, targetIndex)),
+            Negate negate => IsConstantAcrossJoin(negate.Operand, sources, targetIndex),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// The shape <see cref="WhereIsClusteredKeySeek"/> describes, over
+    /// <paramref name="conjuncts"/> read against <paramref name="source"/>,
+    /// each column's value side judged by <paramref name="stable"/>.
+    /// </summary>
+    private static bool IsClusteredKeySeek(HeapTable table, FromSource source, List<BooleanExpression> conjuncts, Func<Expression, bool> stable)
+    {
+        if (KeyLockGroup.RowGroupOf(table) is not { } clustered)
+            return false;
         var equal = new HashSet<int>();
         var ranged = new HashSet<int>();
         foreach (var conjunct in conjuncts)
         {
             if (conjunct.TryGetEqualityOperands(out var left, out var right))
             {
-                if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue: false, planSources: null, out var ordinal, out _)
-                    && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue: false, planSources: null, out ordinal, out _))
-                {
+                if (!SeeksColumn(source, left, right, stable, out var ordinal) && !SeeksColumn(source, right, left, stable, out ordinal))
                     return false;
-                }
                 _ = equal.Add(ordinal);
             }
             else if (conjunct.TryGetRangeOperands(out left, out _, out right))
             {
-                if (!TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue: false, planSources: null, out var ordinal, out _)
-                    && !TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue: false, planSources: null, out ordinal, out _))
-                {
+                if (!SeeksColumn(source, left, right, stable, out var ordinal) && !SeeksColumn(source, right, left, stable, out ordinal))
                     return false;
-                }
                 _ = ranged.Add(ordinal);
             }
             else if (conjunct.TryGetBetweenOperands(out var value, out var lower, out var upper)
                 && TryIdentifyIndexableColumn(source, value, out var betweenOrdinal)
-                && IsStableValueSide(lower, source, allowCorrelatedColumnValue: false, planSources: null)
-                && IsStableValueSide(upper, source, allowCorrelatedColumnValue: false, planSources: null))
+                && stable(lower)
+                && stable(upper))
             {
                 _ = ranged.Add(betweenOrdinal);
             }
@@ -3471,6 +3525,9 @@ internal sealed partial class Selection
                 return false;
         }
         return prefix != 0 || ranged.Contains(keys[0]);
+
+        static bool SeeksColumn(FromSource source, Expression columnSide, Expression valueSide, Func<Expression, bool> stable, out int ordinal) =>
+            TryIdentifyIndexableColumn(source, columnSide, out ordinal) && stable(valueSide);
     }
 
     /// <summary>

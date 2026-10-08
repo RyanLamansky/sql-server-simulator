@@ -1125,6 +1125,8 @@ partial class Simulation
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         var targetAddresses = new RowAddressMap();
         sources[targetIndex] = sources[targetIndex].AsWriteTarget(targetAddresses);
+        // Settled over the FROM clause as written, ahead of the reordering.
+        var targetWait = JoinedTargetWait(table, sources, targetIndex, joins, where);
         sources = Selection.PrepareMutationJoinSources(sources, ref joins, where is null ? [] : [where], ref targetIndex, MutationMayReorder(top, context.Batch), context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -1142,7 +1144,7 @@ partial class Simulation
         var runtime = new RuntimeContext(resolveTuple, context.Batch);
 
         if (!table.SupersededKeyImages.IsEmptyLockFree())
-            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null);
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null, targetWait);
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             currentTuple = tuple;
@@ -1159,9 +1161,9 @@ partial class Simulation
                 continue;
 
             // Judged as another session's write leaves it: the walk waits out,
-            // in U, a row that session holds, and judges it again.
+            // in U or X, a row that session holds, and judges it again.
             var rowBytes = targetBytes;
-            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes))
+            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes, targetWait))
                 continue;
             var judged = ReferenceEquals(rowBytes, targetBytes) || rowBytes.AsSpan().SequenceEqual(targetBytes)
                 ? JudgeTuple(targetBytes)
@@ -1177,7 +1179,7 @@ partial class Simulation
         // elsewhere during the walk was never paired: the statement runs
         // again, as the plain walk's does.
         if (!table.SupersededKeyImages.IsEmptyLockFree())
-            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null);
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null, targetWait);
         if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
             context.Batch.TargetKeyReinserted = true;
 
@@ -2290,6 +2292,20 @@ partial class Simulation
     /// </summary>
     private static bool DmlTopIsZero(Selection.DmlTopLimit? top, BatchContext batch) =>
         top is { } limit && Selection.ResolveDmlTopCap(limit, int.MaxValue, batch) == 0;
+
+    /// <summary>
+    /// The mode a joined UPDATE's or DELETE's walk waits on a target row
+    /// another session holds in: X when real's plan writes the target through
+    /// a seek of its clustered key, everything beside it one row of constants
+    /// (<see cref="Selection.JoinedWriteIsClusteredKeySeek"/>), U otherwise —
+    /// and U without asking while no other session writes the table, which
+    /// makes the walk wait for nothing either way.
+    /// </summary>
+    private static LockMode JoinedTargetWait(HeapTable table, FromSource[] sources, int targetIndex, JoinSpec[] joins, BooleanExpression? where) =>
+        (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree())
+        && Selection.JoinedWriteIsClusteredKeySeek(table, sources, targetIndex, joins, where)
+            ? LockMode.Exclusive
+            : LockMode.Update;
 
     /// <summary>A joined UPDATE / DELETE's predicates: every JOIN ON, then the WHERE.</summary>
     private static List<BooleanExpression> JoinedPredicates(JoinSpec[] joins, BooleanExpression? where)

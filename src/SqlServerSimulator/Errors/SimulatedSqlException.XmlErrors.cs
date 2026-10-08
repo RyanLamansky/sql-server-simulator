@@ -409,6 +409,23 @@ partial class SimulatedSqlException
         new($"In the FOR XML EXPLICIT clause, ID, IDREF, IDREFS, NMTOKEN, and NMTOKENS attributes cannot be hidden in '{column}'.", 6815, 16, 1);
 
     /// <summary>
+    /// Msg 6816: a column carries one of the identity directives beside
+    /// <c>cdata</c>, <c>xml</c> or <c>xmltext</c>. Real checks it after Msg
+    /// 6815 and ahead of Msg 6817 (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitIdCannotBeRaw(string column) =>
+        new($"In the FOR XML EXPLICIT clause, ID, IDREF, IDREFS, NMTOKEN, and NMTOKENS attributes cannot be generated as CDATA, XML, or XMLTEXT in '{column}'.", 6816, 16, 1);
+
+    /// <summary>
+    /// Msg 6839: a row of a tag declaring an <c>idrefs</c> / <c>nmtokens</c>
+    /// column carries a value for the tag's <c>xmltext</c> column — raised as
+    /// the row is written, so an empty rowset or NULL overflow values pass
+    /// (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlExplicitXmlTextBesideIdrefs(string tag) =>
+        new($"FOR XML EXPLICIT does not support XMLTEXT field on tag '{tag}' that has IDREFS or NMTOKENS fields.", 6839, 16, 1);
+
+    /// <summary>
     /// Msg 6817: a column carries two of the mutually exclusive content
     /// directives. Probe-confirmed wording against SQL Server 2025.
     /// </summary>
@@ -433,10 +450,10 @@ partial class SimulatedSqlException
         new($"In the FOR XML EXPLICIT clause, mode '{directive}' in a column name is invalid.", 6824, 16, 1);
 
     /// <summary>
-    /// Msg 6826: an <c>idrefs</c> / <c>nmtokens</c> column. Real admits one
-    /// only where its expression is statically nullable — the shape that feeds
-    /// the values in from a separate <c>SELECT</c> of the union — and reports
-    /// this otherwise. Probe-confirmed wording against SQL Server 2025.
+    /// Msg 6826: a row carries an <c>idrefs</c> / <c>nmtokens</c> value with no
+    /// element of its tag current to take it, or for a list column ahead of the
+    /// one the element's earlier rows moved on to (probed 2026-10-08 against
+    /// SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ForXmlExplicitIdrefsNeedsSeparateSelect() =>
         new("Every IDREFS or NMTOKENS column in a FOR XML EXPLICIT query must appear in a separate SELECT clause, and the instances must be ordered directly after the element to which they belong.", 6826, 16, 1);

@@ -258,6 +258,8 @@ A batch that compiled is remembered under its `PlanCacheKey` with the `SchemaVer
 One that resolved a `#temp` isn't remembered, since what it bound to was the session's.
 The three per-simulation caches keep their own entry counts: `ConcurrentDictionary.Count` takes every lock the dictionary has, and reading it on each fresh text cost more than the walk itself.
 
+One failure ends the compile with no message at all — a table variable defaulting to a sequence that doesn't exist yet — and reaches a caller only through an open `TRY` or `XACT_ABORT`, as the client's own severe error ([`sequences.md`](sequences.md#a-table-variables-default-ends-its-batchs-compile-silently)).
+
 A `TRY` frame the walk parses catches nothing: a syntax error inside a `TRY` body is the batch's compile error, as it is on real, rather than something its `CATCH` handles (probed 2026-09-25); only a batch that runs raises into a frame.
 
 An error that ends a procedure's or dynamic SQL's batch — a compile error, or a missing object at run time — reaches no further: in the caller the `EXEC` fails like any statement, the caller's batch goes on, and a `TRY` around the `EXEC` catches it (`SimulatedSqlException.EndedCalledBatch`, probed 2026-09-24).

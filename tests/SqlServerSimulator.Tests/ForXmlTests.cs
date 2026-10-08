@@ -1810,14 +1810,69 @@ public sealed class ForXmlTests
         // A duplicate HIDE outranks both of the other combination rules.
         _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!element!element!hide!hide] for xml explicit", 6835);
         _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!element!element!id!id] for xml explicit", 6813);
+        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!cdata] for xml explicit", 6816,
+            "In the FOR XML EXPLICIT clause, ID, IDREF, IDREFS, NMTOKEN, and NMTOKENS attributes cannot be generated as CDATA, XML, or XMLTEXT in 'e!1!a!id!cdata'.");
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!cdata!idrefs] for xml explicit", 6816);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!nmtokens!xmltext] for xml explicit", 6816);
+        // An identity directive beside HIDE outranks the content rules, and
+        // beside CDATA / XML / XMLTEXT outranks a content pair.
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!hide!id!element!element] for xml explicit", 6815);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!element!cdata] for xml explicit", 6816);
+        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!id!element!element] for xml explicit", 6817);
     }
 
+    /// <summary>
+    /// An <c>idrefs</c> / <c>nmtokens</c> column takes its values row by row: a
+    /// row whose list column is NULL opens the element, and each later row of
+    /// the tag carrying a value feeds it to that element, space-joined, the
+    /// row's other columns ignored.
+    /// </summary>
     [TestMethod]
-    public void Explicit_Idrefs_Msg6826()
-    {
-        new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!idrefs] for xml explicit", 6826,
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!olist!idrefs] union all select 1, null, 9, 'o10' union all select 1, null, 9, 'o11' union all select 1, null, 2, null union all select 1, null, 7, 'o12' for xml explicit",
+        "<C cid=\"1\" olist=\"o10 o11\"></C><C cid=\"2\" olist=\"o12\"></C>", DisplayName = "Merged into each element")]
+    [DataRow("select 1 as tag, null as parent, cast(null as int) as [e!1!k!nmtokens] for xml explicit", "<e></e>", DisplayName = "No values")]
+    [DataRow("select 1 as tag, null as parent, null as [C!1!l!idrefs], 1 as [C!1!cid] union all select 1, 77, 'v', 99 for xml explicit",
+        "<C cid=\"1\" l=\"v\"></C>", DisplayName = "After the other attributes, the value row's parent ignored")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [C!1!b!nmtokens] union all select 1, null, null, 'x1', null union all select 1, null, null, 'x2', 'y1' union all select 1, null, null, 'x3', null for xml explicit",
+        "<C cid=\"1\" a=\"x1 x2 x3\"></C>", DisplayName = "The reached list column takes the row's value")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [C!1!b!nmtokens] union all select 1, null, null, 'x1', null union all select 1, null, null, null, 'y1' union all select 1, null, null, 'x2', 'y2' for xml explicit",
+        "<C cid=\"1\" a=\"x1\" b=\"y1 y2\"></C>", DisplayName = "Moving on to a later list column")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!nmtokens] union all select 1, null, null, 'a&b<' union all select 1, null, null, '' union all select 1, null, null, 'z' for xml explicit",
+        "<C cid=\"1\" a=\"a&amp;b&lt;  z\"></C>", DisplayName = "Escaped, an empty value kept")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [O!2!oid], null as [O!2!l!idrefs] union all select 2, 1, null, 5, null union all select 2, 1, null, null, 'r1' union all select 2, 1, null, 6, null union all select 2, 1, null, null, 'r2' for xml explicit",
+        "<C cid=\"1\"><O oid=\"5\" l=\"r1\"></O><O oid=\"6\" l=\"r2\"></O></C>", DisplayName = "On a nested tag")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs!element], 'v' as [C!1!b!element], null as [O!2!oid] union all select 1, null, null, 'x1', 'w', null union all select 1, null, null, 'x2', 'w', null union all select 2, 1, null, null, null, 3 for xml explicit",
+        "<C cid=\"1\"><b>v</b><a>x1 x2</a><O oid=\"3\"/></C>", DisplayName = "As an element, after the content and ahead of a child")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!!idrefs] union all select 1, null, null, 'x1' union all select 1, null, null, 'x2' for xml explicit",
+        "<C cid=\"1\">x1 x2</C>", DisplayName = "As text")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [C!1!e!elementxsinil] for xml explicit",
+        "<C xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" cid=\"1\"></C>", DisplayName = "No xsi:nil on its tag")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [O!2!oid] union all select 2, 1, null, null, 4 union all select 1, null, 2, null, null union all select 1, null, null, 'x9', null for xml explicit",
+        "<C cid=\"1\"><O oid=\"4\"/></C><C cid=\"2\" a=\"x9\"></C>", DisplayName = "Into the next element of the tag")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs] union all select 1, null, null, 'x1' for xml explicit, root('r'), type",
+        "<r><C cid=\"1\" a=\"x1\" /></r>", DisplayName = "TYPE")]
+    public void Explicit_ListColumn_TakesLaterRowsValues(string query, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(query));
+
+    [TestMethod]
+    [DataRow("select 1 as tag, null as parent, 'x' as [e!1!k!nmtokens] for xml explicit", DisplayName = "On the opening row")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [O!2!oid] union all select 2, 1, null, null, 5 union all select 1, null, null, 'o10', null for xml explicit", DisplayName = "A child element in between")]
+    [DataRow("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [C!1!b!nmtokens] union all select 1, null, null, null, 'y1' union all select 1, null, null, 'x1', null for xml explicit", DisplayName = "Back to an earlier list column")]
+    public void Explicit_ListValueNoElementTakes_Msg6826(string query)
+        => new Simulation().AssertSqlError(query, 6826,
             "Every IDREFS or NMTOKENS column in a FOR XML EXPLICIT query must appear in a separate SELECT clause, and the instances must be ordered directly after the element to which they belong.");
-        _ = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, 1 as [e!1!a!nmtokens] for xml explicit", 6826);
+
+    [TestMethod]
+    public void Explicit_ListColumn_EmptyRowsetIsNoError()
+        => IsNull(new Simulation().ExecuteScalar("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs] where 1 = 0 for xml explicit"));
+
+    /// <summary>Msg 6839 comes as a row carries an overflow value on a tag with a list column.</summary>
+    [TestMethod]
+    public void Explicit_XmlTextBesideListColumn_Msg6839()
+    {
+        new Simulation().AssertSqlError("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], '<o z=\"1\"/>' as [C!1!!xmltext] for xml explicit", 6839,
+            "FOR XML EXPLICIT does not support XMLTEXT field on tag 'C' that has IDREFS or NMTOKENS fields.");
+        AreEqual("<C cid=\"1\"></C>", new Simulation().ExecuteScalar("select 1 as tag, null as parent, 1 as [C!1!cid], null as [C!1!a!idrefs], null as [C!1!!xmltext] for xml explicit"));
     }
 
     [TestMethod]

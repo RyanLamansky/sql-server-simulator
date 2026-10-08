@@ -97,6 +97,8 @@ partial class Simulation
             connection.CurrentDatabase = enteredDatabase;
         }
 
+        if (SettleSilentCompileEnd(compileBatch, errors) is { } silent)
+            return silent;
         var failures = this.InliningFailuresOf(compileBatch, inlined);
         if (errors.Exists(static error => error.PreemptsBinderErrors))
         {
@@ -147,6 +149,64 @@ partial class Simulation
                 _ = Interlocked.Increment(ref this.compiledBatchCount);
         }
         return null;
+    }
+
+    /// <summary>
+    /// What a procedure's or dynamic batch's compile ending silently
+    /// (<see cref="SimulatedSqlException.EndsCompileSilently"/>) does to its
+    /// caller: null when the call just ends, its scope closed with no status
+    /// and <c>@@ERROR</c> as it was, and the caller goes on; otherwise, with a
+    /// <c>TRY</c> open anywhere around it or <c>XACT_ABORT</c> on, the error
+    /// that ends the caller's whole batch (probed 2026-10-08 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SimulatedSqlException? CallerEndedBySilentCompile(SimulatedDbConnection connection) =>
+        connection.XactAbort || connection.OpenTryFrames > 0
+            ? SimulatedSqlException.CalledCompileEndedSilently(connection.XactAbort)
+            : null;
+
+    /// <summary>
+    /// Whether the scope whose compile ended silently closes ahead of
+    /// <paramref name="callerEnded"/>, the error ending its caller's batch: it
+    /// does, its DONE clear, under a <c>TRY</c> further out than its caller;
+    /// with the <c>TRY</c> in its caller it is the scope the error closes, and
+    /// under <c>XACT_ABORT</c> nothing closes (probed 2026-10-08 against
+    /// SQL Server 2025). Notes the <c>TRY</c> on the error either way.
+    /// </summary>
+    private static bool ClosesSilentScope(SimulatedSqlException callerEnded, BatchContext caller)
+    {
+        if (!callerEnded.ClosesAbandonedScopes)
+            return false;
+        callerEnded.ReachedTryScope = caller.TryFrameDepth > 0;
+        return !callerEnded.ReachedTryScope;
+    }
+
+    /// <summary>
+    /// Settles a walk that met <see cref="BatchContext.SilentCompileEnd"/>: the
+    /// binder errors gathered ahead of it are the report, those after it are
+    /// dropped, and with none ahead of it the failure itself is the walk's
+    /// outcome (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException? SettleSilentCompileEnd(BatchContext walked, List<SimulatedSqlException> errors)
+    {
+        if (walked.SilentCompileEnd is not var (failure, before))
+            return null;
+        errors.RemoveRange(before, errors.Count - before);
+        return errors.Count == 0 ? failure : null;
+    }
+
+    /// <summary>
+    /// A top-level batch whose compile ended silently: under <c>XACT_ABORT</c>
+    /// real rolls the transaction back and closes the batch with a DONE
+    /// carrying the error bit alone, SqlClient's class-11 Msg 0; otherwise
+    /// nothing at all, a null here (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedErrorOutcome? EndedSilently(SimulatedDbConnection connection)
+    {
+        if (!connection.XactAbort)
+            return null;
+        connection.CurrentTransaction?.EndRollback();
+        return new SimulatedErrorOutcome(SimulatedSqlException.CalledCompileEndedSilently(xactAbort: true));
     }
 
     /// <summary>

@@ -44,6 +44,13 @@ partial class Selection
             var tagId = tagValue.AsInt32;
             if (!plan.Tags.TryGetValue(tagId, out var tag))
                 throw SimulatedSqlException.ForXmlExplicitUndeclaredTag(tagId);
+            if (tag.Lists.Count > 0)
+            {
+                if (tag.XmlText is { } overflowColumn && !RowDecoder.DecodeColumn(innerSchema, rowBytes, overflowColumn.Column).IsNull)
+                    throw SimulatedSqlException.ForXmlExplicitXmlTextBesideIdrefs(tag.Name);
+                if (FeedForXmlExplicitLists(open, tagId, tag, rowBytes, innerSchema, options))
+                    continue;
+            }
 
             var keep = 0;
             // A NULL or zero parent is the document level; anything else has to
@@ -72,14 +79,26 @@ partial class Selection
             var overflow = tag.XmlText is null ? null : ReadForXmlExplicitOverflow(tag.XmlText, rowBytes, innerSchema);
 
             if (open.Count > 0)
+            {
+                WriteForXmlExplicitLists(sb, open[^1]);
                 StartForXmlExplicitBody(sb, open[^1]);
+            }
             _ = sb.Append('<').Append(tag.Name);
             if (open.Count == 0)
                 _ = sb.Append(topLevelDeclarations);
             AppendForXmlExplicitAttributes(sb, tag, rowBytes, innerSchema, overflow);
 
-            var frame = new ForXmlExplicitFrame(tagId, tag.Name);
+            var frame = new ForXmlExplicitFrame(tagId, tag.Name, tag);
             open.Add(frame);
+            // Rows after this one may still feed the start tag list
+            // attributes, which go after its others, and an element whose tag
+            // declares a list never self-closes (probed 2026-10-08 against
+            // SQL Server 2025: <e></e>).
+            if (frame.Lists is not null)
+            {
+                frame.ListAttributesAt = sb.Length;
+                StartForXmlExplicitBody(sb, frame);
+            }
 
             var body = new StringBuilder();
             AppendForXmlExplicitContent(body, tag, rowBytes, innerSchema, options, overflow);
@@ -104,6 +123,16 @@ partial class Selection
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
+        // TYPE reads the text back as xml, which collapses an element the
+        // text form kept open with nothing in it — the one a list column or a
+        // materialized overflow forces — to <e/> (probed 2026-10-08 against
+        // SQL Server 2025).
+        if (options.Typed)
+        {
+            var typed = XmlWellFormedness.Canonical(sb.ToString(), nationalSource: true);
+            yield return RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(typed)]);
+            yield break;
+        }
         yield return ForXmlRow(sb, options);
     }
 
@@ -131,8 +160,80 @@ partial class Selection
         frame.BodyStarted = true;
     }
 
-    private static void CloseForXmlExplicitFrame(StringBuilder sb, ForXmlExplicitFrame frame) =>
+    private static void CloseForXmlExplicitFrame(StringBuilder sb, ForXmlExplicitFrame frame)
+    {
+        WriteForXmlExplicitLists(sb, frame);
         _ = frame.BodyStarted ? sb.Append("</").Append(frame.Name).Append('>') : sb.Append("/>");
+    }
+
+    /// <summary>
+    /// Feeds a row's <c>idrefs</c> / <c>nmtokens</c> values to the element
+    /// they belong to, answering whether the row was such a row — one carrying
+    /// any list value, which opens no element and whose other columns count
+    /// for nothing, its parent included. Real takes the value only into the
+    /// current element, of the row's own tag, and walks the list columns
+    /// forward: the column its earlier rows reached takes the row's value when
+    /// it has one, and otherwise the row's first list column carrying a value,
+    /// which may not lie behind it; any other value the row carries is dropped.
+    /// Anything else is Msg 6826 (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    private static bool FeedForXmlExplicitLists(List<ForXmlExplicitFrame> open, int tagId, ForXmlExplicitTag tag, byte[] rowBytes, SqlType[] innerSchema, ForXmlOptions options)
+    {
+        var first = -1;
+        for (var i = 0; i < tag.Lists.Count && first < 0; i++)
+        {
+            if (!RowDecoder.DecodeColumn(innerSchema, rowBytes, tag.Lists[i].Column).IsNull)
+                first = i;
+        }
+        if (first < 0)
+            return false;
+        if (open.Count == 0 || open[^1] is not { Lists: { } lists } frame || frame.TagId != tagId)
+            throw SimulatedSqlException.ForXmlExplicitIdrefsNeedsSeparateSelect();
+
+        var taking = frame.ListCursor >= 0 && !RowDecoder.DecodeColumn(innerSchema, rowBytes, tag.Lists[frame.ListCursor].Column).IsNull
+            ? frame.ListCursor
+            : first >= frame.ListCursor ? first : throw SimulatedSqlException.ForXmlExplicitIdrefsNeedsSeparateSelect();
+        frame.ListCursor = taking;
+        var column = tag.Lists[taking];
+        var value = RowDecoder.DecodeColumn(innerSchema, rowBytes, column.Column);
+        var rendered = new StringBuilder();
+        if (innerSchema[column.Column] is XmlSqlType)
+            _ = AppendUndeclaringDefaultNamespace(rendered, ScalarForXmlText(value));
+        else if (column.Content == ForXmlExplicitContent.Attribute)
+            AppendForXmlText(rendered, ScalarForXmlText(value), isAttribute: true);
+        else
+            AppendForXmlText(rendered, ForXmlColumnText(value, column.Column, rowBytes, innerSchema, options), isAttribute: false);
+        (lists[taking] ??= []).Add(rendered.ToString());
+        return true;
+    }
+
+    /// <summary>
+    /// Writes what an element's rows fed its list columns, space-joined, once
+    /// no more can come: attributes at the end of its start tag, the element
+    /// and text forms after its own content, ahead of any child (probed
+    /// 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    private static void WriteForXmlExplicitLists(StringBuilder sb, ForXmlExplicitFrame frame)
+    {
+        if (frame.Lists is not { } lists)
+            return;
+        frame.Lists = null;
+        var attributes = new StringBuilder();
+        for (var i = 0; i < lists.Length; i++)
+        {
+            if (lists[i] is not { } values)
+                continue;
+            var column = frame.Tag.Lists[i];
+            var joined = string.Join(' ', values);
+            _ = column.Content switch
+            {
+                ForXmlExplicitContent.Attribute => attributes.Append(' ').Append(column.Name).Append("=\"").Append(joined).Append('"'),
+                ForXmlExplicitContent.Text => sb.Append(joined),
+                _ => sb.Append('<').Append(column.Name).Append('>').Append(joined).Append("</").Append(column.Name).Append('>'),
+            };
+        }
+        _ = sb.Insert(frame.ListAttributesAt, attributes);
+    }
 
     /// <summary>
     /// Appends the tag's attribute columns for one row (NULLs omitted, as
@@ -190,8 +291,10 @@ partial class Selection
             var value = RowDecoder.DecodeColumn(innerSchema, rowBytes, column.Column);
             if (value.IsNull)
             {
-                // Only the xsinil form marks a NULL; every other shape omits it.
-                if (column.Content == ForXmlExplicitContent.ElementXsinil)
+                // Only the xsinil form marks a NULL; every other shape omits it,
+                // and so does it on a tag declaring a list column (probed
+                // 2026-10-08 against SQL Server 2025).
+                if (column.Content == ForXmlExplicitContent.ElementXsinil && tag.Lists.Count == 0)
                     _ = sb.Append('<').Append(column.Name).Append(" xsi:nil=\"true\"/>");
                 continue;
             }
@@ -422,13 +525,27 @@ partial class Selection
 }
 
 /// <summary>One element a <c>FOR XML EXPLICIT</c> row opened and hasn't closed.</summary>
-internal sealed class ForXmlExplicitFrame(int tagId, string name)
+internal sealed class ForXmlExplicitFrame(int tagId, string name, ForXmlExplicitTag tag)
 {
     public readonly int TagId = tagId;
     public readonly string Name = name;
+    public readonly ForXmlExplicitTag Tag = tag;
 
     /// <summary>Whether the start tag's <c>&gt;</c> has been written — until it is, the element can still self-close.</summary>
     public bool BodyStarted;
+
+    /// <summary>
+    /// The values each of the tag's list columns has taken, already rendered
+    /// for where they go, while the element is the one rows still feed; null
+    /// for a tag declaring none, or once they are written.
+    /// </summary>
+    public List<string>?[]? Lists = tag.Lists.Count == 0 ? null : new List<string>?[tag.Lists.Count];
+
+    /// <summary>The list column the element's rows have moved on to, -1 before the first value.</summary>
+    public int ListCursor = -1;
+
+    /// <summary>Where in the output the list attributes go: the end of the start tag's other attributes.</summary>
+    public int ListAttributesAt;
 }
 
 /// <summary>
@@ -523,6 +640,13 @@ internal sealed class ForXmlExplicitTag(string name)
 
     /// <summary>The tag's single <c>xmltext</c> column, if it declared one (Msg 6827 refuses a second).</summary>
     public ForXmlExplicitColumn? XmlText;
+
+    /// <summary>
+    /// The tag's <c>idrefs</c> / <c>nmtokens</c> columns in select-list order,
+    /// which rows after the one opening an element feed one value at a time
+    /// (see <see cref="ForXmlExplicitFrame.Lists"/>).
+    /// </summary>
+    public readonly List<ForXmlExplicitColumn> Lists = [];
 }
 
 /// <summary>
@@ -599,6 +723,7 @@ internal sealed class ForXmlExplicitPlan(Dictionary<int, ForXmlExplicitTag> tags
         var idDirectives = 0;
         var hideDirectives = 0;
         var idrefs = false;
+        var raw = false;
 
         for (var s = 3; s < segments.Length; s++)
         {
@@ -606,6 +731,7 @@ internal sealed class ForXmlExplicitPlan(Dictionary<int, ForXmlExplicitTag> tags
             {
                 case ForXmlExplicitDirective.Cdata:
                     contentDirectives++;
+                    raw = true;
                     content = ForXmlExplicitContent.Cdata;
                     break;
                 case ForXmlExplicitDirective.Element:
@@ -628,29 +754,29 @@ internal sealed class ForXmlExplicitPlan(Dictionary<int, ForXmlExplicitTag> tags
                     break;
                 case ForXmlExplicitDirective.Xml:
                     contentDirectives++;
+                    raw = true;
                     content = ForXmlExplicitContent.Xml;
                     break;
                 default:
                     contentDirectives++;
+                    raw = true;
                     content = ForXmlExplicitContent.XmlText;
                     break;
             }
         }
 
-        // Real's own check order, probed one combination at a time.
+        // Real's own check order, probed one combination at a time (2026-10-08
+        // against SQL Server 2025 for the identity directives' place in it).
         if (hideDirectives > 1)
             throw SimulatedSqlException.ForXmlExplicitDuplicateHide(name);
         if (idDirectives > 1)
             throw SimulatedSqlException.ForXmlExplicitConflictingIdDirectives(name);
-        if (contentDirectives > 1)
-            throw SimulatedSqlException.ForXmlExplicitConflictingDirectives(name);
         if (hideDirectives > 0 && idDirectives > 0)
             throw SimulatedSqlException.ForXmlExplicitIdCannotHide(name);
-        // Real admits an idrefs / nmtokens column only where its expression is
-        // statically nullable, feeding one value per row into a merged
-        // attribute; short of that nullability it reports this.
-        if (idrefs)
-            throw SimulatedSqlException.ForXmlExplicitIdrefsNeedsSeparateSelect();
+        if (idDirectives > 0 && raw)
+            throw SimulatedSqlException.ForXmlExplicitIdCannotBeRaw(name);
+        if (contentDirectives > 1)
+            throw SimulatedSqlException.ForXmlExplicitConflictingDirectives(name);
 
         if (!tags.TryGetValue(tagId, out var tag))
         {
@@ -672,6 +798,11 @@ internal sealed class ForXmlExplicitPlan(Dictionary<int, ForXmlExplicitTag> tags
             content = ForXmlExplicitContent.Element;
 
         var parsed = new ForXmlExplicitColumn(column, attributeName, content);
+        if (idrefs)
+        {
+            tag.Lists.Add(parsed);
+            return content == ForXmlExplicitContent.ElementXsinil;
+        }
         switch (content)
         {
             case ForXmlExplicitContent.Attribute:

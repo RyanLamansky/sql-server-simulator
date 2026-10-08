@@ -500,8 +500,8 @@ partial class SimulatedSqlException
     /// is fine — only a back-to-back <c>statement WITH cte</c> sequence
     /// triggers this.
     /// </summary>
-    internal static SimulatedSqlException CteRequiresPrecedingSemicolon() =>
-        new("Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.", 319, 15, 1);
+    internal static SimulatedSqlException CteRequiresPrecedingSemicolon(byte state = 1) =>
+        new("Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.", 319, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 336: the <c>WITH</c> of a CTE follows a FROM

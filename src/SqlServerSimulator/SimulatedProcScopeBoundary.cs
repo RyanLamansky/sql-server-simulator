@@ -30,4 +30,12 @@ sealed class SimulatedProcScopeBoundary(bool isEnter, int? returnStatus = null, 
     /// which real reports on the closing DONEPROC's error bit.
     /// </summary>
     public readonly bool EndedByError = endedByError;
+
+    /// <summary>
+    /// At exit, set for a scope an error left that real never closes — one
+    /// enclosing the <c>TRY</c> scope a
+    /// <see cref="SimulatedSqlException.ClosesAbandonedScopes"/> error ended:
+    /// it leaves the scope without sending anything.
+    /// </summary>
+    public bool Unsent;
 }

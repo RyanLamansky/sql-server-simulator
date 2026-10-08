@@ -427,6 +427,8 @@ partial class Simulation
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         var targetAddresses = new RowAddressMap();
         sources[targetIndex] = sources[targetIndex].AsWriteTarget(targetAddresses);
+        // Settled over the FROM clause as written, ahead of the reordering.
+        var targetWait = JoinedTargetWait(table, sources, targetIndex, joins, where);
         sources = Selection.PrepareMutationJoinSources(sources, ref joins, where is null ? [] : [where], ref targetIndex, MutationMayReorder(top, context.Batch), context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -442,7 +444,7 @@ partial class Simulation
         var runtime = new RuntimeContext(resolveAcrossTuple, context.Batch);
 
         if (!table.SupersededKeyImages.IsEmptyLockFree())
-            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _));
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _), targetWait);
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             currentTuple = tuple;
@@ -461,7 +463,7 @@ partial class Simulation
             // Judged as another session's write leaves it, as the joined
             // UPDATE's are.
             var rowBytes = targetBytes;
-            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes))
+            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes, targetWait))
                 continue;
             SqlValue[]? fullOld;
             if (ReferenceEquals(rowBytes, targetBytes) || rowBytes.AsSpan().SequenceEqual(targetBytes))
@@ -477,7 +479,7 @@ partial class Simulation
         // elsewhere during the walk was never paired: the statement runs
         // again, as the plain walk's does.
         if (!table.SupersededKeyImages.IsEmptyLockFree())
-            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _));
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _), targetWait);
         if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
             context.Batch.TargetKeyReinserted = true;
 

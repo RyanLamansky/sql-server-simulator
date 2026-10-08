@@ -474,8 +474,15 @@ internal sealed partial class Selection
         var columns = new List<OpenJsonColumn>();
         while (true)
         {
+            // A reserved table-hint word where a column name belongs is the
+            // legacy hint form's Msg 1018 (probed 2026-10-08 against SQL
+            // Server 2025: WITH (INDEX(ix)), WITH (HOLDLOCK int)).
             if (context.GetNextRequired() is not Name columnNameToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            {
+                throw context.Token is ReservedKeyword { Keyword: Keyword.Index or Keyword.HoldLock } hint
+                    ? SimulatedSqlException.TableHintNeedsWithKeyword(hint.Source)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
             var columnName = columnNameToken.Value;
 
             context.MoveNextRequired();

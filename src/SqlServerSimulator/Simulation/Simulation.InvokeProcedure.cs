@@ -424,8 +424,11 @@ partial class Simulation
                         outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
                     if (compileError is not null)
                     {
-                        compileError.EndedCalledBatch = true;
-                        compileError.EndedCalledBatchIn = innerBatch;
+                        if (!compileError.EndsCompileSilently)
+                        {
+                            compileError.EndedCalledBatch = true;
+                            compileError.EndedCalledBatchIn = innerBatch;
+                        }
                         throw compileError;
                     }
                     var parser = innerBatch.Parser;
@@ -569,8 +572,21 @@ partial class Simulation
             yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
+        if (bodyError is { EndsCompileSilently: true })
+        {
+            var callerEnded = CallerEndedBySilentCompile(connection);
+            var closes = callerEnded is null || ClosesSilentScope(callerEnded, outerBatch);
+            if (framesScope && closes)
+                yield return ScopeExit(outerBatch, returnStatus: null);
+            if (callerEnded is not null)
+                throw callerEnded;
+            yield break;
+        }
         if (bodyError is not null)
+        {
+            bodyError.LeavingScopeInto(outerBatch);
             ExceptionDispatchInfo.Throw(bodyError);
+        }
         if (writebackError is not null)
             throw writebackError;
         if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)

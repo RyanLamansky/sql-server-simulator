@@ -934,28 +934,28 @@ Attributes always precede content whatever the written order (they belong to the
 | `xmltext` | the overflow element: unnamed, its attributes and content fold onto the tag's own element; named, it becomes a child element with that name |
 | `hide` | the column declares its tag and emits nothing |
 | `id` / `idref` / `nmtoken` | an ordinary attribute (they only mean anything to an inline schema) |
-| `idrefs` / `nmtokens` | **Msg 6826** |
+| `idrefs` / `nmtokens` | a list the rows after the element's own feed, below |
 
 Directive words are case-insensitive, and a column may carry several.
-The combination rules fire in real's own order (probed one pair at a time): a repeated `hide` is **Msg 6835**, two identity directives **Msg 6813**, two of `element` / `elementxsinil` / `xml` / `xmltext` / `cdata` **Msg 6817**, `hide` beside an identity directive **Msg 6815**, and a word that is no directive at all — the empty string included — **Msg 6824**.
+The combination rules fire in real's own order (probed one pair at a time, the identity directives' place 2026-10-08 against SQL Server 2025): a repeated `hide` is **Msg 6835**, two identity directives **Msg 6813**, `hide` beside an identity directive **Msg 6815**, an identity directive beside `cdata`, `xml` or `xmltext` **Msg 6816**, two of `element` / `elementxsinil` / `xml` / `xmltext` / `cdata` **Msg 6817**, and a word that is no directive at all — the empty string included — **Msg 6824**.
+
+An `idrefs` / `nmtokens` column takes its values row by row as the universal table is written (probed 2026-08-02, 2026-10-06 and 2026-10-08 against SQL Server 2025).
+A row whose list columns are all NULL opens its element as any row does; a row carrying a list value opens nothing and feeds that value to the current element, which must be of the row's own tag — its other columns, its parent included, count for nothing.
+The element's rows walk its list columns forward: the column they reached takes the row's value when the row has one, and otherwise the row's first list column carrying a value does, which may not lie behind it; any other value the row carries is dropped.
+A value no element takes — on the opening row, after a child element opened, or for a list column behind the one reached — is **Msg 6826**, an empty rowset is no error, and a row carrying an `xmltext` value on a tag with a list column is **Msg 6839**.
+The values are space-joined, each escaped as its form escapes, an empty one kept as an empty member: an attribute list goes at the end of the start tag after the other attributes, an `element` one as one child element and a text one as text, both after the element's own content and ahead of any child element.
+An element whose tag declares a list column never self-closes in the text form (`<e></e>`), where `TYPE` reads it back as `<e />`, and its `elementxsinil` NULLs send no `xsi:nil` element, though the declaration still goes out.
 
 NULL follows the rest of FOR XML: attributes, elements, text, CDATA and the overflow all vanish, and only `elementxsinil` marks it.
 A CDATA section can't escape, so real breaks it apart at every `]]>`, splitting after the **first** `]` — `a]]>b` comes back as `<![CDATA[a]]]><![CDATA[]>b]]>` — and the simulator matches.
 An `xmltext` value comes back as it was written — the content byte for byte (insignificant whitespace and all), and each attribute value's source text with only the delimiter normalized to `"`, so a `>` stays literal, an entity stays an entity, and a `"` out of a single-quoted value comes back unescaped (ill-formed markup real writes too).
 An overflow attribute whose name the row already wrote is dropped, a second `xmltext` on a tag is **Msg 6827**, and a value that isn't a document with a root element is **Msg 6834** — state 1 for text that parses but holds no element, state 2 for markup that doesn't parse.
-A materialized overflow keeps its element open even when it contributed nothing, so `<e a="1"></e>` rather than `<e a="1"/>`.
+A materialized overflow keeps its element open even when it contributed nothing, so `<e a="1"></e>` rather than `<e a="1"/>` — in the text form, since `TYPE` reads the text back as `xml`, which collapses it to `<e a="1" />` (probed 2026-10-08 against SQL Server 2025).
 
 Value formatting, escaping, `TYPE`, `ROOT`, `BINARY BASE64` and the empty-rowset asymmetry are the shared ones.
 `ELEMENTS` is **Msg 6825** (placement comes from the column names), a binary column without `BINARY BASE64` is **Msg 6829** — the same message RAW gets, raised from a scan that precedes every other check, so it beats even Msg 6801 — and `XMLSCHEMA` is real's own **Msg 3625** state 17, `'Inline XSD for FOR XML EXPLICIT' is not yet implemented.`
 
 An `xml`-typed value, in EXPLICIT alone, gets `xmlns=""` on each unprefixed top-level element that declares no default namespace of its own, after the element's attributes (`<a><i v="9" xmlns=""/></a>`; probed 2026-10-02 against SQL Server 2025).
-
-Divergences:
-
-- **`idrefs` / `nmtokens` always raise Msg 6826**, as the query compiles, an empty rowset included.
-  Real decides it row by row as it writes: a row whose list column is NULL opens its element as any row does, and each following row of the same tag carrying a value appends that value to the open element's attribute, space-joined, whatever its other columns hold; a value with no element open to take it is Msg 6826.
-  So the shape the original record named — values fed one per row into a merged attribute — is admitted: a `UNION ALL` of a branch giving the column `NULL` and a branch giving the values, ordered so each element's `NULL` row leads its values, emits `<C cid="1" olist="o10 o11"></C><C cid="2" olist="o12"></C>`, beside a tag-2 `id` child too; a nullable table column ordered the same way merges likewise, and `cast(null as int) as [e!1!k!nmtokens]` alone emits `<e></e>`.
-  A literal, and a nullable column or a `UNION ALL` whose value rows come before the `NULL` that would open them, are Msg 6826, and an empty rowset is no error (probed 2026-08-02, 2026-10-06 and 2026-10-08 against SQL Server 2025).
 
 ### XML names — escaped in RAW / AUTO, rejected everywhere else
 
@@ -1125,7 +1125,7 @@ Escaping is position-dependent:
 
 The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625).
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
-EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
+An `idrefs` / `nmtokens` column is declared `dt:type="idrefs"` / `"nmtokens"` there, its values merged as in the text form.
 
 What real sends for the two, probed 2026-10-06 against SQL Server 2025, for whoever builds them:
 

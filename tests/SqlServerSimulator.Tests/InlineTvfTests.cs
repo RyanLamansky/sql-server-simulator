@@ -414,6 +414,49 @@ public sealed class InlineTvfTests
         _ = sim.AssertSqlError(create, number);
     }
 
+    /// <summary>
+    /// A rowset function's call takes no table hint: real reads a WITH right
+    /// after it as a column schema, so a reserved hint word there is Msg 1018,
+    /// any other hint a schema column missing its type, and a parenthesized
+    /// list after it a column alias list (Msg 317).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from dbo.f() with (nolock)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("select * from dbo.f() with (nolock) x", 102, "Incorrect syntax near ')'.")]
+    [DataRow("select * from dbo.f() with (nolock, index(ix_a))", 102, "Incorrect syntax near ','.")]
+    [DataRow("select * from dbo.f() with (index(ix_a))", 1018, "Incorrect syntax near 'index'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.")]
+    [DataRow("select * from dbo.f() with (index = ix_a) x", 1018, null)]
+    [DataRow("select * from dbo.f() with (holdlock)", 1018, "Incorrect syntax near 'holdlock'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.")]
+    [DataRow("select * from dbo.f() with (select)", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("select * from dbo.f() with x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("select * from dbo.f() (nolock)", 317, "Table-valued function 'f' cannot have a column alias.")]
+    [DataRow("select * from dbo.f() (index(ix_a))", 1018, null)]
+    [DataRow("select * from dbo.f() x (index(ix_a))", 1018, null)]
+    [DataRow("select * from dbo.f() x (nolock)", 317, null)]
+    [DataRow("select * from dbo.f() x with (nolock)", 319, null)]
+    [DataRow("select * from dbo.f() (1)", 102, "Incorrect syntax near '1'.")]
+    [DataRow("select * from string_split('a,b', ',') with (index(ix_a))", 1018, null)]
+    [DataRow("select * from openjson('[1]') with (index(ix_a))", 1018, null)]
+    public void TableHintAfterTheCall_IsRefused(string query, int number, string? message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f() returns table as return select 1 a");
+        var error = sim.AssertSqlError(query, number);
+        if (message is not null)
+            AreEqual(message, error.Message);
+    }
+
+    /// <summary>A column schema that parses after the call is refused as real's Msg 319 at state 2, at line 12 wherever it stands.</summary>
+    [TestMethod]
+    public void ColumnSchemaAfterTheCall_IsMsg319AtLine12()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f() returns table as return select 1 a");
+        var error = sim.AssertSqlError("print 'x'\nselect * from dbo.f() with (a int, b nosuchtype) x", 319);
+        AreEqual((byte)2, error.State);
+        AreEqual(12, error.LineNumber);
+    }
+
     [TestMethod]
     [Description("Too few arguments is Msg 313 state 3.")]
     public void TooFewArguments_IsMsg313()

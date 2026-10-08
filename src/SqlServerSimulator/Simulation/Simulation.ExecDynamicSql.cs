@@ -983,7 +983,7 @@ partial class Simulation
                 StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
                 if (this.CompileBatch(compileContext, key: null, out var inliningFailures) is { } compileError)
                 {
-                    compileError.EndedCalledBatch = true;
+                    compileError.EndedCalledBatch = !compileError.EndsCompileSilently;
                     throw compileError;
                 }
                 compiled = true;
@@ -1009,7 +1009,7 @@ partial class Simulation
                         outcomes.Add(outcome);
                 }
             }
-            catch (SimulatedSqlException ex) when (compiled)
+            catch (SimulatedSqlException ex) when (compiled || ex.EndsCompileSilently)
             {
                 batchError = ex;
             }
@@ -1066,8 +1066,25 @@ partial class Simulation
             yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
+        if (batchError is { EndsCompileSilently: true })
+        {
+            // sp_executesql still returns @@ERROR, which nothing changed,
+            // unless the caller's batch ends too (probed 2026-10-08 against
+            // SQL Server 2025).
+            var callerEnded = CallerEndedBySilentCompile(connection);
+            if (callerEnded is null)
+                yield return ScopeExit(outerBatch, viaSystemProcedure ? connection.LastErrorNumber : null);
+            else if (ClosesSilentScope(callerEnded, outerBatch))
+                yield return ScopeExit(outerBatch, returnStatus: null);
+            if (callerEnded is not null)
+                throw callerEnded;
+            yield break;
+        }
         if (batchError is not null)
+        {
+            batchError.LeavingScopeInto(outerBatch);
             ExceptionDispatchInfo.Throw(batchError);
+        }
         // sp_executesql returns its last statement's @@ERROR instead (probed
         // 2026-10-06 against SQL Server 2025: 8134 after `SELECT 1/0`, 0 when
         // a statement after it succeeded, 50000 after a RAISERROR).

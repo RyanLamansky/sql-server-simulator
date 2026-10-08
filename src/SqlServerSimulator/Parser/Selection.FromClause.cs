@@ -1539,10 +1539,20 @@ internal sealed partial class Selection
                         var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context));
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
-                        // A user function's columns take no alias list (probed
-                        // 2026-10-04 against SQL Server 2025).
-                        if (tvfAlias is not null && context.Token is Operator { Character: '(' })
-                            throw SimulatedSqlException.TableValuedFunctionColumnAlias(function.Name);
+                        if (tvfAlias is null)
+                            RejectRowsetFunctionWith(context);
+                        // A user function's columns take no alias list, with or
+                        // without an alias before it (probed 2026-10-04 and
+                        // 2026-10-08 against SQL Server 2025).
+                        if (context.Token is Operator { Character: '(' })
+                        {
+                            throw context.GetNextRequired() switch
+                            {
+                                ReservedKeyword { Keyword: Keyword.Index or Keyword.HoldLock } hint => SimulatedSqlException.TableHintNeedsWithKeyword(hint.Source),
+                                Name => SimulatedSqlException.TableValuedFunctionColumnAlias(function.Name),
+                                _ => SimulatedSqlException.SyntaxErrorNear(context),
+                            };
+                        }
                         var outputColumns = function switch
                         {
                             InlineTableValuedFunction inline => Simulation.InlineTvfColumnsWithCurrentMasks(context, inline),
@@ -1982,6 +1992,51 @@ internal sealed partial class Selection
         && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     /// <summary>
+    /// A <c>WITH</c> right after a rowset function's call, no alias between,
+    /// which real reads as the start of a column schema like OPENJSON's —
+    /// <c>WITH (name type, …)</c> — and so refuses a table hint as a schema
+    /// that doesn't parse: a reserved hint word (<c>INDEX</c>, <c>HOLDLOCK</c>)
+    /// where a column name belongs is Msg 1018, any other hint a column name
+    /// missing its type (Msg 102 at what follows it), and a schema that does
+    /// parse Msg 319 at state 2, at line 12 wherever the statement sits
+    /// (probed 2026-10-08 against SQL Server 2025). Cursor on entry: the token
+    /// after the call; anything but <c>WITH</c> there is left alone.
+    /// </summary>
+    private static void RejectRowsetFunctionWith(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return;
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        do
+        {
+            switch (context.GetNextOptional())
+            {
+                case ReservedKeyword { Keyword: Keyword.Index or Keyword.HoldLock } hint:
+                    throw SimulatedSqlException.TableHintNeedsWithKeyword(hint.Source);
+                case Name:
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (context.GetNextOptional() is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            if (context.Token is Operator { Character: '(' })
+            {
+                while (context.GetNextOptional() is not (null or Operator { Character: ')' }))
+                {
+                }
+                context.MoveNextOptional();
+            }
+        }
+        while (context.Token is Operator { Character: ',' });
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        throw SimulatedSqlException.CteRequiresPrecedingSemicolon(state: 2).PinLine(12);
+    }
+
+    /// <summary>
     /// Wraps a built-in rowset function's synthesized plan (OPENJSON /
     /// STRING_SPLIT / GENERATE_SERIES / fn_listextendedproperty) as a FROM
     /// source: projects the plan's schema into per-column
@@ -1993,6 +2048,7 @@ internal sealed partial class Selection
     /// </summary>
     private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
     {
+        RejectRowsetFunctionWith(context);
         var columns = new HeapColumn[plan.Schema.Length];
         for (var ci = 0; ci < columns.Length; ci++)
             columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
