@@ -17,7 +17,7 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The bytes are validated by <see cref="ClrAssemblyMetadata.VerifyImage"/> and <see cref="ClrAssemblyMetadata.VerifySafeContent"/>
+    /// The bytes are validated by <see cref="ClrAssemblyMetadata.VerifyImage"/>, <see cref="ClrAssemblyMetadata.VerifyCatalogReferences"/> and <see cref="ClrAssemblyMetadata.VerifySafeContent"/>
     /// before anything is loaded, so a rejected candidate never gets to run a
     /// module initializer. Registration itself does not load the assembly at
     /// all — that happens lazily on first invocation.
@@ -111,18 +111,21 @@ partial class Simulation
                 $"CREATE ASSEMBLY is disabled. Registering '{assemblyName}' would load and run its code inside this process, so it requires an explicit opt-in: set EnableClr on the Simulation (new Simulation {{ EnableClr = true }}).");
         }
 
-        // The Linux server loads SAFE assemblies alone, refused ahead of
-        // everything else (probed 2026-10-07 against SQL Server 2025).
-        if (permissionSet != AssemblyPermissionSet.Safe)
-            throw SimulatedSqlException.AssemblyNotSafeOnThisEdition(assemblyName);
-
         var database = context.CurrentDatabase;
         if (database.Assemblies.ContainsKey(assemblyName))
             throw SimulatedSqlException.AssemblyAlreadyExists(assemblyName, database.Name);
 
-        ClrAssemblyMetadata.VerifyImage(content, assemblyName, "CREATE");
+        var identity = ClrAssemblyMetadata.VerifyImage(content, assemblyName, "CREATE");
 
-        var identity = ClrAssemblyMetadata.ReadIdentity(content, "CREATE", assemblyName);
+        // The Linux server loads SAFE assemblies alone, refused once the name
+        // is free and the bytes read as an assembly, naming the assembly by
+        // its own name (probed 2026-10-07 and 2026-10-08 against SQL Server
+        // 2025).
+        if (permissionSet != AssemblyPermissionSet.Safe)
+            throw SimulatedSqlException.AssemblyNotSafeOnThisEdition(identity.Name);
+
+        ClrAssemblyMetadata.VerifyCatalogReferences(content, assemblyName, "CREATE");
+
         foreach (var (_, existing) in database.Assemblies)
         {
             if (ClrAssemblyMetadata.ReadIdentity(existing.Content, "CREATE", existing.Name).Mvid == identity.Mvid)
@@ -138,7 +141,7 @@ partial class Simulation
             && !simulation.TrustedAssemblies.ContainsKey(TrustedAssemblyKey(System.Security.Cryptography.SHA512.HashData(content)))
             && !(database.Trustworthy && simulation.HoldsServerPermission(database.OwnerLoginName, Permission.UnsafeAssembly)))
         {
-            throw SimulatedSqlException.AssemblyRefusedByStrictSecurity(assemblyName);
+            throw SimulatedSqlException.AssemblyRefusedByStrictSecurity(identity.Name);
         }
 
         ClrAssemblyMetadata.VerifySafeContent(content, assemblyName, permissionSet, "CREATE");

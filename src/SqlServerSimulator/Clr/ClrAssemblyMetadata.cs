@@ -211,19 +211,27 @@ internal static class ClrAssemblyMetadata
     }
 
     /// <summary>
-    /// The first half of the static <c>CREATE ASSEMBLY</c> validation, which
-    /// real makes ahead of its duplicate-MVID and <c>clr strict security</c>
-    /// checks: the candidate must be a pure-IL managed assembly whose every
-    /// reference the catalog resolves (Msg 6544, Msg 6503).
+    /// The first of the static <c>CREATE ASSEMBLY</c> checks on the bytes,
+    /// which real makes ahead of its permission-set refusal: the candidate must
+    /// be a pure-IL managed assembly (Msg 6544), whose identity is returned.
     /// </summary>
-    public static void VerifyImage(byte[] content, string assemblyName, string verb)
+    public static ClrAssemblyIdentity VerifyImage(byte[] content, string assemblyName, string verb)
+    {
+        using var peReader = OpenPortableExecutable(content, verb, assemblyName);
+        if ((peReader.PEHeaders.CorHeader!.Flags & CorFlags.ILOnly) == 0)
+            throw SimulatedSqlException.AssemblyMalformed(verb, assemblyName, NativeStubDetail);
+        return ReadIdentity(peReader.GetMetadataReader());
+    }
+
+    /// <summary>
+    /// The check real makes after the permission-set refusal and ahead of its
+    /// duplicate-MVID and <c>clr strict security</c> checks: every reference
+    /// the assembly makes resolves in the catalog (Msg 6503).
+    /// </summary>
+    public static void VerifyCatalogReferences(byte[] content, string assemblyName, string verb)
     {
         using var peReader = OpenPortableExecutable(content, verb, assemblyName);
         var metadata = peReader.GetMetadataReader();
-
-        if ((peReader.PEHeaders.CorHeader!.Flags & CorFlags.ILOnly) == 0)
-            throw SimulatedSqlException.AssemblyMalformed(verb, assemblyName, NativeStubDetail);
-
         foreach (var handle in metadata.AssemblyReferences)
         {
             if (!InCatalog(metadata, handle))

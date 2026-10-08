@@ -354,6 +354,7 @@ Probed against SQL Server 2025.
   Stricter behavior is defensible since apps that hit it are buggy.
   Its PRIMARY KEY / UNIQUE / CHECK / DEFAULT constraints and their indexes are listed the same way, in `sys.objects`, `sys.key_constraints`, `sys.check_constraints`, `sys.indexes` and `sys.index_columns` (a heap row where no key is clustered), through `MultiStatementTableValuedFunction.CatalogShape`.
 - A return-table column's `SPARSE` is a syntax error at it (Msg 102), as a table type's is, where a table variable takes it; an inline `INDEX` is catalogued under the function in `sys.indexes`, `sys.index_columns` and `sys.stats`, the clustered one first and the rest in reverse declaration order, as a table's are; and the body reads `@@NESTLEVEL` as a level of its own, where a view's or an inline function's body reads its caller's (probed 2026-10-06 against SQL Server 2025).
+  An earlier record had the multi-statement body reading 0; its probe's case, `SELECT n FROM dbo.tf()` beside `SELECT n FROM dbo.itf()` in separate batches, read 1 for the multi-statement function and 0 for the inline one then and when re-run (2026-10-08 against SQL Server 2025), so the 0 was the inline function's row.
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).

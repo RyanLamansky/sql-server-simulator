@@ -190,7 +190,9 @@ partial class Simulation
     /// object the predicate names with a column-less row, then a row per
     /// column it reads in column order, all selected; the rows sort by object
     /// name and keep each predicate's together, a second predicate repeating
-    /// what the first listed (probed 2026-10-07 against SQL Server 2025).
+    /// what the first listed, so a lone predicate lists each row once (probed
+    /// 2026-10-04 with one predicate, 2026-10-07 with two, both re-probed
+    /// 2026-10-08 against SQL Server 2025).
     /// </summary>
     private static void SpDependsPolicyRows(ModuleDependencies.Entity entity, List<SqlValue[]> rows)
     {

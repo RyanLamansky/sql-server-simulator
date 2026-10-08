@@ -952,8 +952,10 @@ An `xml`-typed value, in EXPLICIT alone, gets `xmlns=""` on each unprefixed top-
 
 Divergences:
 
-- **`idrefs` / `nmtokens` always raise Msg 6826.**
-  Real admits some shapes — `cast(null as int) as [e!1!k!nmtokens]` alone emits `<e></e>` — and refuses others that look alike: a nullable column (`r varchar(10) null`), a literal, and a `UNION ALL` feeding the column `NULL` in its element's own branch are all Msg 6826 (probed 2026-10-06 against SQL Server 2025), so the rule is narrower than the column's nullability and isn't pinned yet.
+- **`idrefs` / `nmtokens` always raise Msg 6826**, as the query compiles, an empty rowset included.
+  Real decides it row by row as it writes: a row whose list column is NULL opens its element as any row does, and each following row of the same tag carrying a value appends that value to the open element's attribute, space-joined, whatever its other columns hold; a value with no element open to take it is Msg 6826.
+  So the shape the original record named — values fed one per row into a merged attribute — is admitted: a `UNION ALL` of a branch giving the column `NULL` and a branch giving the values, ordered so each element's `NULL` row leads its values, emits `<C cid="1" olist="o10 o11"></C><C cid="2" olist="o12"></C>`, beside a tag-2 `id` child too; a nullable table column ordered the same way merges likewise, and `cast(null as int) as [e!1!k!nmtokens]` alone emits `<e></e>`.
+  A literal, and a nullable column or a `UNION ALL` whose value rows come before the `NULL` that would open them, are Msg 6826, and an empty rowset is no error (probed 2026-08-02, 2026-10-06 and 2026-10-08 against SQL Server 2025).
 
 ### XML names — escaped in RAW / AUTO, rejected everywhere else
 

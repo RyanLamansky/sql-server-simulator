@@ -49,8 +49,9 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 10342: an <c>EXTERNAL_ACCESS</c> or <c>UNSAFE</c> assembly, which
-    /// SQL Server on Linux refuses outright (probed 2026-10-07 against SQL
-    /// Server 2025).
+    /// SQL Server on Linux refuses outright, <paramref name="assemblyName"/>
+    /// the name its manifest gives it rather than the <c>CREATE</c>'s (probed
+    /// 2026-10-07 and 2026-10-08 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException AssemblyNotSafeOnThisEdition(string assemblyName) =>
         new($"Assembly '{assemblyName}' cannot be loaded because this edition of SQL Server only supports SAFE assemblies.", 10342, 16, 100);
@@ -58,7 +59,9 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 10343: <c>CREATE ASSEMBLY</c> of an assembly the server doesn't
     /// trust while <c>clr strict security</c> is 1 — severity 14, ending only
-    /// its statement (probed 2026-10-07 against SQL Server 2025).
+    /// its statement, <paramref name="assemblyName"/> the name the assembly's
+    /// manifest gives it (probed 2026-10-07 and 2026-10-08 against SQL Server
+    /// 2025).
     /// </summary>
     internal static SimulatedSqlException AssemblyRefusedByStrictSecurity(string assemblyName) =>
         new($"CREATE or ALTER ASSEMBLY for assembly '{assemblyName}' with the SAFE or EXTERNAL_ACCESS option failed because the 'clr strict security' option of sp_configure is set to 1. Microsoft recommends that you sign the assembly with a certificate or asymmetric key that has a corresponding login with UNSAFE ASSEMBLY permission. Alternatively, you can trust the assembly using sp_add_trusted_assembly.", 10343, 14, 1);

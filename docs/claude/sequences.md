@@ -213,3 +213,9 @@ A `VALUES` row has no query block to rank it and draws as it would without the c
 - Multi-name `DROP SEQUENCE a, b, c` — the comma-separated form works (inherited from the shared DROP parser); each name is dropped independently with `IF EXISTS` applied uniformly.
 - `INFORMATION_SCHEMA.SEQUENCES` — ISO-standard surface, not shipped.
   Apps that query catalogs typically use `sys.sequences` instead.
+
+## Not modeled yet
+
+- **A table variable whose column defaults to a sequence missing as its batch compiles** — never created, or created earlier in the same batch — ends the whole batch on real with no message: nothing it would run runs, the `CREATE SEQUENCE` beside it included, and `@@ERROR` reads 0 in the next batch; run by `EXEC (…)`, the call ends the caller's batch too, which SqlClient reports as `A severe error occurred on the current command` (probed 2026-10-04, re-probed 2026-10-08 against SQL Server 2025).
+  Here a sequence the batch creates leaves the declaration unbound, so each later reference to the table variable is Msg 1087 as the batch compiles and a batch with none runs, while a sequence never created is Msg 208.
+  A sequence created by an earlier batch is drawn as for a table (the shape behind [Resolution / lookup](#resolution--lookup)'s note, probed 2026-10-06 and 2026-10-08).

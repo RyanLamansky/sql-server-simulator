@@ -22,7 +22,7 @@ The gate is deliberately stricter than real: probe-confirmed, real SQL Server's 
 
 **These three rules refuse what the simulator used to register, and a simulator user upgrading meets them first** (probed 2026-10-07 against SQL Server 2025):
 
-- **Only `SAFE` loads.** The simulator models the Linux server, which refuses `PERMISSION_SET = EXTERNAL_ACCESS` and `UNSAFE` outright with **Msg 10342** state 100, ahead of every other check.
+- **Only `SAFE` loads.** The simulator models the Linux server, which refuses `PERMISSION_SET = EXTERNAL_ACCESS` and `UNSAFE` outright with **Msg 10342** state 100, naming the assembly by its manifest's name rather than the `CREATE`'s, as Msg 10343 does too (probed 2026-10-08 against SQL Server 2025).
 - **Only a .NET Framework assembly loads.** Real resolves every `AssemblyRef` against a fixed catalog of Framework assemblies — `mscorlib`, `System`, `System.Data`, `System.Xml`, `System.Core`, `System.Xml.Linq`, `System.Transactions`, `System.Security`, `System.Configuration`, `System.Numerics`, `System.Data.SqlXml`, `System.Data.OracleClient`, `System.Deployment`, `System.Web.Services`, `Microsoft.VisualBasic`, `Microsoft.VisualC`, `CustomMarshalers`, and `Microsoft.SqlServer.Types` 10.0 through 17.x — by name and public key token, the version otherwise ignored (`ClrAssemblyMetadata.catalogReferences`).
   Anything else is **Msg 6503** naming the reference, an unsigned one with version `0.0.0.0`: so an assembly built for .NET (Core) or .NET Standard (`System.Runtime`, `System.Private.CoreLib`, `netstandard`), one built against the `Microsoft.SqlServer.Server` NuGet package, and a Framework assembly outside the list (`System.Drawing`, `System.Runtime.Serialization`, `Microsoft.CSharp`) are refused.
   An assembly has to target `net4x` to load, here as on real; the tests compile theirs with Roslyn against the Framework 4.8 reference assemblies (`ClrFrameworkFixture.Compile`).
@@ -31,7 +31,8 @@ The gate is deliberately stricter than real: probe-confirmed, real SQL Server's 
   Signing with a certificate or asymmetric key isn't modeled, so an assembly real would trust for its signature is refused here.
   The usual way through on a development server — `sp_configure 'show advanced options', 1`, then `sp_configure 'clr strict security', 0` and `RECONFIGURE` — works as on real.
 
-The order real checks in: Msg 10342, a taken name (6246), a malformed image (6544), the catalog (6503), a duplicate MVID (6285), Msg 10343, then the simulator's own SAFE verification below.
+The order real checks in: a taken name (6246), a malformed image (6544), Msg 10342, the catalog (6503), a duplicate MVID (6285), Msg 10343, then the simulator's own SAFE verification below.
+Msg 10342 was first recorded ahead of every other check (probed 2026-10-07) over the shape `CreateAssembly_NotSafe_RaisesMsg10342` keeps — a well-formed, unregistered assembly outside the catalog — where it does come first; re-probed 2026-10-08 against SQL Server 2025, a taken name and bytes that aren't an assembly report their own errors ahead of it, and it still precedes Msg 6503, 6285 and 10343.
 
 ## Grammar
 

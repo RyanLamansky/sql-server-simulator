@@ -87,6 +87,23 @@ public class ClrAssemblyTests
         AreEqual(100, ex.State);
     }
 
+    /// <summary>
+    /// Msg 10342 comes after a taken name's Msg 6246 and a malformed image's
+    /// Msg 6544, ahead of the catalog's Msg 6503, and names the assembly as its
+    /// manifest does (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateAssembly_NotSafe_IsCheckedOnceTheNameIsFreeAndTheImageReads()
+    {
+        var sim = ClrSimulation();
+        var ex = sim.AssertSqlError(
+            $"CREATE ASSEMBLY other_name FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.NetTargeted())} WITH PERMISSION_SET = UNSAFE", 10342);
+        AreEqual("Assembly 'sim_net' cannot be loaded because this edition of SQL Server only supports SAFE assemblies.", ex.Errors[0].Message);
+        _ = sim.AssertSqlError("CREATE ASSEMBLY junk FROM 0x4D5A9000 WITH PERMISSION_SET = EXTERNAL_ACCESS", 6544);
+        _ = sim.ExecuteNonQuery(CreateSafeAssembly());
+        _ = sim.AssertSqlError($"CREATE ASSEMBLY sim_safe FROM 0x4D5A9000 WITH PERMISSION_SET = EXTERNAL_ACCESS", 6246);
+    }
+
     [TestMethod]
     [Description("A writable static in a SAFE assembly is Msg 6211 on real SQL Server.")]
     public void CreateAssembly_MutableStatic_RaisesMsg6211()
@@ -793,6 +810,8 @@ public class ClrAssemblyTests
         sim.AssertSqlError(CreateSafeAssembly(), 10343, Msg10343);
         AreEqual(10343, sim.ExecuteScalar($"begin try {CreateSafeAssembly()} end try begin catch select error_number() end catch"));
         AreEqual(2, sim.ExecuteScalar($"declare @n int = 1; begin try {CreateSafeAssembly()} end try begin catch set @n = 2 end catch select @n"));
+        // The refusal names the assembly as its manifest does (probed 2026-10-08).
+        sim.AssertSqlError($"CREATE ASSEMBLY other_name FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.Safe())} WITH PERMISSION_SET = SAFE", 10343, Msg10343);
     }
 
     [TestMethod]

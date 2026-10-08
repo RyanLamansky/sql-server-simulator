@@ -100,6 +100,7 @@ A simulated database is always consistent, so each check reports a healthy one:
 The arguments check in order — three or four of them (Msg 2583 state 3), the database (Msg 2520 / 2521, a negative id Msg 2560), then each other's type, an integer (Msg 2560 state 9) — then the address: a page past its file's size, a negative one or a file the database lacks is **Msg 8968**, which doesn't end the statement — Msg 2528 still follows and `@@ERROR` reads 8968 — and a log file's page other than its header (page 0) is **Msg 2514** state 9.
 Only then is a print option past 3 Msg 2560 state 102.
 The dump itself — under trace flag 3604 or `WITH TABLERESULTS` — is real's page image, which the simulator's pages don't carry: `NotSupportedException`.
+An earlier record had `WITH TABLERESULTS` returning an empty `ParentObject` / `Object` / `Field` / `VALUE` set (probed 2026-09-30) in a shape it doesn't capture: re-probed 2026-10-08 on CU7 (17.0.4065.4), over sqlcmd and SqlClient, every form returned the page's rows — pages 0, 1 and 1000 of the data file, print options 0 through 3 and none, the database by id 0 or by name, the log file's header page, under `NO_INFOMSGS` and through `INSERT … EXEC`, as had the 2026-09-30 sweep's own `tempdb` page 1 case — while a page past the file is Msg 8968 with no result set; RTM-GDR (17.0.1135.8) refused the probe login with Msg 2571.
 
 ## Table maintenance
 
