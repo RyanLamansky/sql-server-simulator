@@ -758,6 +758,22 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<Expressions.Reference>? FromSourceColumnSink;
 
     /// <summary>
+    /// The FROM clause being parsed, which records the names its <c>ON</c>
+    /// predicates and <c>APPLY</c> right sides bind against part of it (see
+    /// <see cref="Selection.PartialScopeBinding"/>); null outside one.
+    /// </summary>
+    public Selection.PartialScopeBinding? FromBinding;
+
+    /// <summary>
+    /// Collects every column reference parsed while an <c>ON</c> predicate or
+    /// an <c>APPLY</c> right side is read, at any depth — a nested query body
+    /// keeps it, since its correlated names bind against the same part of the
+    /// FROM clause — so a name bound there can be pinned once the clause is
+    /// whole. Null outside those regions.
+    /// </summary>
+    public List<Expressions.Reference>? PartialScopeReferences;
+
+    /// <summary>
     /// Constructs seen while parsing one branch of a WITH body, recorded
     /// rather than rejected on sight: a branch only becomes the <i>recursive
     /// member</i> — where SQL Server forbids them — once its parse turns up a

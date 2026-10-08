@@ -1968,7 +1968,7 @@ internal sealed partial class Selection
             {
                 var remoteSourcesBefore = context.RemoteSourcesParsed;
                 using (ParserScope.Enter(ref context.BrowseFlattenFrom, browseFrom))
-                    ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
+                    _ = ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
                 afterSources = context.SaveCheckpoint();
                 preParsedSources = candidateSources;
                 preParsedJoins = candidateJoins;

@@ -794,6 +794,8 @@ internal sealed partial class Selection
         var (s, c) = FindSourceColumn(sources, name);
         if (s != -1)
         {
+            if (probingBinding && s >= 0)
+                probedSource ??= sources[s];
             if (sources[s].BackingTable is { RefusesLegacyLobReads: true } && sources[s].Columns[c].Type.IsLegacyLob)
                 throw SimulatedSqlException.LegacyLobColumnInPseudoTable();
             // A HeapColumn can carry its MAX-ness in MaxLength while its .Type
@@ -2281,13 +2283,12 @@ internal sealed partial class Selection
         // Only a source's plan is asked for its keys (a derived table, a view's
         // body), so a statement's own query skips deriving them where that
         // can't drop an error: outside a bind-error report, which records
-        // rather than raises, and with no ON clause, the derivation resolves
-        // only names typing and the WHERE resolved against these same sources.
-        // An ON resolved against its own join's sources, so the derivation's
-        // resolution of it across all of them can raise where theirs didn't.
+        // rather than raises, the derivation resolves only names typing, the
+        // WHERE and each ON resolved against these same sources — an ON's
+        // names bound against part of them are pinned to their binders (see
+        // PartialScopeBinding), so reading them across all of them agrees.
         if (scope.Position is not (QueryPosition.Statement or QueryPosition.ParenthesizedModuleBody)
-            || parseBatch.BindErrors is not null
-            || Array.Exists(joins, static join => join.OnPredicate is not null))
+            || parseBatch.BindErrors is not null)
         {
             selection.OutputKeys = DeriveOutputKeys(sources, joins, fromClause, expressions, distinct, aggregates.Count > 0);
         }

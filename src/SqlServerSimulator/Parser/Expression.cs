@@ -1161,6 +1161,7 @@ internal abstract class Expression : ExpressionNode
         // appended to `ReferencedName` after construction, so the whole
         // multi-part name only exists once the postfix loop is done with it.
         context.FromSourceColumnSink?.Add(reference);
+        context.PartialScopeReferences?.Add(reference);
         if (context.ScalarOnlyOperand)
             context.ScalarOnlyColumnReference ??= reference;
         return reference;

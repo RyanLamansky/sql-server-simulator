@@ -373,6 +373,7 @@ partial class Simulation
     {
         var sourcesList = preParsedFrom?.Sources ?? [];
         var joinsList = preParsedFrom?.Joins ?? [];
+        var binding = preParsedFrom?.Binding;
         if (preParsedFrom is not null)
         {
             // The OUTPUT clause's binding already read the sources; resume past them.
@@ -387,12 +388,12 @@ partial class Simulation
             using (ParserScope.Enter(ref context.AllowNextValueForInFromClause, true))
             {
                 context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
-                Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+                binding = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
             }
         }
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
             return new SimulatedNonQuery(0);
-        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
+        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable, binding);
         // A leading name that is a table's but aliases a view, CTE or derived
         // table in the FROM clause writes through that source.
         if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.WriteTargetView() is not null)

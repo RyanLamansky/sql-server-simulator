@@ -79,11 +79,14 @@ internal sealed partial class Selection
     /// <c>SET</c> list so a subquery there binds against the statement's
     /// sources, and the checkpoint just past it where the statement resumes.
     /// </summary>
-    internal sealed class PreParsedFrom(List<FromSource> sources, List<JoinSpec> joins, ParserContext.Checkpoint after)
+    internal sealed class PreParsedFrom(List<FromSource> sources, List<JoinSpec> joins, ParserContext.Checkpoint after, PartialScopeBinding? binding = null)
     {
         public readonly List<FromSource> Sources = sources;
         public readonly List<JoinSpec> Joins = joins;
         public readonly ParserContext.Checkpoint After = after;
+
+        /// <summary>The clause's names bound against part of it, which a target the statement appends pins again.</summary>
+        public readonly PartialScopeBinding? Binding = binding;
     }
 
     /// <summary>
@@ -114,8 +117,8 @@ internal sealed partial class Selection
         using var mutationFrom = ParserScope.Enter(ref context.AllowNextValueForInFromClause, true);
         try
         {
-            ParseSourcesAndJoins(context, QueryScope.Statement, sources, joins);
-            return new PreParsedFrom(sources, joins, context.SaveCheckpoint());
+            var binding = ParseSourcesAndJoins(context, QueryScope.Statement, sources, joins);
+            return new PreParsedFrom(sources, joins, context.SaveCheckpoint(), binding);
         }
         catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
         {
@@ -151,7 +154,7 @@ internal sealed partial class Selection
         bool allowOrderBy)
     {
         var remoteSourcesBefore = context.RemoteSourcesParsed;
-        ParseSourcesAndJoins(context, scope, sources, joins);
+        _ = ParseSourcesAndJoins(context, scope, sources, joins);
         fromClause.ReadsRemoteSource = context.RemoteSourcesParsed > remoteSourcesBefore;
 
         // Now register the multi-source type resolver and parse WHERE / etc.
@@ -166,14 +169,18 @@ internal sealed partial class Selection
     /// binding has to happen first). Enters with the cursor on the
     /// <c>FROM</c> keyword (or, in mutation context, on the FROM keyword
     /// position); leaves the cursor at the lookahead-after-last-source token
-    /// (typically WHERE, end-of-statement, or set-op chain).
+    /// (typically WHERE, end-of-statement, or set-op chain). Returns the
+    /// clause's <see cref="PartialScopeBinding"/>, already pinned, which a
+    /// joined write appending a target the clause didn't name pins again.
     /// </summary>
-    internal static void ParseSourcesAndJoins(
+    internal static PartialScopeBinding ParseSourcesAndJoins(
         ParserContext context,
         QueryScope scope,
         List<FromSource> sources,
         List<JoinSpec> joins)
     {
+        var binding = new PartialScopeBinding(context.PartialScopeReferences);
+        using var fromBinding = ParserScope.Enter(ref context.FromBinding, binding);
         // A FROM clause at any nesting depth is what makes a function body's
         // rejected SELECT real's Msg 444 state 2 rather than state 3.
         FunctionBodyShape.NoteRowsetRead(context);
@@ -201,6 +208,8 @@ internal sealed partial class Selection
         }
 
         RejectSiblingReferences(siblingCandidates, sources, scope.OuterTypeResolver);
+        binding.Pin(sources);
+        return binding;
     }
 
     /// <summary>
@@ -314,11 +323,11 @@ internal sealed partial class Selection
                 {
                     if (NextSourceIsVectorSearch(context))
                     {
-                        AddAppliedVectorSearch(context, sources, joins, kind, scope);
+                        AddAppliedVectorSearch(context, sources, joins, kind, scope, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(sources)[scopeStart..].ToArray());
                     }
                     else
                     {
-                        AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
+                        AddSource(context, sources, ParseLateralFromSource(context, scope, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(sources)[scopeStart..].ToArray()));
                         joins.Add(new JoinSpec(kind, onPredicate: null));
                     }
                     if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
@@ -499,12 +508,14 @@ internal sealed partial class Selection
     private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var scope = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(sources)[scopeStart..].ToArray();
+        var binding = context.FromBinding!;
         // An aggregate the ON would own — written there, or moved there from a
         // subquery reading only the join's columns — is Msg 1015; one reading
         // only an enclosing query's columns belongs to that query.
         var onAggregates = new List<AggregateExpression>();
         BooleanExpression predicate;
-        using (ParserScope.Enter(ref context.OuterTypeResolver, name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver)))
+        using (ParserScope.Enter(ref context.OuterTypeResolver, binding.ResolverOver(scope, outerTypeResolver)))
+        using (ParserScope.Enter(ref context.PartialScopeReferences, binding.References()))
         // A MATCH in an ON binds too, against the ON's own sources, every one
         // of them joined (Msg 13920).
         using (ParserScope.Enter(ref context.MatchScope, new Expressions.MatchScope { Sources = scope, AllJoined = true }))
@@ -516,6 +527,7 @@ internal sealed partial class Selection
         {
             predicate = BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
         }
+        binding.AddOn(predicate, scope, outerTypeResolver);
         if (onAggregates.Count > 0)
             RehomeAggregatesOverOuterScope(context.Batch, [.. sources], onAggregates, outerTypeResolver);
         RefuseClauseAggregates(context.Batch, onAggregates, static () => SimulatedSqlException.AggregateInOnClause());
@@ -717,9 +729,11 @@ internal sealed partial class Selection
     /// <summary>
     /// Parses the right side of <c>CROSS APPLY</c> / <c>OUTER APPLY</c>:
     /// <c>(SELECT ...) [AS alias]</c>. The inner SELECT is parsed with a
-    /// chained outer-type resolver that includes <paramref name="leftSources"/>
-    /// (already collected by the surrounding FROM parse) so its body's
-    /// references to the left side resolve at parse time. Unlike
+    /// chained outer-type resolver over <paramref name="leftSources"/> — its
+    /// own chain's sources to its left, not an earlier comma-separated item's
+    /// (Msg 4104, probed 2026-10-08 against SQL Server 2025) — so its body's
+    /// references to the left side resolve at parse time, recorded for the
+    /// clause's <see cref="PartialScopeBinding"/>. Unlike
     /// <see cref="ParseSingleFromSource"/>, the inner is left as a deferred
     /// <see cref="Selection"/> plan on the returned <see cref="FromSource"/>;
     /// the join driver re-executes it per outer row.
@@ -727,8 +741,11 @@ internal sealed partial class Selection
     private static FromSource ParseLateralFromSource(
         ParserContext context,
         QueryScope scope,
-        List<FromSource> leftSources)
+        FromSource[] leftSources)
     {
+        var binding = context.FromBinding!;
+        using var region = ParserScope.Enter(ref context.PartialScopeReferences, binding.References());
+
         // Peek next token. A parenthesized derived table `(SELECT ...)`
         // stays on the dedicated path so the chained outer-type resolver
         // can be wired into the inner Selection's parse. A leading Name
@@ -760,8 +777,7 @@ internal sealed partial class Selection
             // left sources of the APPLY — wire the chained resolver up front
             // so OPENJSON / STRING_SPLIT / user TVF parse-time GetSqlType
             // calls reach them.
-            var leftSnapshotForName = leftSources.ToArray();
-            var chainedResolverForName = TypeResolverOver(leftSnapshotForName, scope.OuterTypeResolver);
+            var chainedResolverForName = binding.ResolverOver(leftSources, scope.OuterTypeResolver);
 
             // Built-in rowset functions (OPENJSON, STRING_SPLIT,
             // GENERATE_SERIES) share the same APPLY-friendly shape as user-
@@ -775,7 +791,7 @@ internal sealed partial class Selection
                 || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
-                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
+                return AcrossApplyBoundary(context, leftSources, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
             }
 
             // Peek the resolved object name to decide between TVF route
@@ -797,7 +813,7 @@ internal sealed partial class Selection
                 if (followedByParen)
                 {
                     context.RestoreCheckpoint(afterNameCheckpoint);
-                    return ParseXmlNodesSource(context, leftSnapshotForName);
+                    return ParseXmlNodesSource(context, leftSources);
                 }
             }
 
@@ -813,8 +829,8 @@ internal sealed partial class Selection
                 var tvfOuterMask = context.OuterMaskResolver;
                 using var outerMask = ParserScope.Save(ref context.OuterMaskResolver);
                 if (context.Batch.Connection.Simulation.DeclaresDataMasks)
-                    context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshotForName, name, tvfOuterMask);
-                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
+                    context.OuterMaskResolver = name => ScopedColumnMask(leftSources, name, tvfOuterMask);
+                return AcrossApplyBoundary(context, leftSources, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
             }
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
@@ -852,8 +868,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var afterApplyParen = context.GetNextRequired();
 
-        var leftSnapshot = leftSources.ToArray();
-        var chainedResolver = TypeResolverOver(leftSnapshot, scope.OuterTypeResolver);
+        var chainedResolver = binding.ResolverOver(leftSources, scope.OuterTypeResolver);
 
         // CROSS / OUTER APPLY (VALUES (…), (…)) alias(cols): the table value
         // constructor's rows can reference the left APPLY sources — the SSMS
@@ -865,8 +880,8 @@ internal sealed partial class Selection
             var valuesOuterMask = context.OuterMaskResolver;
             using var outerMask = ParserScope.Save(ref context.OuterMaskResolver);
             if (context.Batch.Connection.Simulation.DeclaresDataMasks)
-                context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, valuesOuterMask);
-            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
+                context.OuterMaskResolver = name => ScopedColumnMask(leftSources, name, valuesOuterMask);
+            return AcrossApplyBoundary(context, leftSources, () => ParseValuesDerivedTable(context, chainedResolver));
         }
 
         if (afterApplyParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
@@ -878,8 +893,8 @@ internal sealed partial class Selection
         using (ParserScope.Save(ref context.OuterMaskResolver))
         {
             if (context.Batch.Connection.Simulation.DeclaresDataMasks)
-                context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, savedOuterMask);
-            lateralPlan = AcrossApplyBoundary(context, leftSnapshot, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, chainedResolver)));
+                context.OuterMaskResolver = name => ScopedColumnMask(leftSources, name, savedOuterMask);
+            lateralPlan = AcrossApplyBoundary(context, leftSources, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, chainedResolver)));
         }
 
         var schema = lateralPlan.Schema;

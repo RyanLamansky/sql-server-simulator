@@ -82,13 +82,16 @@ internal sealed partial class Selection
     /// side: the distance rowset is the lateral member, re-run per left row,
     /// and the table joins it on the key — inner under <c>CROSS APPLY</c>,
     /// left under <c>OUTER APPLY</c> so a left row with no match keeps its
-    /// NULLs.
+    /// NULLs. Its arguments see <paramref name="left"/>, the APPLY's chain to
+    /// its left, as any APPLY right side does.
     /// </summary>
-    private static void AddAppliedVectorSearch(ParserContext context, List<FromSource> sources, List<JoinSpec> joins, JoinKind applyKind, QueryScope scope)
+    private static void AddAppliedVectorSearch(ParserContext context, List<FromSource> sources, List<JoinSpec> joins, JoinKind applyKind, QueryScope scope, FromSource[] left)
     {
-        var left = sources.ToArray();
-        var resolver = TypeResolverOver(left, scope.OuterTypeResolver);
-        var search = AcrossApplyBoundary(context, left, () => ParseVectorSearch(context, resolver));
+        var binding = context.FromBinding!;
+        var resolver = binding.ResolverOver(left, scope.OuterTypeResolver);
+        VectorSearchSources search;
+        using (ParserScope.Enter(ref context.PartialScopeReferences, binding.References()))
+            search = AcrossApplyBoundary(context, left, () => ParseVectorSearch(context, resolver));
         AddVectorSearchSources(context, sources, search);
         joins.Add(new JoinSpec(applyKind, onPredicate: null));
         joins.Add(search.KeyJoin is { } keyJoin

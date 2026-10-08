@@ -65,7 +65,7 @@ partial class Simulation
         // raises its own error read in place.
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
-            Selection.ParseSourcesAndJoins(context, QueryScope.Statement, [], []);
+            _ = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, [], []);
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 

@@ -149,6 +149,14 @@ internal readonly struct MultiPartName
     };
 
     /// <summary>
+    /// This one-part name qualified by <paramref name="qualifier"/>, the
+    /// leaf's flags kept: how a name bound while only part of a FROM clause
+    /// was in scope is pinned to the source that bound it.
+    /// </summary>
+    public MultiPartName WithQualifier(string qualifier) =>
+        new(qualifier, this.p1, null, null, 2, leafDelimited: this.LeafDelimited, fromText: this.FromText);
+
+    /// <summary>
     /// Indexed access to populated segments, left-to-right. <c>name[0]</c> is
     /// the leftmost qualifier (e.g. the db in <c>db.schema.table</c>);
     /// <c>name[Count - 1]</c> is the <see cref="Leaf"/>.

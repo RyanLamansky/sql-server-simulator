@@ -1059,6 +1059,7 @@ partial class Simulation
     {
         var sourcesList = preParsedFrom?.Sources ?? [];
         var joinsList = preParsedFrom?.Joins ?? [];
+        var binding = preParsedFrom?.Binding;
         if (preParsedFrom is not null)
         {
             // The SET list's scope already parsed the sources; resume past them.
@@ -1073,12 +1074,12 @@ partial class Simulation
             using (ParserScope.Enter(ref context.AllowNextValueForInFromClause, true))
             {
                 context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
-                Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+                binding = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
             }
         }
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
             return new SimulatedNonQuery(0);
-        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
+        var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable, binding);
         // A leading name that is a table's but aliases a view, CTE or derived
         // table in the FROM clause writes through that source.
         if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.WriteTargetView() is not null)
@@ -2625,7 +2626,8 @@ partial class Simulation
         List<FromSource> sources,
         List<JoinSpec> joins,
         MultiPartName leadingIdent,
-        HeapTable? leadingTable)
+        HeapTable? leadingTable,
+        Selection.PartialScopeBinding? binding)
     {
         var found = FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, sources, leadingIdent.Leaf, leadingTable);
         if (found >= 0)
@@ -2652,6 +2654,9 @@ partial class Simulation
             heapPlan: plan,
             autoElementName: leadingIdent.ToString(),
             unaliasedName: FromSource.Resolved(leadingIdent, context.Batch.CurrentDatabase)));
+        // The appended target is outside every ON's scope, so a name an ON
+        // bound that the target also carries is pinned to its binder too.
+        binding?.Pin(sources);
         return sources.Count - 1;
     }
 

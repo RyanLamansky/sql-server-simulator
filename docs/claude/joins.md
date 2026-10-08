@@ -12,8 +12,7 @@ Execution lives in `Selection.Execution.Joins.cs`.
 `FROM a, b WHERE a.id = b.id` parses as a sequence of explicit-join chains spliced with `JoinKind.Cross` joins.
 Each comma starts a fresh chain via the same `ParseExplicitJoinChain` helper the JOIN-keyword loop calls, so any explicit JOINs *within* a chain bind before the cross-splice.
 
-**Quirk — back-reference across a comma silently succeeds** (e.g. `FROM a, b JOIN c ON c.id = a.id`): real SQL Server binds `b JOIN c ON …` as its own scope and raises Msg 4104 because `a` isn't visible there; the simulator binds an ON predicate against the statement's *whole* source set rather than the chain's own scope (and `ResolveAcrossTuple` resolves the same way per row), so the query runs and returns the Cartesian-filtered rowset.
-The common shapes — basic `FROM a, b WHERE …`, multi-comma chains, comma + derived table, explicit JOIN followed by comma — all match real SQL Server byte-for-byte; only this rare back-reference-across-comma case diverges, toward "more permissive" rather than wrong rowset.
+A chain is a scope of its own: an `ON` or an `APPLY` body in `FROM a, b JOIN c ON …` sees `b` and `c` but not `a` — see [the scope of an `ON` and an `APPLY` body](#the-scope-of-an-on-and-an-apply-body).
 
 ### Cross→Inner equi-join rewrite
 
@@ -41,8 +40,21 @@ It ends the statement's binding: an earlier join's `ON` error reports ahead of i
 ### Divergences
 
 - An alias spelled as its own table's last part (`FROM t t`) reads as no alias, so a collision with it is reported as the table's rather than the correlation name's.
-- An unqualified `ON` name that a source joined later also carries binds in the `ON`'s own scope on real — `a JOIN b ON x = y JOIN c ON c.id = a.id` with `x` in both `a` and `c` answers there (probed 2026-10-08 against SQL Server 2025).
-  The `ON` binds in that scope here too, but the planner resolves its conjuncts again across every source — deriving the query's output keys while it compiles, choosing the join's keys and evaluating each row as it runs — and raises Msg 209.
+
+## The scope of an `ON` and an `APPLY` body
+
+An `ON` binds against its own chain's sources up to and including its join's right operand, and an `APPLY` right side — a body, a rowset function's arguments, a `VALUES` row — against its chain's sources to its left (probed 2026-10-08 against SQL Server 2025).
+Neither sees an earlier comma-separated item (Msg 4104 qualified, 207 not), an enclosing group's sources, or a source joined after it.
+So `a JOIN b ON x = y JOIN c ON c.id = a.id` with `x` in `a` and `c` reads `a.x` rather than raising Msg 209, a subquery in the `ON` correlates through the same scope, and a name the scope lacks binds to an enclosing query even when a later source carries it; a joined `UPDATE` / `DELETE`'s target, appended when its `FROM` doesn't name it, is outside every `ON`.
+The `WHERE` and the clauses after it see every source, where the same `x` is Msg 209.
+
+Everything after the parse — the output keys, the planner and its seeks, the per-row tuple resolver, a correlated body's outer resolver — resolves a name across the whole FROM clause, and giving each of them a scope of its own is the road not taken: `Selection.PartialScopeBinding` instead qualifies each name a source outside its scope also carries by the source that bound it, so reading it across the whole clause agrees.
+A new parse site binding against part of a FROM clause takes its resolver from `PartialScopeBinding.ResolverOver` and collects into `ParserContext.PartialScopeReferences`, or its names are read across the whole clause.
+
+**Divergences** — two bindings can't be written as a qualified name, so they still resolve across the whole FROM clause (probed 2026-10-08 against SQL Server 2025):
+
+- A name bound to an unaliased rowset function, which exposes none: `FROM OPENJSON(…) JOIN c ON value = '1' JOIN (SELECT 1 AS value) z ON 1 = 1` answers on real and is Msg 209 here.
+- An enclosing query's name qualified by an exposed name a later source of the subquery repeats: `o.oz` in `… ON a.id = o.oz JOIN e o ON …` reads the outer `o` on real and `e`'s column here.
 
 ## Parenthesized join groups
 
