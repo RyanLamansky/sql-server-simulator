@@ -1092,6 +1092,7 @@ public sealed class SimulatedDbConnection : DbConnection
     [MethodImpl(Tiering.OptimizeFirstCall)]
     internal void BeginExecutionScope(TimeSpan? timeout = null)
     {
+        this.executionTimeout = timeout;
         var fresh = new CancellationTokenSource();
         // A finite CommandTimeout arms the same source the engine already
         // polls, so a timeout aborts through exactly the path a Cancel() or a
@@ -1122,6 +1123,95 @@ public sealed class SimulatedDbConnection : DbConnection
             this.CancelExecution();
         else if (request is { AttentionReceived: true })
             request.Cancel();
+    }
+
+    /// <summary>The <c>CommandTimeout</c> the current execution scope armed, null for none.</summary>
+    private TimeSpan? executionTimeout;
+
+    /// <summary>
+    /// Stops the current execution's <c>CommandTimeout</c> while a statement
+    /// waits on its client to read the rows it sent (see
+    /// <see cref="ResultStream"/>): SqlClient counts only the time a call spends
+    /// waiting on the server, never the client's own time between reads.
+    /// </summary>
+    internal void PauseExecutionTimeout()
+    {
+        if (this.executionTimeout is null)
+            return;
+        try
+        {
+            Volatile.Read(ref this.executionCancellation).CancelAfter(Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The scope ended with its connection.
+        }
+    }
+
+    /// <summary>
+    /// Re-arms the <c>CommandTimeout</c> <see cref="PauseExecutionTimeout"/>
+    /// stopped, in full, as the client asks for more rows: each SqlClient call
+    /// has the whole timeout to itself.
+    /// </summary>
+    internal void ResumeExecutionTimeout()
+    {
+        if (this.executionTimeout is not { } timeout)
+            return;
+        var source = Volatile.Read(ref this.executionCancellation);
+        try
+        {
+            if (!source.IsCancellationRequested)
+                source.CancelAfter(timeout);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The scope ended with its connection.
+        }
+    }
+
+    /// <summary>
+    /// The statements of this session's requests suspended while their
+    /// clients read the rows they sent (see <see cref="ResultStream"/>); null
+    /// until one first suspends.
+    /// </summary>
+    internal List<ResultStream>? SuspendedStreams;
+
+    /// <summary>
+    /// Runs each statement suspended on its client to its end, its rows kept
+    /// for the client to read, before another in-process request runs:
+    /// requests of one session interleave between statements here where real
+    /// interleaves them anywhere (see <see cref="SessionRequest"/>), so a
+    /// statement's locks, snapshot and LOB epoch — which the session holds one
+    /// of at a time — are never held by two requests' statements at once.
+    /// </summary>
+    internal void FinishSuspendedStreams()
+    {
+        foreach (var stream in this.SnapshotSuspendedStreams())
+            stream.Finish();
+    }
+
+    /// <summary>
+    /// Abandons each statement suspended on its client as the session ends:
+    /// its reader stops, and what the statement held goes back.
+    /// </summary>
+    private void AbandonSuspendedStreams()
+    {
+        foreach (var stream in this.SnapshotSuspendedStreams())
+            stream.AbandonByConsumer?.Invoke();
+    }
+
+    /// <summary>The statements suspended on their clients as of now, newest first, the registry left empty.</summary>
+    private ResultStream[] SnapshotSuspendedStreams()
+    {
+        if (this.SuspendedStreams is not { } suspended)
+            return [];
+        lock (suspended)
+        {
+            ResultStream[] snapshot = [.. suspended];
+            suspended.Clear();
+            Array.Reverse(snapshot);
+            return snapshot;
+        }
     }
 
     /// <summary>
@@ -1348,6 +1438,17 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void Kill()
     {
+        // A statement waiting on its client to read its rows ends at once,
+        // as real ends a request suspended on ASYNC_NETWORK_IO; one running
+        // meets the cancellation below.
+        if (this.SuspendedStreams is { } suspended)
+        {
+            ResultStream[] waiting;
+            lock (suspended)
+                waiting = [.. suspended];
+            foreach (var stream in waiting)
+                stream.AbandonIfSuspended();
+        }
         lock (this.sessionGate)
         {
             this.Killed = true;
@@ -2351,6 +2452,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override void Close()
     {
         using var culture = CultureScope.Engine();
+        this.AbandonSuspendedStreams();
         this.AbandonParkedBulkText();
         // SqlClient auto-rolls-back any active transaction when its
         // connection closes. The transaction's own dispose handles the
@@ -2389,6 +2491,7 @@ public sealed class SimulatedDbConnection : DbConnection
         else
         {
             this.Session.Reclaimed = true;
+            this.AbandonSuspendedStreams();
             this.AbandonParkedBulkText();
             lock (this.sessionGate)
             {

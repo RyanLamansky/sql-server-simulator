@@ -171,6 +171,15 @@ internal sealed class PhantomFenceState
     public bool LocksRows;
 
     /// <summary>
+    /// Whether the fence is a scan's of the clustered key taken key by key as
+    /// the scan reaches each row, as real's is — <see cref="FencedGroup"/>'s
+    /// key of each row read, then the infinity anchor at the scan's end — so a
+    /// reader suspended mid-result holds the ranges behind its position alone
+    /// (<c>BatchContext.EnsureSerializableTableLock</c>).
+    /// </summary>
+    public bool LocksAsScanned;
+
+    /// <summary>
     /// Records that the fence about to be taken locks <paramref name="group"/>'s
     /// keys over <paramref name="intervals"/> as <paramref name="table"/> holds
     /// them now, looking each key's rows up when <paramref name="lookupRows"/>.

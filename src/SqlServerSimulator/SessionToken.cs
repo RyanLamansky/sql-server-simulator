@@ -139,6 +139,14 @@ internal sealed class SessionToken(int spid)
     public bool InWaitFor;
 
     /// <summary>
+    /// The id of the request whose <c>SELECT</c> waits on its client to read
+    /// the rows it sent (see <see cref="ResultStream"/>), or -1 while none
+    /// does: <c>sys.dm_exec_requests</c> reports it <c>suspended</c> on
+    /// <c>ASYNC_NETWORK_IO</c> (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    public int AwaitingClientRequest = -1;
+
+    /// <summary>
     /// The kind of the statement the session is running, as
     /// <c>sys.dm_exec_requests.command</c> reports it; written as each
     /// statement dispatches, so a nested body's statement names itself.

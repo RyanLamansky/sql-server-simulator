@@ -138,6 +138,69 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     }
 
     /// <summary>
+    /// The statement producing these rows as the client reads them, while it
+    /// is (see <see cref="BeginStreaming"/>); null for rows produced whole.
+    /// </summary>
+    internal ResultStream? Stream;
+
+    /// <summary>
+    /// Produces the rows' first window — what real sends before its client
+    /// reads anything — and, when the source ends inside it, keeps them as
+    /// <see cref="MaterializeRows"/> would and answers null; otherwise the rows
+    /// read on from the <see cref="ResultStream"/> answered, which the
+    /// dispatch loop drives as the client reads. A row that raises leaves the
+    /// rows before it in place and rethrows its error, as
+    /// <see cref="MaterializeRows"/> does.
+    /// </summary>
+    internal ResultStream? BeginStreaming()
+    {
+        if (this.rowValues is { } values)
+        {
+            if (values is List<SqlValue[]>)
+                return null;
+            List<SqlValue[]>? produced = null;
+            try
+            {
+                var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), out produced);
+                if (stream is null)
+                {
+                    this.rowValues = produced;
+                    return null;
+                }
+                this.rowValues = stream.Rows();
+                stream.Result = this;
+                return this.Stream = stream;
+            }
+            catch (SimulatedSqlException)
+            {
+                this.rowValues = produced ?? [];
+                throw;
+            }
+        }
+
+        if (this.rowBytes is List<byte[]>)
+            return null;
+        List<byte[]>? producedBytes = null;
+        try
+        {
+            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, out producedBytes);
+            if (byteStream is null)
+            {
+                this.rowBytes = producedBytes;
+                return null;
+            }
+            this.rowBytes = byteStream.Rows();
+            byteStream.Result = this;
+            return this.Stream = byteStream;
+        }
+        catch (SimulatedSqlException)
+        {
+            this.rowBytes = producedBytes ?? [];
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Set when the statement's own error cut these rows short. Real sends a
     /// SELECT's column metadata and each row as it produces it, so the rows
     /// before the failing one reach the client and the error arrives before

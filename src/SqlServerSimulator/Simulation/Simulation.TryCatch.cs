@@ -234,6 +234,11 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
         FunctionBodyShape.NoteSideEffect(batch, "END CATCH", FunctionBodyShape.ControlOperatorState, endCatch.LineNumber);
+        // The construct's end leaves @@ROWCOUNT at 0, caught error or none,
+        // where a block or an IF leaves its last statement's (probed
+        // 2026-10-08 against SQL Server 2025).
+        if (!batch.IsSkipping)
+            batch.Connection.LastStatementRowCount = 0;
         if (frames)
             yield return StatementDone(batch, StatementDoneKind.EndCatch);
         if (StructuralExecutionTimes(batch, endCatch.LineNumber) is { } endCatchTimes)

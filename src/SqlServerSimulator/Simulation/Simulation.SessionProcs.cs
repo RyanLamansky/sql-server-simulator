@@ -261,10 +261,13 @@ partial class Simulation
 
             var isSelf = ReferenceEquals(connection, batch.Connection);
             var blockedBy = WhoBlockingSpid(connection);
-            var status = blockedBy != 0 || connection.WaitingOnResource is not null
+            // A SELECT waiting on its client to read its rows is suspended in
+            // its statement (see ResultStream).
+            var awaitingClient = !isSelf && connection.Session.AwaitingClientRequest >= 0;
+            var status = blockedBy != 0 || connection.WaitingOnResource is not null || awaitingClient
                 ? "suspended"
                 : isSelf || connection.CurrentExecutingThreadId is not null ? "runnable" : "sleeping";
-            var command = isSelf || connection.CurrentExecutingThreadId is not null
+            var command = isSelf || connection.CurrentExecutingThreadId is not null || awaitingClient
                 ? WhoSelfCommand
                 : WhoIdleCommand;
             if (filter.ActiveOnly && command == WhoIdleCommand)

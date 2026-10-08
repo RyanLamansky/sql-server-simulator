@@ -66,6 +66,19 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ => 8,
     };
 
+    /// <summary>
+    /// <see cref="ClientSizeEstimate"/> with a character value's bytes as its
+    /// column sends them: two per character in the <paramref name="national"/>
+    /// family, one outside it. What a streamed result measures its window in
+    /// (see <see cref="ResultStream"/>).
+    /// </summary>
+    internal int ClientWireEstimate(bool national) => this.IsNull ? 1 : this.reference switch
+    {
+        string text => 2 + (national ? text.Length * 2 : text.Length),
+        byte[] bytes => 2 + bytes.Length,
+        _ => 8,
+    };
+
     /// <summary>Non-NULL <see cref="int"/> value.</summary>
     public static SqlValue FromInt32(int value) => new(SqlType.Int32, value, null, isNull: false);
 

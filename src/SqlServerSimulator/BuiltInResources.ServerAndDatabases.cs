@@ -1517,8 +1517,9 @@ internal static partial class BuiltInResources
             // against SQL Server 2025).
             var parked = connection.ParkedRequests();
             Array.Sort(parked, static (a, b) => a.RequestId.CompareTo(b.RequestId));
-            var running = isSelf || session.CurrentExecutingThreadId is not null || lockWait is not null;
-            var runningId = connection.ExecutingRequest?.RequestId ?? 0;
+            var awaitingClient = !isSelf && lockWait is null && session.AwaitingClientRequest >= 0 ? session.AwaitingClientRequest : -1;
+            var running = isSelf || session.CurrentExecutingThreadId is not null || lockWait is not null || awaitingClient >= 0;
+            var runningId = awaitingClient >= 0 ? awaitingClient : connection.ExecutingRequest?.RequestId ?? 0;
             var next = 0;
             foreach (var request in parked)
             {
@@ -1531,6 +1532,7 @@ internal static partial class BuiltInResources
             {
                 var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
                     : inWaitFor ? "WAITFOR"
+                    : awaitingClient >= 0 ? "ASYNC_NETWORK_IO"
                     : null;
                 var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
                 var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - (lockWait is not null && connection.WaitRecord is { } record ? record.WaitStartedTicks : session.WaitStartedTicks)));

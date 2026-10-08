@@ -242,6 +242,16 @@ internal sealed partial class BatchContext
         if (!isWrite && (hints.NoLock || (isolation == System.Data.IsolationLevel.ReadUncommitted && !hints.LocksRead && !hints.ReadCommitted)))
             return DataLockPlan.NoLock;
 
+        // READCOMMITTED and READCOMMITTEDLOCK read their table at READ
+        // COMMITTED under a REPEATABLE READ or SERIALIZABLE session too,
+        // keeping no row lock past the row (probed 2026-10-08 against SQL
+        // Server 2025: a reader suspended mid-result holding OBJECT IS and
+        // the current page's S alone).
+        var lockingLevel = !isWrite && (hints.ReadCommitted || hints.ReadCommittedLock)
+            && isolation is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable
+            ? System.Data.IsolationLevel.ReadCommitted
+            : isolation;
+
         // A row-versioned read — READ_COMMITTED_SNAPSHOT's or a SNAPSHOT
         // transaction's — carrying TABLOCK and no locking hint reads its
         // versions as any other does, without the table S (probed 2026-10-03
@@ -280,7 +290,7 @@ internal sealed partial class BatchContext
             // Reader TABLOCK: table-S. Tx-scoped iff HOLDLOCK/SER/REPEATABLE or session RR/SER.
             var tabLockTxScoped = hints.Serializable
                 || hints.Repeatable
-                || isolation is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable;
+                || lockingLevel is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable;
             if (tabLockTxScoped)
                 this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, hints.NoWait);
             else
@@ -295,7 +305,7 @@ internal sealed partial class BatchContext
         }
 
         // Reader path (no TABLOCK*).
-        var serializable = hints.Serializable || isolation == System.Data.IsolationLevel.Serializable;
+        var serializable = hints.Serializable || lockingLevel == System.Data.IsolationLevel.Serializable;
         if (hints.XLock || hints.UpdLock)
         {
             // Table-IX either way — probed, real reports IX at the object for
@@ -340,11 +350,20 @@ internal sealed partial class BatchContext
         // RC / RR reader. A REPEATABLE READ keeps its IS as long as the row S
         // locks under it, as real reports — it is what a TABLOCKX writer, which
         // takes no row lock, meets.
-        var rowTxScoped = hints.Repeatable || isolation == System.Data.IsolationLevel.RepeatableRead;
+        var rowTxScoped = hints.Repeatable || lockingLevel == System.Data.IsolationLevel.RepeatableRead;
+        // A read of row versions — READ_COMMITTED_SNAPSHOT's, SNAPSHOT's —
+        // holds only the Sch-S its name took (probed 2026-10-08 against SQL
+        // Server 2025, a reader suspended mid-result holding OBJECT Sch-S
+        // alone), so a TABLOCKX writer goes ahead of it.
         if (rowTxScoped)
+        {
             this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
-        else
+        }
+        else if (hints.LocksRead || !(isolation == System.Data.IsolationLevel.Snapshot
+            || (isolation == System.Data.IsolationLevel.ReadCommitted && this.DatabaseFor(table).ReadCommittedSnapshot)))
+        {
             this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
+        }
         // RR: acquire row-S tx-scoped per row.
         // RC default: probe-only (no acquire). Encoded as rowMode = null + noLockReader = false;
         // the row-touch helper distinguishes "null + noLockReader=false" (probe) from
@@ -1310,7 +1329,7 @@ internal sealed partial class BatchContext
     /// narrowly), and for a table this batch already fenced whole.
     /// </para>
     /// </summary>
-    public void EnsureSerializableTableLock(HeapTable table, in DataLockPlan plan)
+    public void EnsureSerializableTableLock(HeapTable table, in DataLockPlan plan, bool asScanned = false)
     {
         if (plan.SerializableRangeMode is not { } mode || plan.Fence is not { Settled: false } fence)
             return;
@@ -1319,6 +1338,19 @@ internal sealed partial class BatchContext
             return;
         if (KeyLockGroup.RowGroupOf(table) is { } group)
         {
+            // A plain scan of the clustered key locks each key as it reaches
+            // it and the infinity anchor at its end (probed 2026-10-08 against
+            // SQL Server 2025: a reader suspended twenty rows in holds twenty
+            // RangeS-S, and an insert past the table's last key goes ahead
+            // meanwhile); see WrapWithRowConflictChecks.
+            if (asScanned && plan.RowMode is null)
+            {
+                fence.FencedGroup = group;
+                fence.FencedGeneration = long.MinValue;
+                fence.LocksRows = false;
+                fence.LocksAsScanned = true;
+                return;
+            }
             List<KeyFenceInterval> everything = [KeyFenceInterval.Everything];
             fence.NoteKeysFenced(table, group, everything, lookupRows: false);
             this.AcquireKeyFence(table, group, group.Commons, everything, mode, KeyFenceKind.Read, lookupRows: false);
@@ -1327,6 +1359,39 @@ internal sealed partial class BatchContext
         {
             this.AcquireSerializableTableS(table);
         }
+    }
+
+    /// <summary>
+    /// For a SERIALIZABLE scan locking keys as it reaches them
+    /// (<see cref="PhantomFenceState.LocksAsScanned"/>), the keys between
+    /// <paramref name="after"/> and <paramref name="before"/> — exclusive, an
+    /// open side null — that rows carry now, with their rows: keys inserted
+    /// since the scan read its order, which it reads before it passes them.
+    /// Asked once the key at <paramref name="before"/> is locked, so no more can
+    /// arrive between the two; empty when none did.
+    /// </summary>
+    internal static List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)> KeysArrivedBetween(HeapTable table, KeyLockGroup group, SqlValueKey? after, SqlValueKey? before)
+    {
+        var heap = table.Heap;
+        var anchors = HeapSeekCache.For(heap).KeyLockAnchors(heap, table.StoredColumns, heap, group.Ordinals, group.Commons,
+            after, false, before, false, int.MaxValue)!;
+        // The last entry is the key past the interval, which isn't in it.
+        anchors.RemoveAt(anchors.Count - 1);
+        return anchors;
+    }
+
+    /// <summary>
+    /// Ends a SERIALIZABLE scan locking keys as it reaches them: the keys past
+    /// <paramref name="lastKey"/>, the last it read, and the infinity anchor,
+    /// in the plan's range mode — after which no key can arrive past the scan
+    /// — answering the keys that arrived there since the scan read its order,
+    /// which it reads before it ends.
+    /// </summary>
+    internal List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)> FenceScanEnd(HeapTable table, KeyLockGroup group, in DataLockPlan plan, SqlValueKey? lastKey)
+    {
+        List<KeyFenceInterval> rest = [new KeyFenceInterval(lastKey, false, null, false, false)];
+        this.AcquireKeyFence(table, group, group.Commons, rest, plan.SerializableRangeMode!.Value, KeyFenceKind.Read, lookupRows: false);
+        return KeysArrivedBetween(table, group, lastKey, null);
     }
 
     /// <summary>
@@ -1631,7 +1696,7 @@ internal sealed partial class BatchContext
         var snapshotXid = batch.ResolveSnapshotXidForRead(table, plan);
         if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
-        batch.EnsureSerializableTableLock(table, plan);
+        batch.EnsureSerializableTableLock(table, plan, asScanned: true);
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += 1;
         var lastPage = -1;
@@ -1644,17 +1709,29 @@ internal sealed partial class BatchContext
         // reach, the row landing at an address the heap's walk already passed:
         // the scan follows the key order then, keys in hand, even over a heap
         // whose own order is the key's.
+        // A SERIALIZABLE scan locking its keys as it goes reads them in hand
+        // too, to find the ones inserted ahead of it.
         var followKeys = !plan.NoLockReader && !plan.SkipBlockedRows
-            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
+            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree()
+                || plan.Fence is { LocksAsScanned: true });
+        var orderGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         if (snapshotXid is null && batch.LockingScanOrder(table, orderKeys!, followKeys) is { } clusteredOrder)
         {
             var seen = new HashSet<(int, int)>();
             // Rows read in the key's place when the key's row was deleted
             // under the scan, read before the scan moves on.
             var followed = new Stack<((int Page, int Slot) Address, SqlValueKey? Key)>();
-            for (var position = 0; position < clusteredOrder.Count; position++)
+            // A SERIALIZABLE scan locking its keys as it reaches them (see
+            // EnsureSerializableTableLock) reads the keys inserted ahead of it
+            // since it read its order, as real's scan meets them in the index.
+            var scanned = batch.ScanFencedGroup(table, plan, orderKeys!.Count == clusteredOrder.Count);
+            SqlValueKey? lastKey = null;
+            for (var position = 0; ; position++)
             {
-                followed.Push((clusteredOrder[position], orderKeys!.Count == clusteredOrder.Count ? orderKeys[position] : null));
+                if (position < clusteredOrder.Count)
+                    followed.Push((clusteredOrder[position], orderKeys!.Count == clusteredOrder.Count ? orderKeys[position] : null));
+                else if (scanned is null || !PushArrivals(followed, batch.FenceScanEnd(table, scanned, plan, lastKey)))
+                    break;
                 while (followed.TryPop(out var next))
                 {
                     var ((pageIndex, slotIndex), key) = next;
@@ -1672,6 +1749,19 @@ internal sealed partial class BatchContext
                         var sequence = table.Heap.WriteSequence;
                         if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
                             continue;
+                        // Its key locked, the row's range below it is the
+                        // scan's: a key inserted there since the order was read
+                        // is read first.
+                        if (scanned is not null && key is { } reached && Volatile.Read(ref table.Heap.MutationGeneration) != orderGeneration)
+                        {
+                            followed.Push(next);
+                            if (PushArrivals(followed, KeysArrivedBetween(table, scanned, lastKey, reached)))
+                            {
+                                _ = seen.Remove((pageIndex, slotIndex));
+                                continue;
+                            }
+                            _ = followed.Pop();
+                        }
                         if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } read)
                             bytes = batch.SettleReadCommitted(table, pageIndex, slotIndex, plan, read, sequence);
                     }
@@ -1687,6 +1777,8 @@ internal sealed partial class BatchContext
                     }
                     io?.Enter(pageIndex, ref lastPage);
                     addresses?.Record(bytes, pageIndex, slotIndex);
+                    if (key is not null)
+                        lastKey = key;
                     yield return bytes;
                 }
             }
@@ -1783,6 +1875,39 @@ internal sealed partial class BatchContext
                 yield return bytes;
             }
         }
+    }
+
+    /// <summary>
+    /// The group a SERIALIZABLE scan locks the keys of as it reaches them
+    /// (<see cref="PhantomFenceState.LocksAsScanned"/>), or null for any other
+    /// read. A scan whose order doesn't come with its keys can't find the keys
+    /// inserted ahead of it, so it locks the whole key space as it begins.
+    /// </summary>
+    private KeyLockGroup? ScanFencedGroup(HeapTable table, in DataLockPlan plan, bool keyed)
+    {
+        if (plan.Fence is not { LocksAsScanned: true, FencedGroup: { } group })
+            return null;
+        if (keyed)
+            return group;
+        List<KeyFenceInterval> everything = [KeyFenceInterval.Everything];
+        this.AcquireKeyFence(table, group, group.Commons, everything, plan.SerializableRangeMode!.Value, KeyFenceKind.Read, lookupRows: false);
+        return null;
+    }
+
+    /// <summary>
+    /// Pushes the rows of the <paramref name="arrivals"/> a SERIALIZABLE scan
+    /// found (<see cref="KeysArrivedBetween"/>) onto its stack of rows to read
+    /// next, the lowest key on top; whether there were any.
+    /// </summary>
+    private static bool PushArrivals(Stack<((int Page, int Slot) Address, SqlValueKey? Key)> followed, List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)> arrivals)
+    {
+        for (var a = arrivals.Count - 1; a >= 0; a--)
+        {
+            var (key, rids) = arrivals[a];
+            for (var r = rids.Length - 1; r >= 0; r--)
+                followed.Push((rids[r], key));
+        }
+        return arrivals.Count != 0;
     }
 
     /// <summary>

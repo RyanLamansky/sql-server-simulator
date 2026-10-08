@@ -1071,7 +1071,7 @@ internal sealed partial class Selection
         var source = sources[0];
         if (source.BackingTable is not { } table || source.LateralPlan is not null)
             return false;
-        if (source.HeapPlan is not { } plan || plan.RowTxScoped)
+        if (source.HeapPlan is not { } plan)
             return false;
         // The scan counts the rows an OFFSET skips before any reaches the
         // filter predicate, which would skip rows it hides.
@@ -1274,6 +1274,19 @@ internal sealed partial class Selection
             upperKeyInclusive = !hasUpper || upperInclusive;
         }
 
+        // A plain SERIALIZABLE read of the whole table in clustered-key order
+        // is the table's own scan, which locks each key as it reaches it (see
+        // BatchContext.EnsureSerializableTableLock) and reads in that order.
+        if (plan is { SerializableRangeMode: not null, RowMode: null } && !descending && pinnedLength == 0 && !hasLower && !hasUpper
+            && excluders.Count == 0 && ClusteredScan.OrdersAscendingBy(table, orderOrds))
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
+            return true;
+        }
+        // A read keeping its row locks waits out the deletes in flight before
+        // it takes its order, as the qualified scan does.
+        if (plan.RowTxScoped && !plan.SkipBlockedRows)
+            batch.AwaitUncommittedDeletes(table);
         var cache = HeapSeekCache.For(table.Heap);
         var candidates = cache.OrderedSeek(
             table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
@@ -1292,6 +1305,21 @@ internal sealed partial class Selection
         // the OFFSET's rows can be passed over where the scan reads them, as
         // real's Top over the ordered scan does.
         skipped = excluders.Count == 0 ? skip : 0;
+        // A read keeping its row locks — REPEATABLE READ, UPDLOCK, XLOCK —
+        // locks each row as the ordered scan reaches it, as real's does, rather
+        // than sorting a scan that locked them all first (probed 2026-10-08
+        // against SQL Server 2025: a REPEATABLE READ `ORDER BY` the clustered
+        // key suspended two rows in held the keys produced so far), and lets
+        // go a row its sargable conjuncts reject (RowLockQualifier).
+        if (plan.RowTxScoped)
+        {
+            skipped = 0;
+            List<(int Page, int Slot)> inOrder = [.. candidates];
+            if (descending)
+                inOrder.Reverse();
+            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver)));
+            return true;
+        }
         orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped));
         return true;
     }

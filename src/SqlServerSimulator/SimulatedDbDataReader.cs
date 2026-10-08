@@ -86,6 +86,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
         if (!this.streamEnded && this.outcomes.MoveNext())
         {
             outcome = this.outcomes.Current;
+            this.Adopt(outcome);
             return true;
         }
         this.streamEnded = true;
@@ -119,6 +120,9 @@ public sealed class SimulatedDbDataReader : DbDataReader
             {
                 case SimulatedInfoOutcome info:
                     this.connection?.RaiseInfoMessage(info.Message);
+                    continue;
+                case SimulatedRowsProduced:
+                    // A result set read past, whose statement ran on.
                     continue;
                 case SimulatedQueryResult query:
                     this.currentResult = query;
@@ -156,6 +160,70 @@ public sealed class SimulatedDbDataReader : DbDataReader
         this.cursor = EmptyCursor.Instance;
         this.Consume();
         return false;
+    }
+
+    /// <summary>
+    /// Has the statement the reader is positioned on produce its next window
+    /// of rows (see <see cref="ResultStream"/>): one advance of the outcome
+    /// stream, which returns at the statement's next marker.
+    /// </summary>
+    private void PullRows()
+    {
+        using var culture = CultureScope.Engine();
+        if (this.streamEnded || !this.outcomes.MoveNext())
+        {
+            this.streamEnded = true;
+            return;
+        }
+        var outcome = this.outcomes.Current;
+        if (outcome is SimulatedRowsProduced)
+            return;
+        this.Adopt(outcome);
+        (this.ranAhead ??= new()).Enqueue(outcome);
+    }
+
+    /// <summary>
+    /// Takes on a result set its statement is still producing rows for, as the
+    /// outcome stream hands it over: the reader is the one that runs the
+    /// statement on (<see cref="PullRows"/>) or abandons it.
+    /// </summary>
+    private void Adopt(SimulatedStatementOutcome outcome)
+    {
+        if (outcome is SimulatedSqlResultSet { Stream: { Complete: false } stream })
+        {
+            stream.Pull = this.PullRows;
+            stream.AbandonByConsumer = this.Abandon;
+        }
+    }
+
+    /// <summary>
+    /// Ends the reader when its session closes under it with a statement
+    /// still producing rows: the outcome stream is disposed, which abandons
+    /// the statement and gives back what it held, and nothing more runs.
+    /// </summary>
+    private void Abandon()
+    {
+        if (this.closed)
+            return;
+        this.closed = true;
+        this.abandoned = true;
+        this.cursor.Dispose();
+        this.outcomes.Dispose();
+        this.streamEnded = true;
+        this.Consume();
+    }
+
+    /// <summary>Set once <see cref="Abandon"/> ended the reader under its client.</summary>
+    private bool abandoned;
+
+    /// <summary>
+    /// Marks a result set the reader passes over without reading as one whose
+    /// rows its statement produces and discards (see <see cref="ResultStream.Draining"/>).
+    /// </summary>
+    private static void PassOver(SimulatedStatementOutcome outcome)
+    {
+        if (outcome is SimulatedSqlResultSet { Stream: { } passed })
+            passed.Draining = true;
     }
 
     /// <inheritdoc/>
@@ -534,6 +602,10 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override bool NextResult()
     {
+        // The rest of a result the reader moves off are produced and passed
+        // over, as SqlClient reads past them.
+        if (this.currentResult is { } current)
+            PassOver(current);
         this.cursor.Dispose();
         return this.AdvanceToNextResult();
     }
@@ -541,6 +613,15 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override bool Read()
     {
+        // The session ended under a statement still sending rows: a KILL
+        // drops the connection, as the transport error SqlClient raises then
+        // says, and a close ends the reader with it.
+        if (this.abandoned)
+        {
+            throw this.connection is { Killed: true }
+                ? SimulatedSqlException.ConnectionBroken()
+                : new InvalidOperationException("Invalid attempt to call Read when reader is closed.");
+        }
         if (this.cursor.MoveNext())
             return true;
 
@@ -594,6 +675,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
                     break;
                 }
                 var outcome = this.outcomes.Current;
+                this.Adopt(outcome);
                 (this.ranAhead ??= new()).Enqueue(outcome);
                 if (outcome is SimulatedQueryResult query)
                     budget -= query.ClientBytes(budget + 1);
@@ -667,12 +749,15 @@ public sealed class SimulatedDbDataReader : DbDataReader
 
         this.closed = true;
         using var culture = CultureScope.Engine();
+        if (this.currentResult is { } current)
+            PassOver(current);
         this.cursor.Dispose();
         try
         {
             while (this.MoveToNextOutcome(out var outcome))
             {
                 this.Accumulate(outcome);
+                PassOver(outcome);
                 if (outcome is SimulatedInfoOutcome info)
                     this.connection?.RaiseInfoMessage(info.Message);
             }
@@ -717,6 +802,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
         while (this.MoveToNextOutcome(out var outcome))
         {
             this.Accumulate(outcome);
+            PassOver(outcome);
             switch (outcome)
             {
                 case SimulatedInfoOutcome info:

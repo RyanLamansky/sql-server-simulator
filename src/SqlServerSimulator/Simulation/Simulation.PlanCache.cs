@@ -414,6 +414,22 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// What a replayed statement gives back as it ends — the reads it counted,
+    /// the LOB epoch and statement snapshot it announced — which a statement
+    /// whose rows went out as its client read them gives back after its last.
+    /// </summary>
+    private static void EndReplayedStatement(SimulatedDbConnection connection, IoStatistics? queryStoreIo, bool announcedReader)
+    {
+        if (queryStoreIo is not null)
+            connection.StatementIo = null;
+        if (announcedReader)
+        {
+            LobReclamation.Leave(connection.Session);
+            Volatile.Write(ref connection.Session.StatementSnapshotXid, long.MaxValue);
+        }
+    }
+
+    /// <summary>
     /// Replays a cached batch's <see cref="Selection"/> sequence against a fresh
     /// <see cref="BatchContext"/> for the incoming command, mirroring the
     /// <see cref="RunSelectStatement"/> for outcome
@@ -491,13 +507,18 @@ public sealed partial class Simulation
                 // As the dispatch loop's statements do (see LobReclamation).
                 var announcedReader = connection.Simulation.LobReclamation.Enter(connection.Session);
                 var rowSecurityMarks = connection.RowSecurityMarks;
+                // A result larger than real gets ahead of its client goes out
+                // as the client reads it, as the dispatch loop sends one.
+                ResultStream? stream = null;
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
-                    rowCount = executed.MaterializeRows();
+                    if (batch.StreamsResultRows && !selection.IsAssignmentOnly && !selection.CountsForClauseSourceRows && connection.SuspendedStreams is not { Count: > 0 })
+                        stream = executed.BeginStreaming();
+                    rowCount = stream is null ? executed.MaterializeRows() : 0;
                     if (selection.CountsForClauseSourceRows)
                         rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
-                    if (queryStore is { } capture)
+                    if (stream is null && queryStore is { } capture)
                         EndQueryStoreCapture(batch, capture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, 0, rowCount);
                 }
                 catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
@@ -521,15 +542,11 @@ public sealed partial class Simulation
                 }
                 finally
                 {
-                    if (queryStoreIo is not null)
-                        connection.StatementIo = null;
-                    if (announcedReader)
-                    {
-                        LobReclamation.Leave(connection.Session);
-                        Volatile.Write(ref connection.Session.StatementSnapshotXid, long.MaxValue);
-                    }
+                    if (stream is null)
+                        EndReplayedStatement(connection, queryStoreIo, announcedReader);
                 }
-                connection.LastStatementRowCount = rowCount;
+                if (stream is null)
+                    connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
                     ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
                     : (SimulatedStatementOutcome)executed;
@@ -541,7 +558,51 @@ public sealed partial class Simulation
                     query.ClientTextSize = connection.TextSize;
                 foreach (var message in DrainPendingMessages(connection))
                     yield return message;
-                yield return replayed;
+                if (stream is null)
+                {
+                    yield return replayed;
+                }
+                else
+                {
+                    var finished = false;
+                    try
+                    {
+                        stream.Suspend(batch);
+                        yield return replayed;
+                        while (true)
+                        {
+                            stream.Resume(batch);
+                            stream.Produce();
+                            if (stream.Complete)
+                                break;
+                            stream.Suspend(batch);
+                            yield return ResultStream.Marker;
+                        }
+                        finished = true;
+                    }
+                    finally
+                    {
+                        if (!finished)
+                        {
+                            stream.Resume(batch);
+                            stream.Abandon();
+                        }
+                        EndReplayedStatement(connection, queryStoreIo, announcedReader);
+                    }
+                    rowCount = stream.Error is null ? stream.RowCount : 0;
+                    connection.LastStatementRowCount = rowCount;
+                    if (stream.Error is { } streamed)
+                    {
+                        cutShort = streamed;
+                        executed.EndedByError = true;
+                        executed.ErrorCaught = CaughtByTryFrame(batch, streamed);
+                    }
+                    if (queryStore is { } streamedCapture)
+                        EndQueryStoreCapture(batch, streamedCapture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, cutShort is null ? (byte)0 : cutShort.IsAttention ? (byte)3 : (byte)4, rowCount);
+                    // The advance that ran the statement to its end returns
+                    // here, before anything its ending sends.
+                    yield return ResultStream.Marker;
+                }
                 if (cutShort is not null)
                 {
                     // Settled and sent as the dispatch loop settles and sends

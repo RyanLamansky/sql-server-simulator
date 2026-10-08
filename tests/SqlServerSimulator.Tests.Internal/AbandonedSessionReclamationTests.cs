@@ -276,6 +276,49 @@ public sealed class AbandonedSessionReclamationTests
     }
 
     /// <summary>
+    /// A reader abandoned with its statement suspended mid-result — a session
+    /// that reports no executing thread while it waits on its client — is
+    /// collected and reclaimed with its connection, the statement's locks and
+    /// its transaction's going with it.
+    /// </summary>
+    [TestMethod]
+    public void GarbageCollected_SuspendedReader_IsReclaimed()
+    {
+        var simulation = new Simulation();
+        using var observer = simulation.CreateDbConnection();
+        observer.Open();
+        Exec(observer, "CREATE TABLE dbo.big (k int PRIMARY KEY, v char(2000) NOT NULL); INSERT dbo.big SELECT value, 'x' FROM generate_series(1, 200)");
+
+        var session = LeakSuspendedReader(simulation);
+        AreEqual(20, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type = 'KEY'"), null));
+        IsNull(session.CurrentExecutingThreadId);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        AreEqual(1, simulation.ReclaimAbandonedSessions());
+        IsTrue(session.Reclaimed);
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static SessionToken LeakSuspendedReader(Simulation simulation)
+    {
+#pragma warning disable CA2000 // Abandoning the connection and its reader undisposed is the scenario under test.
+        var connection = simulation.CreateDbConnection();
+        connection.Open();
+        var transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT * FROM dbo.big";
+        var reader = command.ExecuteReader();
+#pragma warning restore CA2000
+        IsTrue(reader.Read());
+        return connection.Session;
+    }
+
+    /// <summary>
     /// Opens a connection, leaves state behind on it, and returns only its
     /// token — the connection itself is unreachable on return. Not inlined, so
     /// the JIT can't keep the local alive in a caller frame the collection

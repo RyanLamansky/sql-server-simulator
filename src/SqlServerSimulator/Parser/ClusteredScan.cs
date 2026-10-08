@@ -247,6 +247,23 @@ internal static class ClusteredScan
     /// <summary>The storage ordinals of <paramref name="table"/>'s clustered key, or null for a scan that keeps the heap's order.</summary>
     public static int[]? KeyOrdinals(HeapTable table) => ClusteredKey(table)?.Ordinals;
 
+    /// <summary>
+    /// Whether a scan of <paramref name="table"/> in its clustered key's order
+    /// is already ordered by <paramref name="ordinals"/> ascending: they lead
+    /// the key, each of those key columns ascending.
+    /// </summary>
+    public static bool OrdersAscendingBy(HeapTable table, int[] ordinals)
+    {
+        if (ClusteredKey(table) is not var (keyOrdinals, descending) || ordinals.Length > keyOrdinals.Length)
+            return false;
+        for (var i = 0; i < ordinals.Length; i++)
+        {
+            if (keyOrdinals[i] != ordinals[i] || descending[i])
+                return false;
+        }
+        return true;
+    }
+
     private static (int[] Ordinals, bool[] Descending)? ClusteredKey(HeapTable table)
     {
         foreach (var key in table.KeyConstraints)

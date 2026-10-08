@@ -540,6 +540,14 @@ internal sealed class StatementContext
     }
 
     /// <summary>
+    /// The rows a <c>SELECT</c> left to produce as its client reads them,
+    /// which the dispatch loop takes over once the statement has sent its
+    /// result set (see <see cref="ResultStream"/>); null for any other
+    /// statement.
+    /// </summary>
+    public ResultStream? StreamingResult;
+
+    /// <summary>
     /// Freezes the current time for one run of the statement's text and
     /// clears the caches that run fills — once per run, a re-read for the
     /// statement's whole binder report included.

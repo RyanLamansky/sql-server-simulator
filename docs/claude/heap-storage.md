@@ -124,7 +124,7 @@ Real's row lock is held while it reads the row, and its ghost cleanup defers dea
 
 `LobReclamation` (one per simulation) defers reuse instead: a session's outermost statement announces the epoch it began at on its `SessionToken`, a chain a commit, rollback or version sweep gives up is tagged by advancing the epoch (`Heap.RetireLobChain`), and the heap frees it into the reusable list only once no announced statement began before the tag — checked when an allocation finds the free list empty, and before a shrink trims.
 A statement that began after the tag began after the write that superseded the chain had left the heap, so no image it reads names it.
-A cached `SELECT` sequence, which replays outside the dispatch loop, announces the same way.
+A cached `SELECT` sequence, which replays outside the dispatch loop, announces the same way, and a `SELECT` waiting on its client to read its rows keeps its announcement until its last row is out ([`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)), as it keeps its statement snapshot.
 The divergence is the other direction: chains retired beside a long-running statement stay unused until it ends, so `LobPages` grows under LOB churn meanwhile, as real's version and ghost cleanup lag.
 A reader that still meets a chain that doesn't match its row — one no announced statement covered — raises Msg 601, real's error for a `NOLOCK` scan meeting data movement.
 

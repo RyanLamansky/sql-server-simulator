@@ -121,7 +121,7 @@ They live directly on the `Cursor` (`scrollTableLock` / `scrollRowLock`), *not* 
 Each FETCH moves the row-U (`Cursor.MoveScrollLock` releases the row scrolled off, acquires U on the new one); `Cursor.ReleaseScrollLocks` frees both on CLOSE, the last DEALLOCATE, frame teardown (LOCAL cursor), and connection dispose.
 A concurrent writer of the held row blocks on the U-X conflict; a positioned UPDATE upgrades the row to X via the normal writer path (same-owner re-entrance lets the cursor's U and the writer's X coexist).
 
-Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally` (`StatementLifecycle.Leave`).
+Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally` (`StatementLifecycle.Leave`) — for a `SELECT` whose rows go out as its client reads them, once its last row has ([A reader suspended mid-result](#a-reader-suspended-mid-result)).
 **A synthesized child batch has its own list that the dispatch loop never sees**, so every site that builds one to parse or run a module body has to release it itself — a view or inline-TVF body binding takes Sch-S / IS on everything it names, and nothing else will let them go.
 Missing that release does not merely hold a lock for too long: the locks outlive the connection (teardown releases the transaction, the application locks and the temp tables, not these), so they persist for the life of the `Simulation`, held by a SPID whose session no longer exists.
 The symptom is a later Sch-M — an `ALTER`, a startup re-applying its programmable objects — blocking forever against a holder nobody can find.
@@ -263,6 +263,7 @@ Exactly two places discharge it:
   An interval pinning every column of a **unique** key by equality is the exception real makes on a hit: a plain key S (a row S for the clustered key); a miss locks the next key like any range.
   Reading through a nonclustered index also takes the row S real's lookup takes on each row the index finds.
 - **`BatchContext.EnsureSerializableTableLock`**, for a read with no narrower interval — a whole-table scan, a non-sargable predicate, a predicate on an unindexed or non-leading column, a cross-column `OR`, an ordered scan — which locks the whole key space: every key of the clustered index plus the infinity anchor, or over a heap a table S (folding in the IS, which real reports converted).
+  A plain scan of a clustered table takes it key by key as it reaches each row, the infinity anchor at its end (see [A reader suspended mid-result](#a-reader-suspended-mid-result)).
   Reached from `WrapWithRowConflictChecks` (the un-narrowed scan's own iterator), from the ordered-scan path, and from `SettleSerializablePhantomFence` itself when no conjunct offers an interval.
   Idempotent per batch per table, since a source can be re-enumerated many times.
 
@@ -499,10 +500,54 @@ Per-isolation reader behavior:
 | Level              | Reader behavior                                                |
 | ------------------ | -------------------------------------------------------------- |
 | `READ UNCOMMITTED` | Skip every conflict check (dirty read). Equivalent to NOLOCK on every read. |
-| `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders, no row-S acquire). |
+| `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders, no row-S acquire); under `READ_COMMITTED_SNAPSHOT`, the statement's snapshot and no IS. |
 | `REPEATABLE READ`  | Table-IS tx-scoped + row-S tx-scoped per row returned.         |
 | `SERIALIZABLE`     | Table-IS tx-scoped + key-range locks on the keys the predicate reaches, every key otherwise, table-S over a heap. `UPDLOCK` / `XLOCK` shift the table lock to IX and the range mode to `RangeS-U` / `RangeX-X`. |
-| `SNAPSHOT`         | Reads at the transaction's snapshot (see [Snapshot isolation + MVCC](#snapshot-isolation--mvcc)). |
+| `SNAPSHOT`         | Reads at the transaction's snapshot (see [Snapshot isolation + MVCC](#snapshot-isolation--mvcc)), holding the Sch-S its name took and no IS. |
+
+A `READCOMMITTED` or `READCOMMITTEDLOCK` hint reads its table at READ COMMITTED under a `REPEATABLE READ` or `SERIALIZABLE` session, keeping no row or range lock past the row (probed 2026-10-08 against SQL Server 2025).
+
+## A reader suspended mid-result
+
+A `SELECT` sends its rows as its client reads them and waits on the client between windows (see [`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)), so what it holds while it waits is what its locks have reached by its position, not by the end of a finished scan.
+Nothing about which locks it takes is particular to the suspension: the statement's acquisitions are the ones every read makes — the object lock where its source resolves, the row and key locks as its scan reaches each row — and the suspension only keeps the statement's own scope open, releasing its statement-scoped locks with its last row.
+A reader resuming into a row an uncommitted writer holds waits there, its `LOCK_TIMEOUT`, `NOWAIT`, `READPAST`, cancellation and deadlock detection applying as at any row.
+
+Probed 2026-10-08 against SQL Server 2025 over a MARS connection, a reader two rows into 20,000 rows of `char(2000)` and a second session acting meanwhile (an `UPDATE` of row 1, one of a row ahead, an `INSERT` past the last key, an `ALTER TABLE … ADD` and a `TABLOCKX` update), `StreamedResultTests` holding each row:
+
+| Read | Real holds | Here |
+| ---- | ---------- | ---- |
+| `READ COMMITTED` | `OBJECT IS`, the current page's `PAGE S` | `OBJECT IS` |
+| `REPEATABLE READ`, the `REPEATABLEREAD` hint | `KEY S` on the 20 rows produced, `PAGE IS` on their 5 pages, `OBJECT IS` | the 20 `KEY S`, `OBJECT IS` |
+| `SERIALIZABLE`, `HOLDLOCK` / `SERIALIZABLE` hints, a scan | `KEY RangeS-S` on the 20 rows, `PAGE IS`, `OBJECT IS` — an insert past the last key goes ahead | the 20 `RangeS-S`, `OBJECT IS` |
+| `READ_COMMITTED_SNAPSHOT`, `SNAPSHOT`, and under RCSI the `READCOMMITTED` and `TABLOCK` hints | `OBJECT Sch-S` alone — a `TABLOCKX` update goes ahead | the same |
+| `NOLOCK` / `READUNCOMMITTED` | `OBJECT Sch-S` | the same |
+| `TABLOCK` at any level | `OBJECT S` | the same |
+| `TABLOCKX` | `OBJECT X` | the same |
+| `UPDLOCK` / `XLOCK` | `KEY U` / `KEY X` on the 20 rows, `PAGE IU` / `IX`, `OBJECT IX` | the 20 `KEY U` / `X`, `OBJECT IX` |
+| `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `OBJECT IS` |
+| `ROWLOCK` | as the level's, row locks, `PAGE IS` | as the level's |
+| `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | as the level's, row locks |
+
+How the read came to its level doesn't matter — `SET TRANSACTION ISOLATION LEVEL` with a transaction begun in SQL, one the API began at the level, or a table hint — and neither does an `ORDER BY` the clustered key satisfies: a row-locking read (`REPEATABLE READ`, `UPDLOCK`, `XLOCK`) takes the ordered scan and locks each row as it reaches it, letting go a row its sargable conjuncts reject, and a plain `SERIALIZABLE` read in ascending key order is the table's own scan above.
+Before, a row-locking read always sorted, locking every row first — the shape that turned real's 2,119 keys into a table S for an API-begun `REPEATABLE READ` reader of `ORDER BY id`.
+A sort, an aggregate or a join's build reads its whole input before its first row goes out, so under `REPEATABLE READ` every row is locked at once (real: 20,000 `KEY S`), while `READ COMMITTED` still holds `OBJECT IS` until the sorted rows are out.
+Every reader holding `IS` or more keeps an `ALTER TABLE` out, as each one's `Sch-S` keeps it out under the versioned levels.
+`NOWAIT` raises Msg 1222 at the locked row it reaches and `READPAST` passes it, a row a writer locked after the read began included.
+
+A `SERIALIZABLE` scan of a clustered table locks each key as it reaches it and the infinity anchor at its end (`PhantomFenceState.LocksAsScanned`), as real's does — so a reader suspended mid-result holds the ranges behind its position alone, and an insert ahead of it goes in.
+The scan reads its key order when it begins, so a key inserted ahead of it since would be passed: once a row's key is locked, the keys that arrived in the gap below it are read first (`BatchContext.KeysArrivedBetween`), and the infinity anchor's lock at the end is followed by the keys that arrived past the last one (`FenceScanEnd`), which is what keeps the scan free of the phantoms the fence exists against (`StreamedResultTests.Serializable_ScanLocksKeysAsItReachesThem`).
+A scan whose order comes without its keys — a nullable or descending clustered key — locks the whole key space as it begins, as do the reads below.
+
+### Divergences
+
+- **Page locks aren't modeled yet** ([Granularity approximations](#granularity-approximations)).
+  Real's default scan takes `PAGE S` on the page it is reading under READ COMMITTED and `PAGE IS` / `IU` / `IX` above row locks, and `PAGLOCK` takes page locks in place of row locks; here every read is row-locked, so an update of another row on the reader's current page goes ahead where real's waits.
+  The same granularity is why a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
+- **An object S or X lock is one lock here**, where real's host takes it on each of its 16 lock partitions (`OBJECT S` ×16 in `sys.dm_tran_locks`).
+- **A `SERIALIZABLE` read takes its whole fence as it begins** wherever it doesn't scan a clustered table plain in key order: a range or point seek locks every key of its interval, a non-sargable predicate, a descending order or an `UPDLOCK` / `XLOCK` read every key of the table — past the escalation threshold, the table S or X — where real locks each key as the read reaches it.
+  A reader suspended mid-result so blocks writes ahead of it that real lets through, never the reverse.
+- **A sort over `REPEATABLE READ` escalates** at real's threshold, where real's parallel sort of the same 20,000 rows held its 20,000 key locks.
 
 ## Diagnostic DMVs
 

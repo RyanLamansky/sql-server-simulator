@@ -57,6 +57,14 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     internal bool YieldsBetweenStatements;
 
+    /// <summary>
+    /// Set by a consumer that reads a result set's rows as they come — the
+    /// in-process data reader, the TDS endpoint outside MARS — while the
+    /// command starts: its batch's statement-level <c>SELECT</c>s produce
+    /// their rows as the consumer reads them (see <see cref="ResultStream"/>).
+    /// </summary>
+    internal bool StreamsResultRows;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
@@ -145,13 +153,14 @@ public sealed class SimulatedDbCommand : DbCommand
     /// execute is in flight: the engine observes it at the next safe point
     /// (statement boundary, <c>WAITFOR DELAY</c> wait) and aborts the batch —
     /// remaining statements are discarded and, under <c>SET XACT_ABORT ON</c>,
-    /// an open transaction rolls back. Because the simulator executes a
-    /// statement's result set synchronously into memory before
-    /// <c>ExecuteReader</c> returns, a <c>Cancel</c> arriving after that
-    /// point has nothing left in flight for that statement to interrupt (the
-    /// reader then drains already-materialized rows) — matching SqlClient's
-    /// no-op when called with nothing to cancel. A <c>Cancel</c> with no
-    /// live execution is a no-op.
+    /// an open transaction rolls back. A result larger than what the server
+    /// gets ahead of its client is produced as the reader reads it, so a
+    /// <c>Cancel</c> while the reader is still reading one ends its statement
+    /// as the next read resumes it, and that read raises the cancellation; a
+    /// result that fit went out whole before <c>ExecuteReader</c> returned,
+    /// leaving nothing in flight for that statement to interrupt — matching
+    /// SqlClient's no-op when called with nothing to cancel. A <c>Cancel</c>
+    /// with no live execution is a no-op.
     /// <para>A cancel that <em>did</em> abort an execution surfaces as a
     /// <see cref="SimulatedSqlException"/> out of the execute call, carrying
     /// the Msg 0 severe-error wording real SqlClient reports for a cancelled
@@ -312,6 +321,7 @@ public sealed class SimulatedDbCommand : DbCommand
         SimulatedDbDataReader reader;
         this.Request = null;
         this.ReadByReader = true;
+        this.StreamsResultRows = true;
         try
         {
             reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection, this);
@@ -328,6 +338,7 @@ public sealed class SimulatedDbCommand : DbCommand
         finally
         {
             this.ReadByReader = false;
+            this.StreamsResultRows = false;
         }
         if (browse)
         {

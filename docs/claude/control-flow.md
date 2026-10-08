@@ -526,6 +526,7 @@ A token already cancelled *before* execute, and one observed while draining an a
 **`CommandTimeout`** is enforced in-process by the same machinery: `BeginExecutionScope` arms the execution's cancellation source with `CancelAfter`, so an expiry aborts through the identical safe-point path and surfaces **Msg -2, Class 11, State 0** (`Execution Timeout Expired.  …` — SqlClient's own wording, double space included).
 The cause is recovered from a flag `CancelExecution` sets rather than a second token, so a caller-driven cancel stays Msg 0 while a deadline expiry reports Msg -2.
 The default is **30 seconds** (SqlClient's) and `CommandTimeout = 0` is infinite.
+The clock stops while a `SELECT` waits on its reader to read the rows it sent, and each read that resumes the statement rearms it in full, since SqlClient counts only the time a call spends waiting on the server ([`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)).
 Probe-confirmed against SQL Server 2025: the connection stays usable afterwards and an **open transaction survives** the timeout (`@@TRANCOUNT` unchanged), the same shape a cancel has under the default `SET XACT_ABORT OFF` — see [`transactions.md`](transactions.md).
 The wire path needs none of this: SqlClient enforces its own `CommandTimeout` client-side by sending an attention, which the endpoint already answers.
 

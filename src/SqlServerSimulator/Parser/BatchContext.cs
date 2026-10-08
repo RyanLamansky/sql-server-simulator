@@ -721,6 +721,14 @@ internal sealed partial class BatchContext
     public bool SendsAsStatementsEnd => this.CallerStreams && this.FramedStatementDepth == this.StreamingFrames;
 
     /// <summary>
+    /// Whether a <c>SELECT</c> of this batch whose outcomes reach the client as
+    /// they are produced sends its rows as its client reads them
+    /// (<see cref="ResultStream"/>): a command's own batch, run by a consumer
+    /// that reads that way (<see cref="SimulatedDbCommand.StreamsResultRows"/>).
+    /// </summary>
+    public readonly bool StreamsResultRows;
+
+    /// <summary>
     /// The suspended <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> whose
     /// data the batch resumed with, which the statement's second run takes
     /// to write them; null otherwise.
@@ -1712,6 +1720,7 @@ internal sealed partial class BatchContext
     public BatchContext(SimulatedDbCommand command)
     {
         this.CallerStreams = true;
+        this.StreamsResultRows = command.StreamsResultRows;
         this.NoExecActive = command.Connection!.NoExec;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);

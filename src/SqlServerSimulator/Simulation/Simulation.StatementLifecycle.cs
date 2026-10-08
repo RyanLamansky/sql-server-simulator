@@ -414,8 +414,10 @@ partial class Simulation
         /// <remarks>
         /// A simple statement's outcomes are materialized, not yielded, because
         /// an iterator can't catch around a <c>yield</c>. Materialization is
-        /// cheap — such a statement produces few outcomes and a SELECT already
-        /// materializes its rows before yielding its result set — and it fills
+        /// cheap — such a statement produces few outcomes, and a SELECT
+        /// produces its rows whole before yielding its result set or, past its
+        /// first window, leaves the rest for <see cref="SettleStream"/>'s caller
+        /// to produce as the client reads, entered until its last — and it fills
         /// <paramref name="outcomes"/> as the statement produces them, so what
         /// a failing statement sent before its error still reaches the client
         /// first, as real streams it. A statement that runs others — a block,
@@ -426,6 +428,7 @@ partial class Simulation
         public void Run(Simulation simulation, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart)
         {
             var connection = batch.Connection;
+            var ran = false;
             try
             {
                 try
@@ -468,12 +471,49 @@ partial class Simulation
                         thrown = pending;
                     this.RouteError(batch, this.SettleError(simulation, batch, thrown, requireSemicolonBeforeCte, atBatchStart));
                 }
+                ran = true;
+            }
+            finally
+            {
+                // A SELECT whose rows go out as its client reads them holds
+                // what it entered with until its last row has (SettleStream);
+                // one an error ended after it began gives its rows up.
+                var streaming = batch.CurrentStatement.StreamingResult;
+                if (streaming is not null && (!ran || this.Error is not null))
+                {
+                    streaming.Abandon();
+                    batch.CurrentStatement.StreamingResult = streaming = null;
+                }
+                if (streaming is null)
+                    this.Leave(batch);
+            }
+        }
+
+        /// <summary>
+        /// Ends a statement whose rows went out as its client read them (see
+        /// <see cref="ResultStream"/>), once its last row has: its
+        /// <c>@@ROWCOUNT</c>, then the error a row raised, settled and routed
+        /// as <see cref="Run"/> settles one, then <see cref="Leave"/>.
+        /// </summary>
+        public void SettleStream(Simulation simulation, BatchContext batch, ResultStream stream, bool requireSemicolonBeforeCte, bool atBatchStart)
+        {
+            try
+            {
+                batch.Connection.LastStatementRowCount = stream.Error is null ? stream.RowCount : 0;
+                if (stream.Error is { } error)
+                    this.RouteError(batch, this.SettleError(simulation, batch, error, requireSemicolonBeforeCte, atBatchStart));
             }
             finally
             {
                 this.Leave(batch);
             }
         }
+
+        /// <summary>
+        /// Ends a statement whose rows were going out as its client read them
+        /// when the client went away: gives back what it held.
+        /// </summary>
+        public readonly void LeaveAbandonedStream(BatchContext batch) => this.Leave(batch);
 
         /// <summary>
         /// Starts a <see cref="Streams"/> statement's body, whose outcomes

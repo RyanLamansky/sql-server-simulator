@@ -573,6 +573,29 @@ public sealed class TryCatchTests
         AreEqual((byte)5, ex.Errors[0].State);
     }
 
+    /// <summary>
+    /// The end of a TRY…CATCH construct leaves <c>@@ROWCOUNT</c> at 0, whether
+    /// or not its CATCH ran, where a statement inside either block reads its
+    /// predecessor's count (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin try select 1 union all select 2 end try begin catch end catch select @@rowcount", 0)]
+    [DataRow("begin try select 1 / 0 end try begin catch select 1 union all select 2 end catch select @@rowcount", 0)]
+    [DataRow("begin try select 1 union all select 2; select @@rowcount end try begin catch end catch", 2)]
+    [DataRow("begin try select 1 / 0 end try begin catch select 1 union all select 2; select @@rowcount end catch", 2)]
+    public void EndCatch_ResetsRowCount(string batch, int expected)
+    {
+        using var reader = new Simulation().ExecuteReader(batch);
+        object? last = null;
+        do
+        {
+            while (reader.Read())
+                last = reader.GetValue(0);
+        }
+        while (reader.NextResult());
+        AreEqual(expected, last);
+    }
+
     [TestMethod]
     public void ErrorProcedure_IsNvarchar128()
         => AreEqual(256, new Simulation().ExecuteBatchesScalar(

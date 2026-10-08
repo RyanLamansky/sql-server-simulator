@@ -22,15 +22,51 @@ A **FROM-bearing SELECT projects `SqlValue[]` rows** — the projection computed
 The niche producers that genuinely emit encoded rows — a set operation, a view or TVF body, `OPENJSON` / `OPENXML`, the catalog procedures, a DML `OUTPUT` clause — keep the `byte[]` form and the reader decodes each accessed cell (`SqlValueCursor`).
 Both forms are lazy per cell, so a client that reads two columns of thirty pays for two either way.
 
-The dispatch loop settles the form once, at the statement boundary: `SimulatedSqlResultSet.MaterializeRows` drains the row sequence into a list **without converting it**, which is what statement atomicity and `@@ROWCOUNT` need and all they need.
+The dispatch loop settles the form once, at the statement boundary: `SimulatedSqlResultSet.MaterializeRows` drains the row sequence into a list **without converting it**, which is what statement atomicity and `@@ROWCOUNT` need and all they need — and a result larger than what real gets ahead of its client streams in the same form instead ([below](#rows-go-out-as-the-reader-reads-them)).
 Materializing through `RowBytes` instead would encode every projected row into a page image the cursor decodes straight back, cell by cell.
 That round trip measures at 35-43% of the statement's total allocation across every shape measured (730 B/row on a 228k-row `SELECT *` of `Sales.InvoiceLines`).
-It bought one thing: the page image is *compact*, so a buffered result holds ~32 bytes per cell alive while the reader is open rather than the record's own width — see the trade, and the form gate that would settle it per statement, in [`backlog.md`](backlog.md#complex-query-execution--perf-residuals).
+It bought one thing: the page image is *compact*, so a buffered result holds ~32 bytes per cell alive while the reader is open rather than the record's own width — which matters where a result is still buffered whole (see [`backlog.md`](backlog.md#complex-query-execution--perf-residuals)); a streamed one holds a window.
 
 **The one thing the page image did that the values don't is narrow.**
 `varchar` / `char` / `text` encode through their collation's ANSI code page, whose encoder fallback is `?`, so a character the page can't carry is lost on the way to bytes — SQL Server's own lossy narrowing, and the client sees `?` for `SELECT CAST(N'水' AS varchar(10))` on both engines.
 `RowEncoder.NarrowingColumns` marks the columns that can suffer it (those three families, plus a `sql_variant` holding one) and `RowEncoder.StorageForm` applies the type's own `Encode`/`Decode` pair to such a cell — exact by construction rather than by per-type reasoning.
 Every other family's value factory already normalizes at construction (`FromTime` quantizes to the declared precision, `FromDecimal` re-tags to the declared scale, `FromChar` pads by byte count, `FromDateTime` quantizes to 1/300 s), so their storage round trip is the identity and they are never flagged; neither is an ASCII payload of a flagged column, since every ANSI code page the simulator stores through is ASCII-transparent.
+
+## Rows go out as the reader reads them
+
+A `SELECT` larger than what real gets ahead of its client is produced as the client reads it, as real sends a result set, rather than run whole before its first row goes out.
+The statement runs ahead of the reader by about 40,000 wire bytes — the packet the client is reading plus the four `SessionRequest.BytesAheadOfClient` grants — then waits, `suspended` on `ASYNC_NETWORK_IO` in `sys.dm_exec_requests` and `sp_who`, holding what its position needs, and produces the next window when the reader has read the last one (`ResultStream`).
+Probed 2026-10-08 against SQL Server 2025 over a MARS connection, which is what the in-process connection is: a `REPEATABLE READ` reader two rows into a result held the key locks of 20 rows of 2,007 wire bytes, 79 of 507 and 4,438 of 9 — each about 40,000 bytes produced.
+Over the TDS endpoint outside MARS the run-ahead is whatever the connection's socket buffers take on top of that window, as on real, whose reader held 2,119 such keys there.
+What the suspended statement holds, per isolation level and table hint, is in [`locking.md`](locking.md#a-reader-suspended-mid-result).
+
+What streams is a statement-level `SELECT` of a command the in-process reader (`ExecuteReader`) or the TDS endpoint outside MARS runs (`SimulatedDbCommand.StreamsResultRows`), whose outcomes reach that consumer as they are produced — one at the batch's level or inside a block, a `TRY`, an `IF` or a `WHILE` there — and a cached plan's replay alike.
+Its plan doesn't matter: a sort, an aggregate or a join's build reads its input before its first row goes out, as real's does, and its output then streams, the statement holding its object lock until its last row (probed: a `READ COMMITTED` reader of a sort holds `OBJECT IS` while the sorted rows go out).
+A result whose rows all fit the first window is produced whole before it is sent, exactly as before, which keeps the small-result path free of the machinery.
+`ExecuteScalar` and `ExecuteNonQuery`, a procedure's, function's, trigger's or dynamic batch's body, an `INSERT … EXEC` source, `FOR XML` / `FOR JSON`, an assignment `SELECT`, `SELECT … INTO` and a TDS MARS request produce their results whole.
+
+The statement is suspended inside the batch's outcome stream: the dispatch loop yields the result set, then an internal `SimulatedRowsProduced` marker after each window, and runs on only when the consumer advances the stream again — so every row is produced where a request's state, its cancellation scope, its transaction membership and the engine's culture are already in place.
+A consumer of a top-level outcome stream that enables streaming reads markers from its row cursor's pull; any other loop over outcomes passes over them.
+The statement ends with its last row: its `@@ROWCOUNT`, a row's error (the rows before it out first, as before), its locks, its Query Store capture and its `STATISTICS` messages settle there, and the batch's next statement runs only after.
+While it waits it reports no executing thread, so the same-thread deadlock check and the abandoned-session sweep treat it as idle, and its `CommandTimeout` stops counting: SqlClient counts only the time a call spends waiting on the server, so each read that resumes the statement has the whole timeout to itself.
+It keeps its LOB epoch and statement snapshot (see [`heap-storage.md`](heap-storage.md#a-freed-lob-chain-waits-for-the-statements-that-could-read-it)).
+
+How the statement ends early:
+- **The reader moves on or closes** — `NextResult`, `Close`, `Dispose` — and the rest of the rows are produced and discarded, as SqlClient reads past them: `@@ROWCOUNT` after a closed reader counts every row, and each row is still locked and checked on the way.
+- **Another command runs on the same in-process connection**: the suspended statement first runs to its end, its rest kept for its reader (`SimulatedDbConnection.FinishSuspendedStreams`), so the session never holds two statements' positions — its locks, snapshot and LOB epoch — at once.
+- **The connection closes or is reclaimed abandoned**: the statement is abandoned and gives back what it held; the reader's next `Read` throws SqlClient's closed-reader `InvalidOperationException`.
+- **A `KILL`** ends a session whose statement waits on its client at once, as real does: in process the reader's next `Read` raises the broken-connection Msg 0, over TDS the connection drops under it (probed 2026-10-08 against SQL Server 2025).
+  A statement running when the kill lands meets its cancellation at its next safe point, as before.
+- **A cancel or `CommandTimeout`** reaches the statement as the read that resumes it runs, as Msg 0 or Msg -2 from that `Read`.
+
+Measured 2026-10-08 in process against the build that produced every result whole (Release, one case per process, medians of five to seven interleaved processes): reading a result two rows in, the managed heap held 97.5 MB where it held 176.2 MB over 20,000 rows of `char(2000)`, and 97.7 MB against 129.9 MB over 200,000 narrow rows — the buffered result gone; draining them took 93.6 ms against 155.3 ms and 38.8 ms against 102.9 ms, a filtered 200k-row read 17.8 ms against 23.2 ms and a sorted one 180.5 ms against 195.8 ms, the results no longer outliving a collection whole.
+Results that fit the first window are unchanged within noise (a parameterized point `SELECT` 3.83 µs against 3.82 µs, 10 rows 4.41 against 4.50, 100 rows 22.2 against 22.5, 1,000 rows 198 against 204) at about 110 more bytes a call, and the sqllogictest replays too (43.6 / 45.3 s against 45.2 / 45.2 s, 56.5 / 54.9 s against 58.1 / 54.7 s).
+
+### Divergences
+
+- **A lock wait inside the run-ahead window holds up the call that ran the window** — `ExecuteReader`, or the `Read` that pulled it — where real's client can read the packets sent before the blocked row while the server waits.
+  Under a `LOCK_TIMEOUT` the error lands after the rows before the row, as on real; a wait for a writer to commit can't be answered from the reader's own thread meanwhile.
+- **In process, requests of one session interleave between statements**, the suspended one run to its end first, where real interleaves its MARS requests inside a statement — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets).
 
 ## `GetDataTypeName` answers SqlClient, not the server
 
@@ -96,7 +132,7 @@ The simulator classifies SELECT and leaves every other kind `0`; see [`tds-endpo
   Real's client reads tokens ahead to the next result-set boundary, so once `Read` has returned false the counts of the *following* non-row-returning statements are already in; the simulator folds them on the `NextResult` that steps over them.
   A batch's final value agrees, and a single-statement batch is unaffected.
 - **A DML statement's `OUTPUT` count lands early.**
-  The simulator materializes a result before streaming it, so `RecordsAffected` reports an `INSERT … OUTPUT`'s count the moment the reader parks on it; real learns it from the DONE that follows the rows, and reads `-1` until they are drained.
+  A DML statement produces its `OUTPUT` rows whole before sending them, so `RecordsAffected` reports an `INSERT … OUTPUT`'s count the moment the reader parks on it; real learns it from the DONE that follows the rows, and reads `-1` until they are drained.
 - **A trigger's own DML doesn't contribute.**
   Real counts the writes a trigger body performs into the firing statement's total (an INSERT firing a trigger that writes two rows reports 3); the simulator reports the firing statement's own count alone.
   Both front doors agree with each other — the counts never reach the outcome stream.
@@ -118,13 +154,12 @@ The reader consumes the unified continue-on-error outcome stream (see [`control-
 `ExecuteNonQuery` / `ExecuteScalar` bypass this positional model: they drain the whole outcome stream and aggregate every error into one `SimulatedSqlException` thrown at completion (`ExecuteScalar` returns the first result set's first value only when the batch had no error).
 Which informational messages ride along in an exception rather than firing as events is in [`errors.md`](errors.md#the-message-stream).
 
-**Dispose = statement-level drain**: closing the reader executes the batch's remaining statements (side effects persist) and swallows their errors — a disposed reader never throws.
-Row-level pull *inside* the statement the reader was parked on stays abandoned (unchanged; a non-draining reader still doesn't run a SELECT iterator's post-yield code — see [`plan-cache.md`](plan-cache.md)).
+**Dispose = drain**: closing the reader produces and discards the rest of the result it was parked on, then executes the batch's remaining statements (side effects persist) and swallows their errors — a disposed reader never throws.
 
 ## In-process MARS (overlapping readers)
 
 The in-process `SimulatedDbConnection` is a MARS connection: a second command — or a second open reader — while a reader is live works, as EF Core's lazy loading needs (iterate a parent query, touch a navigation per row), and its connection string says so until one is set (`MultipleActiveResultSets=True`), which is what tells EF Core to take no savepoint in a user transaction.
-A query result materializes before it streams, so overlapping enumeration never races shared session state.
+A statement suspended on one reader's client runs to its end before another command on the connection runs ([above](#rows-go-out-as-the-reader-reads-them)), so overlapping enumeration never races shared session state.
 
 Real's MARS rules apply, with each command a request (`SessionRequest`) that real tracks two ways — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets) for the probed rules:
 - **Running** until its batch's outcome stream has ended.

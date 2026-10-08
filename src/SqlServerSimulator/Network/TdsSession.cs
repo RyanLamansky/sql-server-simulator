@@ -819,6 +819,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             command.CommandText = batchText;
 #pragma warning restore CA2100
             command.YieldsBetweenStatements = this.multiplexer is not null;
+            command.StreamsResultRows = this.multiplexer is null;
             // A cancelled batch (return value true) leaves the DONE_ATTN
             // acknowledgment to the session loop; nothing more to emit here.
             _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
@@ -1142,6 +1143,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var outcome = rendered.Outcome;
             var effectiveDoneToken = rendered.InProc ? Tds.TokenDoneInProc : doneToken;
 
+            // A streamed result set's marker, which its rows' writer reads.
+            if (outcome is SimulatedRowsProduced)
+            {
+                hasOutcome = Advance();
+                continue;
+            }
+
             // Between two of a MARS request's statements: what the ones before
             // went out, the request stepping aside while it waits on the
             // client.
@@ -1230,6 +1238,20 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
             if (outcome is SimulatedQueryResult query)
             {
+                // A statement still producing its rows produces more as they
+                // go out (see ResultStream), each window one advance of the
+                // outcome stream.
+                if (query is SimulatedSqlResultSet { Stream: { Complete: false } stream })
+                {
+                    stream.Pull = () =>
+                    {
+                        if (Advance() && escaped is null && outcomes.Current.Outcome is not SimulatedRowsProduced)
+                            throw new InvalidOperationException("A streamed result set's statement sent an outcome before its rows ended.");
+                    };
+                    // A KILL ends a request waiting on its client by dropping
+                    // the connection under it, as real does.
+                    stream.AbandonByConsumer = this.connection.AbortTransport;
+                }
                 writer.MarkResultStart();
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse);
                 long rows = 0;
@@ -1250,7 +1272,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
 
                 var queryEvents = this.EventsBefore(query, this.PendingTransactionEventCount);
-                hasOutcome = AdvancePastClosingMessages();
+                // An error that escaped while the rows were produced follows
+                // their DONE.
+                hasOutcome = escaped is not null || AdvancePastClosingMessages();
                 // A statement whose own error cut its rows short sends that
                 // error ahead of the result set's DONE, as real does.
                 var cutShort = false;

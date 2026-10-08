@@ -1231,6 +1231,10 @@ public sealed partial class Simulation
         SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)
         {
+            // A statement of another in-process request suspended on its
+            // reader runs to its end first (see ResultStream).
+            if (requester is { FramesEveryStatement: false, ExecutingRequest: null })
+                requester.FinishSuspendedStreams();
             requester.BeginCommand();
             // An in-process command is a request of its own from here until
             // its reader passes the batch's end, and runs only between the
@@ -2322,7 +2326,11 @@ public sealed partial class Simulation
             outcomes.InsertRange(0, failures.Select(failure => new SimulatedErrorOutcome(failure.Failure, raisedWhileCompiling: true)));
         }
 
-        if (lifecycle.QueryStore is { } capture && lifecycle.Ending is not (StatementEnding.Deferred or StatementEnding.GatheredBindError))
+        // A SELECT whose rows go out as its client reads them is still running
+        // (see ResultStream), its capture ending with its last row.
+        var stream = batch.CurrentStatement.StreamingResult;
+        batch.CurrentStatement.StreamingResult = null;
+        if (stream is null && lifecycle.QueryStore is { } capture && lifecycle.Ending is not (StatementEnding.Deferred or StatementEnding.GatheredBindError))
             EndFramedQueryStoreCapture(batch, capture, lifecycle.QueryStoreIo, lifecycle.Error, lifecycle.StatementStart);
 
         switch (lifecycle.Ending)
@@ -2368,8 +2376,71 @@ public sealed partial class Simulation
             foreach (var outcome in triggerOutcomes)
                 yield return outcome;
         }
-        foreach (var outcome in outcomes)
-            yield return outcome;
+        if (stream is null)
+        {
+            foreach (var outcome in outcomes)
+                yield return outcome;
+        }
+        else
+        {
+            // The client reads the rows already sent; each time it runs out,
+            // the statement produces the next window, holding its position in
+            // between. A client that goes away abandons the rest.
+            var settled = false;
+            try
+            {
+                stream.Suspend(batch);
+                foreach (var outcome in outcomes)
+                    yield return outcome;
+                while (true)
+                {
+                    stream.Resume(batch);
+                    stream.Produce();
+                    if (stream.Complete)
+                        break;
+                    stream.Suspend(batch);
+                    yield return ResultStream.Marker;
+                }
+                // The rows before a failing one went out ahead of its error.
+                if (stream.Error is { } cutShort && stream.Result is { } cutShortRows)
+                {
+                    cutShortRows.EndedByError = true;
+                    cutShortRows.ErrorCaught = CaughtByTryFrame(batch, cutShort);
+                }
+                settled = true;
+                lifecycle.SettleStream(this, batch, stream, requireSemicolonBeforeCte, atBatchStart);
+            }
+            finally
+            {
+                if (!settled)
+                {
+                    stream.Resume(batch);
+                    stream.Abandon();
+                    lifecycle.LeaveAbandonedStream(batch);
+                }
+            }
+            if (lifecycle.QueryStore is { } streamedCapture)
+                EndFramedQueryStoreCapture(batch, streamedCapture, lifecycle.QueryStoreIo, lifecycle.Error, lifecycle.StatementStart);
+            // The consumer's advance that ran the statement to its end returns
+            // here, before anything its ending sends.
+            yield return ResultStream.Marker;
+            switch (lifecycle.Ending)
+            {
+                case StatementEnding.Propagated:
+                    foreach (var outcome in lifecycle.EndPropagated(batch, []))
+                        yield return outcome;
+                    ExceptionDispatchInfo.Throw(lifecycle.Error!);
+                    yield break;
+                case StatementEnding.Continued:
+                    foreach (var outcome in lifecycle.EndContinued(batch, []))
+                        yield return outcome;
+                    yield break;
+                case StatementEnding.Caught:
+                    foreach (var outcome in lifecycle.EndCaught(batch, []))
+                        yield return outcome;
+                    yield break;
+            }
+        }
 
         // Msg 8153 follows the rows of the statement whose aggregate dropped a
         // NULL. Cleared once sent, since an enclosing IF / BEGIN…END shares
@@ -3574,10 +3645,12 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Runs a <c>SELECT</c> statement: parses it, runs it and materializes its
-    /// rows, and joins it to the batch's plan-cache candidates. Returns what
-    /// the statement sends — null for none — and in
-    /// <paramref name="cutShort"/> the error a row raised after the rows ahead
-    /// of it, which the caller throws once it has sent them.
+    /// rows — or, past what real gets ahead of its client, their first window,
+    /// leaving the rest to <see cref="StatementContext.StreamingResult"/> — and
+    /// joins it to the batch's plan-cache candidates. Returns what the
+    /// statement sends — null for none — and in <paramref name="cutShort"/>
+    /// the error a row raised after the rows ahead of it, which the caller
+    /// throws once it has sent them.
     /// </summary>
     private SimulatedStatementOutcome? RunSelectStatement(BatchContext batch, out SimulatedSqlException? cutShort)
     {
@@ -3684,10 +3757,16 @@ public sealed partial class Simulation
         // empty result set when the plan failed before its first.
         SimulatedSqlResultSet? executed = null;
         int rowCount;
+        ResultStream? stream = null;
         try
         {
             executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
-            rowCount = executed.MaterializeRows();
+            // A result larger than real gets ahead of its client goes out as the
+            // client reads it, the statement holding its position meanwhile;
+            // one that fits is produced whole, as it would be anyway.
+            if (StreamsRows(batch, selection))
+                stream = executed.BeginStreaming();
+            rowCount = stream is null ? executed.MaterializeRows() : 0;
             if (selection.CountsForClauseSourceRows)
                 rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
         }
@@ -3708,7 +3787,11 @@ public sealed partial class Simulation
             executed.EndedByError = true;
             executed.ErrorCaught = CaughtByTryFrame(batch, error);
         }
-        connection.LastStatementRowCount = rowCount;
+        // A streamed statement settles its count once its last row is out.
+        if (stream is null)
+            connection.LastStatementRowCount = rowCount;
+        else
+            batch.CurrentStatement.StreamingResult = stream;
         outcome = selection.IsAssignmentOnly
             ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
             : executed;
@@ -3741,6 +3824,27 @@ public sealed partial class Simulation
         }
         return outcome;
     }
+
+    /// <summary>
+    /// Whether <paramref name="selection"/>, a statement-level <c>SELECT</c>,
+    /// sends its rows as its client reads them (see <see cref="ResultStream"/>):
+    /// one of a command whose consumer reads that way, whose outcomes reach
+    /// that consumer as they are produced — every statement enclosing it
+    /// streams — and that sends rows to it rather than to a variable, a
+    /// <c>FOR XML</c> / <c>FOR JSON</c> document or an <c>INSERT … EXEC</c>.
+    /// A session holds one suspended statement at a time — its LOB epoch and
+    /// statement snapshot are one each — so a reader's batch running on while
+    /// another reader's statement is suspended produces its result whole.
+    /// </summary>
+    private static bool StreamsRows(BatchContext batch, Selection selection) =>
+        batch.StreamsResultRows
+        && batch.StreamingFrames == batch.FramedStatementDepth - 1
+        && !selection.IsAssignmentOnly
+        && !selection.CountsForClauseSourceRows
+        && batch.BindErrors is null
+        && !batch.CreateTimeBinding
+        && batch.Connection.InsertExecTargetTypes is null
+        && batch.Connection.SuspendedStreams is not { Count: > 0 };
 
     /// <summary>
     /// Replays the parse of the <c>SELECT</c> statement at the cursor from
