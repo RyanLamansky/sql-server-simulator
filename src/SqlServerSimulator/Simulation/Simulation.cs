@@ -1573,26 +1573,33 @@ public sealed partial class Simulation
 
             // Nothing runs when the batch doesn't compile; the error is the
             // batch's whole response, raised at ExecuteReader like real's.
-            var compileContext = CompileContextFor(batch, command);
+            // A text compiled before under this schema skips the walk, and so
+            // its context.
             StatementClock? compileClock = batch.Connection.StatisticsTime ? StatementClock.Start(batch.Connection) : null;
-            if (this.CompileBatch(compileContext, cacheKey, out var inliningFailures) is { } compileError)
+            BatchContext? compileContext = null;
+            List<SimulatedSqlException>? inliningFailures = null;
+            if (!this.CompiledBefore(cacheKey, Volatile.Read(ref this.SchemaVersion)))
             {
-                if (compileError.EndsCompileSilently)
+                compileContext = CompileContextFor(batch, command);
+                if (this.CompileBatch(compileContext, cacheKey, out inliningFailures) is { } compileError)
                 {
-                    if (EndedSilently(batch.Connection) is { } underXactAbort)
-                        yield return underXactAbort;
+                    if (compileError.EndsCompileSilently)
+                    {
+                        if (EndedSilently(batch.Connection) is { } underXactAbort)
+                            yield return underXactAbort;
+                        yield break;
+                    }
+                    batch.Connection.LastErrorNumber = compileError.Number;
+                    yield return new SimulatedErrorOutcome(compileError);
                     yield break;
                 }
-                batch.Connection.LastErrorNumber = compileError.Number;
-                yield return new SimulatedErrorOutcome(compileError);
-                yield break;
+                batch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+                batch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
             }
-            batch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
-            batch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
             foreach (var failure in CompileFailuresSent(batch, inliningFailures))
                 yield return failure;
             if (compileClock is not null)
-                yield return new SimulatedInfoOutcome(CompileTime(batch, compileClock, compileContext.LastTopLevelStatementLine, BatchCreatedModuleName(command) ?? batch.ErrorProcedureName));
+                yield return new SimulatedInfoOutcome(CompileTime(batch, compileClock, compileContext?.LastTopLevelStatementLine ?? 0, BatchCreatedModuleName(command) ?? batch.ErrorProcedureName));
 
             var context = batch.Parser;
             context.MoveNextOptional();

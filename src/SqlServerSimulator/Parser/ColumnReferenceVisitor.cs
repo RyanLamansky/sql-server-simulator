@@ -30,3 +30,9 @@ internal sealed class ColumnReferenceVisitor(Action<MultiPartName> onReference, 
     /// </summary>
     public readonly Action<Selection>? OnSubquery = onSubquery;
 }
+
+/// <summary>
+/// A visitor for <see cref="Expression.VisitColumnReferences{TState}(ref TState, ColumnVisitor{TState})"/>:
+/// handed each column reference's name and the walk's state.
+/// </summary>
+internal delegate void ColumnVisitor<TState>(MultiPartName name, ref TState state);

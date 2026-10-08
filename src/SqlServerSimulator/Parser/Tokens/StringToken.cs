@@ -13,9 +13,12 @@ abstract class StringToken : Token
     public abstract ReadOnlySpan<char> Span { get; }
 
     /// <summary>
-    /// The value of the string after being parsed as a substring.
-    /// <see cref="Span"/> is preferable to avoid memory allocation.
+    /// The value of the string after being parsed as a substring, cut on first
+    /// read and kept: a parse reads a name several times over (a dotted
+    /// member is matched against each method family in turn), and a token can
+    /// be read again by every parse the token memo serves.
+    /// <see cref="Span"/> is preferable where no string is needed.
     /// </summary>
     /// <remarks>This should be overridden if the memory allocation is avoidable.</remarks>
-    public virtual string Value => new(Span);
+    public virtual string Value => field ??= new(this.Span);
 }

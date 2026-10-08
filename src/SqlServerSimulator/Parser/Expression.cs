@@ -1417,13 +1417,32 @@ internal abstract class Expression : ExpressionNode
     /// own scope.
     /// </summary>
     internal void VisitColumnReferences(Action<MultiPartName> visit) =>
-        this.VisitColumnReferences(new ColumnReferenceVisitor(visit, coversSubtree: null));
+        this.VisitColumnReferences(ref visit, static (name, ref visit) => visit(name));
+
+    /// <summary>
+    /// <see cref="VisitColumnReferences(Action{MultiPartName})"/> with the
+    /// visitor's state passed by reference, so a static visitor allocates
+    /// nothing and a struct state carries its results back to the caller.
+    /// </summary>
+    internal void VisitColumnReferences<TState>(ref TState state, ColumnVisitor<TState> visit)
+    {
+        var walk = (State: state, Visit: visit);
+        this.Walk(ref walk, static (node, shape, ref walk) =>
+        {
+            if (node is AggregateExpression or WindowExpression)
+                return false;
+            if (shape.Column is { } name)
+                walk.Visit(name, ref walk.State);
+            return true;
+        });
+        state = walk.State;
+    }
 
     /// <summary>Whether <see cref="VisitColumnReferences(Action{MultiPartName})"/> meets any column reference.</summary>
     internal bool ReadsAnyColumn()
     {
         var found = false;
-        this.VisitColumnReferences(_ => found = true);
+        this.VisitColumnReferences(ref found, static (_, ref found) => found = true);
         return found;
     }
 
@@ -1434,7 +1453,7 @@ internal abstract class Expression : ExpressionNode
     /// never entered.
     /// </summary>
     internal void VisitColumnReferences(ColumnReferenceVisitor visit) =>
-        this.Walk((node, shape) =>
+        this.Walk(ref visit, static (node, shape, ref visit) =>
         {
             if (node is AggregateExpression or WindowExpression)
                 return false;

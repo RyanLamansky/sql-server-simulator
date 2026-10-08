@@ -2463,7 +2463,7 @@ partial class Simulation
             {
                 computed = Expression.Parse(context);
             }
-            Selection.RefuseClauseAggregates(context.Batch, computedAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
+            Selection.RefuseClauseAggregates(context.Batch, computedAggregates, static () => SimulatedSqlException.AggregateInComputedOrCheck());
 
             var computedDefinition = context.CanonicalDefinitionFrom(computedStart, predicate: false) ?? EnsureParenthesized(context.SourceTextFrom(computedStart));
             var (persisted, computedNullable) = ParseComputedSuffix(context);
@@ -3341,7 +3341,7 @@ partial class Simulation
         {
             predicate = BooleanExpression.Parse(context);
         }
-        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
+        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, static () => SimulatedSqlException.AggregateInComputedOrCheck());
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

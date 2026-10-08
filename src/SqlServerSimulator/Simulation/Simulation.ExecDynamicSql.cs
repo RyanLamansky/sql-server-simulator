@@ -984,21 +984,26 @@ partial class Simulation
             {
                 // Dynamic SQL is a batch of its own and compiles as one; an error
                 // compiling it is the EXEC's own, and the caller carries on.
-                var compileContext = CompileContextFor(innerBatch, dynCommand);
                 StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
                 var dynamicKey = declarations is not null && tableVariables is null ? DynamicBatchKey(connection, dynCommand.CommandText, declarations) : null;
-                if (this.CompileBatch(compileContext, key: null, out var inliningFailures, dynamicKey: dynamicKey) is { } compileError)
+                BatchContext? compileContext = null;
+                List<SimulatedSqlException>? inliningFailures = null;
+                if (!this.CompiledBefore(dynamicKey, Volatile.Read(ref this.SchemaVersion)))
                 {
-                    compileError.EndedCalledBatch = !compileError.EndsCompileSilently;
-                    throw compileError;
+                    compileContext = CompileContextFor(innerBatch, dynCommand);
+                    if (this.CompileBatch(compileContext, key: null, out inliningFailures, dynamicKey: dynamicKey) is { } compileError)
+                    {
+                        compileError.EndedCalledBatch = !compileError.EndsCompileSilently;
+                        throw compileError;
+                    }
+                    innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+                    innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
                 }
                 compiled = true;
                 this.AttachStatementPlans(innerBatch, dynamicKey);
-                innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
-                innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
                 outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));
                 if (compileClock is not null)
-                    outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));
+                    outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext?.LastTopLevelStatementLine ?? 0, innerBatch.ErrorProcedureName)));
 
                 // An error that ends the batch keeps what the batch sent before
                 // it, which reaches the caller ahead of the error.

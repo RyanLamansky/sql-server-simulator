@@ -279,7 +279,7 @@ internal sealed class SpatialMethodCall : Expression
             return BindsWithoutScope(qualifier, member, context);
         // Every `alias.column` reaches here, so a scope holding no spatial
         // column — nearly every scope — answers without the name search.
-        if (!Array.Exists(sources, static source => Array.Exists(source.Columns, static column => column.Type is SpatialSqlType)))
+        if (!Array.Exists(sources, static source => source.HasSpatialColumn()))
             return false;
         var (columnSource, columnIndex) = TryFind(sources, qualifier);
         if (columnSource < 0 || sources[columnSource].Columns[columnIndex].Type is not SpatialSqlType)

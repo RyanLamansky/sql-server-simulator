@@ -1348,17 +1348,8 @@ internal sealed partial class Selection
         if (!HoldsUniqueKey(table, orderOrdinals))
             return null;
 
-        foreach (var expression in expressions)
-        {
-            var draws = false;
-            expression.Walk((visited, _) =>
-            {
-                draws |= visited is NextValueFor;
-                return !draws;
-            });
-            if (draws)
-                return null;
-        }
+        if (expressions.Exists(DrawsNextValue))
+            return null;
 
         if (!TryApplyOrderedScan([sources[0]], NoJoins, orderBy, excluders, 0, batch, outerResolver, out var ordered, out _))
             return null;
@@ -1409,17 +1400,8 @@ internal sealed partial class Selection
                 return null;
             }
         }
-        foreach (var expression in expressions)
-        {
-            var draws = false;
-            expression.Walk((visited, _) =>
-            {
-                draws |= visited is NextValueFor;
-                return !draws;
-            });
-            if (draws)
-                return null;
-        }
+        if (expressions.Exists(DrawsNextValue))
+            return null;
 
         FromSource[] one = [source];
         var tuple = new byte[]?[1];

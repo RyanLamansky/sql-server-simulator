@@ -34,24 +34,38 @@ internal abstract class ExpressionNode
     /// operator chain nests thousands of nodes deep.
     /// </summary>
     /// <remarks>
+    /// A visitor that captures state allocates a closure and a delegate per
+    /// walk; a hot one passes its state through
+    /// <see cref="Walk{TState}(ref TState, NodeVisitor{TState})"/> to a static
+    /// visitor instead.
+    /// </remarks>
+    internal void Walk(Func<ExpressionNode, NodeShape, bool> visit) =>
+        this.Walk(ref visit, static (node, shape, ref visit) => visit(node, shape));
+
+    /// <summary>
+    /// <see cref="Walk(Func{ExpressionNode, NodeShape, bool})"/> with the
+    /// visitor's state passed by reference, so a static visitor allocates
+    /// nothing and a struct state carries its results back to the caller.
+    /// </summary>
+    /// <remarks>
     /// The shape and stack are reused across walks on a thread: binding one
     /// statement walks its trees dozens of times, and building them afresh per
     /// walk was a sixth of what parsing a one-off <c>SELECT</c> allocated.
     /// A visitor that walks again takes another, so the thread keeps one per
     /// nesting depth it has reached.
     /// </remarks>
-    internal void Walk(Func<ExpressionNode, NodeShape, bool> visit)
+    internal void Walk<TState>(ref TState state, NodeVisitor<TState> visit)
     {
-        var state = idleWalkStates ?? new WalkState();
-        idleWalkStates = state.NextIdle;
-        var shape = state.Shape;
-        var pending = state.Pending;
+        var walk = idleWalkStates ?? new WalkState();
+        idleWalkStates = walk.NextIdle;
+        var shape = walk.Shape;
+        var pending = walk.Pending;
         pending.Push(this);
         while (pending.TryPop(out var node))
         {
             shape.Clear();
             node.Describe(shape);
-            if (!visit(node, shape))
+            if (!visit(node, shape, ref state))
                 continue;
             for (var i = shape.ChildNodes.Count - 1; i >= 0; i--)
             {
@@ -62,8 +76,8 @@ internal abstract class ExpressionNode
         // Holds no node past the walk, and is left unreturned by a visitor
         // that throws, whose stack may still hold some.
         shape.Clear();
-        state.NextIdle = idleWalkStates;
-        idleWalkStates = state;
+        walk.NextIdle = idleWalkStates;
+        idleWalkStates = walk;
     }
 
     [ThreadStatic]
@@ -78,6 +92,13 @@ internal abstract class ExpressionNode
         public WalkState? NextIdle;
     }
 }
+
+/// <summary>
+/// A visitor for <see cref="ExpressionNode.Walk{TState}(ref TState, NodeVisitor{TState})"/>:
+/// handed each node, its shape and the walk's state, it answers whether to
+/// descend into the node's children.
+/// </summary>
+internal delegate bool NodeVisitor<TState>(ExpressionNode node, NodeShape shape, ref TState state);
 
 /// <summary>
 /// One node's shape as <see cref="ExpressionNode.Describe"/> reports it. The

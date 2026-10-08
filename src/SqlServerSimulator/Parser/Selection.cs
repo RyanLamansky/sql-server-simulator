@@ -1906,9 +1906,7 @@ internal sealed partial class Selection
             // parameter has no value to check (see ResolveRowCountLimit).
             // A count drawing from a sequence is refused once the statement's
             // clauses are read, and evaluating it here would draw.
-            var drawsSequence = false;
-            topExpression.Walk((node, _) => !(drawsSequence |= node is NextValueFor));
-            if (!drawsSequence && !ReadsOuterColumns(topExpression, topPercent, context, scope.OuterTypeResolver))
+            if (!DrawsNextValue(topExpression) && !ReadsOuterColumns(topExpression, topPercent, context, scope.OuterTypeResolver))
             {
                 if (!topPercent)
                     _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
@@ -2851,6 +2849,7 @@ internal sealed partial class Selection
         // against these same sources, as does a MATCH, which reads the joins too.
         using var scopeSources = ParserScope.Enter(ref context.ScopeSources, sources);
         using var scopeJoins = ParserScope.Enter(ref context.ScopeJoins, joins);
+        using var bindingMemo = SourceBindingMemo.Enter(sources);
         ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, sources);
     }
 

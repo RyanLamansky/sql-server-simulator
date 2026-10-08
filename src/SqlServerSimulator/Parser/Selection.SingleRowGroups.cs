@@ -14,7 +14,8 @@ partial class Selection
     /// share — the key a reader's own GROUP BY can lean on — or null when none
     /// is known: an updatable single-source projection passes its source's
     /// keys through, a <c>DISTINCT</c> projection is keyed on all its columns,
-    /// and a grouped one on its grouping columns.
+    /// and a grouped one on its grouping columns. Only a source's plan is
+    /// asked, so a statement's own query may leave it null.
     /// </summary>
     public int[][]? OutputKeys;
 
@@ -151,12 +152,12 @@ partial class Selection
             {
                 if (rightConstant)
                 {
-                    changed |= Mark(left);
+                    changed |= Mark(determined, left);
                 }
                 else if (determined[left.Source][left.Column] != determined[right.Source][right.Column])
                 {
-                    changed |= Mark(left);
-                    changed |= Mark(right);
+                    changed |= Mark(determined, left);
+                    changed |= Mark(determined, right);
                 }
             }
             for (var s = 0; s < sources.Length; s++)
@@ -165,7 +166,7 @@ partial class Selection
                     continue;
                 foreach (var key in SourceKeys(sources[s]))
                 {
-                    if (Array.TrueForAll(key, column => determined[s][column]))
+                    if (AllDetermined(determined[s], key))
                     {
                         covered[s] = changed = true;
                         Array.Fill(determined[s], true);
@@ -176,11 +177,21 @@ partial class Selection
         }
         return Array.TrueForAll(covered, static isCovered => isCovered);
 
-        bool Mark((int Source, int Column) column)
+        static bool Mark(bool[][] determined, (int Source, int Column) column)
         {
             if (determined[column.Source][column.Column])
                 return false;
             determined[column.Source][column.Column] = true;
+            return true;
+        }
+
+        static bool AllDetermined(bool[] determined, int[] key)
+        {
+            foreach (var column in key)
+            {
+                if (!determined[column])
+                    return false;
+            }
             return true;
         }
     }

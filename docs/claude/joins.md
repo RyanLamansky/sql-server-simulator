@@ -41,6 +41,8 @@ It ends the statement's binding: an earlier join's `ON` error reports ahead of i
 ### Divergences
 
 - An alias spelled as its own table's last part (`FROM t t`) reads as no alias, so a collision with it is reported as the table's rather than the correlation name's.
+- An unqualified `ON` name that a source joined later also carries binds in the `ON`'s own scope on real — `a JOIN b ON x = y JOIN c ON c.id = a.id` with `x` in both `a` and `c` answers there (probed 2026-10-08 against SQL Server 2025).
+  The `ON` binds in that scope here too, but the planner resolves its conjuncts again across every source — deriving the query's output keys while it compiles, choosing the join's keys and evaluating each row as it runs — and raises Msg 209.
 
 ## Parenthesized join groups
 

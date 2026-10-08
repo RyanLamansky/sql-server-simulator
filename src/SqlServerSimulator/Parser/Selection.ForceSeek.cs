@@ -411,13 +411,21 @@ partial class Selection
         for (var p = 0; p < reachable.Length; p++)
         {
             var expression = expressions[p] is Expressions.NamedExpression named ? named.Inner : expressions[p];
-            if (windows.TrueForAll(window => expression is Expressions.Reference column
-                && Array.Exists(window.PartitionBy, key => key is Expressions.Reference partition && collation.Equals(partition.ReferencedName.ToString(), column.ReferencedName.ToString()))))
-            {
+            if (windows.Count == 0 || (expression is Expressions.Reference column && EveryWindowPartitionsBy(collation, windows, column)))
                 reachable[p] = expressions[p];
-            }
         }
         return reachable;
+    }
+
+    private static bool EveryWindowPartitionsBy(Collation collation, List<Expressions.WindowExpression> windows, Expressions.Reference column)
+    {
+        var name = column.ReferencedName.ToString();
+        foreach (var window in windows)
+        {
+            if (!Array.Exists(window.PartitionBy, key => key is Expressions.Reference partition && collation.Equals(partition.ReferencedName.ToString(), name)))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>

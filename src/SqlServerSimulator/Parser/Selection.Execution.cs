@@ -40,6 +40,17 @@ internal sealed partial class Selection
 
     private static (int SourceIndex, int ColumnIndex) FindSourceColumnOfAnyKind(FromSource[] sources, MultiPartName name)
     {
+        if (SourceBindingMemo.For(sources) is not { } memo)
+            return ResolveSourceColumnOfAnyKind(sources, name);
+        if (memo.TryGet(name, out var found))
+            return found;
+        found = ResolveSourceColumnOfAnyKind(sources, name);
+        memo.Add(name, found);
+        return found;
+    }
+
+    private static (int SourceIndex, int ColumnIndex) ResolveSourceColumnOfAnyKind(FromSource[] sources, MultiPartName name)
+    {
         // Every reference walks every column it may name, so the leaf's
         // ordinal check is made once here and each source's once per source.
         var leaf = name.Leaf;
@@ -281,7 +292,7 @@ internal sealed partial class Selection
 
     /// <summary>Calls <paramref name="visitor"/> on every expression at or under <paramref name="node"/>.</summary>
     private static void VisitAll(ExpressionNode node, Action<Expression> visitor) =>
-        node.Walk((visited, _) =>
+        node.Walk(ref visitor, static (visited, _, ref visitor) =>
         {
             if (visited is Expression expression)
                 visitor(expression);
@@ -969,7 +980,7 @@ internal sealed partial class Selection
         {
             predicate = BooleanExpression.Parse(context);
         }
-        RefuseClauseAggregates(context.Batch, whereAggregates, SimulatedSqlException.AggregateInWhereClause());
+        RefuseClauseAggregates(context.Batch, whereAggregates, static () => SimulatedSqlException.AggregateInWhereClause());
         predicate.BindCarryingTypeChecks(context.Batch, resolveColumnType);
         return BooleanExpression.SimplifyForFilter(predicate, context);
     }
@@ -1497,10 +1508,10 @@ internal sealed partial class Selection
     /// written there or moved there from a subquery reading only the
     /// statement's columns.
     /// </summary>
-    internal static void RefuseClauseAggregates(BatchContext parseBatch, List<AggregateExpression> collected, SimulatedSqlException error)
+    internal static void RefuseClauseAggregates(BatchContext parseBatch, List<AggregateExpression> collected, Func<SimulatedSqlException> error)
     {
         if (collected.Count > 0)
-            RefuseAggregatePlacement(parseBatch, collected[0], error);
+            RefuseAggregatePlacement(parseBatch, collected[0], error());
     }
 
     /// <summary>
@@ -1579,6 +1590,7 @@ internal sealed partial class Selection
         MultiPartName? intoTarget,
         Dictionary<int, ColumnReadTarget>? readColumnSink)
     {
+        using var bindingMemo = SourceBindingMemo.Enter(sources);
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates, windows, expressions);
 
         RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? scope.OuterTypeResolver);
@@ -1624,6 +1636,7 @@ internal sealed partial class Selection
                 writtenObjectName: pushSource.WrittenObjectName,
                 unaliasedName: pushSource.UnaliasedName,
                 catalogSeek: true);
+            bindingMemo.Memo.Rekey(sources);
         }
 
         var orderBy = fromClause.OrderBy;
@@ -1642,7 +1655,9 @@ internal sealed partial class Selection
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
-        SqlType ResolveColumnType(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, scope.OuterTypeResolver);
+        // One delegate for every pass below: each conversion of a local
+        // function to a delegate allocates one.
+        var resolveColumnType = TypeResolverOver(sources, scope.OuterTypeResolver);
 
         // Column-level read tracking (parse-time, principal-independent): record
         // every table / view column this query reads into the shared sink so the
@@ -1654,10 +1669,13 @@ internal sealed partial class Selection
         // schema resolution already visits these references); WHERE / JOIN ON /
         // GROUP BY / HAVING / ORDER BY / aggregate operands are walked
         // structurally below. The runtime row closure keeps the non-recording
-        // ResolveColumnType, so this adds nothing to execution.
+        // resolveColumnType, so this adds nothing to execution.
+        // Only a table or view source records anything, which a catalog
+        // query's sources hold none of.
+        var recordsReads = readColumnSink is not null && Array.Exists(sources, static source => ColumnGrantableSecurable(source) is not null);
         void RecordReadColumn(MultiPartName name)
         {
-            if (readColumnSink is null)
+            if (!recordsReads || readColumnSink is null)
                 return;
             // Best-effort, non-throwing resolution: unlike FindSourceColumn this
             // silently skips an unresolved (correlated / outer) or ambiguous name
@@ -1695,7 +1713,7 @@ internal sealed partial class Selection
         SqlType RecordingResolver(MultiPartName name)
         {
             RecordReadColumn(name);
-            return ResolveColumnType(name);
+            return resolveColumnType(name);
         }
         if (readColumnSink is not null)
         {
@@ -1721,38 +1739,40 @@ internal sealed partial class Selection
         // Every other clause is held to the same rule (probed 2026-09-28): a
         // WHERE, GROUP BY, HAVING, ORDER BY or ON reading the column is Msg 493
         // (525 for a conversion) too.
-        foreach (var expression in expressions)
-            RejectDirectNodesColumnRead(expression, sources, parseBatch.Parser.EnclosingScopes);
-        foreach (var excluder in fromClause.Excluders)
-            RejectDirectNodesColumnRead(excluder, sources, parseBatch.Parser.EnclosingScopes);
-        foreach (var groupingExpression in fromClause.AllGroupingExpressions)
-            RejectDirectNodesColumnRead(groupingExpression, sources, parseBatch.Parser.EnclosingScopes);
-        if (fromClause.Having is { } having)
-            RejectDirectNodesColumnRead(having, sources, parseBatch.Parser.EnclosingScopes);
-        foreach (var orderSpec in fromClause.OrderBy)
+        // Only a scope holding a .nodes() row source can read one, which
+        // nearly none does, so the rest skip the walks.
+        if (NodesColumnInScope(sources, parseBatch.Parser.EnclosingScopes))
         {
-            if (orderSpec.Expr is { } orderExpression)
-                RejectDirectNodesColumnRead(orderExpression, sources, parseBatch.Parser.EnclosingScopes);
-        }
-        foreach (var join in joins)
-        {
-            if (join.OnPredicate is { } on)
-                RejectDirectNodesColumnRead(on, sources, parseBatch.Parser.EnclosingScopes);
+            foreach (var expression in expressions)
+                RejectDirectNodesColumnRead(expression, sources, parseBatch.Parser.EnclosingScopes);
+            foreach (var excluder in fromClause.Excluders)
+                RejectDirectNodesColumnRead(excluder, sources, parseBatch.Parser.EnclosingScopes);
+            foreach (var groupingExpression in fromClause.AllGroupingExpressions)
+                RejectDirectNodesColumnRead(groupingExpression, sources, parseBatch.Parser.EnclosingScopes);
+            if (fromClause.Having is { } nodesHaving)
+                RejectDirectNodesColumnRead(nodesHaving, sources, parseBatch.Parser.EnclosingScopes);
+            foreach (var orderSpec in fromClause.OrderBy)
+            {
+                if (orderSpec.Expr is { } orderExpression)
+                    RejectDirectNodesColumnRead(orderExpression, sources, parseBatch.Parser.EnclosingScopes);
+            }
+            foreach (var join in joins)
+            {
+                if (join.OnPredicate is { } on)
+                    RejectDirectNodesColumnRead(on, sources, parseBatch.Parser.EnclosingScopes);
+            }
         }
         // A reference to a numeric-spelled column names what reads it
         // numeric, so each is marked against the column it binds to — ahead
         // of typing, whose refusals name the operand's type the same way
         // (`CHECKSUM_AGG(<numeric column>)` is Msg 8117 naming numeric).
         foreach (var expression in expressions)
-        {
-            // An unbindable name marks nothing; typing reports it below.
-            Reference.MarkBoundColumns(expression, name =>
-                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column] : null);
-        }
+            Reference.MarkBoundColumns(expression, sources);
 
+        var projectionResolver = recordsReads ? RecordingResolver : resolveColumnType;
         for (var i = 0; i < expressions.Count; i++)
         {
-            outputSchema[i] = expressions[i].TypeCarryingTypeChecks(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
+            outputSchema[i] = expressions[i].TypeCarryingTypeChecks(parseBatch, projectionResolver);
             outputColumnNames[i] = expressions[i] is Reference { ReferencedName.Leaf: ['$', ..] } pseudo && FindSourceColumn(sources, pseudo.ReferencedName) is ( >= 0, var pseudoColumn) and var (pseudoSource, _)
                 // A graph pseudo-column names its result after the internal
                 // column it reads (probed 2026-09-27 against SQL Server 2025).
@@ -1773,7 +1793,7 @@ internal sealed partial class Selection
             if (parseBatch.BindErrors is not null && aggregate.OrderBy is { } withinGroup)
             {
                 foreach (var item in withinGroup)
-                    _ = item.Expr?.GetSqlType(parseBatch, ResolveColumnType);
+                    _ = item.Expr?.GetSqlType(parseBatch, resolveColumnType);
             }
         }
         foreach (var window in windows)
@@ -1836,14 +1856,14 @@ internal sealed partial class Selection
         // first, and driven off the non-recording resolver because the
         // read-column sink walks these clauses structurally just below.
         foreach (var excluder in fromClause.Excluders)
-            excluder.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
+            excluder.BindCarryingTypeChecks(parseBatch, resolveColumnType);
         foreach (var join in joins)
         {
             if (join.OnPredicate is not { } on)
                 continue;
             if (join.ScopeEnd < 0)
             {
-                on.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
+                on.BindCarryingTypeChecks(parseBatch, resolveColumnType);
                 continue;
             }
             var onScope = sources[join.ScopeStart..join.ScopeEnd];
@@ -1856,25 +1876,30 @@ internal sealed partial class Selection
         var groupingOrdinal = 2;
         foreach (var grouping in fromClause.AllGroupingExpressions)
         {
-            RequireSettledOutputCollation(grouping.TypeCarryingTypeChecks(parseBatch, ResolveColumnType), "GROUP BY", groupingOrdinal++);
+            RequireSettledOutputCollation(grouping.TypeCarryingTypeChecks(parseBatch, resolveColumnType), "GROUP BY", groupingOrdinal++);
         }
-        fromClause.Having?.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
+        fromClause.Having?.BindCarryingTypeChecks(parseBatch, resolveColumnType);
 
-        if (readColumnSink is not null)
+        if (recordsReads)
         {
+            // One delegate each: every conversion of a local function or
+            // capturing lambda to a delegate allocates one.
+            Action<MultiPartName> recordRead = RecordReadColumn;
+            void RecordOperandReads(Expression operand) => operand.VisitColumnReferences(recordRead);
+            Action<Expression> recordOperandReads = RecordOperandReads;
             foreach (var aggregate in aggregates)
-                aggregate.Operand?.VisitColumnReferences(RecordReadColumn);
+                aggregate.Operand?.VisitColumnReferences(recordRead);
             foreach (var window in windows)
-                window.AggregateInfo?.Operand?.VisitColumnReferences(RecordReadColumn);
+                window.AggregateInfo?.Operand?.VisitColumnReferences(recordRead);
             foreach (var excluder in fromClause.Excluders)
-                excluder.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
-            fromClause.Having?.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
+                excluder.VisitOperandExpressions(recordOperandReads);
+            fromClause.Having?.VisitOperandExpressions(recordOperandReads);
             foreach (var grouping in fromClause.AllGroupingExpressions)
-                grouping.VisitColumnReferences(RecordReadColumn);
+                grouping.VisitColumnReferences(recordRead);
             foreach (var orderItem in orderBy)
-                orderItem.Expr?.VisitColumnReferences(RecordReadColumn);
+                orderItem.Expr?.VisitColumnReferences(recordRead);
             foreach (var join in joins)
-                join.OnPredicate?.VisitOperandExpressions(op => op.VisitColumnReferences(RecordReadColumn));
+                join.OnPredicate?.VisitOperandExpressions(recordOperandReads);
         }
 
         // Validate ordinal ORDER BY items now that the projection count is
@@ -1947,13 +1972,14 @@ internal sealed partial class Selection
                 }
             }
 
-            return ResolveColumnType(name);
+            return resolveColumnType(name);
         }
 
         // A nested query's unbounded ORDER BY is refused once the query has
         // parsed (Msg 1033), ahead of any of its terms' bind errors; a FOR XML
         // one, which that check lets through, binds its terms per row instead.
         var orderByBinds = !scope.RefusesUnboundedOrderBy || topExpression is not null || fromClause.OffsetExpression is not null;
+        Func<MultiPartName, SqlType>? orderByResolver = null;
         for (var i = 0; orderByBinds && i < orderBy.Count; i++)
         {
             // A written constant reaching here is one whose fold raised (the
@@ -1968,7 +1994,7 @@ internal sealed partial class Selection
             {
                 keyType = orderBy[i].IsOrdinal
                     ? outputSchema[orderBy[i].Ordinal - 1]
-                    : orderBy[i].Expr!.TypeCarryingTypeChecks(parseBatch, ResolveOrderByType);
+                    : orderBy[i].Expr!.TypeCarryingTypeChecks(parseBatch, orderByResolver ??= ResolveOrderByType);
                 // Real follows an unknown name under DISTINCT with DISTINCT's
                 // own complaint, the same as the throwing path below.
                 // An ambiguous name is its own complaint, DISTINCT or not.
@@ -2011,7 +2037,7 @@ internal sealed partial class Selection
         // ROLLUP / CUBE expansion from re-typing one key per set it lands in.
         foreach (var groupingKey in fromClause.AllGroupingExpressions)
         {
-            var groupingKeyType = groupingKey.GetSqlType(parseBatch, ResolveColumnType);
+            var groupingKeyType = groupingKey.GetSqlType(parseBatch, resolveColumnType);
             if (groupingKeyType.IsIncomparable)
                 throw NotComparableInClause(groupingKeyType, "GROUP BY");
         }
@@ -2038,7 +2064,7 @@ internal sealed partial class Selection
                 var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
                 ValidateGroupByReferences(
                     sources, expressions, orderBy, outputColumnNames, fromClause, windows,
-                    grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null,
+                    grouped ? new NullabilityContext(parseBatch, static _ => true, resolveColumnType) : null,
                     parseBatch.BindErrors);
             }
         }
@@ -2078,8 +2104,8 @@ internal sealed partial class Selection
             if (windows[i].Kind == WindowKind.Aggregate)
             {
                 var aggregate = windows[i].AggregateInfo!;
-                windowOperandTypes[i] = aggregate.Operand?.GetSqlType(parseBatch, ResolveColumnType) ?? SqlType.Int32;
-                windowResultTypes[i] = windows[i].GetSqlType(parseBatch, ResolveColumnType);
+                windowOperandTypes[i] = aggregate.Operand?.GetSqlType(parseBatch, resolveColumnType) ?? SqlType.Int32;
+                windowResultTypes[i] = windows[i].GetSqlType(parseBatch, resolveColumnType);
             }
         }
 
@@ -2089,7 +2115,7 @@ internal sealed partial class Selection
         // walk also enforces the SELECT-INTO-specific validations
         // (Msg 1038 unnamed projection, Msg 2705 duplicate name).
         var destColumnSchema = intoTarget is { } target
-            ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins, parseBatch, ResolveColumnType)
+            ? ComputeIntoDestSchema(target, expressions, outputSchema, outputColumnNames, sources, joins, parseBatch, resolveColumnType)
             : null;
 
         // Updatable-view shape capture: single source, no JOINs, no DISTINCT,
@@ -2102,7 +2128,7 @@ internal sealed partial class Selection
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates);
 
-        var columnNullability = ComputeColumnNullability(expressions, sources, joins, fromClause.GroupingSetsWritten, parseBatch, ResolveColumnType);
+        var columnNullability = ComputeColumnNullability(expressions, sources, joins, fromClause.GroupingSetsWritten, parseBatch, resolveColumnType);
 
         ReduceConstantCounts(aggregates, fromClause);
 
@@ -2230,7 +2256,7 @@ internal sealed partial class Selection
                     : ReferenceEquals(batch.RowAddressProbe, self) ? [.. expressions, new RowAddress(0)]
                     : expressions;
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? AheadOfRowProjection(BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver))
+                    ? AheadOfRowProjection(BuildAggregateProjectionRows(execSources, joins, resolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver))
                     : windows.Count > 0
                         ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
@@ -2252,7 +2278,19 @@ internal sealed partial class Selection
         if (selection.CursorShape is not null)
             selection.CursorOrderBy = orderBy;
         self = selection;
-        selection.OutputKeys = DeriveOutputKeys(sources, joins, fromClause, expressions, distinct, aggregates.Count > 0);
+        // Only a source's plan is asked for its keys (a derived table, a view's
+        // body), so a statement's own query skips deriving them where that
+        // can't drop an error: outside a bind-error report, which records
+        // rather than raises, and with no ON clause, the derivation resolves
+        // only names typing and the WHERE resolved against these same sources.
+        // An ON resolved against its own join's sources, so the derivation's
+        // resolution of it across all of them can raise where theirs didn't.
+        if (scope.Position is not (QueryPosition.Statement or QueryPosition.ParenthesizedModuleBody)
+            || parseBatch.BindErrors is not null
+            || Array.Exists(joins, static join => join.OnPredicate is not null))
+        {
+            selection.OutputKeys = DeriveOutputKeys(sources, joins, fromClause, expressions, distinct, aggregates.Count > 0);
+        }
         selection.InstallsRowAddresses = installsRowAddresses;
         selection.CarriesRowAddresses = updatabilityProfile is { Sources.Length: 1 };
         selection.ColumnNullability = columnNullability;
@@ -2264,7 +2302,7 @@ internal sealed partial class Selection
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
         var outerMask = parseBatch.Parser.OuterMaskResolver;
-        selection.ColumnMasks = ProjectionMasks(parseBatch, expressions, sources, outerMask, ResolveColumnType);
+        selection.ColumnMasks = ProjectionMasks(parseBatch, expressions, sources, outerMask, resolveColumnType);
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
         selection.ClauseExpressions = ClauseExpressionsOf(fromClause, joins, orderBy);
@@ -2322,7 +2360,7 @@ internal sealed partial class Selection
                 && GroupingColumnProjections(expressions, sources, fromClause) is { } groupingColumns)
             {
                 var groupedShape = new AggregatePushdown(
-                    outputSchema, outputColumnNames, sources, joins, ResolveColumnType, expressions, fromClause,
+                    outputSchema, outputColumnNames, sources, joins, resolveColumnType, expressions, fromClause,
                     orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, groupingColumns);
                 selection.PredicatePushdown = templates => BuildPushedAggregate(groupedShape, templates);
                 selection.PushdownIsGrouped = true;
@@ -2710,6 +2748,23 @@ internal sealed partial class Selection
             XmlMethodCall or Reference => false,
             _ => true,
         });
+
+    /// <summary>
+    /// Whether <paramref name="sources"/> or an enclosing scope holds a
+    /// <c>.nodes()</c> row source, the only column
+    /// <see cref="RejectDirectNodesColumnRead"/> refuses.
+    /// </summary>
+    private static bool NodesColumnInScope(FromSource[] sources, List<FromSource[]> enclosingScopes)
+    {
+        if (Array.Exists(sources, static source => source.XmlReceiverName is not null))
+            return true;
+        foreach (var scope in enclosingScopes)
+        {
+            if (Array.Exists(scope, static source => source.XmlReceiverName is not null))
+                return true;
+        }
+        return false;
+    }
 
     private static bool ReadsNodesColumn(FromSource[] sources, List<FromSource[]> enclosingScopes, Reference reference)
     {

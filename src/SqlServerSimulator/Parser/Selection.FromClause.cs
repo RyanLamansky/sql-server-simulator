@@ -498,7 +498,7 @@ internal sealed partial class Selection
     /// </summary>
     private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
-        var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
+        var scope = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(sources)[scopeStart..].ToArray();
         // An aggregate the ON would own — written there, or moved there from a
         // subquery reading only the join's columns — is Msg 1015; one reading
         // only an enclosing query's columns belongs to that query.
@@ -512,11 +512,13 @@ internal sealed partial class Selection
         // against the ON's sources as they do against a WHERE's.
         using (ParserScope.Enter(ref context.ScopeSources, scope))
         using (ParserScope.Enter(ref context.AggregateCollector, onAggregates))
+        using (SourceBindingMemo.Enter(scope))
         {
             predicate = BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
         }
-        RehomeAggregatesOverOuterScope(context.Batch, [.. sources], onAggregates, outerTypeResolver);
-        RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
+        if (onAggregates.Count > 0)
+            RehomeAggregatesOverOuterScope(context.Batch, [.. sources], onAggregates, outerTypeResolver);
+        RefuseClauseAggregates(context.Batch, onAggregates, static () => SimulatedSqlException.AggregateInOnClause());
         return predicate;
     }
 

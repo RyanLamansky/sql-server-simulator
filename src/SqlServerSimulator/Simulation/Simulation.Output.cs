@@ -311,7 +311,7 @@ partial class Simulation
         Expression parsed;
         using (ParserScope.Enter(ref context.AggregateCollector, aggregates))
             parsed = Expression.Parse(context);
-        Selection.RefuseClauseAggregates(context.Batch, aggregates, SimulatedSqlException.AggregateInOutputClause());
+        Selection.RefuseClauseAggregates(context.Batch, aggregates, static () => SimulatedSqlException.AggregateInOutputClause());
         return parsed;
     }
 

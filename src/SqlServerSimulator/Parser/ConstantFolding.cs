@@ -285,24 +285,27 @@ internal static class ConstantFolding
     /// (<see cref="Expression.ParallelSafe"/>), so <c>RAND()</c>,
     /// <c>NEXT VALUE FOR</c> and a UDF call never run an extra time.
     /// </remarks>
-    internal static void CollectStartupConstants(ExpressionNode root, ParserContext context, List<Expression> sink) =>
-        root.Walk((node, _) =>
+    internal static void CollectStartupConstants(ExpressionNode root, ParserContext context, List<Expression> sink)
+    {
+        var walk = (Context: context, Sink: sink);
+        root.Walk(ref walk, static (node, _, ref walk) =>
         {
             switch (node)
             {
                 case CaseExpression or Iif or Coalesce or NullIf or Choose or AggregateExpression or WindowExpression:
                     return false;
                 case Expression expression when expression.IsWrittenConstant:
-                    if (FoldRaises(expression, context))
-                        sink.Add(expression);
+                    if (FoldRaises(expression, walk.Context))
+                        walk.Sink.Add(expression);
                     return false;
                 case Expression expression when IsVariableComputation(expression):
-                    sink.Add(expression);
+                    walk.Sink.Add(expression);
                     return false;
                 default:
                     return true;
             }
         });
+    }
 
     /// <summary>
     /// Whether evaluating the written constant <paramref name="expression"/>
@@ -348,26 +351,25 @@ internal static class ConstantFolding
         if (expression is VariableReference or Value or Reference || !expression.ParallelSafe)
             return false;
 
-        var readsVariable = false;
-        var qualifies = true;
-        expression.Walk((node, shape) =>
+        (bool ReadsVariable, bool Qualifies) found = (false, true);
+        expression.Walk(ref found, static (node, shape, ref found) =>
         {
             switch (node)
             {
                 case CaseExpression or Iif or Coalesce or NullIf or Choose:
-                    qualifies = false;
+                    found.Qualifies = false;
                     break;
                 case VariableReference:
-                    readsVariable = true;
+                    found.ReadsVariable = true;
                     break;
                 default:
                     if (shape.Column is not null)
-                        qualifies = false;
+                        found.Qualifies = false;
                     break;
             }
-            return qualifies;
+            return found.Qualifies;
         });
-        return qualifies && readsVariable;
+        return found.Qualifies && found.ReadsVariable;
     }
 
     /// <summary>

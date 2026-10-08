@@ -323,7 +323,7 @@ partial class Simulation
         {
             predicate = BooleanExpression.Parse(context);
         }
-        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
+        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, static () => SimulatedSqlException.AggregateInComputedOrCheck());
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

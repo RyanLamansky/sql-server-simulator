@@ -67,7 +67,7 @@ partial class Simulation
         inliningFailures = null;
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
         var remembered = key ?? dynamicKey;
-        if (remembered is { } cached && this.compiledBatches.TryGetValue(cached, out var compiledUnder) && compiledUnder == schemaVersion)
+        if (this.CompiledBefore(remembered, schemaVersion))
             return null;
 
         var errors = new List<SimulatedSqlException>();
@@ -139,12 +139,15 @@ partial class Simulation
                 inliningFailures.Add(failure);
         }
 
-        foreach (var message in compileBatch.CompileMessages ?? [])
+        if (compileBatch.CompileMessages is { } compileMessages)
         {
-            if (message.Number != SimulatedSqlException.JoinOrderEnforcedMessageNumber || key is not null || !sendsOnce
-                || (firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+            foreach (var message in compileMessages)
             {
-                connection.PendingMessages.Enqueue(message);
+                if (message.Number != SimulatedSqlException.JoinOrderEnforcedMessageNumber || key is not null || !sendsOnce
+                    || (firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+                {
+                    connection.PendingMessages.Enqueue(message);
+                }
             }
         }
         if (remembered is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
@@ -216,6 +219,14 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether a batch under <paramref name="remembered"/> compiled under
+    /// <paramref name="schemaVersion"/>, so <see cref="CompileBatch"/> skips
+    /// it — which a caller asks first to skip building the walk's context too.
+    /// </summary>
+    private bool CompiledBefore(PlanCacheKey? remembered, long schemaVersion) =>
+        remembered is { } cached && this.compiledBatches.TryGetValue(cached, out var compiledUnder) && compiledUnder == schemaVersion;
+
+    /// <summary>
     /// The throwaway context <see cref="CompileBatch"/> walks
     /// <paramref name="executing"/>'s text on: the same command, a copy of the
     /// variables, table variables and cursor variables its parameters seeded (so the walk's own
@@ -228,10 +239,16 @@ partial class Simulation
         var compile = executing.ProcFrame is { } frame
             ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
             : new BatchContext(command, variables);
-        foreach (var (name, table) in executing.TableVariables ?? [])
-            compile.SetTableVariable(name, table);
-        foreach (var (name, cursor) in executing.CursorVariables ?? [])
-            compile.SetCursorVariable(name, cursor);
+        if (executing.TableVariables is { } tableVariables)
+        {
+            foreach (var (name, table) in tableVariables)
+                compile.SetTableVariable(name, table);
+        }
+        if (executing.CursorVariables is { } cursorVariables)
+        {
+            foreach (var (name, cursor) in cursorVariables)
+                compile.SetCursorVariable(name, cursor);
+        }
         compile.LineOffset = executing.LineOffset;
         compile.ErrorProcedureName = executing.ErrorProcedureName;
         compile.ForceTempTableScope = executing.ForceTempTableScope;

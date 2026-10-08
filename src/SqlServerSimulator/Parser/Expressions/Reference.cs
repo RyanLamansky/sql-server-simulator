@@ -31,19 +31,20 @@ internal sealed class Reference : Expression
     internal override Schemas.AliasType? ResultAliasType => this.aliasType;
 
     /// <summary>
-    /// Records on every reference in <paramref name="root"/> what the column
-    /// <paramref name="columnOf"/> binds it to says about how it reads: the
+    /// Records on every reference in <paramref name="root"/> what the column of
+    /// <paramref name="sources"/> it binds to says about how it reads: the
     /// column's alias type, and whether it is numeric-spelled (as
     /// <see cref="MarkNumericSpelled"/>). A reference binding to no column
     /// keeps no alias type. A subquery binds in its own scope and isn't
     /// entered.
     /// </summary>
-    internal static void MarkBoundColumns(ExpressionNode root, Func<MultiPartName, HeapColumn?> columnOf) =>
-        root.Walk((node, _) =>
+    internal static void MarkBoundColumns(ExpressionNode root, FromSource[] sources) =>
+        root.Walk(ref sources, static (node, _, ref sources) =>
         {
             if (node is Reference reference)
             {
-                var column = columnOf(reference.ReferencedName);
+                // An unbindable name marks nothing; typing reports it.
+                var column = Selection.TryResolveSourceColumn(sources, reference.ReferencedName) is { } id ? sources[id.Source].Columns[id.Column] : null;
                 if (column is { SpelledNumeric: true })
                     reference.readsNumericColumn = true;
                 reference.aliasType = column?.AliasType;
@@ -58,7 +59,7 @@ internal sealed class Reference : Expression
     /// <c>n</c> are numeric). A subquery binds in its own scope and isn't entered.
     /// </summary>
     internal static void MarkNumericSpelled(ExpressionNode root, Func<MultiPartName, bool> isNumericColumn) =>
-        root.Walk((node, _) =>
+        root.Walk(ref isNumericColumn, static (node, _, ref isNumericColumn) =>
         {
             if (node is Reference reference && isNumericColumn(reference.ReferencedName))
                 reference.readsNumericColumn = true;

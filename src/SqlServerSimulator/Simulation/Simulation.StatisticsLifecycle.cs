@@ -377,13 +377,13 @@ partial class Simulation
             anyTable |= source.BackingTable is { IsTableVariable: false } || source.BackingView is { BaseTable: not null };
         if (!anyTable)
             return;
-        var collation = batch.CurrentDatabase.Collation;
+        var walk = (Batch: batch, batch.CurrentDatabase.Collation, Sources: sources);
         foreach (var operand in predicateOperands)
         {
-            operand.VisitColumnReferences(name =>
+            operand.VisitColumnReferences(ref walk, static (name, ref walk) =>
             {
-                if (ResolvePredicateColumn(collation, sources, name) is var (table, ordinal))
-                    LoadQueryStatistics(batch, table, ordinal);
+                if (ResolvePredicateColumn(walk.Collation, walk.Sources, name) is var (table, ordinal))
+                    LoadQueryStatistics(walk.Batch, table, ordinal);
             });
         }
     }
@@ -414,6 +414,16 @@ partial class Simulation
         LoadPredicateStatistics(batch, [.. sources], operands);
     }
 
+    private static int IndexOfColumn(Collation collation, HeapColumn[] columns, string name)
+    {
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (collation.Equals(columns[i].Name, name))
+                return i;
+        }
+        return -1;
+    }
+
     private static (HeapTable Table, int Ordinal)? ResolvePredicateColumn(Collation collation, List<FromSource> sources, MultiPartName name)
     {
         (HeapTable, int)? found = null;
@@ -426,7 +436,7 @@ partial class Simulation
             if (source.BackingTable is { } backing)
             {
                 table = backing;
-                ordinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
+                ordinal = IndexOfColumn(collation, table.Columns, name.Leaf);
                 if (ordinal < 0)
                     continue;
             }

@@ -36,7 +36,7 @@ internal sealed class XmlMethodCall : Expression
     internal static bool AppearsIn(ExpressionNode root)
     {
         var found = false;
-        root.Walk((node, _) =>
+        root.Walk(ref found, static (node, _, ref found) =>
         {
             found |= node is XmlMethodCall;
             return !found;

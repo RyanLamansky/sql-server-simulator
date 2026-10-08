@@ -76,17 +76,16 @@ internal sealed class VolatileProjection(bool fixesValues, int[] ordinals, Expre
 
     private static (bool Draws, bool ReadsRow) Classify(ExpressionNode node)
     {
-        var draws = false;
-        var readsRow = false;
-        node.Walk((visited, shape) =>
+        (bool Draws, bool ReadsRow) found = default;
+        node.Walk(ref found, static (visited, shape, ref found) =>
         {
             if (visited is NewId or CryptGenRandom)
-                draws = true;
-            if (shape.Column is not null || shape.Locals.Exists(local => local is Selection))
-                readsRow = true;
+                found.Draws = true;
+            if (shape.Column is not null || shape.Locals.Exists(static local => local is Selection))
+                found.ReadsRow = true;
             return true;
         });
-        return (draws, readsRow);
+        return found;
     }
 
     /// <summary>

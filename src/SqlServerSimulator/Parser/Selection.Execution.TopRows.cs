@@ -329,6 +329,18 @@ partial class Selection
         return (int)Math.Min(end, count);
     }
 
+    /// <summary>Whether <paramref name="expression"/> draws a <c>NEXT VALUE FOR</c> anywhere in it.</summary>
+    private static bool DrawsNextValue(ExpressionNode expression)
+    {
+        var draws = false;
+        expression.Walk(ref draws, static (visited, _, ref draws) =>
+        {
+            draws |= visited is NextValueFor;
+            return !draws;
+        });
+        return draws;
+    }
+
     /// <summary>
     /// A sorted projection without <c>DISTINCT</c>: ranks the rows the WHERE
     /// keeps by their ORDER BY keys alone, then projects only the rows the
@@ -384,16 +396,7 @@ partial class Selection
         // A NEXT VALUE FOR (legal here under its own OVER) draws once per row,
         // deduplicated across a row's references by the row stamp, so a
         // select list reading one is projected whole while its row is read.
-        var projectEagerly = expressions.Exists(static expression =>
-        {
-            var draws = false;
-            expression.Walk((visited, _) =>
-            {
-                draws |= visited is NextValueFor;
-                return !draws;
-            });
-            return draws;
-        });
+        var projectEagerly = expressions.Exists(DrawsNextValue);
 
         // Hoisted per-row resolution scaffolding — see ProjectStreaming.
         var memo = new SourceColumnMemo();

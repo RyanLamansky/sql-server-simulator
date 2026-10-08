@@ -200,7 +200,7 @@ partial class Simulation
         {
             onPredicate = BooleanExpression.Parse(context);
         }
-        Selection.RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
+        Selection.RefuseClauseAggregates(context.Batch, onAggregates, static () => SimulatedSqlException.AggregateInOnClause());
 
         // Compile-time bind of the ON predicate against the same two-sided
         // resolver, so a cross-collation comparison, a legacy-LOB string-scalar
@@ -989,7 +989,7 @@ partial class Simulation
                 {
                     searchCondition = BooleanExpression.Parse(context);
                 }
-                Selection.RefuseClauseAggregates(context.Batch, conditionAggregates, SimulatedSqlException.AggregateInMergeWhenClause());
+                Selection.RefuseClauseAggregates(context.Batch, conditionAggregates, static () => SimulatedSqlException.AggregateInMergeWhenClause());
                 searchCondition.BindCarryingTypeChecks(context.Batch, conditionResolver);
             }
 
@@ -1073,7 +1073,7 @@ partial class Simulation
         Selection.RefuseClauseAggregates(
             context.Batch,
             actionAggregates,
-            isInsert ? SimulatedSqlException.AggregateInValuesList() : SimulatedSqlException.AggregateInSetList());
+            isInsert ? static () => SimulatedSqlException.AggregateInValuesList() : static () => SimulatedSqlException.AggregateInSetList());
         return clause;
     }
 

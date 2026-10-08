@@ -777,7 +777,44 @@ Before the changes, the point `SELECT` spent 77% of its samples parsing, 42% of 
 Each step's own A/B, same method, point `SELECT` / join / SMO-style query: the keyword lookup −23% / −28% / −24% (−33% on the `INSERT`); the identifier marks in the ordinal shortcut −2% / 0 / −17%; the per-source column-name check −7% / −2% / −4%; the hash memo −9% / −9% / −2%; the reused walk state −7% / −7% / −5%; blank skipping −2% / −4% / −6%; the literal fast paths with the read-column recorder's ordinal path −2% / −1% / −5%; one walk marking both of a reference's column facts, with `IsVariableComputation` answering a column reference without a walk, −1% / −5% / −3%.
 
 **What the profile shows after**: the compile walk is 35% of the point `SELECT` and the two parses 63%; native runtime frames still a quarter; `FindSourceColumnOfAnyKind` 5–6% from its call count rather than its compares; the walk visitors' delegates 6–10% of the bytes, the largest single type; `BuiltInArity.For`'s ~300-arm switch 3% of the SMO-style query.
-These are listed with what each would take in the [backlog](backlog.md#complex-query-execution--perf-residuals).
+The [next pass](#one-off-texts-the-profiles-leftovers) took them.
+
+### One-off texts: the profile's leftovers
+
+The same harness and method, the baseline a release build of the commit that ended the first pass, five processes per build alternating (measured 2026-10-08):
+
+| Shape | Before | After | Δ | KB per execution |
+|---|---|---|---|---|
+| Point `SELECT` by key | 17.8 µs | 15.2 µs | −15% | 38.9 → 29.5 |
+| Three-table join with `WHERE` and `ORDER BY` | 62.2 µs | 54.7 µs | −12% | 98.0 → 76.4 |
+| `INSERT … VALUES` of 10 columns | 18.6 µs | 18.6 µs | 0 | 31.7 → 31.2 |
+| `UPDATE` of two columns by key | 12.9 µs | 12.6 µs | −2% | 29.7 → 27.1 |
+| EF-style parameterized `SELECT` | 48.2 µs | 44.0 µs | −9% | 77.2 → 62.2 |
+| SMO-style `sys.tables` query | 91.3 µs | 73.4 µs | −20% | 132 → 103 |
+| SMO's column query | 208 µs | 137 µs | −35% | 194 → 147 |
+| A repeated `EXEC` of a one-`SELECT` procedure | 5.34 µs | 5.21 µs | −2% | 15.5 → 13.4 |
+
+The sqllogictest replays, three runs per build alternating, medians: `refs/random` 45.9 s before against 44.6 s after (−3%, its runs 45.7–46.3 s against 43.3–47.5 s), `refs/index` 58.6 s against 54.9 s (−6%), the same outcome classes — their statements are mostly expressions over a column or two of one table, which the column passes touch least.
+
+- **Column resolution**, a memo rather than fewer callers.
+  The point `SELECT`'s 71 resolutions across its two parses and its run were about a dozen passes over the same four references, each a pass a different rule needs, so `SourceBindingMemo` answers a name a second time while a query's `ON`, `WHERE` or projection binds: keyed by the sources' identities in order, which the `[.. sources]` copies keep, and by the name's part strings, which a parsed reference keeps, it leaves 15.
+  Two passes needed no resolution at all: the `.nodes()` column check runs only where a scope holds a `.nodes()` source, and the column-read recorder only where a source is a table or view, which no catalog query's is.
+  `FindSourceColumnOfAnyKind` went from 6.1% of the point `SELECT`'s samples to 1.5%.
+- **A spatial-property probe** was the SMO column query's largest leaf, uncovered once the resolutions shrank: every `alias.column` asked every column of every source in scope whether it is spatial, 12% of the query's samples in type checks and their lambdas, settled once per source now.
+- **The walk's delegates.**
+  `ExpressionNode.Walk` takes its state by reference (`Walk<TState>(ref TState, NodeVisitor<TState>)`), as does `VisitColumnReferences`, and the hot visitors are static: the walk delegates went from 5–6% of a one-off statement's bytes to none sampled, the column visitors with them, and the other delegates from 5–9% to 3–6%.
+  The rest were method-group conversions — `BuildSqlProjection` handed its resolver to each pass as a fresh delegate — and an exception built for every `ON` clause in case it held an aggregate.
+  A name token cuts its string once, where every read of a dotted member's name cut another (6% of the join's bytes by then).
+- **`BuiltInArity.For`** looks the rule up in a frozen dictionary by the uppercase name the caller holds; the 230-arm span switch it replaces compiled to 47 KB of tier-1 code and was 1.9% of the SMO column query.
+- **The second `BatchContext`** costs the point `SELECT` 0.3% of its samples and 1.9 KB — the context, its parser and statement contexts and the copied variable maps — about 5% of its bytes.
+  Most of what it holds the walk needs, so it stays; a batch whose compile is remembered no longer builds it before finding that out, which is the `EXEC` row above, and empty table-variable and cursor maps are no longer copied into it.
+- **The walk's discarded plan metadata.**
+  Two pieces are skipped where it is provable that nothing changes: the semi-join shape of a query with no enclosing scope, which can't correlate, so the shape was always null; and a statement's own output keys, which only a source's plan is ever asked for, where the statement has no `ON` and no bind-error report is being gathered — otherwise deriving them resolves only names typing and the `WHERE` already resolved against the same sources.
+  The rest stays: nullability, volatile and identity columns and the wire flags are read off a statement's plan by a set operation combining branches and by `CREATE VIEW`, and an `ON` conjunct resolved across every source can raise where its own join's scope didn't.
+  That last is a divergence of its own, found while proving the skip: `a JOIN b ON x = y JOIN c ON …` with `x` in both `a` and `c` binds on real and raises Msg 209 here (see [`joins.md`](joins.md#divergences)).
+  The compile walk went from 37% of the point `SELECT` to 35%, and `BuildSqlProjection` from 25% to 19%.
+
+What stays: the first resolution of each name (`ResolveSourceColumnOfAnyKind`, 1.5% of the point `SELECT`, 5% of the SMO column query, much of it the join planner's at run time), the read recorder's own scan of a table query's columns (1.5%), `BuildSqlProjection`'s closure, which captures most of its locals, and the native allocation path, still about a fifth of the samples.
 
 ## Not modeled / future
 

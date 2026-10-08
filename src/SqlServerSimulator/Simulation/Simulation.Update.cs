@@ -286,7 +286,7 @@ partial class Simulation
 
         context.OuterTypeResolver = savedOuterTypeResolver;
         context.AggregateCollector = savedCollector;
-        Selection.RefuseClauseAggregates(context.Batch, setAggregates, SimulatedSqlException.AggregateInSetList());
+        Selection.RefuseClauseAggregates(context.Batch, setAggregates, static () => SimulatedSqlException.AggregateInSetList());
 
         // A linked server's table: the SET list is what the replay writes,
         // and real's provider refuses an OUTPUT clause outright.

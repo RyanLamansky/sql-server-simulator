@@ -60,7 +60,10 @@ internal sealed partial class Selection
         List<WindowExpression> windows,
         Func<MultiPartName, SqlType>? outerTypeResolver)
     {
-        if (distinct
+        // A query with no enclosing scope correlates with nothing: a name it
+        // can't bind fails its bind, so no conjunct can name an outer column.
+        if (outerTypeResolver is null
+            || distinct
             || topExpression is not null
             || aggregates.Count != 0
             || windows.Count != 0

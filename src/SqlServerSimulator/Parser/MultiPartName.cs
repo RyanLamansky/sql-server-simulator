@@ -192,6 +192,16 @@ internal readonly struct MultiPartName
     };
 
     /// <summary>
+    /// Whether <paramref name="other"/> is this name as one parse built it:
+    /// the same part strings by reference, the same count and leaf delimiting.
+    /// A memo keyed this way answers only the reference that filled it.
+    /// </summary>
+    public bool IsSameInstanceAs(MultiPartName other) =>
+        ReferenceEquals(this.p1, other.p1) && ReferenceEquals(this.p2, other.p2)
+            && ReferenceEquals(this.p3, other.p3) && ReferenceEquals(this.p4, other.p4)
+            && this.Count == other.Count && this.LeafDelimited == other.LeafDelimited;
+
+    /// <summary>
     /// Renders the name in dotted form (<c>"db.schema.table.col"</c>).
     /// Used by error-message interpolation as the natural default —
     /// <c>$"Invalid column name '{name}'."</c> emits the full reference

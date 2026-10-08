@@ -3187,8 +3187,11 @@ internal abstract class BooleanExpression : ExpressionNode
         // A literal has no children to walk.
         if (expression is Value)
             return true;
+        // A column reference reads a row with nothing to walk.
+        if (expression is Reference)
+            return false;
         var constant = true;
-        expression.Walk((node, _) =>
+        expression.Walk(ref constant, static (node, _, ref constant) =>
         {
             if (node is Reference or ScalarSubqueryExpression)
                 constant = false;
