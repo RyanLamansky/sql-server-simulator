@@ -342,7 +342,10 @@ internal static class ConstantFolding
     /// </summary>
     private static bool IsVariableComputation(Expression expression)
     {
-        if (expression is VariableReference or Value || !expression.ParallelSafe)
+        // A column reference fails the walk below at its first node, so it
+        // is answered without one — CollectStartupConstants asks for every
+        // node it passes, and most of those are columns.
+        if (expression is VariableReference or Value or Reference || !expression.ParallelSafe)
             return false;
 
         var readsVariable = false;

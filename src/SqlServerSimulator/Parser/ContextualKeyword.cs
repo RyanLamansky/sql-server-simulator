@@ -18,7 +18,7 @@ namespace SqlServerSimulator.Parser;
 /// contextual lookup.
 ///
 /// <para>The two sentinels lead; every member after them is a real contextual
-/// keyword, named exactly as it is spelled — <see cref="Enum.TryParse{TEnum}(ReadOnlySpan{char}, bool, out TEnum)"/>
+/// keyword, named exactly as it is spelled — <see cref="EnumNameLookup{TEnum}"/>
 /// over the token's own span is the classifier — and kept alphabetical.
 /// Two sentinels rather than the one <see cref="Keyword"/> and
 /// <see cref="AtAtKeyword"/> carry, because classification here is lazy: the

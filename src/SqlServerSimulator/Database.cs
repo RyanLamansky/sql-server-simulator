@@ -98,9 +98,9 @@ internal sealed partial class Database
         this.Name = name;
         this.Collation = collation;
         this.CollationName = collation.Name;
-        this.Schemas = new(collation);
-        this.DdlTriggers = new(collation);
-        this.Principals = new(collation);
+        this.Schemas = new(collation.NameKeys);
+        this.DdlTriggers = new(collation.NameKeys);
+        this.Principals = new(collation.NameKeys);
         this.FullTextCatalogs = new(collation);
         this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
         this.Files =

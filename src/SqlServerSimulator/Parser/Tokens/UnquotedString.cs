@@ -33,7 +33,7 @@ sealed class UnquotedString : Name
 
     /// <summary>
     /// Lazily classifies this token against <see cref="Parser.ContextualKeyword"/>.
-    /// First access parses <see cref="Span"/> via <see cref="Enum.TryParse{TEnum}(ReadOnlySpan{char}, bool, out TEnum)"/>
+    /// First access parses <see cref="Span"/> via <see cref="EnumNameLookup{TEnum}"/>
     /// (case-insensitive); the result is cached on the field so repeat reads at
     /// the same token are constant-time. A miss — or a pathological identifier
     /// matching either sentinel name (<c>NotChecked</c> / <c>NotAKeyword</c>) —
@@ -45,7 +45,7 @@ sealed class UnquotedString : Name
         {
             if (field == ContextualKeyword.NotChecked)
             {
-                field = Enum.TryParse<ContextualKeyword>(this.Span, ignoreCase: true, out var keyword)
+                field = EnumNameLookup<ContextualKeyword>.TryParse(this.Span, out var keyword)
                     && keyword is not (ContextualKeyword.NotChecked or ContextualKeyword.NotAKeyword)
                     ? keyword
                     : ContextualKeyword.NotAKeyword;
@@ -68,7 +68,7 @@ sealed class UnquotedString : Name
     /// </param>
     /// <returns>The appropriate token.</returns>
     public static Token CheckReserved(string command, int index, int length, CompatibilityLevel compatibilityLevel = CompatibilityLevel.Sql170) =>
-        Enum.TryParse<Keyword>(command.AsSpan(index, length), true, out var keyword)
+        EnumNameLookup<Keyword>.TryParse(command.AsSpan(index, length), out var keyword)
             && (keyword != Keyword.Regexp_Like || compatibilityLevel >= CompatibilityLevel.Sql170) ?
         new ReservedKeyword(keyword, command, index, length) :
         new UnquotedString(command, index, length);

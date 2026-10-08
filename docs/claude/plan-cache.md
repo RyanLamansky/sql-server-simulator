@@ -410,7 +410,7 @@ The pattern is the same one the plan cache shows: the saving is a fixed per-text
 
 **These deltas exceed what a tokenize-only measurement predicts, and the gap is the point.**
 Timing `Tokenizer.NextToken` in a loop over the same texts gives 2.4–2.9 µs for the INSERT batch, where the end-to-end saving is ~3.8 µs.
-A memo skips more than the character scan: it skips **constructing** the tokens, and construction is where `UnquotedString.CheckReserved` runs `Enum.TryParse<Keyword>` over every word.
+A memo skips more than the character scan: it skips **constructing** the tokens, and construction is where every word is classified against the reserved keywords (then through `Enum.TryParse<Keyword>`, since replaced — see [one-off texts](#one-off-texts-a-cpu-profile-of-the-parse)).
 It also makes `UnquotedString.ContextualKeyword`'s lazy classification a once-ever cost rather than a once-per-parse one, because the token instance carrying the memoized field is shared across executions.
 An earlier estimate (2026-07-30) put a token cache at "~10% of parse cost, ~5–8% of the operation" and shelved it on that basis; it was measuring the scan and missing both amortizations.
 The lesson generalizes: **for a cache, measure by disabling it in the real pipeline, not by timing the work you think it removes.**
@@ -719,7 +719,7 @@ A throwaway build that skipped `CompileBatch` outright bounds what sharing the w
 | A repeated procedure call, as text or as an RPC | 26.0 / 23.4 µs | 26.7 / 23.5 µs | none |
 
 The last two already skip the walk (`compiledBatches`, `ModulePlan`), paying at most the memo's lookup, and the repeated `sp_executesql` now does too: remembering a dynamic batch's compile (`DynamicBatchKey`) took it from 21.7 to 15.3 µs, the bound.
-The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped or shared there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why, and for the split of a trivial `SELECT`'s ~9.5 µs parse.
+The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped or shared there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why; [one-off texts](#one-off-texts-a-cpu-profile-of-the-parse) below took the parse's constant factors instead.
 Those rows didn't move (ad hoc `SELECT` 21.3 → 21.5 µs, join 51.6 → 51.2 µs, `UPDATE` 13.0 → 13.0 µs, the `#temp` batch 81.6 → 80.6 µs).
 
 ### Trigger bodies over their pseudo-tables, and function calls
@@ -741,6 +741,43 @@ ADO.NET against a 1,000-row table clustered on `Id` under an `AFTER INSERT, UPDA
 A firing's saving is its statement's parse, so it is what a few-row firing spends and a small share of a 100-row one, whose audit rows dominate.
 The function rows come from the call's construction (see [`programmable.md`](programmable.md#body-batches-and-the-per-statement-freeze)): allocation per scalar call fell from 4.1 to 3.1 KB, and a body with no plan to replay keeps its parse ([below](#not-modeled--future)).
 The sqllogictest `refs/random` replay took 51 / 52 s before and 51 / 52 s after, and EF Core 10.0.2's stored-procedure update, Northwind bulk update, triggers, identity graph update and Northwind miscellaneous classes in process 30 s either way, with the same outcomes.
+
+### One-off texts: a CPU profile of the parse
+
+A text neither memo serves pays both parses, so its cost is the parse's constant factors.
+ADO.NET over a 1,000-customer / 2,000-order / 3,000-line schema, each text made unique by a trailing comment, one case per process, 2 s warm-up then 3 s timed (median of 0.1 s blocks), three processes per build alternating the two builds, the median of the three (measured 2026-10-08):
+
+| Shape | Before | After | Δ | KB per execution |
+|---|---|---|---|---|
+| Point `SELECT` by key | 29.7 µs | 18.2 µs | −39% | 49.8 → 38.9 |
+| Three-table join with `WHERE` and `ORDER BY` | 109 µs | 61.2 µs | −44% | 138 → 98 |
+| `INSERT … VALUES` of 10 columns | 29.7 µs | 18.0 µs | −40% | 37.7 → 31.7 |
+| `UPDATE` of two columns by key | 19.9 µs | 12.7 µs | −36% | 33.1 → 29.7 |
+| EF-style parameterized `SELECT` (brackets, aliases, `LEFT JOIN`, `LIKE`) | 64.0 µs | 47.0 µs | −27% | 125 → 77 |
+| SMO-style `sys.tables` query with a correlated `sys.extended_properties` subquery | 187 µs | 90.3 µs | −52% | 206 → 132 |
+| SMO's column query (`sys.all_columns` joined to `sys.types`, `sys.indexes`, `sys.index_columns`) | 381 µs | 206 µs | −46% | 288 → 194 |
+
+The sqllogictest replays, whose texts are unique, moved with it: `refs/random` 49.6 / 49.9 s before against 43.1 / 43.3 s after, `refs/index` 66.7 / 66.7 s against 55.4 / 55.3 s (alternating builds, the same outcome classes).
+EF Core 10.0.2's Gears of War, Northwind miscellaneous and Northwind where query classes in process took 14, 27–28 and 20 s either way with the same outcomes, since EF's own work and tier-0 code dominate a test process.
+
+**The profile.**
+dotnet-trace's EventPipe sampler doesn't give one: it suspends the runtime and records each thread where it stops, which for running managed code is the next GC safe point, so 77% of a one-off `SELECT`'s samples landed in `Thread.PollGC` under `Buffer.BulkMoveWithWriteBarrier` — the poll a reference-array copy makes — and the rest at P/Invoke transitions.
+That is the "`Stack` growing" an earlier thread-time sample blamed on the expression walks.
+Kernel sampling (`perf`, `dotnet-trace collect-linux`) needs `perf_event_open`; where that is refused, a `ptrace` sampler interrupting the thread at 2 kHz and reading its instruction pointer and frame-pointer chain, resolved against the map `DOTNET_PerfMapEnabled=1` writes, gives a true CPU profile, and `dotnet-trace`'s `gc-verbose` profile still gives the allocation ticks.
+Before the changes, the point `SELECT` spent 77% of its samples parsing, 42% of them in the compile walk, and the leaf frames were:
+
+- **`Enum.TryParse` classifying each word**, 15–29% across the shapes: it compares the word to every member name in turn, and the tokenizer asked it of every unquoted word against the ~190 reserved keywords.
+  `EnumNameLookup` answers from a frozen dictionary, handing anything it can't answer identically back to `Enum.TryParse`; `EnumNameLookupTests` holds the two together.
+- **Column-name matching**, 10%: `FindSourceColumnOfAnyKind` ran for 77 resolutions of the four references in the point `SELECT`, each comparing every column through `BuiltInToken`, which re-checked both names for its ordinal shortcut per compare and sent any name with an underscore to ICU.
+  The shortcut now admits `_ @ # $`, which is most of what catalog queries compare (−17% for the SMO-style query alone), and a source settles once whether its column names take it.
+- **Object-name hashing**, 7%: one object reference is hashed by every dictionary the resolver tries — the catalog views under an ICU sort key, then a schema's views, synonyms, functions and tables under Latin1-General's weight walk — on both parses; `MemoizedHashComparer` memoizes the hash by text.
+- **Allocation**, the native runtime frames, a libc memory fill, thread-local lookup and the write barrier together about a quarter of the samples, while GC suspensions came to about 1% of wall time — so it is the per-object allocation path, not collection, that allocation costs here.
+  A sixth of a one-off `SELECT`'s bytes was `ExpressionNode.Walk`'s shape and stack, now reused per thread (−7% on the point `SELECT` and the join); blank runs are skipped without building a `Whitespace` token, and a quoted body or bracketed name without an escape is cut from the text rather than built a character at a time.
+
+Each step's own A/B, same method, point `SELECT` / join / SMO-style query: the keyword lookup −23% / −28% / −24% (−33% on the `INSERT`); the identifier marks in the ordinal shortcut −2% / 0 / −17%; the per-source column-name check −7% / −2% / −4%; the hash memo −9% / −9% / −2%; the reused walk state −7% / −7% / −5%; blank skipping −2% / −4% / −6%; the literal fast paths with the read-column recorder's ordinal path −2% / −1% / −5%; one walk marking both of a reference's column facts, with `IsVariableComputation` answering a column reference without a walk, −1% / −5% / −3%.
+
+**What the profile shows after**: the compile walk is 35% of the point `SELECT` and the two parses 63%; native runtime frames still a quarter; `FindSourceColumnOfAnyKind` 5–6% from its call count rather than its compares; the walk visitors' delegates 6–10% of the bytes, the largest single type; `BuiltInArity.For`'s ~300-arm switch 3% of the SMO-style query.
+These are listed with what each would take in the [backlog](backlog.md#complex-query-execution--perf-residuals).
 
 ## Not modeled / future
 

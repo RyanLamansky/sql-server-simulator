@@ -40,6 +40,10 @@ internal sealed partial class Selection
 
     private static (int SourceIndex, int ColumnIndex) FindSourceColumnOfAnyKind(FromSource[] sources, MultiPartName name)
     {
+        // Every reference walks every column it may name, so the leaf's
+        // ordinal check is made once here and each source's once per source.
+        var leaf = name.Leaf;
+        var leafOrdinal = BuiltInToken.IsOrdinalComparable(leaf);
         if (name.ImmediateQualifier is { } qualifier)
         {
             for (var s = 0; s < sources.Length; s++)
@@ -48,9 +52,10 @@ internal sealed partial class Selection
                     continue;
                 if (name.Count >= 3 && !sources[s].AnswersPrefix(name, name.Count - 1))
                     return (-1, -1);
+                var ordinal = leafOrdinal && sources[s].ColumnNamesAreOrdinalComparable();
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
-                    if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
+                    if (ColumnNameMatches(sources[s].ColumnNames[c], leaf, ordinal))
                         return (s, c);
                 }
                 // Qualifier matched but the column doesn't exist in that
@@ -69,9 +74,10 @@ internal sealed partial class Selection
         var matches = 0;
         for (var s = 0; s < sources.Length; s++)
         {
+            var ordinal = leafOrdinal && sources[s].ColumnNamesAreOrdinalComparable();
             for (var c = 0; c < sources[s].ColumnNames.Length; c++)
             {
-                if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
+                if (ColumnNameMatches(sources[s].ColumnNames[c], leaf, ordinal))
                 {
                     if (matches == 0)
                     {
@@ -102,6 +108,14 @@ internal sealed partial class Selection
             ? AnyPlaceholderSource(sources) ? (foundSource, foundColumn) : throw SimulatedSqlException.AmbiguousColumnName(name.Leaf)
             : matches == 1 ? (foundSource, foundColumn) : (-1, -1);
     }
+
+    /// <summary>
+    /// <see cref="BuiltInToken.Equals(string?, string?)"/>, compared ordinally
+    /// when <paramref name="ordinal"/> says both sides are names
+    /// <see cref="BuiltInToken.IsOrdinalComparable"/> admits.
+    /// </summary>
+    private static bool ColumnNameMatches(string column, string leaf, bool ordinal) =>
+        ordinal ? string.Equals(column, leaf, StringComparison.OrdinalIgnoreCase) : BuiltInToken.Equals(column, leaf);
 
     /// <summary>
     /// Records the facts <c>CREATE INDEX</c> judges a view on, when a
@@ -1654,13 +1668,15 @@ internal sealed partial class Selection
             var matchColumn = -1;
             var matches = 0;
             var qualifier = name.ImmediateQualifier;
+            var leafOrdinal = BuiltInToken.IsOrdinalComparable(name.Leaf);
             for (var s = 0; s < sources.Length; s++)
             {
                 if (qualifier is not null && (sources[s].Qualifier is null || !BuiltInToken.Equals(sources[s].Qualifier, qualifier)))
                     continue;
+                var ordinal = leafOrdinal && sources[s].ColumnNamesAreOrdinalComparable();
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
-                    if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
+                    if (ColumnNameMatches(sources[s].ColumnNames[c], name.Leaf, ordinal))
                     {
                         matchSource = s;
                         matchColumn = c;
@@ -1730,10 +1746,8 @@ internal sealed partial class Selection
         foreach (var expression in expressions)
         {
             // An unbindable name marks nothing; typing reports it below.
-            Reference.MarkNumericSpelled(expression, name =>
-                TryResolveSourceColumn(sources, name) is { } id && sources[id.Source].Columns[id.Column].SpelledNumeric);
-            Reference.MarkAliasTyped(expression, name =>
-                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column].AliasType : null);
+            Reference.MarkBoundColumns(expression, name =>
+                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column] : null);
         }
 
         for (var i = 0; i < expressions.Count; i++)

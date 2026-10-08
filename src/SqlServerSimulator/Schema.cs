@@ -55,7 +55,7 @@ internal sealed class Schema
         this.Database = database;
         this.Name = name;
         this.SchemaId = schemaId;
-        var collation = database.Collation;
+        var collation = database.Collation.NameKeys;
         this.HeapTables = new(collation);
         this.Functions = new(collation);
         this.Views = new(collation);

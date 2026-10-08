@@ -5,7 +5,8 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Guards the equivalence <see cref="BuiltInToken"/> relies on to answer
-/// most comparisons ordinally: over ASCII alphanumerics an
+/// most comparisons ordinally: over ASCII alphanumerics and the identifier
+/// marks <c>_</c>, <c>@</c>, <c>#</c>, <c>$</c> an
 /// ordinal-ignore-case compare and the linguistic compare under
 /// <c>IgnoreCase | IgnoreKanaType | IgnoreWidth</c> agree, so the cheaper
 /// one may stand in. Every input outside that range has to keep reaching
@@ -30,10 +31,10 @@ public sealed class BuiltInTokenComparisonTests
         CultureInfo.InvariantCulture.CompareInfo.Compare(x, y, Options) == 0;
 
     private static readonly string[] Alphabet =
-        [.. "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".Select(c => c.ToString())];
+        [.. "#$0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".Select(c => c.ToString())];
 
     [TestMethod]
-    public void AsciiAlphanumerics_AgreeWithLinguisticCompare()
+    public void IdentifierCharacters_AgreeWithLinguisticCompare()
     {
         // Every one- and two-character word over the range the shortcut
         // admits, against every other: the shortcut is only sound if the two
@@ -101,8 +102,8 @@ public sealed class BuiltInTokenComparisonTests
     [TestMethod]
     public void Underscores_AndOtherNonAlphanumerics_AgreeWithLinguisticCompare()
     {
-        // Names outside the shortcut's range still have to answer correctly —
-        // system-proc and level-type tokens are full of underscores.
+        // System-proc and level-type tokens are full of underscores, which the
+        // shortcut admits, so these compare ordinally.
         string[] names = ["sp_addextendedproperty", "SP_ADDEXTENDEDPROPERTY", "level0type", "LEVEL0TYPE", "fn_listextendedproperty", "sp_help"];
         foreach (var x in names)
         {

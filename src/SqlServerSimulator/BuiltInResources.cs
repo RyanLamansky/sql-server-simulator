@@ -104,6 +104,8 @@ internal static partial class BuiltInResources
             if (CatalogViewObjectIds.ByKey.TryGetValue(key, out var realId))
                 view.ObjectId = realId;
         }
-        return views.ToFrozenDictionary(BuiltInToken.Comparer);
+        // Every object reference a FROM clause names is looked up here first,
+        // so the ICU sort key behind BuiltInToken's hash is memoized.
+        return views.ToFrozenDictionary(new MemoizedHashComparer(BuiltInToken.Comparer));
     }
 }

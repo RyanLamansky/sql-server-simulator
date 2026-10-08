@@ -1283,7 +1283,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
         try
         {
-            while (Tokenizer.NextToken(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
+            while (Tokenizer.NextTokenPastBlanks(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
             {
                 if (token is Whitespace or Comment)
                     continue;

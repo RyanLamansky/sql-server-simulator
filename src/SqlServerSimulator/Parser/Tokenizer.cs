@@ -84,6 +84,19 @@ static class Tokenizer
             var c => throw SimulatedSqlException.SyntaxErrorNear(c) // Might throw on valid-but-unsupported syntax.
         };
 
+    /// <summary>
+    /// <see cref="NextToken"/> past any run of the blanks it reads as a
+    /// <see cref="Whitespace"/> token, for a reader that discards those: a
+    /// parse meets one between most pairs of tokens, and building each only to
+    /// drop it was a sixth of the token objects a one-off text allocated.
+    /// </summary>
+    public static Token? NextTokenPastBlanks(string command, ref int index, Collation activeCollation, bool quotedIdentifiers, CompatibilityLevel compatibilityLevel)
+    {
+        while (index < command.Length && command[index] is ' ' or '\r' or '\n' or '\t')
+            index++;
+        return NextToken(command, ref index, activeCollation, quotedIdentifiers, compatibilityLevel);
+    }
+
     private static Whitespace ParseWhitespace(string command, ref int index)
     {
         var start = index;
@@ -346,6 +359,15 @@ static class Tokenizer
     private static string ParseQuotedBody(string command, ref int index, char quote)
     {
         var openIndex = index;
+        // A body holding no doubled delimiter is the text up to the first
+        // one, read without building it a character at a time.
+        var close = command.IndexOf(quote, openIndex + 1);
+        if (close >= 0 && (close + 1 == command.Length || command[close + 1] != quote))
+        {
+            index = close + 1;
+            return command.Substring(openIndex + 1, close - openIndex - 1);
+        }
+
         var builder = new StringBuilder();
         while (++index < command.Length)
         {
@@ -535,6 +557,17 @@ static class Tokenizer
     private static DelimitedIdentifier ParseBracketDelimitedIdentifier(string command, ref int index)
     {
         var start = index;
+        // As in ParseQuotedBody, a name holding no ]] escape is the text up to
+        // the first ].
+        var close = command.IndexOf(']', start + 1);
+        if (close >= 0 && (close + 1 == command.Length || command[close + 1] != ']'))
+        {
+            index = close + 1;
+            return close == start + 1
+                ? throw SimulatedSqlException.EmptyColumnAlias()
+                : new(command.Substring(start + 1, close - start - 1), command, start, close - start);
+        }
+
         var builder = new StringBuilder();
         while (++index < command.Length)
         {

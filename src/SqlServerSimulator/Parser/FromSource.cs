@@ -196,6 +196,27 @@ internal sealed class FromSource(
     /// </summary>
     public readonly string? AutoElementName = autoElementName;
     public readonly string[] ColumnNames = columnNames;
+
+    /// <summary>
+    /// Whether every <see cref="ColumnNames"/> entry is one
+    /// <see cref="BuiltInToken.IsOrdinalComparable"/> admits: 0 not yet
+    /// asked, 1 yes, 2 no. Settled on first ask and idempotent, so a plan
+    /// shared across sessions may race to settle it.
+    /// </summary>
+    private int columnNamesOrdinal;
+
+    /// <summary>
+    /// Whether a column-name match against a name
+    /// <see cref="BuiltInToken.IsOrdinalComparable"/> admits may compare
+    /// ordinally, which name resolution asks per column per reference.
+    /// </summary>
+    public bool ColumnNamesAreOrdinalComparable()
+    {
+        if (this.columnNamesOrdinal == 0)
+            this.columnNamesOrdinal = Array.TrueForAll(this.ColumnNames, name => name is not null && BuiltInToken.IsOrdinalComparable(name)) ? 1 : 2;
+        return this.columnNamesOrdinal == 1;
+    }
+
     public readonly HeapColumn[] Columns = columns;
     public readonly HeapColumn[] StoredSchema = storedSchema;
     public readonly int[]? StorageOrdinals = storageOrdinals;

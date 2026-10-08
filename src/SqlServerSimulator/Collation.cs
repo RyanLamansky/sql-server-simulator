@@ -102,6 +102,14 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
     private CaseMap? caseMap;
 
+    /// <summary>
+    /// This collation as the comparer of a dictionary keyed by object names,
+    /// with its hash memoized by text (see <see cref="MemoizedHashComparer"/>).
+    /// Built on first use and held on the interned instance; a first-touch race
+    /// builds two equivalent comparers, which only splits the memo.
+    /// </summary>
+    internal MemoizedHashComparer NameKeys => field ??= new(this);
+
     /// <summary>The <c>UPPER</c> / <c>LOWER</c> mapping this collation applies; see <see cref="CaseMap"/>.</summary>
     internal CaseMap CaseMapping() => this.caseMap ??= CaseMap.For(this);
 

@@ -17,7 +17,7 @@ sealed class DoubleAtPrefixedString(string command, int index, int length) : Str
                 if (source[i] != '_')
                     stripped[pos++] = source[i];
             }
-            return Enum.TryParse<AtAtKeyword>(stripped[..pos], true, out _);
+            return EnumNameLookup<AtAtKeyword>.TryParse(stripped[..pos], out _);
         }
     }
 
@@ -36,7 +36,7 @@ sealed class DoubleAtPrefixedString(string command, int index, int length) : Str
             if (source[i] != '_')
                 stripped[pos++] = source[i];
         }
-        return !Enum.TryParse<AtAtKeyword>(stripped[..pos], true, out var result)
+        return !EnumNameLookup<AtAtKeyword>.TryParse(stripped[..pos], out var result)
             ? throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{this.Span}`.")
             : result;
     }

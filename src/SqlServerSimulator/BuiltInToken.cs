@@ -52,7 +52,7 @@ internal static class BuiltInToken
     /// <see cref="StringComparison.OrdinalIgnoreCase"/> are interchangeable.
     /// </summary>
     private static readonly SearchValues<char> ordinalComparableCharacters =
-        SearchValues.Create("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+        SearchValues.Create("#$0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz");
 
     /// <summary>
     /// Whether <paramref name="value"/> lies in the character range where an
@@ -61,10 +61,17 @@ internal static class BuiltInToken
     /// <see cref="Options"/> answers, letting the cheaper comparison stand in.
     /// </summary>
     /// <remarks>
-    /// The two comparisons agree on ASCII alphanumerics because each such
-    /// character carries its own primary collation weight, case is the only
-    /// difference the options erase, and none of them participate in a
-    /// contraction, an expansion, or a zero weight. Every character outside
+    /// The two comparisons agree on ASCII alphanumerics and the four marks an
+    /// identifier body may hold (<c>_</c>, <c>@</c>, <c>#</c>, <c>$</c>)
+    /// because each such character carries its own primary collation weight,
+    /// case is the only difference the options erase, and none of them
+    /// participate in a contraction, an expansion, or a zero weight — every
+    /// pair of strings of up to four characters drawn from letters, digits
+    /// and the four marks compares alike both ways under ICU 74 (checked
+    /// 2026-10-08).
+    /// Underscored names are most of what reaches this matcher — catalog
+    /// columns (<c>schema_id</c>) and snake_case schemas — and on the
+    /// linguistic path each compare cost an ICU call. Every character outside
     /// that range is a candidate to break one of those properties, and the
     /// ones that do are not exotic: a fullwidth <c>Ｓ</c> matches an ASCII
     /// <c>S</c> under <see cref="CompareOptions.IgnoreWidth"/>, and control
@@ -73,7 +80,7 @@ internal static class BuiltInToken
     /// linguistically while an ordinal compare separates them. Both cases
     /// land on the linguistic path.
     /// </remarks>
-    private static bool IsOrdinalComparable(string value) =>
+    internal static bool IsOrdinalComparable(string value) =>
         !value.AsSpan().ContainsAnyExcept(ordinalComparableCharacters);
 
     /// <summary>

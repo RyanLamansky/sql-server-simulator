@@ -33,10 +33,19 @@ internal abstract class ExpressionNode
     /// children. Runs on an explicit stack rather than recursion, since a long
     /// operator chain nests thousands of nodes deep.
     /// </summary>
+    /// <remarks>
+    /// The shape and stack are reused across walks on a thread: binding one
+    /// statement walks its trees dozens of times, and building them afresh per
+    /// walk was a sixth of what parsing a one-off <c>SELECT</c> allocated.
+    /// A visitor that walks again takes another, so the thread keeps one per
+    /// nesting depth it has reached.
+    /// </remarks>
     internal void Walk(Func<ExpressionNode, NodeShape, bool> visit)
     {
-        var shape = new NodeShape();
-        var pending = new Stack<ExpressionNode>();
+        var state = idleWalkStates ?? new WalkState();
+        idleWalkStates = state.NextIdle;
+        var shape = state.Shape;
+        var pending = state.Pending;
         pending.Push(this);
         while (pending.TryPop(out var node))
         {
@@ -50,6 +59,23 @@ internal abstract class ExpressionNode
                     pending.Push(child);
             }
         }
+        // Holds no node past the walk, and is left unreturned by a visitor
+        // that throws, whose stack may still hold some.
+        shape.Clear();
+        state.NextIdle = idleWalkStates;
+        idleWalkStates = state;
+    }
+
+    [ThreadStatic]
+    private static WalkState? idleWalkStates;
+
+    private sealed class WalkState
+    {
+        public readonly NodeShape Shape = new();
+
+        public readonly Stack<ExpressionNode> Pending = new();
+
+        public WalkState? NextIdle;
     }
 }
 

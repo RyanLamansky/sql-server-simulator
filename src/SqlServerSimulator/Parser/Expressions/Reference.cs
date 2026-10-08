@@ -25,21 +25,29 @@ internal sealed class Reference : Expression
 
     internal override bool ResultReportsNumeric => this.readsNumericColumn;
 
-    /// <summary>The alias type of the column this reference binds to; set by <see cref="MarkAliasTyped"/>.</summary>
+    /// <summary>The alias type of the column this reference binds to; set by <see cref="MarkBoundColumns"/>.</summary>
     private Schemas.AliasType? aliasType;
 
     internal override Schemas.AliasType? ResultAliasType => this.aliasType;
 
     /// <summary>
-    /// Records on every reference in <paramref name="root"/> the alias type
-    /// <paramref name="aliasOf"/> reports for the column it binds to. A
-    /// subquery binds in its own scope and isn't entered.
+    /// Records on every reference in <paramref name="root"/> what the column
+    /// <paramref name="columnOf"/> binds it to says about how it reads: the
+    /// column's alias type, and whether it is numeric-spelled (as
+    /// <see cref="MarkNumericSpelled"/>). A reference binding to no column
+    /// keeps no alias type. A subquery binds in its own scope and isn't
+    /// entered.
     /// </summary>
-    internal static void MarkAliasTyped(ExpressionNode root, Func<MultiPartName, Schemas.AliasType?> aliasOf) =>
+    internal static void MarkBoundColumns(ExpressionNode root, Func<MultiPartName, HeapColumn?> columnOf) =>
         root.Walk((node, _) =>
         {
             if (node is Reference reference)
-                reference.aliasType = aliasOf(reference.ReferencedName);
+            {
+                var column = columnOf(reference.ReferencedName);
+                if (column is { SpelledNumeric: true })
+                    reference.readsNumericColumn = true;
+                reference.aliasType = column?.AliasType;
+            }
             return true;
         });
 
