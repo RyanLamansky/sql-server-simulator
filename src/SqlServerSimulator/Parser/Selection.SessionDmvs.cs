@@ -232,9 +232,9 @@ partial class Selection
             // running, which only the querying session's own reach sees.
             if (connection == batch.Connection)
             {
-                foreach (var (name, cursor) in batch.LocalCursors)
+                foreach (var (name, cursor) in batch.LocalCursors ?? [])
                     Add(cursor, name);
-                foreach (var (name, cursor) in batch.CursorVariables)
+                foreach (var (name, cursor) in batch.CursorVariables ?? [])
                     Add(cursor, "@" + name);
             }
             foreach (var (name, cursor) in connection.Cursors)

@@ -205,7 +205,7 @@ internal sealed class NextValueFor : Expression
             throw SimulatedSqlException.InvalidObjectName(missing, 211);
         if (this.OverRank is { } rank)
             return this.DrawRanked(runtime, rank);
-        if (batch.SequenceRowCache.TryGetValue(this.Sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)
+        if (batch.SequenceRowCache?.TryGetValue(this.Sequence, out var entry) == true && entry.Stamp == batch.CurrentRowStamp)
             return entry.Value;
         if (batch.SequenceValuesByRow?.TryGetValue((this.Sequence, batch.CurrentRowStamp), out var retained) == true)
             return retained;
@@ -222,7 +222,7 @@ internal sealed class NextValueFor : Expression
         // is actually drawn (probed 2026-09-25 against SQL Server 2025).
         this.Sequence.Schema.Database.RejectWriteWhenReadOnly();
         var value = this.Sequence.Advance();
-        batch.SequenceRowCache[this.Sequence] = (batch.CurrentRowStamp, value);
+        (batch.SequenceRowCache ??= [])[this.Sequence] = (batch.CurrentRowStamp, value);
         if (batch.SequenceValuesByRow is { } byRow)
             byRow[(this.Sequence, batch.CurrentRowStamp)] = value;
         return value;

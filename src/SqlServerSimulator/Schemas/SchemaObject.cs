@@ -84,6 +84,14 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public AttachedTriggerSet? AttachedTriggers;
 
     /// <summary>
+    /// The <c>inserted</c> / <c>deleted</c> pairs this table's <c>AFTER</c>
+    /// triggers and this table's or view's <c>INSTEAD OF</c> trigger read,
+    /// kept across firings (<see cref="Parser.PseudoTableSlot"/>); null until
+    /// one fires.
+    /// </summary>
+    public Parser.PseudoTableSlot? AfterPseudoTables, InsteadOfPseudoTables;
+
+    /// <summary>
     /// The row-level security this table carries as of one
     /// <see cref="Simulation.SchemaVersion"/>, kept by
     /// <see cref="Parser.RowSecurity.For"/>; null until first asked.

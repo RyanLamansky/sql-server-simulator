@@ -90,14 +90,13 @@ internal sealed class CursorStatusFunction : Expression
         if (isVariable)
         {
             var varName = name.StartsWith('@') ? name[1..] : name;
-            return SqlValue.FromInt16((short)(batch.CursorVariables.TryGetValue(varName, out var bound)
+            return SqlValue.FromInt16((short)(batch.TryGetCursorVariable(varName, out var bound)
                 ? bound?.StatusValue ?? -2
                 : -3));
         }
 
         // 'local' / 'global' scope: the respective named-cursor map only.
-        var map = isLocal ? batch.LocalCursors : batch.Connection.Cursors;
-        return SqlValue.FromInt16((short)(map.TryGetValue(name, out var cursor)
+        return SqlValue.FromInt16((short)((isLocal ? batch.TryGetLocalCursor(name, out var cursor) : batch.Connection.Cursors.TryGetValue(name, out cursor))
             ? cursor.StatusValue
             : -3));
     }

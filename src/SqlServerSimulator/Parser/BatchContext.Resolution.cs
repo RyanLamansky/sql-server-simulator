@@ -89,25 +89,44 @@ internal sealed partial class BatchContext
         return true;
     }
 
+    /// <summary>
+    /// Notes that the statement parsing binds <paramref name="frame"/>'s
+    /// <c>inserted</c> or <c>deleted</c>: a kept pair the firing holds, whose
+    /// statement plans the next firing holding it replays
+    /// (<see cref="StatementPseudoTables"/>), or tables of the firing's own,
+    /// which no plan can serve again (<see cref="StatementBindsFiringPseudoTables"/>).
+    /// A SQLCLR routine's context-connection command takes the second way:
+    /// its text is a batch of its own, whose plans aren't the trigger's.
+    /// </summary>
+    private void NotePseudoTableRead(TriggerFrame frame)
+    {
+        if (frame.PseudoTables is { } kept && !this.IsContextConnectionCommand)
+        {
+            this.StatementPseudoTables = kept;
+            return;
+        }
+        this.HasSessionScopedReference = true;
+        this.StatementBindsFiringPseudoTables = true;
+    }
+
     private bool TryResolveTableCore(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
     {
         // Trigger pseudo-tables INSERTED / DELETED resolve first when a
         // trigger body is in flight. 1-part names only (probe-confirmed:
         // qualified `dbo.inserted` raises Msg 208 in real SQL Server).
         // Pseudo-tables are batch-local materializations — no Sch-S needed
-        // (no DDL can target them) — and belong to one firing, so a plan
-        // binding one can't serve the next.
+        // (no DDL can target them).
         if (this.TriggerFrame is { } triggerFrame && name.Count == 1)
         {
             if (BuiltInToken.Equals(name.Leaf, "inserted") && triggerFrame.Inserted is { } ins)
             {
-                this.HasSessionScopedReference = true;
+                this.NotePseudoTableRead(triggerFrame);
                 table = ins;
                 return true;
             }
             if (BuiltInToken.Equals(name.Leaf, "deleted") && triggerFrame.Deleted is { } del)
             {
-                this.HasSessionScopedReference = true;
+                this.NotePseudoTableRead(triggerFrame);
                 table = del;
                 return true;
             }
@@ -170,7 +189,7 @@ internal sealed partial class BatchContext
             this.HasSessionScopedReference = true;
             this.CurrentStatement.ReadsTemporaryObject = true;
             this.CurrentStatement.ReadsTableVariable = true;
-            return this.TableVariables.TryGetValue(name.Leaf[1..], out table);
+            return this.TryGetTableVariable(name.Leaf[1..], out table);
         }
 
         if (!this.TryResolveSchema(name, out var schema))

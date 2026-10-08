@@ -24,7 +24,14 @@ internal delegate T LobChainReader<TState, T>(ReadOnlySpan<byte> bytes, TState s
 /// is enough to drive the encoder/decoder through real page-bounded storage
 /// while leaving room for IAM/PFS modeling later.
 /// </summary>
-internal sealed class Heap
+/// <param name="sessionPrivate">
+/// Sizes the heap's concurrent maps for the session-private table it backs —
+/// a table variable, a trigger's pseudo-table, a function's return table —
+/// which one session writes, so each holds one lock where a shared table's
+/// holds one per processor (about a kilobyte apiece, which every such table
+/// once paid).
+/// </param>
+internal sealed class Heap(bool sessionPrivate = false)
 {
     /// <summary>
     /// SQL Server's documented in-row record size limit. The encoder pushes
@@ -245,7 +252,7 @@ internal sealed class Heap
     /// others twice.
     /// </para>
     /// </summary>
-    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
+    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = sessionPrivate ? new(concurrencyLevel: 1, capacity: 0) : new();
 
     /// <summary>
     /// Monotonic counter bumped by every <see cref="Insert"/>,
@@ -662,7 +669,7 @@ internal sealed class Heap
     /// call paths; weakly-consistent iteration is fine — a missed candidate just
     /// defers reuse to the next insert.
     /// </summary>
-    private readonly ConcurrentDictionary<int, byte> reclaimablePages = new();
+    private readonly ConcurrentDictionary<int, byte> reclaimablePages = sessionPrivate ? new(concurrencyLevel: 1, capacity: 0) : new();
 
     /// <summary>
     /// Records that page <paramref name="pageIndex"/> holds reclaimable space.

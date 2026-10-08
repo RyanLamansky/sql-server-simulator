@@ -95,7 +95,8 @@ It's set in these places, all at parse time:
 3. **The recursive-CTE builder** (`Simulation.With.cs`): a recursive-CTE plan rebinds `CteBinding.CurrentIterationRows` at execution time, so a cached copy replayed by two commands concurrently would cross-feed iteration rowsets.
    A FROM-less anchor (`SELECT 1 … UNION ALL …`) was already disqualified by rule 2; the builder's own flag covers FROM-ful anchors.
    Non-recursive CTEs stay cacheable (their bindings are read-only after parse).
-4. **A trigger body's `inserted` / `deleted`** (`TryResolveTable`): each firing materializes its own, so a statement plan binding one would read the firing that recorded it.
+4. **A trigger body's `inserted` / `deleted` of its firing's own** (`TryResolveTable`): a firing finding its parent's kept pair taken — by another session, or by a firing it is nested in — materializes a pair for itself, which no later firing reads, so a plan binding one couldn't serve again; the statement also records nothing at all (`StatementBindsFiringPseudoTables`), leaving the kept pair's plans in place.
+   The kept pair itself is no session-scoped reference: a plan over it replays for whichever firing holds it ([`triggers.md`](triggers.md#statement-plans-over-the-pseudo-tables)).
 
 All conditions disqualify identically at the promotion site.
 The flag name is intentionally general — what matters is "this plan can't be safely replayed", not the cause.
@@ -173,7 +174,7 @@ Checked per statement, since an earlier statement in the batch can change what t
 
 And per shape, at the split point (`NoteDmlPlan` plus each parser's `admitted`, `TakeParse` for both kinds):
 
-- No session-scoped reference — a `#temp` table, a table variable, a TVP, a trigger's `inserted` / `deleted`, a FROM-less `SELECT`'s values settled while parsing — and no informational message queued by the parse (a join-order warning, say), which a replay wouldn't send; no `OPTION (RECOMPILE)`, no `SELECT … INTO`.
+- No session-scoped reference — a `#temp` table, a table variable, a TVP, a trigger's `inserted` / `deleted` materialized for its firing alone, a FROM-less `SELECT`'s values settled while parsing — and no informational message queued by the parse (a join-order warning, say), which a replay wouldn't send; no `OPTION (RECOMPILE)`, no `SELECT … INTO`.
 
 - A table in the session's own database, or a stored view writing through to its one base table (`AdmitsDmlPlan`): not a table variable, a `#temp` table (any session-scoped reference in the statement), a TVP, a linked server's table, or a table whose writes check the session's SET options (an indexed view, a filtered index, a persisted computed column — `RequiresCorrectSetOptions`).
   A view qualifies only with no `OUTPUT` clause, whose view columns read through the parsing batch (`SingleBaseViewReader`), and with no trigger, enabled or not, on it or on a view down its chain (`ViewChainHasTrigger`), since which way a write through a view routes is settled while parsing from its `INSTEAD OF` triggers' enabled state.
@@ -199,7 +200,8 @@ What else a body's binding reads is either repeated per execution or declines, t
 
 - **The module's version.** `ALTER` and every schema change move the schema version each entry is stamped with, so the next call records again; `DBCC FREEPROCCACHE` and `CLEAR PROCEDURE_CACHE` remove the entries with the batch ones.
 - **Recompile requests.** A call that compiles the body afresh — `EXEC … WITH RECOMPILE`, a procedure created `WITH RECOMPILE` — takes no key, and a statement compiling as it runs ([above](#what-a-statement-plan-declines)) parses; `sp_recompile` leaves the entries, which hold nothing a compile sends.
-- **Temporary objects.** A `#temp` table, the body's own or the caller's, binds differently per call and per caller, a table variable and a TVP belong to the call, and `inserted` / `deleted` to the firing: each marks its statement session-scoped, so it parses every call — real recompiles such a statement too, on the temp table's own DDL.
+- **Temporary objects.** A `#temp` table, the body's own or the caller's, binds differently per call and per caller, and a table variable and a TVP belong to the call: each marks its statement session-scoped, so it parses every call — real recompiles such a statement too, on the temp table's own DDL.
+- **A trigger's pseudo-tables.** `inserted` / `deleted` are a pair kept on the parent and refilled per firing, so a statement over them replays, but only in a firing holding the pair its plan names (`StatementPlanEntry.PseudoTables`, checked by `CurrentStatementPlan`); a firing that found the pair taken parses them as tables of its own ([`triggers.md`](triggers.md#statement-plans-over-the-pseudo-tables)).
 - **Principals.** The ownership chain the body runs under (`OwnershipChainOwnerId`), its `EXECUTE AS` frame, masks, row-level security and the permission checks are read as each call runs or repeated from the recording, as for any principal ([below](#principal-independence)).
 - **What a call reads of its caller.** `@@PROCID`, the error attribution (`ErrorProcedureName`, `LineOffset`) and the body's variables are read from the executing batch, never the plan.
 
@@ -362,7 +364,7 @@ The shared-plan contract has its own section of tests there: parameterized TOP /
 `PlanCacheRetentionTests` (Tests.Internal) pins that an abandoned connection whose SELECT became a cached plan is still finalized and reclaimed.
 
 `Simulation.DmlPlanHits` and `DmlPlanRecordings` back `DmlPlanCacheTests` (Tests.Internal): EF Core's insert, update-batch, delete, `MERGE`, trigger-table, `ExecuteUpdate` and `ExecuteDelete` shapes (`OUTPUT … INTO @inserted0` included), a `MERGE` from a table, from a query and through a view, a subquery and a correlated `EXISTS`, `INSERT … SELECT` (parenthesized too) and `DEFAULT VALUES`, the joined forms (a target the `FROM` clause omits included) and a write through a view replay statement by statement; a `MERGE` into a table variable or onto a table with an `INSTEAD OF` trigger, a client `OUTPUT` on a triggered table, a write through a view with a trigger or an `OUTPUT` clause, an `INSERT … SELECT` into a table a security policy names, a `#temp` target, a statement under a `WITH` prefix or inside a block, another isolation level and a key option changed mid-batch all re-parse, while an impersonated principal replays; a schema change re-parses once and then replays again, `FREEPROCCACHE` drops the plans, parameter types keep separate plans, and an abandoned connection that recorded a plan is still reclaimed.
-`Simulation.SelectPlanHits` and `SelectPlanRecordings` count the `SELECT` statement plans, and back `StatementPlanCacheTests` (Tests.Internal) beside the DML counters: a procedure's queries and writes replay from the call after the one that recorded them — called as text, as an RPC, from a `WHILE` loop, through `sp_executesql` — as do a trigger's statements reading no pseudo-table and a function's query, while `WITH RECOMPILE` (on the procedure or the call), `OPTION (RECOMPILE)`, a caller's `#temp` table and a TVP parse every call, and an `ALTER` or `FREEPROCCACHE` records again.
+`Simulation.SelectPlanHits` and `SelectPlanRecordings` count the `SELECT` statement plans, and back `StatementPlanCacheTests` (Tests.Internal) beside the DML counters: a procedure's queries and writes replay from the call after the one that recorded them — called as text, as an RPC, from a `WHILE` loop, through `sp_executesql` — as do a trigger's statements — over the pseudo-tables too, fired per `MERGE` action, through an `INSTEAD OF` on a view, and with a firing nested on the same table parsing its own without displacing the outer firing's plans, while a `GLOBAL` cursor left open over `inserted` makes each firing record afresh — and a function's query, while `WITH RECOMPILE` (on the procedure or the call), `OPTION (RECOMPILE)`, a caller's `#temp` table and a TVP parse every call, and an `ALTER` or `FREEPROCCACHE` records again.
 `PlanCacheTests.TempTableChurnOnAnotherSession_LeavesPlansStanding` pins that another session's temp-table `CREATE` / `DROP` leaves a `SELECT` and a DML plan replaying.
 Whether a replay reports what a fresh parse reports is `DmlPlanReplayTests`' and `StatementPlanReplayTests`' ([above](#statement-plans)).
 
@@ -720,10 +722,31 @@ The last two already skip the walk (`compiledBatches`, `ModulePlan`), paying at 
 The ad hoc and `#temp` rows are what's left, and the walk can't simply be skipped or shared there — see the [backlog entry](backlog.md#complex-query-execution--perf-residuals) for why, and for the split of a trivial `SELECT`'s ~9.5 µs parse.
 Those rows didn't move (ad hoc `SELECT` 21.3 → 21.5 µs, join 51.6 → 51.2 µs, `UPDATE` 13.0 → 13.0 µs, the `#temp` batch 81.6 → 80.6 µs).
 
+### Trigger bodies over their pseudo-tables, and function calls
+
+ADO.NET against a 1,000-row table clustered on `Id` under an `AFTER INSERT, UPDATE, DELETE` trigger writing `inserted FULL JOIN deleted` into an identity-keyed audit table, one case per process, 3 s warm-up then 3 s timed (median of 0.25 s blocks), three processes per build alternating the build at the previous commit (A) and this one (B), the median of the three (measured 2026-10-08):
+
+| Shape | A | B | Δ |
+|---|---|---|---|
+| A single-row `UPDATE` firing the trigger | 56.4 µs | 16.0 µs | −72% |
+| A 100-row `UPDATE` firing it | 638 µs | 589 µs | −8% |
+| A single-row `INSERT` and `DELETE`, two firings | 95.2 µs | 26.7 µs | −72% |
+| A 100-row `INSERT … SELECT` and `DELETE` | 1,266 µs | 1,122 µs | −11% |
+| A one-row `MERGE` firing it (update or insert) | 59.1 µs | 17.4 µs | −71% |
+| A two-row `MERGE` firing it twice, and a `DELETE` | 153 µs | 49.0 µs | −68% |
+| A scalar function `RETURN @x * 2` (`INLINE = OFF`) over 1,000 rows | 1.19 ms | 0.99 ms | −17% |
+| A `DECLARE` / `IF` / `SET` / `RETURN` function over 1,000 rows | 4.54 ms | 4.00 ms | −12% |
+| A two-`INSERT` multi-statement function called 100 times from a `WHILE` loop | 1.96 ms | 1.77 ms | −9% |
+
+A firing's saving is its statement's parse, so it is what a few-row firing spends and a small share of a 100-row one, whose audit rows dominate.
+The function rows come from the call's construction (see [`programmable.md`](programmable.md#body-batches-and-the-per-statement-freeze)): allocation per scalar call fell from 4.1 to 3.1 KB, and a body with no plan to replay keeps its parse ([below](#not-modeled--future)).
+The sqllogictest `refs/random` replay took 51 / 52 s before and 51 / 52 s after, and EF Core 10.0.2's stored-procedure update, Northwind bulk update, triggers, identity graph update and Northwind miscellaneous classes in process 30 s either way, with the same outcomes.
+
 ## Not modeled / future
 
 - **DML plans for the declined shapes** — a write through a view with an `OUTPUT` clause (its view-column reader holds the parsing batch) or a trigger down its chain, `INSERT … EXEC`, a write under a `WITH` prefix, and an `INSERT … SELECT` into a table a security policy names (its predicate bind would become a recorded step).
-- **Plans for a trigger body's statements over `inserted` / `deleted`, and for `RETURN`, `SET`, `DECLARE` and conditions** — see the [backlog](backlog.md#complex-query-execution--perf-residuals) for what each would take.
+- **Plans for `RETURN`, `SET`, `DECLARE` and conditions** — see the [backlog](backlog.md#complex-query-execution--perf-residuals) for what each would take.
+- **Plans for a multi-statement function's writes to its return table**, which is a new table each call, as the pseudo-tables once were for each firing.
 - **`SET` / `DECLARE` as recordable effects**, which is what a batch mixing them with a SELECT would need to cache as a SELECT sequence; the DML statement plans don't need it, since they sit beside statements that still parse.
 - LRU eviction, for both layers (the cap is hard FIFO-ish, and a one-shot migration script run first can fill it ahead of the steady-state working set).
 - Parameter-sniffing-style value-dependent plan selection (the simulator has no cost-based optimizer, so this doesn't apply).

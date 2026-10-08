@@ -199,7 +199,18 @@ internal sealed class FromSource(
     public readonly HeapColumn[] Columns = columns;
     public readonly HeapColumn[] StoredSchema = storedSchema;
     public readonly int[]? StorageOrdinals = storageOrdinals;
-    public readonly Heap? LobStore = lobStore;
+#pragma warning disable IDE0032 // The property reads the backing table's heap for a reused pseudo-table, so it isn't the field's wrapper.
+    private readonly Heap? lobStore = lobStore;
+#pragma warning restore IDE0032
+
+    /// <summary>
+    /// The heap the rows' off-row values are read from: the one the source
+    /// was built over, except for a trigger's reused pseudo-table, whose heap
+    /// each firing replaces (<see cref="HeapTable.ReplacesHeapPerFiring"/>) —
+    /// that one is read from the table as the plan runs.
+    /// </summary>
+    public Heap? LobStore => this.BackingTable is { ReplacesHeapPerFiring: true } pseudo ? pseudo.Heap : this.lobStore;
+
     public readonly IEnumerable<byte[]> Rows = rows;
 
     /// <summary>

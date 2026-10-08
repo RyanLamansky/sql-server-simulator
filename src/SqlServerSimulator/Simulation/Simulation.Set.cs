@@ -985,10 +985,10 @@ partial class Simulation
     {
         // Cursor variable: SET @c = CURSOR … / SET @c = @otherVar / SET @c =
         // named_cursor. Routes away from the scalar slot machinery.
-        if (context.Batch.CursorVariables.ContainsKey(variableToken.Value))
+        if (context.Batch.HasCursorVariable(variableToken.Value))
             return TryParseSetCursorVariable(context, variableToken.Value);
 
-        if (!context.Batch.Variables.ContainsKey(variableToken.Value) && !context.Batch.TableVariables.ContainsKey(variableToken.Value))
+        if (!context.Batch.Variables.ContainsKey(variableToken.Value) && !context.Batch.HasTableVariable(variableToken.Value))
         {
             // An undeclared target is refused once the statement has parsed.
             context.MoveNextRequired();
@@ -1185,7 +1185,7 @@ partial class Simulation
                 context.MoveNextOptional();
                 if (context.Batch.IsSkipping)
                     return true;
-                newCursor = context.Batch.CursorVariables.TryGetValue(sourceVar.Value, out var src) && src is not null
+                newCursor = context.Batch.TryGetCursorVariable(sourceVar.Value, out var src) && src is not null
                     ? src
                     : throw SimulatedSqlException.CursorVariableNotAllocated(sourceVar.Value);
                 break;

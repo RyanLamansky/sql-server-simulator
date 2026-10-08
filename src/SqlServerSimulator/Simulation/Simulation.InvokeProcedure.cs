@@ -170,7 +170,7 @@ partial class Simulation
             {
                 if (boundOutputSlots[i] is { } scalarSlot)
                     throw BindingError(SimulatedSqlException.OperandTypeClash(SimulatedSqlException.FamilyRootName(scalarSlot.DeclaredType), "cursor"));
-                if (boundCursorArgNames[i] is { } callerName && outerBatch.CursorVariables.TryGetValue(callerName, out var held) && held is not null)
+                if (boundCursorArgNames[i] is { } callerName && outerBatch.TryGetCursorVariable(callerName, out var held) && held is not null)
                     throw SimulatedSqlException.CursorOutputArgumentAllocated(callerName);
                 continue;
             }
@@ -386,7 +386,7 @@ partial class Simulation
                 foreach (var param in procedure.Parameters)
                 {
                     if (param.IsCursor)
-                        innerBatch.CursorVariables[param.Name] = null;
+                        innerBatch.SetCursorVariable(param.Name, null);
                 }
                 bodyEntered = true;
                 connection.NestingLevel++;
@@ -517,7 +517,7 @@ partial class Simulation
                 // closed leaves the variable unallocated (probed 2026-09-29
                 // against SQL Server 2025).
                 if (boundCursorArgNames[i] is { } callerCursorName && innerBatch is not null
-                    && innerBatch.CursorVariables.TryGetValue(param.Name, out var producedCursor)
+                    && innerBatch.TryGetCursorVariable(param.Name, out var producedCursor)
                     && producedCursor is { IsOpen: true })
                 {
                     RebindCursorVariable(outerBatch, callerCursorName, producedCursor);

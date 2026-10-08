@@ -54,6 +54,9 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
 
     /// <summary>The client-bound <c>OUTPUT</c> shape the parse noted, if any.</summary>
     public (Storage.SqlType[] Schema, string[] ColumnNames)? ClientOutputShape;
+
+    /// <summary>The kept <c>inserted</c> / <c>deleted</c> pair the parse bound, if any.</summary>
+    public PseudoTableSlot? PseudoTables;
 #if DEBUG
 
     /// <summary>The watch over the parse's principal reads, until the split point ends it.</summary>
@@ -93,6 +96,7 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
         this.ReadsTemporaryObject = statement.ReadsTemporaryObject;
         this.ReadsTableVariable = statement.ReadsTableVariable;
         this.ClientOutputShape = statement.ClientOutputShape;
+        this.PseudoTables = batch.StatementPseudoTables;
         return true;
     }
 }
@@ -122,6 +126,13 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
 
     /// <summary>The database the statement parsed in.</summary>
     public readonly Database Database = database;
+
+    /// <summary>
+    /// The kept <c>inserted</c> / <c>deleted</c> pair the plan reads, when the
+    /// statement is a trigger's over them: only a firing holding that pair
+    /// replays it (see <see cref="PseudoTableSlot"/>).
+    /// </summary>
+    public readonly PseudoTableSlot? PseudoTables = recording.PseudoTables;
 
     /// <summary>Whether the statement recorded no plan, its shape being one a replay can't reproduce.</summary>
     public bool IsDeclined => this.Plan is null && this.Query is null;

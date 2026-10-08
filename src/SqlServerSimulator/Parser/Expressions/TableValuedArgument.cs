@@ -35,7 +35,7 @@ internal sealed class TableValuedArgument : Expression
             context.MoveNextRequired();
         }
         if (context.Token is AtPrefixedString variable
-            && context.Batch.TableVariables.TryGetValue(VariableKey(variable.Value), out var table))
+            && context.Batch.TryGetTableVariable(VariableKey(variable.Value), out var table))
         {
             context.MoveNextRequired();
             var closed = 0;
@@ -62,7 +62,7 @@ internal sealed class TableValuedArgument : Expression
     private static string VariableKey(string written) => written.StartsWith('@') ? written[1..] : written;
 
     /// <summary>The table the argument passes, in the batch the call runs in.</summary>
-    public HeapTable Resolve(RuntimeContext runtime) => runtime.Batch.TableVariables[this.variableName];
+    public HeapTable Resolve(RuntimeContext runtime) => runtime.Batch.TableVariables![this.variableName];
 
     public override SqlValue Run(RuntimeContext runtime) => throw new InvalidOperationException("A table-valued argument has no scalar value.");
 

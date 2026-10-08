@@ -84,6 +84,11 @@ internal sealed class HeapTable : SchemaObject
         this.CheckConstraints = checkConstraints is null ? [] : [.. checkConstraints];
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
+        // A table variable is one session's (see Heap's constructor).
+        this.Heap = new(sessionPrivate: isTableVariable);
+        this.RowLocks = isTableVariable ? new(concurrencyLevel: 1, capacity: 0) : new();
+        this.SupersededKeyImages = isTableVariable ? new(concurrencyLevel: 1, capacity: 0) : new();
+        this.KeyLockGroups = isTableVariable ? new(concurrencyLevel: 1, capacity: 0, ReferenceEqualityComparer.Instance) : new(ReferenceEqualityComparer.Instance);
         this.PeriodColumns = periodColumns;
         this.TableDataLock = this.SchemaLock;
         this.TableDataLock.OwningTable = this;
@@ -283,7 +288,7 @@ internal sealed class HeapTable : SchemaObject
     /// ALTER TABLE ADD / DROP COLUMN when existing rows are re-encoded
     /// against the new schema — every other site reads it as fixed.
     /// </summary>
-    public Heap Heap = new();
+    public Heap Heap;
 
     /// <summary>
     /// Recomputes <see cref="StoredColumns"/> / <see cref="StorageOrdinals"/>
@@ -545,6 +550,15 @@ internal sealed class HeapTable : SchemaObject
     /// against SQL Server 2025).
     /// </summary>
     public bool RefusesLegacyLobReads;
+
+    /// <summary>
+    /// For a trigger's <c>inserted</c> / <c>deleted</c> kept across firings
+    /// (<see cref="Parser.PseudoTableSlot"/>), whose <see cref="Heap"/> each
+    /// firing replaces with its own rows: a plan reading the table finds the
+    /// heap through the table as it runs, never one it kept while parsing
+    /// (<see cref="Parser.FromSource.LobStore"/>).
+    /// </summary>
+    public bool ReplacesHeapPerFiring;
 
     /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
@@ -819,7 +833,7 @@ internal sealed class HeapTable : SchemaObject
     /// temp tables / system tables, which never participate in
     /// cross-connection contention.
     /// </summary>
-    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), LockResource> RowLocks = new();
+    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), LockResource> RowLocks;
 
     /// <summary>
     /// Count of connections currently holding a data-<see cref="LockMode.Exclusive"/>
@@ -864,7 +878,7 @@ internal sealed class HeapTable : SchemaObject
     /// every deleted one (probed 2026-09-26 against SQL Server 2025). An
     /// entry retires with the release of its row X.
     /// </summary>
-    public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages = new();
+    public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages;
 
     /// <summary>
     /// Drops <paramref name="resource"/>, the lock of the row at
@@ -913,7 +927,7 @@ internal sealed class HeapTable : SchemaObject
     /// <see cref="ActiveKeyRangeLocks"/> counter, not the dictionary's size, is
     /// what tells a writer whether any testing is needed.
     /// </summary>
-    public readonly ConcurrentDictionary<object, KeyLockGroup> KeyLockGroups = new(ReferenceEqualityComparer.Instance);
+    public readonly ConcurrentDictionary<object, KeyLockGroup> KeyLockGroups;
 
     /// <summary>
     /// Count of holds live across every <see cref="KeyLockGroups"/> anchor.

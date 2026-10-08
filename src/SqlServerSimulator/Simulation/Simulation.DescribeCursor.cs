@@ -82,11 +82,11 @@ partial class Simulation
         switch (scope)
         {
             case 1:
-                _ = batch.LocalCursors.TryGetValue(identity, out cursor);
+                _ = batch.TryGetLocalCursor(identity, out cursor);
                 break;
             case 3:
                 var variable = identity.StartsWith('@') ? identity[1..] : identity;
-                if (!batch.CursorVariables.TryGetValue(variable, out cursor))
+                if (!batch.TryGetCursorVariable(variable, out cursor))
                     throw AtProcedureLine(SimulatedSqlException.CursorProcedureUndeclaredVariable(variable), procedure, line);
                 break;
             default:
@@ -136,9 +136,9 @@ partial class Simulation
         var listed = new List<(int Handle, SqlValue[] Row)>();
         if ((scope & 1) != 0)
         {
-            foreach (var (name, cursor) in batch.LocalCursors)
+            foreach (var (name, cursor) in batch.LocalCursors ?? [])
                 listed.Add((cursor.Handle, DescribeCursorRow(name, cursor, 1, listed: true)));
-            foreach (var (name, cursor) in batch.CursorVariables)
+            foreach (var (name, cursor) in batch.CursorVariables ?? [])
             {
                 if (cursor is not null)
                     listed.Add((cursor.Handle, DescribeCursorRow("@" + name, cursor, 1, listed: true)));
@@ -192,7 +192,7 @@ partial class Simulation
         var returnArgument = bound[0]!.Value;
         if (returnArgument.OutputSlot is { } scalar)
             throw SimulatedSqlException.OperandTypeClash(SimulatedSqlException.FamilyRootName(scalar.DeclaredType), "cursor").PinLine(0);
-        if (returnArgument.CursorVariableName is { } variable && batch.CursorVariables.TryGetValue(variable, out var held) && held is not null)
+        if (returnArgument.CursorVariableName is { } variable && batch.TryGetCursorVariable(variable, out var held) && held is not null)
             throw SimulatedSqlException.CursorOutputArgumentAllocated(variable);
 
         var values = new SqlValue?[parameters.Length];

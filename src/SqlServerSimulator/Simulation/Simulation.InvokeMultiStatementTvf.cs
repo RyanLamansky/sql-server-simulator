@@ -63,11 +63,6 @@ partial class Simulation
         HeapTable?[]? tableArguments)
     {
         var connection = outerBatch.Connection;
-        using var bodyCommand = new SimulatedDbCommand(this, connection);
-#pragma warning disable CA2100 // function.BodyText is the function's pre-validated stored body, not external input
-        bodyCommand.CommandText = function.BodyText;
-#pragma warning restore CA2100
-
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         for (var i = 0; i < function.Parameters.Length; i++)
         {
@@ -124,6 +119,9 @@ partial class Simulation
         // confirmed: even a multi-statement TVF's mid-body error surfaces the
         // referencing SELECT's line, no procedure), so this frame leaves the
         // exception unresolved for the enclosing statement to stamp.
+#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+        var bodyCommand = connection.RentBodyCommand(function.BodyText);
+#pragma warning restore CA2000
         var innerBatch = new BatchContext(bodyCommand, variables)
         {
             SuppressDiagnosticsResolution = true,
@@ -137,7 +135,7 @@ partial class Simulation
         };
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         innerBatch.InheritCallerTriggerFrame(outerBatch);
-        innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
+        innerBatch.SetTableVariable(function.ReturnVariableName, returnTable);
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);
         // WITH EXECUTE AS runs the body as the principal it names, as a
@@ -172,6 +170,7 @@ partial class Simulation
             connection.AnsiNulls = savedAnsiNulls;
             identityScope.Exit(IdentityScopeKind.Function);
             moduleScope.Exit();
+            connection.ReturnBodyCommand(bodyCommand);
         }
 
         // Yield the accumulated @r rows, re-encoded in the selection's own

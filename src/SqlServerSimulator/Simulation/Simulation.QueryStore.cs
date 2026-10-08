@@ -269,7 +269,7 @@ partial class Simulation
     {
         foreach (var name in shape.Variables)
         {
-            if (batch.TableVariables.ContainsKey(name))
+            if (batch.HasTableVariable(name))
                 return true;
         }
         return false;

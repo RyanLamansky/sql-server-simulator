@@ -1859,7 +1859,7 @@ public sealed partial class Simulation
             // ProcArgument shape EXEC's `@local_t` table-variable arg produces.
             if (parameter is SimulatedDbParameter structured
                 && BatchContext.IsTableValuedParameterValue(structured)
-                && batch.TableVariables.TryGetValue(pname, out var tvpClone))
+                && batch.TryGetTableVariable(pname, out var tvpClone))
             {
                 arguments.Add(new ProcArgument(argumentName, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tvpClone));
                 continue;
@@ -2351,7 +2351,17 @@ public sealed partial class Simulation
         // 2026-09-28 against SQL Server 2025).
         if (lifecycle.TimedKind is not null && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, lifecycle.StatementStart)))
             yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
-        foreach (var outcome in ProducedOutcomes(batch, outcomes))
+        // ProducedOutcomes, written out: an iterator of its own would be one
+        // more allocation for every statement.
+        foreach (var message in DrainPendingMessages(connection))
+            yield return message;
+        if (batch.PendingTriggerOutcomes is { Count: > 0 } triggerOutcomes)
+        {
+            batch.PendingTriggerOutcomes = null;
+            foreach (var outcome in triggerOutcomes)
+                yield return outcome;
+        }
+        foreach (var outcome in outcomes)
             yield return outcome;
 
         // Msg 8153 follows the rows of the statement whose aggregate dropped a
@@ -2363,13 +2373,19 @@ public sealed partial class Simulation
             if (connection.AnsiWarnings)
                 yield return NullEliminatedWarning(batch);
         }
-        foreach (var notice in ArithmeticNotices(batch))
-            yield return notice;
+        if (batch.CurrentStatement.OwesOverflowNotice || batch.CurrentStatement.OwesDivideByZeroNotice)
+        {
+            foreach (var notice in ArithmeticNotices(batch))
+                yield return notice;
+        }
         // A statement that turns STATISTICS TIME on or off reports no time,
         // having started or ended without it.
-        var timed = lifecycle.TimedCall || (lifecycle.TimedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
-        foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, lifecycle.StreamedOwnOutcome, lifecycle.StreamedQuery, timed && connection.StatisticsTime, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
-            yield return notice;
+        var timed = (lifecycle.TimedCall || (lifecycle.TimedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone)) && connection.StatisticsTime;
+        if (timed || lifecycle.StatementIo is { IsEmpty: false })
+        {
+            foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, lifecycle.StreamedOwnOutcome, lifecycle.StreamedQuery, timed, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
+                yield return notice;
+        }
 
         // A WRITETEXT BULK has its data once the batch resumes, and runs again
         // from its first token to write it, as a statement of its own.

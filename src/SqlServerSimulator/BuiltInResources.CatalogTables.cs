@@ -38,7 +38,7 @@ partial class BuiltInResources
                 tables.AddRange(connection.TempTables.EnumerateValues());
         }
         tables.AddRange(simulation.GlobalTempTables.EnumerateValues());
-        foreach (var (_, variable) in batch.TableVariables)
+        foreach (var (_, variable) in batch.TableVariables ?? [])
         {
             if (variable.InternalName is not null)
                 tables.Add(variable);

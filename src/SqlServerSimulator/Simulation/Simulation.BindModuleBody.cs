@@ -308,7 +308,7 @@ partial class Simulation
             foreach (var param in parameters)
             {
                 if (param.IsCursor)
-                    batch.CursorVariables[param.Name] = null;
+                    batch.SetCursorVariable(param.Name, null);
             }
             return batch;
         });
@@ -384,7 +384,7 @@ partial class Simulation
         {
             var batch = new BatchContext(bodyCommand, variables);
             SeedTableValuedParameters(batch, outerBatch, CollectionsMarshal.AsSpan(parameters));
-            batch.TableVariables[returnVariableName] = returnTable;
+            batch.SetTableVariable(returnVariableName, returnTable);
             return batch;
         },
         shape,
@@ -503,7 +503,7 @@ partial class Simulation
         for (var i = 0; i < parameters.Length; i++)
         {
             if (parameters[i].TableType is { } tableType)
-                body.TableVariables[parameters[i].Name] = CloneTableValuedArgument(tableType, parameters[i].Name, outerBatch, arguments?[i]);
+                body.SetTableVariable(parameters[i].Name, CloneTableValuedArgument(tableType, parameters[i].Name, outerBatch, arguments?[i]));
         }
     }
 

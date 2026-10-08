@@ -2039,6 +2039,38 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
+    /// The command a module body's batch reads its text through, kept between
+    /// calls (see <see cref="RentBodyCommand"/>); null while a call holds it.
+    /// </summary>
+    private SimulatedDbCommand? idleBodyCommand;
+
+    /// <summary>
+    /// A command carrying <paramref name="bodyText"/> for a function's or
+    /// trigger's body batch, handed back with <see cref="ReturnBodyCommand"/>
+    /// once the call ends. Such a command carries nothing but its text, so the
+    /// session keeps one for every call rather than building one per call
+    /// (each registers for finalization); a call nested in another holding it
+    /// builds its own.
+    /// </summary>
+    internal SimulatedDbCommand RentBodyCommand(string bodyText)
+    {
+        if (Interlocked.Exchange(ref this.idleBodyCommand, null) is not { } command)
+        {
+            command = new SimulatedDbCommand(this.Simulation, this);
+#pragma warning disable CA1816 // The session keeps the command for its lifetime and never disposes it, so it needs no finalization.
+            GC.SuppressFinalize(command);
+#pragma warning restore CA1816
+        }
+#pragma warning disable CA2100 // A module's body text is the simulator's own stored span, not external input.
+        command.CommandText = bodyText;
+#pragma warning restore CA2100
+        return command;
+    }
+
+    /// <summary>Hands back a command <see cref="RentBodyCommand"/> lent, for the next call.</summary>
+    internal void ReturnBodyCommand(SimulatedDbCommand command) => Volatile.Write(ref this.idleBodyCommand, command);
+
+    /// <summary>
     /// T-SQL cursors declared on this session, keyed case-insensitively by
     /// name (cursor names are identifiers, not <c>@</c>-prefixed). Populated
     /// by <c>DECLARE … CURSOR</c>, removed by <c>DEALLOCATE</c>; cleared on

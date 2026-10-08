@@ -499,22 +499,29 @@ partial class Simulation
         {
             // An unallocated variable is Msg 16950 here too (probed
             // 2026-09-29 against SQL Server 2025).
-            if (!batch.CursorVariables.TryGetValue(reference.Name, out var bound) || bound is null)
+            if (!batch.TryGetCursorVariable(reference.Name, out var bound) || bound is null)
                 throw SimulatedSqlException.CursorVariableNotAllocated(reference.Name);
             ReleaseVariableReference(batch, bound);
-            batch.CursorVariables[reference.Name] = null;
+            batch.SetCursorVariable(reference.Name, null);
             return;
         }
 
         // Named cursor: unqualified removes from LOCAL first, then GLOBAL;
         // GLOBAL-qualified only touches the global map.
         Cursor removed;
-        if (!reference.GlobalQualified && batch.LocalCursors.TryGetValue(reference.Name, out removed!))
-            _ = batch.LocalCursors.Remove(reference.Name);
+        if (!reference.GlobalQualified && batch.TryGetLocalCursor(reference.Name, out var removedLocal))
+        {
+            removed = removedLocal;
+            _ = batch.LocalCursors!.Remove(reference.Name);
+        }
         else if (batch.Connection.Cursors.TryGetValue(reference.Name, out removed!))
+        {
             _ = batch.Connection.Cursors.Remove(reference.Name);
+        }
         else
+        {
             throw SimulatedSqlException.CursorDoesNotExist(reference.Name);
+        }
 
         // Drop the name; only destroy the object if no cursor variable still
         // holds it (refcount keeps a variable-referenced cursor alive).
@@ -695,12 +702,12 @@ partial class Simulation
     /// </remarks>
     private static Cursor ResolveCursor(BatchContext batch, CursorReference reference, bool missingAtPriorLine = false) =>
         reference.IsVariable
-            ? batch.CursorVariables.TryGetValue(reference.Name, out var bound) && bound is not null
+            ? batch.TryGetCursorVariable(reference.Name, out var bound) && bound is not null
                 ? bound
                 : missingAtPriorLine
                     ? throw AtPriorStatementLine(batch, SimulatedSqlException.CursorVariableNotAllocated(reference.Name))
                     : throw SimulatedSqlException.CursorVariableNotAllocated(reference.Name)
-            : !reference.GlobalQualified && batch.LocalCursors.TryGetValue(reference.Name, out var local)
+            : !reference.GlobalQualified && batch.TryGetLocalCursor(reference.Name, out var local)
                 ? local
                 : batch.Connection.Cursors.TryGetValue(reference.Name, out var global)
                     ? global
@@ -734,12 +741,17 @@ partial class Simulation
     /// </summary>
     private static void DeclareCursorInScope(BatchContext batch, string name, Cursor cursor, bool local)
     {
-        var scope = local ? batch.LocalCursors : batch.Connection.Cursors;
+        var scope = local ? (batch.LocalCursors ??= new(BuiltInToken.Comparer)) : batch.Connection.Cursors;
         if (scope.ContainsKey(name))
             throw SimulatedSqlException.CursorAlreadyExists(name);
         scope[name] = cursor;
         if (!local)
+        {
             (batch.Connection.CursorsDeclaredInExecution ??= []).Add(cursor);
+            // One a trigger body leaves allocated reads its pseudo-tables past
+            // the firing, so the kept pair can't be refilled under it.
+            batch.TriggerFrame?.PseudoTables?.NoteGlobalCursor(cursor);
+        }
     }
 
     /// <summary>
@@ -768,7 +780,7 @@ partial class Simulation
     /// variable via <c>SET @c = named_cursor</c>. Msg 16916 on a miss.
     /// </summary>
     private static Cursor ResolveNamedCursor(BatchContext batch, string name) =>
-        batch.LocalCursors.TryGetValue(name, out var local)
+        batch.TryGetLocalCursor(name, out var local)
             ? local
             : batch.Connection.Cursors.TryGetValue(name, out var global)
                 ? global
@@ -782,11 +794,11 @@ partial class Simulation
     /// </summary>
     private static void RebindCursorVariable(BatchContext batch, string variableName, Cursor? newCursor)
     {
-        if (batch.CursorVariables.TryGetValue(variableName, out var previous) && previous is not null)
+        if (batch.TryGetCursorVariable(variableName, out var previous) && previous is not null)
             ReleaseVariableReference(batch, previous);
         if (newCursor is not null)
             newCursor.VariableRefCount++;
-        batch.CursorVariables[variableName] = newCursor;
+        batch.SetCursorVariable(variableName, newCursor);
     }
 
     /// <summary>
@@ -800,19 +812,25 @@ partial class Simulation
     /// </summary>
     internal static void TeardownFrameCursors(BatchContext batch)
     {
-        foreach (var bound in batch.CursorVariables.Values)
+        if (batch.CursorVariables is { } variables)
         {
-            if (bound is not null)
-                ReleaseVariableReference(batch, bound);
+            foreach (var bound in variables.Values)
+            {
+                if (bound is not null)
+                    ReleaseVariableReference(batch, bound);
+            }
+            variables.Clear();
         }
-        batch.CursorVariables.Clear();
 
-        foreach (var cursor in batch.LocalCursors.Values)
+        if (batch.LocalCursors is { } locals)
         {
-            if (cursor.VariableRefCount == 0)
-                DestroyCursor(batch, cursor);
+            foreach (var cursor in locals.Values)
+            {
+                if (cursor.VariableRefCount == 0)
+                    DestroyCursor(batch, cursor);
+            }
+            locals.Clear();
         }
-        batch.LocalCursors.Clear();
     }
 
     /// <summary>

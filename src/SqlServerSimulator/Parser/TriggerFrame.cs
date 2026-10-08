@@ -54,6 +54,13 @@ internal sealed class TriggerFrame
     public readonly HeapTable? Deleted;
 
     /// <summary>
+    /// The kept pair <see cref="Inserted"/> and <see cref="Deleted"/> are, when
+    /// this firing holds it; null when the firing materialized tables of its
+    /// own, whose statements can't keep a plan.
+    /// </summary>
+    public readonly PseudoTableSlot? PseudoTables;
+
+    /// <summary>
     /// The serialized <c>&lt;EVENT_INSTANCE&gt;</c> document for the DDL event
     /// that fired this body, as <c>EVENTDATA()</c> returns it. Null in a DML
     /// trigger body, where <c>EVENTDATA()</c> reads NULL (probe-confirmed).
@@ -75,11 +82,12 @@ internal sealed class TriggerFrame
     public readonly int DdlEventType;
 
     /// <summary>DML trigger fire.</summary>
-    public TriggerFrame(Trigger trigger, HeapTable? inserted, HeapTable? deleted, byte[] columnsUpdatedMask, TriggerActions firingAction = TriggerActions.None)
+    public TriggerFrame(Trigger trigger, HeapTable? inserted, HeapTable? deleted, byte[] columnsUpdatedMask, TriggerActions firingAction = TriggerActions.None, PseudoTableSlot? pseudoTables = null)
     {
         this.Trigger = trigger;
         this.Inserted = inserted;
         this.Deleted = deleted;
+        this.PseudoTables = pseudoTables;
         this.ColumnsUpdatedMask = columnsUpdatedMask;
         this.FiringAction = firingAction;
     }

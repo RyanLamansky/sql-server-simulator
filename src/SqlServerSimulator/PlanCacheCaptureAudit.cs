@@ -163,7 +163,9 @@ internal static class PlanCacheCaptureAudit
         ProcFrame => "a procedure call's frame",
         UdfFrame => "a function call's frame",
         TriggerFrame => "a trigger firing's frame",
-        HeapTable { IsTableVariable: true } => "a table variable",
+        // A trigger's kept inserted / deleted belongs to its parent, not to a
+        // batch; a plan names it and reads whichever firing holds it.
+        HeapTable { IsTableVariable: true, ReplacesHeapPerFiring: false } => "a table variable",
         HeapTable table when BatchContext.IsLocalTempName(table.Name) => "a #temp table",
         _ => null,
     };

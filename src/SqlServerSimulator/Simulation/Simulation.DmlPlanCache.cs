@@ -109,9 +109,10 @@ partial class Simulation
 
     /// <summary>
     /// The plan cached for the statement starting at <paramref name="start"/>,
-    /// when it was recorded under the current schema version and in the
-    /// database the batch is in; null when there is none to replay or decline
-    /// by, and for a statement compiling as it runs this time (see
+    /// when it was recorded under the current schema version, in the database
+    /// the batch is in and — for a trigger's statement over <c>inserted</c> /
+    /// <c>deleted</c> — over the pair the firing holds; null when there is none
+    /// to replay or decline by, and for a statement compiling as it runs this time (see
     /// <see cref="StatementsCompiledOnRun"/>), whose compile sends what a
     /// replay wouldn't.
     /// </summary>
@@ -120,6 +121,7 @@ partial class Simulation
             && context.Batch.StatementPlans?.Find(start.MemoPosition) is { } entry
             && entry.SchemaVersion == Volatile.Read(ref this.SchemaVersion)
             && ReferenceEquals(entry.Database, context.CurrentDatabase)
+            && (entry.PseudoTables is null || ReferenceEquals(entry.PseudoTables, context.Batch.TriggerFrame?.PseudoTables))
                 ? entry
                 : null;
 
@@ -132,6 +134,8 @@ partial class Simulation
     {
         var recording = new StatementPlanRecording(batch.Connection.PendingMessages.Count);
         batch.ReplayLockLog = [];
+        batch.StatementPseudoTables = null;
+        batch.StatementBindsFiringPseudoTables = false;
 #if DEBUG
         recording.PrincipalWatch = PlanCacheCaptureAudit.WatchPrincipalReads(batch.Connection.Security);
 #endif
@@ -140,7 +144,9 @@ partial class Simulation
 
     /// <summary>
     /// Files what a statement's parse recorded — a plan, or that its shape
-    /// has none — unless the schema changed while it ran.
+    /// has none — unless the schema changed while it ran, or the statement
+    /// bound pseudo-tables its firing materialized for itself, whose shape
+    /// says nothing about the kept pair's statements.
     /// </summary>
     private void EndStatementRecording(BatchContext batch, StatementPlanRecording recording, ParserContext.Checkpoint start, long schemaVersion, Database database)
     {
@@ -149,6 +155,8 @@ partial class Simulation
         if (recording.Plan is not null || recording.Query is not null)
             PlanCacheCaptureAudit.VerifyPrincipalIndependent(recording.PrincipalRead, batch.PlanCacheKey!.Value.CommandText);
 #endif
+        if (batch.StatementBindsFiringPseudoTables)
+            return;
         if ((recording.Plan is not null || recording.Query is not null || recording.Declined) && Volatile.Read(ref this.SchemaVersion) == schemaVersion)
             this.PublishStatementPlan(batch, start.MemoPosition, new StatementPlanEntry(recording, schemaVersion, database));
     }

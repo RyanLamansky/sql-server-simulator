@@ -556,7 +556,7 @@ partial class Simulation
         /// <summary>The table this target writes in <paramref name="batch"/>.</summary>
         private HeapTable TargetIn(BatchContext batch) =>
             this.table
-            ?? (batch.TableVariables.TryGetValue(tableVariable![1..], out var declared) ? declared : throw SimulatedSqlException.MustDeclareTableVariable(tableVariable));
+            ?? (batch.TryGetTableVariable(tableVariable![1..], out var declared) ? declared : throw SimulatedSqlException.MustDeclareTableVariable(tableVariable));
 
         /// <summary>
         /// Appends one row to the target table. Columns named in the

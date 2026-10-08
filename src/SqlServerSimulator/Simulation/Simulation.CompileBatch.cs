@@ -228,10 +228,10 @@ partial class Simulation
         var compile = executing.ProcFrame is { } frame
             ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
             : new BatchContext(command, variables);
-        foreach (var (name, table) in executing.TableVariables)
-            compile.TableVariables[name] = table;
-        foreach (var (name, cursor) in executing.CursorVariables)
-            compile.CursorVariables[name] = cursor;
+        foreach (var (name, table) in executing.TableVariables ?? [])
+            compile.SetTableVariable(name, table);
+        foreach (var (name, cursor) in executing.CursorVariables ?? [])
+            compile.SetCursorVariable(name, cursor);
         compile.LineOffset = executing.LineOffset;
         compile.ErrorProcedureName = executing.ErrorProcedureName;
         compile.ForceTempTableScope = executing.ForceTempTableScope;
@@ -330,8 +330,11 @@ partial class Simulation
                 foreach (var (name, slot) in compileBatch.Variables)
                     _ = recovery.Variables.TryAdd(name, slot);
             }
-            foreach (var (name, table) in compileBatch.TableVariables)
-                _ = recovery.TableVariables.TryAdd(name, table);
+            foreach (var (name, table) in compileBatch.TableVariables ?? [])
+            {
+                if (!recovery.HasTableVariable(name))
+                    recovery.SetTableVariable(name, table);
+            }
             recovery.LineOffset = compileBatch.LineOffset;
             recovery.ErrorProcedureName = compileBatch.ErrorProcedureName;
             // Past a schema-bound body's header, the rest of the batch is still

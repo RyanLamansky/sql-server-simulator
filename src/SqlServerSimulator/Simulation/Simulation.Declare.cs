@@ -56,16 +56,16 @@ partial class Simulation
             // real still refuses (all probe-confirmed).
             var declarationSite = context.Batch.CurrentStatement.StartIndex;
             var alreadyDeclared = context.Batch.Variables.ContainsKey(variableName)
-                || context.Batch.TableVariables.ContainsKey(variableName)
-                || context.Batch.CursorVariables.ContainsKey(variableName);
+                || context.Batch.HasTableVariable(variableName)
+                || context.Batch.HasCursorVariable(variableName);
             var reExecution = alreadyDeclared
                 && !declaredHere.Contains(variableName, BatchContext.VariableNameComparer)
-                && context.Batch.VariableDeclarationSites.TryGetValue(variableName, out var priorSite)
+                && context.Batch.VariableDeclarationSites?.TryGetValue(variableName, out var priorSite) == true
                 && priorSite == declarationSite;
             if (alreadyDeclared && !reExecution)
                 throw SimulatedSqlException.VariableAlreadyDeclared(variableName);
             declaredHere.Add(variableName);
-            context.Batch.VariableDeclarationSites[variableName] = declarationSite;
+            (context.Batch.VariableDeclarationSites ??= new(BatchContext.VariableNameComparer))[variableName] = declarationSite;
 
             // Optional AS keyword between name and type spec — `DECLARE @v AS INT`.
             context.MoveNextRequired();
@@ -79,7 +79,7 @@ partial class Simulation
                 // frame's cursor-variable namespace. No type spec follows.
                 case ReservedKeyword { Keyword: Keyword.Cursor }:
                     if (!reExecution)
-                        context.Batch.CursorVariables[variableName] = null;
+                        context.Batch.SetCursorVariable(variableName, null);
                     context.MoveNextOptional();
                     sawScalar = true;
                     continue;
@@ -430,7 +430,7 @@ partial class Simulation
     private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType, bool reExecution)
     {
         if (!reExecution)
-            context.Batch.TableVariables[variableName] = tableType.Clone("@" + variableName, context.Batch);
+            context.Batch.SetTableVariable(variableName, tableType.Clone("@" + variableName, context.Batch));
     }
 
     /// <summary>
@@ -520,7 +520,7 @@ partial class Simulation
         // three-pass loop leave three rows). The column list is still parsed,
         // because the cursor has to advance past it either way.
         if (!reExecution)
-            context.Batch.TableVariables[variableName] = heapTable;
+            context.Batch.SetTableVariable(variableName, heapTable);
     }
 
     /// <summary>

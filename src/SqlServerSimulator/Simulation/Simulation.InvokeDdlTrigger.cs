@@ -133,9 +133,16 @@ partial class Simulation
     /// </remarks>
     private void FireDdlTriggers(BatchContext batch)
     {
+        // Every statement passes through here, and the body's closures would
+        // be allocated on entry, so the common case returns ahead of them.
+        if (batch.CurrentStatement.PendingDdlEvents is { Count: > 0 } events)
+            this.FireDdlTriggers(batch, events);
+    }
+
+    /// <summary>Fires the DDL triggers for <paramref name="events"/>, the statement's pending ones.</summary>
+    private void FireDdlTriggers(BatchContext batch, List<DdlEventInfo> events)
+    {
         var statement = batch.CurrentStatement;
-        if (statement.PendingDdlEvents is not { Count: > 0 } events)
-            return;
         statement.PendingDdlEvents = null;
         var createdThisStatement = statement.DdlTriggerCreatedThisStatement;
 

@@ -51,16 +51,6 @@ partial class Simulation
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
-        // Synthesize a command for the body. The connection is the caller's;
-        // database / transaction state is shared. CommandText is the function's
-        // own stored body (set at CREATE FUNCTION time from the user's own
-        // command text) — never external input, so the CA2100 injection
-        // concern doesn't apply here.
-        using var bodyCommand = new SimulatedDbCommand(this, connection);
-#pragma warning disable CA2100 // function.BodyText is the function's pre-validated stored body, not external input
-        bodyCommand.CommandText = function.BodyText;
-#pragma warning restore CA2100
-
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         for (var i = 0; i < function.Parameters.Length; i++)
         {
@@ -86,6 +76,12 @@ partial class Simulation
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
+        // The body's command: the connection is the caller's, so database and
+        // transaction state is shared, and the text is the function's own
+        // stored body.
+#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+        var bodyCommand = connection.RentBodyCommand(function.BodyText);
+#pragma warning restore CA2000
         var udfFrame = new UdfFrame(function.ReturnType);
         // The body binds and runs in the function's own database.
         var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);
@@ -137,6 +133,7 @@ partial class Simulation
             connection.Security.RevertTo(savedImpersonationDepth);
             identityScope.Exit(IdentityScopeKind.Function);
             moduleScope.Exit();
+            connection.ReturnBodyCommand(bodyCommand);
         }
 
         // The returned value is cut to the declared width as an assignment

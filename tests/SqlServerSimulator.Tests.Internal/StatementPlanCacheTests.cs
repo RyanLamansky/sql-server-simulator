@@ -107,9 +107,53 @@ public sealed class StatementPlanCacheTests
             "declare @x ids; insert @x values (1); exec tv @x"));
 
     [TestMethod]
-    public void Trigger_ReplaysWhatReadsNoPseudoTable()
-        => AreEqual((2L, 2L + 2), ReplaysOverThreeRuns(
+    public void Trigger_ReplaysItsQueriesAndWrites()
+        => AreEqual((2L, 4L + 2), ReplaysOverThreeRuns(
             "create trigger tr on log after insert as begin set nocount on; select count(*) from t; update t set v = v + 1 where id = 2; insert t select id + 100, v from inserted where 1 = 0 end",
+            "insert log values (1, 1)"));
+
+    [TestMethod]
+    public void Trigger_ReplaysWhatReadsPseudoTables()
+        => AreEqual((2L, 2L + 2), ReplaysOverThreeRuns(
+            "create trigger tr on log after insert as begin set nocount on; select count(*) from inserted i join deleted d on d.id = i.id; insert t select id + 100, v from inserted where 1 = 0 end",
+            "insert log values (1, 1)"));
+
+    /// <summary>
+    /// A firing nested inside another on the same table reads tables of its
+    /// own, so its statements parse, and leave the outer firing's plans be.
+    /// </summary>
+    [TestMethod]
+    public void Trigger_NestedFiringOnItsOwnTable_ParsesWithoutDisplacingTheOuterPlans()
+        => AreEqual((0L, 2L + 4), ReplaysOverThreeRuns(
+            "alter database current set recursive_triggers on\ngo\ncreate trigger tr on log after insert as begin set nocount on; insert t select id + 100 * trigger_nestlevel(), v from inserted where 1 = 0; if trigger_nestlevel() < 2 insert log select id, v from inserted end",
+            "insert log values (1, 1)"));
+
+    [TestMethod]
+    public void Trigger_InsteadOfThroughAView_Replays()
+        => AreEqual((2L, 2L), ReplaysOverThreeRuns(
+            "create view lv as select id, v from log\ngo\ncreate trigger tr on lv instead of insert as begin set nocount on; select count(*) from inserted; insert log select id, v from inserted end",
+            "insert lv values (1, 1)"));
+
+    /// <summary>
+    /// The <c>MERGE</c> fires the trigger for its update and its insert, and the
+    /// <c>DELETE</c> once more, so of the body's nine runs the first records
+    /// and the other eight replay, beside the batch's own two writes' two
+    /// replays each.
+    /// </summary>
+    [TestMethod]
+    public void Trigger_FiredForEachMergeAction_Replays()
+        => AreEqual((2L, 2L + 2 + 8), ReplaysOverThreeRuns(
+            "create trigger tr on t after insert, update, delete as begin set nocount on; insert log select coalesce(i.id, d.id), i.v from inserted i full join deleted d on d.id = i.id end",
+            "merge t using (values (1, 5), (9, 9)) s (id, v) on t.id = s.id when matched then update set v = s.v when not matched then insert values (s.id, s.v); select count(*) from t; delete t where id = 9"));
+
+    /// <summary>
+    /// A <c>GLOBAL</c> cursor left open over <c>inserted</c> keeps the firing's
+    /// tables, so the next firing builds a new pair and records afresh.
+    /// </summary>
+    [TestMethod]
+    public void Trigger_LeavingAGlobalCursorOpenOverItsRows_RecordsEachFiring()
+        => AreEqual((0L, 2L), ReplaysOverThreeRuns(
+            "create trigger tr on log after insert as begin set nocount on; if cursor_status('global', 'gc') >= -1 deallocate gc; declare gc cursor global for select id from inserted; open gc; select count(*) from inserted end",
             "insert log values (1, 1)"));
 
     [TestMethod]

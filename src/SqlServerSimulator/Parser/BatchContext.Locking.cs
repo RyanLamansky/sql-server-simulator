@@ -34,9 +34,9 @@ internal sealed partial class BatchContext
     /// else — so the hinted tables are recorded here at
     /// <see cref="AcquireDataLockIfApplicable"/> and looked up there. Cleared
     /// with the statement's locks, so a hint doesn't leak into the batch's
-    /// next statement.
+    /// next statement. Null until a statement of the batch names one.
     /// </summary>
-    private readonly HashSet<HeapTable> noWaitTables = [];
+    private HashSet<HeapTable>? noWaitTables;
 
     /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
@@ -215,7 +215,7 @@ internal sealed partial class BatchContext
 
         if (hints.NoWait)
         {
-            _ = this.noWaitTables.Add(table);
+            _ = (this.noWaitTables ??= []).Add(table);
             this.ReplayLockLog?.Add(new ReplayedLock(table));
         }
 
@@ -1291,9 +1291,9 @@ internal sealed partial class BatchContext
     /// protection. Purely an idempotency guard: the fallback is decided per
     /// materialization, and a source can be re-enumerated many times (a
     /// correlated subquery's inner side), so without this the whole key space
-    /// would be walked and re-covered per pass.
+    /// would be walked and re-covered per pass. Null until the batch fences one.
     /// </summary>
-    private readonly HashSet<HeapTable> serializableTableFallbacks = new(ReferenceEqualityComparer.Instance);
+    private HashSet<HeapTable>? serializableTableFallbacks;
 
     /// <summary>
     /// Discharges a SERIALIZABLE / <c>HOLDLOCK</c> reader's outstanding
@@ -1315,7 +1315,7 @@ internal sealed partial class BatchContext
         if (plan.SerializableRangeMode is not { } mode || plan.Fence is not { Settled: false } fence)
             return;
         fence.Settled = true;
-        if (!this.serializableTableFallbacks.Add(table))
+        if (!(this.serializableTableFallbacks ??= new(ReferenceEqualityComparer.Instance)).Add(table))
             return;
         if (KeyLockGroup.RowGroupOf(table) is { } group)
         {
@@ -1336,7 +1336,7 @@ internal sealed partial class BatchContext
     /// </summary>
     private void AcquireSerializableTableS(HeapTable table)
     {
-        this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, this.noWaitTables.Contains(table));
+        this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, this.NamedNoWait(table));
         var connection = this.Connection;
         var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
         var index = held.IndexOf((table.TableDataLock, LockMode.IntentShared, connection.LockOwner));
@@ -1416,7 +1416,7 @@ internal sealed partial class BatchContext
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
         var session = connection.LockOwner;
-        var noWait = this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table);
+        var noWait = this.NamedNoWait(table);
         var acquired = 0;
         foreach (var (key, requestMode, rids, lookup) in requests)
         {
@@ -1985,7 +1985,7 @@ internal sealed partial class BatchContext
             var resource = group.GetOrCreate(key);
             if (manager.IsHeldBy(resource, mode, session))
                 return;
-            this.AcquireTransactionLock(resource, mode, this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table));
+            this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
             this.CountLocksForEscalation(table, 1, exclusive: false, rowsKeyLocked: true);
             if (heap.ReadSlotBytes(pageIndex, slotIndex) is not { } locked || !group.TryReadKey(locked, out var lockedKey) || lockedKey.Equals(key))
                 return;
@@ -2078,8 +2078,11 @@ internal sealed partial class BatchContext
             manager.Release(resource, mode, owner);
         }
         this.StatementSchemaLocks.Clear();
-        this.noWaitTables.Clear();
+        this.noWaitTables?.Clear();
     }
+
+    /// <summary>Whether the current statement named <paramref name="table"/> with a <c>NOWAIT</c> table hint.</summary>
+    private bool NamedNoWait(HeapTable table) => this.noWaitTables is { Count: > 0 } named && named.Contains(table);
 
     /// <summary>
     /// The lock timeout to use for <paramref name="table"/>: zero when the
@@ -2087,7 +2090,7 @@ internal sealed partial class BatchContext
     /// session's own <see cref="SimulatedDbConnection.LockTimeoutMillis"/>.
     /// </summary>
     private int LockTimeoutFor(HeapTable table)
-        => table.IsMemoryOptimized || (this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table)) ? 0 : this.Connection.LockTimeoutMillis;
+        => table.IsMemoryOptimized || this.NamedNoWait(table) ? 0 : this.Connection.LockTimeoutMillis;
 
     /// <summary>
     /// The isolation rules a memory-optimized table is reached under (probed

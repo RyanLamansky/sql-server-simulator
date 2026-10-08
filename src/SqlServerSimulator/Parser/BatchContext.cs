@@ -775,6 +775,23 @@ internal sealed partial class BatchContext
     public bool HasSessionScopedReference;
 
     /// <summary>
+    /// The kept <c>inserted</c> / <c>deleted</c> pair the statement being
+    /// recorded binds (see <see cref="PseudoTableSlot"/>), which its plan names
+    /// so only a firing holding the same pair replays it. Judged per statement
+    /// as <see cref="HasSessionScopedReference"/> is.
+    /// </summary>
+    public PseudoTableSlot? StatementPseudoTables;
+
+    /// <summary>
+    /// Set when the statement being recorded binds pseudo-tables its firing
+    /// materialized for itself, the kept pair being held elsewhere: such a
+    /// statement neither keeps a plan nor replaces the one the pair's
+    /// statements keep. Judged per statement as
+    /// <see cref="HasSessionScopedReference"/> is.
+    /// </summary>
+    public bool StatementBindsFiringPseudoTables;
+
+    /// <summary>
     /// Whether a name in this batch was looked up as a local or global temp
     /// table, found or not, or a statement creates one. What it bound to is the
     /// session's, so a compile of the batch says nothing about the next
@@ -898,7 +915,7 @@ internal sealed partial class BatchContext
             }
             else if (taken.NoWaitTable is { } table)
             {
-                _ = this.noWaitTables.Add(table);
+                _ = (this.noWaitTables ??= []).Add(table);
             }
             else if (taken.TransactionScoped)
             {
@@ -1523,9 +1540,9 @@ internal sealed partial class BatchContext
     /// must not report Msg 134 the second time — T-SQL hoists the declaration
     /// and leaves only the assignment behind. The offset is what separates
     /// that from a genuine second <c>DECLARE</c> of the same name, which stays
-    /// an error however unreachable it is.
+    /// an error however unreachable it is. Null until the batch declares one.
     /// </summary>
-    public readonly Dictionary<string, int> VariableDeclarationSites = new(VariableNameComparer);
+    public Dictionary<string, int>? VariableDeclarationSites;
 
     /// <summary>How <see cref="Variables"/> matches names: ignoring case, kana type and width.</summary>
     /// <remarks>
@@ -1576,9 +1593,23 @@ internal sealed partial class BatchContext
     /// a shared namespace with <see cref="Variables"/> — a <c>DECLARE @t int</c>
     /// followed by <c>DECLARE @t TABLE (...)</c> raises Msg 134
     /// (probe-confirmed: real SQL Server's name-uniqueness check is per-name,
-    /// not per-kind).
+    /// not per-kind). Null until the batch declares one.
     /// </summary>
-    public readonly Dictionary<string, HeapTable> TableVariables = new(TableVariableNameComparer);
+    public Dictionary<string, HeapTable>? TableVariables;
+
+    /// <summary>Whether this batch declares the table variable <paramref name="name"/> (no <c>@</c>).</summary>
+    public bool HasTableVariable(string name) => this.TableVariables?.ContainsKey(name) == true;
+
+    /// <summary>The batch's table variable <paramref name="name"/> (no <c>@</c>), when it declares one.</summary>
+    public bool TryGetTableVariable(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
+    {
+        table = null;
+        return this.TableVariables?.TryGetValue(name, out table) == true;
+    }
+
+    /// <summary>Declares, or seeds, the batch's table variable <paramref name="name"/> (no <c>@</c>).</summary>
+    public void SetTableVariable(string name, HeapTable table) =>
+        (this.TableVariables ??= new(TableVariableNameComparer))[name] = table;
 
     /// <summary>
     /// LOCAL cursors declared in this batch / procedure / trigger frame
@@ -1589,8 +1620,9 @@ internal sealed partial class BatchContext
     /// <see cref="Cursor"/> object alive past its name-scope). GLOBAL cursors
     /// live on <see cref="SimulatedDbConnection.Cursors"/> instead and persist
     /// for the connection. Names are bare identifiers keyed like the global map.
+    /// Null until the frame declares one.
     /// </summary>
-    public readonly Dictionary<string, Cursor> LocalCursors = new(BuiltInToken.Comparer);
+    public Dictionary<string, Cursor>? LocalCursors;
 
     /// <summary>
     /// Cursor variables (<c>DECLARE @c CURSOR</c>) declared or seeded in this
@@ -1600,8 +1632,30 @@ internal sealed partial class BatchContext
     /// use). Distinct namespace from scalar / table variables. Refcounted:
     /// binding increments <see cref="Cursor.VariableRefCount"/>, rebinding /
     /// <c>DEALLOCATE @c</c> / frame exit decrements and tears down at zero.
+    /// Null until the frame declares one.
     /// </summary>
-    public readonly Dictionary<string, Cursor?> CursorVariables = new(TableVariableNameComparer);
+    public Dictionary<string, Cursor?>? CursorVariables;
+
+    /// <summary>Whether this frame declares the cursor variable <paramref name="name"/>.</summary>
+    public bool HasCursorVariable(string name) => this.CursorVariables?.ContainsKey(name) == true;
+
+    /// <summary>The cursor the frame's cursor variable <paramref name="name"/> holds, when it declares one.</summary>
+    public bool TryGetCursorVariable(string name, out Cursor? cursor)
+    {
+        cursor = null;
+        return this.CursorVariables?.TryGetValue(name, out cursor) == true;
+    }
+
+    /// <summary>Declares or rebinds the frame's cursor variable <paramref name="name"/>.</summary>
+    public void SetCursorVariable(string name, Cursor? cursor) =>
+        (this.CursorVariables ??= new(TableVariableNameComparer))[name] = cursor;
+
+    /// <summary>The frame's LOCAL cursor <paramref name="name"/>, when it declares one.</summary>
+    public bool TryGetLocalCursor(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Cursor? cursor)
+    {
+        cursor = null;
+        return this.LocalCursors?.TryGetValue(name, out cursor) == true;
+    }
 
     /// <summary>
     /// Monotonically-increasing per-row stamp consumed by
@@ -1627,7 +1681,7 @@ internal sealed partial class BatchContext
     /// per-statement reset because the stamp-equality check makes stale
     /// entries automatically invalid.
     /// </summary>
-    public readonly Dictionary<Sequence, (long Stamp, SqlValue Value)> SequenceRowCache = [];
+    public Dictionary<Sequence, (long Stamp, SqlValue Value)>? SequenceRowCache;
 
     /// <summary>
     /// Every value drawn by row stamp, kept while a multi-row <c>INSERT …
@@ -1704,7 +1758,7 @@ internal sealed partial class BatchContext
         if (tableVariables is not null)
         {
             foreach (var kvp in tableVariables)
-                this.TableVariables[kvp.Key] = kvp.Value;
+                this.SetTableVariable(kvp.Key, kvp.Value);
         }
     }
 
@@ -1909,7 +1963,7 @@ internal sealed partial class BatchContext
                 paramName = paramName[1..];
             var clone = tableType.Clone("@" + paramName, batch, isTableValuedParameter: true);
             MaterializeTvpRows(parameter.Value!, tableType, clone, batch);
-            batch.TableVariables[paramName] = clone;
+            batch.SetTableVariable(paramName, clone);
         }
     }
 
@@ -2035,9 +2089,9 @@ internal sealed partial class BatchContext
     public VariableSlot GetVariableSlot(string name) =>
         Variables.TryGetValue(name, out var slot)
         ? slot
-        : throw (this.TableVariables.ContainsKey(name)
+        : throw (this.HasTableVariable(name)
             ? SimulatedSqlException.TableVariableUsedAsScalar(name)
-            : this.CursorVariables.ContainsKey(name)
+            : this.HasCursorVariable(name)
                 ? SimulatedSqlException.CursorVariableUsedAsScalar(name)
                 : SimulatedSqlException.MustDeclareScalarVariable(name));
 

@@ -337,6 +337,248 @@ public sealed class StatementPlanReplayTests
             With(("@id", 3), ("@v", 60)),
             With(("@id", 4), ("@v", 2)));
 
+    private const string AuditTables = """
+        create table a (id int primary key, v int not null, note nvarchar(max) null, twice as v * 2);
+        insert a (id, v, note) values (1, 1, N'one'), (2, 2, replicate(cast(N'b' as nvarchar(max)), 5000)), (3, 3, null);
+        create table audit (n int identity primary key, op char(1), id int, old_v int, new_v int, note_len int, mask varbinary(8), v_updated bit check (v_updated is not null));
+        """;
+
+    private const string AuditTrigger = """
+        create trigger tr on a after insert, update, delete as
+        begin
+            set nocount on;
+            insert audit (op, id, old_v, new_v, note_len, mask, v_updated)
+            select case when d.id is null then 'I' when i.id is null then 'D' else 'U' end,
+                coalesce(i.id, d.id), d.v, i.v, len(coalesce(i.note, d.note)), columns_updated(),
+                case when update(v) then 1 when i.v < 0 then null else 0 end
+            from inserted i full join deleted d on d.id = i.id;
+            select count(*), sum(twice), max(len(note)) from inserted;
+            update a set note = d.note + N'!' from a join deleted d on d.id = a.id where a.note is null and d.v > 100;
+        end
+        """;
+
+    private const string AuditState = "select id, v, len(note), twice from a order by id; select n, op, id, old_v, new_v, note_len, mask, v_updated from audit order by n";
+
+    [TestMethod]
+    public void Trigger_AuditOverInsertedAndDeleted_EveryVerbAndRowCount()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + AuditTrigger,
+            """
+            insert a (id, v, note) values (@id, @v, replicate(cast(N'x' as nvarchar(max)), @len));
+            update a set v = v + 1 where id <= @id;
+            update a set note = N'n' + cast(@id as nvarchar(9)) where id = @id;
+            delete a where id = @id;
+            insert a (id, v, note) select id + 10, v, note from a where id < @id;
+            delete a where id > 10
+            """,
+            AuditState,
+            With(("@id", 4), ("@v", 4), ("@len", 3)),
+            With(("@id", 5), ("@v", 7), ("@len", 6000)),
+            With(("@id", 6), ("@v", -1), ("@len", 1)),
+            With(("@id", 7), ("@v", 150), ("@len", 9000)));
+
+    [TestMethod]
+    public void Trigger_AuditFiredByMerge_AllThreeActions()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + AuditTrigger,
+            """
+            merge a as tgt
+            using (values (1, @v), (@id, 9), (@id + 1, @v)) as s (id, v)
+            on tgt.id = s.id
+            when matched and s.v > 5 then delete
+            when matched then update set v = s.v
+            when not matched then insert (id, v, note) values (s.id, s.v, replicate(cast(N'm' as nvarchar(max)), @len));
+            """,
+            AuditState,
+            With(("@id", 4), ("@v", 2), ("@len", 2)),
+            With(("@id", 5), ("@v", 8), ("@len", 7000)),
+            With(("@id", 2), ("@v", -3), ("@len", 1)),
+            With(("@id", 9), ("@v", 3), ("@len", 4)));
+
+    [TestMethod]
+    public void Trigger_SchemaOfItsTableChangesBetweenFirings()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + """
+            create trigger tr on a after insert, update as
+            begin
+                select * from inserted;
+                select d.*, i.v from deleted d join inserted i on i.id = d.id;
+            end
+            """,
+            "update a set v = v + @d where id = 1; insert a (id, v) values (@d + 20, @d); delete a where id > 20",
+            "select * from a order by id; select * from audit order by n",
+            With(("@d", 1)),
+            After("alter table a add extra int null default 7", ("@d", 2)),
+            After("alter table a drop column twice", ("@d", 3)),
+            After("alter table a alter column v bigint not null", ("@d", 4)));
+
+    [TestMethod]
+    public void Trigger_InsteadOf_OnATableAndThroughAView()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + """
+            create view av as select id, v, note from a where id < 100
+            go
+            create trigger ia on a instead of insert as
+            begin
+                set nocount on;
+                insert audit (op, id, new_v, note_len, v_updated) select 'X', id, v, len(note), case when update(v) then 1 else 0 end from inserted;
+                insert a (id, v, note) select id, abs(v), note from inserted where v <> 0;
+            end
+            go
+            create trigger iv on av instead of update, delete as
+            begin
+                set nocount on;
+                insert audit (op, id, old_v, new_v, v_updated) select case when i.id is null then 'R' else 'W' end, d.id, d.v, i.v, case when update(note) then 1 else 0 end
+                from deleted d left join inserted i on i.id = d.id;
+                update a set v = i.v * 10 from a join inserted i on i.id = a.id;
+                delete a from a join deleted d on d.id = a.id where not exists (select * from inserted);
+            end
+            """,
+            """
+            insert a (id, v, note) values (@id, @v, N'n'), (@id + 50, 0, null);
+            update av set v = @v where id = @id;
+            update av set note = N'q' where id = 1;
+            delete av where id = @id - 1;
+            delete a where id > 3
+            """,
+            AuditState,
+            With(("@id", 4), ("@v", 2)),
+            With(("@id", 5), ("@v", -2)),
+            With(("@id", 6), ("@v", 0)),
+            With(("@id", 7), ("@v", -9)));
+
+    [TestMethod]
+    public void Trigger_RecursiveAndNestedFirings_ReadTheirOwnRows()
+        => AssertReplayMatchesFreshParse(AuditTables + "\nalter database current set recursive_triggers on;\ngo\n" + """
+            create table b (id int primary key, v int not null);
+            go
+            create trigger ta on a after insert as
+            begin
+                set nocount on;
+                insert audit (op, id, new_v, v_updated) select 'A', id, v, trigger_nestlevel() from inserted;
+                if trigger_nestlevel() < 3
+                    insert a (id, v) select id + 100, v + 1 from inserted where id < 100;
+                insert b (id, v) select id, v from inserted where id < 100;
+                select trigger_nestlevel(), count(*) from inserted;
+            end
+            go
+            create trigger tb on b after insert as
+            begin
+                set nocount on;
+                insert audit (op, id, new_v, v_updated) select 'B', id, v, 1 from inserted;
+                update a set v = a.v + i.v from a join inserted i on i.id = a.id;
+            end
+            """,
+            "insert a (id, v) values (@id, @v), (@id + 1, @v); select id, v from b order by id; delete a where id >= 10; delete b",
+            AuditState,
+            With(("@id", 10), ("@v", 1)),
+            With(("@id", 20), ("@v", 2)),
+            With(("@id", 30), ("@v", 3)));
+
+    [TestMethod]
+    public void Trigger_ErrorsAndRollbackOverItsPseudoTables()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + """
+            create trigger tr on a after update as
+            begin
+                set nocount on;
+                insert audit (op, id, old_v, new_v, v_updated) select 'U', i.id, d.v, i.v / (i.v - 3), case when i.v = 4 then null else 1 end
+                from inserted i join deleted d on d.id = i.id;
+                if exists (select * from inserted where v > 50)
+                begin
+                    rollback;
+                    raiserror (N'too big', 16, 1);
+                end
+            end
+            """,
+            """
+            begin try
+                update a set v = @v where id = 1;
+                select @@trancount, @@rowcount;
+            end try
+            begin catch
+                select error_number(), error_line(), error_procedure(), error_message(), @@trancount;
+            end catch;
+            update a set v = @v where id = 2;
+            """,
+            AuditState + "; select @@trancount",
+            With(("@v", 1)),
+            With(("@v", 3)),
+            With(("@v", 4)),
+            With(("@v", 60)),
+            After("begin tran", ("@v", 5)),
+            After("set xact_abort on", ("@v", 3)),
+            After("set xact_abort off; while @@trancount > 0 rollback", ("@v", 7)));
+
+    [TestMethod]
+    public void Trigger_MergeAndCursorOverInserted()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + """
+            create table totals (id int primary key, total int not null);
+            go
+            create trigger tr on a after insert, update as
+            begin
+                set nocount on;
+                merge totals as t
+                using inserted as i on t.id = i.id
+                when matched then update set total = t.total + i.v
+                when not matched then insert (id, total) values (i.id, i.v);
+                declare @id int, @v int;
+                declare c cursor local fast_forward for select id, v from inserted order by id;
+                open c;
+                fetch next from c into @id, @v;
+                while @@fetch_status = 0
+                begin
+                    insert audit (op, id, new_v, v_updated) values ('C', @id, @v, 0);
+                    fetch next from c into @id, @v;
+                end
+                close c;
+                deallocate c;
+            end
+            """,
+            "insert a (id, v) values (@id, @v), (@id + 1, @v + 1); update a set v = v + @v where id between 1 and @id; delete a where id >= 10",
+            AuditState + "; select id, total from totals order by id",
+            With(("@id", 10), ("@v", 1)),
+            With(("@id", 20), ("@v", 2)),
+            With(("@id", 30), ("@v", 3)));
+
+    [TestMethod]
+    public void Trigger_GlobalCursorItLeavesOpen_KeepsItsFiringsRows()
+        => AssertReplayMatchesFreshParse(AuditTables + "\ngo\n" + """
+            create trigger tr on a after insert as
+            begin
+                set nocount on;
+                if cursor_status('global', 'gc') >= -1
+                    deallocate gc;
+                declare gc cursor global dynamic for select id, v from inserted;
+                open gc;
+                select id, v from inserted;
+            end
+            """,
+            "insert a (id, v) values (@id, @v), (@id + 1, @v); delete a where id >= 10",
+            AuditState,
+            With(("@id", 10), ("@v", 1)),
+            After("fetch next from gc; fetch next from gc", ("@id", 20), ("@v", 2)),
+            After("fetch first from gc; fetch next from gc", ("@id", 30), ("@v", 3)));
+
+    [TestMethod]
+    public void ConcurrentFirings_OfOneTrigger_ReadTheirOwnRows()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table c (id int primary key, v int not null); create table c_log (id int, v int, total int)");
+        _ = simulation.ExecuteNonQuery("""
+            create trigger c_tr on c after insert, update as
+            set nocount on;
+            insert c_log (id, v, total) select i.id, i.v, (select sum(v) from inserted) from inserted i left join deleted d on d.id = i.id
+            """);
+        const int workers = 8, iterations = 200;
+        _ = Parallel.For(0, workers, worker =>
+        {
+            using var connection = simulation.CreateOpenConnection();
+            for (var i = 0; i < iterations; i++)
+            {
+                using var command = connection.CreateCommand("insert c (id, v) values (@id, @v), (@id + 1, @v)", ("@id", ((worker * iterations) + i) * 2), ("@v", worker + 1));
+                _ = command.ExecuteNonQuery();
+            }
+        });
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from c_log where total <> 2 * v"));
+        AreEqual(workers * iterations * 2, simulation.ExecuteScalar("select count(*) from c_log l join c on c.id = l.id and c.v = l.v"));
+    }
+
     [TestMethod]
     public void ScalarFunction_SelectInItsBody()
         => AssertReplayMatchesFreshParse(Tables + "\n" + """

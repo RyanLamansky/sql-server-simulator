@@ -38,6 +38,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 - **INSERTED / DELETED pseudo-tables** — bare 1-part names resolve through the new `TriggerFrame.Inserted` / `TriggerFrame.Deleted` slots ahead of the schema / temp-table dispatch.
   Both pseudo-tables are always materialized (matching real SQL Server): an INSERT trigger sees an empty `deleted`, a DELETE trigger sees an empty `inserted`, an UPDATE trigger sees both populated.
   Pseudo-tables are `HeapTable` instances flagged `IsTableVariable` so writes don't touch the regular transaction undo log; columns are shared by reference from the parent table (for table parents) or the view's `OutputColumns` (for view parents).
+  The pair is kept on the parent from firing to firing, each firing giving it a heap of its own rows, so a body statement reading it replays its plan → [Statement plans over the pseudo-tables](#statement-plans-over-the-pseudo-tables).
   Read without an `ORDER BY`, an AFTER trigger's pseudo-tables yield the rows in the **reverse** of the order the statement wrote them and an INSTEAD OF trigger's in that order (probed 2026-09-28 against SQL Server 2025 across heap and keyed targets, `INSERT … VALUES` / `SELECT`, `UPDATE`, `DELETE`, `MERGE`, a cursor, `TOP (1)` and a thousand rows) — unordered on both engines, but a body that logs row by row shows it.
 - **The joined shapes a production body is written in** — a body rarely reads one row.
   It reaches its own parent table through an alias and *joins* the pseudo-table: `UPDATE n SET n.tag = dbo.f(n.tag) FROM t n JOIN INSERTED i ON n.id = i.id`, the same family as the aliased `DELETE <alias> FROM …` form.
@@ -75,7 +76,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
   `DROP TRIGGER` routed through the shared `Simulation.Drop.cs` dispatch (which also cascade-drops triggers when DROP TABLE / DROP VIEW removes the parent).
 - **Frame**: [`TriggerFrame`](../../src/SqlServerSimulator/Parser/TriggerFrame.cs) holds the per-fire pseudo-table instances.
   Set on the child `BatchContext` via the new trigger-body constructor; read by [`BatchContext.TryResolveTable`](../../src/SqlServerSimulator/Parser/BatchContext.Resolution.cs) ahead of the temp / `@t` / schema dispatch.
-- **Dispatch**: [`Simulation.InvokeTrigger.cs`](../../src/SqlServerSimulator/Simulation/Simulation.InvokeTrigger.cs) — `FireTriggers` walks every schema's `Triggers` dict, materializes the pseudo-tables once per fire, allocates a child `BatchContext`, runs the body via `DispatchStatementsUntil`.
+- **Dispatch**: [`Simulation.InvokeTrigger.cs`](../../src/SqlServerSimulator/Simulation/Simulation.InvokeTrigger.cs) — `FireTriggers` walks every schema's `Triggers` dict, fills the parent's kept pseudo-table pair once per fire (or materializes a pair of its own when another firing holds it), allocates a child `BatchContext`, runs the body via `DispatchStatementsUntil`.
   `TryFireInsteadOfTrigger` is the single-trigger INSTEAD OF dispatch; returns `true` if a trigger fired.
   `HasAfterTrigger` / `HasInsteadOfTrigger` are the fast-path predicates DML sites call first to avoid per-row snapshot capture when no trigger is attached.
   Both predicates route through `CanFireTrigger`, so a trigger the nesting rules suppress reads as absent.
@@ -243,6 +244,30 @@ Severity ≤ 10 is informational and leaves the unit intact (a caught `RAISERROR
 So does any error caught after the body's own `SET XACT_ABORT OFF`, which dooms nothing (probed 2026-09-28 against SQL Server 2025).
 An error the body leaves *un*handled propagates with its own number instead — an outer `CATCH` sees `ERROR_NUMBER()` 51000 for a body-side `THROW 51000`, with `ERROR_PROCEDURE()` naming the trigger — so Msg 3616 fires only for the swallowed case.
 An error caught inside a stored procedure the body called counts too, which is why `SimulatedDbConnection.TriggerBodyErrorRaised` is connection-scoped; it's saved and cleared per body so a handled error in one trigger doesn't condemn the next.
+
+## Statement plans over the pseudo-tables
+
+A body statement reading `inserted` or `deleted` — an audit trail's `INSERT … SELECT … FROM inserted i FULL JOIN deleted d`, a denormalizing `UPDATE … FROM … JOIN inserted`, a `MERGE … USING inserted` — replays its statement plan as the body's other statements do ([`plan-cache.md`](plan-cache.md#module-bodies)).
+A plan binds the tables it reads, so the pseudo-tables can't be built afresh per firing and still serve one: a table's `AFTER` triggers and a table's or view's `INSTEAD OF` trigger each read a pair kept on the parent ([`PseudoTableSlot`](../../src/SqlServerSimulator/Parser/PseudoTableSlot.cs), `SchemaObject.AfterPseudoTables` / `InsteadOfPseudoTables`), and each firing gives both tables a new `Heap` holding its own rows.
+The plans name the tables, and a pseudo-table's heap is read through the table as a plan runs (`HeapTable.ReplacesHeapPerFiring`, `FromSource.LobStore`), so a replay reads the firing that holds the pair.
+
+- **One firing holds the pair.**
+  Another session's firing, or one nested in a firing over the same parent — `RECURSIVE_TRIGGERS`, or a trigger writing back to a table further up the stack — finds it taken and materializes a pair of its own, as every firing once did; its statements over them parse and neither keep a plan nor replace the kept pair's (`BatchContext.StatementBindsFiringPseudoTables`).
+  A plan records the pair it read (`StatementPlanEntry.PseudoTables`), and only a batch whose frame holds that pair replays it.
+- **The pair follows the parent's shape.**
+  It stands while the columns it was built over and the schema version stand; a schema change builds a new one, whose firings record afresh, as the version stamp on every plan already makes them.
+  Each timing keeps its own pair: an `INSTEAD OF` pair widens its columns' nullability and reads as a work table, where an `AFTER` pair refuses a legacy LOB read.
+- **What varies per firing is read per firing.**
+  `UPDATE(col)` binds its column id while parsing and tests the firing's mask as it runs, `COLUMNS_UPDATED()` reads the mask, the rows are the firing's own, and a `MERGE` firing a trigger per action takes and releases the pair per action.
+- **What outlives a firing.**
+  A body's result sets are materialized before it returns, so nothing they hold reads the tables afterwards; a `GLOBAL` cursor a body declares and leaves allocated does, so a firing that leaves one retires the pair rather than refilling it under the cursor, and the next builds another.
+  A large firing's heap is dropped as it releases the pair rather than kept to the next.
+- **Object ids.**
+  A firing reusing the pair still draws the two object ids a pair of its own would take, so the ids later objects take don't depend on whether a firing found the pair free.
+- **SQLCLR.**
+  A CLR trigger's context-connection commands are batches of their own and keep parsing their reads of the pair.
+
+`StatementPlanReplayTests` holds audit triggers over every verb, row counts and `nvarchar(max)` values long enough to go off-row, `MERGE` firing all three actions, a schema change under `SELECT *` from the pair, `INSTEAD OF` on a table and through a view, recursive and nested firings, errors and rollback over the pair, a `MERGE` and a cursor over `inserted`, a `GLOBAL` cursor left open across firings and 8 sessions firing one trigger at once to a fresh parse's transcript; `StatementPlanCacheTests` (Tests.Internal) counts which statements replay, including that a nested firing leaves the outer firing's plans in place.
 
 ## Writing the pseudo-tables
 

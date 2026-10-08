@@ -164,7 +164,13 @@ Regression coverage: `CurrentTimeFunctionTests`.
 
 **A body's statements replay from plans.**
 A procedure's, DML trigger's, scalar or multi-statement function's and dynamic batch's `SELECT` and DML statements run from the statement plans their first call recorded, keyed by the module ([`plan-cache.md`](plan-cache.md#module-bodies)); the body still dispatches statement by statement, so the freeze, the error attribution, `@@PROCID`, streaming and skip mode are the parsed body's.
-A statement reading a `#temp` table, a table variable, a TVP or a trigger's `inserted` / `deleted` parses on every call, and so does every statement of a call that compiles afresh (`WITH RECOMPILE`).
+A statement reading a `#temp` table, a table variable or a TVP parses on every call, and so does every statement of a call that compiles afresh (`WITH RECOMPILE`); a trigger's statements over `inserted` / `deleted` replay too, the pair being kept across firings ([`triggers.md`](triggers.md#statement-plans-over-the-pseudo-tables)).
+
+**What a call costs besides its statements.**
+A scalar function's call builds a child batch — the `BatchContext`, its `ParserContext` and `StatementContext`, the parameters' `VariableSlot`s — and dispatches the body through the loop, which allocates its iterators per statement; that is most of a `RETURN @x * 2` call, whose parse is a small share.
+A call borrows the session's body command (`SimulatedDbConnection.RentBodyCommand`) rather than building one, since a command registers for finalization; the batch's cursor, table-variable, declaration-site and sequence maps, its `NOWAIT` and SERIALIZABLE-fence sets are made only when used; a table variable's, pseudo-table's or return table's concurrent maps take one lock where a shared table's take one per processor; and the dispatch loop skips the arithmetic-notice, statistics and DDL-trigger steps a statement owes nothing to rather than entering them.
+Measured 2026-10-08 (see [`plan-cache.md`](plan-cache.md#trigger-bodies-over-their-pseudo-tables-and-function-calls)) that took a `RETURN @x * 2` call over 1,000 rows from 1.19 to 0.99 ms and a `DECLARE` / `IF` / `SET` / `RETURN` body from 4.54 to 4.00 ms.
+What is left is the child batch's own objects (about 0.9, 0.5 and 0.25 KB) and the parse of a body's `DECLARE` / `SET` / `IF` / `RETURN`, which have no plans — see the [backlog](backlog.md#complex-query-execution--perf-residuals).
 
 ## The body-introducing `AS` is optional
 

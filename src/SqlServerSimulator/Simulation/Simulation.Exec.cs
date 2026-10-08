@@ -736,7 +736,7 @@ partial class Simulation
         // implicitly read-only and don't write back).
         if (context.Token is AtPrefixedString varRef)
         {
-            if (batch.TableVariables.TryGetValue(varRef.Value, out var tableVar))
+            if (batch.TryGetTableVariable(varRef.Value, out var tableVar))
             {
                 context.MoveNextOptional();
                 return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, tableValue: tableVar);
@@ -747,7 +747,7 @@ partial class Simulation
             // is consumed like the scalar path.
             // Without OUTPUT the procedure's cursor never reaches the variable
             // (probed 2026-09-29 against SQL Server 2025).
-            if (batch.CursorVariables.ContainsKey(varRef.Value))
+            if (batch.HasCursorVariable(varRef.Value))
             {
                 context.MoveNextOptional();
                 string? boundName = null;

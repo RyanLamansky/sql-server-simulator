@@ -590,7 +590,7 @@ partial class Simulation
             return (SqlValue.Null(SqlType.Int32), null);
         }
         if (context.Token is AtPrefixedString tableRef
-            && batch.TableVariables.TryGetValue(tableRef.Value.TrimStart('@'), out var tableVariable))
+            && batch.TryGetTableVariable(tableRef.Value.TrimStart('@'), out var tableVariable))
         {
             table = tableVariable;
             context.MoveNextOptional();

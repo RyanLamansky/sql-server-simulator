@@ -28,10 +28,11 @@ partial class Simulation
     /// site (the DML's row count was the value before trigger fire).
     /// </para>
     /// <para>
-    /// Pseudo-tables are materialized as fresh <see cref="HeapTable"/>
-    /// instances carrying the parent table's column array (with no
-    /// constraints / no Identity counter advances) and the affected
-    /// rows pre-encoded into the heap. Re-using the parent's HeapColumn
+    /// Pseudo-tables are <see cref="HeapTable"/> instances carrying the
+    /// parent table's column array (with no constraints / no Identity
+    /// counter advances), the parent's kept pair given a heap of the
+    /// affected rows (<see cref="PseudoTableSlot"/>), or, when another
+    /// firing holds that pair, a pair materialized for this firing. Re-using the parent's HeapColumn
     /// instances is safe because the pseudo-tables are read-only inside
     /// the trigger body (DML against <c>inserted</c> / <c>deleted</c>
     /// would surface Msg 286 in real SQL Server — the simulator's HeapTable
@@ -87,11 +88,60 @@ partial class Simulation
         // targets, INSERT VALUES / SELECT, UPDATE, DELETE and MERGE, a
         // thousand rows included) — unordered on both, but visible to a body
         // that reads row by row without an ORDER BY.
-        var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch, reversed: true);
-        var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch, reversed: true);
-        insertedPseudo.RefusesLegacyLobReads = deletedPseudo.RefusesLegacyLobReads = true;
+        var slot = this.TakePseudoTables(ref targetTable.AfterPseudoTables, targetTable.Columns, outerBatch, static (columns, name, batch) => AfterPseudoTable(columns, name, [], batch));
+        var (insertedPseudo, deletedPseudo) = FillPseudoTables(slot, targetTable.Columns, insertedRows, deletedRows, outerBatch, reversed: true, AfterPseudoTable);
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, targetDatabase, matching, action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
+        try
+        {
+            RunTriggerBodies(outerBatch, targetDatabase, matching, action, insertedPseudo, deletedPseudo, affectedRowCount, mask, slot);
+        }
+        finally
+        {
+            slot?.Release(outerBatch.Connection);
+        }
+    }
+
+    /// <summary>An <c>AFTER</c> trigger's pseudo-table, which refuses a legacy LOB read.</summary>
+    private static HeapTable AfterPseudoTable(HeapColumn[] columns, string name, List<SqlValue[]> rows, BatchContext outerBatch)
+    {
+        var pseudo = MaterializePseudoTable(columns, name, rows, outerBatch, reversed: true);
+        pseudo.RefusesLegacyLobReads = true;
+        return pseudo;
+    }
+
+    /// <summary>
+    /// Takes the kept <c>inserted</c> / <c>deleted</c> pair at
+    /// <paramref name="home"/> for one firing over <paramref name="sourceColumns"/>
+    /// (see <see cref="PseudoTableSlot"/>), or null when another firing holds it.
+    /// </summary>
+    private PseudoTableSlot? TakePseudoTables(ref PseudoTableSlot? home, HeapColumn[] sourceColumns, BatchContext outerBatch, Func<HeapColumn[], string, BatchContext, HeapTable> build) =>
+        PseudoTableSlot.TryTake(ref home, sourceColumns, Volatile.Read(ref this.SchemaVersion), name => build(sourceColumns, name, outerBatch));
+
+    /// <summary>
+    /// This firing's <c>inserted</c> and <c>deleted</c>: the kept pair
+    /// <paramref name="slot"/> refilled with its rows, or, when it holds none,
+    /// tables of its own built by <paramref name="build"/>. Either way the
+    /// tables' object ids are drawn, so the ids later objects take don't
+    /// depend on whether a firing found the pair free.
+    /// </summary>
+    private static (HeapTable Inserted, HeapTable Deleted) FillPseudoTables(
+        PseudoTableSlot? slot,
+        HeapColumn[] columns,
+        List<SqlValue[]>? insertedRows,
+        List<SqlValue[]>? deletedRows,
+        BatchContext outerBatch,
+        bool reversed,
+        Func<HeapColumn[], string, List<SqlValue[]>, BatchContext, HeapTable> build)
+    {
+        if (slot is null)
+            return (build(columns, "inserted", insertedRows ?? [], outerBatch), build(columns, "deleted", deletedRows ?? [], outerBatch));
+
+        if (slot.Fill((table, heap) => EncodePseudoRows(table, heap, ReferenceEquals(table, slot.Inserted) ? insertedRows : deletedRows, reversed)))
+        {
+            _ = outerBatch.CurrentDatabase.AllocateObjectId();
+            _ = outerBatch.CurrentDatabase.AllocateObjectId();
+        }
+        return (slot.Inserted, slot.Deleted);
     }
 
     /// <summary>
@@ -202,34 +252,55 @@ partial class Simulation
         if (matched is null)
             return false;
 
-        // The rows an INSTEAD OF trigger reads were never written, so every
-        // column but a computed or identity one reads as nullable, and an
-        // INSERT's rowversion as NULL, where an UPDATE's keeps the row's
-        // (probed 2026-10-01 and 2026-10-04 against SQL Server 2025).
+        // An INSERT's rowversion reads as NULL, where an UPDATE's keeps the
+        // row's (probed 2026-10-04 against SQL Server 2025).
+        if (action == TriggerActions.Insert && insertedRows is { Count: > 0 })
+        {
+            for (var i = 0; i < pseudoColumns.Length; i++)
+            {
+                if (pseudoColumns[i].Type is not RowVersionSqlType)
+                    continue;
+                for (var r = 0; r < insertedRows.Count; r++)
+                {
+                    insertedRows[r] = (SqlValue[])insertedRows[r].Clone();
+                    insertedRows[r][i] = SqlValue.Null(pseudoColumns[i].Type);
+                }
+            }
+        }
+        var slot = this.TakePseudoTables(ref parent.InsteadOfPseudoTables, pseudoColumns, outerBatch, static (columns, name, batch) => InsteadOfPseudoTable(columns, name, [], batch));
+        var (insertedPseudo, deletedPseudo) = FillPseudoTables(slot, pseudoColumns, insertedRows, deletedRows, outerBatch, reversed: false, InsteadOfPseudoTable);
+        outerBatch.Connection.StatementIo?.UseWorktable();
+        var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
+        try
+        {
+            RunTriggerBodies(outerBatch, targetDatabase, [matched], action, insertedPseudo, deletedPseudo, affectedRowCount, mask, slot);
+        }
+        finally
+        {
+            slot?.Release(outerBatch.Connection);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// An <c>INSTEAD OF</c> trigger's pseudo-table over the parent's
+    /// <paramref name="pseudoColumns"/>. Its rows were never written, so every
+    /// column but a computed or identity one reads as nullable (probed
+    /// 2026-10-01 against SQL Server 2025), and they wait in a work table,
+    /// which the firing statement lists and the body's reads scan (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static HeapTable InsteadOfPseudoTable(HeapColumn[] pseudoColumns, string name, List<SqlValue[]> rows, BatchContext outerBatch)
+    {
         var columns = new HeapColumn[pseudoColumns.Length];
         for (var i = 0; i < columns.Length; i++)
         {
             var column = pseudoColumns[i];
             columns[i] = column.Nullable || column.Computed is not null || column.Identity is not null ? column : column.WithNullable(true);
-            if (column.Type is RowVersionSqlType && action == TriggerActions.Insert && insertedRows is { Count: > 0 })
-            {
-                for (var r = 0; r < insertedRows.Count; r++)
-                {
-                    insertedRows[r] = (SqlValue[])insertedRows[r].Clone();
-                    insertedRows[r][i] = SqlValue.Null(column.Type);
-                }
-            }
         }
-        var insertedPseudo = MaterializePseudoTable(columns, "inserted", insertedRows ?? [], outerBatch);
-        var deletedPseudo = MaterializePseudoTable(columns, "deleted", deletedRows ?? [], outerBatch);
-        // An INSTEAD OF trigger's rows wait in a work table, which the firing
-        // statement lists and the body's reads of inserted / deleted scan
-        // (probed 2026-09-28 against SQL Server 2025).
-        insertedPseudo.ReadsAsWorktable = deletedPseudo.ReadsAsWorktable = true;
-        outerBatch.Connection.StatementIo?.UseWorktable();
-        var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, targetDatabase, [matched], action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
-        return true;
+        var pseudo = MaterializePseudoTable(columns, name, rows, outerBatch);
+        pseudo.ReadsAsWorktable = true;
+        return pseudo;
     }
 
     /// <summary>
@@ -246,7 +317,8 @@ partial class Simulation
         HeapTable insertedPseudo,
         HeapTable deletedPseudo,
         int affectedRowCount,
-        byte[] columnsUpdatedMask)
+        byte[] columnsUpdatedMask,
+        PseudoTableSlot? pseudoTables)
     {
         var connection = outerBatch.Connection;
 
@@ -291,7 +363,7 @@ partial class Simulation
                 RunOneTriggerBody(
                     outerBatch,
                     targetDatabase,
-                    new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask, action),
+                    new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask, action, pseudoTables),
                     trigger.BodyText,
                     trigger.BodyLineOffset,
                     trigger.Name,
@@ -404,6 +476,7 @@ partial class Simulation
         // against SQL Server 2025).
         connection.XactAbort = true;
         BatchContext? innerBatch = null;
+        SimulatedDbCommand? bodyCommand = null;
         try
         {
             moduleScope = ModuleDatabaseScope.Enter(connection, bodyDatabase);
@@ -424,10 +497,9 @@ partial class Simulation
                 PushServerTriggerExecuteAsFrame(connection, executeAsLogin, bodyDatabase);
             if (!string.IsNullOrEmpty(bodyText))
             {
-                using var bodyCommand = new SimulatedDbCommand(this, connection);
-#pragma warning disable CA2100 // bodyText is the simulator's own captured body span
-                bodyCommand.CommandText = bodyText;
-#pragma warning restore CA2100
+#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+                bodyCommand = connection.RentBodyCommand(bodyText);
+#pragma warning restore CA2000
                 innerBatch = new BatchContext(bodyCommand, frame)
                 {
                     // Trigger-body errors report a CREATE-relative line and
@@ -535,6 +607,8 @@ partial class Simulation
             // trigger exit (probe-confirmed Msg 208 afterward — module-
             // scoped lifetime, same as procs / dynamic SQL).
             innerBatch?.DropScopedTempTables();
+            if (bodyCommand is not null)
+                connection.ReturnBodyCommand(bodyCommand);
             connection.Security.RevertTo(savedImpersonationDepth);
             connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
             connection.TriggerTransactionEnded = savedTransactionEnded;
@@ -718,12 +792,24 @@ partial class Simulation
             schemaId: Database.DboSchemaId,
             createDate: outerBatch.CurrentStatement.UtcNow,
             isTableVariable: true);
+        EncodePseudoRows(pseudo, pseudo.Heap, rows, reversed);
+        return pseudo;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/> into <paramref name="heap"/> in
+    /// <paramref name="pseudo"/>'s stored layout, last first when
+    /// <paramref name="reversed"/>.
+    /// </summary>
+    private static void EncodePseudoRows(HeapTable pseudo, Heap heap, List<SqlValue[]>? rows, bool reversed)
+    {
+        if (rows is null)
+            return;
         for (var i = 0; i < rows.Count; i++)
         {
-            var stored = ProjectStoredValuesForColumns(columns, pseudo.StorageOrdinals, rows[reversed ? rows.Count - 1 - i : i]);
-            _ = pseudo.Heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, pseudo.Heap), undoLog: null);
+            var stored = ProjectStoredValuesForColumns(pseudo.Columns, pseudo.StorageOrdinals, rows[reversed ? rows.Count - 1 - i : i]);
+            _ = heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, heap), undoLog: null);
         }
-        return pseudo;
     }
 
     /// <summary>
