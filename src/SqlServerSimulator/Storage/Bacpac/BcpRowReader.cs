@@ -93,6 +93,8 @@ internal static class BcpRowReader
             WireForm.EightByte => ReadEightBytePrefixed(ref stream, type, decoder.Payload),
             WireForm.Varchar2 => ReadVarchar2(ref stream, type),
             WireForm.Varbinary2 => ReadVarbinary2(ref stream, type),
+            WireForm.LegacyText4 => ReadLegacyText4(ref stream, type),
+            WireForm.LegacyImage4 => ReadLegacyImage4(ref stream, type),
             _ => throw new InvalidOperationException($"unknown WireForm {decoder.Form}"),
         };
     }
@@ -179,6 +181,13 @@ internal static class BcpRowReader
             VarcharSqlType or NVarcharSqlType or SystemNameSqlType or NCharSqlType or CharSqlType => Simple(type, WireForm.Varchar2),
             VarbinarySqlType or BinarySqlType => Simple(type, WireForm.Varbinary2),
 
+            // The legacy LOB types — 4-byte LE prefix, 0xFFFFFFFF = NULL —
+            // with text written as UTF-16-LE like every character column
+            // (probe-confirmed 2026-10-09 against a SQL Server 2025 export:
+            // a text 'abc' is 06 00 00 00 61 00 62 00 63 00).
+            TextSqlType or NTextSqlType => Simple(type, WireForm.LegacyText4),
+            ImageSqlType => Simple(type, WireForm.LegacyImage4),
+
             _ => throw new NotSupportedException($"BCP decoder doesn't yet handle type {type}."),
         };
     }
@@ -215,6 +224,10 @@ internal static class BcpRowReader
         Varchar2,
         /// <summary>2-byte LE prefix then N raw bytes.</summary>
         Varbinary2,
+        /// <summary>4-byte LE prefix then N bytes of UTF-16-LE text, for <c>text</c> and <c>ntext</c>.</summary>
+        LegacyText4,
+        /// <summary>4-byte LE prefix then N raw bytes, for <c>image</c>.</summary>
+        LegacyImage4,
     }
 
     /// <summary>
@@ -454,6 +467,33 @@ internal static class BcpRowReader
             CharSqlType => SqlValue.FromChar(type, text),
             _ => throw new InvalidOperationException(),
         };
+    }
+
+    private static SqlValue ReadLegacyText4(ref PushbackStream stream, SqlType type)
+    {
+        if (ReadLegacyPayload(ref stream) is not { } data)
+            return SqlValue.Null(type);
+        var text = SystemNameSqlType.Utf16LeDecode(data);
+        return type is NTextSqlType ? SqlValue.FromNText(text) : SqlValue.FromText(text);
+    }
+
+    private static SqlValue ReadLegacyImage4(ref PushbackStream stream, SqlType type) =>
+        ReadLegacyPayload(ref stream) is { } data ? SqlValue.FromImage(data) : SqlValue.Null(type);
+
+    /// <summary>
+    /// Reads a legacy LOB value's 4-byte LE length and its bytes; null for
+    /// the 0xFFFFFFFF NULL marker.
+    /// </summary>
+    private static byte[]? ReadLegacyPayload(ref PushbackStream stream)
+    {
+        Span<byte> prefixBytes = stackalloc byte[4];
+        stream.ReadExact(prefixBytes);
+        var byteLength = BinaryPrimitives.ReadUInt32LittleEndian(prefixBytes);
+        if (byteLength == uint.MaxValue)
+            return null;
+        var data = new byte[checked((int)byteLength)];
+        stream.ReadExact(data);
+        return data;
     }
 
     private static SqlValue ReadVarbinary2(ref PushbackStream stream, SqlType type)

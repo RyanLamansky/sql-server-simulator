@@ -150,6 +150,7 @@ Type matrix probe-confirmed against AdventureWorks2025 hex-dumps:
   Probe against AW's plain-bit `Production.Document.FolderFlag` (the only non-UDDT bit column in AW) confirmed.
 - MAX types + xml + CLR-UDT all share the **simple inline** 8-byte-prefix shape, NOT the chunked PLP form used in TDS network traffic.
   Probe-confirmed via `ProductPhoto.ThumbNailPhoto` (1077 bytes inline, no chunk markers) and `HumanResources.JobCandidate.Resume` xml (9086 bytes likewise inline).
+- The legacy LOB family `text` / `ntext` / `image` takes a **4-byte** LE length prefix instead (`0xFFFFFFFF` = NULL), and `text` is written as UTF-16-LE like every other character column, so a `text` `'abc'` is `06 00 00 00 61 00 62 00 63 00` (probed 2026-10-09 against a `sqlpackage /Action:Export` of a SQL Server 2025 table; neither AdventureWorks nor WideWorldImporters carries one).
 - `decimal` / `numeric` carries an inline precision + scale + sign ahead of the mantissa, whose width is the precision tier's (4 / 8 / 12 / 16 bytes for 1-9 / 10-19 / 20-28 / 29-38), and the reader takes the whole mantissa at any tier — a `decimal(38, s)` column round-trips digit for digit.
   `BacpacBuilder`, the test harness that writes these files, takes its values as .NET `decimal`s and so writes narrower ones than the reader accepts.
 
@@ -165,7 +166,6 @@ It was found by exporting a purpose-built table with precisions 0, 3 and 7 side 
 A large enough offset moves the payload onto a different calendar day than the local value.
 
 **Wire-format gaps** (none seen in AW or WWI):
-- `text` / `ntext` / `image` legacy LOB family — likely same 8-byte-prefix shape as MAX, but not confirmed.
 - `sql_variant` envelope — probably type-tag byte + per-type encoding.
 - TDS-PLP chunked form (8-byte length = `0xFFFFFFFFFFFFFFFE` "unknown total", 4-byte-length chunks terminating on 4-byte zero) — not seen in any bacpac shard; reserved for live TDS traffic only.
 

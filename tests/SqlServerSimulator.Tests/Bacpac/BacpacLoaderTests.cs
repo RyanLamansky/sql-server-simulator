@@ -42,6 +42,36 @@ public class BacpacLoaderTests
         }
     }
 
+    /// <summary>
+    /// The legacy LOB types' rows load: a 4-byte length per value, text and
+    /// ntext written as UTF-16 (probed 2026-10-09 against a SQL Server 2025
+    /// export), where the whole table's data was skipped.
+    /// </summary>
+    [TestMethod]
+    public void LegacyLobColumns_Load()
+    {
+        var bytes = BacpacBuilder.Create()
+            .Table("dbo", "L", t => t
+                .Column("Id", "int")
+                .Column("T", "text", nullable: true)
+                .Column("N", "ntext", nullable: true)
+                .Column("I", "image", nullable: true)
+                .Row(1, "abc", "héllo ✓", new byte[] { 1, 2 })
+                .Row(2, null, null, null)
+                .Row(3, new string('x', 9000), new string('y', 9000), Array.Empty<byte>()))
+            .Build();
+        var simulation = new Simulation();
+        simulation.ImportBacpac(bytes, out var result);
+        IsEmpty(result.Skipped);
+
+        AreEqual("1|3|14|2|abc|héllo ✓|0102,2||||||,3|9000|18000|0|xxxxx|yyyyyyy|", simulation.ExecuteScalar("""
+            select string_agg(concat(Id, '|', datalength(T), '|', datalength(N), '|', datalength(I), '|',
+                cast(substring(T, 1, 5) as varchar(9)), '|', cast(substring(N, 1, 7) as nvarchar(9)), '|', convert(varchar(10), cast(I as varbinary(10)), 2)), ',')
+                within group (order by Id)
+            from dbo.L
+            """));
+    }
+
     [TestMethod]
     public void NamedSchemas_LandIn_sys_schemas()
     {

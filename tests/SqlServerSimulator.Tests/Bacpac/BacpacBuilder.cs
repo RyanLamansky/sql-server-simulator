@@ -809,6 +809,16 @@ public sealed partial class BacpacBuilder
             case "xml":
                 Encode8BytePrefixedString(stream, value as string);
                 return;
+            case "text" or "ntext":
+                // The legacy LOB types carry a 4-byte LE length prefix
+                // (0xFFFFFFFF = NULL), text written as UTF-16-LE like every
+                // character column (probed 2026-10-09 against a SQL Server
+                // 2025 export).
+                Encode4BytePrefixed(stream, value is string text ? Encoding.Unicode.GetBytes(text) : null);
+                return;
+            case "image":
+                Encode4BytePrefixed(stream, value as byte[]);
+                return;
             case "geography" or "geometry":
                 // Geography / geometry values are pre-encoded into Microsoft's
                 // spatial UDT binary (typically via MakeGeographyPoint /
@@ -1043,6 +1053,15 @@ public sealed partial class BacpacBuilder
         BinaryPrimitives.WriteUInt16LittleEndian(prefix, checked((ushort)value.Length));
         stream.Write(prefix);
         stream.Write(value);
+    }
+
+    private static void Encode4BytePrefixed(Stream stream, byte[]? value)
+    {
+        Span<byte> prefix = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(prefix, value is null ? uint.MaxValue : checked((uint)value.Length));
+        stream.Write(prefix);
+        if (value is not null)
+            stream.Write(value);
     }
 
     private static void Encode8BytePrefixedString(Stream stream, string? value)

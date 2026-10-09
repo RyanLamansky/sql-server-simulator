@@ -2738,11 +2738,13 @@ public sealed partial class Simulation
     /// doesn't exist yet, which real binds only once it runs. Real's binder
     /// raises a few severity-15 errors too — Msg 107, 130, 145, 147, 164 and
     /// 4108 wait with their statement, where a parse-phase one such as Msg 174
-    /// or 321 doesn't (probed 2026-10-01 against SQL Server 2025).
+    /// or 321 doesn't (probed 2026-10-01 against SQL Server 2025) — and so
+    /// does an <c>INSERT … SELECT *</c>'s count against its column list,
+    /// Msg 120 / 121, over a table the batch creates (probed 2026-10-09).
     /// </summary>
     private static bool DefersWithItsStatement(BatchContext batch, SimulatedSqlException ex)
         => IsDeferrableNameResolutionError(ex)
-            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 130 or 145 or 147 or 157 or 164 or 4108));
+            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 4108));
 
     /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that
@@ -2948,11 +2950,13 @@ public sealed partial class Simulation
     /// the same way wherever they are raised (probed 2026-09-29), as does a
     /// refusal real settles compiling a statement it deferred — a DML
     /// <c>TOP</c>'s written constant, a nested <c>NEXT VALUE FOR</c> (probed
-    /// 2026-10-06). An error not listed keeps a run-time error's handling.
+    /// 2026-10-06), and an <c>INSERT … SELECT *</c>'s count against its column
+    /// list, Msg 120 / 121 (probed 2026-10-09). An error not listed keeps a
+    /// run-time error's handling.
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
-            || ex.Number is 107 or 108 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
+            || ex.Number is 107 or 108 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709;
 
     /// <summary>

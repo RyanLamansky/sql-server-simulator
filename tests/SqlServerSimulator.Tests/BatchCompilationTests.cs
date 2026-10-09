@@ -140,6 +140,46 @@ public sealed class BatchCompilationTests
         AreEqual(1, Scalar(connection, "select count(*) from sys.tables where name = 't2'"));
     }
 
+    /// <summary>
+    /// An <c>INSERT … SELECT *</c> over a table the batch creates counts its
+    /// select list against the insert list only once it runs, when <c>*</c>
+    /// expands to the table's real columns (probed 2026-10-09 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 as a, 2 as b into #t; insert into dbo.c (a, b) select * from #t")]
+    [DataRow("select 1 as a, 2 as b into #t; insert into dbo.c (a, b) select t.* from #t t")]
+    [DataRow("create table #t (a int, b int); insert #t values (1, 2); insert into dbo.c (a, b) select * from #t")]
+    public void InsertSelectStar_OverATableTheBatchCreates_CountsWhenItRuns(string batch)
+    {
+        var (_, connection) = Open();
+        _ = Scalar(connection, "create table dbo.c (a int, b int)");
+        _ = Scalar(connection, batch);
+        AreEqual(1, Scalar(connection, "select count(*) from dbo.c where a = 1 and b = 2"));
+    }
+
+    /// <summary>
+    /// A count that's wrong once <c>*</c> expands is real's Msg 120 / 121 as
+    /// the statement runs, the statements before it having run and the batch
+    /// ending uncaught; over a table that already exists it refuses the
+    /// batch while it compiles (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 as a into #t", 120)]
+    [DataRow("select 1 as a, 2 as b, 3 as x into #t", 121)]
+    public void InsertSelectStar_OverATableTheBatchCreates_WrongCountRaisesAsItRuns(string create, int number)
+    {
+        var (_, connection) = Open();
+        _ = Scalar(connection, "create table dbo.c (a int, b int)");
+        var ex = Fails(connection, $"print 'first'; begin try {create}; insert into dbo.c (a, b) select * from #t; end try begin catch print 'caught' end catch; print 'after'");
+        AreEqual(number, ex.Number);
+        CollectionAssert.AreEqual(new[] { "first" }, Messages(ex));
+
+        var compiled = Fails(connection, "print 'first'; insert into dbo.c (a, b) select a from dbo.c");
+        AreEqual(120, compiled.Number);
+        IsEmpty(Messages(compiled));
+    }
+
     [TestMethod]
     public void CompileError_IsNotCaught()
     {
