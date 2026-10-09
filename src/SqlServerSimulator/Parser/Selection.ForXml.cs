@@ -284,12 +284,17 @@ partial class Selection
         SqlType[] schema = [options.Typed ? SqlType.Xml : SqlType.NVarcharMax];
         string[] columnNames = [options.Typed ? "" : ForXmlColumnName];
 
+        var whenEmpty = options.Typed ? EmptyForXmlRow() : null;
         if (explicitPlan is not null)
         {
+            IEnumerable<string> explicitPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXmlExplicit(inner, innerSchema, explicitPlan, options, batch, outerResolver);
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
                 hasTopOrOffsetOrFetch: false,
-                (batch, outerResolver) => SerializeForXmlExplicit(inner, innerSchema, explicitPlan, options, batch, outerResolver));
+                (batch, outerResolver) => WholeDocument(explicitPieces(batch, outerResolver), text => ForXmlExplicitRow(text, options), whenEmpty))
+            {
+                documentPieces = explicitPieces,
+            };
         }
 
         if (options.Mode == ForXmlMode.Auto)
@@ -311,18 +316,26 @@ partial class Selection
             var autoOptions = binaryUrls is not null && Array.Exists(binaryUrls, static url => url is not null)
                 ? options.WithBinaryUrls(binaryUrls)
                 : options;
+            IEnumerable<string> autoPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXmlAuto(inner, innerSchema, levels, levelElements, autoOptions, batch, outerResolver);
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
                 hasTopOrOffsetOrFetch: false,
-                (batch, outerResolver) => SerializeForXmlAuto(inner, innerSchema, levels, levelElements, autoOptions, batch, outerResolver));
+                (batch, outerResolver) => WholeDocument(autoPieces(batch, outerResolver), text => ForXmlRow(text, options), whenEmpty))
+            {
+                documentPieces = autoPieces,
+            };
         }
 
         var rowElement = BuildForXmlRowElement(inner, options);
 
+        IEnumerable<string> pieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXml(inner, innerSchema, rowElement, options, batch, outerResolver);
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => SerializeForXml(inner, innerSchema, rowElement, options, batch, outerResolver));
+            (batch, outerResolver) => WholeDocument(pieces(batch, outerResolver), text => ForXmlRow(text, options), whenEmpty))
+        {
+            documentPieces = pieces,
+        };
     }
 
     /// <summary>
@@ -585,7 +598,12 @@ partial class Selection
         return child;
     }
 
-    private static IEnumerable<byte[]> SerializeForXml(
+    /// <summary>
+    /// The document's text as its rows serialize, a row at a time, the
+    /// <c>ROOT</c> element's start tag with the first row's and its end tag
+    /// after the last; an empty input rowset writes nothing.
+    /// </summary>
+    private static IEnumerable<string> SerializeForXml(
         Selection inner, SqlType[] innerSchema, ForXmlElement rowElement,
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -614,19 +632,16 @@ partial class Selection
                 SerializeForXmlElement(sb, rowElement, rowBytes, innerSchema, options, topLevelDeclarations, isRowElement: true);
                 prevAtomic = false;
             }
+            yield return Drain(sb);
         }
 
         if (!any)
-        {
-            if (options.Typed)
-                yield return EmptyForXmlRow();
             yield break;
-        }
 
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
-        yield return ForXmlRow(sb, options);
+        yield return Drain(sb);
     }
 
     /// <summary>
@@ -639,7 +654,7 @@ partial class Selection
     /// rows). A single-level projection — the flat AUTO shape — falls out as
     /// the degenerate case.
     /// </summary>
-    private static IEnumerable<byte[]> SerializeForXmlAuto(
+    private static IEnumerable<string> SerializeForXmlAuto(
         Selection inner, SqlType[] innerSchema, AutoLevel[] levels, ForXmlElement[] levelElements,
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -683,30 +698,27 @@ partial class Selection
                 open.Add(element.Name);
             }
             previous = rowBytes;
+            yield return Drain(sb);
         }
 
         if (previous is null)
-        {
-            if (options.Typed)
-                yield return EmptyForXmlRow();
             yield break;
-        }
 
         for (var i = open.Count - 1; i >= 0; i--)
             _ = sb.Append("</").Append(open[i]).Append('>');
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
-        yield return ForXmlRow(sb, options);
+        yield return Drain(sb);
     }
 
     /// <summary>
     /// The serialized fragment as one result row — a typed <c>xml</c> value
     /// under the TYPE option, else the <c>nvarchar(max)</c> string form.
     /// </summary>
-    private static byte[] ForXmlRow(StringBuilder document, ForXmlOptions options) => options.Typed
-        ? RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(document.ToString())])
-        : RowEncoder.EncodeRow([SqlType.NVarcharMax], [SqlValue.FromNVarchar(SqlType.NVarcharMax, document.ToString())]);
+    private static byte[] ForXmlRow(string document, ForXmlOptions options) => options.Typed
+        ? RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(document)])
+        : RowEncoder.EncodeRow([SqlType.NVarcharMax], [SqlValue.FromNVarchar(SqlType.NVarcharMax, document)]);
 
     /// <summary>
     /// The row an empty input rowset produces under the TYPE option: one NULL

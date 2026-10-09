@@ -467,6 +467,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.RowAddresses = null;
+                batch.CurrentStatement.ReadsSnapshot = false;
                 batch.CurrentStatement.CatalogViewRows = null;
 #if DEBUG
                 batch.CurrentStatement.AuditedCatalogRowSets = null;
@@ -513,11 +514,16 @@ public sealed partial class Simulation
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
-                    if (batch.StreamsResultRows && !selection.IsAssignmentOnly && !selection.CountsForClauseSourceRows)
-                        stream = executed.BeginStreaming(batch.CurrentStatement);
+                    if (batch.StreamsResultRows && !selection.IsAssignmentOnly)
+                        stream = executed.BeginStreaming(batch.CurrentStatement, batch.Connection);
                     rowCount = stream is null ? executed.MaterializeRows() : 0;
                     if (selection.CountsForClauseSourceRows)
-                        rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+                    {
+                        if (stream is null)
+                            rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+                        else
+                            stream.CountsForClauseSourceRows = true;
+                    }
                     if (stream is null && queryStore is { } capture)
                         EndQueryStoreCapture(batch, capture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, 0, rowCount);
                 }
@@ -589,7 +595,7 @@ public sealed partial class Simulation
                         }
                         EndReplayedStatement(connection, queryStoreIo, announcedReader);
                     }
-                    rowCount = stream.Error is null ? stream.RowCount : 0;
+                    rowCount = stream.Error is null ? stream.StatementRowCount(batch) : 0;
                     connection.LastStatementRowCount = rowCount;
                     if (stream.Error is { } streamed)
                     {

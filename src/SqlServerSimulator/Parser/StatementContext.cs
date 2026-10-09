@@ -564,6 +564,15 @@ internal sealed class StatementContext
     public int Suspensions;
 
     /// <summary>
+    /// Set once a read of the statement resolved a snapshot to read at: a
+    /// <c>SELECT</c> suspended on its client then finishes before another
+    /// request of its transaction writes, rather than keeping its rows through
+    /// <see cref="Storage.OwnWriteImages"/>, which its snapshot reads don't
+    /// consult.
+    /// </summary>
+    public bool ReadsSnapshot;
+
+    /// <summary>
     /// The rows a <c>SELECT</c> left to produce as its client reads them,
     /// which the dispatch loop takes over once the statement has sent its
     /// result set (see <see cref="ResultStream"/>); null for any other
@@ -594,6 +603,7 @@ internal sealed class StatementContext
         this.EscalatedTables = null;
         this.RemoteWrite = null;
         this.RemoteWriteAlias = null;
+        this.ReadsSnapshot = false;
     }
 }
 

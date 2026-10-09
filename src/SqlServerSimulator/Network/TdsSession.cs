@@ -1254,6 +1254,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // ahead of the client itself (see SendWhatTheClientTakesAsync).
                     if (writer.MarsSession is not null)
                         stream.LeadPackets = 1;
+                    stream.FramesPackets = true;
                     stream.Pull = () =>
                     {
                         if (Advance() && escaped is null && outcomes.Current.Outcome is not SimulatedRowsProduced)

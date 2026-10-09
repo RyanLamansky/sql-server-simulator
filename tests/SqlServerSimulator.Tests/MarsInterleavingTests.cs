@@ -202,42 +202,117 @@ public sealed class MarsInterleavingTests
     }
 
     /// <summary>
-    /// A request in the reader's own transaction reads beside it, and its
-    /// first write finds the reader's statement run to its end first, so the
-    /// reader reads none of its writes, as real's reader doesn't — real
-    /// versions the writes it makes there (probed 2026-10-05 against SQL
-    /// Server 2025).
+    /// A request in the reader's own transaction reads and writes beside it,
+    /// and the reader goes on reading the rows its statement began with — an
+    /// update ahead of it reads as before, a delete is read, an insert isn't, a
+    /// key moved either way reads at its old key, and the transaction's write
+    /// from before the statement as written — while it stays where it stood,
+    /// holding the locks its position holds and no more, so another session's
+    /// write ahead of it goes in and is read where the read reaches it, as
+    /// real's versioned reader does (probed 2026-10-09 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow(IsolationLevel.ReadCommitted, "update big set v = 'u' where k = 1500")]
-    [DataRow(IsolationLevel.RepeatableRead, "update big set v = 'u' where k = 1500")]
-    [DataRow(IsolationLevel.RepeatableRead, "alter table heap add c int")]
-    public void RequestInTheReadersTransaction_LeavesItsReadAsItBegan(IsolationLevel level, string write)
+    [DataRow(IsolationLevel.ReadCommitted, "select k, v from big", true, false, false)]
+    [DataRow(IsolationLevel.RepeatableRead, "select k, v from big", true, false, false)]
+    [DataRow(IsolationLevel.Serializable, "select k, v from big", true, false, false)]
+    [DataRow(IsolationLevel.RepeatableRead, "select k, v from big order by k desc", false, false, false)]
+    [DataRow(IsolationLevel.Serializable, "select k, v from big order by k desc", false, true, false)]
+    [DataRow(IsolationLevel.RepeatableRead, "select k, v from big where k between 1 and 2000", false, false, false)]
+    [DataRow(IsolationLevel.Serializable, "select k, v from big where k between 1 and 2000", false, false, false)]
+    [DataRow(IsolationLevel.RepeatableRead, "select k, v from big where len(v) > 0", true, false, false)]
+    [DataRow(IsolationLevel.ReadCommitted, "select k, v from big with (nolock)", true, false, false)]
+    [DataRow(IsolationLevel.ReadUncommitted, "select k, v from big", true, false, false)]
+    [DataRow(IsolationLevel.RepeatableRead, "select k, v from heap", true, false, true)]
+    public void RequestInTheReadersTransaction_LeavesItWhereItStood(IsolationLevel level, string query, bool readsInsertAhead, bool insertAheadWaits, bool updateAheadWaits)
     {
+        var table = query.Contains("heap", StringComparison.Ordinal) ? "heap" : "big";
+        var descending = query.Contains("desc", StringComparison.Ordinal);
         var sim = Big();
         using var connection = sim.CreateOpenConnection();
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var transaction = connection.BeginTransaction(level);
+        AreEqual(0, Attempt(connection, $"update {table} set v = 'p' where k = 1400", transaction));
+        using var rows = Read(connection, query, 2, transaction);
+        var held = ReaderLocks(other, spid);
+        AreEqual(0, Attempt(connection, $"""
+            update {table} set v = 'u' where k in (1500, 500);
+            delete {table} where k in (1700, 700, 1650);
+            insert {table} values ({Rows + 1}, 'i');
+            update {table} set k = 2500 where k = 1600;
+            update {table} set k = 1650 where k = 1900;
+            """, transaction));
+        AreEqual(held, ReaderLocks(other, spid));
+        AreEqual(updateAheadWaits ? 1222 : 0, Attempt(other, $"update {table} set v = 'c' where k = 1800"));
+        AreEqual(insertAheadWaits ? 1222 : 0, Attempt(other, $"insert {table} values (3000, 'c')"));
+        AreEqual(held, ReaderLocks(other, spid));
+        var rest = Rest(rows);
+        var keys = rest.ConvertAll(row => row.Key);
+        if (table == "big")
+            IsTrue(keys.SequenceEqual(descending ? keys.OrderDescending() : keys.Order()));
+        var read = rest.ToDictionary(row => row.Key, row => row.Value);
+        HasCount(Rows - 2 + (readsInsertAhead ? 1 : 0), read);
+        AreEqual("p", read[1400]);
+        AreEqual("x", read[1500]);
+        AreEqual("x", read[1700]);
+        AreEqual("x", read[1600]);
+        AreEqual("x", read[1900]);
+        AreEqual("x", read[1650]);
+        IsFalse(read.ContainsKey(Rows + 1));
+        IsFalse(read.ContainsKey(2500));
+        AreEqual(updateAheadWaits ? "x" : "c", read[1800]);
+        AreEqual(readsInsertAhead, read.ContainsKey(3000));
+        if (!descending)
+            AreEqual("x", read[500]);
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A row lock the transaction converts — a <c>REPEATABLE READ</c> read's S
+    /// on a row it then updates — lists once, in the mode it was converted to,
+    /// as real's one lock per row does.
+    /// </summary>
+    [TestMethod]
+    public void ConvertedRowLock_ListsOnceInItsStrongerMode()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(connection);
+        using var transaction = connection.BeginTransaction(IsolationLevel.RepeatableRead);
         using var rows = Read(connection, "select k, v from big", 2, transaction);
-        var held = Locks(other, spid);
-        using (var lookup = connection.CreateCommand("select count(*) from sys.objects where name = 'big'"))
-        {
-            lookup.Transaction = transaction;
-            AreEqual(1, lookup.ExecuteScalar());
-        }
-        AreEqual(held, Locks(other, spid));
-        AreEqual(0, Attempt(connection, write, transaction));
+        AreEqual(20, ReaderLocks(other, spid));
+        AreEqual(0, Attempt(connection, "update big set v = 'u' where k = 1", transaction));
+        AreEqual(19, ReaderLocks(other, spid));
+        AreEqual("KEY Sx19, KEY X, OBJECT IS, OBJECT IX", Locks(other, spid));
+        rows.Dispose();
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A definition change by a request in the reader's own transaction finds
+    /// the reader's statement run to its end first, its rest read as it began.
+    /// </summary>
+    [TestMethod]
+    public void DefinitionChangeInTheReadersTransaction_FinishesTheReadFirst()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.RepeatableRead);
+        using var rows = Read(connection, "select k, v from big", 2, transaction);
+        AreEqual(0, Attempt(connection, "alter table heap add c int", transaction));
         AreEqual(0, Attempt(connection, "update big set v = 'u' where k = 1500", transaction));
-        AreEqual(0, Attempt(connection, "delete big where k = 1700", transaction));
-        AreEqual(0, Attempt(connection, $"insert big values ({Rows + 1}, 'i')", transaction));
         var read = Rest(rows).ToDictionary(row => row.Key, row => row.Value);
         HasCount(Rows - 2, read);
         AreEqual("x", read[1500]);
-        IsTrue(read.ContainsKey(1700));
-        IsFalse(read.ContainsKey(Rows + 1));
         transaction.Rollback();
     }
+
+    /// <summary>The reader's key and row locks other than a write's: what its read holds.</summary>
+    private static int ReaderLocks(DbConnection observer, short spid) => (int)observer.CreateCommand($"""
+        select count(*) from sys.dm_tran_locks
+        where request_session_id = {spid} and resource_type in ('KEY', 'RID') and request_mode in ('S', 'U', 'RangeS-S')
+        """).ExecuteScalar()!;
 
     /// <summary>
     /// A local temp table is locked whole — S for a read, held to the

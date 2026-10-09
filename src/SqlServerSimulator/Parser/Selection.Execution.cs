@@ -3214,7 +3214,7 @@ internal sealed partial class Selection
         }
 
         if (!hasJoinGroup)
-            sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
+            sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, where: true);
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0 && !top.RequiresBuffering
             ? ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver)

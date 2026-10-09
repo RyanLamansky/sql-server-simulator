@@ -69,6 +69,7 @@ partial class Selection
 
         var seen = new HashSet<(int, int)>();
         var pending = new Stack<((int Page, int Slot) Address, SqlValueKey? Key)>();
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
         List<KeyFenceInterval> ordered = [.. intervals];
         ordered.Sort(static (x, y) => CompareLower(x, y));
         if (descending)
@@ -90,6 +91,15 @@ partial class Selection
                     interval.Lower, interval.LowerInclusive, interval.Upper, interval.UpperInclusive, int.MaxValue)!;
                 if (reads == MaxKeyRereads || (!AwaitDeletesInside(interval) && Volatile.Read(ref table.KeysPutBack) == putBack))
                     break;
+            }
+            // The rows another request of the statement's transaction wrote
+            // since the statement began stand where the statement found them.
+            if (batch.OwnWritesOf(table) is { } own)
+            {
+                var beyond = keys[^1];
+                keys.RemoveAt(keys.Count - 1);
+                keys = BatchContext.WithOwnWrites(table, own, ordinals, commons, keys, interval.Lower, interval.LowerInclusive, interval.Upper, interval.UpperInclusive);
+                keys.Add(beyond);
             }
             if (point)
             {
@@ -160,7 +170,11 @@ partial class Selection
                         if (PushBefore(next, Arrivals(interval, last, atBound, below: reaching)))
                             continue;
                     }
-                    var prior = heap.ReadLiveRow(page, slot);
+                    // A row another request of the statement's transaction
+                    // wrote since the statement began reads as the statement
+                    // found it.
+                    var noted = ownWrites.TryRead(batch, table, (page, slot), out var image);
+                    var prior = noted ? image : heap.ReadLiveRow(page, slot);
                     if (prior is not null && !point)
                         batch.LockWalkedKey(table, group, key, page, slot, mode, generation);
                     if (!point && !descending && key is { } reached && Volatile.Read(ref heap.MutationGeneration) != generation)
@@ -178,11 +192,15 @@ partial class Selection
                         var sequence = heap.WriteSequence;
                         if (!batch.TouchRowForRead(table, page, slot, walked))
                             continue;
-                        if (heap.ReadLiveRow(page, slot) is { } read)
+                        if (noted)
+                            bytes = prior;
+                        else if (heap.ReadLiveRow(page, slot) is { } read)
                             bytes = batch.SettleReadCommitted(table, page, slot, walked, read, sequence);
                     }
                     if (bytes is null)
                     {
+                        if (noted)
+                            continue;
                         // The key the walk found the row by names the rows that
                         // carry it now, should a write since have moved it.
                         var known = key is { } found && group.IsRowGroup ? BatchContext.Normalize(group, found) : (SqlValueKey?)null;
@@ -253,7 +271,7 @@ partial class Selection
             }
             var found = cache.KeyLockAnchors(heap, schema, heap, ordinals, commons, lower, lowerInclusive, upper, upperInclusive, int.MaxValue)!;
             found.RemoveAt(found.Count - 1);
-            return found;
+            return batch.WithoutOwnWrites(table, found);
         }
 
         // The key past `interval`'s upper bound as the table stands now — the

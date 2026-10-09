@@ -54,7 +54,7 @@ internal sealed partial class BatchContext
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
-            connection.FinishReadsBeforeWrite();
+            connection.FinishReadsBeforeWrite(definition: true);
         var owner = connection.LockOwner;
         connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode, owner));
@@ -120,7 +120,7 @@ internal sealed partial class BatchContext
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: true));
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
-            connection.FinishReadsBeforeWrite();
+            connection.FinishReadsBeforeWrite(definition: true);
         var owner = connection.LockOwner;
         connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
@@ -1868,6 +1868,13 @@ internal sealed partial class BatchContext
             var statement = batch.CurrentStatement;
             var suspensions = statement.Suspensions;
             byte[]? lastRead = null;
+            // The rows another request of the statement's transaction deleted
+            // since it began, read where the walk passes their addresses, and
+            // the address the walk read last.
+            List<((int Page, int Slot) Address, byte[] Image)>? ownDeletes = null;
+            var nextOwnDelete = 0;
+            var lastAddress = (-1, -1);
+            var ownWrites = new OwnWriteView(batch, table);
             while (true)
             {
                 if (statement.Suspensions != suspensions)
@@ -1879,20 +1886,47 @@ internal sealed partial class BatchContext
                         && (lastRead is null || rowGroup.TryReadKey(lastRead, out readKey)))
                     {
                         SqlValueKey? lastKey = lastRead is null ? null : readKey;
-                        var (order, keys) = KeysAhead(table, rowGroup, lastKey);
+                        var (order, keys) = KeysAhead(table, rowGroup, lastKey, batch.OwnWritesOf(table));
                         foreach (var row in ScanInKeyOrder(table, batch, plan, order, keys, now, io, addresses))
                             yield return row;
                         yield break;
                     }
+                    ownDeletes = batch.OwnDeletesPast(table, lastAddress);
+                    nextOwnDelete = 0;
                 }
                 // Read just ahead of the row, so a write since — one a wait in
                 // the probe below outlasted — shows as a moved sequence.
                 var sequence = heap.WriteSequence;
-                if (!rows.MoveNext())
+                var more = rows.MoveNext();
+                var (pageIndex, slotIndex, bytes) = more ? rows.Current : (int.MaxValue, int.MaxValue, null!);
+                if (ownDeletes is not null)
+                {
+                    for (; nextOwnDelete < ownDeletes.Count && ownDeletes[nextOwnDelete].Address.CompareTo((pageIndex, slotIndex)) < 0; nextOwnDelete++)
+                    {
+                        var ((deletedPage, deletedSlot), image) = ownDeletes[nextOwnDelete];
+                        if (!batch.TouchRowForRead(table, deletedPage, deletedSlot, plan))
+                            continue;
+                        io?.Enter(deletedPage, ref lastPage);
+                        addresses?.Record(image, deletedPage, deletedSlot);
+                        lastRead = image;
+                        yield return image;
+                    }
+                }
+                if (!more)
                     break;
-                var (pageIndex, slotIndex, bytes) = rows.Current;
+                lastAddress = (pageIndex, slotIndex);
                 if (followed is not null && followed.Contains((pageIndex, slotIndex)))
                     continue;
+                if (ownWrites.TryRead(batch, table, (pageIndex, slotIndex), out var found))
+                {
+                    if (found is null || !batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
+                        continue;
+                    io?.Enter(pageIndex, ref lastPage);
+                    addresses?.Record(found, pageIndex, slotIndex);
+                    lastRead = found;
+                    yield return found;
+                    continue;
+                }
                 io?.Enter(pageIndex, ref lastPage);
                 if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
                     continue;
@@ -1973,6 +2007,7 @@ internal sealed partial class BatchContext
         var statement = batch.CurrentStatement;
         var suspensions = statement.Suspensions;
         var rowGroup = scanned is null && orderKeys.Count == clusteredOrder.Count ? KeyLockGroup.RowGroupOf(table) : null;
+        var ownWrites = new OwnWriteView(batch, table);
         for (var position = 0; ; position++)
         {
             if (rowGroup is not null && statement.Suspensions != suspensions && followed.Count == 0)
@@ -1981,13 +2016,13 @@ internal sealed partial class BatchContext
                 if (Volatile.Read(ref table.Heap.MutationGeneration) is var now && now != orderGeneration)
                 {
                     orderGeneration = now;
-                    (clusteredOrder, orderKeys) = KeysAhead(table, rowGroup, lastKey);
+                    (clusteredOrder, orderKeys) = KeysAhead(table, rowGroup, lastKey, batch.OwnWritesOf(table));
                     position = 0;
                 }
             }
             if (position < clusteredOrder.Count)
                 followed.Push((clusteredOrder[position], orderKeys.Count == clusteredOrder.Count ? orderKeys[position] : null));
-            else if (scanned is null || !PushArrivals(followed, batch.FenceScanEnd(table, scanned, plan, lastKey)))
+            else if (scanned is null || !PushArrivals(followed, batch.WithoutOwnWrites(table, batch.FenceScanEnd(table, scanned, plan, lastKey))))
                 break;
             while (followed.TryPop(out var next))
             {
@@ -2000,8 +2035,10 @@ internal sealed partial class BatchContext
                 // transaction does, or here again, as its rollback does.
                 // Real's scan meets the key under its writer's X, waits,
                 // and reads what the key holds then.
-                byte[]? bytes = null;
-                if (!table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
+                // A row another request of the statement's transaction wrote
+                // since the statement began reads as the statement found it.
+                var noted = ownWrites.TryRead(batch, table, (pageIndex, slotIndex), out var bytes);
+                if (noted ? bytes is not null : !table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
                 {
                     var sequence = table.Heap.WriteSequence;
                     if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
@@ -2012,18 +2049,20 @@ internal sealed partial class BatchContext
                     if (scanned is not null && key is { } reached && Volatile.Read(ref table.Heap.MutationGeneration) != orderGeneration)
                     {
                         followed.Push(next);
-                        if (PushArrivals(followed, KeysArrivedBetween(table, scanned, lastKey, reached)))
+                        if (PushArrivals(followed, batch.WithoutOwnWrites(table, KeysArrivedBetween(table, scanned, lastKey, reached))))
                         {
                             _ = seen.Remove((pageIndex, slotIndex));
                             continue;
                         }
                         _ = followed.Pop();
                     }
-                    if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } read)
+                    if (!noted && table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } read)
                         bytes = batch.SettleReadCommitted(table, pageIndex, slotIndex, plan, read, sequence);
                 }
                 if (bytes is null)
                 {
+                    if (noted)
+                        continue;
                     if (batch.RowsOfDeletedKey(table, pageIndex, slotIndex, plan, key, null, out var movedKey) is { } moved)
                     {
                         _ = seen.Remove((pageIndex, slotIndex));
@@ -2047,11 +2086,19 @@ internal sealed partial class BatchContext
     /// with its key at the same index: where a scan in key order reads on from
     /// as the table stands now.
     /// </summary>
-    private static (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) KeysAhead(HeapTable table, KeyLockGroup group, SqlValueKey? after)
+    /// <remarks>
+    /// With <paramref name="own"/>, the rows another request of the running
+    /// statement's transaction wrote since it began stand where the statement
+    /// found them (<see cref="WithOwnWrites(HeapTable, OwnWriteImages, int[], SqlType[], List{ValueTuple{SqlValueKey?, ValueTuple{int, int}[]}}, SqlValueKey?, bool, SqlValueKey?, bool)"/>).
+    /// </remarks>
+    private static (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) KeysAhead(HeapTable table, KeyLockGroup group, SqlValueKey? after, OwnWriteImages? own)
     {
         List<(int Page, int Slot)> order = [];
         List<SqlValueKey> keys = [];
-        foreach (var (key, rids) in KeysArrivedBetween(table, group, after, null))
+        var ahead = KeysArrivedBetween(table, group, after, null);
+        if (own is not null)
+            ahead = WithOwnWrites(table, own, group.Ordinals, group.Commons, ahead, after, false, null, false);
+        foreach (var (key, rids) in ahead)
         {
             if (key is not { } named)
                 continue;
@@ -2139,7 +2186,10 @@ internal sealed partial class BatchContext
         // A locking read reads the latest committed row under its locks. A
         // SNAPSHOT transaction's snapshot is still fixed by it, as its first
         // data access, which is what a later Msg 3960 judges by.
-        return plan.LockingRead && !table.IsMemoryOptimized ? null : snapshotXid;
+        if ((plan.LockingRead && !table.IsMemoryOptimized) || snapshotXid is null)
+            return null;
+        this.CurrentStatement.ReadsSnapshot = true;
+        return snapshotXid;
     }
 
     /// <summary>The snapshot an unhinted read of <paramref name="table"/> reads at, by the session's level and the table's database.</summary>
@@ -2299,6 +2349,17 @@ internal sealed partial class BatchContext
         // the lock on a key it no longer carries: lock the one it carries then.
         for (var attempt = 0; attempt < Simulation.MaxTargetWalks; attempt++)
         {
+            // A row another request of the statement's transaction wrote since
+            // the statement began is read, and keyed, as the statement found it.
+            if (this.TryReadOwnWrite(table, (pageIndex, slotIndex), out var found))
+            {
+                if (found is not null && group.TryReadKey(found, out var foundKey) && !manager.IsHeldBy(group.GetOrCreate(foundKey), mode, session))
+                {
+                    this.AcquireTransactionLock(group.GetOrCreate(foundKey), mode, this.NamedNoWait(table));
+                    this.CountLocksForEscalation(table, 1, exclusive: LockManager.KeyPartOf(mode) != LockMode.Shared, rowsKeyLocked: group.IsRowGroup, index: group);
+                }
+                return;
+            }
             if (heap.ReadSlotBytes(pageIndex, slotIndex) is not { } image || !group.TryReadKey(image, out var key))
                 return;
             var resource = group.GetOrCreate(key);

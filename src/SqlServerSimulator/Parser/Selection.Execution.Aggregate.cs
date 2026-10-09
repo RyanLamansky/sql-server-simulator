@@ -109,7 +109,7 @@ internal sealed partial class Selection
         var projectionGroupingKeys = fromClause.GroupingSetsWritten ? ProjectionGroupingKeys(sources, expressions, fromClause) : null;
         ShapeKey[] currentSetKeys = [];
 
-        sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver);
+        sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver, where: true);
         (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
 
         // Effective grouping sets: parser-built list, or a single synthesized

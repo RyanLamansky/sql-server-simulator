@@ -135,8 +135,123 @@ internal static class ClusteredScan
     /// <c>STATISTICS IO</c>, counts the scan and the pages it enters, and
     /// <paramref name="addresses"/>, when it reads a row locator, records each
     /// row's address.
+    /// <para>
+    /// For a statement of <paramref name="batch"/>, when given, that can wait
+    /// on its client mid-result: once it has waited while the table changed, a
+    /// scan in key order reads on from the key it stopped at as the table
+    /// stands then, as the locking scan does (<c>BatchContext.ScanInKeyOrder</c>),
+    /// and a row another request of its transaction wrote since it began reads
+    /// as the statement found it (probed 2026-10-09 against SQL Server 2025: a
+    /// <c>NOLOCK</c> reader suspended mid-result read another session's
+    /// update and insert ahead of it, and none of another request's writes in
+    /// its own transaction).
+    /// </para>
     /// </remarks>
-    public static IEnumerable<byte[]> Rows(HeapTable table, IoStatistics? io = null, RowAddressMap? addresses = null)
+    public static IEnumerable<byte[]> Rows(HeapTable table, IoStatistics? io = null, RowAddressMap? addresses = null, BatchContext? batch = null)
+    {
+        if (batch is null || !batch.StreamsResultRows)
+            return RowsAsOrdered(table, io, addresses);
+        return RowsAsTheyStand(table, io, addresses, batch);
+    }
+
+    private static IEnumerable<byte[]> RowsAsTheyStand(HeapTable table, IoStatistics? io, RowAddressMap? addresses, BatchContext batch)
+    {
+        var counts = io?.Touch(table);
+        _ = counts?.ScanCount += 1;
+        var lastPage = -1;
+        var heap = table.Heap;
+        var statement = batch.CurrentStatement;
+        var suspensions = statement.Suspensions;
+        var generation = Volatile.Read(ref heap.MutationGeneration);
+        var rowGroup = KeyLockGroup.RowGroupOf(table);
+        // Keys come with the order where the ordered view serves it, which a
+        // read on from the last key needs.
+        var keys = rowGroup is null ? null : new List<SqlValueKey>();
+        var order = Order(table, keys);
+        if (keys is not null && (order is null || keys.Count != order.Count))
+            keys = null;
+        List<((int Page, int Slot) Address, byte[] Image)>? ownDeletes = null;
+        var nextOwnDelete = 0;
+        var lastAddress = (-1, -1);
+        byte[]? lastRead = null;
+        var seen = new HashSet<(int, int)>();
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
+        using var heapRows = order is null ? heap.EnumerateRowsWithAddress().GetEnumerator() : null;
+        for (var position = 0; ; position++)
+        {
+            if (statement.Suspensions != suspensions)
+            {
+                suspensions = statement.Suspensions;
+                if (Volatile.Read(ref heap.MutationGeneration) is var now && now != generation)
+                {
+                    generation = now;
+                    var readKey = default(SqlValueKey);
+                    if (rowGroup is not null && (order is null ? ServesKeyedOrder(table) : keys is not null)
+                        && (lastRead is null || rowGroup.TryReadKey(lastRead, out readKey)))
+                    {
+                        var ahead = BatchContext.KeysArrivedBetween(table, rowGroup, lastRead is null ? null : readKey, null);
+                        if (batch.OwnWritesOf(table) is { } own)
+                            ahead = BatchContext.WithOwnWrites(table, own, rowGroup.Ordinals, rowGroup.Commons, ahead, lastRead is null ? null : readKey, false, null, false);
+                        order = [];
+                        keys = [];
+                        foreach (var (key, rids) in ahead)
+                        {
+                            foreach (var rid in rids)
+                            {
+                                order.Add(rid);
+                                keys.Add(key!.Value);
+                            }
+                        }
+                        position = 0;
+                    }
+                }
+                if (order is null)
+                {
+                    ownDeletes = batch.OwnDeletesPast(table, lastAddress);
+                    nextOwnDelete = 0;
+                }
+            }
+            (int Page, int Slot) address;
+            byte[]? bytes;
+            if (order is not null)
+            {
+                if (position >= order.Count)
+                    yield break;
+                address = order[position];
+                if (!seen.Add(address))
+                    continue;
+                bytes = ownWrites.TryRead(batch, table, address, out var found) ? found : heap.ReadLiveRow(address.Page, address.Slot);
+            }
+            else
+            {
+                var more = heapRows!.MoveNext();
+                var (page, slot, live) = more ? heapRows.Current : (int.MaxValue, int.MaxValue, null!);
+                if (ownDeletes is not null)
+                {
+                    for (; nextOwnDelete < ownDeletes.Count && ownDeletes[nextOwnDelete].Address.CompareTo((page, slot)) < 0; nextOwnDelete++)
+                    {
+                        var (deleted, image) = ownDeletes[nextOwnDelete];
+                        counts?.Enter(deleted.Page, ref lastPage);
+                        addresses?.Record(image, deleted.Page, deleted.Slot);
+                        lastRead = image;
+                        yield return image;
+                    }
+                }
+                if (!more)
+                    yield break;
+                address = lastAddress = (page, slot);
+                bytes = ownWrites.TryRead(batch, table, address, out var found) ? found : live;
+            }
+            if (bytes is null)
+                continue;
+            counts?.Enter(address.Page, ref lastPage);
+            addresses?.Record(bytes, address.Page, address.Slot);
+            lastRead = bytes;
+            yield return bytes;
+        }
+    }
+
+    private static IEnumerable<byte[]> RowsAsOrdered(HeapTable table, IoStatistics? io, RowAddressMap? addresses)
     {
         var counts = io?.Touch(table);
         _ = counts?.ScanCount += 1;

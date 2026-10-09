@@ -745,7 +745,7 @@ internal sealed class LockCheckedScanRows(HeapTable table, DataLockPlan plan) : 
 internal sealed class UnlockedScanRows(HeapTable table) : PerExecutionRows
 {
     public override IEnumerable<byte[]> For(BatchContext batch) =>
-        RowSecurity.FilterRows(table, ClusteredScan.Rows(table, batch.Connection.StatementIo, batch.CurrentStatement.RowAddresses), batch);
+        RowSecurity.FilterRows(table, ClusteredScan.Rows(table, batch.Connection.StatementIo, batch.CurrentStatement.RowAddresses, table.IsTableVariable ? null : batch), batch);
 }
 
 /// <summary>

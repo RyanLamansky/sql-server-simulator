@@ -649,6 +649,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         if (undoLog is not null)
         {
+            if (journalEvent)
+                undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), before: null, undoLog.Position);
             undoLog.RecordInsert(this, pageIndex, slotIndex);
             if (journalEvent)
                 undoLog.MarkRowWrite(undoLog.Position - 1, (pageIndex, slotIndex));
@@ -1041,6 +1043,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         _ = this.RootedNullLobCells?.TryRemove((pageIndex, slotIndex), out _);
         var firstUndoEntry = undoLog?.Position ?? 0;
+        if (undoLog?.ImageWatchers is not null)
+            undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), this.ReadSlotBytes(pageIndex, slotIndex), firstUndoEntry);
         this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
         undoLog?.MarkRowWrite(firstUndoEntry, (pageIndex, slotIndex));
     }
@@ -1163,6 +1167,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         var oldImage = this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         var firstUndoEntry = undoLog?.Position ?? 0;
+        if (undoLog?.ImageWatchers is not null)
+            undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), oldImage ?? this.ReadSlotBytes(pageIndex, slotIndex), firstUndoEntry);
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
             this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);

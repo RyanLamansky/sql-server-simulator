@@ -68,6 +68,14 @@ internal sealed class SessionToken(int spid)
     public int? CurrentExecutingThreadId;
 
     /// <summary>
+    /// This owner's hold entries in a mode that can keep a reader waiting,
+    /// against the lock manager's count of everyone's
+    /// (<see cref="Storage.LockManager.BlockingHolds"/>). Kept under the lock
+    /// manager's gate.
+    /// </summary>
+    public int BlockingHolds;
+
+    /// <summary>
     /// The <see cref="Storage.LobReclamation"/> epoch the session's running
     /// outermost statement began at, or <see cref="long.MaxValue"/> between
     /// statements: no LOB chain retired after it is reused until it ends.

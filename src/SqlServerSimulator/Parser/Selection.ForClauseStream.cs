@@ -1,3 +1,4 @@
+using System.Text;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -18,6 +19,41 @@ internal sealed partial class Selection
     /// streams to the client as when it is a SELECT statement's own query.
     /// </summary>
     private SqlType? streamedDocumentType;
+
+    /// <summary>
+    /// A FOR JSON or FOR XML wrapper's document text in the order it is
+    /// written, a piece as each source row serializes, which a SELECT
+    /// statement's own document streams from (<see cref="StreamDocument"/>)
+    /// and any other use concatenates (<see cref="WholeDocument"/>).
+    /// </summary>
+    private DocumentPieces? documentPieces;
+
+    /// <summary>Produces a FOR JSON / FOR XML document's text a piece at a time (see <see cref="documentPieces"/>).</summary>
+    private delegate IEnumerable<string> DocumentPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver);
+
+    /// <summary>What <paramref name="body"/> holds, which it then no longer does.</summary>
+    private static string Drain(StringBuilder body)
+    {
+        var text = body.ToString();
+        _ = body.Clear();
+        return text;
+    }
+
+    /// <summary>
+    /// The document <paramref name="pieces"/> make as the clause's one result
+    /// row (<paramref name="row"/>), or <paramref name="whenEmpty"/> — no row
+    /// when null — where they make none.
+    /// </summary>
+    private static IEnumerable<byte[]> WholeDocument(IEnumerable<string> pieces, Func<string, byte[]> row, byte[]? whenEmpty)
+    {
+        StringBuilder? document = null;
+        foreach (var piece in pieces)
+            _ = (document ??= new StringBuilder()).Append(piece);
+        if (document is not null)
+            yield return row(document.ToString());
+        else if (whenEmpty is not null)
+            yield return whenEmpty;
+    }
 
     /// <summary>
     /// Whether this is a FOR JSON or untyped FOR XML wrapper, whose single
@@ -50,18 +86,40 @@ internal sealed partial class Selection
         };
     }
 
+    /// <summary>
+    /// The statement's document in chunks, each going out as the source rows
+    /// that write it serialize, as real's does: a reader one chunk into a
+    /// <c>FOR JSON PATH</c> over 2,000 rows of 2,000 characters held the key
+    /// locks of eleven, twenty chunks in twenty-nine, and one a chunk into the
+    /// same rows narrowed to two integers 1,042 (probed 2026-10-09 against
+    /// SQL Server 2025 under <c>REPEATABLE READ</c>; <c>FOR XML PATH</c> alike).
+    /// </summary>
     private static IEnumerable<byte[]> StreamDocument(Selection document, SqlType type, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
-        foreach (var row in document.Execute(batch, outerResolver).RowValues)
+        var pending = new StringBuilder();
+        foreach (var piece in document.documentPieces!(batch, outerResolver))
         {
-            var text = row[0].AsString;
-            for (var start = 0; start < text.Length; start += StreamedDocumentChunkLength)
+            var start = 0;
+            // A piece completing the pending chunk, then whole chunks of it.
+            if (pending.Length != 0)
             {
-                var chunk = text.Substring(start, Math.Min(StreamedDocumentChunkLength, text.Length - start));
-                yield return RowEncoder.EncodeRow([type], [type == SqlType.NText ? SqlValue.FromNText(chunk) : SqlValue.FromNVarchar(SqlType.NVarcharMax, chunk)]);
+                var taken = Math.Min(StreamedDocumentChunkLength - pending.Length, piece.Length);
+                _ = pending.Append(piece, 0, taken);
+                start = taken;
+                if (pending.Length < StreamedDocumentChunkLength)
+                    continue;
+                yield return DocumentChunk(type, Drain(pending));
             }
+            for (; piece.Length - start >= StreamedDocumentChunkLength; start += StreamedDocumentChunkLength)
+                yield return DocumentChunk(type, piece.Substring(start, StreamedDocumentChunkLength));
+            _ = pending.Append(piece, start, piece.Length - start);
         }
+        if (pending.Length != 0)
+            yield return DocumentChunk(type, pending.ToString());
     }
+
+    private static byte[] DocumentChunk(SqlType type, string chunk) =>
+        RowEncoder.EncodeRow([type], [type == SqlType.NText ? SqlValue.FromNText(chunk) : SqlValue.FromNVarchar(SqlType.NVarcharMax, chunk)]);
 
     /// <summary>
     /// The rows a FOR JSON / FOR XML clause serializes, recording their count

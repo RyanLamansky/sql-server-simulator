@@ -502,7 +502,7 @@ partial class Simulation
                 // A DML statement's write ends with its rows, before an error
                 // a row raised — a cancel — is settled.
                 stream.EndWrite(commit: stream.Error is null);
-                batch.Connection.LastStatementRowCount = stream.Error is null ? stream.AffectedRows ?? stream.RowCount : 0;
+                batch.Connection.LastStatementRowCount = stream.Error is null ? stream.StatementRowCount(batch) : 0;
                 if (stream.Error is { } error)
                     this.RouteError(batch, this.SettleError(simulation, batch, error, requireSemicolonBeforeCte, atBatchStart));
             }

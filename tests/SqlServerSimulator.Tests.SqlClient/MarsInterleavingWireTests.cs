@@ -119,22 +119,36 @@ public sealed class MarsInterleavingWireTests
         AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'b' where k = 1"));
     }
 
-    /// <summary>A request in the reader's own transaction leaves the reader's statement reading as it began.</summary>
+    /// <summary>
+    /// A request in the reader's own transaction leaves the reader's statement
+    /// reading the rows it began with, where it stood: another session's write
+    /// ahead of it goes in and is read.
+    /// </summary>
     [TestMethod]
     public async Task RequestInTheReadersTransaction_LeavesItsReadAsItBegan()
     {
         var simulation = Big();
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
-        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, TestContext.CancellationToken);
+        await using var other = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var spid = await this.SpidAsync(connection);
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, TestContext.CancellationToken);
 
         await using var rows = await this.ReadAsync(connection, "select k, v from big", 2, transaction);
+        var held = await this.LocksAsync(other, spid);
         AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'u' where k = 1500", transaction));
         AreEqual(0, await this.AttemptAsync(connection, "delete big where k = 1700", transaction));
+        AreEqual(0, await this.AttemptAsync(connection, $"insert big values ({Rows + 1}, 'i')", transaction));
+        AreEqual(0, await this.AttemptAsync(other, "update big set v = 'c' where k = 1800"));
+        AreEqual(0, await this.AttemptAsync(other, "insert big values (3000, 'c')"));
+        AreEqual(held.Split(", ")[0], (await this.LocksAsync(other, spid)).Split(", ")[0]);
         var read = await this.RestAsync(rows);
-        HasCount(Rows - 2, read);
+        HasCount(Rows - 1, read);
         AreEqual("x", read[1500]);
+        AreEqual("c", read[1800]);
         IsTrue(read.ContainsKey(1700));
+        IsTrue(read.ContainsKey(3000));
+        IsFalse(read.ContainsKey(Rows + 1));
         await rows.DisposeAsync();
         await transaction.RollbackAsync(TestContext.CancellationToken);
     }

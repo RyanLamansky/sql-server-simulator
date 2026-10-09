@@ -152,6 +152,18 @@ internal static class TdsTypeCodec
     }
 
     /// <summary>
+    /// The bytes of length prefix a fixed-length value of <paramref name="type"/>
+    /// carries in a ROW token: none for a NOT NULL value written raw
+    /// (<see cref="IsRawWhenNotNull"/>), two for the USHORTLEN families
+    /// (<c>char</c>, <c>nchar</c>, <c>binary</c>, <c>rowversion</c>), one for
+    /// every other.
+    /// </summary>
+    internal static int FixedValuePrefix(SqlType type, bool notNull) =>
+        notNull && IsRawWhenNotNull(type) ? 0
+        : type is CharSqlType or NCharSqlType or BinarySqlType or RowVersionSqlType ? 2
+        : 1;
+
+    /// <summary>
     /// The fixed-width wire families whose NOT NULL COLMETADATA carries the
     /// FIXEDLENTYPE token (INT1 / INT2 / INT4 / INT8 / BIT / FLT4 / FLT8 /
     /// MONEY4 / MONEY / DATETIM4 / DATETIME) rather than the nullable N-variant,

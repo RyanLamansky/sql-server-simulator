@@ -152,7 +152,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// rows before it in place and rethrows its error, as
     /// <see cref="MaterializeRows"/> does.
     /// </summary>
-    internal ResultStream? BeginStreaming(Parser.StatementContext? statement)
+    internal ResultStream? BeginStreaming(Parser.StatementContext? statement, SimulatedDbConnection? connection)
     {
         if (this.rowValues is { } values)
         {
@@ -161,7 +161,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
             List<SqlValue[]>? produced = null;
             try
             {
-                var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), statement, out produced);
+                var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), statement, connection, out produced);
                 if (stream is null)
                 {
                     this.rowValues = produced;
@@ -183,7 +183,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         List<byte[]>? producedBytes = null;
         try
         {
-            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, statement, out producedBytes);
+            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, statement, connection, out producedBytes);
             if (byteStream is null)
             {
                 this.rowBytes = producedBytes;
@@ -209,7 +209,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     {
         if (this.rowBytes is not { } rows)
             return null;
-        var stream = ResultStream<byte[], EncodedRowMeasure>.Start(WatchingCancellation(rows, batch), this.columnNames, default, statement: null, out var first);
+        var stream = ResultStream<byte[], EncodedRowMeasure>.Start(WatchingCancellation(rows, batch), this.columnNames, default, statement: null, connection: null, out var first);
         if (stream is null)
         {
             this.rowBytes = first;

@@ -1231,6 +1231,7 @@ public sealed partial class Simulation
         SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)
         {
+            requester.JoinBackgroundProduction();
             requester.BeginCommand();
             // An in-process command is a request of its own from here until
             // its reader passes the batch's end, and runs only between the
@@ -1454,6 +1455,7 @@ public sealed partial class Simulation
     {
         if (connection is null)
             return outcomes.MoveNext();
+        connection.JoinBackgroundProduction();
         _ = Interlocked.Increment(ref connection.Session.ExecutingStretches);
         var shared = connection.CurrentTransaction?.WhenShared;
         SimulatedDbConnection? previous = null;
@@ -3811,10 +3813,15 @@ public sealed partial class Simulation
             // client reads it, the statement holding its position meanwhile;
             // one that fits is produced whole, as it would be anyway.
             if (StreamsRows(batch, selection))
-                stream = executed.BeginStreaming(batch.CurrentStatement);
+                stream = executed.BeginStreaming(batch.CurrentStatement, batch.Connection);
             rowCount = stream is null ? executed.MaterializeRows() : 0;
             if (selection.CountsForClauseSourceRows)
-                rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+            {
+                if (stream is null)
+                    rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+                else
+                    stream.CountsForClauseSourceRows = true;
+            }
         }
         catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
         {
@@ -3886,7 +3893,6 @@ public sealed partial class Simulation
         batch.StreamsResultRows
         && batch.StreamingFrames == batch.FramedStatementDepth - 1
         && !selection.IsAssignmentOnly
-        && !selection.CountsForClauseSourceRows
         && batch.BindErrors is null
         && !batch.CreateTimeBinding
         && batch.Connection.InsertExecTargetTypes is null;

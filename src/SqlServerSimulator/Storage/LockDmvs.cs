@@ -168,7 +168,7 @@ internal static class LockDmvs
         var keyType = SqlValue.FromNVarchar("KEY");
         foreach (var row in EmitRowsForResource(locks, SqlValue.FromNVarchar("OBJECT"), dbId, string.Empty, table.ObjectId, table.TableDataLock, waitsByResource, grantStatus, waitStatus))
             yield return row;
-        var folded = FoldRowLocksIntoKeyLocks(locks, table);
+        var folded = FoldConvertedRowLocks(locks, table, FoldRowLocksIntoKeyLocks(locks, table));
         foreach (var row in EmitRowLocks(batch, table, SqlValue.FromNVarchar("RID"), keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
             yield return row;
         foreach (var (_, group) in table.KeyLockGroups)
@@ -688,6 +688,43 @@ internal static class LockDmvs
                 return owner.Acting.Spid;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Real converts a session's lock on a row to the stronger mode it asks for
+    /// next — a <c>REPEATABLE READ</c> read's S on a row its transaction then
+    /// updates becomes the one X — where here each mode is a hold of its own,
+    /// so the view leaves out an S or U beside the same owner's U or X on the
+    /// row (probed 2026-10-09 against SQL Server 2025: a reader's twenty
+    /// <c>KEY S</c> read nineteen beside the X its transaction's update of one
+    /// of their rows took). <paramref name="folded"/> gains the entries.
+    /// </summary>
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldConvertedRowLocks(
+        LockManager locks, HeapTable table, Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded)
+    {
+        if (Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
+            return folded;
+        foreach (var (_, rowLock) in table.RowLocks)
+        {
+            var holds = locks.HoldersOf(rowLock);
+            if (holds.Length < 2)
+                continue;
+            foreach (var weaker in holds)
+            {
+                if (weaker.Mode is not (LockMode.Shared or LockMode.Update))
+                    continue;
+                foreach (var stronger in holds)
+                {
+                    if (ReferenceEquals(stronger.Owner, weaker.Owner)
+                        && (stronger.Mode == LockMode.Exclusive || (stronger.Mode == LockMode.Update && weaker.Mode == LockMode.Shared)))
+                    {
+                        (folded ??= [])[(rowLock, weaker.Owner, weaker.Mode)] = null;
+                        break;
+                    }
+                }
+            }
+        }
+        return folded;
     }
 
     /// <summary>

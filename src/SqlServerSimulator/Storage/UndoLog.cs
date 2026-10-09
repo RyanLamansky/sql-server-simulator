@@ -99,6 +99,48 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         return false;
     }
 
+    /// <summary>
+    /// The statements of this transaction waiting on their clients whose
+    /// reads keep the rows they began with (<see cref="OwnWriteImages"/>);
+    /// null while none is. Changed only under its own lock.
+    /// </summary>
+    public List<OwnWriteImages>? ImageWatchers;
+
+    /// <summary>Registers <paramref name="images"/> for the visible row writes this log records from here on.</summary>
+    public void Watch(OwnWriteImages images)
+    {
+        lock (this.entries)
+            this.ImageWatchers = [.. this.ImageWatchers ?? [], images];
+    }
+
+    /// <summary>Stops noting writes for <paramref name="images"/>.</summary>
+    public void Unwatch(OwnWriteImages images)
+    {
+        lock (this.entries)
+        {
+            if (this.ImageWatchers is not { } watchers)
+                return;
+            List<OwnWriteImages> rest = [.. watchers];
+            _ = rest.Remove(images);
+            this.ImageWatchers = rest.Count == 0 ? null : rest;
+        }
+    }
+
+    /// <summary>
+    /// Notes, for each <see cref="ImageWatchers"/> entry, that the visible row
+    /// at <paramref name="address"/> of <paramref name="heap"/> is about to be
+    /// written, <paramref name="before"/> its image now — null for a row being
+    /// inserted — and <paramref name="position"/> the log's length before the
+    /// write's entries.
+    /// </summary>
+    public void NoteVisibleWrite(Heap heap, (int Page, int Slot) address, byte[]? before, int position)
+    {
+        if (this.ImageWatchers is not { } watchers)
+            return;
+        foreach (var images in watchers)
+            images.Note(heap, address, before, position);
+    }
+
     public void RecordInsert(Heap heap, int pageIndex, int slotIndex) =>
         this.entries.Add(new SlotChange(heap, UndoKind.Insert, pageIndex, slotIndex, freeOnCommit: false));
 
@@ -285,6 +327,11 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         }
 
         this.entries.RemoveRange(position, this.entries.Count - position);
+        if (this.ImageWatchers is { } watchers)
+        {
+            foreach (var images in watchers)
+                images.Forget(position);
+        }
     }
 
     // The heaps whose row writes past `position` outnumber the events their

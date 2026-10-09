@@ -563,6 +563,122 @@ public sealed class StreamedResultTests
     }
 
     /// <summary>
+    /// A statement's own <c>FOR JSON</c> or <c>FOR XML</c> document goes out in
+    /// chunks as its rows serialize, so a reader a chunk in holds the key locks
+    /// of the rows serialized so far (probed 2026-10-09 against SQL Server 2025
+    /// under <c>REPEATABLE READ</c>); the chunks make the same document, and
+    /// its count is still the rows serialized.
+    /// </summary>
+    [TestMethod]
+    [DataRow("for json path", 11)]
+    [DataRow("for xml path", 10)]
+    public void ForClauseDocument_GoesOutAsItsRowsSerialize(string clause, int held)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int not null, pad char(2000) not null default 'x'); insert t (id, v) select value, value from generate_series(1, 2000)");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        var whole = (string)reader.CreateCommand($"select (select id, v, pad from t {clause})").ExecuteScalar()!;
+        using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
+        var text = new System.Text.StringBuilder();
+        using (var command = reader.CreateCommand($"select id, v, pad from t {clause}"))
+        {
+            command.Transaction = transaction;
+            using var rows = command.ExecuteReader();
+            IsTrue(rows.Read());
+            _ = text.Append(rows.GetString(0));
+            AreEqual(held, KeyLocks(other, spid, "S"));
+            AreEqual(0, Attempt(other, "update t set pad = 'y' where id = 1500"));
+            while (rows.Read())
+                _ = text.Append(rows.GetString(0));
+        }
+        AreEqual(whole, text.ToString());
+        using var count = reader.CreateCommand("select @@rowcount");
+        count.Transaction = transaction;
+        AreEqual(2000, count.ExecuteScalar());
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A locking read lets go the lock of a row its own <c>WHERE</c> rejects,
+    /// however the predicate reads the row, as real's scan applies such a
+    /// predicate itself; one reached through a subquery or a join's
+    /// <c>ON</c> filters above the scan, which keeps every lock it took
+    /// (probed 2026-10-09 against SQL Server 2025, a reader two rows in).
+    /// </summary>
+    [TestMethod]
+    [DataRow("read committed", "select id, v, pad from t with (updlock) where v % 3 = 0", "U", 20, 666)]
+    [DataRow("read committed", "select id, v, pad from t with (xlock) where v % 3 = 0", "X", 20, 666)]
+    [DataRow("repeatable read", "select id, v, pad from t where v % 3 = 0", "S", 20, 666)]
+    [DataRow("read committed", "select id, v, pad from t with (updlock) where v % 3 = 0 and newid() is not null", "U", 20, 666)]
+    [DataRow("read committed", "select id, v, pad from t with (updlock) where v % 3 = 0 or id < 0", "U", 20, 666)]
+    [DataRow("read committed", "select id, v, pad from t with (updlock) where v % 3 = 0 order by id", "U", 20, 666)]
+    [DataRow("read committed", "select t.id, t.v, t.pad from t with (updlock) join (values (0), (1)) x (n) on t.v % 3 = x.n * 9", "U", 60, 2000)]
+    [DataRow("read committed", "select id, v, pad from t with (updlock) where (select count(*) from t u where u.id = t.id and t.v % 3 = 0) = 1", "U", 60, 2000)]
+    public void LockingRead_LetsGoARowItsWhereRejects(string level, string query, string mode, int held, int heldAtEnd)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int not null, pad char(2000) not null default 'x'); insert t (id, v) select value, value from generate_series(1, 2000)");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        _ = reader.CreateCommand($"set transaction isolation level {level}; begin tran").ExecuteNonQuery();
+        using (var rows = reader.CreateCommand(query).ExecuteReader())
+        {
+            IsTrue(rows.Read());
+            IsTrue(rows.Read());
+            AreEqual(held, KeyLocks(other, spid, mode));
+            AreEqual(held == 20 ? 0 : 1222, Attempt(other, "update t set pad = 'y' where id = 4"));
+            while (rows.Read())
+            {
+            }
+        }
+        AreEqual(heldAtEnd, KeyLocks(other, spid, mode));
+        _ = reader.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    private static int KeyLocks(DbConnection observer, short spid, string mode) =>
+        (int)observer.CreateCommand($"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'KEY' and request_mode = '{mode}'").ExecuteScalar()!;
+
+    /// <summary>
+    /// While the statement waits on a row an uncommitted writer holds, its
+    /// client reads every row that begins in a packet the statement filled
+    /// before the wait — the rest of the packet it was filling never goes out
+    /// — until its <c>CommandTimeout</c> ends the wait, and a wait inside the
+    /// first packet holds up <c>ExecuteReader</c> itself (probed 2026-10-09
+    /// against SQL Server 2025, MARS or not).
+    /// </summary>
+    [TestMethod]
+    [DataRow(2000, 3, 0)]
+    [DataRow(2000, 9, 8)]
+    [DataRow(2000, 12, 8)]
+    [DataRow(2000, 100, 96)]
+    [DataRow(100, 100, 75)]
+    [DataRow(100, 301, 299)]
+    public void UncommittedWriter_RowsBeforeItGoOutWhileTheStatementWaits(int width, int held, int readable)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table b (k int primary key, v char({width}) not null); insert b select value, 'x' from generate_series(1, 3000)");
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand($"begin tran; update b set v = 'z' where k = {held}").ExecuteNonQuery();
+
+        using var command = reader.CreateCommand("select k, v from b");
+        command.CommandTimeout = 1;
+        var read = 0;
+        var error = ThrowsExactly<SimulatedSqlException>(() =>
+        {
+            using var rows = command.ExecuteReader();
+            while (rows.Read())
+                read++;
+        });
+        AreEqual(-2, error.Number);
+        AreEqual(readable, read);
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
     /// A <c>CommandTimeout</c> ends the wait for the writer's row with Msg -2;
     /// the time the client spends between reads doesn't count against it.
     /// </summary>

@@ -533,6 +533,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void ResumeRequest(SessionRequest request)
     {
+        this.JoinBackgroundProduction();
         this.ExecutingRequest = request;
         if (ReferenceEquals(this.occupant, request))
         {
@@ -968,6 +969,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void RefuseApiRequest()
     {
+        this.JoinBackgroundProduction();
         this.AwaitSession(this.ExecutingRequest, timeout: null);
         if (this.RefuseNewRequest() is { } refused)
             throw AtLineOne(refused);
@@ -1354,19 +1356,45 @@ public sealed class SimulatedDbConnection : DbConnection
     internal List<ResultStream>? SuspendedStreams;
 
     /// <summary>
+    /// The rows the statement producing rows for its client reads in place of
+    /// what another request of its transaction wrote while it waited (see
+    /// <see cref="Storage.OwnWriteImages"/>); null whenever no such statement
+    /// is running.
+    /// </summary>
+    internal Storage.OwnWriteImages? ActiveOwnWriteImages;
+
+    /// <summary>
+    /// The statement producing its rows on a thread of its own while its
+    /// client reads (see <see cref="ResultStream"/>), which every other entry
+    /// into the session's engine waits out first
+    /// (<see cref="JoinBackgroundProduction"/>); null while none does.
+    /// </summary>
+    internal volatile ResultStream? BackgroundProduction;
+
+    /// <summary>
+    /// Waits out a statement producing its rows in the background, unless the
+    /// caller is that production: the session's engine runs one request at a
+    /// time.
+    /// </summary>
+    internal void JoinBackgroundProduction() => this.BackgroundProduction?.JoinBackground();
+
+    /// <summary>
     /// Runs to its end each statement suspended on its client in another
     /// request working in the transaction the executing request is about to
-    /// write in — a row, or a definition under Sch-M — its rows kept for its
-    /// client, then carries the writing request on where it stood. Real versions
-    /// such a write so the suspended statement still reads what it began
-    /// reading (probed 2026-10-05 against SQL Server 2025: a reader in a
-    /// transaction the API began read none of the inserts, updates or deletes
-    /// another request made in it meanwhile), which the statement having read
-    /// its rows first gives it here. A request in another transaction runs
-    /// beside it, its writes read as another session's are, and one in the same
-    /// transaction that only reads leaves it suspended.
+    /// write in, its rows kept for its client, then carries the writing request
+    /// on where it stood — for a row write, only a statement that can't keep
+    /// the rows it began with (<see cref="ResultStream.OwnWrites"/>): one whose
+    /// reads resolve a snapshot; for a definition under Sch-M
+    /// (<paramref name="definition"/>), every one. Real versions such a write so
+    /// the suspended statement still reads what it began reading (probed
+    /// 2026-10-05 against SQL Server 2025: a reader in a transaction the API
+    /// began read none of the inserts, updates or deletes another request made
+    /// in it meanwhile), which the statement having read its rows first gives
+    /// it here. A request in another transaction runs beside it, its writes
+    /// read as another session's are, and one in the same transaction that only
+    /// reads leaves it suspended.
     /// </summary>
-    internal void FinishReadsBeforeWrite()
+    internal void FinishReadsBeforeWrite(bool definition = false)
     {
         if (this.SuspendedStreams is not { Count: > 0 } suspended || this.CurrentTransaction is not { } transaction || this.ExecutingRequest is not { } writer)
             return;
@@ -1376,8 +1404,11 @@ public sealed class SimulatedDbConnection : DbConnection
         var finished = false;
         foreach (var stream in snapshot)
         {
-            if (stream.Request is not { } request || request == writer || request.Finished || request.EnlistedTransactionId != transaction.TransactionId)
+            if (stream.Request is not { } request || request == writer || request.Finished || request.EnlistedTransactionId != transaction.TransactionId
+                || (!definition && stream.OwnWrites is not null))
+            {
                 continue;
+            }
             // A wire request's statement runs on its own state, which an
             // in-process reader's outcome stream restores itself.
             if (!request.InProcess)
@@ -1391,6 +1422,18 @@ public sealed class SimulatedDbConnection : DbConnection
         this.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         DateOrder.Current = this.DateFormat;
         Language.Current = this.Language;
+    }
+
+    /// <summary>
+    /// Cancels a statement producing its rows in the background as the session
+    /// ends, and waits it out, so what it held is given back with the rest.
+    /// </summary>
+    private void EndBackgroundProduction()
+    {
+        if (this.BackgroundProduction is null)
+            return;
+        this.CancelExecution();
+        this.JoinBackgroundProduction();
     }
 
     /// <summary>
@@ -2649,6 +2692,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override void ChangeDatabase(string databaseName)
     {
         using var culture = CultureScope.Engine();
+        this.JoinBackgroundProduction();
         if (string.IsNullOrWhiteSpace(databaseName))
             throw new ArgumentException("Database cannot be null, the empty string, or string of only whitespace.", nameof(databaseName));
 
@@ -2683,6 +2727,7 @@ public sealed class SimulatedDbConnection : DbConnection
     public override void Close()
     {
         using var culture = CultureScope.Engine();
+        this.EndBackgroundProduction();
         this.AbandonSuspendedStreams();
         this.AbandonParkedBulkText();
         // SqlClient auto-rolls-back any active transaction when its
@@ -2722,6 +2767,7 @@ public sealed class SimulatedDbConnection : DbConnection
         else
         {
             this.Session.Reclaimed = true;
+            this.EndBackgroundProduction();
             this.AbandonSuspendedStreams();
             this.AbandonParkedBulkText();
             lock (this.sessionGate)

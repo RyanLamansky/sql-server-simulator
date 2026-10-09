@@ -16,7 +16,12 @@ partial class Selection
     /// rearrangement. Everything below the named parent closes first, so a row
     /// for an outer tag ends the inner elements the preceding rows opened.
     /// </summary>
-    private static IEnumerable<byte[]> SerializeForXmlExplicit(
+    /// <remarks>
+    /// The text goes out a row at a time, save while an open element's start
+    /// tag still waits for the list attributes later rows feed it, which are
+    /// written into the text already serialized.
+    /// </remarks>
+    private static IEnumerable<string> SerializeForXmlExplicit(
         Selection inner, SqlType[] innerSchema, ForXmlExplicitPlan plan,
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -109,32 +114,30 @@ partial class Selection
                 StartForXmlExplicitBody(sb, frame);
                 _ = sb.Append(body);
             }
+            if (!open.Exists(static open => open.Lists is not null))
+                yield return Drain(sb);
         }
 
         if (!any)
-        {
-            if (options.Typed)
-                yield return EmptyForXmlRow();
             yield break;
-        }
 
         for (var i = open.Count - 1; i >= 0; i--)
             CloseForXmlExplicitFrame(sb, open[i]);
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
-        // TYPE reads the text back as xml, which collapses an element the
-        // text form kept open with nothing in it — the one a list column or a
-        // materialized overflow forces — to <e/> (probed 2026-10-08 against
-        // SQL Server 2025).
-        if (options.Typed)
-        {
-            var typed = XmlWellFormedness.Canonical(sb.ToString(), nationalSource: true);
-            yield return RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(typed)]);
-            yield break;
-        }
-        yield return ForXmlRow(sb, options);
+        yield return Drain(sb);
     }
+
+    /// <summary>
+    /// The serialized universal table as one result row. TYPE reads the text
+    /// back as xml, which collapses an element the text form kept open with
+    /// nothing in it — the one a list column or a materialized overflow forces
+    /// — to <c>&lt;e/&gt;</c> (probed 2026-10-08 against SQL Server 2025).
+    /// </summary>
+    private static byte[] ForXmlExplicitRow(string document, ForXmlOptions options) => options.Typed
+        ? RowEncoder.EncodeRow([SqlType.Xml], [SqlValue.FromXml(XmlWellFormedness.Canonical(document, nationalSource: true))])
+        : ForXmlRow(document, options);
 
     /// <summary>
     /// How many frames stand at and above the open element for

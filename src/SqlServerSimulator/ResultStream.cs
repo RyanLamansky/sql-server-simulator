@@ -70,6 +70,20 @@ internal abstract class ResultStream
     /// </summary>
     public bool Unbounded;
 
+    /// <summary>
+    /// The rows another request of the statement's transaction writes while
+    /// the statement waits on its client, as the statement found them, which
+    /// its reads take in their place (see <see cref="OwnWriteImages"/>); null
+    /// until it first waits inside a transaction, and for a statement whose
+    /// reads resolve a snapshot or a DML statement's <c>OUTPUT</c> rows.
+    /// </summary>
+    public OwnWriteImages? OwnWrites;
+
+    /// <summary>The log <see cref="OwnWrites"/> watches, and the connection whose reads consult it.</summary>
+    private UndoLog? watchedLog;
+
+    private SimulatedDbConnection? watchingConnection;
+
     /// <summary>The request the statement belongs to, as it last suspended; null outside one.</summary>
     public SessionRequest? Request;
 
@@ -86,6 +100,23 @@ internal abstract class ResultStream
 
     /// <summary>The rows a DML statement changed, its <c>@@ROWCOUNT</c>; null for a <c>SELECT</c>, whose rows are its count.</summary>
     public int? AffectedRows;
+
+    /// <summary>
+    /// Set for a statement's own FOR JSON / FOR XML document, whose count —
+    /// <c>@@ROWCOUNT</c> and its DONE token's — is the rows the clause
+    /// serialized, not the chunks it sent (<see cref="StatementContext.ForClauseSourceRows"/>).
+    /// </summary>
+    public bool CountsForClauseSourceRows;
+
+    /// <summary>The statement's count once it has produced its last row (see <see cref="CountsForClauseSourceRows"/>).</summary>
+    public int StatementRowCount(BatchContext batch)
+    {
+        if (!this.CountsForClauseSourceRows)
+            return this.AffectedRows ?? this.RowCount;
+        var serialized = batch.CurrentStatement.ForClauseSourceRows;
+        _ = this.Result?.ReportedRowCount = serialized;
+        return serialized;
+    }
 
     /// <summary>Ends a DML statement's <see cref="PendingWrite"/>, once: <paramref name="commit"/> or roll back.</summary>
     public void EndWrite(bool commit)
@@ -190,7 +221,21 @@ internal abstract class ResultStream
             this.Complete = true;
         }
         if (this.Complete)
+        {
             this.DisposeSource();
+            this.StopWatching();
+        }
+    }
+
+    /// <summary>Stops <see cref="OwnWrites"/> noting writes and its reads consulting it, as the statement ends.</summary>
+    private void StopWatching()
+    {
+        if (this.OwnWrites is not { } images)
+            return;
+        this.watchedLog?.Unwatch(images);
+        this.watchedLog = null;
+        if (this.watchingConnection is { } connection && ReferenceEquals(connection.ActiveOwnWriteImages, images))
+            connection.ActiveOwnWriteImages = null;
     }
 
     /// <summary>
@@ -201,6 +246,7 @@ internal abstract class ResultStream
     {
         this.Complete = true;
         this.DisposeSource();
+        this.StopWatching();
         this.EndWrite(commit: false);
     }
 
@@ -237,6 +283,16 @@ internal abstract class ResultStream
         this.Request = connection.ExecutingRequest;
         connection.Session.AwaitingClientRequest = connection.ExecutingRequest?.RequestId ?? 0;
         connection.PauseExecutionTimeout();
+        // Inside a transaction, what another request of it writes while the
+        // statement waits keeps out of the statement's reads.
+        if (this.OwnWrites is null && this.PendingWrite is null && this.statement is { ReadsSnapshot: false } && connection.CurrentTransaction is { } transaction)
+        {
+            this.OwnWrites = new OwnWriteImages();
+            this.watchedLog = transaction.UndoLog;
+            this.watchingConnection = connection;
+            transaction.UndoLog.Watch(this.OwnWrites);
+        }
+        connection.ActiveOwnWriteImages = null;
         // A READ COMMITTED scan holds the row it stands on while it waits.
         if (this.lastRowProbed && this.statement is { ProbedTable: { } table } frame)
         {
@@ -262,9 +318,13 @@ internal abstract class ResultStream
                 _ = suspended.Remove(this);
         }
         connection.Session.AwaitingClientRequest = -1;
-        connection.ResumeExecutionTimeout();
+        // Producing ahead of its client in the background, the statement is
+        // timed only while its client waits on it (see AwaitBackground).
+        if (this.worker is null)
+            connection.ResumeExecutionTimeout();
         if (this.hadThread)
             connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        connection.ActiveOwnWriteImages = this.OwnWrites;
         // Another request's statements ran meanwhile, publishing their own.
         DateOrder.Current = connection.DateFormat;
         Language.Current = connection.Language;
@@ -294,12 +354,246 @@ internal abstract class ResultStream
 
     /// <summary>
     /// Runs the consumer's <see cref="Pull"/>, holding the stream against an
-    /// <see cref="AbandonIfSuspended"/> from another thread meanwhile.
+    /// <see cref="AbandonIfSuspended"/> from another thread meanwhile, after
+    /// handing the consumer what an earlier production in the background left
+    /// unread, which comes ahead of anything this one produces.
     /// </summary>
     private protected void PullLocked(Action pull)
     {
+        this.JoinBackground();
+        _ = this.EndWorker();
         lock (this.Gate())
             pull();
+    }
+
+    /// <summary>The connection the statement runs on, for a stream its batch started; null otherwise.</summary>
+    private protected SimulatedDbConnection? connection;
+
+    /// <summary>The lock owner the statement started under, whose own holds can't keep it waiting.</summary>
+    private protected SessionToken? owner;
+
+    /// <summary>
+    /// Set when the consumer frames the rows into packets itself — the TDS
+    /// endpoint, whose client reads only the packets that went out — so every
+    /// row produced ahead of a wait goes to it, the packet it ends in held back
+    /// by its framing; the in-process reader reads only the rows that begin
+    /// inside a packet the statement filled (see <see cref="PublishStaged"/>).
+    /// </summary>
+    public bool FramesPackets;
+
+    /// <summary>
+    /// Whether another session holds a lock that could keep the statement
+    /// waiting (<see cref="Storage.LockManager.BlockingHolds"/>): then it
+    /// produces its rows on a thread of its own while its client reads the
+    /// ones it has, as real's server produces ahead of its client, so a wait
+    /// on one row leaves the rows before it readable (see
+    /// <see cref="AwaitBackground"/>). Uncontended, a production can't wait,
+    /// so running it on the client's own call is the same.
+    /// </summary>
+    private protected bool Contended() =>
+        this.connection is { } running && this.owner is { } own
+        && Volatile.Read(ref running.Simulation.LockManager.BlockingHolds) > Volatile.Read(ref own.BlockingHolds);
+
+    /// <summary>The production running on a thread of its own, null while none is; its thread's id.</summary>
+    private Task? worker;
+
+    private int workerThreadId;
+
+    /// <summary>Set by the background production as it ends and as one of its lock waits begins.</summary>
+    private ManualResetEventSlim? workerSignal;
+
+    private volatile bool workerDone, waitBegan;
+
+    /// <summary>What escaped the background production, for the consumer to meet.</summary>
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? workerFault;
+
+    /// <summary>Whether the calling thread is the one producing in the background.</summary>
+    internal bool OnWorker => Environment.CurrentManagedThreadId == Volatile.Read(ref this.workerThreadId);
+
+    /// <summary>Whether a production in the background runs, or left rows or a fault the consumer hasn't had.</summary>
+    private protected bool BackgroundPending => this.worker is not null || this.workerFault is not null || this.HasStaged;
+
+    /// <summary>Whether rows produced in the background wait to be handed to the consumer.</summary>
+    private protected abstract bool HasStaged { get; }
+
+    /// <summary>Drops the rows produced in the background that a cancel kept from the consumer.</summary>
+    private protected abstract void DiscardStaged();
+
+    /// <summary>Starts taking the rows a production produces aside, for <see cref="PublishStaged"/> to hand over.</summary>
+    private protected abstract void BeginStaging();
+
+    /// <summary>
+    /// Hands the consumer rows produced in the background: all of them with
+    /// <paramref name="all"/> or <see cref="FramesPackets"/>, otherwise those
+    /// beginning inside a packet the statement filled, which are what real's
+    /// client reads while the statement waits (probed 2026-10-09 against SQL
+    /// Server 2025, MARS or not: with 2,007-byte rows and a writer holding row
+    /// 5, 9, 12, 30 or 100 the client read 4, 8, 8, 28 and 96 rows; with
+    /// 107-byte rows and row 100, 151 or 301 held, 75, 150 and 299 — every
+    /// row starting in an 8,000-byte packet sent, and nothing until the first
+    /// was). Returns how many it handed over.
+    /// </summary>
+    private protected abstract int PublishStaged(bool all);
+
+    /// <summary>
+    /// Runs <paramref name="pull"/> on a thread of its own, the consumer going
+    /// on with the rows it has; the consumer meets it again in
+    /// <see cref="AwaitBackground"/> when it needs more, and every other entry
+    /// into the session's engine waits it out first (<see cref="JoinBackground"/>).
+    /// </summary>
+    private protected void StartBackground(Action pull)
+    {
+        var running = this.connection!;
+        var signal = this.workerSignal ??= new ManualResetEventSlim(false);
+        signal.Reset();
+        this.workerDone = this.waitBegan = false;
+        this.BeginStaging();
+        running.BackgroundProduction = this;
+        var worker = new Task(
+            () =>
+            {
+                Volatile.Write(ref this.workerThreadId, Environment.CurrentManagedThreadId);
+                try
+                {
+                    using var culture = CultureScope.Engine();
+                    lock (this.Gate())
+                        pull();
+                }
+#pragma warning disable CA1031 // Whatever escapes the production is the consumer's to meet, rethrown on its own thread.
+                catch (Exception fault)
+#pragma warning restore CA1031
+                {
+                    this.workerFault = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault);
+                }
+                finally
+                {
+                    Volatile.Write(ref this.workerThreadId, 0);
+                    if (ReferenceEquals(running.BackgroundProduction, this))
+                        running.BackgroundProduction = null;
+                    this.workerDone = true;
+                    signal.Set();
+                }
+            },
+            TaskCreationOptions.LongRunning);
+        this.worker = worker;
+        worker.Start(TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// The background production's lock wait has begun, on its own thread
+    /// (<see cref="Storage.LockManager"/>): the consumer waiting on it can have
+    /// the rows produced before.
+    /// </summary>
+    internal void NoteWaitBegins()
+    {
+        if (!this.OnWorker || this.workerSignal is not { } signal)
+            return;
+        this.waitBegan = true;
+        signal.Set();
+    }
+
+    /// <summary>
+    /// The consumer needs rows the background production hasn't handed over:
+    /// waits, counting toward its <c>CommandTimeout</c> as a client's wait on
+    /// the server does, until the production ends or begins a lock wait with
+    /// rows its client would have by then, and hands them over; a fault that
+    /// escaped the production is thrown here.
+    /// </summary>
+    /// <returns>Whether it handed over any rows.</returns>
+    private protected bool AwaitBackground()
+    {
+        if (this.worker is not null)
+        {
+            var signal = this.workerSignal!;
+            this.connection!.ResumeExecutionTimeout();
+            try
+            {
+                while (!this.workerDone)
+                {
+                    signal.Reset();
+                    if (this.waitBegan)
+                    {
+                        this.waitBegan = false;
+                        if (this.PublishStaged(all: false) != 0)
+                            return true;
+                    }
+                    if (!this.workerDone)
+                        signal.Wait();
+                }
+            }
+            finally
+            {
+                this.connection.PauseExecutionTimeout();
+            }
+        }
+        var handed = this.EndWorker();
+        this.ThrowFault();
+        return handed;
+    }
+
+    /// <summary>
+    /// Ends a background production that has ended — none runs any longer
+    /// unless <see cref="workerDone"/> says otherwise — handing over what it
+    /// produced: all of it, unless a cancel ended the statement, which ends
+    /// it where its client stands, the rows in a packet it never filled going
+    /// nowhere. Whether it handed over any rows.
+    /// </summary>
+    private bool EndWorker()
+    {
+        if (this.worker is { } running)
+        {
+            if (!this.workerDone)
+                return false;
+            running.Wait();
+            this.worker = null;
+        }
+        var handed = this.PublishStaged(all: this.Error is not { Number: 0 or -2 }) != 0;
+        this.DiscardStaged();
+        return handed;
+    }
+
+    /// <summary>
+    /// <see cref="EndWorker"/> for the consumer, between two rows it reads:
+    /// whether no production runs in the background any longer.
+    /// </summary>
+    private protected bool ReapBackground()
+    {
+        if (this.worker is not null && !this.workerDone)
+            return false;
+        _ = this.EndWorker();
+        this.ThrowFault();
+        return true;
+    }
+
+    private void ThrowFault()
+    {
+        if (this.workerFault is not { } fault)
+            return;
+        this.workerFault = null;
+        fault.Throw();
+    }
+
+    /// <summary>
+    /// Waits out the background production, if one runs and the caller isn't
+    /// it, before anything else of the session's engine runs: the rows it
+    /// produced and a fault it met stay for the consumer. The wait counts
+    /// toward the statement's <c>CommandTimeout</c>, so a lock wait with no
+    /// end of its own can't hold the caller for good.
+    /// </summary>
+    internal void JoinBackground()
+    {
+        if (this.worker is not { } running || this.workerDone || this.OnWorker)
+            return;
+        var waiting = this.connection!;
+        waiting.ResumeExecutionTimeout();
+        try
+        {
+            running.Wait();
+        }
+        finally
+        {
+            waiting.PauseExecutionTimeout();
+        }
     }
 
     /// <summary>
@@ -317,6 +611,7 @@ internal abstract class ResultStream
     /// </summary>
     public void Finish()
     {
+        this.JoinBackground();
         this.Unbounded = true;
         while (!this.Complete && this.Pull is { } pull)
             this.PullLocked(pull);
@@ -411,16 +706,26 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
     /// reading on from there. A row's error leaves the rows before it in
     /// <paramref name="produced"/> and propagates.
     /// </summary>
-    public static ResultStream<T, TMeasure>? Start(IEnumerable<T> rows, string[] names, TMeasure measure, StatementContext? statement, out List<T> produced)
+    /// <remarks>
+    /// Under contention for the locks the statement reads under
+    /// (<see cref="ResultStream.Contended"/>), the window is the first packet
+    /// alone, which is what real's client has once the statement's first
+    /// packet is full: the rest it produces in the background as its client
+    /// reads.
+    /// </remarks>
+    public static ResultStream<T, TMeasure>? Start(IEnumerable<T> rows, string[] names, TMeasure measure, StatementContext? statement, SimulatedDbConnection? connection, out List<T> produced)
     {
         produced = [];
         var source = rows.GetEnumerator();
         var header = HeaderBytes(names);
         var bytes = header;
+        var owner = connection?.LockOwner;
+        var contended = owner is not null && Volatile.Read(ref connection!.Simulation.LockManager.BlockingHolds) > Volatile.Read(ref owner.BlockingHolds);
+        var window = contended ? PacketBytes : FirstWindowBytes;
         try
         {
             var probed = false;
-            while (bytes < FirstWindowBytes)
+            while (bytes < window)
             {
                 var probes = statement?.RowsProbed ?? 0;
                 if (!source.MoveNext())
@@ -433,7 +738,14 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 produced.Add(row);
                 bytes += measure.Of(row);
             }
-            return new ResultStream<T, TMeasure>(source, measure, produced, header) { statement = statement, lastRowProbed = probed };
+            return new ResultStream<T, TMeasure>(source, measure, produced, header)
+            {
+                statement = statement,
+                lastRowProbed = probed,
+                connection = connection,
+                owner = owner,
+                producesAhead = contended,
+            };
         }
         catch
         {
@@ -442,8 +754,95 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
         }
     }
 
+    /// <summary>Whether the statement began under contention, so produces ahead of its client in the background from its first read.</summary>
+    private bool producesAhead;
+
+    /// <summary>
+    /// Rows the background production produced that the consumer hasn't been
+    /// handed (<see cref="PublishStaged"/>), guarded by itself, with their
+    /// bytes; null until a production first runs in the background.
+    /// </summary>
+    private List<T>? staging;
+
+    private long stagedBytes;
+
+    private protected override bool HasStaged => this.staging is { Count: > 0 };
+
+    private protected override void BeginStaging() => this.staging ??= [];
+
+    private protected override void DiscardStaged()
+    {
+        if (this.staging is not { } staged)
+            return;
+        lock (staged)
+        {
+            staged.Clear();
+            this.stagedBytes = 0;
+        }
+    }
+
+    private protected override int PublishStaged(bool all)
+    {
+        if (this.staging is not { } staged)
+            return 0;
+        lock (staged)
+        {
+            var boundary = all || this.FramesPackets ? long.MaxValue : (this.producedBytes + this.stagedBytes) / PacketBytes * PacketBytes;
+            var moved = 0;
+            for (; moved < staged.Count && this.producedBytes < boundary; moved++)
+            {
+                var row = staged[moved];
+                var before = this.producedBytes;
+                this.Produced(row);
+                this.stagedBytes -= this.producedBytes - before;
+                this.Buffer.Add(row);
+            }
+            staged.RemoveRange(0, moved);
+            return moved;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ProduceUntil"/> on the background production's thread: the
+    /// rows go aside for <see cref="PublishStaged"/>, the consumer reading
+    /// from <see cref="Buffer"/> meanwhile.
+    /// </summary>
+    private void ProduceStaged(long limit, List<T> staged)
+    {
+        var source = this.source;
+        var statement = this.statement;
+        while (true)
+        {
+            lock (staged)
+            {
+                if (this.producedBytes + this.stagedBytes >= limit)
+                    return;
+            }
+            var probes = statement?.RowsProbed ?? 0;
+            if (!source.MoveNext())
+            {
+                this.Complete = true;
+                return;
+            }
+            this.lastRowProbed = statement is not null && statement.RowsProbed != probes;
+            var row = source.Current;
+            var size = this.measure.Of(row);
+            lock (staged)
+            {
+                this.RowCount++;
+                staged.Add(row);
+                this.stagedBytes += size;
+            }
+        }
+    }
+
     private protected override void ProduceUntil(long limit)
     {
+        if (this.OnWorker && this.staging is { } staged)
+        {
+            this.ProduceStaged(limit, staged);
+            return;
+        }
         var buffer = this.Buffer;
         if (this.Head == buffer.Count)
         {
@@ -476,6 +875,19 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
     private protected override void DisposeSource() => this.source.Dispose();
 
     /// <summary>
+    /// Has the statement produce ahead of its client in the background as far
+    /// as its window reaches, once any production there before has ended and
+    /// handed over what it produced.
+    /// </summary>
+    private void RunAhead()
+    {
+        if (!this.ReapBackground())
+            return;
+        if (!this.Complete && !this.Draining && this.Pull is { } pull && this.producedBytes < WindowEnd(this.clientBytes))
+            this.StartBackground(pull);
+    }
+
+    /// <summary>
     /// The rows as the consumer reads them, the statement running on as the
     /// client reads into each next packet (<see cref="ResultStream.WindowEnd"/>),
     /// and whenever the buffer runs dry.
@@ -484,6 +896,10 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
     {
         try
         {
+            // Begun under contention, the statement goes on producing ahead of
+            // its client at once, as real's does past its first packet.
+            if (this.producesAhead)
+                this.RunAhead();
             while (true)
             {
                 if (this.Head < this.Buffer.Count)
@@ -496,7 +912,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                     {
                         _ = this.packetEnds.Dequeue();
                         this.clientBytes = end.Bytes;
-                        if (!this.Complete && !this.Draining && this.producedBytes < WindowEnd(this.clientBytes) && this.Pull is { } refill)
+                        if (!this.Complete && !this.Draining && this.Pull is { } refill)
                         {
                             // Most of the buffer read, it starts again from the front.
                             if (this.Head >= 64 && this.Head * 2 >= this.Buffer.Count)
@@ -504,14 +920,31 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                                 this.Buffer.RemoveRange(0, this.Head);
                                 this.Head = 0;
                             }
-                            this.PullLocked(refill);
+                            if (this.BackgroundPending || this.Contended())
+                                this.RunAhead();
+                            else if (this.producedBytes < WindowEnd(this.clientBytes))
+                                this.PullLocked(refill);
                         }
                     }
                     yield return row;
                     continue;
                 }
+                if (this.BackgroundPending)
+                {
+                    // Nothing more to hand over from a production that has
+                    // ended without the statement's: the consumer can no
+                    // longer run it on.
+                    if (!this.AwaitBackground() && !this.Complete && !this.BackgroundPending)
+                        yield break;
+                    continue;
+                }
                 if (this.Complete || this.Pull is not { } pull)
                     yield break;
+                if (!this.Draining && this.Contended())
+                {
+                    this.StartBackground(pull);
+                    continue;
+                }
                 this.PullLocked(pull);
                 // A consumer that can no longer run the statement on — its
                 // reader closed under it — ends the rows where they stand.
@@ -538,8 +971,9 @@ internal interface IRowMeasure<in T>
 
 /// <summary>
 /// How a schema's projected rows measure as TDS sends them: a token byte,
-/// each fixed-length column's width — a length byte more where it is
-/// nullable — and each other column's value with its length, a character
+/// each fixed-length column's width with the length prefix its wire family
+/// carries — none for a NOT NULL integer, float, money or <c>datetime</c> —
+/// and each other column's value with its length, a character
 /// column's characters at the width its family sends them. A struct over a
 /// shape kept per plan, which a cached plan shares across its executions, so
 /// the measure costs no allocation and its calls specialize.
@@ -563,7 +997,7 @@ internal readonly struct ValueRowMeasure : IRowMeasure<SqlValue[]>
         for (var i = 0; i < schema.Length; i++)
         {
             if (schema[i].IsFixedLength)
-                fixedBytes += schema[i].FixedLength + (nullability is not null && !nullability[i] ? 0 : 1);
+                fixedBytes += schema[i].FixedLength + Network.TdsTypeCodec.FixedValuePrefix(schema[i], notNull: nullability is not null && !nullability[i]);
             else
                 variable.Add(SqlType.IsNationalStringCategory(schema[i]) ? ~i : i);
         }

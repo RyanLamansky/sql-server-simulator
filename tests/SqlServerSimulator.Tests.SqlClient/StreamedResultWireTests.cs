@@ -264,6 +264,38 @@ public sealed class StreamedResultWireTests
     }
 
     /// <summary>
+    /// While the statement waits on a row an uncommitted writer holds, the
+    /// client reads the rows the packets sent before the wait carry, MARS or
+    /// not, until its <c>CommandTimeout</c> ends the wait (probed 2026-10-09
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(2000, 30, 28, true)]
+    [DataRow(100, 100, 75, false)]
+    [DataRow(100, 301, 299, true)]
+    public async Task UncommittedWriter_RowsBeforeItGoOutWhileTheStatementWaits(int width, int held, int readable, bool mars)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, $"create table b (k int primary key, v char({width}) not null); insert b select value, 'x' from generate_series(1, 3000)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var reader = await Wire.OpenAsync(listener, TestContext.CancellationToken, mars ? ";MultipleActiveResultSets=True" : "");
+        await using var writer = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var write = new SqlCommand($"begin tran; update b set v = 'z' where k = {held}", writer))
+            _ = await write.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        await using var command = new SqlCommand("select k, v from b", reader) { CommandTimeout = 1 };
+        var read = 0;
+        var error = await ThrowsExactlyAsync<SqlException>(async () =>
+        {
+            await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+            while (await rows.ReadAsync(TestContext.CancellationToken))
+                read++;
+        });
+        AreEqual(-2, error.Number);
+        AreEqual(readable, read);
+    }
+
+    /// <summary>
     /// A streamed result's DONE counts the rows it sent, and one a row's error
     /// cut short reports no count, as real's does.
     /// </summary>
@@ -291,6 +323,28 @@ public sealed class StreamedResultWireTests
         AreEqual(8134, error.Number);
         AreEqual(Rows - 101, read);
         CollectionAssert.AreEqual(new[] { Rows }, counts);
+    }
+
+    /// <summary>
+    /// A streamed <c>FOR JSON</c> document's DONE counts the rows it
+    /// serialized, not the chunks it sent.
+    /// </summary>
+    [TestMethod]
+    public async Task StreamedForJson_DoneCountsTheRowsSerialized()
+    {
+        var simulation = Big();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var counts = new List<int>();
+        await using var command = new SqlCommand("select top (1000) k, v from big order by k for json path", connection);
+        command.StatementCompleted += (_, e) => counts.Add(e.RecordCount);
+        await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        var chunks = 0;
+        while (await rows.ReadAsync(TestContext.CancellationToken))
+            chunks++;
+        IsGreaterThan(100, chunks);
+        _ = await rows.NextResultAsync(TestContext.CancellationToken);
+        CollectionAssert.AreEqual(new[] { 1000 }, counts);
     }
 
     /// <summary>

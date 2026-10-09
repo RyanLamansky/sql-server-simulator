@@ -41,6 +41,11 @@ internal sealed partial class Selection
     /// narrowed source is the whole FROM, which is every caller but
     /// <see cref="NarrowJoinSources"/>.
     /// </para>
+    /// <para>
+    /// <c>where</c> says <c>excluders</c> is the query's own <c>WHERE</c> over
+    /// the one source, all of whose repeatable conjuncts then decide which row
+    /// locks a locking read keeps (see <see cref="RowLockQualifier"/>).
+    /// </para>
     /// </summary>
     private static FromSource[] MaybeApplyIndexSeek(
         FromSource[] sources,
@@ -48,8 +53,9 @@ internal sealed partial class Selection
         List<BooleanExpression> excluders,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        FromSource[]? planSources = null)
-        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _);
+        FromSource[]? planSources = null,
+        bool where = false)
+        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _, where);
 
     /// <summary>
     /// The narrowing above, additionally reporting how many candidate row
@@ -67,7 +73,8 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
         FromSource[]? planSources,
-        out int seekedCandidates)
+        out int seekedCandidates,
+        bool where = false)
     {
         seekedCandidates = -1;
         if (sources.Length != 1 || joins.Length != 0 || excluders.Count == 0)
@@ -130,7 +137,7 @@ internal sealed partial class Selection
                 IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
                 if (planSources is not null)
                     seekedCandidates = CountFencedRows(table, keyFence);
-                var walkQualifier = plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver) : null;
+                var walkQualifier = plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where) : null;
                 return SeekedSource(source, RowSecurity.FilterRows(table,
                     WalkKeyFence(table, batch, plan, keyFence.Group, keyFence.Commons, keyFence.Intervals, descending: false, walkQualifier), batch));
             }
@@ -141,18 +148,22 @@ internal sealed partial class Selection
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
         // touches (and locks) only the seeked rows, matching a real index seek.
         // A tx-scoped row lock (REPEATABLE READ / UPDLOCK / XLOCK) is let go
-        // again on a row the sargable conjuncts reject, as real's is, so what
+        // again on a row the qualifying conjuncts reject, as real's is, so what
         // the transaction keeps is the rows it read that qualify, whether the
         // read seeks or scans (probed 2026-09-28 against SQL Server 2025).
+        // A read with nothing sargable to judge its rows by scans as it always
+        // has, its own WHERE's repeatable conjuncts qualifying the rows there.
         RowLockQualifier? qualifier = null;
         if (plan.RowTxScoped)
         {
             if (batch.ResolveSnapshotXidForRead(table, plan) is not null
-                || (qualifier = RowLockQualifier.For(source, conjuncts, outerResolver)) is null)
+                || (qualifier = RowLockQualifier.For(source, conjuncts, outerResolver, where)) is null)
             {
                 IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
                 return sources;
             }
+            if (RowLockQualifier.For(source, conjuncts, outerResolver) is null)
+                return QualifiedScan(source, table, plan, batch, scanFences, qualifier);
         }
 
         // A snapshot / RCSI reader sees the version visible at its snapshot, not
@@ -219,9 +230,20 @@ internal sealed partial class Selection
             return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch));
         }
 
+        if (qualifier is not null)
+            return QualifiedScan(source, table, plan, batch, scanFences, qualifier);
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-        if (qualifier is null)
-            return sources;
+        return sources;
+    }
+
+    /// <summary>
+    /// A tx-scoped row-lock read with no seek to take: every row in scan order,
+    /// each lock let go where <paramref name="qualifier"/> rejects the row — a
+    /// <c>SERIALIZABLE</c> one walking its keys as it reaches them.
+    /// </summary>
+    private static FromSource[] QualifiedScan(FromSource source, HeapTable table, DataLockPlan plan, BatchContext batch, bool scanFences, RowLockQualifier qualifier)
+    {
+        IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         if (scanFences && KeyLockGroup.RowGroupOf(table) is { } scanned && WalksKeyFence(table, plan, scanned))
         {
             batch.AwaitUncommittedDeletes(table);
@@ -235,31 +257,73 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// A tx-scoped row-lock read's sargable conjuncts, which decide whether the
-    /// lock a row just took is kept: real takes the lock to read the row and
-    /// lets it go again when the row doesn't qualify, so a REPEATABLE READ or
-    /// <c>UPDLOCK</c> scan holds only the rows it returns. Only the sargable
-    /// shapes are evaluated — deterministic over the row and fixed values, so
-    /// a row they reject is one the residual WHERE rejects too; a row failing
-    /// only a conjunct outside them keeps its lock, erring toward real's
-    /// stricter footprint rather than dropping a row it would have returned.
+    /// The conjuncts of a tx-scoped row-lock read that decide whether the lock
+    /// a row just took is kept: real takes the lock to read the row and lets it
+    /// go again when the row doesn't qualify, so a REPEATABLE READ or
+    /// <c>UPDLOCK</c> scan holds only the rows it returns. Each is asked again
+    /// by the residual WHERE of the rows it keeps, so it must answer alike
+    /// however often it is asked, a row they reject being one the residual
+    /// WHERE rejects too; a row failing only a conjunct outside them keeps its
+    /// lock, erring toward real's stricter footprint rather than dropping a
+    /// row it would have returned. Otherwise only the sargable shapes, which
+    /// are deterministic over the row and fixed values, decide.
     /// </summary>
+    /// <remarks>
+    /// Reading a statement's own <c>WHERE</c> over the one source
+    /// (<paramref name="conjuncts"/> with <c>where</c> set in
+    /// <see cref="For"/>), every conjunct real pushes into its scan decides
+    /// too — any reading only the source's columns and fixed values, however
+    /// it reads them — save one a second evaluation could answer differently
+    /// (<see cref="IsRepeatableScanPredicate"/>). Real's scan applies such a
+    /// predicate itself and lets go the lock of a row it rejects, while one
+    /// reached through a subquery or a join's <c>ON</c> is a filter above the
+    /// scan, which keeps every lock the scan took (probed 2026-10-09 against
+    /// SQL Server 2025: <c>UPDLOCK … WHERE v % 3 = 0</c> held twenty keys two
+    /// rows in and 666 at its end, as did <c>XLOCK</c>, a <c>REPEATABLE
+    /// READ</c> read and the predicate beside <c>NEWID() IS NOT NULL</c> or
+    /// under an <c>OR</c>; through a correlated subquery or an <c>ON</c>, sixty
+    /// and 2,000).
+    /// </remarks>
     private sealed class RowLockQualifier(FromSource source, BooleanExpression[] conjuncts, Func<MultiPartName, SqlValue>? outerResolver)
     {
         public readonly FromSource Source = source;
         public readonly BooleanExpression[] Conjuncts = conjuncts;
         public readonly Func<MultiPartName, SqlValue>? OuterResolver = outerResolver;
 
-        public static RowLockQualifier? For(FromSource source, List<BooleanExpression> conjuncts, Func<MultiPartName, SqlValue>? outerResolver)
+        public static RowLockQualifier? For(FromSource source, List<BooleanExpression> conjuncts, Func<MultiPartName, SqlValue>? outerResolver, bool where = false)
         {
             List<BooleanExpression>? sargable = null;
             FromSource[] one = [source];
             foreach (var conjunct in conjuncts)
             {
-                if (IsSourceLocalSargable(source, conjunct, one))
+                if (IsSourceLocalSargable(source, conjunct, one) || (where && IsRepeatableScanPredicate(conjunct)))
                     (sargable ??= []).Add(conjunct);
             }
             return sargable is null ? null : new RowLockQualifier(source, [.. sargable], outerResolver);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="conjunct"/>, of a one-source query's
+        /// <c>WHERE</c>, answers the same for a row however often it is asked:
+        /// it reaches no subquery, draws nothing (<c>NEWID</c>,
+        /// <c>NEWSEQUENTIALID</c>, <c>RAND</c>, <c>CRYPT_GEN_RANDOM</c>,
+        /// <c>NEXT VALUE FOR</c>) and calls no user or CLR function, whose body
+        /// could. The residual <c>WHERE</c> asks it again of each row the scan
+        /// keeps.
+        /// </summary>
+        private static bool IsRepeatableScanPredicate(BooleanExpression conjunct)
+        {
+            var repeatable = true;
+            conjunct.Walk(ref repeatable, static (node, shape, ref repeatable) =>
+            {
+                if (node is NewId or NewSequentialId or Rand or CryptGenRandom or NextValueFor or UserFunctionCall or ClrFunctionCall or ClrTypeMemberCall or ClrTypeMutation
+                    || shape.Locals.Exists(static local => local is Selection))
+                {
+                    repeatable = false;
+                }
+                return repeatable;
+            });
+            return repeatable;
         }
     }
 
@@ -278,7 +342,12 @@ internal sealed partial class Selection
             foreach (var (page, slot, _) in table.Heap.EnumerateRowsWithAddress())
                 addresses.Add((page, slot));
         }
-        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier, keys: keys.Count == addresses.Count ? keys : null))
+        // In key order, a statement waiting on its client mid-result reads on
+        // from where it stopped as the table stands then (see OrderedScanRest).
+        var rest = ClusteredScan.ServesKeyedOrder(table) && KeyLockGroup.RowGroupOf(table) is { } rowGroup
+            ? new OrderedScanRest(HeapSeekCache.For(table.Heap), table.Heap, table.StoredColumns, table.Heap, rowGroup.Ordinals, rowGroup.Commons, null, false, null, false, descending: false)
+            : null;
+        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier, keys: keys.Count == addresses.Count ? keys : null, rest: rest))
             yield return row;
     }
 
@@ -1404,7 +1473,7 @@ internal sealed partial class Selection
             skipped = 0;
             IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
             orderedSources = SeekedSource(source, WalkKeyFence(table, batch, plan, rowGroup, walkCommons, walked, descending,
-                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver) : null));
+                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where: true) : null));
             return true;
         }
         // A read keeping its row locks waits out the deletes in flight before
@@ -1434,7 +1503,7 @@ internal sealed partial class Selection
         // than sorting a scan that locked them all first (probed 2026-10-08
         // against SQL Server 2025: a REPEATABLE READ `ORDER BY` the clustered
         // key suspended two rows in held the keys produced so far), and lets
-        // go a row its sargable conjuncts reject (RowLockQualifier).
+        // go a row its WHERE rejects (RowLockQualifier).
         // A statement waiting on its client mid-result reads on from where its
         // scan stopped, as the index stands then (see OrderedScanRest).
         var rest = new OrderedScanRest(cache, table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
@@ -1445,7 +1514,7 @@ internal sealed partial class Selection
             List<(int Page, int Slot)> inOrder = [.. candidates];
             if (descending)
                 inOrder.Reverse();
-            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver), rest: rest));
+            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver, where: true), rest: rest));
             return true;
         }
         orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest));
@@ -1507,20 +1576,33 @@ internal sealed partial class Selection
             return true;
         }
 
-        /// <summary>The addresses still to read in the order the original seek returned them, the last row read being <paramref name="last"/>.</summary>
-        public (int Page, int Slot)[] After(byte[]? last)
+        /// <summary>
+        /// The addresses still to read in the order the original seek returned
+        /// them, the last row read being <paramref name="last"/>; the rows
+        /// another request of the statement's transaction wrote since it began
+        /// stand where the statement found them (see
+        /// <see cref="BatchContext.OwnWritesOf"/>).
+        /// </summary>
+        public (int Page, int Slot)[] After(byte[]? last, HeapTable table, BatchContext batch)
         {
-            if (last is null || !HeapSeekCache.TryComputeKey(last, ordinals, commons, schema, lobStore, out var key))
-                return cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, lower, lowerInclusive, upper, upperInclusive);
-            return descending
-                ? cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, lower, lowerInclusive, key, true)
-                : cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, key, true, upper, upperInclusive);
+            var (from, fromInclusive, to, toInclusive) = (lower, lowerInclusive, upper, upperInclusive);
+            if (last is not null && HeapSeekCache.TryComputeKey(last, ordinals, commons, schema, lobStore, out var key))
+            {
+                if (descending)
+                    (to, toInclusive) = (key, true);
+                else
+                    (from, fromInclusive) = (key, true);
+            }
+            var order = cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, from, fromInclusive, to, toInclusive);
+            return batch.OwnWritesOf(table) is { } own
+                ? BatchContext.WithOwnWrites(table, own, ordinals, commons, order, from, fromInclusive, to, toInclusive)
+                : order;
         }
 
         /// <summary><see cref="After"/> in the order the scan reads it, a descending scan's reversed.</summary>
-        public List<(int Page, int Slot)> AfterInReadOrder(byte[]? last)
+        public List<(int Page, int Slot)> AfterInReadOrder(byte[]? last, HeapTable table, BatchContext batch)
         {
-            List<(int Page, int Slot)> order = [.. this.After(last)];
+            List<(int Page, int Slot)> order = [.. this.After(last, table, batch)];
             if (descending)
                 order.Reverse();
             return order;
@@ -1676,17 +1758,21 @@ internal sealed partial class Selection
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
         var heap = table.Heap;
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
         rest?.Begin(batch);
         for (var i = 0; i < order.Length; i++)
         {
             if (rest is not null && rest.Moved())
             {
-                order = rest.After(rest.LastRead);
+                order = rest.After(rest.LastRead, table, batch);
                 i = -1;
                 continue;
             }
             var (page, slot) = order[descending ? order.Length - 1 - i : i];
-            if (!seen.Add((page, slot)) || heap.IsSlotTombstoned(page, slot) || !batch.TouchRowForRead(table, page, slot, plan))
+            // A row another request of the statement's transaction wrote since
+            // the statement began reads as the statement found it.
+            var noted = ownWrites.TryRead(batch, table, (page, slot), out var found);
+            if (!seen.Add((page, slot)) || (noted ? found is null : heap.IsSlotTombstoned(page, slot)) || !batch.TouchRowForRead(table, page, slot, plan))
                 continue;
             io?.Enter(page, ref lastPage);
             if (skip > 0)
@@ -1695,7 +1781,7 @@ internal sealed partial class Selection
                 batch.PollCancellation();
                 continue;
             }
-            if (heap.ReadLiveRow(page, slot) is not { } bytes)
+            if ((noted ? found : heap.ReadLiveRow(page, slot)) is not { } bytes)
                 continue;
             addresses?.Record(bytes, page, slot);
             _ = rest?.LastRead = bytes;
@@ -3387,6 +3473,7 @@ internal sealed partial class Selection
         // The key each row read in a deleted row's place was found by, which
         // names its rows again should it be deleted in turn.
         Dictionary<(int, int), SqlValueKey>? followedKeys = null;
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
         // An ordered scan reads on from where it stopped after its statement
         // waited on its client while the table changed (see OrderedScanRest).
         rest?.Begin(batch);
@@ -3397,29 +3484,34 @@ internal sealed partial class Selection
             {
                 if (rest is not null && rest.Moved())
                 {
-                    work = rest.AfterInReadOrder(rest.LastRead);
+                    work = rest.AfterInReadOrder(rest.LastRead, table, batch);
                     position = -1;
                     continue;
                 }
                 var (page, slot) = work[position];
                 if (!seen.Add((page, slot)))
                     continue;
+                // A row another request of the statement's transaction wrote
+                // since the statement began reads as the statement found it.
+                var noted = ownWrites.TryRead(batch, table, (page, slot), out var found);
                 // The image before the row's lock is taken names its key should
                 // the wait end with the row deleted; the sequence says whether
                 // the image read after the lock still is it.
                 var sequence = heap.WriteSequence;
-                var prior = heap.ReadLiveRow(page, slot);
+                var prior = noted ? found : heap.ReadLiveRow(page, slot);
                 byte[]? bytes = null;
                 if (prior is not null)
                 {
                     if (!batch.TouchRowForRead(table, page, slot, plan))
                         continue;
-                    bytes = heap.WriteSequence == sequence ? prior
+                    bytes = noted || heap.WriteSequence == sequence ? prior
                         : heap.ReadLiveRow(page, slot) is { } read ? batch.SettleReadCommitted(table, page, slot, plan, read, sequence)
                         : null;
                 }
                 if (bytes is null)
                 {
+                    if (noted)
+                        continue;
                     SqlValueKey? key = keys is not null && ReferenceEquals(work, candidates) && position < keys.Count ? keys[position]
                         : followedKeys is not null && followedKeys.TryGetValue((page, slot), out var followedKey) ? followedKey
                         : null;

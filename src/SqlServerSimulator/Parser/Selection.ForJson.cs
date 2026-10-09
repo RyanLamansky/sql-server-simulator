@@ -178,12 +178,14 @@ partial class Selection
                     levelNodes[i].Add(new ForJsonNode(inner.ColumnNames[column], column, null));
             }
 
+            IEnumerable<string> autoPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForJsonAuto(inner, innerSchema, levels, levelNodes, rawColumns, options, batch, outerResolver);
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
                 hasTopOrOffsetOrFetch: false,
-                (batch, outerResolver) => SerializeForJsonAuto(inner, innerSchema, levels, levelNodes, rawColumns, options, batch, outerResolver))
+                (batch, outerResolver) => WholeDocument(autoPieces(batch, outerResolver), text => ForJsonRow(text, options), whenEmpty: null))
             {
                 ForJson = options,
+                documentPieces = autoPieces,
             };
         }
 
@@ -198,16 +200,25 @@ partial class Selection
             InsertForJsonPath(root, name.Split('.'), 0, i, name);
         }
 
+        IEnumerable<string> pathPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForJson(inner, innerSchema, root, rawColumns, options, batch, outerResolver);
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => SerializeForJson(inner, innerSchema, root, rawColumns, options, batch, outerResolver))
+            (batch, outerResolver) => WholeDocument(pathPieces(batch, outerResolver), text => ForJsonRow(text, options), whenEmpty: null))
         {
             ForJson = options,
+            documentPieces = pathPieces,
         };
     }
 
-    private static IEnumerable<byte[]> SerializeForJson(
+    /// <summary>
+    /// The document's text as its rows serialize, a row at a time: the
+    /// <c>ROOT</c> object's and the array wrapper's openings with the first
+    /// row's object, the comma-separated objects, their closings after the
+    /// last. An empty input rowset writes nothing at all (a scalar subquery
+    /// then yields SQL NULL, matching real SQL Server).
+    /// </summary>
+    private static IEnumerable<string> SerializeForJson(
         Selection inner, SqlType[] innerSchema, List<ForJsonNode> root, bool[] rawColumns,
         ForJsonOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -217,44 +228,37 @@ partial class Selection
         {
             if (any)
                 _ = body.Append(',');
+            else
+                AppendForJsonOpening(body, options);
             any = true;
             _ = RenderForJsonObject(body, root, rowBytes, innerSchema, rawColumns, options.IncludeNulls);
+            yield return Drain(body);
         }
 
-        // Empty input rowset → no output row at all (a scalar subquery then
-        // yields SQL NULL, matching real SQL Server).
-        if (!any)
-            yield break;
-
-        yield return ForJsonRow(body, options);
+        if (any)
+            yield return ForJsonClosing(options);
     }
 
-    /// <summary>
-    /// Wraps the comma-separated per-row objects in the array wrapper (unless
-    /// <c>WITHOUT_ARRAY_WRAPPER</c>) and the <c>ROOT</c> object, then encodes
-    /// the whole document as the single result row.
-    /// </summary>
-    private static byte[] ForJsonRow(StringBuilder body, ForJsonOptions options)
+    /// <summary>The <c>ROOT</c> object's opening and the array wrapper's (unless <c>WITHOUT_ARRAY_WRAPPER</c>), ahead of the first row's object.</summary>
+    private static void AppendForJsonOpening(StringBuilder body, ForJsonOptions options)
     {
-        var document = new StringBuilder();
-        if (options.WithoutArrayWrapper)
-            _ = document.Append(body);
-        else
-            _ = document.Append('[').Append(body).Append(']');
-
         if (options.RootName is { } rootName)
         {
-            var wrapped = new StringBuilder();
-            _ = wrapped.Append('{');
-            AppendForJsonString(wrapped, rootName);
-            _ = wrapped.Append(':').Append(document).Append('}');
-            document = wrapped;
+            _ = body.Append('{');
+            AppendForJsonString(body, rootName);
+            _ = body.Append(':');
         }
-
-        return RowEncoder.EncodeRow(
-            [options.DocumentType],
-            [SqlValue.FromNVarchar(options.DocumentType, document.ToString())]);
+        if (!options.WithoutArrayWrapper)
+            _ = body.Append('[');
     }
+
+    /// <summary>What closes <see cref="AppendForJsonOpening"/>.</summary>
+    private static string ForJsonClosing(ForJsonOptions options) =>
+        (options.WithoutArrayWrapper ? "" : "]") + (options.RootName is null ? "" : "}");
+
+    /// <summary>The whole document as the clause's single result row.</summary>
+    private static byte[] ForJsonRow(string document, ForJsonOptions options) =>
+        RowEncoder.EncodeRow([options.DocumentType], [SqlValue.FromNVarchar(options.DocumentType, document)]);
 
     /// <summary>
     /// Renders one object <c>{ … }</c> from <paramref name="nodes"/> for a
@@ -321,7 +325,7 @@ partial class Selection
     /// in one array) while the innermost level emits one object per row —
     /// the same grouping FOR XML AUTO applies to its elements.
     /// </summary>
-    private static IEnumerable<byte[]> SerializeForJsonAuto(
+    private static IEnumerable<string> SerializeForJsonAuto(
         Selection inner, SqlType[] innerSchema, AutoLevel[] levels, List<ForJsonNode>[] levelNodes, bool[] rawColumns,
         ForJsonOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -334,6 +338,8 @@ partial class Selection
 
         foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
+            if (previous is null)
+                AppendForJsonOpening(body, options);
             var depth = previous is null ? 0 : AutoRestartDepth(levels, innerSchema, previous, rowBytes);
             for (var i = openDepth - 1; i >= depth; i--)
             {
@@ -364,6 +370,7 @@ partial class Selection
                 openDepth = i + 1;
             }
             previous = rowBytes;
+            yield return Drain(body);
         }
 
         // Empty input rowset → no output row at all (a scalar subquery then
@@ -378,7 +385,7 @@ partial class Selection
                 _ = body.Append(']');
         }
 
-        yield return ForJsonRow(body, options);
+        yield return Drain(body) + ForJsonClosing(options);
     }
 
     /// <summary>

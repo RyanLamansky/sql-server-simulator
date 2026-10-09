@@ -286,6 +286,29 @@ internal sealed class LockManager
     internal Simulation? OwningSimulation;
 
     /// <summary>
+    /// The hold entries, across every resource, in a mode that can keep a
+    /// reader waiting (<see cref="CanBlockReaders"/>); each owner's own are in
+    /// its <see cref="SessionToken.BlockingHolds"/>. Kept under the gate.
+    /// Their difference tells a statement producing rows for its client
+    /// whether another session could hold it up, which is when it produces
+    /// on a thread of its own (see <see cref="ResultStream"/>).
+    /// </summary>
+    internal int BlockingHolds;
+
+    /// <summary>Whether a hold in <paramref name="mode"/> can keep a reader waiting: anything but the shared and stability modes.</summary>
+    private static bool CanBlockReaders(LockMode mode) =>
+        mode is not (LockMode.SchemaStability or LockMode.IntentShared or LockMode.Shared or LockMode.RangeSharedShared);
+
+    /// <summary>Counts a hold entry of <paramref name="owner"/>'s in <paramref name="mode"/> gained (+1) or gone (-1) in <see cref="BlockingHolds"/>.</summary>
+    private void CountBlockingHold(SessionToken owner, LockMode mode, int delta)
+    {
+        if (!CanBlockReaders(mode))
+            return;
+        Volatile.Write(ref this.BlockingHolds, this.BlockingHolds + delta);
+        Volatile.Write(ref owner.BlockingHolds, owner.BlockingHolds + delta);
+    }
+
+    /// <summary>
     /// Drains the simulation's abandoned-session queue, if there is anything
     /// in it, <em>before</em> the gate is taken. Gate-free on purpose: a
     /// teardown rolls a transaction back and releases that session's locks,
@@ -443,6 +466,9 @@ internal sealed class LockManager
                     {
                         owner.WaitStartedTicks = Environment.TickCount64;
                         (resource.Queue ??= []).Add((owner, mode));
+                        // A statement producing its rows in the background
+                        // lets its client have the ones before this wait.
+                        owner.TryResolveActing()?.BackgroundProduction?.NoteWaitBegins();
                     }
                     owner.WaitingOnResource = resource;
                     owner.WaitingForMode = mode;
@@ -582,6 +608,7 @@ internal sealed class LockManager
                     if (hold.Count == 0)
                     {
                         resource.Holders.RemoveAt(i);
+                        this.CountBlockingHold(owner, mode, -1);
                         if (resource.OwningTable is { } table)
                         {
                             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
@@ -643,7 +670,7 @@ internal sealed class LockManager
     /// (<see cref="Converts"/>).
     /// </remarks>
     [MethodImpl(Tiering.OptimizeFirstCall)]
-    private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner, bool queued)
+    private bool TryGrant(LockResource resource, LockMode mode, SessionToken owner, bool queued)
     {
         var held = HeldBy.None;
         foreach (var hold in resource.Holders)
@@ -671,6 +698,7 @@ internal sealed class LockManager
             }
         }
         resource.Holders.Add(new LockResource.Hold(owner, mode, 1));
+        this.CountBlockingHold(owner, mode, +1);
         if (resource.OwningTable is { } table)
         {
             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
@@ -711,6 +739,7 @@ internal sealed class LockManager
                 if (moved.Count == 0)
                 {
                     resource.Holders.RemoveAt(source);
+                    this.CountBlockingHold(from, mode, -1);
                     removed = true;
                 }
                 else
@@ -729,6 +758,7 @@ internal sealed class LockManager
                 else
                 {
                     resource.Holders.Add(new LockResource.Hold(to, mode, 1));
+                    this.CountBlockingHold(to, mode, +1);
                     if (!removed)
                         CountHoldEntry(resource, mode, +1);
                 }
