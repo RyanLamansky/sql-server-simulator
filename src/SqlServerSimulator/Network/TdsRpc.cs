@@ -79,9 +79,10 @@ internal sealed class TdsRpcRequest
     private static TdsRpcParameter ParseParameter(TdsValueReader reader, string currentDatabase, int ordinal)
     {
         var name = reader.ReadUcs2(reader.ReadByte());
-        var isOutput = (reader.ReadByte() & 0x01) != 0;
+        var status = reader.ReadByte();
+        var isOutput = (status & 0x01) != 0;
         var token = reader.ReadByte();
-        return token switch
+        var parameter = token switch
         {
             0x22 => DecodeImage(reader, name, isOutput),
             0x23 => DecodeLegacyLob(reader, name, isOutput, ansi: true),
@@ -112,6 +113,10 @@ internal sealed class TdsRpcRequest
             0xF5 => DecodeVector(reader, name, isOutput),
             _ => throw new NotSupportedException($"Unrecognized TDS RPC parameter type token 0x{token:X2}."),
         };
+        // fDefaultValue: the client left the parameter to its default — SqlClient's
+        // C# null Value — so it binds as not supplied rather than as NULL.
+        parameter.IsDefault = (status & 0x02) != 0;
+        return parameter;
     }
 
     /// <summary>
@@ -567,4 +572,11 @@ internal sealed class TdsRpcParameter(string name, bool isOutput, DbType dbType,
 
     /// <summary>Declared scale for decimal / time / datetime2 / datetimeoffset parameters, otherwise 0.</summary>
     public readonly byte Scale = scale;
+
+    /// <summary>
+    /// True when the fDefaultValue status bit leaves the parameter to its
+    /// default: it is not supplied, so the call takes a declared default or
+    /// refuses as SQL Server 2025 does (Msg 8178, Msg 201).
+    /// </summary>
+    public bool IsDefault;
 }

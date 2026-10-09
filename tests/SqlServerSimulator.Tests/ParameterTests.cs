@@ -43,10 +43,110 @@ public class ParameterTests
         var parameter = command.CreateParameter();
         parameter.ParameterName = "p";
         parameter.DbType = dbType;
-        parameter.Value = null;
+        parameter.Value = DBNull.Value;
         _ = command.Parameters.Add(parameter);
 
         AreEqual(DBNull.Value, command.ExecuteScalar());
+    }
+
+    private static SimulatedDbParameter Unsupplied(string name, DbType dbType, int size = 0, ParameterDirection direction = ParameterDirection.Input) =>
+        new() { ParameterName = name, DbType = dbType, Size = size, Direction = direction, Value = null };
+
+    [TestMethod]
+    [DataRow(DbType.Int32, 0, "(@a int)select @a")]
+    [DataRow(DbType.String, 0, "(@a nvarchar(4000))select @a")]
+    [DataRow(DbType.String, 50, "(@a nvarchar(50))select @a")]
+    [DataRow(DbType.String, -1, "(@a nvarchar(max) )select @a")]
+    [DataRow(DbType.String, 5000, "(@a nvarchar(max) )select @a")]
+    [DataRow(DbType.AnsiString, 20, "(@a varchar(20))select @a")]
+    [DataRow(DbType.AnsiStringFixedLength, 0, "(@a char(8000))select @a")]
+    [DataRow(DbType.Binary, -1, "(@a varbinary(max) )select @a")]
+    [DataRow(DbType.Decimal, 0, "(@a decimal(29,0))select @a")]
+    [DataRow(DbType.DateTime2, 0, "(@a datetime2(7))select @a")]
+    [DataRow(DbType.Currency, 0, "(@a money)select @a")]
+    [DataRow(DbType.Object, 0, "(@a sql_variant)select @a")]
+    public void CSharpNullValue_IsNotSupplied(DbType dbType, int size, string query)
+    {
+        using var command = new Simulation().CreateOpenConnection().CreateCommand();
+        command.CommandText = "select @a";
+        _ = command.Parameters.Add(Unsupplied("a", dbType, size));
+
+        var error = Throws<SimulatedSqlException>(() => _ = command.ExecuteScalar());
+        AreEqual(8178, error.Number);
+        AreEqual(0, error.LineNumber);
+        AreEqual($"The parameterized query '{query}' expects the parameter '@a', which was not supplied.", error.Message);
+    }
+
+    [TestMethod]
+    public void CSharpNullValue_NamesTheFirstUnsupplied_InDeclarationOrder()
+    {
+        using var command = new Simulation().CreateOpenConnection().CreateCommand();
+        command.CommandText = "select 1";
+        _ = command.Parameters.Add(Unsupplied("@o", DbType.Int32, direction: ParameterDirection.Output));
+        _ = command.Parameters.Add(new SimulatedDbParameter { ParameterName = "@n", Value = DBNull.Value, DbType = DbType.Int32 });
+        _ = command.Parameters.Add(Unsupplied("@b", DbType.Int32, direction: ParameterDirection.InputOutput));
+        _ = command.Parameters.Add(Unsupplied("@r", DbType.Int32, direction: ParameterDirection.ReturnValue));
+        _ = command.Parameters.Add(Unsupplied("@c", DbType.Int32));
+
+        AreEqual(
+            "The parameterized query '(@o int output,@n int,@b int output,@c int)select 1' expects the parameter '@b', which was not supplied.",
+            Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery()).Message);
+    }
+
+    [TestMethod]
+    public void CSharpNullValue_QuotesTheFirst64Characters()
+    {
+        using var command = new Simulation().CreateOpenConnection().CreateCommand();
+        command.CommandText = "select 1 /*" + new string('x', 100) + "*/";
+        _ = command.Parameters.Add(Unsupplied("a", DbType.Int32));
+
+        AreEqual(
+            "The parameterized query '(@a int)select 1 /*" + new string('x', 45) + "' expects the parameter '@a', which was not supplied.",
+            Throws<SimulatedSqlException>(() => _ = command.ExecuteNonQuery()).Message);
+    }
+
+    [TestMethod]
+    public void CSharpNullValue_OutputOnly_IsSuppliedAsNull()
+    {
+        using var command = new Simulation().CreateOpenConnection().CreateCommand();
+        command.CommandText = "select @o = isnull(@o, 0) + 1";
+        var output = Unsupplied("o", DbType.Int32, direction: ParameterDirection.Output);
+        _ = command.Parameters.Add(output);
+
+        _ = command.ExecuteNonQuery();
+        AreEqual(1, output.Value);
+    }
+
+    [TestMethod]
+    public void CSharpNullValue_StoredProcedure_TakesItsDefaultOrRaises201()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create procedure zzd @x int = 7 output as begin select @x; set @x = 9 end",
+            "create procedure zznpp @x int as select @x");
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandType = CommandType.StoredProcedure;
+        command.CommandText = "zzd";
+        _ = command.Parameters.Add(Unsupplied("@x", DbType.Int32));
+        AreEqual(7, command.ExecuteScalar());
+
+        command.CommandText = "zzd";
+        var inOut = Unsupplied("@x", DbType.Int32, direction: ParameterDirection.InputOutput);
+        command.Parameters.Clear();
+        _ = command.Parameters.Add(inOut);
+        AreEqual(7, command.ExecuteScalar());
+        AreEqual(9, inOut.Value);
+
+        command.CommandText = "zznpp";
+        command.Parameters.Clear();
+        _ = command.Parameters.Add(Unsupplied("@x", DbType.Int32));
+        var error = Throws<SimulatedSqlException>(() => _ = command.ExecuteScalar());
+        AreEqual(201, error.Number);
+        AreEqual(4, error.State);
+        AreEqual(0, error.LineNumber);
+        AreEqual("zznpp", error.Procedure);
+        AreEqual("Procedure or function 'zznpp' expects parameter '@x', which was not supplied.", error.Message);
     }
 
     [TestMethod]

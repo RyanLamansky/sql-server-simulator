@@ -12,9 +12,11 @@ internal sealed partial class TdsSession
 
     private int nextPreparedHandle;
 
-    private sealed class PreparedStatement(string statement, List<string> parameterNames)
+    private sealed class PreparedStatement(string statement, string declaration, List<string> parameterNames)
     {
         public readonly string Statement = statement;
+
+        public readonly string Declaration = declaration;
 
         /// <summary>
         /// Names from the preparation-time declaration string, used to name
@@ -121,15 +123,16 @@ internal sealed partial class TdsSession
             case Tds.ProcIdExecuteSql:
                 {
                     var statement = ParameterText(request.Parameters, 0);
+                    var declaration = request.Parameters.Count >= 2 ? ParameterText(request.Parameters, 1) : null;
                     // Value params (index 2+) arrive positional/unnamed (name='')
                     // from native drivers like mssql-jdbc's PreparedStatement;
                     // name them from the declaration (index 1) so `@P0` binds, the
                     // same mapping sp_execute / sp_prepexec use. SqlClient names
                     // its own sp_executesql params, so they pass through unchanged.
                     var bound = request.Parameters.Count >= 2
-                        ? NameUnnamedParameters(request.Parameters, 2, ParseDeclarationNames(ParameterText(request.Parameters, 1)))
+                        ? NameUnnamedParameters(request.Parameters, 2, ParseDeclarationNames(declaration!))
                         : [.. request.Parameters.Skip(1)];
-                    await this.ExecuteStatementRpcAsync(statement, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(statement, declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -153,7 +156,7 @@ internal sealed partial class TdsSession
                     }
 
                     var bound = NameUnnamedParameters(request.Parameters, 1, prepared.ParameterNames);
-                    await this.ExecuteStatementRpcAsync(prepared.Statement, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -166,7 +169,7 @@ internal sealed partial class TdsSession
                     // native ODBC / OLE DB (name=''); name them from the prepared
                     // declaration so `@P1` binds, the same mapping sp_execute uses.
                     var bound = NameUnnamedParameters(request.Parameters, 3, prepared.ParameterNames);
-                    await this.ExecuteStatementRpcAsync(prepared.Statement, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -188,6 +191,7 @@ internal sealed partial class TdsSession
     /// <summary>Runs a statement with bound wire parameters (sp_executesql / sp_execute / sp_prepexec).</summary>
     private async ValueTask ExecuteStatementRpcAsync(
         string statement,
+        string? declaration,
         List<TdsRpcParameter> boundParameters,
         (string Name, int Handle)? handleReturn,
         TdsTokenWriter writer,
@@ -204,6 +208,7 @@ internal sealed partial class TdsSession
         // sp_executesql) leaks temp tables across calls and a re-run
         // `create table #t` collides with Msg 2714.
         command.ScopeTempTablesToBatch = true;
+        command.ParameterDeclaration = declaration;
         command.YieldsBetweenStatements = this.multiplexer is not null;
         command.StreamsResultRows = true;
 
@@ -355,7 +360,9 @@ internal sealed partial class TdsSession
         }
 
         parameter.DbType = wire.DbType;
-        parameter.Value = wire.Value ?? DBNull.Value;
+        // A parameter left to its default carries C# null, which the engine
+        // reads as not supplied, as SqlClient's own null Value means.
+        parameter.Value = wire.IsDefault ? null : wire.Value ?? DBNull.Value;
         parameter.Direction = wire.IsOutput ? ParameterDirection.InputOutput : ParameterDirection.Input;
         if (wire.Size != 0)
             parameter.Size = wire.Size;
@@ -367,7 +374,7 @@ internal sealed partial class TdsSession
     private int StorePreparedStatement(string statement, string declaration)
     {
         var handle = ++this.nextPreparedHandle;
-        this.preparedStatements[handle] = new PreparedStatement(statement, ParseDeclarationNames(declaration));
+        this.preparedStatements[handle] = new PreparedStatement(statement, declaration, ParseDeclarationNames(declaration));
         return handle;
     }
 
@@ -387,7 +394,7 @@ internal sealed partial class TdsSession
         {
             var parameter = parameters[i];
             if (parameter.Name.Length == 0 && i - skip < names.Count)
-                parameter = new TdsRpcParameter(names[i - skip], parameter.IsOutput, parameter.DbType, parameter.Value, parameter.Size, parameter.Precision, parameter.Scale);
+                parameter = new TdsRpcParameter(names[i - skip], parameter.IsOutput, parameter.DbType, parameter.Value, parameter.Size, parameter.Precision, parameter.Scale) { IsDefault = parameter.IsDefault };
 
             bound.Add(parameter);
         }
@@ -402,40 +409,8 @@ internal sealed partial class TdsSession
 
     /// <summary>
     /// Extracts the parameter names from a declaration string like
-    /// <c>@a int, @b decimal(10,2) OUTPUT</c>, honoring parenthesized type
-    /// arguments when splitting.
+    /// <c>@a int, @b decimal(10,2) OUTPUT</c>.
     /// </summary>
-    private static List<string> ParseDeclarationNames(string declaration)
-    {
-        var names = new List<string>();
-        var depth = 0;
-        var segmentStart = 0;
-        for (var i = 0; i <= declaration.Length; i++)
-        {
-            if (i < declaration.Length)
-            {
-                var c = declaration[i];
-                if (c == '(')
-                    depth++;
-                else if (c == ')')
-                    depth--;
-
-                if (c != ',' || depth != 0)
-                    continue;
-            }
-
-            var segment = declaration.AsSpan(segmentStart, i - segmentStart).Trim();
-            segmentStart = i + 1;
-            if (segment.Length == 0 || segment[0] != '@')
-                continue;
-
-            var end = 0;
-            while (end < segment.Length && !char.IsWhiteSpace(segment[end]))
-                end++;
-
-            names.Add(segment[..end].ToString());
-        }
-
-        return names;
-    }
+    private static List<string> ParseDeclarationNames(string declaration) =>
+        [.. Simulation.SplitParameterDeclaration(declaration).Select(declared => declared.Name)];
 }

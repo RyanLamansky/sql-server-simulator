@@ -1564,6 +1564,16 @@ public sealed partial class Simulation
             yield break;
         }
 
+        // A declared parameter without a value is the batch's whole response,
+        // raised before anything compiles.
+        if ((command.Parameters.Count != 0 || command.ParameterDeclaration is not null) && UnsuppliedParameter(command) is { } unsupplied)
+        {
+            if (command.Connection is { } unsuppliedConnection)
+                unsuppliedConnection.LastErrorNumber = unsupplied.Number;
+            yield return new SimulatedErrorOutcome(unsupplied);
+            yield break;
+        }
+
         // Plan-cache fast path: a single-SELECT batch parsed once under the
         // current schema version replays without tokenizing or re-parsing.
         // Eligibility is gated by TryBuildPlanCacheKey (non-empty text, live
@@ -1969,7 +1979,11 @@ public sealed partial class Simulation
                 outputSlot = new VariableSlot(dbType, declaredMaxLength: null, value, parameter);
                 batch.Variables[OutputSlotKey(argumentIndex, pname)] = outputSlot;
             }
-            arguments.Add(new ProcArgument(argumentName, isDefault: false, value, outputSlot));
+            // A C# null (not DBNull) input is a parameter SqlClient sends with
+            // its default flag and no value, which binds as an omitted
+            // argument: the procedure's declared default, or Msg 201.
+            var omitted = parameter.Value is null && parameter.Direction is not ParameterDirection.Output;
+            arguments.Add(new ProcArgument(argumentName, isDefault: omitted, value, outputSlot));
         }
 
         // ReturnValue slot: lives in the outer batch's Variables under an

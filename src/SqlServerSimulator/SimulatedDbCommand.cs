@@ -30,6 +30,15 @@ public sealed class SimulatedDbCommand : DbCommand
     internal bool ScopeTempTablesToBatch;
 
     /// <summary>
+    /// The parameter declaration string an RPC <c>sp_executesql</c> /
+    /// <c>sp_execute</c> / <c>sp_prepexec</c> call carried, set by the TDS
+    /// endpoint; null for an in-process command, whose declaration is the one
+    /// SqlClient would build from <see cref="Parameters"/>. A declared
+    /// parameter the call doesn't supply raises Msg 8178 quoting it.
+    /// </summary>
+    internal string? ParameterDeclaration;
+
+    /// <summary>
     /// When set, a <c>DECLARE … CURSOR</c> in this command's batch opens an API
     /// server cursor rather than a T-SQL one. Set by the TDS endpoint's
     /// <c>sp_cursoropen</c> family, which synthesizes the DECLARE / OPEN pair;

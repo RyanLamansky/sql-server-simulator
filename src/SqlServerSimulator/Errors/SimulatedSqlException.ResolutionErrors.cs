@@ -251,13 +251,17 @@ partial class SimulatedSqlException
     /// any other; and where several are missing, the <em>first declared</em>
     /// one is named. The quoted query is the two argument strings verbatim —
     /// the declarations parenthesized, then the statement, with whatever
-    /// spacing they were written with. Wording, severity and state all
-    /// probe-confirmed against SQL Server 2025.
+    /// spacing they were written with, cut to its first 64 characters.
+    /// Wording, severity and state all probe-confirmed against SQL Server
+    /// 2025.
     /// </summary>
     internal static SimulatedSqlException ParameterizedQueryExpectsParameter(
-        string parameterDefinitions, string statement, string parameterName) =>
-        new($"The parameterized query '({parameterDefinitions}){statement}' expects the parameter "
+        string parameterDefinitions, string statement, string parameterName)
+    {
+        var query = $"({parameterDefinitions}){statement}";
+        return new($"The parameterized query '{(query.Length > 64 ? query[..64] : query)}' expects the parameter "
             + $"'{parameterName}', which was not supplied.", 8178, 16, 1);
+    }
 
     /// <summary>
     /// Mimics SQL Server's Msg 4124 — an <c>sp_executesql</c> declaration
