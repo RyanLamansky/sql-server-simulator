@@ -1011,6 +1011,7 @@ partial class Simulation
                 parser.MoveNextOptional();
                 innerBatch.CallerStreams = streams;
                 innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && streams;
+                innerBatch.StreamsResultRows = outerBatch.StreamsResultRows && streams;
                 if (streams)
                 {
                     streamed = DispatchStatementsUntil(innerBatch, endKeyword: null).GetEnumerator();

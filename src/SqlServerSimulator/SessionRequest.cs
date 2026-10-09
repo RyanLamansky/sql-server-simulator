@@ -142,6 +142,22 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
     /// <summary>The messages the request queued and hadn't sent as it was parked; null for none.</summary>
     public SimulatedError[]? PendingMessages;
 
+    /// <summary>
+    /// The token the request holds its locks and writes under outside a
+    /// transaction, or null for the session's own: a request that begins while
+    /// another of its session's is unfinished takes one of its own, as real
+    /// separates a session's requests by the transaction each works in, its
+    /// autocommit statement's included (probed 2026-10-05 against SQL Server
+    /// 2025: a request's update waited on the key locks another request's
+    /// suspended <c>REPEATABLE READ</c> reader held). A transaction the request
+    /// begins is held under it too (<see cref="SimulatedDbTransaction.LockOwner"/>).
+    /// </summary>
+    public SessionToken? LockOwner;
+
+    /// <summary>What the request's running statement holds on the session while it is parked; null until it first parks.</summary>
+    public ParkedStatement? Statement;
+
+
     // What the request's module calls hold on the connection while it is
     // parked inside one: another request runs outside them.
     public int NestingLevel;
@@ -183,4 +199,21 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
             // The execution it targeted has finished.
         }
     }
+}
+
+/// <summary>
+/// What a MARS request's statement — suspended mid-way, or between two of its
+/// batch's — holds on the session while another request runs: its LOB epoch
+/// and statement snapshot (published to the session's sweeps through
+/// <see cref="SessionToken.ParkedStatementEpoch"/> and
+/// <see cref="SessionToken.ParkedStatementSnapshotXid"/>), its
+/// <c>CommandTimeout</c>, its statistics and whether it waits on its client.
+/// </summary>
+internal sealed class ParkedStatement
+{
+    public long Epoch = long.MaxValue;
+    public long SnapshotXid = long.MaxValue;
+    public TimeSpan? ExecutionTimeout;
+    public Parser.IoStatistics? Io;
+    public bool AwaitingClient;
 }

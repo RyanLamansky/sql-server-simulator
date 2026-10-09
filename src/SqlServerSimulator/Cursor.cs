@@ -419,7 +419,7 @@ internal sealed class Cursor(
             {
                 if (this.scrollTableLocks.Contains(table.TableDataLock))
                     continue;
-                connection.Simulation.LockManager.Acquire(table.TableDataLock, LockMode.IntentExclusive, connection.Session, connection.LockTimeoutMillis);
+                connection.Simulation.LockManager.Acquire(table.TableDataLock, LockMode.IntentExclusive, connection.SessionScope, connection.LockTimeoutMillis);
                 this.scrollTableLocks.Add(table.TableDataLock);
             }
         }
@@ -454,10 +454,10 @@ internal sealed class Cursor(
     {
         var lockManager = connection.Simulation.LockManager;
         foreach (var row in this.scrollRowLocks)
-            lockManager.Release(row, LockMode.Update, connection.Session);
+            lockManager.Release(row, LockMode.Update, connection.SessionScope);
         this.scrollRowLocks.Clear();
         foreach (var table in this.scrollTableLocks)
-            lockManager.Release(table, LockMode.IntentExclusive, connection.Session);
+            lockManager.Release(table, LockMode.IntentExclusive, connection.SessionScope);
         this.scrollTableLocks.Clear();
     }
 
@@ -473,7 +473,7 @@ internal sealed class Cursor(
         var connection = batch.Connection;
         var lockManager = connection.Simulation.LockManager;
         foreach (var prior in this.scrollRowLocks)
-            lockManager.Release(prior, LockMode.Update, connection.Session);
+            lockManager.Release(prior, LockMode.Update, connection.SessionScope);
         this.scrollRowLocks.Clear();
         if (this.CurrentRids is not { } rids)
             return;
@@ -486,7 +486,7 @@ internal sealed class Cursor(
             var resource = this.BaseTables[i].GetOrCreateRowLock(rid.Page, rid.Slot);
             if (this.scrollRowLocks.Contains(resource))
                 continue;
-            lockManager.Acquire(resource, LockMode.Update, connection.Session, connection.LockTimeoutMillis);
+            lockManager.Acquire(resource, LockMode.Update, connection.SessionScope, connection.LockTimeoutMillis);
             this.scrollRowLocks.Add(resource);
         }
     }

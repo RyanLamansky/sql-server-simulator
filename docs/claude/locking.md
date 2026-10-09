@@ -154,6 +154,16 @@ Divergences:
 - **A SCROLL_LOCKS cursor's locks and a session's own application locks** stay its session's, so they block another member.
 - **The token's bits** aren't real's encoding: it has real's alphabet (`-` through `l`) and fixed characters, the rest drawn.
 
+## Lock owners of a MARS session's requests
+
+Real separates a session's MARS requests by the transaction each works in — an autocommit statement's own among them — so one request's locks meet another's as another session's would (probed 2026-10-05 against SQL Server 2025: a request's update waited on the key locks the session's suspended `REPEATABLE READ` reader held, its `ALTER TABLE` on the reader's `IS`, while requests in one API transaction shared their locks).
+`connection.LockOwner` reads the bound transaction's shared owner, else the current transaction's own (`SimulatedDbTransaction.LockOwner`, the token it began under), else the executing request's (`SessionRequest.LockOwner`), else the session's token.
+A request takes a token of its own only when it begins while another request of the session is unfinished (`SimulatedDbConnection.ResumeRequest`), so commands that never overlap — nearly all — lock under the session's token as before; the token reports the session's `@@SPID` (`RunningMember` is the session).
+Three things keep the split from reaching where the session is one:
+- **The same-thread deadlock check passes over a parked request's locks** (`SessionToken.RequestParked`, set as a request parks and cleared as one resumes under the token): the statement this thread runs doesn't hold them, so a wait on them goes on until the parked request lets go or a timeout ends it — real's deadlock monitor ended 5 of 27 such waits with Msg 1205 ("lock | generic waitable object") within five seconds and let the rest run to their `CommandTimeout` (probed 2026-10-05 and 2026-10-08 against SQL Server 2025), so the simulator waits.
+- **A cursor's scroll locks belong to the session** (`SimulatedDbConnection.SessionScope`, `SessionToken.IsSessionScope`), compatible with every request of it (`LockManager.SharesSessionScope`), so a positioned update meets its cursor's U as its own whichever request runs it; a request's own token likewise shares what the session's token holds while no request is parked on it, its application locks.
+- **A request writing in the transaction a suspended reader works in runs the reader's statement to its end first** (`SimulatedDbConnection.FinishReadsBeforeWrite`, from the row-write sites and every Sch-M), standing in for the versioning real applies there ([`data-reader.md`](data-reader.md#divergences)).
+
 ## Abandoned-session reclamation
 
 Without reclamation, an application that opens a `SimulatedDbConnection` and drops it without disposing leaks its whole session forever: an open transaction kept its locks and pinned the MVCC version store, `##global` temp tables lingered, session application locks stayed held, and the SPID accumulated.
@@ -443,7 +453,7 @@ A waiter blocked on a session that was abandoned rather than closed sweeps the a
 
 When a conflict-driven wait would block, `LockManager.Acquire`:
 
-1. **Same-thread short-circuit**: if any conflicting holder's `CurrentExecutingThreadId` equals the caller's managed thread id, raise Msg 1205 immediately.
+1. **Same-thread short-circuit**: if any conflicting holder's `CurrentExecutingThreadId` equals the caller's managed thread id, raise Msg 1205 immediately — unless the holder is another request of the caller's session parked for it ([Lock owners of a MARS session's requests](#lock-owners-of-a-mars-sessions-requests)).
 2. **Cross-thread cycle walk**: `FindDeadlockVictim` walks the wait-for graph starting at each conflicting holder.
    A waiter's edges are the ones its grant waits on (`LockManager.Blockers`): the holders it conflicts with and the requests queued ahead of it; a compatible holder is no edge, which once reported cycles that weren't there.
    Each connection's `WaitingOnResource` is read consistently under the manager's gate.
@@ -510,14 +520,16 @@ A `READCOMMITTED` or `READCOMMITTEDLOCK` hint reads its table at READ COMMITTED 
 ## A reader suspended mid-result
 
 A `SELECT` sends its rows as its client reads them and waits on the client between windows (see [`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)), so what it holds while it waits is what its locks have reached by its position, not by the end of a finished scan.
-Nothing about which locks it takes is particular to the suspension: the statement's acquisitions are the ones every read makes — the object lock where its source resolves, the row and key locks as its scan reaches each row — and the suspension only keeps the statement's own scope open, releasing its statement-scoped locks with its last row.
+Its acquisitions are the ones every read makes — the object lock where its source resolves, the row and key locks as its scan reaches each row — and the suspension keeps the statement's own scope open, releasing its statement-scoped locks with its last row.
+One lock is the suspension's own: a plain `READ COMMITTED` scan, which holds no row lock past the row it reads, holds S on the row it stands on — the last it produced — while it waits, and lets it go as it reads on (`ResultStream.Suspend`, `BatchContext.HoldScanPosition`, the position recorded as `ProbeRowForRead` probes each row), so a writer of that row waits on the reader and a writer of any other goes ahead (probed 2026-10-08 against SQL Server 2025: a reader 2, 50, 100 and 300 rows into a result of 2,000 rows of `char(2000)` held `KEY S` on its last row produced, in a transaction or not; a sort, which read every row before its first went out, holds none).
 A reader resuming into a row an uncommitted writer holds waits there, its `LOCK_TIMEOUT`, `NOWAIT`, `READPAST`, cancellation and deadlock detection applying as at any row.
+Another MARS request of the reader's own session meets these locks as another session's would ([Lock owners of a MARS session's requests](#lock-owners-of-a-mars-sessions-requests)).
 
 Probed 2026-10-08 against SQL Server 2025 over a MARS connection, a reader two rows into 20,000 rows of `char(2000)` and a second session acting meanwhile (an `UPDATE` of row 1, one of a row ahead, an `INSERT` past the last key, an `ALTER TABLE … ADD` and a `TABLOCKX` update), `StreamedResultTests` holding each row:
 
 | Read | Real holds | Here |
 | ---- | ---------- | ---- |
-| `READ COMMITTED` | `OBJECT IS`, the current page's `PAGE S` | `OBJECT IS` |
+| `READ COMMITTED` | `OBJECT IS`, the current page's `PAGE S` — over 2,000 rows, `KEY S` on the row it stands on, `PAGE IS` | `KEY S` on the row it stands on, `OBJECT IS` |
 | `REPEATABLE READ`, the `REPEATABLEREAD` hint | `KEY S` on the 20 rows produced, `PAGE IS` on their 5 pages, `OBJECT IS` | the 20 `KEY S`, `OBJECT IS` |
 | `SERIALIZABLE`, `HOLDLOCK` / `SERIALIZABLE` hints, a scan | `KEY RangeS-S` on the 20 rows, `PAGE IS`, `OBJECT IS` — an insert past the last key goes ahead | the 20 `RangeS-S`, `OBJECT IS` |
 | `READ_COMMITTED_SNAPSHOT`, `SNAPSHOT`, and under RCSI the `READCOMMITTED` and `TABLOCK` hints | `OBJECT Sch-S` alone — a `TABLOCKX` update goes ahead | the same |
@@ -525,9 +537,9 @@ Probed 2026-10-08 against SQL Server 2025 over a MARS connection, a reader two r
 | `TABLOCK` at any level | `OBJECT S` | the same |
 | `TABLOCKX` | `OBJECT X` | the same |
 | `UPDLOCK` / `XLOCK` | `KEY U` / `KEY X` on the 20 rows, `PAGE IU` / `IX`, `OBJECT IX` | the 20 `KEY U` / `X`, `OBJECT IX` |
-| `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `OBJECT IS` |
+| `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `KEY S` on the row it stands on, `OBJECT IS` |
 | `ROWLOCK` | as the level's, row locks, `PAGE IS` | as the level's |
-| `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | as the level's, row locks |
+| `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | as the level's, row locks — the row the scan stands on for the page |
 
 How the read came to its level doesn't matter — `SET TRANSACTION ISOLATION LEVEL` with a transaction begun in SQL, one the API began at the level, or a table hint — and neither does an `ORDER BY` the clustered key satisfies: a row-locking read (`REPEATABLE READ`, `UPDLOCK`, `XLOCK`) takes the ordered scan and locks each row as it reaches it, letting go a row its sargable conjuncts reject, and a plain `SERIALIZABLE` read in ascending key order is the table's own scan above.
 Before, a row-locking read always sorted, locking every row first — the shape that turned real's 2,119 keys into a table S for an API-begun `REPEATABLE READ` reader of `ORDER BY id`.
@@ -538,6 +550,8 @@ Every reader holding `IS` or more keeps an `ALTER TABLE` out, as each one's `Sch
 A `SERIALIZABLE` scan of a clustered table locks each key as it reaches it and the infinity anchor at its end (`PhantomFenceState.LocksAsScanned`), as real's does — so a reader suspended mid-result holds the ranges behind its position alone, and an insert ahead of it goes in.
 The scan reads its key order when it begins, so a key inserted ahead of it since would be passed: once a row's key is locked, the keys that arrived in the gap below it are read first (`BatchContext.KeysArrivedBetween`), and the infinity anchor's lock at the end is followed by the keys that arrived past the last one (`FenceScanEnd`), which is what keeps the scan free of the phantoms the fence exists against (`StreamedResultTests.Serializable_ScanLocksKeysAsItReachesThem`).
 A scan whose order comes without its keys — a nullable or descending clustered key — locks the whole key space as it begins, as do the reads below.
+So does every other `SERIALIZABLE` scan that can't seek: one a predicate no key seeks on filters takes its fence as it scans, every key it passes — a row the predicate rejects included — and one taking `UPDLOCK` / `XLOCK` locks each key in its range mode before the row's own lock (`TouchRowForRead`), as real's do (probed 2026-10-08 against SQL Server 2025: twenty `RangeS-S` for the twenty rows a filtered reader had sent, sixty where its predicate kept one row in three, twenty `RangeS-U` / `RangeX-X` under `UPDLOCK` / `XLOCK`, and an insert ahead of each going in).
+`Selection.MaybeApplyIndexSeek` leaves such a read's fence to the scan (`scanFences`), taking the whole key space itself only for a path that reads through a seek instead — the union of an `OR`'s seeks, a qualifying row-lock scan.
 
 ### Divergences
 
@@ -545,8 +559,10 @@ A scan whose order comes without its keys — a nullable or descending clustered
   Real's default scan takes `PAGE S` on the page it is reading under READ COMMITTED and `PAGE IS` / `IU` / `IX` above row locks, and `PAGLOCK` takes page locks in place of row locks; here every read is row-locked, so an update of another row on the reader's current page goes ahead where real's waits.
   The same granularity is why a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
 - **An object S or X lock is one lock here**, where real's host takes it on each of its 16 lock partitions (`OBJECT S` ×16 in `sys.dm_tran_locks`).
-- **A `SERIALIZABLE` read takes its whole fence as it begins** wherever it doesn't scan a clustered table plain in key order: a range or point seek locks every key of its interval, a non-sargable predicate, a descending order or an `UPDLOCK` / `XLOCK` read every key of the table — past the escalation threshold, the table S or X — where real locks each key as the read reaches it.
+- **A `SERIALIZABLE` read takes its whole fence as it begins** where it seeks or reads in descending order: a range or point seek locks every key of its interval and the key past it, a descending scan or an `UPDLOCK` / `XLOCK` read with a predicate every key of the table — past the escalation threshold, the table S or X — where real locks each key as the read reaches it (probed 2026-10-08 against SQL Server 2025: a reader of `BETWEEN 200 AND 3800` two rows in held twenty keys, ascending or descending, and a descending scan twenty-one, the infinity anchor first).
   A reader suspended mid-result so blocks writes ahead of it that real lets through, never the reverse.
+  The scan's way of locking as it reads and finding keys inserted ahead of it (`ScanInKeyOrder`) would carry over: a seek's interval bounds its keys, and its end locks the key past it where the scan's end locks the infinity anchor.
+- **The `READ COMMITTED` reader's position is a row, never a page**: over a table large enough that real's scan locks pages, real holds the current page's S, which keeps out a writer of any row on it.
 - **A sort over `REPEATABLE READ` escalates** at real's threshold, where real's parallel sort of the same 20,000 rows held its 20,000 key locks.
 
 ## Diagnostic DMVs

@@ -57,7 +57,7 @@ internal sealed class LobReclamation(Simulation simulation)
         lock (simulation.Sessions)
         {
             foreach (var session in simulation.Sessions)
-                oldest = Math.Min(oldest, Volatile.Read(ref session.StatementEpoch));
+                oldest = Math.Min(oldest, Math.Min(Volatile.Read(ref session.StatementEpoch), Volatile.Read(ref session.ParkedStatementEpoch)));
         }
         return oldest;
     }

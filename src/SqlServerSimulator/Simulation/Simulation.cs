@@ -1231,10 +1231,6 @@ public sealed partial class Simulation
         SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)
         {
-            // A statement of another in-process request suspended on its
-            // reader runs to its end first (see ResultStream).
-            if (requester is { FramesEveryStatement: false, ExecutingRequest: null })
-                requester.FinishSuspendedStreams();
             requester.BeginCommand();
             // An in-process command is a request of its own from here until
             // its reader passes the batch's end, and runs only between the
@@ -1294,6 +1290,8 @@ public sealed partial class Simulation
                 outcomes = this.CreateResultSetsForCommandCore(command, continueOnError).GetEnumerator();
             }
             var parking = false;
+            // The DML statement whose OUTPUT rows hold the session while they go out.
+            ResultStream? heldBy = null;
             try
             {
                 while (MoveNextAsMember(command.Connection, outcomes))
@@ -1309,19 +1307,30 @@ public sealed partial class Simulation
                         parking = true;
                         break;
                     }
+                    // A DML statement's OUTPUT rows hold the session until the
+                    // reader moves off them, unless they all fit in what real
+                    // gets ahead of its client — through the windows they go
+                    // out in (SimulatedRowsProduced).
                     if (request is not null)
                     {
-                        // A DML statement's OUTPUT rows hold the session until
-                        // the reader moves off them, unless they all fit in
-                        // what real gets ahead of its client.
-                        request.HoldsSession = outcome is SimulatedQueryResult { CountsRowsReturned: false } output
-                            && output.ClientBytes(SessionRequest.BytesAheadOfClient) > SessionRequest.BytesAheadOfClient;
+                        if (outcome is not SimulatedRowsProduced)
+                        {
+                            request.HoldsSession = outcome is SimulatedQueryResult { CountsRowsReturned: false } output
+                                && output.ClientBytes(SessionRequest.BytesAheadOfClient) > SessionRequest.BytesAheadOfClient;
+                            heldBy = request.HoldsSession && outcome is SimulatedSqlResultSet { Stream: { } writing } ? writing : null;
+                        }
                         command.Connection!.ExecutingRequest = null;
                     }
                     yield return outcome;
                     if (request is not null)
                     {
-                        request.HoldsSession = false;
+                        // Rows going out as the reader reads them hold it until
+                        // their statement has ended.
+                        if (heldBy is not { Complete: false })
+                        {
+                            request.HoldsSession = false;
+                            heldBy = null;
+                        }
                         // Other commands may have run while the consumer held
                         // the outcome, each on its own copy of the session's
                         // state.
@@ -1409,6 +1418,21 @@ public sealed partial class Simulation
     }
 
     private int statementsInFlight;
+
+    /// <summary>
+    /// Whether a DML statement of <paramref name="batch"/> sends its
+    /// <c>OUTPUT</c> rows as its client reads them (see <see cref="ResultStream"/>):
+    /// one whose outcomes reach a consumer reading that way as they are
+    /// produced, as <see cref="StreamsRows"/> judges a <c>SELECT</c>'s.
+    /// </summary>
+    private static bool StreamsWrittenRows(BatchContext batch) =>
+        batch.StreamsResultRows
+        && batch.StreamingFrames == batch.FramedStatementDepth - 1
+        && !batch.IsSkipping
+        && batch.BindErrors is null
+        && !batch.CreateTimeBinding
+        && batch.TriggerFrame is null
+        && batch.Connection.InsertExecTargetTypes is null;
 
     /// <summary>
     /// Runs one stretch of <paramref name="connection"/>'s execution — up to
@@ -2415,6 +2439,10 @@ public sealed partial class Simulation
                 if (!settled)
                 {
                     stream.Resume(batch);
+                    // A cancel ending a DML statement's OUTPUT rows ends its
+                    // write, which its acknowledgment reports.
+                    if (stream.PendingWrite is not null && batch.Connection is { ExecutionCancellationRequested: true } cancelled)
+                        cancelled.AttentionEndedWrite = !batch.IsSkipping && batch.TriggerFrame is null && !cancelled.XactAbort;
                     stream.Abandon();
                     lifecycle.LeaveAbandonedStream(batch);
                 }
@@ -3765,7 +3793,7 @@ public sealed partial class Simulation
             // client reads it, the statement holding its position meanwhile;
             // one that fits is produced whole, as it would be anyway.
             if (StreamsRows(batch, selection))
-                stream = executed.BeginStreaming();
+                stream = executed.BeginStreaming(batch.CurrentStatement);
             rowCount = stream is null ? executed.MaterializeRows() : 0;
             if (selection.CountsForClauseSourceRows)
                 rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
@@ -3832,9 +3860,9 @@ public sealed partial class Simulation
     /// that consumer as they are produced — every statement enclosing it
     /// streams — and that sends rows to it rather than to a variable, a
     /// <c>FOR XML</c> / <c>FOR JSON</c> document or an <c>INSERT … EXEC</c>.
-    /// A session holds one suspended statement at a time — its LOB epoch and
-    /// statement snapshot are one each — so a reader's batch running on while
-    /// another reader's statement is suspended produces its result whole.
+    /// Each of a session's MARS requests may hold one suspended, what it holds
+    /// parked with the request while another runs
+    /// (<see cref="SimulatedDbConnection.ResumeRequest"/>).
     /// </summary>
     private static bool StreamsRows(BatchContext batch, Selection selection) =>
         batch.StreamsResultRows
@@ -3843,8 +3871,7 @@ public sealed partial class Simulation
         && !selection.CountsForClauseSourceRows
         && batch.BindErrors is null
         && !batch.CreateTimeBinding
-        && batch.Connection.InsertExecTargetTypes is null
-        && batch.Connection.SuspendedStreams is not { Count: > 0 };
+        && batch.Connection.InsertExecTargetTypes is null;
 
     /// <summary>
     /// Replays the parse of the <c>SELECT</c> statement at the cursor from
@@ -4531,6 +4558,80 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// A mutation statement's atomic scope (<see cref="RunMutation"/>): what
+    /// completes it on success and what rewinds it on failure — and, for a
+    /// statement whose <c>OUTPUT</c> rows go out as its client reads them, its
+    /// ending held until they have (<see cref="ResultStream.PendingWrite"/>).
+    /// </summary>
+    private readonly struct MutationScope(
+        ParserContext context, SimulatedDbTransaction? tx, UndoLog log, int marker, UndoLog tableVarLog, int versionEntriesMarker, List<PendingVersionEntry>? statementVersionEntries)
+    {
+        private readonly ParserContext context = context;
+        private readonly SimulatedDbTransaction? tx = tx;
+        private readonly UndoLog log = log;
+        private readonly int marker = marker;
+        private readonly UndoLog tableVarLog = tableVarLog;
+        private readonly int versionEntriesMarker = versionEntriesMarker;
+        private readonly List<PendingVersionEntry>? statementVersionEntries = statementVersionEntries;
+
+        public void Rewind()
+        {
+            this.RewindStatement();
+            EndInsertExecTransaction(this.context.Batch, commit: false);
+        }
+
+        public void Complete()
+        {
+            if (this.statementVersionEntries is { } autoCommitEntries)
+            {
+                // FinalizePendingEntries clears the list, so capture whether
+                // this statement versioned anything before the call.
+                var versionedThisStatement = autoCommitEntries.Count > 0;
+                Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, this.context.Connection.Simulation);
+                // Auto-commit statement: its writes are now permanent, so
+                // commit the throwaway log — reclaiming chains superseded by
+                // this statement's UPDATE/DELETEs (unversioned path). Under an
+                // explicit tx (statementVersionEntries is null) the entries
+                // stay on the tx's log until COMMIT instead.
+                this.log.Commit();
+                // When this statement versioned its superseded rows, those
+                // images are pinned only by the HistoricalVersions just
+                // created. With no snapshot open nothing needs them, so collect
+                // now rather than leaving them until the next explicit-tx
+                // commit (the version-store analog of the unversioned
+                // log.Commit() above). An active snapshot legitimately needs the
+                // versions, so defer — and skip the scan — until it closes.
+                var autoCommitSimulation = this.context.Connection.Simulation;
+                if (versionedThisStatement && autoCommitSimulation.ActiveSnapshotTxs.IsEmptyLockFree())
+                    Storage.VersionStore.RunGarbageCollection(autoCommitSimulation, this.context.CurrentDatabase);
+            }
+            // Table-variable writes are non-transactional and final on
+            // statement success regardless of any enclosing tx, so their
+            // throwaway log always commits here.
+            this.tableVarLog.Commit();
+            EndInsertExecTransaction(this.context.Batch, commit: true);
+        }
+
+        public void RewindStatement()
+        {
+            // The heap rewinds before the pending versions go, as a
+            // transaction's rollback does.
+            this.log.RollbackTo(this.marker);
+            if (this.statementVersionEntries is { } autoCommitEntries)
+            {
+                Storage.VersionStore.DiscardPendingEntries(autoCommitEntries);
+            }
+            else if (this.tx is not null && this.tx.PendingVersionEntries.Count > this.versionEntriesMarker)
+            {
+                var added = this.tx.PendingVersionEntries.GetRange(this.versionEntriesMarker, this.tx.PendingVersionEntries.Count - this.versionEntriesMarker);
+                this.tx.PendingVersionEntries.RemoveRange(this.versionEntriesMarker, this.tx.PendingVersionEntries.Count - this.versionEntriesMarker);
+                Storage.VersionStore.DiscardPendingEntries(added, kept: this.tx.PendingVersionEntries);
+            }
+            this.tableVarLog.Rollback();
+        }
+    }
+
+    /// <summary>
     /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
     /// statement-level atomicity. Routes mutations to the connection's
     /// active transaction's <see cref="UndoLog"/> when one exists (an
@@ -4594,43 +4695,27 @@ public sealed partial class Simulation
         context.Batch.CurrentStatementVersionEntries = enclosingTriggerLog is null
             ? statementVersionEntries
             : context.Connection.TriggerStatementVersionEntries;
+        var scope = new MutationScope(context, tx, log, marker, tableVarLog, versionEntriesMarker, statementVersionEntries);
         try
         {
             var outcome = RunMutationBodyUntilSettled();
-            if (statementVersionEntries is { } autoCommitEntries)
+            // OUTPUT rows past what real gets ahead of its client go out as the
+            // client reads them, the statement — its atomicity, its locks —
+            // ending only after its last (see ResultStream).
+            if (outcome is SimulatedSqlResultSet { CountsRowsReturned: false } output && StreamsWrittenRows(context.Batch)
+                && output.BeginStreamingProduced(context.Batch) is { } stream)
             {
-                // FinalizePendingEntries clears the list, so capture whether
-                // this statement versioned anything before the call.
-                var versionedThisStatement = autoCommitEntries.Count > 0;
-                Storage.VersionStore.FinalizePendingEntries(autoCommitEntries, context.Connection.Simulation);
-                // Auto-commit statement: its writes are now permanent, so
-                // commit the throwaway log — reclaiming chains superseded by
-                // this statement's UPDATE/DELETEs (unversioned path). Under an
-                // explicit tx (statementVersionEntries is null) the entries
-                // stay on the tx's log until COMMIT instead.
-                log.Commit();
-                // When this statement versioned its superseded rows, those
-                // images are pinned only by the HistoricalVersions just
-                // created. With no snapshot open nothing needs them, so collect
-                // now rather than leaving them until the next explicit-tx
-                // commit (the version-store analog of the unversioned
-                // log.Commit() above). An active snapshot legitimately needs the
-                // versions, so defer — and skip the scan — until it closes.
-                var autoCommitSimulation = context.Connection.Simulation;
-                if (versionedThisStatement && autoCommitSimulation.ActiveSnapshotTxs.IsEmptyLockFree())
-                    Storage.VersionStore.RunGarbageCollection(autoCommitSimulation, context.CurrentDatabase);
+                stream.AffectedRows = output.RecordsAffected;
+                stream.PendingWrite = new PendingStatementWrite(scope.Complete, scope.Rewind);
+                context.Batch.CurrentStatement.StreamingResult = stream;
+                return outcome;
             }
-            // Table-variable writes are non-transactional and final on
-            // statement success regardless of any enclosing tx, so their
-            // throwaway log always commits here.
-            tableVarLog.Commit();
-            EndInsertExecTransaction(context.Batch, commit: true);
+            scope.Complete();
             return outcome;
         }
         catch
         {
-            RewindStatement();
-            EndInsertExecTransaction(context.Batch, commit: false);
+            scope.Rewind();
             throw;
         }
         finally
@@ -4638,24 +4723,6 @@ public sealed partial class Simulation
             context.Batch.CurrentUndoLog = savedLog;
             context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
             context.Batch.CurrentStatementVersionEntries = savedStatementVersionEntries;
-        }
-
-        void RewindStatement()
-        {
-            // The heap rewinds before the pending versions go, as a
-            // transaction's rollback does.
-            log.RollbackTo(marker);
-            if (statementVersionEntries is { } autoCommitEntries)
-            {
-                Storage.VersionStore.DiscardPendingEntries(autoCommitEntries);
-            }
-            else if (tx is not null && tx.PendingVersionEntries.Count > versionEntriesMarker)
-            {
-                var added = tx.PendingVersionEntries.GetRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
-                tx.PendingVersionEntries.RemoveRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
-                Storage.VersionStore.DiscardPendingEntries(added, kept: tx.PendingVersionEntries);
-            }
-            tableVarLog.Rollback();
         }
 
         // A target row the statement waited on came back deleted while its
@@ -4684,7 +4751,7 @@ public sealed partial class Simulation
                 }
                 if (!context.Batch.TargetKeyReinserted || attempt == MaxTargetWalks || enclosingTriggerLog is not null || context.Batch.IsSkipping)
                     return outcome;
-                RewindStatement();
+                scope.RewindStatement();
                 context.RestoreCheckpoint(start);
             }
         }

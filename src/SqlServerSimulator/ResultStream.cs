@@ -44,7 +44,7 @@ internal abstract class ResultStream
     /// of 20 rows of 2,007 wire bytes, 79 of 507 and 4,438 of 9 — about
     /// 40,000 bytes produced in each case.
     /// </summary>
-    private const int PacketBytes = 8000;
+    private protected const int PacketBytes = 8000;
 
     /// <summary>The rows produced so far, the statement's count once it ends.</summary>
     public int RowCount;
@@ -64,11 +64,40 @@ internal abstract class ResultStream
 
     /// <summary>
     /// Set when the statement has to finish before something else runs on the
-    /// session — another request in process, which is run whole-statement
-    /// (see <see cref="SimulatedDbConnection.FinishSuspendedStreams"/>): the
-    /// rest of the rows are produced into the buffer at once.
+    /// session — another request's write in the same transaction (see
+    /// <see cref="SimulatedDbConnection.FinishReadsBeforeWrite"/>): the rest of
+    /// the rows are produced into the buffer at once.
     /// </summary>
     public bool Unbounded;
+
+    /// <summary>The request the statement belongs to, as it last suspended; null outside one.</summary>
+    public SessionRequest? Request;
+
+    /// <summary>
+    /// For a DML statement's <c>OUTPUT</c> rows, the statement's own ending —
+    /// its autocommit, or its place in the transaction — which waits for its
+    /// last row: committed as the rows end, rolled back when they don't
+    /// (<see cref="EndWrite"/>). Real can't suspend such a statement, so it
+    /// writes as it sends and a cancel mid-way rolls it back (probed
+    /// 2026-10-05 against SQL Server 2025); here it writes first and holds its
+    /// ending. Null for a <c>SELECT</c>.
+    /// </summary>
+    public PendingStatementWrite? PendingWrite;
+
+    /// <summary>The rows a DML statement changed, its <c>@@ROWCOUNT</c>; null for a <c>SELECT</c>, whose rows are its count.</summary>
+    public int? AffectedRows;
+
+    /// <summary>Ends a DML statement's <see cref="PendingWrite"/>, once: <paramref name="commit"/> or roll back.</summary>
+    public void EndWrite(bool commit)
+    {
+        if (this.PendingWrite is not { } pending)
+            return;
+        this.PendingWrite = null;
+        if (commit)
+            pending.Complete();
+        else
+            pending.Rewind();
+    }
 
     /// <summary>
     /// The consumer's way to have the statement produce more: advances the
@@ -93,6 +122,27 @@ internal abstract class ResultStream
     /// <summary>The bytes the client has been sent, as the TDS row writer would count them.</summary>
     private protected long producedBytes;
 
+    /// <summary>The bytes of the rows the client has read, which the statement runs ahead of.</summary>
+    private protected long clientBytes;
+
+    /// <summary>
+    /// How far the statement produces ahead of a client that has read
+    /// <paramref name="read"/> bytes: through the packet the client is
+    /// reading and the four after it (<see cref="LeadPackets"/>). Real refills its window as the client
+    /// reads each packet (probed 2026-10-08 against SQL Server 2025: a
+    /// reader 2, 50, 100 and 300 rows into a result of 2,007-byte rows held
+    /// the locks of 20, 68, 116 and 318).
+    /// </summary>
+    private protected long WindowEnd(long read) => ((read / PacketBytes) + this.LeadPackets) * PacketBytes;
+
+    /// <summary>
+    /// How many packets past the one its consumer is on the statement
+    /// produces (<see cref="WindowEnd"/>): five for a client reading the rows
+    /// itself; one for the MARS endpoint's writer, whose packets wait in the
+    /// client's four-packet window beside it.
+    /// </summary>
+    public int LeadPackets = 5;
+
     /// <summary>
     /// Whether the session reported an executing thread as the statement
     /// suspended, which <see cref="Resume"/> restores as the resuming one.
@@ -103,6 +153,25 @@ internal abstract class ResultStream
     public bool Suspended;
 
     /// <summary>
+    /// The statement's frame, whose <see cref="StatementContext.ProbedTable"/>
+    /// names where a <c>READ COMMITTED</c> scan of it stands; null where none
+    /// can.
+    /// </summary>
+    private protected StatementContext? statement;
+
+    /// <summary>
+    /// Whether the statement's last row came from a row its scan probed on the
+    /// way to it — a scan streaming its rows, not a sort or aggregate that
+    /// read them all first — so the scan stands on that row.
+    /// </summary>
+    private protected bool lastRowProbed;
+
+    /// <summary>The S the suspended statement holds on the row its scan stands on (see <see cref="Suspend"/>).</summary>
+    private LockResource? positionLock;
+
+    private SessionToken? positionOwner;
+
+    /// <summary>
     /// Produces the next window of rows into the buffer, or the rest
     /// when <see cref="Draining"/> or <see cref="Unbounded"/>; sets
     /// <see cref="Complete"/> once the source ends. An error a row raises ends
@@ -110,9 +179,7 @@ internal abstract class ResultStream
     /// </summary>
     public void Produce()
     {
-        var limit = this.Draining || this.Unbounded
-            ? long.MaxValue
-            : ((this.producedBytes / PacketBytes) + 5) * PacketBytes;
+        var limit = this.Draining || this.Unbounded ? long.MaxValue : WindowEnd(this.clientBytes);
         try
         {
             this.ProduceUntil(limit);
@@ -126,11 +193,25 @@ internal abstract class ResultStream
             this.DisposeSource();
     }
 
-    /// <summary>Gives up the rows the statement hasn't produced: the client went away.</summary>
+    /// <summary>
+    /// Gives up the rows the statement hasn't produced: the client went away,
+    /// or the statement failed — a DML statement's writes going back with them.
+    /// </summary>
     public void Abandon()
     {
         this.Complete = true;
         this.DisposeSource();
+        this.EndWrite(commit: false);
+    }
+
+    /// <summary>Lets go of the row S <see cref="Suspend"/> took, as the scan moves on or ends.</summary>
+    private void ReleasePosition(SimulatedDbConnection connection)
+    {
+        if (this.positionLock is not { } held)
+            return;
+        this.positionLock = null;
+        connection.Simulation.LockManager.Release(held, LockMode.Shared, this.positionOwner!);
+        this.positionOwner = null;
     }
 
     private protected abstract void ProduceUntil(long limit);
@@ -149,11 +230,19 @@ internal abstract class ResultStream
     {
         var connection = batch.Connection;
         this.Suspended = true;
+        batch.CurrentStatement.Suspensions++;
         this.hadThread = connection.CurrentExecutingThreadId is not null;
         connection.CurrentExecutingThreadId = null;
         connection.Session.WaitStartedTicks = Environment.TickCount64;
+        this.Request = connection.ExecutingRequest;
         connection.Session.AwaitingClientRequest = connection.ExecutingRequest?.RequestId ?? 0;
         connection.PauseExecutionTimeout();
+        // A READ COMMITTED scan holds the row it stands on while it waits.
+        if (this.lastRowProbed && this.statement is { ProbedTable: { } table } frame)
+        {
+            this.positionLock = batch.HoldScanPosition(table, frame.ProbedPage, frame.ProbedSlot);
+            this.positionOwner = this.positionLock is null ? null : connection.LockOwner;
+        }
         var suspended = connection.SuspendedStreams ??= [];
         lock (suspended)
             suspended.Add(this);
@@ -166,6 +255,7 @@ internal abstract class ResultStream
             return;
         this.Suspended = false;
         var connection = batch.Connection;
+        this.ReleasePosition(connection);
         if (connection.SuspendedStreams is { } suspended)
         {
             lock (suspended)
@@ -175,6 +265,9 @@ internal abstract class ResultStream
         connection.ResumeExecutionTimeout();
         if (this.hadThread)
             connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        // Another request's statements ran meanwhile, publishing their own.
+        DateOrder.Current = connection.DateFormat;
+        Language.Current = connection.Language;
     }
 
     /// <summary>
@@ -269,14 +362,46 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
     /// <summary>The next row of <see cref="Buffer"/> the consumer reads.</summary>
     public int Head;
 
-    private ResultStream(IEnumerator<T> source, TMeasure measure, List<T> buffer, long producedBytes)
+    private ResultStream(IEnumerator<T> source, TMeasure measure, List<T> buffer, long headerBytes)
     {
         this.source = source;
         this.measure = measure;
         this.Buffer = buffer;
-        this.producedBytes = producedBytes;
+        this.clientBytes = headerBytes;
+        this.producedBytes = headerBytes;
+        this.nextPacket = ((headerBytes / PacketBytes) + 1) * PacketBytes;
+        foreach (var row in buffer)
+            this.Produced(row);
         this.RowCount = buffer.Count;
     }
+
+    /// <summary>
+    /// The rows, counted from the result's first, whose last byte lies in a
+    /// packet after the row before's, with the bytes produced through them:
+    /// reading one moves the client into that packet, the statement running on
+    /// by as much (<see cref="Rows"/>) — so a row costs the reader no measure.
+    /// </summary>
+    private readonly Queue<(long Row, long Bytes)> packetEnds = new();
+
+    /// <summary>The rows the consumer has read, counted from the result's first.</summary>
+    private long rowsRead;
+
+    /// <summary>Counts <paramref name="row"/>'s bytes as produced, noting the packet it ends in.</summary>
+    private void Produced(T row)
+    {
+        this.producedBytes += this.measure.Of(row);
+        this.producedRows++;
+        if (this.producedBytes >= this.nextPacket)
+        {
+            this.packetEnds.Enqueue((this.producedRows, this.producedBytes));
+            this.nextPacket = ((this.producedBytes / PacketBytes) + 1) * PacketBytes;
+        }
+    }
+
+    private long producedRows;
+
+    /// <summary>Where the packet after the one the last row produced ends in begins.</summary>
+    private long nextPacket;
 
     /// <summary>
     /// Produces <paramref name="rows"/>' first window — what real sends before
@@ -286,31 +411,35 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
     /// reading on from there. A row's error leaves the rows before it in
     /// <paramref name="produced"/> and propagates.
     /// </summary>
-    public static ResultStream<T, TMeasure>? Start(IEnumerable<T> rows, string[] names, TMeasure measure, out List<T> produced)
+    public static ResultStream<T, TMeasure>? Start(IEnumerable<T> rows, string[] names, TMeasure measure, StatementContext? statement, out List<T> produced)
     {
         produced = [];
         var source = rows.GetEnumerator();
-        var bytes = HeaderBytes(names);
+        var header = HeaderBytes(names);
+        var bytes = header;
         try
         {
+            var probed = false;
             while (bytes < FirstWindowBytes)
             {
+                var probes = statement?.RowsProbed ?? 0;
                 if (!source.MoveNext())
                 {
                     source.Dispose();
                     return null;
                 }
+                probed = statement is not null && statement.RowsProbed != probes;
                 var row = source.Current;
                 produced.Add(row);
                 bytes += measure.Of(row);
             }
+            return new ResultStream<T, TMeasure>(source, measure, produced, header) { statement = statement, lastRowProbed = probed };
         }
         catch
         {
             source.Dispose();
             throw;
         }
-        return new ResultStream<T, TMeasure>(source, measure, produced, bytes);
     }
 
     private protected override void ProduceUntil(long limit)
@@ -322,24 +451,35 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
             this.Head = 0;
         }
         var source = this.source;
+        var statement = this.statement;
         while (this.producedBytes < limit)
         {
+            var probes = statement?.RowsProbed ?? 0;
             if (!source.MoveNext())
             {
                 this.Complete = true;
                 return;
             }
+            this.lastRowProbed = statement is not null && statement.RowsProbed != probes;
             var row = source.Current;
             this.RowCount++;
-            this.producedBytes += this.measure.Of(row);
-            if (!this.Draining)
-                buffer.Add(row);
+            if (this.Draining)
+            {
+                this.producedBytes += this.measure.Of(row);
+                continue;
+            }
+            this.Produced(row);
+            buffer.Add(row);
         }
     }
 
     private protected override void DisposeSource() => this.source.Dispose();
 
-    /// <summary>The rows as the consumer reads them, pulling another window whenever the buffer runs dry.</summary>
+    /// <summary>
+    /// The rows as the consumer reads them, the statement running on as the
+    /// client reads into each next packet (<see cref="ResultStream.WindowEnd"/>),
+    /// and whenever the buffer runs dry.
+    /// </summary>
     public IEnumerable<T> Rows()
     {
         try
@@ -350,6 +490,23 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 {
                     var row = this.Buffer[this.Head];
                     this.Buffer[this.Head++] = null!;
+                    // Into another packet, the client lets the statement run on.
+                    this.rowsRead++;
+                    if (this.packetEnds.TryPeek(out var end) && end.Row == this.rowsRead)
+                    {
+                        _ = this.packetEnds.Dequeue();
+                        this.clientBytes = end.Bytes;
+                        if (!this.Complete && !this.Draining && this.producedBytes < WindowEnd(this.clientBytes) && this.Pull is { } refill)
+                        {
+                            // Most of the buffer read, it starts again from the front.
+                            if (this.Head >= 64 && this.Head * 2 >= this.Buffer.Count)
+                            {
+                                this.Buffer.RemoveRange(0, this.Head);
+                                this.Head = 0;
+                            }
+                            this.PullLocked(refill);
+                        }
+                    }
                     yield return row;
                     continue;
                 }
@@ -443,4 +600,15 @@ internal readonly struct ValueRowMeasure : IRowMeasure<SqlValue[]>
 internal readonly struct EncodedRowMeasure : IRowMeasure<byte[]>
 {
     public long Of(byte[] row) => 1 + row.Length;
+}
+
+/// <summary>
+/// The ending a DML statement holds while its <c>OUTPUT</c> rows go out
+/// (<see cref="ResultStream.PendingWrite"/>): what completes it, and what rolls
+/// it back.
+/// </summary>
+internal sealed class PendingStatementWrite(Action complete, Action rewind)
+{
+    public readonly Action Complete = complete;
+    public readonly Action Rewind = rewind;
 }

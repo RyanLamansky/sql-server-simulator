@@ -1705,6 +1705,7 @@ partial class Simulation
         BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true, UniqueKeyWriteGuard? guard = null, SqlValue[]? storedValues = null)
     {
         RejectLobOnEmptyFilegroup(batch, table, image);
+        batch.Connection.FinishReadsBeforeWrite();
         if (!IsLockableTable(table))
             return table.Heap.Insert(image, undoLog);
         batch.ProbeKeyLocksForInsert(table, image);
@@ -1753,6 +1754,7 @@ partial class Simulation
     {
         var (pageIndex, slotIndex, _, _) = affected[row];
         RejectLobOnEmptyFilegroup(batch, table, newImage);
+        batch.Connection.FinishReadsBeforeWrite();
         if (guard is null)
         {
             table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, reclaimSuperseded);

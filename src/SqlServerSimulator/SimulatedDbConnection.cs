@@ -450,7 +450,10 @@ public sealed class SimulatedDbConnection : DbConnection
             if (this.PublishedSettings is not { } published)
             {
                 if (ReferenceEquals(this.occupant, request))
+                {
                     this.occupant = null;
+                    this.RequestLockOwner = null;
+                }
                 // Nothing overlapped the request, so nothing else holds what
                 // it started from.
                 if (request.StartSettings is { } unshared)
@@ -467,6 +470,7 @@ public sealed class SimulatedDbConnection : DbConnection
                 return;
             published.ApplyTo(this);
             this.occupant = null;
+            this.RequestLockOwner = null;
             if (!request.InProcess)
                 return;
             foreach (var pending in this.pendingRequests)
@@ -553,6 +557,26 @@ public sealed class SimulatedDbConnection : DbConnection
         // starts, which then starts from what this one started from.
         request.StartSettings = published ?? (request.Consumed ? null : this.TakeStartSettings());
         request.EnlistedTransactionId = this.CurrentTransaction?.TransactionId ?? 0;
+        // Beside another unfinished request, this one holds its own statements'
+        // locks apart from that one's.
+        if (this.pendingRequests.Count > 1 && this.HasOtherUnfinishedRequest(request))
+            request.LockOwner = new SessionToken(this.Session.Spid) { Owner = this.Session.Owner, RunningMember = this.Session, IsRequestOwner = true };
+        this.RequestLockOwner = request.LockOwner;
+        this.LockOwner.RequestParked = false;
+    }
+
+    /// <summary>Whether a request of this session other than <paramref name="request"/> is still running on the server.</summary>
+    private bool HasOtherUnfinishedRequest(SessionRequest request)
+    {
+        lock (this.requestsGate)
+        {
+            foreach (var pending in this.pendingRequests)
+            {
+                if (pending != request && !pending.Finished)
+                    return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -566,6 +590,7 @@ public sealed class SimulatedDbConnection : DbConnection
             this.pendingRequests.Add(request);
         this.ExecutingRequest = request;
         this.occupant = request;
+        this.RequestLockOwner = request.LockOwner;
         request.StartSettings = this.PublishedSettings;
         request.EnlistedTransactionId = 0;
     }
@@ -590,6 +615,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     private void ParkRequest(SessionRequest request, bool finished = false)
     {
+        // What the request holds is no longer the running statement's.
+        this.LockOwner.RequestParked = true;
         request.Settings = SessionSettings.Capture(this);
         request.CancelledByUser |= this.executionCancelledByUser;
         request.TransactionIdAtExecutionStart = this.TransactionIdAtExecutionStart;
@@ -606,6 +633,17 @@ public sealed class SimulatedDbConnection : DbConnection
         this.OpenTryFrames = 0;
         this.EnclosingCatchError = null;
         this.NestingLevel = 0;
+        // A statement suspended mid-way keeps what it pinned and timed.
+        var statement = request.Statement ??= new();
+        statement.ExecutionTimeout = this.executionTimeout;
+        statement.Io = this.StatementIo;
+        this.StatementIo = null;
+        if (session.AwaitingClientRequest == request.RequestId)
+        {
+            statement.AwaitingClient = true;
+            session.AwaitingClientRequest = -1;
+        }
+        this.ParkStatementRegistrations(statement);
         request.ImpersonationFrames = finished ? null : this.Security.TakeRequestFrames();
         request.ModuleTempTables = finished ? null : this.TakeModuleTempTables();
         if (this.PendingMessages.Count != 0)
@@ -626,7 +664,59 @@ public sealed class SimulatedDbConnection : DbConnection
         }
         request.DisplacedTransaction = null;
         Volatile.Write(ref this.executionCancellation, ParkedScope);
+        this.RequestLockOwner = null;
         request.Parked = true;
+    }
+
+    /// <summary>
+    /// Moves the LOB epoch and statement snapshot of the request's statement
+    /// suspended mid-way off the session's running-statement registrations
+    /// onto its parked ones, where the LOB reclamation and the version sweep
+    /// still see them while another request's statements register their own.
+    /// </summary>
+    private void ParkStatementRegistrations(ParkedStatement statement)
+    {
+        var session = this.Session;
+        var epoch = Volatile.Read(ref session.StatementEpoch);
+        var snapshot = Volatile.Read(ref session.StatementSnapshotXid);
+        if (epoch == long.MaxValue && snapshot == long.MaxValue)
+            return;
+        statement.Epoch = epoch;
+        statement.SnapshotXid = snapshot;
+        // Published parked before it leaves the running slot, so a sweep in
+        // between sees it in one or the other.
+        lock (this.requestsGate)
+        {
+            _ = Interlocked.Exchange(ref session.ParkedStatementEpoch, Math.Min(session.ParkedStatementEpoch, epoch));
+            _ = Interlocked.Exchange(ref session.ParkedStatementSnapshotXid, Math.Min(session.ParkedStatementSnapshotXid, snapshot));
+        }
+        Volatile.Write(ref session.StatementEpoch, long.MaxValue);
+        Volatile.Write(ref session.StatementSnapshotXid, long.MaxValue);
+    }
+
+    /// <summary>Undoes <see cref="ParkStatementRegistrations"/> as the request runs again.</summary>
+    private void RestoreStatementRegistrations(ParkedStatement statement)
+    {
+        if (statement.Epoch == long.MaxValue && statement.SnapshotXid == long.MaxValue)
+            return;
+        var session = this.Session;
+        _ = Interlocked.Exchange(ref session.StatementEpoch, statement.Epoch);
+        _ = Interlocked.Exchange(ref session.StatementSnapshotXid, statement.SnapshotXid);
+        statement.Epoch = long.MaxValue;
+        statement.SnapshotXid = long.MaxValue;
+        lock (this.requestsGate)
+        {
+            long epoch = long.MaxValue, snapshot = long.MaxValue;
+            foreach (var pending in this.pendingRequests)
+            {
+                if (pending.Statement is not { } parked)
+                    continue;
+                epoch = Math.Min(epoch, parked.Epoch);
+                snapshot = Math.Min(snapshot, parked.SnapshotXid);
+            }
+            Volatile.Write(ref session.ParkedStatementEpoch, epoch);
+            Volatile.Write(ref session.ParkedStatementSnapshotXid, snapshot);
+        }
     }
 
     /// <summary>Gives the connection back the per-request state <see cref="ParkRequest"/> took.</summary>
@@ -668,6 +758,20 @@ public sealed class SimulatedDbConnection : DbConnection
         }
         request.Transaction = null;
         Volatile.Write(ref this.executionCancellation, request.Cancellation ?? ParkedScope);
+        if (request.Statement is { } statement)
+        {
+            this.executionTimeout = statement.ExecutionTimeout;
+            this.StatementIo = statement.Io;
+            statement.Io = null;
+            if (statement.AwaitingClient)
+            {
+                statement.AwaitingClient = false;
+                session.AwaitingClientRequest = request.RequestId;
+            }
+            this.RestoreStatementRegistrations(statement);
+        }
+        this.RequestLockOwner = request.LockOwner;
+        this.LockOwner.RequestParked = false;
     }
 
     /// <summary>
@@ -851,7 +955,10 @@ public sealed class SimulatedDbConnection : DbConnection
         lock (this.requestsGate)
             this.pendingRequests.Clear();
         this.ExecutingRequest = null;
+        this.RequestLockOwner = null;
         this.abandonedTransactionId = 0;
+        Volatile.Write(ref this.Session.ParkedStatementEpoch, long.MaxValue);
+        Volatile.Write(ref this.Session.ParkedStatementSnapshotXid, long.MaxValue);
     }
 
     /// <summary>
@@ -1177,17 +1284,43 @@ public sealed class SimulatedDbConnection : DbConnection
     internal List<ResultStream>? SuspendedStreams;
 
     /// <summary>
-    /// Runs each statement suspended on its client to its end, its rows kept
-    /// for the client to read, before another in-process request runs:
-    /// requests of one session interleave between statements here where real
-    /// interleaves them anywhere (see <see cref="SessionRequest"/>), so a
-    /// statement's locks, snapshot and LOB epoch — which the session holds one
-    /// of at a time — are never held by two requests' statements at once.
+    /// Runs to its end each statement suspended on its client in another
+    /// request working in the transaction the executing request is about to
+    /// write in — a row, or a definition under Sch-M — its rows kept for its
+    /// client, then carries the writing request on where it stood. Real versions
+    /// such a write so the suspended statement still reads what it began
+    /// reading (probed 2026-10-05 against SQL Server 2025: a reader in a
+    /// transaction the API began read none of the inserts, updates or deletes
+    /// another request made in it meanwhile), which the statement having read
+    /// its rows first gives it here. A request in another transaction runs
+    /// beside it, its writes read as another session's are, and one in the same
+    /// transaction that only reads leaves it suspended.
     /// </summary>
-    internal void FinishSuspendedStreams()
+    internal void FinishReadsBeforeWrite()
     {
-        foreach (var stream in this.SnapshotSuspendedStreams())
+        if (this.SuspendedStreams is not { Count: > 0 } suspended || this.CurrentTransaction is not { } transaction || this.ExecutingRequest is not { } writer)
+            return;
+        ResultStream[] snapshot;
+        lock (suspended)
+            snapshot = [.. suspended];
+        var finished = false;
+        foreach (var stream in snapshot)
+        {
+            if (stream.Request is not { } request || request == writer || request.Finished || request.EnlistedTransactionId != transaction.TransactionId)
+                continue;
+            // A wire request's statement runs on its own state, which an
+            // in-process reader's outcome stream restores itself.
+            if (!request.InProcess)
+                this.ResumeRequest(request);
             stream.Finish();
+            finished = true;
+        }
+        if (!finished)
+            return;
+        this.ResumeRequest(writer);
+        this.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        DateOrder.Current = this.DateFormat;
+        Language.Current = this.Language;
     }
 
     /// <summary>
@@ -1569,13 +1702,17 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// The token a lock wait of this session is recorded on — its
     /// <see cref="LockOwner"/>, whose waits are this session's while it is
-    /// the one running under it — or null while another session bound to the
+    /// the one running under it, or its <see cref="SessionScope"/> while a
+    /// cursor's scroll lock waits — or null while another session bound to the
     /// same transaction is.
     /// </summary>
     internal SessionToken? WaitRecord
     {
         get
         {
+            // A cursor's scroll lock waits under the session's cursor scope.
+            if (this.sessionScope is { WaitingOnResource: not null } scope)
+                return scope;
             var owner = this.LockOwner;
             return ReferenceEquals(owner.Acting, this.Session) ? owner : null;
         }
@@ -1590,7 +1727,31 @@ public sealed class SimulatedDbConnection : DbConnection
     /// so none of them blocks on another's locks or reads another's writes as
     /// uncommitted.
     /// </summary>
-    internal SessionToken LockOwner => this.SharedLockOwner ?? this.Session;
+    /// <remarks>
+    /// Real separates a session's MARS requests by the transaction each works
+    /// in, so beside another unfinished request a request's own statements,
+    /// and a transaction it begins, are held under a token of its own
+    /// (<see cref="SessionRequest.LockOwner"/>), and a request working in a
+    /// transaction holds what that transaction does.
+    /// </remarks>
+    internal SessionToken LockOwner => this.SharedLockOwner ?? this.CurrentTransaction?.LockOwner ?? this.RequestLockOwner ?? this.Session;
+
+    /// <summary>
+    /// The token a cursor's scroll locks are held under: the session's whole,
+    /// shared by every request of it (<see cref="SessionToken.IsSessionScope"/>),
+    /// so a positioned update meets its cursor's lock as its own whichever
+    /// request runs it.
+    /// </summary>
+    internal SessionToken SessionScope => this.sessionScope ??= new SessionToken(this.Session.Spid) { Owner = this.Session.Owner, RunningMember = this.Session, IsSessionScope = true };
+
+    private SessionToken? sessionScope;
+
+    /// <summary>
+    /// The token the executing request holds its autocommit statements'
+    /// locks under, when it isn't the session's own (see
+    /// <see cref="SessionRequest.LockOwner"/>); null otherwise.
+    /// </summary>
+    internal SessionToken? RequestLockOwner;
 
     /// <summary>
     /// The shared owner <see cref="LockOwner"/> names while this session is

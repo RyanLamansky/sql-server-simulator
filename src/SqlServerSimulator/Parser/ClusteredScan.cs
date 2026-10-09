@@ -248,6 +248,24 @@ internal static class ClusteredScan
     public static int[]? KeyOrdinals(HeapTable table) => ClusteredKey(table)?.Ordinals;
 
     /// <summary>
+    /// Whether <paramref name="table"/>'s clustered key order comes from the
+    /// seek cache's ordered view, its keys in hand (see <see cref="Order"/>):
+    /// every key column NOT NULL and ascending.
+    /// </summary>
+    public static bool ServesKeyedOrder(HeapTable table)
+    {
+        if (ClusteredKey(table) is not var (ordinals, descending))
+            return false;
+        var schema = table.StoredColumns;
+        for (var i = 0; i < ordinals.Length; i++)
+        {
+            if (schema[ordinals[i]].Nullable || descending[i])
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Whether a scan of <paramref name="table"/> in its clustered key's order
     /// is already ordered by <paramref name="ordinals"/> ascending: they lead
     /// the key, each of those key columns ascending.

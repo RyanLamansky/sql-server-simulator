@@ -701,6 +701,7 @@ partial class Simulation
     internal static void DeleteRowAt(ParserContext context, HeapTable table, int pageIndex, int slotIndex, SqlValue[]? fullOld, UndoLog? undoLog, bool rowLocked = false)
     {
         table.OwningDatabase?.RejectWriteWhenReadOnly();
+        context.Connection.FinishReadsBeforeWrite();
         table.ChangeTracking?.RecordRow(context.Batch, table, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), ChangeTrackingOperation.Delete);
         var lockable = IsLockableTable(table);
         if (lockable)
@@ -728,6 +729,7 @@ partial class Simulation
     internal static void RewriteRowAt(ParserContext context, HeapTable table, int pageIndex, int slotIndex, byte[] rewritten, UndoLog? undoLog)
     {
         RejectLobOnEmptyFilegroup(context.Batch, table, rewritten);
+        context.Connection.FinishReadsBeforeWrite();
         if (IsLockableTable(table))
         {
             context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);

@@ -9,9 +9,10 @@ namespace SqlServerSimulator;
 /// 40,000 bytes ahead of an in-process reader — the packet the client is in
 /// plus the four a MARS connection grants — and holding, while it waits on
 /// the reader, what real holds at that position (probed 2026-10-08 against
-/// SQL Server 2025 with a reader two rows into 20,000 rows of
+/// SQL Server 2025 with a reader two rows into 2,000 and 20,000 rows of
 /// <c>char(2000)</c>): <c>IS</c> on the table under <c>READ COMMITTED</c>,
-/// which keeps a redefinition out while writers go on; the key locks of the
+/// which keeps a redefinition out while writers go on, and S on the row the
+/// scan stands on; the key locks of the
 /// rows produced so far under <c>REPEATABLE READ</c>; <c>Sch-S</c> alone under
 /// <c>NOLOCK</c> and the versioned levels. The request reads as
 /// <c>suspended</c> on <c>ASYNC_NETWORK_IO</c>, and a row an uncommitted
@@ -83,8 +84,15 @@ public sealed class StreamedResultTests
         return read;
     }
 
+    /// <summary>
+    /// A <c>READ COMMITTED</c> reader holds the table's <c>IS</c> and S on the
+    /// row its scan stands on — the last it produced, twenty rows of 2,007
+    /// wire bytes into the result — so a writer of that row waits while one
+    /// of any other goes on; real holds the current page's S instead over a
+    /// table ten times the size, its scan locking pages.
+    /// </summary>
     [TestMethod]
-    public void ReadCommitted_SuspendedReader_HoldsIntentShared()
+    public void ReadCommitted_SuspendedReader_HoldsIntentSharedAndItsPosition()
     {
         var sim = Big();
         using var reader = sim.CreateOpenConnection();
@@ -93,10 +101,12 @@ public sealed class StreamedResultTests
 
         using (var rows = ReadTwo(reader, "select * from big"))
         {
-            AreEqual("OBJECT IS", Locks(other, spid));
+            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
             AreEqual("suspended ASYNC_NETWORK_IO SELECT", Request(other, spid));
             AreEqual(1222, Attempt(other, "alter table big add c int"));
             AreEqual(0, Attempt(other, "update big set v = v where k = 1"));
+            AreEqual(1222, Attempt(other, "update big set v = v where k = 20"));
+            AreEqual(0, Attempt(other, "update big set v = v where k = 21"));
             AreEqual(0, Attempt(other, $"update big set v = v where k = {Rows - 10}"));
             AreEqual(Rows, ReadRest(rows));
             AreEqual("", Locks(other, spid));
@@ -232,7 +242,9 @@ public sealed class StreamedResultTests
     /// own as of the reader's position (probed 2026-10-08 against SQL Server
     /// 2025 over a MARS connection), less the page locks and the sixteen
     /// partitions of an object lock real takes on its host, neither of which
-    /// the simulator models: <paramref name="rowOne"/> is what an update of
+    /// the simulator models — a scan that locks rows holds the S of the row it
+    /// stands on, as real's does over a table this size, where <c>PAGLOCK</c>'s
+    /// holds the page's: <paramref name="rowOne"/> is what an update of
     /// the first row meets, <paramref name="tableX"/> what a <c>TABLOCKX</c>
     /// update of a row ahead meets, and a column added to the table always
     /// waits.
@@ -247,17 +259,17 @@ public sealed class StreamedResultTests
     [DataRow(IsolationLevel.ReadCommitted, "", "holdlock", "KEY RangeS-Sx20, OBJECT IS", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "serializable", "KEY RangeS-Sx20, OBJECT IS", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "repeatableread", "KEY Sx20, OBJECT IS", 1222, 1222)]
-    [DataRow(IsolationLevel.RepeatableRead, "", "readcommitted", "OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.Serializable, "", "readcommitted", "OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.RepeatableRead, "", "readcommittedlock", "OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "readcommitted", "KEY S, OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.Serializable, "", "readcommitted", "KEY S, OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "readcommittedlock", "KEY S, OBJECT IS", 0, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "updlock", "KEY Ux20, OBJECT IX", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "xlock", "KEY Xx20, OBJECT IX", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "paglock", "OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "rowlock", "OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "paglock", "KEY S, OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "rowlock", "KEY S, OBJECT IS", 0, 1222)]
     [DataRow(IsolationLevel.RepeatableRead, "", "rowlock", "KEY Sx20, OBJECT IS", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommitted", "OBJECT Sch-S", 0, 0)]
     [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "tablock", "OBJECT Sch-S", 0, 0)]
-    [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommittedlock", "OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommittedlock", "KEY S, OBJECT IS", 0, 1222)]
     public void Hint_DecidesWhatTheSuspendedReaderHolds(IsolationLevel level, string database, string hint, string held, int rowOne, int tableX)
     {
         var sim = Big(database);
@@ -337,6 +349,40 @@ public sealed class StreamedResultTests
         using var count = reader.CreateCommand("select count(*) from big");
         count.Transaction = transaction;
         AreEqual(Rows + 2, count.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A <c>SERIALIZABLE</c> scan filtered by a predicate no key seeks on, or
+    /// taking <c>UPDLOCK</c> / <c>XLOCK</c>, locks each key as it reaches it in
+    /// its range mode too — every key it passes, a row its predicate rejects
+    /// included — so a suspended reader holds the ranges behind it alone and
+    /// an insert or update ahead goes in (probed 2026-10-08 against SQL Server
+    /// 2025: twenty keys for twenty rows sent, sixty for a predicate keeping
+    /// one row in three).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "where v like 'x%'", "RangeS-S", 20, "IS")]
+    [DataRow("", "where k % 6 = 0", "RangeS-S", 60, "IS")]
+    [DataRow(", updlock", "", "RangeS-U", 20, "IX")]
+    [DataRow(", xlock", "", "RangeX-X", 20, "IX")]
+    public void Serializable_FilteredOrUpdatingScan_LocksKeysAsItReachesThem(string hint, string where, string mode, int keys, string objectMode)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table big (k int primary key, v char(2000) not null); insert big select value * 2, 'x' from generate_series(1, {Rows})");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction();
+        using (var rows = ReadTwo(reader, $"select * from big with (serializable{hint}) {where}", transaction))
+        {
+            AreEqual($"KEY {mode}x{keys}, OBJECT {objectMode}", Locks(other, spid));
+            AreEqual(1222, Attempt(other, "insert big values (5, 'y')"));
+            AreEqual(0, Attempt(other, $"insert big values ({Rows + 1}, 'y')"));
+            AreEqual(0, Attempt(other, $"update big set v = 'y' where k = {Rows}"));
+            _ = ReadRest(rows);
+        }
+        AreEqual(1222, Attempt(other, $"insert big values ({Rows + 1}, 'y')"));
+        transaction.Rollback();
     }
 
     /// <summary>
@@ -555,48 +601,6 @@ public sealed class StreamedResultTests
         AreEqual("", Locks(other, spid));
     }
 
-    /// <summary>
-    /// Another command on the reader's own connection runs once the reader's
-    /// statement has finished, in process — its rows kept for the reader — so
-    /// the session never holds two statements' positions at once.
-    /// </summary>
-    [TestMethod]
-    public void AnotherCommand_FinishesTheSuspendedStatementFirst()
-    {
-        var sim = Big();
-        using var reader = sim.CreateOpenConnection();
-        using var other = sim.CreateOpenConnection();
-        var spid = Spid(reader);
-        using var rows = ReadTwo(reader, "select * from big");
-        AreEqual("OBJECT IS", Locks(other, spid));
-        AreEqual(Rows, reader.CreateCommand("select count(*) from big").ExecuteScalar());
-        AreEqual("", Locks(other, spid));
-        AreEqual(Rows, ReadRest(rows));
-    }
-
-    /// <summary>
-    /// Two readers of one connection read every row of every result while
-    /// their batches interleave: the session holds one suspended statement at
-    /// a time, so a reader's batch running on while the other's is suspended
-    /// produces its next result whole.
-    /// </summary>
-    [TestMethod]
-    public void TwoReaders_InterleaveWithOneSuspendedStatement()
-    {
-        var sim = Big();
-        using var connection = sim.CreateOpenConnection();
-        using var other = sim.CreateOpenConnection();
-        var spid = Spid(connection);
-        using var first = ReadTwo(connection, "select * from big; select * from heap");
-        using var second = ReadTwo(connection, "select * from heap");
-        AreEqual("OBJECT IS", Locks(other, spid));
-        AreEqual(Rows, ReadRest(first));
-        IsTrue(first.NextResult());
-        AreEqual(Rows, ReadRest(first, 0));
-        AreEqual(Rows, ReadRest(second));
-        AreEqual("", Locks(other, spid));
-    }
-
     /// <summary>A replayed cached plan sends its rows the same way.</summary>
     [TestMethod]
     public void CachedPlanReplay_Streams()
@@ -608,7 +612,7 @@ public sealed class StreamedResultTests
         for (var run = 0; run < 3; run++)
         {
             using var rows = ReadTwo(reader, "select * from big");
-            AreEqual("OBJECT IS", Locks(other, spid));
+            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
             AreEqual(Rows, ReadRest(rows));
         }
     }

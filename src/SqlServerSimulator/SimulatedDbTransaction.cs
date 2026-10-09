@@ -22,7 +22,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.UndoLog = new(simulation.LobReclamation);
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
-        this.LockOwner = connection.Session;
+        this.LockOwner = connection.LockOwner;
         connection.LastBegunTransactionId = this.TransactionId;
         connection.RecordTransactionEvent(TransactionEvent.Begin, this);
     }
@@ -600,7 +600,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
 
     /// <summary>
     /// The owner this transaction's locks and uncommitted writes are held
-    /// under: the session that began it, which every session bound to it, or
+    /// under: the session that began it — or the MARS request that did, while
+    /// it ran beside another (<see cref="SessionRequest.LockOwner"/>) — which every session bound to it, or
     /// enlisted in it as a loopback server's, shares (see
     /// <see cref="SimulatedDbConnection.LockOwner"/>) — so none of them blocks
     /// on another's locks, and each reads the others' writes as its own, as

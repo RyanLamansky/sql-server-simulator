@@ -724,9 +724,11 @@ internal sealed partial class BatchContext
     /// Whether a <c>SELECT</c> of this batch whose outcomes reach the client as
     /// they are produced sends its rows as its client reads them
     /// (<see cref="ResultStream"/>): a command's own batch, run by a consumer
-    /// that reads that way (<see cref="SimulatedDbCommand.StreamsResultRows"/>).
+    /// that reads that way (<see cref="SimulatedDbCommand.StreamsResultRows"/>),
+    /// and a procedure's or dynamic batch's body that batch calls with its
+    /// outcomes streaming (<see cref="CallerStreams"/>).
     /// </summary>
-    public readonly bool StreamsResultRows;
+    public bool StreamsResultRows;
 
     /// <summary>
     /// The suspended <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> whose

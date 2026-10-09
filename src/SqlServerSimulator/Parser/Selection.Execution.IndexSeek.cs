@@ -113,7 +113,13 @@ internal sealed partial class Selection
             else if (bounds.Count != 0)
                 _ = AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
         }
-        SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
+        // A read offering no seek scans the table, which locks each key as it
+        // reaches it (BatchContext.EnsureSerializableTableLock) and settles its
+        // fence itself; a path reading through a seek instead takes the whole
+        // key space here first.
+        var scanFences = plan.SerializableRangeMode is not null && equalities.Count == 0 && bounds.Count == 0;
+        if (!scanFences)
+            SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
 
         // The seek narrows the row source, then routes each candidate through
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
@@ -167,6 +173,14 @@ internal sealed partial class Selection
             source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue: true, planSources,
             out var unionCandidates, out var unionDisjuncts))
         {
+            // Fenced before its candidates are read again, so an insert landing
+            // between can't be missed.
+            if (scanFences)
+            {
+                batch.EnsureSerializableTableLock(table, plan);
+                if (!TryComputeUnionCandidates(source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue: true, planSources, out unionCandidates, out unionDisjuncts))
+                    return sources;
+            }
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"UnionSeek({table.Name},{unionDisjuncts})");
             IndexSeekDiagnostics.Sink?.Add($"UnionSeekCandidates({table.Name},{unionCandidates.Count})");
@@ -190,7 +204,11 @@ internal sealed partial class Selection
         }
 
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-        return qualifier is null ? sources : SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch));
+        if (qualifier is null)
+            return sources;
+        if (scanFences)
+            batch.EnsureSerializableTableLock(table, plan);
+        return SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch));
     }
 
     /// <summary>
@@ -1311,17 +1329,85 @@ internal sealed partial class Selection
         // against SQL Server 2025: a REPEATABLE READ `ORDER BY` the clustered
         // key suspended two rows in held the keys produced so far), and lets
         // go a row its sargable conjuncts reject (RowLockQualifier).
+        // A statement waiting on its client mid-result reads on from where its
+        // scan stopped, as the index stands then (see OrderedScanRest).
+        var rest = new OrderedScanRest(cache, table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
+            lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive, descending);
         if (plan.RowTxScoped)
         {
             skipped = 0;
             List<(int Page, int Slot)> inOrder = [.. candidates];
             if (descending)
                 inOrder.Reverse();
-            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver)));
+            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver), rest: rest));
             return true;
         }
-        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped));
+        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest));
         return true;
+    }
+
+    /// <summary>
+    /// The rest of an ordered scan after the row it read last, as the index
+    /// stands now: a statement sending its rows as its client reads them can
+    /// wait on the client between two of them while another request or
+    /// session writes the table, and real's scan, reading the index as it
+    /// goes, then reads a key inserted ahead of it and not one deleted (probed
+    /// 2026-10-08 against SQL Server 2025 at every locking level). The scan
+    /// asks for it after such a wait (<see cref="StatementContext.Suspensions"/>)
+    /// once the heap has changed; a key equal to the last row's is in the rest,
+    /// the scan passing over the rows it has read.
+    /// </summary>
+    private sealed class OrderedScanRest(
+        HeapSeekCache cache, Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
+        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, bool descending)
+    {
+        private StatementContext? statement;
+        private int suspensions;
+        private long generation;
+
+        /// <summary>The last row the scan read, which the rest reads on from.</summary>
+        public byte[]? LastRead;
+
+        /// <summary>Notes where the scan begins: the statement whose waits on its client it watches, and the heap as it stands.</summary>
+        public void Begin(BatchContext batch)
+        {
+            this.statement = batch.CurrentStatement;
+            this.suspensions = this.statement.Suspensions;
+            this.generation = Volatile.Read(ref heap.MutationGeneration);
+            this.LastRead = null;
+        }
+
+        /// <summary>Whether the statement waited on its client since the scan last asked and the heap changed meanwhile, so the scan reads on from <see cref="After"/>.</summary>
+        public bool Moved()
+        {
+            if (this.statement!.Suspensions == this.suspensions)
+                return false;
+            this.suspensions = this.statement.Suspensions;
+            var now = Volatile.Read(ref heap.MutationGeneration);
+            if (now == this.generation)
+                return false;
+            this.generation = now;
+            return true;
+        }
+
+        /// <summary>The addresses still to read in the order the original seek returned them, the last row read being <paramref name="last"/>.</summary>
+        public (int Page, int Slot)[] After(byte[]? last)
+        {
+            if (last is null || !HeapSeekCache.TryComputeKey(last, ordinals, commons, schema, lobStore, out var key))
+                return cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, lower, lowerInclusive, upper, upperInclusive);
+            return descending
+                ? cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, lower, lowerInclusive, key, true)
+                : cache.OrderedSeek(heap, schema, lobStore, ordinals, commons, key, true, upper, upperInclusive);
+        }
+
+        /// <summary><see cref="After"/> in the order the scan reads it, a descending scan's reversed.</summary>
+        public List<(int Page, int Slot)> AfterInReadOrder(byte[]? last)
+        {
+            List<(int Page, int Slot)> order = [.. this.After(last)];
+            if (descending)
+                order.Reverse();
+            return order;
+        }
     }
 
     /// <summary>
@@ -1465,7 +1551,7 @@ internal sealed partial class Selection
     /// decode and projection of every row ahead of it.
     /// </summary>
     private static IEnumerable<byte[]> MaterializeOrderedWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, (int Page, int Slot)[] order, bool descending, int skip)
+        HeapTable table, BatchContext batch, DataLockPlan plan, (int Page, int Slot)[] order, bool descending, int skip, OrderedScanRest? rest = null)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += 1;
@@ -1473,8 +1559,15 @@ internal sealed partial class Selection
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
         var heap = table.Heap;
+        rest?.Begin(batch);
         for (var i = 0; i < order.Length; i++)
         {
+            if (rest is not null && rest.Moved())
+            {
+                order = rest.After(rest.LastRead);
+                i = -1;
+                continue;
+            }
             var (page, slot) = order[descending ? order.Length - 1 - i : i];
             if (!seen.Add((page, slot)) || heap.IsSlotTombstoned(page, slot) || !batch.TouchRowForRead(table, page, slot, plan))
                 continue;
@@ -1488,6 +1581,7 @@ internal sealed partial class Selection
             if (heap.ReadLiveRow(page, slot) is not { } bytes)
                 continue;
             addresses?.Record(bytes, page, slot);
+            _ = rest?.LastRead = bytes;
             yield return bytes;
         }
     }
@@ -3146,7 +3240,7 @@ internal sealed partial class Selection
     /// </remarks>
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
         HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null, int seeks = 1,
-        List<SqlValueKey>? keys = null, Func<List<(int Page, int Slot)>>? recompute = null)
+        List<SqlValueKey>? keys = null, Func<List<(int Page, int Slot)>>? recompute = null, OrderedScanRest? rest = null)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += seeks;
@@ -3176,11 +3270,20 @@ internal sealed partial class Selection
         // The key each row read in a deleted row's place was found by, which
         // names its rows again should it be deleted in turn.
         Dictionary<(int, int), SqlValueKey>? followedKeys = null;
+        // An ordered scan reads on from where it stopped after its statement
+        // waited on its client while the table changed (see OrderedScanRest).
+        rest?.Begin(batch);
         for (var round = 1; ; round++)
         {
             var lost = false;
             for (var position = 0; position < work.Count; position++)
             {
+                if (rest is not null && rest.Moved())
+                {
+                    work = rest.AfterInReadOrder(rest.LastRead);
+                    position = -1;
+                    continue;
+                }
                 var (page, slot) = work[position];
                 if (!seen.Add((page, slot)))
                     continue;
@@ -3226,6 +3329,7 @@ internal sealed partial class Selection
                 }
                 addresses?.Record(bytes, page, slot);
                 io?.Enter(page, ref lastPage);
+                _ = rest?.LastRead = bytes;
                 if (qualifying)
                 {
                     tuple[0] = bytes;

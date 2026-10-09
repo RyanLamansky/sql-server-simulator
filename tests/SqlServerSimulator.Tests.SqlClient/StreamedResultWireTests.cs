@@ -71,6 +71,11 @@ public sealed class StreamedResultWireTests
         return (int)await command.ExecuteScalarAsync(TestContext.CancellationToken);
     }
 
+    /// <summary>
+    /// A <c>READ COMMITTED</c> reader holds the table's <c>IS</c>, which keeps a
+    /// redefinition out, and S on where its scan stands — real's the current
+    /// page's over a table this size, its scan locking pages, here the row's.
+    /// </summary>
     [TestMethod]
     public async Task ReadCommitted_SuspendedReader_HoldsIntentSharedAndKeepsDdlOut()
     {
@@ -86,8 +91,16 @@ public sealed class StreamedResultWireTests
         IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
         await this.AwaitSuspendedAsync(other, spid);
 
+        // The statement runs on while the socket takes its rows, letting go of
+        // where it stood each time; it settles once the socket is full.
         await using (var locks = new SqlCommand($"select string_agg(concat(resource_type, ' ', request_mode), ', ') from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'", other))
-            AreEqual("OBJECT IS", await locks.ExecuteScalarAsync(TestContext.CancellationToken));
+        {
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            object? held;
+            while (!Equals(held = await locks.ExecuteScalarAsync(TestContext.CancellationToken), "OBJECT IS, KEY S") && waited.ElapsedMilliseconds < 10_000)
+                await Task.Delay(10, TestContext.CancellationToken);
+            AreEqual("OBJECT IS, KEY S", held);
+        }
         AreEqual(1222, await this.AttemptAsync(other, "alter table big add c int"));
         AreEqual(0, await this.AttemptAsync(other, "update big set v = v where k = 1"));
         AreEqual(0, await this.AttemptAsync(other, $"update big set v = v where k = {Rows - 10}"));

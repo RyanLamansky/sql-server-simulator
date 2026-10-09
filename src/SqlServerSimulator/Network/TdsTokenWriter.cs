@@ -99,8 +99,27 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     /// </summary>
     public void HoldSession()
     {
-        if (this.Request is not null)
+        if (this.Request is null)
+            return;
+        // Closes the hold a result going out as it is produced opened.
+        if (this.sessionHolds.Count > 0 && this.sessionHolds[^1].End == int.MaxValue)
+            this.sessionHolds[^1] = (this.sessionHolds[^1].Start, this.length);
+        else
             this.sessionHolds.Add((this.resultStart, this.length));
+    }
+
+    /// <summary>
+    /// Marks the result set started at <see cref="MarkResultStart"/> as holding
+    /// the session from here on, for a DML statement's <c>OUTPUT</c> rows sent
+    /// as the statement produces them: the session stays held while they go
+    /// out, until <see cref="HoldSession"/> closes the stretch at their DONE.
+    /// </summary>
+    public void HoldSessionFromResultStart()
+    {
+        if (this.Request is not { } request)
+            return;
+        this.sessionHolds.Add((this.resultStart, int.MaxValue));
+        request.HoldsSession = true;
     }
 
     /// <summary>
@@ -183,7 +202,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
             if (end <= sent)
                 this.sessionHolds.RemoveAt(i);
             else
-                this.sessionHolds[i] = (Math.Max(start - sent, 0), end - sent);
+                this.sessionHolds[i] = (Math.Max(start - sent, 0), end == int.MaxValue ? end : end - sent);
         }
     }
 

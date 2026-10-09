@@ -1414,11 +1414,12 @@ public sealed class TemporalTableTests
         => AreEqual(1, new Simulation().ExecuteScalar($"""
             {CreateTemporalCustomers};
             insert Customers (Id, Name) values (1, 'a');
-            declare @began datetime2 = sysutcdatetime();
+            declare @before datetime2 = sysutcdatetime();
             begin tran;
+            declare @after datetime2 = sysutcdatetime();
             waitfor delay '00:00:00.200';
             update Customers set Name = 'b' where Id = 1;
-            select case when datediff(ms, @began, Vf) < 150 then 1 else 0 end from Customers where Id = 1;
+            select case when Vf between @before and @after then 1 else 0 end from Customers where Id = 1;
             commit
             """));
 

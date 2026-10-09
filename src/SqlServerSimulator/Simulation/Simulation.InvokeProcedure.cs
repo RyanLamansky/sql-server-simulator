@@ -411,6 +411,7 @@ partial class Simulation
                 compiles = connection.StatisticsTime && ReportsStatistics(outerBatch);
                 innerBatch.CallerStreams = streams && !compiles;
                 innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && innerBatch.CallerStreams;
+                innerBatch.StreamsResultRows = outerBatch.StreamsResultRows && innerBatch.CallerStreams;
                 // An error that ends the body keeps what the body sent before
                 // it, which reaches the caller ahead of the error.
                 try

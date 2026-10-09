@@ -205,7 +205,7 @@ internal sealed partial class TdsSession
         // `create table #t` collides with Msg 2714.
         command.ScopeTempTablesToBatch = true;
         command.YieldsBetweenStatements = this.multiplexer is not null;
-        command.StreamsResultRows = this.multiplexer is null;
+        command.StreamsResultRows = true;
 
         var outputs = new List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)>();
         for (var i = 0; i < boundParameters.Count; i++)

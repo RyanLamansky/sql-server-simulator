@@ -591,7 +591,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// Serves one request of a MARS logical session: runs it under the
     /// connection's execution gate into the session's deferred-flush writer —
     /// stepping out between statements while what it produced waits on the
-    /// client (see <see cref="BetweenStatementsAsync"/>) — then acknowledges
+    /// client (see <see cref="SendWhatTheClientTakesAsync"/>) — then acknowledges
     /// any attention and sends the rest of the response.
     /// </summary>
     private async Task ServeMarsRequestAsync(SmpSession session, SessionRequest request, TdsMessage message, string? batchText, bool isBulkInsertBegin, TdsTokenWriter writer, CancellationToken cancellationToken)
@@ -819,7 +819,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             command.CommandText = batchText;
 #pragma warning restore CA2100
             command.YieldsBetweenStatements = this.multiplexer is not null;
-            command.StreamsResultRows = this.multiplexer is null;
+            command.StreamsResultRows = true;
             // A cancelled batch (return value true) leaves the DONE_ATTN
             // acknowledgment to the session loop; nothing more to emit here.
             _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
@@ -1157,7 +1157,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             {
                 if (this.FlushInfoMessages(writer))
                     closed = false;
-                await this.BetweenStatementsAsync(writer, cancellationToken).ConfigureAwait(false);
+                await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(false);
                 if (this.connection.ExecutionCancellationRequested)
                     return true;
                 hasOutcome = Advance();
@@ -1241,8 +1241,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // A statement still producing its rows produces more as they
                 // go out (see ResultStream), each window one advance of the
                 // outcome stream.
-                if (query is SimulatedSqlResultSet { Stream: { Complete: false } stream })
+                var streamed = query is SimulatedSqlResultSet { Stream: { Complete: false } open } ? open : null;
+                if (streamed is { } stream)
                 {
+                    // A MARS request's packets wait in the writer for the
+                    // client's window, which runs the statement's four packets
+                    // ahead of the client itself (see SendWhatTheClientTakesAsync).
+                    if (writer.MarsSession is not null)
+                        stream.LeadPackets = 1;
                     stream.Pull = () =>
                     {
                         if (Advance() && escaped is null && outcomes.Current.Outcome is not SimulatedRowsProduced)
@@ -1253,6 +1259,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     stream.AbandonByConsumer = this.connection.AbortTransport;
                 }
                 writer.MarkResultStart();
+                // A DML statement's OUTPUT rows going out as it produces them
+                // hold a MARS session from their first.
+                if (query is SimulatedSqlResultSet { Stream.PendingWrite: not null })
+                    writer.HoldSessionFromResultStart();
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse);
                 long rows = 0;
                 using (var cursor = query.CreateClientCursor())
@@ -1262,6 +1272,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         TdsTypeCodec.WriteRow(writer, query.Schema, cursor, query.ColumnNullability);
                         rows++;
                         await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
+                        // A MARS request's statement suspended on its client
+                        // steps aside for the session's other requests while
+                        // the client's window is shut, as real's does.
+                        if (streamed is { Complete: false } && writer.MarsSession is not null)
+                            await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(false);
                         // Mid-result-set attention: stop between rows (never
                         // mid-row — the flush above closed the last ROW token).
                         // The partial rows already sent are discarded client-side
@@ -1432,16 +1447,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
-    /// Between two statements of a MARS request: the packets its statements
+    /// Between two statements of a MARS request, or between two rows of a
+    /// <c>SELECT</c> it is sending as its client reads them: the packets it
     /// filled go out — all but its last DONE, whose more bit the next
     /// statement settles. When the client's window can't take them yet, the
     /// request steps out of the execution gate until it has, so the session's
-    /// other requests run meanwhile, and only then runs its next statement:
-    /// real runs a batch's statement once its client has read all but about
-    /// 32 KB of what the batch sent before it (probed 2026-10-06 against SQL
-    /// Server 2025).
+    /// other requests run meanwhile — a suspended statement holding what its
+    /// position holds — and only then runs on: real runs a batch's statement
+    /// once its client has read all but about 32 KB of what the batch sent
+    /// before it, and suspends a <c>SELECT</c> about 40 KB ahead of its client
+    /// (probed 2026-10-05 and 2026-10-06 against SQL Server 2025).
     /// </summary>
-    private async ValueTask BetweenStatementsAsync(TdsTokenWriter writer, CancellationToken cancellationToken)
+    private async ValueTask SendWhatTheClientTakesAsync(TdsTokenWriter writer, CancellationToken cancellationToken)
     {
         if (writer is not { MarsSession: { } session, Request: { } request })
             return;

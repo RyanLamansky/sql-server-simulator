@@ -513,8 +513,8 @@ public sealed partial class Simulation
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
-                    if (batch.StreamsResultRows && !selection.IsAssignmentOnly && !selection.CountsForClauseSourceRows && connection.SuspendedStreams is not { Count: > 0 })
-                        stream = executed.BeginStreaming();
+                    if (batch.StreamsResultRows && !selection.IsAssignmentOnly && !selection.CountsForClauseSourceRows)
+                        stream = executed.BeginStreaming(batch.CurrentStatement);
                     rowCount = stream is null ? executed.MaterializeRows() : 0;
                     if (selection.CountsForClauseSourceRows)
                         rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;

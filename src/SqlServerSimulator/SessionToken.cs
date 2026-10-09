@@ -84,6 +84,49 @@ internal sealed class SessionToken(int spid)
     public long StatementSnapshotXid = long.MaxValue;
 
     /// <summary>
+    /// The earliest <see cref="StatementEpoch"/> among the session's MARS
+    /// requests parked mid-statement while another runs, each statement's
+    /// own kept with its request (<see cref="ParkedStatement.Epoch"/>);
+    /// <see cref="long.MaxValue"/> for none. Read beside
+    /// <see cref="StatementEpoch"/> wherever that is.
+    /// </summary>
+    public long ParkedStatementEpoch = long.MaxValue;
+
+    /// <summary>
+    /// The oldest <see cref="StatementSnapshotXid"/> among the session's
+    /// requests parked mid-statement (see <see cref="ParkedStatementEpoch"/>).
+    /// </summary>
+    public long ParkedStatementSnapshotXid = long.MaxValue;
+
+    /// <summary>
+    /// For a token a MARS request holds its locks under, set while the
+    /// request last running under it is parked for another of its session's
+    /// requests (<see cref="SimulatedDbConnection.ResumeRequest"/>): a lock
+    /// it holds is then no lock of the session's running statement, so the
+    /// same-thread deadlock check passes over it and a wait on it goes on
+    /// until the parked request lets it go or a timeout ends it.
+    /// </summary>
+    public volatile bool RequestParked;
+
+    /// <summary>
+    /// Set on a token a MARS request holds its own statements' locks under
+    /// beside its session's other requests (see
+    /// <see cref="SessionRequest.LockOwner"/>): what the session's own token
+    /// holds while no request is parked on it — a cursor's scroll locks, the
+    /// session's application locks — is the request's own as well
+    /// (<c>LockManager.SharesSessionScope</c>), so a positioned update meets
+    /// its cursor's lock as before.
+    /// </summary>
+    public bool IsRequestOwner;
+
+    /// <summary>
+    /// Set on the token a session's cursors hold their scroll locks under
+    /// (<see cref="SimulatedDbConnection.SessionScope"/>), which every request
+    /// of the session shares, whichever token its statements lock under.
+    /// </summary>
+    public bool IsSessionScope;
+
+    /// <summary>
     /// The <see cref="LockResource"/> this session is currently blocked on, or
     /// <c>null</c> when it isn't waiting. Set and cleared inside
     /// <c>LockManager</c>'s gate so the cycle detector reads a consistent
@@ -179,7 +222,9 @@ internal sealed class SessionToken(int spid)
     /// running under it, or the one that ran last; null for a session's own
     /// token. Only one member runs at a time, so the wait this token records
     /// is that member's, and real reports the transaction's locks under the
-    /// member that last ran (probed 2026-10-07 against SQL Server 2025).
+    /// member that last ran (probed 2026-10-07 against SQL Server 2025). For
+    /// a token one of a MARS session's requests holds its locks under, the
+    /// session itself (see <see cref="SimulatedDbConnection.LockOwner"/>).
     /// </summary>
     public SessionToken? RunningMember;
 

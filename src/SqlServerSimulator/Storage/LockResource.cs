@@ -552,7 +552,7 @@ internal sealed class LockManager
         {
             foreach (var hold in resource.Holders)
             {
-                if (ReferenceEquals(hold.Owner, excludingOwner) || (counts is not null && !counts(hold.Owner)))
+                if (ReferenceEquals(hold.Owner, excludingOwner) || SharesSessionScope(hold.Owner, excludingOwner) || (counts is not null && !counts(hold.Owner)))
                     continue;
                 if (!IsCompatible(hold.Mode, probedMode))
                     return true;
@@ -653,7 +653,7 @@ internal sealed class LockManager
                 held |= hold.Mode == LockMode.SchemaStability ? HeldBy.SchemaStability : HeldBy.Other;
                 continue;
             }
-            if (!IsCompatible(hold.Mode, mode))
+            if (!IsCompatible(hold.Mode, mode) && !SharesSessionScope(hold.Owner, owner))
                 return false;
         }
         if ((held & HeldBy.Other) == 0 && resource.Queue is { Count: > 0 } queue)
@@ -833,9 +833,17 @@ internal sealed class LockManager
         var myThread = Environment.CurrentManagedThreadId;
         foreach (var hold in resource.Holders)
         {
-            if (ReferenceEquals(hold.Owner, owner))
+            if (ReferenceEquals(hold.Owner, owner) || SharesSessionScope(hold.Owner, owner))
                 continue;
             if (IsCompatible(hold.Mode, mode))
+                continue;
+            // Another request of the caller's own session, parked while this
+            // one runs, holds it, not the statement this thread runs: the wait
+            // goes on until a timeout ends it, as real's mostly does — its
+            // deadlock monitor ended 5 of 27 such waits with Msg 1205 ("lock
+            // | generic waitable object") within five seconds, whatever the
+            // lock (probed 2026-10-05 and 2026-10-08 against SQL Server 2025).
+            if (hold.Owner.RequestParked)
                 continue;
             if (hold.Owner.Acting.CurrentExecutingThreadId == myThread)
                 return true;
@@ -921,7 +929,7 @@ internal sealed class LockManager
         {
             if (ReferenceEquals(hold.Owner, requester))
                 held |= hold.Mode == LockMode.SchemaStability ? HeldBy.SchemaStability : HeldBy.Other;
-            else if (!IsCompatible(hold.Mode, mode))
+            else if (!IsCompatible(hold.Mode, mode) && !SharesSessionScope(hold.Owner, requester))
                 blockers.Add(hold.Owner);
         }
         if ((held & HeldBy.Other) == 0 && resource.Queue is { Count: > 0 } queue)
@@ -936,6 +944,20 @@ internal sealed class LockManager
         }
         return blockers;
     }
+
+    /// <summary>
+    /// Whether <paramref name="holder"/>'s locks are <paramref name="requester"/>'s
+    /// own though the tokens differ: the holder is the session's cursor scope
+    /// (<see cref="SessionToken.IsSessionScope"/>) and the requester one of its
+    /// requests, or the requester a MARS request's token
+    /// (<see cref="SessionToken.IsRequestOwner"/>) and the holder its session's
+    /// own token while no request is parked on it, which then holds only what
+    /// the session holds — its application locks.
+    /// </summary>
+    private static bool SharesSessionScope(SessionToken holder, SessionToken requester) =>
+        holder.IsSessionScope
+            ? ReferenceEquals(holder.RunningMember, requester.Acting) && !requester.IsSessionScope
+            : requester.IsRequestOwner && ReferenceEquals(requester.RunningMember, holder) && !holder.RequestParked;
 
     /// <summary>What a requester already holds on the resource it asks for.</summary>
     [Flags]

@@ -537,7 +537,30 @@ internal sealed class StatementContext
         this.AutocommitDdlUndo = null;
         this.PendingCompileRefusal = null;
         this.DdlTriggerCreatedThisStatement = null;
+        this.ProbedTable = null;
     }
+
+    /// <summary>
+    /// The row a <c>READ COMMITTED</c> read of the statement probed last
+    /// (<c>BatchContext.TouchRowForRead</c>), with <see cref="ProbedPage"/>
+    /// and <see cref="ProbedSlot"/>, and how many it has probed: a
+    /// <c>SELECT</c> suspended on its client holds that row's S while it
+    /// waits when the row is where its scan stands (see
+    /// <see cref="ResultStream"/>).
+    /// </summary>
+    public Storage.HeapTable? ProbedTable;
+
+    public int ProbedPage, ProbedSlot;
+
+    public long RowsProbed;
+
+    /// <summary>
+    /// How many times a <c>SELECT</c> of the batch has waited on its client
+    /// mid-result (<see cref="ResultStream"/>): a scan that sees it move reads
+    /// on as the table stands after another request's or session's writes.
+    /// Only ever counts up.
+    /// </summary>
+    public int Suspensions;
 
     /// <summary>
     /// The rows a <c>SELECT</c> left to produce as its client reads them,

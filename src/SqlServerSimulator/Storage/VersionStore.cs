@@ -543,7 +543,7 @@ internal static class VersionStore
         lock (simulation.Sessions)
         {
             foreach (var session in simulation.Sessions)
-                min = Math.Min(min, Volatile.Read(ref session.StatementSnapshotXid));
+                min = Math.Min(min, Math.Min(Volatile.Read(ref session.StatementSnapshotXid), Volatile.Read(ref session.ParkedStatementSnapshotXid)));
         }
         return min;
     }

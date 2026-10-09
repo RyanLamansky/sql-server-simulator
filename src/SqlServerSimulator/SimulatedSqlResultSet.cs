@@ -152,7 +152,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// rows before it in place and rethrows its error, as
     /// <see cref="MaterializeRows"/> does.
     /// </summary>
-    internal ResultStream? BeginStreaming()
+    internal ResultStream? BeginStreaming(Parser.StatementContext? statement)
     {
         if (this.rowValues is { } values)
         {
@@ -161,7 +161,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
             List<SqlValue[]>? produced = null;
             try
             {
-                var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), out produced);
+                var stream = ResultStream<SqlValue[], ValueRowMeasure>.Start(values, this.columnNames, ValueRowMeasure.For(this.schema, this.ColumnNullability), statement, out produced);
                 if (stream is null)
                 {
                     this.rowValues = produced;
@@ -183,7 +183,7 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         List<byte[]>? producedBytes = null;
         try
         {
-            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, out producedBytes);
+            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, statement, out producedBytes);
             if (byteStream is null)
             {
                 this.rowBytes = producedBytes;
@@ -197,6 +197,35 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         {
             this.rowBytes = producedBytes ?? [];
             throw;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="BeginStreaming"/> for rows already produced — a DML
+    /// statement's <c>OUTPUT</c> rows, which it wrote before sending — whose
+    /// sending a cancel can still end (<see cref="ResultStream.PendingWrite"/>).
+    /// </summary>
+    internal ResultStream? BeginStreamingProduced(Parser.BatchContext batch)
+    {
+        if (this.rowBytes is not { } rows)
+            return null;
+        var stream = ResultStream<byte[], EncodedRowMeasure>.Start(WatchingCancellation(rows, batch), this.columnNames, default, statement: null, out var first);
+        if (stream is null)
+        {
+            this.rowBytes = first;
+            return null;
+        }
+        this.rowBytes = stream.Rows();
+        stream.Result = this;
+        return this.Stream = stream;
+    }
+
+    private static IEnumerable<byte[]> WatchingCancellation(IEnumerable<byte[]> rows, Parser.BatchContext batch)
+    {
+        foreach (var row in rows)
+        {
+            batch.ThrowIfCancelled();
+            yield return row;
         }
     }
 
