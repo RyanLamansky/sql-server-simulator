@@ -8,7 +8,13 @@ abstract class SimulatedStatementOutcome
         this.CountsRowsReturned = countsRowsReturned;
     }
 
-    public readonly int RecordsAffected;
+    /// <summary>
+    /// The rows the statement changed, or returned when
+    /// <see cref="CountsRowsReturned"/> says so; settled as its last row goes
+    /// out for a DML statement that writes its rows as it sends them
+    /// (<see cref="SimulatedSqlResultSet.CountPending"/>).
+    /// </summary>
+    public int RecordsAffected;
 
     /// <summary>
     /// Whether <see cref="RecordsAffected"/> counts rows the statement

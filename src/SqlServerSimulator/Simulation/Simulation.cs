@@ -1445,6 +1445,32 @@ public sealed partial class Simulation
         && batch.Connection.InsertExecTargetTypes is null;
 
     /// <summary>
+    /// Whether a DML statement of <paramref name="batch"/> writes its rows as
+    /// its client <c>OUTPUT</c> sends them, as real's pipeline does (probed
+    /// 2026-10-09 against SQL Server 2025: an <c>UPDATE … OUTPUT</c> of 2,000
+    /// rows of 2,010 bytes a reader is two rows into holds the X of 20, a
+    /// <c>NOLOCK</c> reader counts 20 changed, another session's write to a
+    /// row ahead goes in and is read, and a row's error goes out after the
+    /// rows before it): one with a client clause whose rows reach a consumer
+    /// reading them as they are produced (<see cref="StreamsWrittenRows"/>).
+    /// Its executor returns them unwritten, marked
+    /// <see cref="SimulatedSqlResultSet.WritesAsItSends"/>, and
+    /// <see cref="RunMutation"/> sends them.
+    /// </summary>
+    private static bool WritesAsItSends(BatchContext batch, OutputProjection? output) =>
+        output is { HasTarget: false }
+        && StreamsWrittenRows(batch)
+        && batch.CurrentStatement.RemoteWrite is null;
+
+    /// <summary>Takes the error that cut a DML statement's written rows short (<see cref="StatementContext.CutShortWrite"/>), once.</summary>
+    private static SimulatedSqlException? TakeCutShortWrite(BatchContext batch)
+    {
+        var cutShort = batch.CurrentStatement.CutShortWrite;
+        batch.CurrentStatement.CutShortWrite = null;
+        return cutShort;
+    }
+
+    /// <summary>
     /// Runs one stretch of <paramref name="connection"/>'s execution — up to
     /// its next outcome — counted in
     /// <see cref="SessionToken.ExecutingStretches"/>, and in a
@@ -2598,7 +2624,7 @@ public sealed partial class Simulation
     private static SimulatedStatementOutcome? CaughtWriteCount(BatchContext batch)
     {
         var statement = batch.CurrentStatement;
-        if (!statement.WritesRows || statement.WritesText)
+        if (!statement.WritesRows || statement.WritesText || statement.SentWrittenRows)
             return null;
         SimulatedStatementOutcome count = statement.ClientOutputShape is var (schema, names)
             ? new SimulatedSqlResultSet(schema, names, Array.Empty<byte[]>(), 0) { EndedByError = true, ErrorCaught = true }
@@ -3195,6 +3221,8 @@ public sealed partial class Simulation
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
+                    if (TakeCutShortWrite(batch) is { } cutShortWrite)
+                        ExceptionDispatchInfo.Throw(cutShortWrite);
                 }
                 break;
 
@@ -3205,6 +3233,8 @@ public sealed partial class Simulation
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
+                    if (TakeCutShortWrite(batch) is { } cutShortWrite)
+                        ExceptionDispatchInfo.Throw(cutShortWrite);
                 }
                 // Real SQL Server requires `;` after MERGE (Msg 10713) —
                 // the only statement family with a mandatory terminator, and it
@@ -3234,6 +3264,8 @@ public sealed partial class Simulation
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
+                    if (TakeCutShortWrite(batch) is { } cutShortWrite)
+                        ExceptionDispatchInfo.Throw(cutShortWrite);
                 }
                 break;
 
@@ -3244,6 +3276,8 @@ public sealed partial class Simulation
                 {
                     connection.LastStatementRowCount = outcome.RecordsAffected;
                     yield return outcome;
+                    if (TakeCutShortWrite(batch) is { } cutShortWrite)
+                        ExceptionDispatchInfo.Throw(cutShortWrite);
                 }
                 break;
 
@@ -3958,14 +3992,82 @@ public sealed partial class Simulation
         && batch.CallerTriggerFrame is null
         && batch.Connection is { InsertExecTargetTypes: null, StatisticsIo: false, StatisticsTime: false }
         && batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
-        && HasDmlTrigger(batch)
+        && (HasDmlTrigger(batch.Connection.Simulation, batch.CurrentDatabase) || MayFireCrossDatabaseTrigger(batch))
         && MayFireTrigger(batch);
 
-    /// <summary>Whether any schema of the batch's database holds a DML trigger, cached per schema version.</summary>
-    private static bool HasDmlTrigger(BatchContext batch)
+    /// <summary>
+    /// Whether the DML statement at the cursor, in a database with no DML
+    /// trigger, writes through a three- or four-part name while another
+    /// database holds one: its target's trigger then fires as one of its own
+    /// database's would.
+    /// </summary>
+    private static bool MayFireCrossDatabaseTrigger(BatchContext batch)
     {
-        var database = batch.CurrentDatabase;
-        var version = Volatile.Read(ref batch.Connection.Simulation.SchemaVersion);
+        var simulation = batch.Connection.Simulation;
+        var version = Volatile.Read(ref simulation.SchemaVersion);
+        if (Volatile.Read(ref simulation.dmlTriggerAnywhereVersion) != version)
+        {
+            var any = false;
+            foreach (var (_, database) in simulation.Databases)
+            {
+                if (HasDmlTrigger(simulation, database))
+                {
+                    any = true;
+                    break;
+                }
+            }
+            simulation.dmlTriggerAnywhere = any;
+            Volatile.Write(ref simulation.dmlTriggerAnywhereVersion, version);
+        }
+        return simulation.dmlTriggerAnywhere && WritesThroughLongName(batch);
+    }
+
+    /// <summary>
+    /// Whether any database held a DML trigger as of
+    /// <see cref="SchemaVersion"/> <see cref="dmlTriggerAnywhereVersion"/>,
+    /// so a statement in a database without one asks after its target's
+    /// database only when some database has one (<see cref="MayFireCrossDatabaseTrigger"/>).
+    /// </summary>
+    private bool dmlTriggerAnywhere;
+
+    /// <inheritdoc cref="dmlTriggerAnywhere"/>
+    private long dmlTriggerAnywhereVersion = -1;
+
+    /// <summary>
+    /// Whether the DML statement at the cursor names its target, as written
+    /// after <c>INSERT [INTO]</c>, <c>UPDATE</c>, <c>DELETE [FROM]</c> or
+    /// <c>MERGE [INTO]</c>, with three or four parts.
+    /// </summary>
+    private static bool WritesThroughLongName(BatchContext batch)
+    {
+        var context = batch.Parser;
+        var start = context.SaveCheckpoint();
+        try
+        {
+            var verb = context.Token;
+            context.MoveNextOptional();
+            if ((context.Token is ReservedKeyword { Keyword: Keyword.Into } && verb is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Merge })
+                || (context.Token is ReservedKeyword { Keyword: Keyword.From } && verb is ReservedKeyword { Keyword: Keyword.Delete }))
+            {
+                context.MoveNextOptional();
+            }
+            return context.Token is Name or UnquotedString { ContextualKeyword: ContextualKeyword.None }
+                && BatchContext.ParseObjectName(context).Count >= 3;
+        }
+        catch (SimulatedSqlException)
+        {
+            return true;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(start);
+        }
+    }
+
+    /// <summary>Whether any schema of <paramref name="database"/> holds a DML trigger, cached per schema version.</summary>
+    private static bool HasDmlTrigger(Simulation simulation, Database database)
+    {
+        var version = Volatile.Read(ref simulation.SchemaVersion);
         if (Volatile.Read(ref database.DmlTriggerProbeVersion) == version)
             return database.HasDmlTriggerProbe;
         var has = false;
@@ -4779,6 +4881,105 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Sends the <c>OUTPUT</c> rows of a DML statement that writes them as it
+    /// produces them (<see cref="WritesAsItSends"/>): its first window is
+    /// written before the statement's result set goes out, and the rest as
+    /// the client reads them (<see cref="ResultStream"/>), the statement's
+    /// ending — its commit or rollback, its <c>@@ROWCOUNT</c> — held until its
+    /// last row. A row's error ends the statement there, rolled back, with the
+    /// rows before it sent ahead of the error, as real's are (probed
+    /// 2026-10-09 against SQL Server 2025: <c>INSERT … OUTPUT … VALUES (2),
+    /// (1), (3)</c> over an existing key 1 sends the 2 row, then Msg 2627).
+    /// </summary>
+    private static SimulatedSqlResultSet SendAsWritten(BatchContext batch, SimulatedSqlResultSet written, MutationScope scope)
+    {
+        written.ReplaceRows(WrittenInScope(written.RowBytes, batch));
+        batch.CurrentStatement.SentWrittenRows = true;
+        ResultStream? stream;
+        try
+        {
+            stream = written.BeginStreaming(batch.CurrentStatement, batch.Connection);
+        }
+        catch (SimulatedSqlException error)
+        {
+            written.EndedByError = true;
+            written.ErrorCaught = CaughtByTryFrame(batch, error);
+            written.RecordsAffected = CutShortCount(written);
+            scope.Rewind();
+            batch.CurrentStatement.CutShortWrite = error;
+            return written;
+        }
+        if (stream is null)
+        {
+            written.RecordsAffected = written.MaterializeRows();
+            scope.Complete();
+            return written;
+        }
+        written.CountPending = true;
+        stream.PendingWrite = new PendingStatementWrite(
+            () =>
+            {
+                written.RecordsAffected = stream.RowCount;
+                written.CountPending = false;
+                scope.Complete();
+            },
+            () =>
+            {
+                written.RecordsAffected = CutShortCount(written);
+                written.CountPending = false;
+                scope.Rewind();
+            });
+        batch.CurrentStatement.StreamingResult = stream;
+        return written;
+    }
+
+    /// <summary>
+    /// The count a write's error cut short reports: none, or 0 when a TRY
+    /// frame caught the error, as every caught write reports
+    /// (<see cref="CaughtWriteCount"/>).
+    /// </summary>
+    private static int CutShortCount(SimulatedSqlResultSet written) => written.ErrorCaught ? 0 : -1;
+
+    /// <summary>
+    /// <paramref name="rows"/>, each produced inside the statement's atomic
+    /// scope as <see cref="RunMutation"/> installed it — its undo logs and
+    /// version entries — wherever the consumer asks for it from, and after a
+    /// look at the statement's cancellation, which a cancel sent while the
+    /// statement waited on its client meets before writing anything more.
+    /// </summary>
+    private static IEnumerable<byte[]> WrittenInScope(IEnumerable<byte[]> rows, BatchContext batch) =>
+        WrittenInScope(rows, batch, batch.CurrentUndoLog, batch.CurrentTableVarUndoLog, batch.CurrentStatementVersionEntries);
+
+    private static IEnumerable<byte[]> WrittenInScope(IEnumerable<byte[]> rows, BatchContext batch, UndoLog? log, UndoLog? tableVarLog, List<PendingVersionEntry>? versionEntries)
+    {
+        using var source = rows.GetEnumerator();
+        while (true)
+        {
+            var savedLog = batch.CurrentUndoLog;
+            var savedTableVarLog = batch.CurrentTableVarUndoLog;
+            var savedVersionEntries = batch.CurrentStatementVersionEntries;
+            batch.CurrentUndoLog = log;
+            batch.CurrentTableVarUndoLog = tableVarLog;
+            batch.CurrentStatementVersionEntries = versionEntries;
+            byte[] row;
+            try
+            {
+                batch.ThrowIfCancelled();
+                if (!source.MoveNext())
+                    yield break;
+                row = source.Current;
+            }
+            finally
+            {
+                batch.CurrentUndoLog = savedLog;
+                batch.CurrentTableVarUndoLog = savedTableVarLog;
+                batch.CurrentStatementVersionEntries = savedVersionEntries;
+            }
+            yield return row;
+        }
+    }
+
+    /// <summary>
     /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
     /// statement-level atomicity. Routes mutations to the connection's
     /// active transaction's <see cref="UndoLog"/> when one exists (an
@@ -4846,6 +5047,8 @@ public sealed partial class Simulation
         try
         {
             var outcome = RunMutationBodyUntilSettled();
+            if (outcome is SimulatedSqlResultSet { WritesAsItSends: true } writing)
+                return SendAsWritten(context.Batch, writing, scope);
             // OUTPUT rows past what real gets ahead of its client go out as the
             // client reads them, the statement — its atomicity, its locks —
             // ending only after its last (see ResultStream).

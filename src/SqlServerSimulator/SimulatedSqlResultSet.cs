@@ -188,10 +188,20 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
 
         if (this.rowBytes is List<byte[]>)
             return null;
+        // A DML statement's OUTPUT rows measure as the wire carries them,
+        // where a niche producer's measure by their page image.
+        if (this.WritesAsItSends)
+            return this.BeginStreaming(new EncodedValueRowMeasure(ValueRowMeasure.For(this.schema, this.ColumnNullability), this.schema), statement, connection);
+        return this.BeginStreaming(default(EncodedRowMeasure), statement, connection);
+    }
+
+    private ResultStream? BeginStreaming<TMeasure>(TMeasure measure, Parser.StatementContext? statement, SimulatedDbConnection? connection)
+        where TMeasure : IRowMeasure<byte[]>
+    {
         List<byte[]>? producedBytes = null;
         try
         {
-            var byteStream = ResultStream<byte[], EncodedRowMeasure>.Start(this.rowBytes!, this.columnNames, default, statement, connection, out producedBytes);
+            var byteStream = ResultStream<byte[], TMeasure>.Start(this.rowBytes!, this.columnNames, measure, statement, connection, out producedBytes);
             if (byteStream is null)
             {
                 this.rowBytes = producedBytes;
@@ -236,6 +246,28 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
             yield return row;
         }
     }
+
+    /// <summary>
+    /// Set by a DML statement's executor whose <c>OUTPUT</c> rows write as
+    /// they are produced: the rows are its pipeline, each one's write running
+    /// as it is read, which <c>Simulation.RunMutation</c> sends.
+    /// </summary>
+    public bool WritesAsItSends;
+
+    /// <summary>Puts <paramref name="rows"/>, in the page-row form, in place of the rows.</summary>
+    internal void ReplaceRows(IEnumerable<byte[]> rows)
+    {
+        this.rowBytes = rows;
+        this.rowValues = null;
+    }
+
+    /// <summary>
+    /// Set while a DML statement that writes its <c>OUTPUT</c> rows as it
+    /// sends them has rows still to go: its <see cref="SimulatedStatementOutcome.RecordsAffected"/>
+    /// settles with its last row, which is when a reader counts it, as
+    /// SqlClient counts a statement once its DONE arrives.
+    /// </summary>
+    public bool CountPending;
 
     /// <summary>
     /// Set when the statement's own error cut these rows short. Real sends a

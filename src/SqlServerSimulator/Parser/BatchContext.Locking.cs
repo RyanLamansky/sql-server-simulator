@@ -2652,6 +2652,24 @@ internal sealed partial class BatchContext
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
+        // A statement under an auto-commit statement's trigger leaves its
+        // data locks to that statement, whose transaction they belong to: its
+        // writes' and what its level keeps read, not a READ COMMITTED read's
+        // object intent.
+        if (connection.TriggerStatementLocks is { } unit && !ReferenceEquals(unit, this.StatementSchemaLocks) && connection.CurrentTransaction is null)
+        {
+            foreach (var held in this.StatementSchemaLocks)
+            {
+                if (held.Mode is LockMode.SchemaStability or LockMode.IntentShared)
+                    manager.Release(held.Resource, held.Mode, held.Owner);
+                else
+                    unit.Add(held);
+            }
+            this.StatementSchemaLocks.Clear();
+            this.noWaitTables?.Clear();
+            this.pageLockedWrites?.Clear();
+            return;
+        }
         // Release in reverse acquisition order — symmetric to a stack of
         // acquires. Phase 0 has no order-dependent semantics in release
         // (every Sch-S / Sch-M release pulses the gate independently), but

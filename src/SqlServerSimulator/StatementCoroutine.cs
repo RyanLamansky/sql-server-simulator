@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Storage;
 
@@ -67,6 +68,10 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
     [ThreadStatic]
     public static bool OnAnyStatementThread;
 
+    /// <summary>The coroutine whose statement the calling thread runs, while it runs one.</summary>
+    [ThreadStatic]
+    public static StatementCoroutine? Running;
+
     /// <summary>
     /// Runs <paramref name="statement"/> on a thread of its own, answering each
     /// outcome it sends as it sends it, and ends once it returns, with what
@@ -118,6 +123,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
     private void RunStatement(Action statement)
     {
         Volatile.Write(ref this.statementThreadId, Environment.CurrentManagedThreadId);
+        Running = this;
         try
         {
             using var culture = CultureScope.Engine();
@@ -137,6 +143,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
         }
         finally
         {
+            Running = null;
             Volatile.Write(ref this.statementThreadId, 0);
             this.ended = true;
             _ = this.toCaller.Release();
@@ -193,9 +200,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
             OnAnyStatementThread = true;
             while (true)
             {
-                var statement = this.job!;
-                this.job = null;
-                statement();
+                this.RunJob();
                 lock (IdleGate)
                 {
                     this.nextIdle = idle;
@@ -215,6 +220,19 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Runs the statement handed over, in a frame of its own, so the idle
+        /// thread that ran it names nothing of it — its batch and session
+        /// would otherwise stay reachable until the thread runs another.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void RunJob()
+        {
+            var statement = this.job!;
+            this.job = null;
+            statement();
         }
 
         public void Dispose() => this.woken.Dispose();

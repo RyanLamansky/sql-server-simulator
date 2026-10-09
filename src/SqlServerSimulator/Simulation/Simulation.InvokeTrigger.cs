@@ -333,6 +333,7 @@ partial class Simulation
         // save/restore nests harmlessly.
         var outerTriggerLog = connection.TriggerStatementUndoLog;
         var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
+        var outerTriggerLocks = connection.TriggerStatementLocks;
         // Savepoints belong to the unit they were set on: a nested fire over
         // the same unit keeps them, a fire over a new one starts without.
         var outerSavepoints = connection.TriggerUnitSavepoints;
@@ -344,6 +345,7 @@ partial class Simulation
         }
         connection.TriggerStatementUndoLog = outerBatch.CurrentUndoLog;
         connection.TriggerStatementVersionEntries = outerBatch.CurrentStatementVersionEntries;
+        connection.TriggerStatementLocks = connection.CurrentTransaction is null ? outerTriggerLocks ?? outerBatch.StatementSchemaLocks : null;
         // A statement firing in auto-commit whose trigger ended the statement's
         // unit and began a transaction of its own ends that transaction's
         // outermost level when it completes, as the unit it replaced would
@@ -384,6 +386,7 @@ partial class Simulation
             connection.TriggerReplacedTransaction = outerReplaced;
             connection.TriggerStatementUndoLog = outerTriggerLog;
             connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
+            connection.TriggerStatementLocks = outerTriggerLocks;
             connection.TriggerUnitSavepoints = outerSavepoints;
             connection.TriggerUnitDoomed = outerDoomed;
         }
@@ -640,10 +643,22 @@ partial class Simulation
     /// <summary>
     /// The thread of its own a trigger's firing statement runs on, which the
     /// body's outcomes go out of as it produces them; null when the statement
-    /// runs on its caller's.
+    /// runs on its caller's. A statement of a trigger body — or of a procedure
+    /// or dynamic batch one calls — whose outcomes go straight out sends what
+    /// the trigger it fires produces through the same thread, so a nested
+    /// trigger's rows go out as its client reads them too, as real's do
+    /// (probed 2026-10-09 against SQL Server 2025: a reader two rows into the
+    /// rows of a trigger fired by another trigger's INSERT held the twenty
+    /// keys of its window under REPEATABLE READ, the inner body's statements
+    /// after its SELECT and the outer body's after its INSERT not yet run).
     /// </summary>
     private static StatementCoroutine? SendingCoroutine(BatchContext firing) =>
-        firing.StatementCoroutine is { OnStatementThread: true } coroutine ? coroutine : null;
+        firing.StatementCoroutine is { OnStatementThread: true } coroutine ? coroutine
+        : firing is { StreamsResultRows: true, IsSkipping: false, ResultSetsSink: null, Connection.InsertExecTargetTypes: null }
+            && firing.StreamingFrames == firing.FramedStatementDepth - 1
+            && StatementCoroutine.Running is { OnStatementThread: true } running
+            ? running
+            : null;
 
     /// <summary>
     /// Fast-path predicate: returns true when at least one enabled

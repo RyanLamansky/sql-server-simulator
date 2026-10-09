@@ -779,7 +779,28 @@ partial class Simulation
         // A key referencing the table itself is checked once the rows are in.
         var selfReferencingRows = !insteadOfActive && ReferencesItself(destinationTable) ? new List<SqlValue[]>() : null;
         var drawsIdentity = identityColumn is not null && !insteadOfActive && Array.IndexOf(destinationColumns, identityColumn) < 0;
+        // Real's pipeline writes each row as it sends its OUTPUT row, so a
+        // statement whose client reads them as they come writes each one as
+        // it is read (see SendAsWritten); one a trigger, a view, a key
+        // referencing the table itself or an indexed view settles once every
+        // row is in writes them all first.
+        if (output is not null && triggerRows is null && destinationView is null && joinViewPlan is null && selfReferencingRows is null
+            && destinationTable.DependentIndexedViews.Count == 0 && !context.Batch.IsSkipping && WritesAsItSends(context.Batch, output))
+        {
+            // The rows go out one at a time, each taken as it is written.
+            outputRows = [];
+            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, WriteAsSent(context.Batch.SequenceValuesByRow), recordsAffected: 0)
+            {
+                ColumnNullability = output.Nullability,
+                WritesAsItSends = true,
+            };
+        }
         for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
+            _ = WriteRow(rowIndex);
+
+        // Writes one source row, its OUTPUT row added to outputRows; false
+        // when it wrote nothing.
+        bool WriteRow(int rowIndex)
         {
             var sourceRow = sourceRows[rowIndex];
             // Per-row evaluation context for the DEFAULT-clause expressions
@@ -960,7 +981,7 @@ partial class Simulation
                     // why lastIdentityValue is already assigned above.
                     if (EnforceRowKeys(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
                     {
-                        continue;
+                        return false;
                     }
 
                     EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, plan.Verb, selfReferencing: selfReferencingRows is null ? null : false);
@@ -973,7 +994,7 @@ partial class Simulation
                     // no row-X on it yet would be visible to a READ COMMITTED
                     // reader for the whole wait.
                     if (!InsertCheckedRow(context.Batch, destinationTable, rowValues, storedValues, image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog, keyGuard))
-                        continue;
+                        return false;
                     EnforceLandedRowChecks(destinationTable, rowValues, context.Batch, plan.Verb);
                     context.Connection.StatementIo?.CountWrite(destinationTable);
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
@@ -989,7 +1010,34 @@ partial class Simulation
 
                 triggerRows?.Add((SqlValue[])rowValues.Clone());
                 insertedCount++;
+                return true;
             }
+            return false;
+        }
+
+        // The OUTPUT rows as the client reads them, each row written as it is
+        // read, under the sequence values its tuple drew.
+        IEnumerable<byte[]> WriteAsSent(Dictionary<(Sequence Sequence, long Stamp), SqlValue>? sequenceValues)
+        {
+            for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
+            {
+                var savedSequenceValues = context.Batch.SequenceValuesByRow;
+                context.Batch.SequenceValuesByRow = sequenceValues;
+                try
+                {
+                    _ = WriteRow(rowIndex);
+                }
+                finally
+                {
+                    context.Batch.SequenceValuesByRow = savedSequenceValues;
+                }
+                if (outputRows!.Count == 0)
+                    continue;
+                var row = outputRows[0];
+                outputRows.Clear();
+                yield return row;
+            }
+            context.Connection.RecordInsertIdentity(lastIdentityValue);
         }
 
         if (selfReferencingRows is { Count: > 0 })

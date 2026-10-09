@@ -2287,6 +2287,19 @@ public sealed class SimulatedDbConnection : DbConnection
     internal Storage.UndoLog? TriggerStatementUndoLog;
 
     /// <summary>
+    /// The statement-scoped locks of the auto-commit statement that fired the
+    /// running trigger, paired with <see cref="TriggerStatementUndoLog"/>: the
+    /// data locks a statement underneath takes — a body's write, a
+    /// <c>REPEATABLE READ</c> read — join them as that statement ends, held
+    /// until the firing statement's own end as real holds them to its
+    /// transaction's (probed 2026-10-09 against SQL Server 2025: another
+    /// session's read of a row a trigger body inserted waits while the firing
+    /// statement's client reads the body's later rows). Null outside a trigger,
+    /// and under an explicit transaction, whose own list holds them.
+    /// </summary>
+    internal List<(Storage.LockResource Resource, Storage.LockMode Mode, SessionToken Owner)>? TriggerStatementLocks;
+
+    /// <summary>
     /// Set when a <c>ROLLBACK</c> or <c>COMMIT</c> inside the running trigger
     /// body ended the transaction — the user's, or the firing statement's own
     /// auto-commit unit, which reads as <c>@@TRANCOUNT</c> 1 in the body. The

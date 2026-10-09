@@ -239,6 +239,38 @@ public sealed class TriggerStreamingTests
         AreEqual(Rows, ReadRest(rows));
     }
 
+    /// <summary>
+    /// A trigger fired by another trigger's statement, or attached to another
+    /// database's table, sends its rows as the client reads them too: the
+    /// firing bodies wait mid-way, their later statements not yet run, while
+    /// what they wrote so far stays locked until the firing statement ends
+    /// (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert a values (1)", "OBJECT IXx3, RID Xx3", 3)]
+    [DataRow("insert other.dbo.x values (1)", "OBJECT IXx2, RID Xx2", 2)]
+    public void NestedOrOtherDatabasesTriggerRows_GoOutAsRead(string sql, string writes, int logged)
+    {
+        var sim = WithTrigger();
+        sim.ExecuteBatches(
+            "create table a (id int); create table b (id int); create database other",
+            "create trigger ta on a after insert as begin insert b values (1); insert l values ('a after'); end",
+            "create trigger tb on b after insert as begin insert l values ('b before'); set transaction isolation level repeatable read; select k, v from big order by k; insert l values ('b after'); end",
+            "use other; create table x (id int); exec ('create trigger tx on x after insert as begin insert simulated.dbo.l values (''x before''); set transaction isolation level repeatable read; select k, v from simulated.dbo.big order by k; insert simulated.dbo.l values (''x after''); end')");
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(connection);
+        using (var rows = ReadTwo(connection, sql))
+        {
+            AreEqual($"KEY Sx20, OBJECT IS, {writes}", Locks(other, spid));
+            AreEqual("suspended ASYNC_NETWORK_IO SELECT", string.Join(", ", Extensions.FirstColumn(other, $"select concat(status, ' ', wait_type, ' ', command) from sys.dm_exec_requests where session_id = {spid}")));
+            AreEqual(1, Scalar(other, "select count(*) from l with (nolock)"));
+            AreEqual(1222, ThrowsExactly<SimulatedSqlException>(() => Scalar(other, "set lock_timeout 0; select count(*) from l")).Number);
+            AreEqual(Rows, ReadRest(rows));
+        }
+        AreEqual(logged, Scalar(other, "select count(*) from l"));
+    }
+
     [TestMethod]
     public void ExecuteNonQuery_RunsTheTriggerWhole()
     {

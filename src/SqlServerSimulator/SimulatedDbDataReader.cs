@@ -293,7 +293,14 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// the final value equals what <c>ExecuteNonQuery</c> returns for the same
     /// batch, in every shape probed).
     /// </summary>
-    public override int RecordsAffected => this.anyRecordsAffected ? this.recordsAffected : -1;
+    public override int RecordsAffected
+    {
+        get
+        {
+            this.CountSettledWrite();
+            return this.anyRecordsAffected ? this.recordsAffected : -1;
+        }
+    }
 
     /// <inheritdoc/>
     public override bool GetBoolean(int ordinal)
@@ -731,14 +738,42 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// </summary>
     private void Accumulate(SimulatedStatementOutcome outcome)
     {
+        this.CountSettledWrite();
         if (!this.compileError.Admits(outcome))
             return;
+        if (outcome is SimulatedSqlResultSet { CountPending: true } writing)
+        {
+            this.uncountedWrite = writing;
+            return;
+        }
+        this.Count(outcome);
+    }
+
+    private void Count(SimulatedStatementOutcome outcome)
+    {
         var contribution = outcome.ClientRecordsAffected;
         if (contribution < 0)
             return;
 
         this.recordsAffected += contribution;
         this.anyRecordsAffected = true;
+    }
+
+    /// <summary>
+    /// A DML statement's result set whose rows were still being written as
+    /// the reader reached it (<see cref="SimulatedSqlResultSet.CountPending"/>):
+    /// its count joins <see cref="RecordsAffected"/> once its last row is out,
+    /// as SqlClient counts a statement once its DONE arrives.
+    /// </summary>
+    private SimulatedSqlResultSet? uncountedWrite;
+
+    /// <summary>Counts <see cref="uncountedWrite"/> once its statement has settled.</summary>
+    private void CountSettledWrite()
+    {
+        if (this.uncountedWrite is not { CountPending: false } settled)
+            return;
+        this.uncountedWrite = null;
+        this.Count(settled);
     }
 
     /// <summary>

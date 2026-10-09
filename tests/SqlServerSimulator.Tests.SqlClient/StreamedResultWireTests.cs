@@ -283,7 +283,10 @@ public sealed class StreamedResultWireTests
         await using (var write = new SqlCommand($"begin tran; update b set v = 'z' where k = {held}", writer))
             _ = await write.ExecuteNonQueryAsync(TestContext.CancellationToken);
 
-        await using var command = new SqlCommand("select k, v from b", reader) { CommandTimeout = 1 };
+        // The writer holds its row for the whole test, so the wait only ever
+        // ends by timeout; a timeout longer than a loaded runner needs to
+        // deliver the packets sent before the wait leaves the count exact.
+        await using var command = new SqlCommand("select k, v from b", reader) { CommandTimeout = 5 };
         var read = 0;
         var error = await ThrowsExactlyAsync<SqlException>(async () =>
         {

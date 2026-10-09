@@ -1073,6 +1073,22 @@ internal readonly struct ValueRowMeasure : IRowMeasure<SqlValue[]>
     }
 
     /// <summary>
+    /// <see cref="Of(SqlValue[])"/> for a row in its page-row form under
+    /// <paramref name="schema"/>, decoding only its variable-length columns.
+    /// </summary>
+    public long Of(SqlType[] schema, byte[] row)
+    {
+        var total = this.shape.FixedBytes;
+        foreach (var column in this.shape.Variable)
+        {
+            total += column >= 0
+                ? RowDecoder.DecodeColumn(schema, row, column).ClientWireEstimate(national: false)
+                : RowDecoder.DecodeColumn(schema, row, ~column).ClientWireEstimate(national: true);
+        }
+        return total;
+    }
+
+    /// <summary>
     /// The token byte and every fixed-length column's width — what each row
     /// takes before its variable-length columns — and the variable-length
     /// columns' ordinals, a national one's complemented (<c>~ordinal</c>).
@@ -1082,6 +1098,15 @@ internal readonly struct ValueRowMeasure : IRowMeasure<SqlValue[]>
         public readonly long FixedBytes = fixedBytes;
         public readonly int[] Variable = variable;
     }
+}
+
+/// <summary>
+/// How a DML statement's <c>OUTPUT</c> rows measure as TDS sends them, in their
+/// page-row form (<see cref="ValueRowMeasure.Of(SqlType[], byte[])"/>).
+/// </summary>
+internal readonly struct EncodedValueRowMeasure(ValueRowMeasure values, SqlType[] schema) : IRowMeasure<byte[]>
+{
+    public long Of(byte[] row) => values.Of(schema, row);
 }
 
 /// <summary>How a niche producer's encoded rows measure: by their page image.</summary>

@@ -745,6 +745,9 @@ partial class Simulation
         /// </summary>
         public (ColumnReadTarget Read, ColumnReadTarget Assigned)? ColumnTargets;
 
+        /// <summary>Whether the <c>WHERE</c> or <c>SET</c> list holds a subquery, once a run writing as it sends has asked (<see cref="Simulation.ReadsSubquery"/>).</summary>
+        public bool? ReadsSubquery;
+
         public override SimulatedStatementOutcome Run(ParserContext context) => RunUpdate(context, this);
     }
 
@@ -784,7 +787,8 @@ partial class Simulation
         // The compile walk holds no schema lock, so it doesn't read the
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch);
+        IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -807,13 +811,20 @@ partial class Simulation
             && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
         var targetWait = contended && Selection.WhereIsClusteredKeySeek(table, where!) ? LockMode.Exclusive : LockMode.Update;
         var throughIndex = contended && targetWait == LockMode.Update ? Selection.MutationSeekIndex(table, where!) : null;
+        int[] setOrdinals = [.. SetColumnOrdinals(assignments)];
+        // A statement whose client reads its OUTPUT rows as they come writes
+        // each as it sends it, in the order real's plan for its shape does.
+        var writeOrder = positionedCursor is null && sourceView is null && viewRows is null && !readsNoRow && WritesAsItSends(context.Batch, output)
+            ? UpdateWriteOrder(context.Batch, table, setOrdinals, plan.ReadsSubquery ??= ReadsSubquery([where, .. rawAssignments.Select(static assignment => assignment.Expr)]), top)
+            : WriteOrder.WholeFirst;
         // A seek chose its rows from the images they carried; one a wait here
-        // let settle may carry another.
+        // let settle may carry another. A walk writing as it reads waits on a
+        // row it meets where it meets it, the rows before it out first.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
-            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null, targetWait, throughIndex)
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => (writeOrder != WriteOrder.AsRead || table.Heap.ReadLiveRow(address.Page, address.Slot) is null) && JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null, targetWait, throughIndex)
             && where is not null)
         {
-            rowSource = MutationRowSource(table, where, context.Batch);
+            rowSource = MutationRowSource(table, where, context.Batch, out seek);
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
@@ -821,6 +832,8 @@ partial class Simulation
         // only a later row would raise never runs (probed 2026-10-06 against
         // SQL Server 2025: `UPDATE TOP (1) t SET g.STSrid = 55` past a NULL g).
         var rowCap = top is { Percent: false } countLimit && !readsNoRow ? Selection.ResolveDmlTopCap(countLimit, int.MaxValue, context.Batch) : int.MaxValue;
+        if (writeOrder == WriteOrder.AsRead)
+            return SentAsWritten(output!, UpdateAsRead());
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             if (affected.Count >= rowCap)
@@ -851,14 +864,14 @@ partial class Simulation
                 context.Batch.TargetKeyReinserted = true;
         }
         ApplyDmlTopCap(top, affected, context.Batch);
-        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+        if (writeOrder == WriteOrder.ReadsFirst)
         {
-            var (pageIndex, slotIndex, _, _) = affected[i];
-            if (JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
-                return false;
-            affected[i] = (pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot);
-            return true;
-        });
+            judgedRows.RemoveRange(affected.Count, judgedRows.Count - affected.Count);
+            HoldReadRows(context.Batch, table, judgedRows);
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+            return SentAsWritten(output!, UpdateReadRows());
+        }
+        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) => Rejudge(affected, i, rowBytes));
 
         // SI writer pre-flight: any row visible at our snapshot but
         // deleted by a concurrent committed tx (or in-flight foreign
@@ -871,7 +884,79 @@ partial class Simulation
         if (positionedCursor is null)
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView, rowsLocked: true);
+        return CommitUpdate(context, table, affected, output, setOrdinals, sourceView, rowsLocked: true);
+
+        // Judges the row at rows[i] again as rowBytes, replacing its entry;
+        // false when it no longer qualifies.
+        bool Rejudge(List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> rows, int i, byte[] rowBytes)
+        {
+            var (pageIndex, slotIndex, _, _) = rows[i];
+            if (JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
+                return false;
+            rows[i] = (pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot);
+            return true;
+        }
+
+        // The OUTPUT rows of a statement writing each row as the walk reaches
+        // it (WriteOrder.AsRead): read, locked, written and sent one at a time.
+        IEnumerable<byte[]> UpdateAsRead()
+        {
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+            var cap = context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < rowCap ? (int)rowCountLimit : rowCap;
+            var written = 0;
+            var walk = new TargetWalk();
+            List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            using var rows = TargetRowsAsTheyStand(table, seek, context.Batch, walk).GetEnumerator();
+            while (written < cap)
+            {
+                context.Batch.PollCancellation();
+                var generation = Volatile.Read(ref table.Heap.MutationGeneration);
+                if (!rows.MoveNext())
+                    yield break;
+                var (pageIndex, slotIndex, rowBytes) = rows.Current;
+                if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes, targetWait, throughIndex)
+                    || JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
+                {
+                    continue;
+                }
+                row.Clear();
+                row.Add((pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot));
+                read.Clear();
+                read.Add((pageIndex, slotIndex, rowBytes));
+                HoldQualifyingRows(context.Batch, table, row, read, generation, RowLockPurpose.UpdatePreImage, rejudge);
+                if (row.Count == 0)
+                    continue;
+                written++;
+                var sent = OutputRowOf(CommitUpdate(context, table, row, output, setOrdinals, sourceView: null, rowsLocked: true));
+                walk.NoteOwnWrites(table);
+                yield return sent;
+            }
+        }
+
+        // The OUTPUT rows of a statement that read every row first, holding
+        // each in U (WriteOrder.ReadsFirst): each written as it is sent.
+        IEnumerable<byte[]> UpdateReadRows()
+        {
+            List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            for (var i = 0; i < affected.Count; i++)
+            {
+                context.Batch.PollCancellation();
+                row.Clear();
+                row.Add(affected[i]);
+                read.Clear();
+                read.Add(judgedRows[i]);
+                HoldQualifyingRows(context.Batch, table, row, read, walkGeneration, RowLockPurpose.UpdatePreImage, rejudge);
+                if (row.Count == 0)
+                    continue;
+                yield return OutputRowOf(CommitUpdate(context, table, row, output, setOrdinals, sourceView: null, rowsLocked: true));
+            }
+        }
 
         // The row's new values and, when something reads the pre-update image,
         // that image; null for a row the statement doesn't update. With
@@ -1152,6 +1237,9 @@ partial class Simulation
         public readonly OutputProjection? Output = output;
         public readonly Selection.DmlTopLimit? Top = top;
 
+        /// <summary>Whether the <c>WHERE</c> or <c>SET</c> list holds a subquery, once a run writing as it sends has asked (<see cref="Simulation.ReadsSubquery"/>).</summary>
+        public bool? ReadsSubquery;
+
         public override SimulatedStatementOutcome Run(ParserContext context) => RunJoinedUpdate(context, this);
     }
 
@@ -1239,16 +1327,55 @@ partial class Simulation
             context.Batch.TargetKeyReinserted = true;
 
         ApplyDmlTopCap(top, affected, context.Batch);
-        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+        int[] setOrdinals = [.. SetColumnOrdinals(assignments)];
+        // A statement whose client reads its OUTPUT rows as they come writes
+        // each as it sends it, the join read whole first.
+        var writeOrder = WritesAsItSends(context.Batch, output)
+            ? JoinedWriteOrder(UpdateWriteOrder(context.Batch, table, setOrdinals, plan.ReadsSubquery ??= ReadsSubquery([where, .. assignments.Select(static assignment => assignment.Expr)]), top), sources, targetIndex, table)
+            : WriteOrder.WholeFirst;
+        if (writeOrder != WriteOrder.WholeFirst)
+        {
+            judgedRows.RemoveRange(affected.Count, judgedRows.Count - affected.Count);
+            if (writeOrder == WriteOrder.ReadsFirst)
+                HoldReadRows(context.Batch, table, judgedRows);
+            return SentAsWritten(output!, UpdateReadRows());
+        }
+        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) => RejudgeAt(affected, i, rowBytes));
+
+        return CommitUpdate(context, table, affected, output, setOrdinals, sourceView: null, rowsLocked: true, partners);
+
+        // Judges the row at rows[i] again as rowBytes against its partners,
+        // replacing its entry; false when it no longer qualifies.
+        bool RejudgeAt(List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> rows, int i, byte[] rowBytes)
         {
             if (Rejudge(rowBytes) is not { } judged)
                 return false;
-            affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
-            partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), currentTuple);
+            rows[i] = (rows[i].PageIndex, rows[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            partners?.Note((rows[i].PageIndex, rows[i].SlotIndex), currentTuple);
             return true;
-        });
+        }
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null, rowsLocked: true, partners);
+        // The OUTPUT rows of a statement that read its join whole: each row
+        // written as it is sent.
+        IEnumerable<byte[]> UpdateReadRows()
+        {
+            List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] rowBytes) => RejudgeAt(row, at, rowBytes);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            for (var i = 0; i < affected.Count; i++)
+            {
+                context.Batch.PollCancellation();
+                row.Clear();
+                row.Add(affected[i]);
+                read.Clear();
+                read.Add(judgedRows[i]);
+                HoldQualifyingRows(context.Batch, table, row, read, walkGeneration, RowLockPurpose.UpdatePreImage, rejudge);
+                if (row.Count == 0)
+                    continue;
+                yield return OutputRowOf(CommitUpdate(context, table, row, output, setOrdinals, sourceView: null, rowsLocked: true, partners));
+            }
+        }
 
         // The target row of the current tuple's new values, and its old image
         // when something reads that.
@@ -1287,8 +1414,17 @@ partial class Simulation
     /// table's scan otherwise.
     /// </summary>
     private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch) =>
-        (where is null ? null : Selection.SeekMutationTarget(table, where, batch))
-            ?? ClusteredScan.RowsWithAddress(table, batch.Connection.StatementIo);
+        MutationRowSource(table, where, batch, out _);
+
+    /// <summary>
+    /// <see cref="MutationRowSource(HeapTable, BooleanExpression?, BatchContext)"/>,
+    /// with the seek's rows in <paramref name="seek"/> when it seeks.
+    /// </summary>
+    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch, out IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek)
+    {
+        seek = where is null ? null : Selection.SeekMutationTarget(table, where, batch);
+        return seek ?? ClusteredScan.RowsWithAddress(table, batch.Connection.StatementIo);
+    }
 
     /// <summary>
     /// <paramref name="sources"/> with the joined write's target source at

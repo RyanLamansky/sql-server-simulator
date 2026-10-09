@@ -127,6 +127,8 @@ Missing that release does not merely hold a lock for too long: the locks outlive
 The symptom is a later Sch-M — an `ALTER`, a startup re-applying its programmable objects — blocking forever against a holder nobody can find.
 `ModuleCreationLockLeakTests` walks every module kind, created and invoked, and asserts `sys.dm_tran_locks` is empty; a new body-inspection site that forgets the release fails there rather than in a consumer's startup.
 Transaction-scoped locks live in `SimulatedDbTransaction.HeldLocks` and release in `Commit()` / `Rollback()` / dispose-implicit-rollback.
+**A trigger body's statements under an auto-commit statement** hand their data locks to that statement as each ends (`SimulatedDbConnection.TriggerStatementLocks`), keeping every write's X and what a `REPEATABLE READ` or `SERIALIZABLE` read keeps until the firing statement — the transaction they belong to — ends; a `READ COMMITTED` read's object IS and every Sch-S go with their statement.
+Probed 2026-10-09 against SQL Server 2025: another session's read of a row a trigger body inserted waits while the firing statement's client reads the body's later rows; it once read the row there, uncommitted.
 Savepoint partial rollbacks (`ROLLBACK TRAN <savepoint>`) do NOT release locks — matches real SQL Server (probe-confirmed).
 
 ### Sessions sharing a transaction
@@ -744,6 +746,7 @@ The pieces, each shared by the single-table and joined forms:
   A joined form waits once a tuple has passed the join and the WHERE, so it waits only on a row that joins, as real's plan seeking the target by its join key does, and judges a row the wait changed again against its partners, re-running the join with the target narrowed to that row (`WithTargetNarrowedTo`, the join-view path's `SourcesAlongPath` with a one-row source).
 - **The walk holds nothing.**
   UPDATE and DELETE let the U go once the waited row is read (`BatchContext.AwaitTargetRowWriters`) and take every qualifying row's X after the walk and its `TOP`, in walk order (`Simulation.HoldQualifyingRows`), reading a row again and judging it afresh when the heap's `MutationGeneration` has moved.
+  A statement writing as its client reads its `OUTPUT` rows takes each row's X as it writes it instead, one row at a time, the walk reading each row as it reaches it, or, where real's plan spools the read, holding every row read in U until its write ([`data-reader.md`](data-reader.md#a-dml-statements-output-rows)); a `MERGE` writing so holds its matched rows in U rather than X.
   Holding the walk's U, a session could keep a later row while its X waited on an earlier one, held by another session whose X waited on the later: eight sessions each updating the same two rows forty times deadlocked one to seventeen times per run, single-table or joined, where real meets no deadlock because its walk takes U on every row in order.
   MERGE takes X inline, matched row by matched row, right after the U it waited in, which keeps the same order; its actions take it again re-entrantly.
 - **A view target read as the view yields it.**
@@ -778,7 +781,7 @@ Divergences:
 - **Constants the simulator doesn't fold**: a joined write from a CTE over a `VALUES` row (`WITH c AS (SELECT * FROM (VALUES (2)) x (id))`) or a `TOP` derived table of one constant row, and one whose target is an `APPLY` body over `VALUES` (`UPDATE x … FROM (VALUES (2)) d (id) CROSS APPLY (SELECT * FROM t WHERE t.id = d.id) x`), wait in U, where real waits `LCK_M_X`; and an `APPLY` body reading the target beside the target joined to it waits in S here where real waits in U (probed 2026-10-08 against SQL Server 2025).
 - **A joined write's or a MERGE's seek through a nonclustered index** waits on the row's own lock, the clustered key or the RID; real holds U on the index key it read and waits on the row — the same row and mode, the index key's U missing here — or, when the holder changed that key, waits on the index key itself, which the simulator reports as the row.
   The single-table UPDATE and DELETE read it as real does (above).
-- **A qualifying row's X comes after the walk**, real's as the plan writes the row; a MERGE holds X on a matched row an `AND` condition then declines, where real's U is released.
+- **A qualifying row's X comes after the walk**, real's as the plan writes the row — except for a statement writing as its client reads its `OUTPUT` rows, which takes each as it writes it; a MERGE holds X on a matched row an `AND` condition then declines, where real's U is released.
 - **The prior image a rewrite registry entry carries** is the row before the session's latest write of it, so a row a transaction rewrote twice is tested on its intermediate image rather than its committed one.
 
 - **A MERGE into a join view keeps U on every row the join reached** until it has written, where real's scan releases the U on a row it doesn't write; and a joined write through a single-table view waits on every row of the table another session holds before its read, where real's scan waits on the rows it reaches.

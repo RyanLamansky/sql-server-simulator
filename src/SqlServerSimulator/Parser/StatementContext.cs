@@ -284,6 +284,14 @@ internal sealed class StatementContext
     public (SqlType[] Schema, string[] Names)? ClientOutputShape;
 
     /// <summary>
+    /// Set once a DML statement writing as it sends has sent its result set
+    /// (<c>Simulation.SendAsWritten</c>), which carries the statement's count
+    /// whatever ends it: a TRY frame catching its error adds no count of its
+    /// own (<see cref="ClientOutputShape"/>).
+    /// </summary>
+    public bool SentWrittenRows;
+
+    /// <summary>
     /// Whether this is a <c>SELECT</c> sending its rows to the client — neither
     /// assigning variables nor directing them <c>INTO</c> a table — set as it
     /// starts executing.
@@ -522,6 +530,8 @@ internal sealed class StatementContext
         this.WritesRows = false;
         this.WritesText = false;
         this.ClientOutputShape = null;
+        this.SentWrittenRows = false;
+        this.CutShortWrite = null;
         this.SendsRows = false;
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
@@ -611,6 +621,14 @@ internal sealed class StatementContext
     /// statement.
     /// </summary>
     public ResultStream? StreamingResult;
+
+    /// <summary>
+    /// The error that ended a DML statement writing its <c>OUTPUT</c> rows as
+    /// it sends them before its first window was out: the statement's result
+    /// set carries the rows written before it, and the dispatch loop raises
+    /// it once that result set has gone out, as it raises a <c>SELECT</c>'s.
+    /// </summary>
+    public SimulatedSqlException? CutShortWrite;
 
     /// <summary>
     /// Freezes the current time for one run of the statement's text and

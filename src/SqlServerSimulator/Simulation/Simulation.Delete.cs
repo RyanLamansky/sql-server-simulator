@@ -161,6 +161,9 @@ partial class Simulation
         public readonly bool SerializableHint = serializableHint;
         public readonly View? SourceView = sourceView;
 
+        /// <summary>Whether the <c>WHERE</c> holds a subquery, once a run writing as it sends has asked (<see cref="Simulation.ReadsSubquery"/>).</summary>
+        public bool? ReadsSubquery;
+
         public override SimulatedStatementOutcome Run(ParserContext context) => RunDelete(context, this);
     }
 
@@ -232,7 +235,8 @@ partial class Simulation
         // The compile walk holds no schema lock, so it doesn't read the
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch);
+        IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
@@ -258,16 +262,28 @@ partial class Simulation
             && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
         var targetWait = contended && Selection.WhereIsClusteredKeySeek(table, where!) ? LockMode.Exclusive : LockMode.Update;
         var throughIndex = contended && targetWait == LockMode.Update ? Selection.MutationSeekIndex(table, where!) : null;
+        // A statement whose client reads its OUTPUT rows as they come deletes
+        // each as it sends it, in the order real's plan for its shape does.
+        var writeOrder = positionedCursor is null && sourceView is null && viewRows is null && !readsNoRow && WritesAsItSends(context.Batch, output)
+            ? DeleteWriteOrder(context.Batch, table, plan.ReadsSubquery ??= ReadsSubquery([where]), top)
+            : WriteOrder.WholeFirst;
         // A seek chose its rows from the images they carried; one a wait here
-        // let settle may carry another.
+        // let settle may carry another. A walk writing as it reads waits on a
+        // row it meets where it meets it, the rows before it out first.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
-            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _), targetWait, throughIndex)
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => (writeOrder != WriteOrder.AsRead || table.Heap.ReadLiveRow(address.Page, address.Slot) is null) && JudgeRow(address.Page, address.Slot, prior, out _), targetWait, throughIndex)
             && where is not null)
         {
-            rowSource = MutationRowSource(table, where, context.Batch);
+            rowSource = MutationRowSource(table, where, context.Batch, out seek);
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
+        // Real's plan for a table with no nonclustered index sends each row
+        // before it deletes it, so the row a reader's window ends on is held,
+        // not yet deleted.
+        var sendsBeforeDeleting = writeOrder != WriteOrder.WholeFirst && SendsBeforeDeleting(context.Batch, table);
+        if (writeOrder == WriteOrder.AsRead)
+            return SentAsWritten(output!, DeleteAsRead());
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             context.Batch.PollCancellation();
@@ -294,14 +310,14 @@ partial class Simulation
                 context.Batch.TargetKeyReinserted = true;
         }
         ApplyDmlTopCap(top, deleted, context.Batch);
-        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
+        if (writeOrder == WriteOrder.ReadsFirst)
         {
-            var (pageIndex, slotIndex, _) = deleted[i];
-            if (!JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
-                return false;
-            deleted[i] = (pageIndex, slotIndex, fullOld);
-            return true;
-        });
+            judgedRows.RemoveRange(deleted.Count, judgedRows.Count - deleted.Count);
+            HoldReadRows(context.Batch, table, judgedRows);
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+            return SentAsWritten(output!, DeleteReadRows());
+        }
+        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) => Rejudge(deleted, i, rowBytes));
 
         // SI writer pre-flight: scan the version chain for snapshot-visible
         // tombstoned rows. A pre-delete payload matching WHERE means
@@ -314,6 +330,95 @@ partial class Simulation
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
         return CommitDelete(context, table, deleted, output, sourceView, rowsLocked: true);
+
+        // Judges the row at rows[i] again as rowBytes, replacing its entry;
+        // false when it no longer qualifies.
+        bool Rejudge(List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> rows, int i, byte[] rowBytes)
+        {
+            var (pageIndex, slotIndex, _) = rows[i];
+            if (!JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
+                return false;
+            rows[i] = (pageIndex, slotIndex, fullOld);
+            return true;
+        }
+
+        // The OUTPUT rows of a statement deleting each row as the walk reaches
+        // it (WriteOrder.AsRead): read, locked, deleted and sent one at a time.
+        IEnumerable<byte[]> DeleteAsRead()
+        {
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+            var cap = top is { Percent: false } countLimit ? Selection.ResolveDmlTopCap(countLimit, int.MaxValue, context.Batch) : int.MaxValue;
+            if (context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
+                cap = (int)rowCountLimit;
+            var written = 0;
+            var walk = new TargetWalk();
+            List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            using var rows = TargetRowsAsTheyStand(table, seek, context.Batch, walk).GetEnumerator();
+            while (written < cap)
+            {
+                context.Batch.PollCancellation();
+                var generation = Volatile.Read(ref table.Heap.MutationGeneration);
+                if (!rows.MoveNext())
+                    yield break;
+                var (pageIndex, slotIndex, rowBytes) = rows.Current;
+                if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes, targetWait, throughIndex)
+                    || !JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
+                {
+                    continue;
+                }
+                row.Clear();
+                row.Add((pageIndex, slotIndex, fullOld));
+                read.Clear();
+                read.Add((pageIndex, slotIndex, rowBytes));
+                HoldQualifyingRows(context.Batch, table, row, read, generation, RowLockPurpose.Delete, rejudge);
+                if (row.Count == 0)
+                    continue;
+                written++;
+                if (!sendsBeforeDeleting)
+                {
+                    var sent = OutputRowOf(CommitDelete(context, table, row, output, sourceView: null, rowsLocked: true));
+                    walk.NoteOwnWrites(table);
+                    yield return sent;
+                    continue;
+                }
+                CheckBeforeSending(context, table, row[0].FullOld);
+                yield return ProjectDeleteOutput(row, output!, context.Batch)[0];
+                _ = CommitDelete(context, table, row, output: null, sourceView: null, rowsLocked: true);
+                walk.NoteOwnWrites(table);
+            }
+        }
+
+        // The OUTPUT rows of a statement that read every row first, holding
+        // each in U (WriteOrder.ReadsFirst): each deleted as it is sent.
+        IEnumerable<byte[]> DeleteReadRows()
+        {
+            List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] current) => Rejudge(row, at, current);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            for (var i = 0; i < deleted.Count; i++)
+            {
+                context.Batch.PollCancellation();
+                row.Clear();
+                row.Add(deleted[i]);
+                read.Clear();
+                read.Add(judgedRows[i]);
+                HoldQualifyingRows(context.Batch, table, row, read, walkGeneration, RowLockPurpose.Delete, rejudge);
+                if (row.Count == 0)
+                    continue;
+                if (!sendsBeforeDeleting)
+                {
+                    yield return OutputRowOf(CommitDelete(context, table, row, output, sourceView: null, rowsLocked: true));
+                    continue;
+                }
+                CheckBeforeSending(context, table, row[0].FullOld);
+                yield return ProjectDeleteOutput(row, output!, context.Batch)[0];
+                _ = CommitDelete(context, table, row, output: null, sourceView: null, rowsLocked: true);
+            }
+        }
 
         // Whether the statement deletes the row, with the full image the
         // statement keeps of it when something reads that.
@@ -445,6 +550,9 @@ partial class Simulation
         public readonly OutputProjection? Output = output;
         public readonly Selection.DmlTopLimit? Top = top;
 
+        /// <summary>Whether the <c>WHERE</c> holds a subquery, once a run writing as it sends has asked (<see cref="Simulation.ReadsSubquery"/>).</summary>
+        public bool? ReadsSubquery;
+
         public override SimulatedStatementOutcome Run(ParserContext context) => RunJoinedDelete(context, this);
     }
 
@@ -528,16 +636,61 @@ partial class Simulation
             context.Batch.TargetKeyReinserted = true;
 
         ApplyDmlTopCap(top, deleted, context.Batch);
-        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
+        // A statement whose client reads its OUTPUT rows as they come deletes
+        // each as it sends it, the join read whole first.
+        var writeOrder = WritesAsItSends(context.Batch, output)
+            ? JoinedWriteOrder(DeleteWriteOrder(context.Batch, table, plan.ReadsSubquery ??= ReadsSubquery([where]), top), sources, targetIndex, table)
+            : WriteOrder.WholeFirst;
+        if (writeOrder != WriteOrder.WholeFirst)
+        {
+            judgedRows.RemoveRange(deleted.Count, judgedRows.Count - deleted.Count);
+            if (writeOrder == WriteOrder.ReadsFirst)
+                HoldReadRows(context.Batch, table, judgedRows);
+            return SentAsWritten(output!, DeleteReadRows(SendsBeforeDeleting(context.Batch, table)));
+        }
+        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) => RejudgeAt(deleted, i, rowBytes));
+
+        return CommitDelete(context, table, deleted, output, sourceView: null, rowsLocked: true, partners);
+
+        // Judges the row at rows[i] again as rowBytes against its partners,
+        // replacing its entry; false when it no longer qualifies.
+        bool RejudgeAt(List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> rows, int i, byte[] rowBytes)
         {
             if (!Rejudge(rowBytes, out var fullOld))
                 return false;
-            deleted[i] = (deleted[i].PageIndex, deleted[i].SlotIndex, fullOld);
-            partners?.Note((deleted[i].PageIndex, deleted[i].SlotIndex), currentTuple);
+            rows[i] = (rows[i].PageIndex, rows[i].SlotIndex, fullOld);
+            partners?.Note((rows[i].PageIndex, rows[i].SlotIndex), currentTuple);
             return true;
-        });
+        }
 
-        return CommitDelete(context, table, deleted, output, sourceView: null, rowsLocked: true, partners);
+        // The OUTPUT rows of a statement that read its join whole: each row
+        // deleted as it is sent.
+        IEnumerable<byte[]> DeleteReadRows(bool sendsBeforeDeleting)
+        {
+            List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> row = [];
+            List<(int PageIndex, int SlotIndex, byte[] Bytes)> read = [];
+            bool RejudgeRow(int at, byte[] rowBytes) => RejudgeAt(row, at, rowBytes);
+            Func<int, byte[], bool> rejudge = RejudgeRow;
+            for (var i = 0; i < deleted.Count; i++)
+            {
+                context.Batch.PollCancellation();
+                row.Clear();
+                row.Add(deleted[i]);
+                read.Clear();
+                read.Add(judgedRows[i]);
+                HoldQualifyingRows(context.Batch, table, row, read, walkGeneration, RowLockPurpose.Delete, rejudge);
+                if (row.Count == 0)
+                    continue;
+                if (!sendsBeforeDeleting)
+                {
+                    yield return OutputRowOf(CommitDelete(context, table, row, output, sourceView: null, rowsLocked: true, partners));
+                    continue;
+                }
+                CheckBeforeSending(context, table, row[0].FullOld);
+                yield return ProjectDeleteOutput(row, output!, context.Batch, partners)[0];
+                _ = CommitDelete(context, table, row, output: null, sourceView: null, rowsLocked: true);
+            }
+        }
 
         // The target row's full image, when something reads it.
         SqlValue[]? FullImage(byte[] targetBytes)
