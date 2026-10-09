@@ -45,6 +45,7 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
   Real compiles the inner batch against the table visible *before* it runs, so a column only the inner table has is Msg 207 on both engines (`CREATE TABLE #t (b int); SELECT b FROM #t` inside `EXEC` while the caller holds `#t (a int)`), and so is a `CREATE PROC` whose body does the same in a session holding one.
 - **A name over 116 characters** is Msg 193, the room tempdb leaves beside its twelve-digit suffix; a missing temp table's Msg 208 is at state 0, where a permanent table's is at 1; and `OBJECT_ID('#foo')` is NULL unless tempdb is the current database — `OBJECT_ID('tempdb..#foo')` is the spelling that finds it (probed 2026-10-01 against SQL Server 2025).
 - **A view or function can't read one**: a view's body naming `#foo` is Msg 4508, a function's — scalar, inline or multi-statement — Msg 2772, each at its `CREATE` (probed 2026-10-01).
+- **Locked whole**: a read takes the table's object S and a write its X, never a row lock, so a request of the session writing a table its other request is reading mid-result waits, and `sys.dm_tran_locks` lists the lock in tempdb — the modes and durations by level and hint are in [`locking.md`](locking.md#local-temp-tables).
 - **Bare `#`** is a valid temp-table name (one-char `#`).
   Identity / SCOPE_IDENTITY work identically to regular tables.
   CTE prefix, JOINs across multiple `#`-tables, all queries against `#foo` flow through the same Selection / Insert / Update / Delete / Merge machinery via `TryResolveTable`.

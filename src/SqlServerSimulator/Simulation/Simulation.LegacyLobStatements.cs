@@ -340,11 +340,12 @@ partial class Simulation
     /// a block, a <c>TRY</c>, an <c>IF</c>, a <c>WHILE</c> or a procedure or
     /// dynamic-SQL call, which stream theirs
     /// (<see cref="BatchContext.StreamingFrames"/>,
-    /// <see cref="BatchContext.CallerStreams"/>).
+    /// <see cref="BatchContext.CallerStreams"/>) — save in a procedure an RPC
+    /// called (<see cref="BatchContext.InRpcProcedure"/>).
     /// </summary>
     private static SimulatedBulkTextRequest AwaitBulkText(BatchContext batch, string statement)
     {
-        if (batch.FramedStatementDepth != batch.StreamingFrames + 1 || !batch.CallerStreams || batch.YieldsBetweenStatements)
+        if (batch.FramedStatementDepth != batch.StreamingFrames + 1 || !batch.CallerStreams || batch.YieldsBetweenStatements || batch.InRpcProcedure)
         {
             throw new NotSupportedException($"{statement} BULK where its batch can't suspend — in a trigger or a function, in a procedure an RPC, INSERT … EXEC or WITH RESULT SETS calls, or on a MARS session — isn't modeled.");
         }

@@ -386,6 +386,119 @@ public sealed class StreamedResultTests
     }
 
     /// <summary>
+    /// A <c>SERIALIZABLE</c> seek — a range either way, an <c>IN</c> list, a
+    /// descending scan — locks each key as it reaches it, so a reader suspended
+    /// two rows in holds twenty keys, a write behind it waits and one ahead goes
+    /// in and is read when the seek gets there. Past its last row an ascending
+    /// read locks the key after its range, a descending one the key below it,
+    /// and a descending scan takes the infinity anchor first (probed 2026-10-09
+    /// against SQL Server 2025, every row).
+    /// </summary>
+    [TestMethod]
+    [DataRow("where k between 400 and 3600", "KEY RangeS-Sx20, OBJECT IS", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
+    [DataRow("where k between 400 and 3600 order by k desc", "KEY RangeS-Sx20, OBJECT IS", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
+    [DataRow("where k between 400 and 3601 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (3601, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1604, OBJECT IS")]
+    [DataRow("where k > 400 and k < 3600 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1600, "KEY RangeS-Sx1602, OBJECT IS")]
+    [DataRow("where k between 400 and 9000 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (4001, 'y')", "insert big values (401, 'y')", 1802, "KEY RangeS-Sx1804, OBJECT IS")]
+    [DataRow("order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (4001, 'y')", "insert big values (3, 'y')", 2001, "KEY RangeS-Sx2002, OBJECT IS")]
+    [DataRow("where k > 400 order by k", "KEY RangeS-Sx20, OBJECT IS", "insert big values (401, 'y')", "insert big values (4001, 'y')", 1801, "KEY RangeS-Sx1802, OBJECT IS")]
+    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k", "KEY Sx20, OBJECT IS", "update big set v = 'y' where k = 80", "update big set v = 'y' where k = 1000", 25, "KEY Sx25, OBJECT IS")]
+    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k desc", "KEY Sx20, OBJECT IS", "update big set v = 'y' where k = 1000", "update big set v = 'y' where k = 40", 25, "KEY Sx25, OBJECT IS")]
+    [DataRow("with (updlock) where k between 400 and 3600", "KEY RangeS-Ux20, OBJECT IX", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Ux1603, OBJECT IX")]
+    [DataRow("with (xlock) where k between 400 and 3600 order by k desc", "KEY RangeX-Xx20, OBJECT IX", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeX-Xx1603, OBJECT IX")]
+    public void Serializable_SeekLocksKeysAsItReachesThem(string query, string held, string blocked, string free, int read, string heldAtEnd)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table big (k int primary key, v char(2000) not null); insert big select value * 2, 'x' from generate_series(1, {Rows})");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction(IsolationLevel.Serializable);
+        using (var rows = ReadTwo(reader, $"select * from big {query}", transaction))
+        {
+            AreEqual(held, Locks(other, spid));
+            AreEqual(1222, Attempt(other, blocked));
+            _ = other.CreateCommand(free).ExecuteNonQuery();
+            AreEqual(read, ReadRest(rows));
+        }
+        AreEqual(heldAtEnd, Locks(other, spid));
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A <c>SERIALIZABLE</c> seek of an equality prefix of a composite key, and
+    /// one through a nonclustered index — whose key locks real counts toward
+    /// escalation apart from its rows' — lock as they reach each key too, the
+    /// nonclustered seek taking each row's S as it looks it up (probed
+    /// 2026-10-09 against SQL Server 2025: 3,603 range locks and 3,602 row
+    /// locks held at the end, unescalated).
+    /// </summary>
+    [TestMethod]
+    public void Serializable_PrefixAndNonclusteredSeeks_LockKeysAsTheyReachThem()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table c (a int not null, b int not null, v char(2000) not null default 'x', primary key (a, b));
+            insert c (a, b) select a.value, b.value * 2 from generate_series(1, 9) a cross join generate_series(1, 300) b;
+            create table n (k int primary key, v int not null, pad char(2000) not null default 'x', index ixv (v));
+            insert n (k, v) select value * 2, value * 2 from generate_series(1, 4000);
+            """);
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction(IsolationLevel.Serializable);
+        using (var rows = ReadTwo(reader, "select * from c where a = 5 order by a, b", transaction))
+        {
+            AreEqual("KEY RangeS-Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual(1222, Attempt(other, "insert c (a, b) values (5, 3)"));
+            AreEqual(1222, Attempt(other, "insert c (a, b) values (4, 601)"));
+            _ = other.CreateCommand("insert c (a, b) values (5, 599)").ExecuteNonQuery();
+            AreEqual(301, ReadRest(rows));
+        }
+        AreEqual("KEY RangeS-Sx302, OBJECT IS", Locks(other, spid));
+        using (var rows = ReadTwo(reader, "select * from n with (index (ixv)) where v between 400 and 7600", transaction))
+        {
+            AreEqual("KEY RangeS-Sx322, KEY Sx20, OBJECT ISx2", Locks(other, spid));
+            AreEqual(1222, Attempt(other, "update n set pad = 'y' where k = 402"));
+            AreEqual(0, Attempt(other, "update n set pad = 'y' where k = 7000"));
+            AreEqual(3601, ReadRest(rows));
+        }
+        AreEqual("KEY RangeS-Sx3904, KEY Sx3601, OBJECT ISx2", Locks(other, spid));
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A procedure's body streams its rows whether a batch's <c>EXEC</c> or an
+    /// RPC calls it, and the call holds no lock on the procedure once its body
+    /// runs — real takes its Sch-S only to compile — so another session drops
+    /// it while the reader is suspended in it (probed 2026-10-09 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void ProcedureBody_StreamsAndHoldsNoLockOnTheProcedure(bool rpc)
+    {
+        var sim = Big();
+        _ = sim.ExecuteNonQuery("create procedure p as select * from big");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var command = reader.CreateCommand(rpc ? "p" : "exec p");
+        if (rpc)
+            command.CommandType = CommandType.StoredProcedure;
+        using (var rows = command.ExecuteReader())
+        {
+            IsTrue(rows.Read());
+            IsTrue(rows.Read());
+            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+            AreEqual(0, Attempt(other, "drop procedure p"));
+            AreEqual(Rows, ReadRest(rows));
+        }
+        AreEqual("", Locks(other, spid));
+    }
+
+    /// <summary>
     /// A key another transaction inserted ahead of a suspended
     /// <c>SERIALIZABLE</c> scan and hasn't committed stops the scan there, as
     /// any locked row does.

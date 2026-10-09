@@ -264,20 +264,21 @@ A nonclustered index's anchors meet only a write that changes a column the index
 
 The table-level acquisition is only **IS** (or **IX** behind `UPDLOCK` / `XLOCK`), tx-scoped, and the phantom fence is settled later — the predicate that decides what to lock isn't known when the FROM source resolves.
 `DataLockPlan.SerializableRangeMode` carries the obligation forward, naming the mode the key locks are taken in — `RangeS-S` for a plain read, `RangeS-U` behind `UPDLOCK`, `RangeX-X` behind `XLOCK`, all three probe-confirmed against real.
-Exactly two places discharge it:
+Three places discharge it:
 
-- **`Selection.SettleSerializablePhantomFence`**, called from `MaybeApplyIndexSeek` once the WHERE conjuncts have been collected and *before* any candidate address is read.
-  `ComputeKeyFence` walks the table's keys then its indexes (so the choice doesn't ride on dictionary order), scoring each by how deep an **equality prefix** the conjuncts pin on it plus whether a range bound lands on the key column right after that prefix; the longest prefix wins and a bound continuation breaks a tie.
+- **`Selection.WalkKeyFence`**, for a read of intervals of an index it can walk in order — the clustered key, or an ascending unfiltered nonclustered index — which produces the rows itself, locking each key as it reaches it (see [A reader suspended mid-result](#a-reader-suspended-mid-result)).
+  `ComputeKeyFence`, called from `MaybeApplyIndexSeek` once the WHERE conjuncts have been collected, walks the table's keys then its indexes (so the choice doesn't ride on dictionary order), scoring each by how deep an **equality prefix** the conjuncts pin on it plus whether a range bound lands on the key column right after that prefix; the longest prefix wins and a bound continuation breaks a tie.
   An `IN` list reads one interval per value — per tuple of the cartesian product across a multi-column prefix, up to `KeyFenceProbeCap` of them, past which the hull of each column's values is read instead.
-  `BatchContext.AcquireKeyFence` then asks the seek cache (`HeapSeekCache.KeyLockAnchors`) for every key inside each interval and the first key past it — the infinity anchor when none follows — and locks them.
   An interval pinning every column of a **unique** key by equality is the exception real makes on a hit: a plain key S (a row S for the clustered key); a miss locks the next key like any range.
   Reading through a nonclustered index also takes the row S real's lookup takes on each row the index finds.
+  The ordered-scan path walks too, for an order the clustered key leads — a range, a pinned prefix, an `IN` list on the order column, either direction — as does a row-locking scan with nothing to seek on.
+- **`Selection.SettleSerializablePhantomFence`**, for an interval of an index the walk can't read in key order — a descending or filtered one, a clustered key with a nullable column — which `BatchContext.AcquireKeyFence` locks up front, *before* any candidate address is read: it asks the seek cache (`HeapSeekCache.KeyLockAnchors`) for every key inside each interval and the first key past it — the infinity anchor when none follows — and locks them.
 - **`BatchContext.EnsureSerializableTableLock`**, for a read with no narrower interval — a whole-table scan, a non-sargable predicate, a predicate on an unindexed or non-leading column, a cross-column `OR`, an ordered scan — which locks the whole key space: every key of the clustered index plus the infinity anchor, or over a heap a table S (folding in the IS, which real reports converted).
   A plain scan of a clustered table takes it key by key as it reaches each row, the infinity anchor at its end (see [A reader suspended mid-result](#a-reader-suspended-mid-result)).
-  Reached from `WrapWithRowConflictChecks` (the un-narrowed scan's own iterator), from the ordered-scan path, and from `SettleSerializablePhantomFence` itself when no conjunct offers an interval.
+  Reached from `WrapWithRowConflictChecks` (the un-narrowed scan's own iterator), from the ordered-scan path over a nonclustered index, and from a union of an `OR`'s seeks.
   Idempotent per batch per table, since a source can be re-enumerated many times.
 
-The two are mutually exclusive **per source**, which `DataLockPlan.Fence` (a `PhantomFenceState` cell the plan's struct copies share) enforces: a source that locked its keys must not then have the whole key space added on top by the scan wrapper, which would re-block the keys the seek deliberately left free.
+They are mutually exclusive **per source**, which `DataLockPlan.Fence` (a `PhantomFenceState` cell the plan's struct copies share) enforces: a source that locked its keys must not then have the whole key space added on top by the scan wrapper, which would re-block the keys the seek deliberately left free.
 The fence itself is *not* short-circuited on the cell: a correlated inner re-plans per outer row and each outer value names keys of its own — which is how a join's inner side, seeked per outer row, locks each outer value's keys.
 A key the session already holds in the mode is not taken again (`LockManager.IsHeldBy`), so a re-planned inner doesn't pile up held-lock entries.
 
@@ -417,6 +418,7 @@ Real escalates a statement's row and key locks on one table to a single table lo
 Probed 2026-09-28 against SQL Server 2025: the first attempt comes at 6 250 locks in all (a SERIALIZABLE scan of a narrow table escalates at about 6 235 keys, an UPDATE at about 6 235 rows), two statements of 4 000 keys each in one transaction never escalate, and the mode is S when every lock is S-family (a REPEATABLE READ or SERIALIZABLE read) and X otherwise (an UPDATE, an `UPDLOCK` read with or without SERIALIZABLE).
 
 `BatchContext.CountLocksForEscalation` keeps the tally on the statement (`StatementContext.LockTallies`), with the page locks estimated from the heap's rows per page (`EstimatedLockTotal`); a row lock under a key lock the statement holds on the clustered key adds nothing, as real holds one lock per key.
+A nonclustered index's key locks keep a tally of their own, as real counts per index (probed 2026-10-09 against SQL Server 2025: a SERIALIZABLE read through a nonclustered index held 3,603 range locks on its keys and 3,602 on its rows, unescalated).
 At the attempt point `TryEscalate`:
 
 1. Tries the table S or X **without waiting** — real escalates only when the table lock is grantable at once, and otherwise keeps the fine-grained locks and tries again 1 250 locks later.
@@ -429,6 +431,7 @@ A table set `LOCK_ESCALATION = DISABLE` (`HeapTable.LockEscalation`) never escal
 
 **Sch-S** — every successful `BatchContext.TryResolve*` path (table / view / function / procedure / table-type / sequence) on a schema-bound object.
 Skipped for temp tables / table variables / trigger `INSERTED` / `DELETED` pseudo-tables / system tables.
+A procedure call lets its procedure's go once the body has compiled (`BatchContext.ReleaseStatementLock`), as real holds it only to compile: a body running, or suspended mid-result, holds none, and another session drops or alters the procedure meanwhile (probed 2026-10-09 against SQL Server 2025).
 
 **Sch-M** — every DDL site: `DROP {TABLE,VIEW,FUNCTION,PROCEDURE,TYPE, SEQUENCE,TRIGGER}` after the lookup; `TRUNCATE TABLE`; `ALTER TABLE`; `DROP INDEX` and a clustered `CREATE INDEX`, while a nonclustered `CREATE INDEX` takes the table's S (see [Table-level and schema-lock behaviors](#table-level-and-schema-lock-behaviors)).
 
@@ -440,7 +443,17 @@ Update is a delete+insert pair, so both the old RID and the new RID get row-X.
 **Row probe / row-S / row-U / row-X (reads)** — `BatchContext.TouchRowForRead(table, pageIndex, slotIndex, plan)` during heap row enumeration (wrapped by `BatchContext.WrapWithRowConflictChecks`).
 Iterators that need addresses go through `Heap.EnumerateRowsWithAddress` instead of `Heap.EnumerateRows`.
 
-Table variables / local temp tables / system tables bypass all data-lock acquisition (and row-lock acquisition).
+Table variables and system tables bypass all data-lock acquisition (and row-lock acquisition); a local temp table takes its object lock alone ([below](#local-temp-tables)).
+
+### Local temp tables
+
+A local temp table is its session's alone, so real locks it whole, never a row, a page or a key, and lists the lock in tempdb (probed 2026-10-09 against SQL Server 2025, `BatchContext.AcquireLocalTempLock`):
+- a read takes `S`, to the statement's end under `READ COMMITTED` and `TABLOCK`, to the transaction's under `REPEATABLE READ`, `SERIALIZABLE` and their hints;
+- `UPDLOCK`, `XLOCK`, `TABLOCKX` and every write take `X` to the transaction's end;
+- a read of no committed state — `NOLOCK`, `READ UNCOMMITTED`, `SNAPSHOT` — holds `Sch-S` alone;
+- outside MARS, a session in a transaction takes `X` for any access, a read of no committed state included (`SimulatedDbConnection.RunsMars`).
+Only the session's other MARS requests meet these locks, so a request's write waits on a reader suspended over the table, as real's does; a redefinition takes the object's `Sch-M` as a user table's does.
+A global temp table locks as a user table, shared across sessions, and `sys.dm_tran_locks` lists both kinds in tempdb (`LockDmvs.EnumerateTempTableLocks`).
 
 ## Request queue
 
@@ -551,18 +564,28 @@ A `SERIALIZABLE` scan of a clustered table locks each key as it reaches it and t
 The scan reads its key order when it begins, so a key inserted ahead of it since would be passed: once a row's key is locked, the keys that arrived in the gap below it are read first (`BatchContext.KeysArrivedBetween`), and the infinity anchor's lock at the end is followed by the keys that arrived past the last one (`FenceScanEnd`), which is what keeps the scan free of the phantoms the fence exists against (`StreamedResultTests.Serializable_ScanLocksKeysAsItReachesThem`).
 A scan whose order comes without its keys — a nullable or descending clustered key — locks the whole key space as it begins, as do the reads below.
 So does every other `SERIALIZABLE` scan that can't seek: one a predicate no key seeks on filters takes its fence as it scans, every key it passes — a row the predicate rejects included — and one taking `UPDLOCK` / `XLOCK` locks each key in its range mode before the row's own lock (`TouchRowForRead`), as real's do (probed 2026-10-08 against SQL Server 2025: twenty `RangeS-S` for the twenty rows a filtered reader had sent, sixty where its predicate kept one row in three, twenty `RangeS-U` / `RangeX-X` under `UPDLOCK` / `XLOCK`, and an insert ahead of each going in).
-`Selection.MaybeApplyIndexSeek` leaves such a read's fence to the scan (`scanFences`), taking the whole key space itself only for a path that reads through a seek instead — the union of an `OR`'s seeks, a qualifying row-lock scan.
+`Selection.MaybeApplyIndexSeek` leaves such a read's fence to the scan (`scanFences`), taking the whole key space itself only for the union of an `OR`'s seeks; a row-locking scan with nothing to seek on walks the key space as below.
+
+A `SERIALIZABLE` seek locks each key as it reaches it too (`Selection.WalkKeyFence`): it produces its rows by walking the keys of its intervals — a range, an equality prefix of a composite key, each value of an `IN` list, a read in key order either way — rather than locking them all and then reading (probed 2026-10-09 against SQL Server 2025, every shape two rows into 2,007-byte rows: twenty keys held, a write behind the position waiting, an insert ahead going in and read when the seek got there).
+Which anchors outside the rows it locks follows the direction:
+- **ascending**, the key past each interval once it has read the interval — the infinity anchor when none is — even when the upper bound is a key it read;
+- **descending**, that same key before its first row, unless the interval's top is a key equal to an inclusive upper bound, so a descending scan begins with the infinity anchor; and at its end the last key below the interval, which has no infinity counterpart;
+- **a full key of a unique index**, the plain key lock on a hit and the next key's range on a miss, each as the seek reaches it, so twenty values of an `IN` list hold twenty locks.
+A seek through a nonclustered index locks its entries in the range mode and takes each row's S as it looks it up; a key an earlier delete in flight took away is waited out before the walk reads its keys, as the seek's other paths do.
 
 ### Divergences
 
-- **Page locks aren't modeled yet** ([Granularity approximations](#granularity-approximations)).
-  Real's default scan takes `PAGE S` on the page it is reading under READ COMMITTED and `PAGE IS` / `IU` / `IX` above row locks, and `PAGLOCK` takes page locks in place of row locks; here every read is row-locked, so an update of another row on the reader's current page goes ahead where real's waits.
+- **A `READ COMMITTED` reader's position is a row, never a page**, where over a large enough table real's is a page, whose `PAGE S` keeps out a writer of any row on it.
+  **Settled — don't re-pitch:** real's own position lock isn't deterministic.
+  Probed 2026-10-09 against SQL Server 2025 with readers two rows into tables of various widths: the choice between `KEY S` and `PAGE S` turned on both the row count and the row width — `KEY S` through 7,500 rows of 2,000-byte rows and `PAGE S` from 7,700, `KEY S` through 8,000 rows of 100 bytes and `PAGE S` at 9,000, `KEY S` at 10,000 rows of 10 bytes and `PAGE S` at 20,000 — and identical runs held no position lock at all on some passes (100-byte rows at 8,000 rows, 2,000-byte rows at 200, 10-byte rows at 7,500), as the scan happened to stop between rows or pages when its client's window filled.
+  The pages themselves were predictable — rows inserted in key order filled them 4, 19, 69 and 299 to a page by width, and the page held was the position's — but a client can't rely on which lock the position holds, so neither is a contract to match.
+- **`PAGLOCK` isn't modeled yet** ([Granularity approximations](#granularity-approximations)): real holds `PAGE S` on the page its position is on under READ COMMITTED, and on the pages produced under REPEATABLE READ, whatever the table's size (probed 2026-10-09 against SQL Server 2025 under READ COMMITTED: the page of rows 17 to 20 of 2,000-byte rows, over 2,000 rows as over 20,000); here the hint reads with the level's row locks.
+  Nor are the page intent locks above row locks, which only `sys.dm_tran_locks` shows.
   The same granularity is why a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
 - **An object S or X lock is one lock here**, where real's host takes it on each of its 16 lock partitions (`OBJECT S` ×16 in `sys.dm_tran_locks`).
-- **A `SERIALIZABLE` read takes its whole fence as it begins** where it seeks or reads in descending order: a range or point seek locks every key of its interval and the key past it, a descending scan or an `UPDLOCK` / `XLOCK` read with a predicate every key of the table — past the escalation threshold, the table S or X — where real locks each key as the read reaches it (probed 2026-10-08 against SQL Server 2025: a reader of `BETWEEN 200 AND 3800` two rows in held twenty keys, ascending or descending, and a descending scan twenty-one, the infinity anchor first).
+- **A few `SERIALIZABLE` reads still take their whole fence as they begin**: one through a nonclustered index read in descending order, a descending or filtered index, a clustered key with a nullable or descending column, and the union of an `OR`'s seeks — past the escalation threshold, the table S or X — where real locks each key as the read reaches it.
   A reader suspended mid-result so blocks writes ahead of it that real lets through, never the reverse.
-  The scan's way of locking as it reads and finding keys inserted ahead of it (`ScanInKeyOrder`) would carry over: a seek's interval bounds its keys, and its end locks the key past it where the scan's end locks the infinity anchor.
-- **The `READ COMMITTED` reader's position is a row, never a page**: over a table large enough that real's scan locks pages, real holds the current page's S, which keeps out a writer of any row on it.
+- **A row-locking read under `READ COMMITTED` keeps its `U` or `X` on a row a predicate no seek reads rejects**, where real lets it go (probed 2026-10-09 against SQL Server 2025: `UPDLOCK … WHERE v % 3 = 0` held the twenty rows it returned, here every row it passed): only the sargable conjuncts decide (`RowLockQualifier`), since evaluating another conjunct twice could draw a sequence or a `NEWID()` twice.
 - **A sort over `REPEATABLE READ` escalates** at real's threshold, where real's parallel sort of the same 20,000 rows held its 20,000 key locks.
 
 ## Diagnostic DMVs

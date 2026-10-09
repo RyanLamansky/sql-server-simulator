@@ -310,6 +310,14 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool ScopesTransactionsToBatch;
 
     /// <summary>
+    /// Whether this session runs MARS: the in-process connection always does,
+    /// a TDS session when its client asked for it. Outside MARS a session in a
+    /// transaction locks a local temp table exclusively whatever it does with
+    /// it (<c>BatchContext.AcquireLocalTempLock</c>).
+    /// </summary>
+    internal bool RunsMars = true;
+
+    /// <summary>
     /// The batch a <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> suspended
     /// while it waits for its data, which the session's next request resumes
     /// in place of its own; null when none waits.
@@ -820,6 +828,67 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
+    /// How long a request waits on another sending a DML statement's
+    /// <c>OUTPUT</c> rows before Msg 3980 refuses it: real's deadlock monitor
+    /// refuses it at its next pass, which came 3.8 to 5.0 seconds in (probed
+    /// 2026-10-09 against SQL Server 2025), so a shorter <c>CommandTimeout</c>
+    /// expires first, and a reader draining the rows meanwhile lets the
+    /// request run.
+    /// </summary>
+    internal static readonly TimeSpan SessionBusyWait = TimeSpan.FromSeconds(4);
+
+    /// <summary>Whether a request other than <paramref name="asking"/> holds the session sending a DML statement's <c>OUTPUT</c> rows.</summary>
+    internal bool SessionHeldByOtherRequest(SessionRequest? asking)
+    {
+        if (this.pendingRequests.Count <= (asking is null ? 0 : 1))
+            return false;
+        lock (this.requestsGate)
+        {
+            foreach (var request in this.pendingRequests)
+            {
+                if (request != asking && !request.Finished && request.HoldsSession)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Waits, before <paramref name="asking"/> starts, while another request
+    /// holds the session sending a DML statement's <c>OUTPUT</c> rows — up to
+    /// <see cref="SessionBusyWait"/>, after which <see cref="RefuseNewRequest"/>
+    /// refuses it with Msg 3980, or until <paramref name="timeout"/> (none when
+    /// null) expires first, which ends it with the timeout's Msg -2 — or until
+    /// <paramref name="stop"/> says the asker went away.
+    /// </summary>
+    internal async ValueTask AwaitSessionAsync(SessionRequest? asking, TimeSpan? timeout, Func<bool>? stop = null)
+    {
+        var started = Environment.TickCount64;
+        while (this.KeepsAwaitingSession(asking, timeout, stop, started))
+            await Task.Delay(SessionBusyPoll).ConfigureAwait(false);
+    }
+
+    /// <summary><see cref="AwaitSessionAsync"/> for a caller that runs the engine synchronously, in process.</summary>
+    internal void AwaitSession(SessionRequest? asking, TimeSpan? timeout)
+    {
+        var started = Environment.TickCount64;
+        while (this.KeepsAwaitingSession(asking, timeout, stop: null, started))
+            Thread.Sleep(SessionBusyPoll);
+    }
+
+    private const int SessionBusyPoll = 25;
+
+    private bool KeepsAwaitingSession(SessionRequest? asking, TimeSpan? timeout, Func<bool>? stop, long started)
+    {
+        if (!this.SessionHeldByOtherRequest(asking) || stop?.Invoke() == true)
+            return false;
+        var waited = TimeSpan.FromMilliseconds(Environment.TickCount64 - started);
+        if (timeout is { } limit && limit < SessionBusyWait && waited >= limit)
+            throw SimulatedSqlException.ExecutionTimeoutExpired();
+        return waited < SessionBusyWait;
+    }
+
+    /// <summary>
     /// The error a request starting now meets because of another still
     /// running, or null: Msg 3980 while one is sending a DML statement's
     /// <c>OUTPUT</c> rows, Msg 15386 once after one changed the session's
@@ -899,6 +968,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void RefuseApiRequest()
     {
+        this.AwaitSession(this.ExecutingRequest, timeout: null);
         if (this.RefuseNewRequest() is { } refused)
             throw AtLineOne(refused);
     }

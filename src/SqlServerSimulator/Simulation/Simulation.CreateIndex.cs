@@ -23,7 +23,7 @@ partial class Simulation
     {
         if (clustered)
             batch.AcquireTableRedefinitionLock(table);
-        else if (IsLockableTable(table))
+        else if (IsLockableTable(table) || BatchContext.IsLocalTempName(table.Name))
             batch.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
     }
 

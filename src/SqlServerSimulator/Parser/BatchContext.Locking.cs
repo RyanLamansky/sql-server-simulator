@@ -62,6 +62,26 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
+    /// Lets go of the statement's own <paramref name="mode"/> on
+    /// <paramref name="resource"/> before the statement ends — a lock real
+    /// holds only while the statement compiles. A no-op when the statement
+    /// holds none.
+    /// </summary>
+    public void ReleaseStatementLock(LockResource resource, LockMode mode)
+    {
+        var held = this.StatementSchemaLocks;
+        for (var i = held.Count - 1; i >= 0; i--)
+        {
+            var (locked, lockedMode, owner) = held[i];
+            if (!ReferenceEquals(locked, resource) || lockedMode != mode)
+                continue;
+            held.RemoveAt(i);
+            this.Connection.Simulation.LockManager.Release(locked, lockedMode, owner);
+            return;
+        }
+    }
+
+    /// <summary>
     /// The Sch-M a statement that redefines <paramref name="table"/> or
     /// rewrites its rows wholesale — <c>ALTER TABLE</c>, <c>TRUNCATE</c>,
     /// <c>SWITCH</c> — takes on the table's one object lock, for the statement
@@ -77,7 +97,7 @@ internal sealed partial class BatchContext
     public void AcquireTableRedefinitionLock(HeapTable table)
     {
         this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
-        if (Simulation.IsLockableTable(table))
+        if (Simulation.IsLockableTable(table) || IsLocalTempName(table.Name))
             this.AcquireTransactionLock(table.TableDataLock, LockMode.SchemaModification);
     }
 
@@ -212,10 +232,10 @@ internal sealed partial class BatchContext
         // would outlive it.
         if (this.IsSkipping)
             return DataLockPlan.Bypass;
-        if (table.IsTableVariable || IsLocalTempName(table.Name))
+        if (table.IsTableVariable || Simulation.SystemHeapTables.Values.Contains(table))
             return DataLockPlan.Bypass;
-        if (Simulation.SystemHeapTables.Values.Contains(table))
-            return DataLockPlan.Bypass;
+        if (IsLocalTempName(table.Name))
+            return this.AcquireLocalTempLock(table, hints, isWrite);
 
         if (hints.NoWait)
         {
@@ -374,6 +394,45 @@ internal sealed partial class BatchContext
         // "null + noLockReader=true" (skip even probe — that's the NoLock path).
         var rowMode = rowTxScoped ? (LockMode?)LockMode.Shared : null;
         return new DataLockPlan(rowMode: rowMode, rowTxScoped: rowTxScoped, skipBlockedRows: hints.ReadPast, noLockReader: false);
+    }
+
+    /// <summary>
+    /// A local temp table is its session's alone, so real locks it whole, never
+    /// a row or a key (probed 2026-10-09 against SQL Server 2025): a read takes
+    /// S, held to the statement's end under <c>READ COMMITTED</c> and
+    /// <c>TABLOCK</c> and to the transaction's under <c>REPEATABLE READ</c>,
+    /// <c>SERIALIZABLE</c> and their hints; <c>UPDLOCK</c>, <c>XLOCK</c>,
+    /// <c>TABLOCKX</c> and every write take X to the transaction's end; and a
+    /// read of no committed state — <c>NOLOCK</c>, <c>READ UNCOMMITTED</c>,
+    /// <c>SNAPSHOT</c> — holds Sch-S alone. Outside MARS a session in a
+    /// transaction takes X for any access, a read of no committed state too.
+    /// Only the session's other MARS requests can meet these locks: a write
+    /// waits on a reader suspended mid-result over the table, as on real.
+    /// </summary>
+    private DataLockPlan AcquireLocalTempLock(HeapTable table, Selection.TableHintInfo hints, bool isWrite)
+    {
+        var connection = this.Connection;
+        var isolation = connection.SessionIsolationLevel;
+        if (isWrite || hints.UpdLock || hints.XLock || hints.TabLockX || (connection.CurrentTransaction is not null && !connection.RunsMars))
+        {
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive, hints.NoWait);
+            return DataLockPlan.Bypass;
+        }
+        if (hints.NoLock || (!hints.LocksRead && !hints.ReadCommitted && isolation is System.Data.IsolationLevel.ReadUncommitted or System.Data.IsolationLevel.Snapshot))
+        {
+            this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability, hints.NoWait);
+            return DataLockPlan.Bypass;
+        }
+        if (hints.Repeatable || hints.Serializable
+            || (!hints.ReadCommitted && !hints.ReadCommittedLock && isolation is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable))
+        {
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, hints.NoWait);
+        }
+        else
+        {
+            this.AcquireStatementLock(table.TableDataLock, LockMode.Shared, hints.NoWait);
+        }
+        return DataLockPlan.Bypass;
     }
 
     /// <summary>
@@ -1222,13 +1281,18 @@ internal sealed partial class BatchContext
     /// an UPDATE shows (probed 2026-09-28 against SQL Server 2025). A table
     /// set <c>LOCK_ESCALATION = DISABLE</c> keeps its locks however many.
     /// </summary>
-    private void CountLocksForEscalation(HeapTable table, int added, bool exclusive, bool rowLock = false, bool rowsKeyLocked = false)
+    private void CountLocksForEscalation(HeapTable table, int added, bool exclusive, bool rowLock = false, bool rowsKeyLocked = false, KeyLockGroup? index = null)
     {
         if (table.LockEscalation == 1)
             return;
         var tallies = this.CurrentStatement.LockTallies ??= new(ReferenceEqualityComparer.Instance);
-        if (!tallies.TryGetValue(table, out var tally))
-            tallies[table] = tally = new LockEscalationTally();
+        // Real counts toward escalation per index: a nonclustered index's key
+        // locks don't add to the rows' (probed 2026-10-09 against SQL Server
+        // 2025: a SERIALIZABLE read through a nonclustered index holding 3,603
+        // range locks on its keys and 3,602 on its rows kept them all).
+        object counted = index is { IsRowGroup: false } ? index : table;
+        if (!tallies.TryGetValue(counted, out var tally))
+            tallies[counted] = tally = new LockEscalationTally();
         tally.Exclusive |= exclusive;
         tally.RowsKeyLocked |= rowsKeyLocked;
         if (added == 0 || (rowLock && tally.RowsKeyLocked))
@@ -1484,46 +1548,81 @@ internal sealed partial class BatchContext
                 requests.Add((anchors[i].Key, mode, anchors[i].Rids, lookupRows && !group.IsRowGroup && i < anchors.Count - 1));
         }
 
-        var connection = this.Connection;
-        var manager = connection.Simulation.LockManager;
-        var session = connection.LockOwner;
-        var noWait = this.NamedNoWait(table);
         var acquired = 0;
         foreach (var (key, requestMode, rids, lookup) in requests)
         {
-            var resource = group.GetOrCreate(key is { } k ? Normalize(group, k) : null);
-            if (!manager.IsHeldBy(resource, requestMode, session))
-            {
-                this.AcquireTransactionLock(resource, requestMode, noWait);
+            if (this.TakeKeyAnchor(table, group, key, rids, requestMode))
                 acquired++;
-            }
-
-            if (group.IsRowGroup)
-            {
-                var rowMode = LockManager.KeyPartOf(requestMode);
-                foreach (var rid in rids)
-                {
-                    if (table.RowLocks.TryGetValue(rid, out var rowLock) && manager.HasIncompatibleHolderOtherThan(rowLock, rowMode, session))
-                    {
-                        this.AcquireOnTable(table, rowLock, rowMode, session);
-                        manager.Release(rowLock, rowMode, session);
-                    }
-                }
-            }
-            else if (lookup)
+            if (lookup)
             {
                 foreach (var (page, slot) in rids)
                     this.AcquireRowLockTxScoped(table, page, slot, LockMode.Shared);
             }
         }
 
-        this.CountLocksForEscalation(table, acquired, exclusive: keyPart != LockMode.Shared, rowsKeyLocked: group.IsRowGroup);
+        this.CountLocksForEscalation(table, acquired, exclusive: keyPart != LockMode.Shared, rowsKeyLocked: group.IsRowGroup, index: group);
+    }
+
+    /// <summary>
+    /// Locks one anchor of <paramref name="group"/> — <paramref name="key"/>,
+    /// the infinity anchor when null — in <paramref name="mode"/>, unless the
+    /// session holds it already, and, on the clustered key, waits out another
+    /// session's lock on the rows it anchors (<paramref name="rids"/>), which
+    /// real meets as the key lock itself. Whether it took the lock.
+    /// </summary>
+    private bool TakeKeyAnchor(HeapTable table, KeyLockGroup group, SqlValueKey? key, (int Page, int Slot)[] rids, LockMode mode)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var session = connection.LockOwner;
+        var resource = group.GetOrCreate(key is { } k ? Normalize(group, k) : null);
+        var taken = false;
+        if (!manager.IsHeldBy(resource, mode, session))
+        {
+            this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
+            taken = true;
+        }
+        if (group.IsRowGroup)
+        {
+            var rowMode = LockManager.KeyPartOf(mode);
+            foreach (var rid in rids)
+            {
+                if (table.RowLocks.TryGetValue(rid, out var rowLock) && manager.HasIncompatibleHolderOtherThan(rowLock, rowMode, session))
+                {
+                    this.AcquireOnTable(table, rowLock, rowMode, session);
+                    manager.Release(rowLock, rowMode, session);
+                }
+            }
+        }
+        return taken;
+    }
+
+    /// <summary>
+    /// Locks the anchor a SERIALIZABLE read walking its keys
+    /// (<c>Selection.WalkKeyFence</c>) stops at or begins from, outside the
+    /// rows it reads — the key past the interval, the infinity anchor when
+    /// <paramref name="key"/> is null — counted toward escalation as real
+    /// counts it, and nothing once the read's table lock escalated.
+    /// </summary>
+    internal void LockFenceAnchor(HeapTable table, KeyLockGroup group, SqlValueKey? key, LockMode mode)
+    {
+        var keyPart = LockManager.KeyPartOf(mode);
+        if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || keyPart == LockMode.Shared))
+            return;
+        (int Page, int Slot)[] rids = [];
+        if (key is { } anchored && group.IsRowGroup)
+        {
+            var heap = table.Heap;
+            rids = HeapSeekCache.For(heap).Seek(heap, table.StoredColumns, heap, group.Ordinals, group.Commons, Normalize(group, anchored)).ToArray();
+        }
+        if (this.TakeKeyAnchor(table, group, key, rids, mode))
+            this.CountLocksForEscalation(table, 1, exclusive: keyPart != LockMode.Shared, rowsKeyLocked: group.IsRowGroup, index: group);
     }
 
     // An anchor found through a seek-cache entry keyed in the predicate's
     // promoted types, restated in the column types every writer's test reads
     // its row in — a widening, so narrowing back is exact.
-    private static SqlValueKey Normalize(KeyLockGroup group, SqlValueKey key)
+    internal static SqlValueKey Normalize(KeyLockGroup group, SqlValueKey key)
     {
         var restated = false;
         for (var i = 0; i < key.ComponentCount && !restated; i++)
@@ -2188,7 +2287,7 @@ internal sealed partial class BatchContext
     /// scan reads that its fence, taken over the keys the table held before,
     /// may have missed (<see cref="PhantomFenceState.FencedGroup"/>).
     /// </summary>
-    private void HoldFencedRowKey(HeapTable table, KeyLockGroup group, int pageIndex, int slotIndex, LockMode mode)
+    internal void HoldFencedRowKey(HeapTable table, KeyLockGroup group, int pageIndex, int slotIndex, LockMode mode)
     {
         if (this.EscalatedModeOf(table) is not null)
             return;
@@ -2206,10 +2305,38 @@ internal sealed partial class BatchContext
             if (manager.IsHeldBy(resource, mode, session))
                 return;
             this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
-            this.CountLocksForEscalation(table, 1, exclusive: false, rowsKeyLocked: true);
+            this.CountLocksForEscalation(table, 1, exclusive: LockManager.KeyPartOf(mode) != LockMode.Shared, rowsKeyLocked: group.IsRowGroup, index: group);
             if (heap.ReadSlotBytes(pageIndex, slotIndex) is not { } locked || !group.TryReadKey(locked, out var lockedKey) || lockedKey.Equals(key))
                 return;
         }
+    }
+
+    /// <summary>
+    /// Takes <paramref name="mode"/> on <paramref name="key"/>, the key a
+    /// walk of <paramref name="group"/> found the row at
+    /// <paramref name="pageIndex"/> / <paramref name="slotIndex"/> by, unless the
+    /// session holds it already; once the heap has changed since the walk read
+    /// its keys (<paramref name="generation"/>), the key the row carries now
+    /// instead (<see cref="HoldFencedRowKey"/>).
+    /// </summary>
+    internal void LockWalkedKey(HeapTable table, KeyLockGroup group, SqlValueKey? key, int pageIndex, int slotIndex, LockMode mode, long generation)
+    {
+        if (key is not { } walked || Volatile.Read(ref table.Heap.MutationGeneration) != generation)
+        {
+            this.HoldFencedRowKey(table, group, pageIndex, slotIndex, mode);
+            return;
+        }
+        if (this.EscalatedModeOf(table) is not null)
+            return;
+        var connection = this.Connection;
+        var resource = group.GetOrCreate(Normalize(group, walked));
+        if (connection.Simulation.LockManager.IsHeldBy(resource, mode, connection.LockOwner))
+            return;
+        this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
+        this.CountLocksForEscalation(table, 1, exclusive: LockManager.KeyPartOf(mode) != LockMode.Shared, rowsKeyLocked: group.IsRowGroup, index: group);
+        // A write landing during the wait may have moved the row off the key.
+        if (Volatile.Read(ref table.Heap.MutationGeneration) != generation)
+            this.HoldFencedRowKey(table, group, pageIndex, slotIndex, mode);
     }
 
     /// <summary>

@@ -254,6 +254,8 @@ internal sealed partial class TdsSession
 #pragma warning disable CA2100 // This IS a SQL endpoint: the procedure name is the client's request by design.
         command.CommandText = request.ProcName;
 #pragma warning restore CA2100
+        command.YieldsBetweenStatements = this.multiplexer is not null;
+        command.StreamsResultRows = true;
 
         var returnParameter = command.CreateParameter();
         returnParameter.ParameterName = "@RETURN_VALUE";

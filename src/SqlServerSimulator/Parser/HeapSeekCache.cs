@@ -222,6 +222,21 @@ internal sealed class HeapSeekCache
     }
 
     /// <summary>
+    /// The last key below <paramref name="bound"/> — below every key sharing
+    /// its components when <paramref name="inclusive"/> says the bound itself
+    /// was inside the read, at or below it otherwise — or null when none is:
+    /// where a descending read of an interval stops.
+    /// </summary>
+    public SqlValueKey? PreviousKeyBelow(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, SqlValueKey bound, bool inclusive)
+    {
+        lock (this.gate)
+        {
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
+            return entry.PreviousBelow(ordinals.Length, bound, inclusive);
+        }
+    }
+
+    /// <summary>
     /// True when some live row's <paramref name="ordinals"/> tuple equals
     /// <paramref name="probeKey"/>. The foreign-key parent-existence check: seek
     /// narrows the candidates, then each is verified against its live bytes so a
@@ -726,6 +741,21 @@ internal sealed class HeapSeekCache
             {
                 var c = KeyTupleComparer.Instance.Compare(key, bound);
                 if (c > 0 || (c == 0 && !inclusive))
+                    return key.ComponentCount > arity ? key.Prefix(arity) : key;
+            }
+            return null;
+        }
+
+        // The mirror of NextAbove: the last key below `bound`, cut to `arity`.
+        public SqlValueKey? PreviousBelow(int arity, SqlValueKey bound, bool inclusive)
+        {
+            var sorted = this.EnsureSorted();
+            if (sorted.Count == 0 || KeyTupleComparer.Instance.Compare(bound, sorted.Min) < 0)
+                return null;
+            foreach (var key in sorted.GetViewBetween(sorted.Min, bound).Reverse())
+            {
+                var c = KeyTupleComparer.Instance.Compare(key, bound);
+                if (c < 0 || (c == 0 && !inclusive))
                     return key.ComponentCount > arity ? key.Prefix(arity) : key;
             }
             return null;

@@ -190,14 +190,15 @@ internal sealed class StatementContext
     public int PriorStatementLine;
 
     /// <summary>
-    /// Per table, the row and key locks this statement has taken there, which
+    /// Per table — and apart from it, per nonclustered index whose keys it
+    /// locks — the row and key locks this statement has taken there, which
     /// is what real's lock escalation counts: a statement, not a transaction,
     /// crossing the threshold escalates (probed 2026-09-28 against SQL Server
     /// 2025 — two SERIALIZABLE reads of 4 000 keys each in one transaction
     /// keep all 8 001 key locks). Cleared by the dispatch loop at the top of
     /// each statement iteration.
     /// </summary>
-    public Dictionary<Storage.HeapTable, LockEscalationTally>? LockTallies;
+    public Dictionary<object, LockEscalationTally>? LockTallies;
 
     /// <summary>
     /// Tables this statement escalated outside a transaction, with the table

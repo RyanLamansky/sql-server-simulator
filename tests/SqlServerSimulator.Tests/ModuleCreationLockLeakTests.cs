@@ -69,6 +69,37 @@ public sealed class ModuleCreationLockLeakTests
     }
 
     /// <summary>
+    /// A procedure called by RPC (<see cref="System.Data.CommandType.StoredProcedure"/>)
+    /// holds its Sch-S for the call alone, however the reader ends — read to
+    /// its end, or closed with rows unread in a body that streams them.
+    /// </summary>
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(2)]
+    public void InvokingAProcedureByRpc_LeavesNoLock(int read)
+    {
+        var sim = Seeded();
+        _ = sim.ExecuteNonQuery("create procedure dbo.p_x as select a.id, replicate('x', 2000) v from t_a a cross join generate_series(1, 100)");
+        _ = sim.ExecuteNonQuery("insert t_a (id) select value from generate_series(1, 100)");
+        using (var connection = sim.CreateOpenConnection())
+        {
+            using var command = connection.CreateCommand("dbo.p_x");
+            command.CommandType = System.Data.CommandType.StoredProcedure;
+            using var reader = command.ExecuteReader();
+            if (read == 0)
+            {
+                while (reader.Read())
+                {
+                }
+            }
+            for (var row = 0; row < read; row++)
+                IsTrue(reader.Read());
+        }
+        AreEqual(0, ResidualLocks(sim));
+        _ = sim.ExecuteNonQuery("drop procedure dbo.p_x");
+    }
+
+    /// <summary>
     /// A body that fails its own validation must not leave the locks its
     /// partial parse already took — the failure path is the one that skips a
     /// release written after the work rather than in a finally.

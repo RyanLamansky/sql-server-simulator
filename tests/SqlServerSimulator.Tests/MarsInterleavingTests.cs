@@ -240,6 +240,49 @@ public sealed class MarsInterleavingTests
     }
 
     /// <summary>
+    /// A local temp table is locked whole — S for a read, held to the
+    /// statement's end or the transaction's by the level, X for a locking hint
+    /// or a write, Sch-S alone for a read of no committed state — so another
+    /// request's write waits on a reader suspended over it, listed in tempdb
+    /// (probed 2026-10-09 against SQL Server 2025, which lists each object lock
+    /// sixteen times, one per lock partition).
+    /// </summary>
+    [TestMethod]
+    [DataRow("read committed", "", "OBJECT S", 1222, "")]
+    [DataRow("read uncommitted", "", "OBJECT Sch-S", 0, "")]
+    [DataRow("read committed", "with (nolock)", "OBJECT Sch-S", 0, "")]
+    [DataRow("repeatable read", "", "OBJECT S", 1222, "OBJECT S")]
+    [DataRow("serializable", "", "OBJECT S", 1222, "OBJECT S")]
+    [DataRow("read committed", "with (holdlock)", "OBJECT S", 1222, "OBJECT S")]
+    [DataRow("read committed", "with (updlock)", "OBJECT X", 1222, "OBJECT X")]
+    [DataRow("read committed", "with (tablockx)", "OBJECT X", 1222, "OBJECT X")]
+    public void TempTable_LockedWholeAgainstAnotherRequest(string level, string hint, string held, int write, string heldAfter)
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        var spid = Spid(connection);
+        _ = connection.CreateCommand($"create table #t (k int primary key, v char(2000) not null); insert #t select value, 'x' from generate_series(1, {Rows})").ExecuteNonQuery();
+        using (var rows = Read(connection, $"set transaction isolation level {level}; select k, v from #t {hint}", 2))
+        {
+            AreEqual(held, Locks(observer, spid));
+            AreEqual(2, observer.CreateCommand($"select resource_database_id from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'OBJECT'").ExecuteScalar());
+            AreEqual(write, Attempt(connection, "insert #t values (5000, 'i')"));
+            HasCount(write == 0 ? Rows - 1 : Rows - 2, Rest(rows));
+        }
+        AreEqual("", Locks(observer, spid));
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        using (var count = connection.CreateCommand($"set transaction isolation level {level}; select count(*) from #t {hint}; set transaction isolation level read committed"))
+        {
+            count.Transaction = transaction;
+            _ = count.ExecuteScalar();
+        }
+        AreEqual(heldAfter, Locks(observer, spid));
+        transaction.Rollback();
+        AreEqual("", Locks(observer, spid));
+    }
+
+    /// <summary>
     /// A cursor's scroll locks are the session's, so a request running beside
     /// a suspended reader updates the row its cursor holds.
     /// </summary>

@@ -412,6 +412,7 @@ partial class Simulation
                 innerBatch.CallerStreams = streams && !compiles;
                 innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && innerBatch.CallerStreams;
                 innerBatch.StreamsResultRows = outerBatch.StreamsResultRows && innerBatch.CallerStreams;
+                innerBatch.InRpcProcedure = outerBatch.InRpcProcedure;
                 // An error that ends the body keeps what the body sent before
                 // it, which reaches the caller ahead of the error.
                 try
@@ -437,6 +438,12 @@ partial class Simulation
                         }
                         throw compileError;
                     }
+                    // Real holds a procedure's Sch-S only while the call
+                    // compiles: a running body, one suspended mid-result
+                    // included, holds none, and another session drops or
+                    // alters the procedure meanwhile (probed 2026-10-09
+                    // against SQL Server 2025).
+                    outerBatch.ReleaseStatementLock(procedure.SchemaLock, LockMode.SchemaStability);
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
                     if (innerBatch.CallerStreams)

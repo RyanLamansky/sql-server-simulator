@@ -731,6 +731,13 @@ internal sealed partial class BatchContext
     public bool StreamsResultRows;
 
     /// <summary>
+    /// Whether this batch runs inside a procedure an RPC called
+    /// (<c>CommandType.StoredProcedure</c>), whose body streams but whose
+    /// request can't park for a bulk text form's data.
+    /// </summary>
+    public bool InRpcProcedure;
+
+    /// <summary>
     /// The suspended <c>WRITETEXT BULK</c> or <c>UPDATETEXT BULK</c> whose
     /// data the batch resumed with, which the statement's second run takes
     /// to write them; null otherwise.

@@ -1012,6 +1012,7 @@ partial class Simulation
                 innerBatch.CallerStreams = streams;
                 innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && streams;
                 innerBatch.StreamsResultRows = outerBatch.StreamsResultRows && streams;
+                innerBatch.InRpcProcedure = outerBatch.InRpcProcedure;
                 if (streams)
                 {
                     streamed = DispatchStatementsUntil(innerBatch, endKeyword: null).GetEnumerator();

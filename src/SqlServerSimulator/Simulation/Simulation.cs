@@ -1259,10 +1259,19 @@ public sealed partial class Simulation
             }
             if (request is not null)
             {
-                if (command.Connection!.RefuseNewRequest() is { } refused)
+                SimulatedSqlException? timedOut = null;
+                try
+                {
+                    command.Connection!.AwaitSession(request, command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
+                }
+                catch (SimulatedSqlException timeout)
+                {
+                    timedOut = timeout;
+                }
+                if ((timedOut ?? command.Connection!.RefuseNewRequest()) is { } refused)
                 {
                     refused.ResolveDiagnostics(1, 0, "");
-                    command.Connection.ExecutingRequest = null;
+                    command.Connection!.ExecutingRequest = null;
                     yield return new SimulatedErrorOutcome(refused);
                     yield break;
                 }
@@ -1826,7 +1835,7 @@ public sealed partial class Simulation
         // but it's the home for the temporary writeback slots. The body runs
         // on past a statement-terminating error as one a batch's EXEC calls
         // does (probed 2026-09-28 against SQL Server 2025 over RPC).
-        var batch = new BatchContext(command) { ContinueOnError = continueOnError };
+        var batch = new BatchContext(command) { ContinueOnError = continueOnError, InRpcProcedure = true };
         var context = batch.Parser;
         context.MoveNextOptional();
         if (context.Token is not Name)
@@ -1946,8 +1955,17 @@ public sealed partial class Simulation
         }
 
         var attributionName = rpcSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}";
-        foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName, attributionName, rpcSynonym))
-            yield return outcome;
+        // The Sch-S the name took holds the procedure for the call, and this
+        // batch, which no dispatch loop ends, gives it back as the call ends.
+        try
+        {
+            foreach (var outcome in InvokeProcedure(batch, procedure, arguments, returnCodeVarName, attributionName, rpcSynonym, streams: batch.SendsAsStatementsEnd))
+                yield return outcome;
+        }
+        finally
+        {
+            batch.ReleaseStatementSchemaLocks();
+        }
 
         // Output param writeback: the per-argument OutputSlot.Value was
         // updated by InvokeProcedure. Copy back to each DbParameter.Value. The

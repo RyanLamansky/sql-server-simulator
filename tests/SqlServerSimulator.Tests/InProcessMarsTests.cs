@@ -270,6 +270,26 @@ public sealed class InProcessMarsTests
     }
 
     /// <summary>
+    /// A command meeting a DML statement's <c>OUTPUT</c> rows still going out
+    /// waits before Msg 3980 refuses it, as real's does until its deadlock
+    /// monitor's next pass, so a shorter <c>CommandTimeout</c> expires first
+    /// (probed 2026-10-09 against SQL Server 2025: refused after 3.8 to 5.0
+    /// seconds, timed out after 2).
+    /// </summary>
+    [TestMethod]
+    public void DmlOutputRowsBeingRead_AShortTimeoutExpiresBeforeMsg3980()
+    {
+        using var connection = Seeded();
+        using var command = connection.CreateCommand("update big set v = v + 1 output inserted.id, inserted.pad");
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        using var probe = connection.CreateCommand("select 1");
+        probe.CommandTimeout = 1;
+        AreEqual(-2, Refused(() => probe.ExecuteScalar()).Number);
+        IsNull(Drain(reader));
+    }
+
+    /// <summary>
     /// A batch runs on as far as its output fits what real gets ahead of its
     /// client: past a small result set at once, past a large one once the
     /// reader has read its last row. What a statement run ahead reported

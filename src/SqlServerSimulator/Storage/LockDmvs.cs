@@ -105,6 +105,11 @@ internal static class LockDmvs
                     AddDatabaseLock(databaseLocks, workspace, each);
                 yield return row;
             }
+            if (each.Name == Simulation.TempdbDatabaseName)
+            {
+                foreach (var row in EnumerateTempTableLocks(batch, each, connections))
+                    yield return row;
+            }
         }
 
         var databaseType = SqlValue.FromNVarchar("DATABASE");
@@ -146,6 +151,63 @@ internal static class LockDmvs
     private static int WorkspaceSpid(SimulatedDbConnection connection) =>
         connection.CurrentTransaction?.FirstMember(connection) is { } first ? first.Spid : connection.Spid;
 
+    /// <summary>
+    /// The lock rows of <paramref name="table"/>: its object lock — the schema
+    /// and data locks are one resource, real's object lock — then its row and
+    /// key locks.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EmitTableLocks(
+        BatchContext batch, HeapTable table, SqlValue dbId,
+        Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits)
+    {
+        var locks = batch.Connection.Simulation.LockManager;
+        var grantStatus = SqlValue.FromNVarchar("GRANT");
+        var waitStatus = SqlValue.FromNVarchar("WAIT");
+        // Real reports a key lock as resource_type KEY described by a hash of
+        // the index key (KeyLockGroup.Describe).
+        var keyType = SqlValue.FromNVarchar("KEY");
+        foreach (var row in EmitRowsForResource(locks, SqlValue.FromNVarchar("OBJECT"), dbId, string.Empty, table.ObjectId, table.TableDataLock, waitsByResource, grantStatus, waitStatus))
+            yield return row;
+        var folded = FoldRowLocksIntoKeyLocks(locks, table);
+        foreach (var row in EmitRowLocks(batch, table, SqlValue.FromNVarchar("RID"), keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
+            yield return row;
+        foreach (var (_, group) in table.KeyLockGroups)
+        {
+            foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(null), table.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
+                yield return row;
+            foreach (var kv in group.Anchors)
+            {
+                foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(kv.Key), table.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
+                    yield return row;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The lock rows of the temp tables, which real lists in tempdb: every
+    /// open session's local ones and the global ones.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateTempTableLocks(BatchContext batch, Database tempdb, SimulatedDbConnection[] connections)
+    {
+        var dbId = SqlValue.FromInt32(tempdb.Id);
+        var waitsByResource = SnapshotWaiters(batch.Connection.Simulation, out var keyWaits);
+        foreach (var connection in connections)
+        {
+            if (connection.State != System.Data.ConnectionState.Open)
+                continue;
+            foreach (var (_, table) in connection.TempTables)
+            {
+                foreach (var row in EmitTableLocks(batch, table, dbId, waitsByResource, keyWaits))
+                    yield return row;
+            }
+        }
+        foreach (var (_, table) in batch.Connection.Simulation.GlobalTempTables)
+        {
+            foreach (var row in EmitTableLocks(batch, table, dbId, waitsByResource, keyWaits))
+                yield return row;
+        }
+    }
+
     /// <summary>The lock rows of <paramref name="database"/>'s resources.</summary>
     private static IEnumerable<SqlValue[]> EnumerateDatabaseLocks(BatchContext batch, Database database)
     {
@@ -159,10 +221,6 @@ internal static class LockDmvs
         var grantStatus = SqlValue.FromNVarchar("GRANT");
         var waitStatus = SqlValue.FromNVarchar("WAIT");
         var objectType = SqlValue.FromNVarchar("OBJECT");
-        var ridType = SqlValue.FromNVarchar("RID");
-        // Real reports a key lock as resource_type KEY described by a hash of
-        // the index key (KeyLockGroup.Describe).
-        var keyType = SqlValue.FromNVarchar("KEY");
 
         var waitsByResource = SnapshotWaiters(sim, out var keyWaits);
 
@@ -170,22 +228,8 @@ internal static class LockDmvs
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                // The schema and data locks are one resource, real's object lock.
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitTableLocks(batch, t, dbId, waitsByResource, keyWaits))
                     yield return row;
-                var folded = FoldRowLocksIntoKeyLocks(locks, t);
-                foreach (var row in EmitRowLocks(batch, t, ridType, keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
-                    yield return row;
-                foreach (var (_, group) in t.KeyLockGroups)
-                {
-                    foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
-                        yield return row;
-                    foreach (var kv in group.Anchors)
-                    {
-                        foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
-                            yield return row;
-                    }
-                }
             }
             foreach (var (_, v) in schema.Views)
             {

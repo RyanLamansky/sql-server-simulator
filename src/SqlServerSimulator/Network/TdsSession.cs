@@ -201,6 +201,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return;
             }
             this.connection.TransactionEvents = [];
+            this.connection.RunsMars = marsRequested;
             this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
@@ -603,6 +604,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         session.Executing = true;
         try
         {
+            // Another request sending a DML statement's OUTPUT rows holds the
+            // session: this one waits beside it, outside the gate so that
+            // request can drain, until Msg 3980 refuses it.
+            await this.connection!.AwaitSessionAsync(request, timeout: null, stop: () => request.AttentionReceived).ConfigureAwait(false);
             await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch

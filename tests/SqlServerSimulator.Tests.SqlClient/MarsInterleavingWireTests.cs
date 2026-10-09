@@ -180,4 +180,105 @@ public sealed class MarsInterleavingWireTests
         await using var count = new SqlCommand("select count(*) from big where v = 'y'", connection);
         AreEqual(committed, await count.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A <c>SERIALIZABLE</c> seek suspended mid-result holds the keys behind
+    /// its position alone, so the session's other request inserts ahead of it
+    /// and the seek reads the key when it gets there, while one behind waits
+    /// (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("")]
+    [DataRow(" desc")]
+    public async Task SerializableSeek_LocksKeysAsItReachesThem(string direction)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, $"create table big (k int primary key, v char(2000) not null); insert big select value * 2, 'x' from generate_series(1, {Rows})");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+        await using var other = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using var rows = await this.ReadAsync(connection, $"set transaction isolation level serializable; select k, v from big where k between 200 and 3800 order by k{direction}", 2);
+        var behind = direction.Length == 0 ? 201 : 3799;
+        var ahead = direction.Length == 0 ? 3001 : 1001;
+        AreEqual(1222, await this.AttemptAsync(other, $"insert big values ({behind}, 'b')"));
+        AreEqual(0, await this.AttemptAsync(connection, $"insert big values ({ahead}, 'a')"));
+        var read = await this.RestAsync(rows);
+        IsTrue(read.ContainsKey(ahead));
+        HasCount(1801 - 2 + 1, read);
+    }
+
+    /// <summary>
+    /// A local temp table is locked whole: the session's other request writing
+    /// one a reader is suspended over waits on the reader's S, and outside MARS
+    /// a transaction locks one it reads in X (probed 2026-10-09 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task TempTable_LockedWhole()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using (var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra))
+        {
+            await using (var create = new SqlCommand($"create table #t (k int primary key, v char(2000) not null); insert #t select value, 'x' from generate_series(1, {Rows})", connection))
+                _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            await using var rows = await this.ReadAsync(connection, "select k, v from #t", 2);
+            AreEqual(1222, await this.AttemptAsync(connection, "insert #t values (5000, 'i')"));
+            HasCount(Rows - 2, await this.RestAsync(rows));
+        }
+        await using var plain = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var read = new SqlCommand("""
+            create table #t (k int primary key); insert #t values (1);
+            begin tran; select count(*) from #t;
+            select request_mode from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'OBJECT' and resource_database_id = 2;
+            rollback
+            """, plain);
+        await using var reader = await read.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.NextResultAsync(TestContext.CancellationToken));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("X", reader.GetString(0));
+    }
+
+    /// <summary>
+    /// A procedure an RPC calls streams its body's rows as a batch's
+    /// <c>EXEC</c> does, holding its position while another request runs.
+    /// </summary>
+    [TestMethod]
+    public async Task RpcProcedure_SuspendsHoldingItsPosition()
+    {
+        var simulation = Big("create procedure p as select k, v from big");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        var command = new SqlCommand("p", connection) { CommandType = CommandType.StoredProcedure };
+        await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        for (var read = 0; read < 2; read++)
+            IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
+        AreEqual(1222, await this.AttemptAsync(connection, "alter table big add c int"));
+        AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'u' where k = 1500"));
+        AreEqual("u", (await this.RestAsync(rows))[1500]);
+    }
+
+    /// <summary>
+    /// A request meeting a DML statement's <c>OUTPUT</c> rows still going out
+    /// waits before Msg 3980 refuses it, so a reader draining the rows
+    /// meanwhile lets it run, as real's deadlock monitor does.
+    /// </summary>
+    [TestMethod]
+    public async Task OutputRowsDrainedWhileARequestWaits_LetItRun()
+    {
+        var simulation = Big();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using var command = new SqlCommand("update big set v = 'y' output inserted.k, inserted.v", connection);
+        await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
+        await using var probe = new SqlCommand("select count(*) from big where v = 'y'", connection);
+        var waiting = probe.ExecuteScalarAsync(TestContext.CancellationToken);
+        HasCount(Rows - 1, await this.RestAsync(rows));
+        await rows.DisposeAsync();
+        AreEqual(Rows, await waiting);
+    }
 }

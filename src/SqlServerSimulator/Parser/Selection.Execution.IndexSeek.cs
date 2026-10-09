@@ -113,13 +113,29 @@ internal sealed partial class Selection
             else if (bounds.Count != 0)
                 _ = AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
         }
-        // A read offering no seek scans the table, which locks each key as it
-        // reaches it (BatchContext.EnsureSerializableTableLock) and settles its
-        // fence itself; a path reading through a seek instead takes the whole
-        // key space here first.
-        var scanFences = plan.SerializableRangeMode is not null && equalities.Count == 0 && bounds.Count == 0;
-        if (!scanFences)
-            SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
+        // A read offering no interval to fence scans the table, which locks
+        // each key as it reaches it (BatchContext.EnsureSerializableTableLock)
+        // and settles its fence itself; a path reading through a seek instead
+        // takes the whole key space first.
+        KeyFence? keyFence = null;
+        var scanFences = plan.SerializableRangeMode is not null
+            && ((equalities.Count == 0 && bounds.Count == 0) || (keyFence = ComputeKeyFence(source, table, batch, outerResolver, equalities, bounds)) is null);
+        if (keyFence is not null)
+        {
+            // An interval of the clustered key is read by walking its keys,
+            // each locked as the read reaches it, as real's seek does.
+            if (WalksKeyFence(table, plan, keyFence.Group) && batch.ResolveSnapshotXidForRead(table, plan) is null)
+            {
+                plan.Fence!.Settled = true;
+                IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
+                if (planSources is not null)
+                    seekedCandidates = CountFencedRows(table, keyFence);
+                var walkQualifier = plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver) : null;
+                return SeekedSource(source, RowSecurity.FilterRows(table,
+                    WalkKeyFence(table, batch, plan, keyFence.Group, keyFence.Commons, keyFence.Intervals, descending: false, walkQualifier), batch));
+            }
+            SettleSerializablePhantomFence(table, plan, batch, keyFence);
+        }
 
         // The seek narrows the row source, then routes each candidate through
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
@@ -206,6 +222,13 @@ internal sealed partial class Selection
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         if (qualifier is null)
             return sources;
+        if (scanFences && KeyLockGroup.RowGroupOf(table) is { } scanned && WalksKeyFence(table, plan, scanned))
+        {
+            batch.AwaitUncommittedDeletes(table);
+            plan.Fence!.Settled = true;
+            return SeekedSource(source, RowSecurity.FilterRows(table,
+                WalkKeyFence(table, batch, plan, scanned, scanned.Commons, [KeyFenceInterval.Everything], descending: false, qualifier), batch));
+        }
         if (scanFences)
             batch.EnsureSerializableTableLock(table, plan);
         return SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch));
@@ -261,39 +284,81 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Takes the phantom protection a SERIALIZABLE / <c>HOLDLOCK</c> reader is
-    /// still owed over <paramref name="table"/>: the key locks of the
-    /// intervals the sargable conjuncts pin on the leading columns of some key
-    /// / index, or — when no conjunct offers one — the whole key space the
-    /// scan path falls back to. A no-op for every other isolation level. The
-    /// mode comes off the plan, so an <c>UPDLOCK</c> / <c>XLOCK</c> reader
-    /// locks the same keys in <c>RangeS-U</c> / <c>RangeX-X</c>.
+    /// owed over <paramref name="table"/> up front: the key locks of the
+    /// intervals the sargable conjuncts pin on the leading columns of an index
+    /// the read can't walk (<see cref="WalksKeyFence"/>). The mode comes off
+    /// the plan, so an <c>UPDLOCK</c> / <c>XLOCK</c> reader locks the same keys
+    /// in <c>RangeS-U</c> / <c>RangeX-X</c>.
     /// </summary>
-    private static void SettleSerializablePhantomFence(
-        FromSource source,
-        HeapTable table,
-        DataLockPlan plan,
-        BatchContext batch,
-        Func<MultiPartName, SqlValue>? outerResolver,
-        Dictionary<int, Expression[]> equalities,
-        Dictionary<int, RangeBoundExprs> bounds)
+    /// <remarks>
+    /// Deliberately not short-circuited on an already-settled fence: a
+    /// correlated inner re-plans per outer row, and each outer value names
+    /// keys of its own that have to be locked too.
+    /// </remarks>
+    private static void SettleSerializablePhantomFence(HeapTable table, DataLockPlan plan, BatchContext batch, KeyFence fence)
     {
-        if (plan.SerializableRangeMode is not { } mode)
-            return;
-        // Deliberately not short-circuited on an already-settled fence: a
-        // correlated inner re-plans per outer row, and each outer value names
-        // keys of its own that have to be locked too.
-        if (ComputeKeyFence(source, table, batch, outerResolver, equalities, bounds) is not { } fence)
-        {
-            batch.EnsureSerializableTableLock(table, plan);
-            return;
-        }
-
+        var mode = plan.SerializableRangeMode!.Value;
         if (plan.Fence is { } settled)
         {
             settled.Settled = true;
             settled.NoteKeysFenced(table, fence.Group, fence.Intervals, lookupRows: mode == LockMode.RangeSharedShared);
         }
         batch.AcquireKeyFence(table, fence.Group, fence.Commons, fence.Intervals, mode, KeyFenceKind.Read, lookupRows: mode == LockMode.RangeSharedShared);
+    }
+
+    /// <summary>
+    /// Whether a SERIALIZABLE read of <paramref name="group"/>'s keys produces
+    /// its rows by walking them (<see cref="WalkKeyFence"/>), by a read that
+    /// waits on what it meets: an index whose order the seek cache's ordered
+    /// view is — every column ascending, and for the clustered key NOT NULL,
+    /// since the view holds no NULL key a scan would read; a nonclustered
+    /// index unfiltered.
+    /// </summary>
+    private static bool WalksKeyFence(HeapTable table, DataLockPlan plan, KeyLockGroup group)
+    {
+        if (plan.SkipBlockedRows || plan.NoLockReader)
+            return false;
+        if (group.IsRowGroup)
+            return ClusteredScan.ServesKeyedOrder(table);
+        switch (group.Owner)
+        {
+            case KeyConstraint key:
+                for (var i = 0; i < key.StorageOrdinals.Length; i++)
+                {
+                    if (key.IsDescending(i))
+                        return false;
+                }
+                return true;
+            case Storage.Index { Filter: null } index:
+                foreach (var column in index.KeyColumns)
+                {
+                    if (column.IsDescending)
+                        return false;
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// How many rows <paramref name="fence"/>'s intervals hold now: a walked
+    /// read's candidate count, which picks the source a joined read drives
+    /// from as a seek's does.
+    /// </summary>
+    private static int CountFencedRows(HeapTable table, KeyFence fence)
+    {
+        var heap = table.Heap;
+        var cache = HeapSeekCache.For(heap);
+        var count = 0;
+        foreach (var interval in fence.Intervals)
+        {
+            var anchors = cache.KeyLockAnchors(heap, table.StoredColumns, heap, fence.Group.Ordinals, fence.Commons,
+                interval.Lower, interval.LowerInclusive, interval.Upper, interval.UpperInclusive, int.MaxValue)!;
+            for (var i = 0; i < anchors.Count - 1; i++)
+                count += anchors[i].Rids.Length;
+        }
+        return count;
     }
 
     /// <summary>
@@ -1164,6 +1229,11 @@ internal sealed partial class Selection
         // a range on the first order column into the scan bounds. Pinned columns
         // are consumed; everything else stays residual.
         var firstOrderOrdinal = fullPrefix[pinnedLength];
+        // A SERIALIZABLE read in the clustered key's order walks the keys it
+        // reads, each locked as it reaches it (WalkKeyFence) — an IN list on
+        // the order column too, whose keys the walk reads in order.
+        var serializableWalk = SerializableWalkGroup(table, plan, fullPrefix);
+        var walkFamily = false;
         var consumed = new HashSet<int>();
         for (var i = 0; i < pinnedLength; i++)
             _ = consumed.Add(fullPrefix[i]);
@@ -1189,6 +1259,11 @@ internal sealed partial class Selection
                 // seek), narrower than scanning the whole pinned group, so
                 // prefer it. A family on a leading key column is likewise a
                 // competing seek.
+                if (serializableWalk is not null && IsFamilyOnColumn(source, family, firstOrderOrdinal))
+                {
+                    walkFamily = true;
+                    continue;
+                }
                 if (IsFamilyOnColumn(source, family, firstOrderOrdinal) || IsLeadingKeyFamily(source, table, family))
                     return false;
                 continue;
@@ -1301,6 +1376,37 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
             return true;
         }
+        // Any other SERIALIZABLE read in the clustered key's order — a range,
+        // a pinned prefix, an IN list, a descending scan — walks its keys.
+        if (serializableWalk is { } rowGroup)
+        {
+            SqlType[] walkCommons;
+            List<KeyFenceInterval> walked;
+            if (walkFamily)
+            {
+                if (ComputeKeyFence(source, table, batch, outerResolver,
+                    CollectColumnEqualities(source, conjuncts, allowCorrelatedColumnValue: true, null, table, batch, outerResolver),
+                    CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true)) is not { } fence
+                    || !ReferenceEquals(fence.Group, rowGroup))
+                {
+                    return false;
+                }
+                (walkCommons, walked) = (fence.Commons, fence.Intervals);
+            }
+            else
+            {
+                walkCommons = (SqlType[])rowGroup.Commons.Clone();
+                Array.Copy(commons, walkCommons, commons.Length);
+                walked = [new KeyFenceInterval(lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive, uniquePoint: false)];
+            }
+            batch.AwaitUncommittedDeletes(table);
+            plan.Fence!.Settled = true;
+            skipped = 0;
+            IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
+            orderedSources = SeekedSource(source, WalkKeyFence(table, batch, plan, rowGroup, walkCommons, walked, descending,
+                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver) : null));
+            return true;
+        }
         // A read keeping its row locks waits out the deletes in flight before
         // it takes its order, as the qualified scan does.
         if (plan.RowTxScoped && !plan.SkipBlockedRows)
@@ -1345,6 +1451,17 @@ internal sealed partial class Selection
         orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest));
         return true;
     }
+
+    /// <summary>
+    /// The clustered key a SERIALIZABLE read in the order of
+    /// <paramref name="ordinals"/> walks (<see cref="WalkKeyFence"/>), or null
+    /// for any other read: they lead the key, which the walk can read.
+    /// </summary>
+    private static KeyLockGroup? SerializableWalkGroup(HeapTable table, DataLockPlan plan, int[] ordinals) =>
+        plan.SerializableRangeMode is not null && KeyLockGroup.RowGroupOf(table) is { } group && WalksKeyFence(table, plan, group)
+            && ordinals.Length <= group.Ordinals.Length && ordinals.AsSpan().SequenceEqual(group.Ordinals.AsSpan(0, ordinals.Length))
+            ? group
+            : null;
 
     /// <summary>
     /// The rest of an ordered scan after the row it read last, as the index

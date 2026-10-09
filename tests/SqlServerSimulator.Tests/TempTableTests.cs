@@ -642,4 +642,28 @@ public sealed class TempTableTests
         AreEqual(128, reader.GetString(2).Length);
         AreEqual("a", reader.GetString(3));
     }
+
+    /// <summary>
+    /// <c>sys.dm_tran_locks</c> lists a temp table's locks in tempdb: a
+    /// global one's row and key locks as any table's, a local one's object
+    /// lock, which a write holds in X to the transaction's end (probed
+    /// 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TempTableLocks_ListedInTempdb()
+    {
+        var sim = new Simulation();
+        using var writer = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        Exec(writer, "create table ##g (k int primary key, v int); insert ##g values (1, 0), (2, 0); create table #l (k int primary key, v int); insert #l values (1, 0)");
+        var spid = writer.CreateCommand("select @@spid").ExecuteScalar();
+        Exec(writer, "begin tran; update ##g set v = 1 where k = 1; update #l set v = 1");
+        CollectionAssert.AreEqual(
+            new[] { "2 KEY X", "2 OBJECT IX", "2 OBJECT X" },
+            observer.CreateCommand($"""
+                select string_agg(concat(resource_database_id, ' ', resource_type, ' ', request_mode), '|') within group (order by resource_type, request_mode)
+                from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'
+                """).ExecuteScalar()!.ToString()!.Split('|'));
+        Exec(writer, "rollback");
+    }
 }
