@@ -19,7 +19,8 @@ internal readonly struct DataLockPlan(
     PhantomFenceState? fence = null,
     bool lockingRead = false,
     bool snapshotConflictCheck = false,
-    RowAddressMap? writeTargetAddresses = null)
+    RowAddressMap? writeTargetAddresses = null,
+    PagePosition? pages = null)
 {
     /// <summary>
     /// Lock mode to acquire per touched row, or <c>null</c> when no row-
@@ -103,9 +104,16 @@ internal readonly struct DataLockPlan(
     /// </summary>
     public readonly RowAddressMap? WriteTargetAddresses = writeTargetAddresses;
 
+    /// <summary>
+    /// For a <c>PAGLOCK</c> read, the page lock it takes on each page its rows
+    /// are on and the page it last locked; null for every other read
+    /// (<c>BatchContext.TouchPage</c>).
+    /// </summary>
+    public readonly PagePosition? Pages = pages;
+
     /// <summary>This plan with <see cref="LockingRead"/> and <see cref="SnapshotConflictCheck"/> set as given.</summary>
     public DataLockPlan WithVersioningRule(bool lockingRead, bool snapshotConflictCheck) =>
-        new(this.RowMode, this.RowTxScoped, this.SkipBlockedRows, this.NoLockReader, this.SerializableRangeMode, this.Fence, lockingRead, snapshotConflictCheck, this.WriteTargetAddresses);
+        new(this.RowMode, this.RowTxScoped, this.SkipBlockedRows, this.NoLockReader, this.SerializableRangeMode, this.Fence, lockingRead, snapshotConflictCheck, this.WriteTargetAddresses, this.Pages);
 
     /// <summary>
     /// Plan for a joined write's target read: the heap's live rows, every one
@@ -129,6 +137,26 @@ internal readonly struct DataLockPlan(
     /// reader skips conflict checks entirely.
     /// </summary>
     public static readonly DataLockPlan NoLock = new(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: true);
+}
+
+/// <summary>
+/// A <c>PAGLOCK</c> read's page locks, allocated with its source's
+/// <see cref="DataLockPlan"/> and shared by every copy of it: the mode it
+/// locks each page in, whether it holds them to its transaction's end or only
+/// while it stands on the page — real's <c>READ COMMITTED</c> page lock
+/// moves with the scan — and the page it last locked.
+/// </summary>
+internal sealed class PagePosition(LockMode mode, bool held)
+{
+    public readonly LockMode Mode = mode;
+
+    public readonly bool Held = held;
+
+    /// <summary>The page last locked, in the table's <c>RealPageLayout</c>; -1 before the first.</summary>
+    public int Page = -1;
+
+    /// <summary>The page lock a read that doesn't hold its pages stands on, which it lets go as it moves on.</summary>
+    public Storage.LockResource? Standing;
 }
 
 /// <summary>

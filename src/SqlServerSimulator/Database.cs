@@ -320,6 +320,18 @@ internal sealed partial class Database
     public bool ReadCommittedSnapshot;
 
     /// <summary>
+    /// Whether a schema of the database held a DML trigger as of
+    /// <c>Simulation.SchemaVersion</c> <see cref="DmlTriggerProbeVersion"/>,
+    /// which every trigger's creation and removal bumps — so the dispatch
+    /// loop's question, asked of every DML statement a streaming command runs,
+    /// costs a field compare (<c>Simulation.RunsOnItsOwnThread</c>).
+    /// </summary>
+    internal bool HasDmlTriggerProbe;
+
+    /// <inheritdoc cref="HasDmlTriggerProbe"/>
+    internal long DmlTriggerProbeVersion = -1;
+
+    /// <summary>
     /// <c>RECURSIVE_TRIGGERS</c> per-database setting. Default <c>false</c>;
     /// flipped by <c>ALTER DATABASE … SET RECURSIVE_TRIGGERS { ON | OFF }</c>
     /// and surfaced as <c>sys.databases.is_recursive_triggers_on</c>. When

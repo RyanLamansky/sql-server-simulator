@@ -138,6 +138,14 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     }
 
     /// <summary>
+    /// The innermost <c>WITH RESULT SETS</c> sink the statement producing
+    /// these rows sent them through, converting them as it produced them, so
+    /// the <c>EXECUTE</c> of that sink and of every sink enclosing it passes
+    /// them on as they are; null for rows no statement sent that way.
+    /// </summary>
+    internal ResultSetsSink? SentThrough;
+
+    /// <summary>
     /// The statement producing these rows as the client reads them, while it
     /// is (see <see cref="BeginStreaming"/>); null for rows produced whole.
     /// </summary>

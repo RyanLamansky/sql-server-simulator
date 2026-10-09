@@ -467,7 +467,6 @@ public sealed partial class Simulation
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.RowAddresses = null;
-                batch.CurrentStatement.ReadsSnapshot = false;
                 batch.CurrentStatement.CatalogViewRows = null;
 #if DEBUG
                 batch.CurrentStatement.AuditedCatalogRowSets = null;

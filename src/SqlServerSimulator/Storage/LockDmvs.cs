@@ -31,6 +31,7 @@ internal static class LockDmvs
         LockMode.SchemaModification => "Sch-M",
         LockMode.IntentShared => "IS",
         LockMode.IntentExclusive => "IX",
+        LockMode.IntentUpdate => "IU",
         LockMode.SharedIntentExclusive => "SIX",
         LockMode.Shared => "S",
         LockMode.Update => "U",
@@ -166,9 +167,17 @@ internal static class LockDmvs
         // Real reports a key lock as resource_type KEY described by a hash of
         // the index key (KeyLockGroup.Describe).
         var keyType = SqlValue.FromNVarchar("KEY");
-        foreach (var row in EmitRowsForResource(locks, SqlValue.FromNVarchar("OBJECT"), dbId, string.Empty, table.ObjectId, table.TableDataLock, waitsByResource, grantStatus, waitStatus))
+        foreach (var row in EmitRowsForResource(locks, SqlValue.FromNVarchar("OBJECT"), dbId, string.Empty, table.ObjectId, table.TableDataLock, waitsByResource, grantStatus, waitStatus, FoldObjectModes(locks, table.TableDataLock)))
             yield return row;
-        var folded = FoldConvertedRowLocks(locks, table, FoldRowLocksIntoKeyLocks(locks, table));
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? pagesFolded = null;
+        if (!table.PageLocks.IsEmptyLockFree())
+        {
+            foreach (var row in EmitPageLocks(locks, table, dbId, waitsByResource, grantStatus, waitStatus))
+                yield return row;
+            pagesFolded = FoldRowLocksUnderPageLocks(locks, table);
+        }
+        var keyFolded = FoldRowLocksIntoKeyLocks(locks, table);
+        var folded = FoldConvertedRowLocks(locks, table, pagesFolded is null ? keyFolded : keyFolded is null ? pagesFolded : Merged(keyFolded, pagesFolded));
         foreach (var row in EmitRowLocks(batch, table, SqlValue.FromNVarchar("RID"), keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
             yield return row;
         foreach (var (_, group) in table.KeyLockGroups)
@@ -688,6 +697,164 @@ internal static class LockDmvs
                 return owner.Acting.Spid;
         }
         return null;
+    }
+
+    /// <summary>
+    /// The page locks of <paramref name="table"/>, a <c>PAGLOCK</c> read's or
+    /// write's S, U and X, in page order, described as real describes a page,
+    /// <c>file:page</c>. The intent locks a row lock takes on its page while
+    /// such a lock is held stay out, as every other row lock's page intent
+    /// does here (see <c>docs/claude/locking.md</c>).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EmitPageLocks(
+        LockManager locks, HeapTable table, SqlValue dbId, Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, SqlValue grantStatus, SqlValue waitStatus)
+    {
+        var pageType = SqlValue.FromNVarchar("PAGE");
+        var pages = table.PageLocks.ToArray();
+        Array.Sort(pages, static (a, b) => a.Key.CompareTo(b.Key));
+        foreach (var (page, resource) in pages)
+        {
+            if (resource.Holders.Count == 0 && !waitsByResource.ContainsKey(resource))
+                continue;
+            Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? intents = null;
+            foreach (var hold in locks.HoldersOf(resource))
+            {
+                if (hold.Mode is LockMode.IntentShared or LockMode.IntentUpdate or LockMode.IntentExclusive)
+                    (intents ??= [])[(resource, hold.Owner, hold.Mode)] = null;
+            }
+            foreach (var row in EmitRowsForResource(locks, pageType, dbId, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + page}"), table.ObjectId, resource, waitsByResource, grantStatus, waitStatus, intents))
+                yield return row;
+        }
+    }
+
+    /// <summary>The page id the first page of a table's layout is described by.</summary>
+    private const int FirstPageId = 8;
+
+    /// <summary>
+    /// A <c>PAGLOCK</c> write's row X under its own X on the row's page, which
+    /// real takes in place of the row's: the view shows the page's alone
+    /// (probed 2026-10-09 against SQL Server 2025). Null when nothing folds.
+    /// </summary>
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldRowLocksUnderPageLocks(LockManager locks, HeapTable table)
+    {
+        RealPageLayout? layout = null;
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
+        foreach (var (address, rowLock) in table.RowLocks)
+        {
+            if (rowLock.Holders.Count == 0)
+                continue;
+            foreach (var hold in locks.HoldersOf(rowLock))
+            {
+                if (hold.Mode != LockMode.Exclusive)
+                    continue;
+                layout ??= RealPageLayout.For(table);
+                // A row the write deleted is on no page of the layout any
+                // longer; it was on one the write locked.
+                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex)
+                    ? HoldsAnyPage(locks, table, hold.Owner)
+                    : HoldsPage(locks, table, layout.PageOf(address), hold.Owner) || HoldsPage(locks, table, layout.InsertPageOf(address), hold.Owner))
+                {
+                    (folded ??= [])[(rowLock, hold.Owner, LockMode.Exclusive)] = null;
+                }
+            }
+        }
+        return folded;
+
+        static bool HoldsPage(LockManager locks, HeapTable table, int page, SessionToken owner) =>
+            table.PageLocks.TryGetValue(page, out var pageLock) && locks.IsHeldBy(pageLock, LockMode.Exclusive, owner);
+
+        static bool HoldsAnyPage(LockManager locks, HeapTable table, SessionToken owner)
+        {
+            foreach (var (_, pageLock) in table.PageLocks)
+            {
+                if (locks.IsHeldBy(pageLock, LockMode.Exclusive, owner))
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?> Merged(
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?> into, Dictionary<(LockResource, SessionToken, LockMode), LockMode?> from)
+    {
+        foreach (var (key, value) in from)
+            into[key] = value;
+        return into;
+    }
+
+    /// <summary>
+    /// Real holds one lock per session on an object, converting it as the
+    /// session asks for more — <c>IS</c> under <c>IX</c> or <c>S</c> stays the
+    /// stronger, <c>S</c> beside <c>IX</c> becomes <c>SIX</c>, and an <c>X</c>
+    /// takes in everything (probed 2026-10-09 against SQL Server 2025: a
+    /// transaction's REPEATABLE READ read and update of one table hold
+    /// <c>OBJECT IX</c>, a held <c>TABLOCK</c> read and an update
+    /// <c>OBJECT SIX</c>) — where the lock manager here keeps each mode as a
+    /// hold of its own, which are compatible with the same requests as the
+    /// converted one. So the view folds a session's data-mode holds on the
+    /// object into that one mode. Null when nothing folds.
+    /// </summary>
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldObjectModes(LockManager locks, LockResource resource)
+    {
+        if (resource.Holders.Count < 2)
+            return null;
+        var holders = locks.HoldersOf(resource);
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
+        for (var i = 0; i < holders.Length; i++)
+        {
+            var owner = holders[i].Owner;
+            if (!IsFoldableObjectMode(holders[i].Mode) || !FirstOfOwner(holders, i))
+                continue;
+            var has = 0;
+            var count = 0;
+            for (var j = i; j < holders.Length; j++)
+            {
+                if (ReferenceEquals(holders[j].Owner, owner) && IsFoldableObjectMode(holders[j].Mode))
+                {
+                    has |= 1 << (int)holders[j].Mode;
+                    count++;
+                }
+            }
+            if (count < 2)
+                continue;
+            static bool Has(int set, LockMode mode) => (set & (1 << (int)mode)) != 0;
+            LockMode combined;
+            if (Has(has, LockMode.Exclusive))
+                combined = LockMode.Exclusive;
+            else if (Has(has, LockMode.SharedIntentExclusive) || (Has(has, LockMode.Shared) && Has(has, LockMode.IntentExclusive)))
+                combined = LockMode.SharedIntentExclusive;
+            else if (Has(has, LockMode.Update) && !Has(has, LockMode.IntentExclusive))
+                combined = LockMode.Update;
+            else if (Has(has, LockMode.Shared))
+                combined = LockMode.Shared;
+            else if (Has(has, LockMode.IntentExclusive) && !Has(has, LockMode.Update))
+                combined = LockMode.IntentExclusive;
+            else
+                continue;
+            var shown = false;
+            for (var j = i; j < holders.Length; j++)
+            {
+                if (!ReferenceEquals(holders[j].Owner, owner) || !IsFoldableObjectMode(holders[j].Mode))
+                    continue;
+                // The first hold of the owner shows the converted mode; the rest go.
+                (folded ??= [])[(resource, owner, holders[j].Mode)] = shown ? null : combined;
+                shown = true;
+            }
+        }
+        return folded;
+
+        static bool IsFoldableObjectMode(LockMode mode) =>
+            mode is LockMode.IntentShared or LockMode.IntentExclusive or LockMode.SharedIntentExclusive or LockMode.Shared or LockMode.Update or LockMode.Exclusive;
+
+        static bool FirstOfOwner(LockResource.Hold[] holders, int index)
+        {
+            for (var k = 0; k < index; k++)
+            {
+                if (ReferenceEquals(holders[k].Owner, holders[index].Owner) && IsFoldableObjectMode(holders[k].Mode))
+                    return false;
+            }
+            return true;
+        }
     }
 
     /// <summary>

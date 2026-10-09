@@ -838,7 +838,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal static readonly TimeSpan SessionBusyWait = TimeSpan.FromSeconds(4);
 
-    /// <summary>Whether a request other than <paramref name="asking"/> holds the session sending a DML statement's <c>OUTPUT</c> rows.</summary>
+    /// <summary>Whether a request other than <paramref name="asking"/> holds the session sending a DML statement's <c>OUTPUT</c> rows, or mid-statement (<see cref="SessionRequest.MidStatement"/>).</summary>
     internal bool SessionHeldByOtherRequest(SessionRequest? asking)
     {
         if (this.pendingRequests.Count <= (asking is null ? 0 : 1))
@@ -847,7 +847,7 @@ public sealed class SimulatedDbConnection : DbConnection
         {
             foreach (var request in this.pendingRequests)
             {
-                if (request != asking && !request.Finished && request.HoldsSession)
+                if (request != asking && !request.Finished && (request.HoldsSession || request.MidStatement))
                     return true;
             }
         }
@@ -909,7 +909,7 @@ public sealed class SimulatedDbConnection : DbConnection
             {
                 if (request == this.ExecutingRequest || request.Finished)
                     continue;
-                if (request.HoldsSession)
+                if (request.HoldsSession || request.MidStatement)
                     return SimulatedSqlException.RequestWhileSessionBusy();
                 if (request.ChangedSecurityContext)
                 {
@@ -1379,49 +1379,31 @@ public sealed class SimulatedDbConnection : DbConnection
     internal void JoinBackgroundProduction() => this.BackgroundProduction?.JoinBackground();
 
     /// <summary>
-    /// Runs to its end each statement suspended on its client in another
-    /// request working in the transaction the executing request is about to
-    /// write in, its rows kept for its client, then carries the writing request
-    /// on where it stood — for a row write, only a statement that can't keep
-    /// the rows it began with (<see cref="ResultStream.OwnWrites"/>): one whose
-    /// reads resolve a snapshot; for a definition under Sch-M
-    /// (<paramref name="definition"/>), every one. Real versions such a write so
-    /// the suspended statement still reads what it began reading (probed
-    /// 2026-10-05 against SQL Server 2025: a reader in a transaction the API
-    /// began read none of the inserts, updates or deletes another request made
-    /// in it meanwhile), which the statement having read its rows first gives
-    /// it here. A request in another transaction runs beside it, its writes
-    /// read as another session's are, and one in the same transaction that only
-    /// reads leaves it suspended.
+    /// Refuses a definition change of <paramref name="resource"/> — a
+    /// statement's Sch-M on it, a nonclustered index build on its table —
+    /// while a statement of another request working in the executing
+    /// request's transaction is suspended on its client holding a lock on it,
+    /// with Msg 3970, as real refuses it (probed 2026-10-09 against SQL Server
+    /// 2025). A change of an object no such statement holds goes ahead beside
+    /// it, as real's does, and so does every row write in the transaction,
+    /// which the suspended statement reads past
+    /// (<see cref="ResultStream.OwnWrites"/>).
     /// </summary>
-    internal void FinishReadsBeforeWrite(bool definition = false)
+    internal void RefuseDefinitionBesideSuspendedRead(LockResource resource)
     {
         if (this.SuspendedStreams is not { Count: > 0 } suspended || this.CurrentTransaction is not { } transaction || this.ExecutingRequest is not { } writer)
             return;
         ResultStream[] snapshot;
         lock (suspended)
             snapshot = [.. suspended];
-        var finished = false;
         foreach (var stream in snapshot)
         {
-            if (stream.Request is not { } request || request == writer || request.Finished || request.EnlistedTransactionId != transaction.TransactionId
-                || (!definition && stream.OwnWrites is not null))
+            if (stream.Request is { } request && request != writer && !request.Finished
+                && request.EnlistedTransactionId == transaction.TransactionId && stream.HoldsStatementLock(resource))
             {
-                continue;
+                throw SimulatedSqlException.DefinitionConflictsWithPendingOperation();
             }
-            // A wire request's statement runs on its own state, which an
-            // in-process reader's outcome stream restores itself.
-            if (!request.InProcess)
-                this.ResumeRequest(request);
-            stream.Finish();
-            finished = true;
         }
-        if (!finished)
-            return;
-        this.ResumeRequest(writer);
-        this.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
-        DateOrder.Current = this.DateFormat;
-        Language.Current = this.Language;
     }
 
     /// <summary>
@@ -2723,10 +2705,79 @@ public sealed class SimulatedDbConnection : DbConnection
         this.SessionAppLocks.Clear();
     }
 
+    /// <summary>
+    /// The readers opened on the connection and not yet closed, which closing
+    /// the connection closes first, each running what remains of its batch to
+    /// its end, as SqlClient's close does (probed 2026-10-09 against SQL
+    /// Server 2025: a batch whose reader was two rows into a 2,000-row result
+    /// when its connection closed ran its later statements, a transaction it
+    /// began and committed included).
+    /// A reader of a statement running on a thread of its own is named weakly
+    /// (<see cref="HoldReaderWeakly"/>), since that thread keeps the
+    /// connection reachable and a reader its application dropped unclosed
+    /// must still be collectible for the statement to notice.
+    /// </summary>
+    private readonly List<object> openReaders = [];
+
+    internal void TrackReader(SimulatedDbDataReader reader, bool weakly)
+    {
+        lock (this.openReaders)
+            this.openReaders.Add(weakly ? new WeakReference<SimulatedDbDataReader>(reader) : reader);
+    }
+
+    /// <summary>Names <paramref name="reader"/> weakly among <see cref="openReaders"/> from now on.</summary>
+    internal void HoldReaderWeakly(SimulatedDbDataReader reader)
+    {
+        lock (this.openReaders)
+        {
+            var at = this.openReaders.IndexOf(reader);
+            if (at >= 0)
+                this.openReaders[at] = new WeakReference<SimulatedDbDataReader>(reader);
+        }
+    }
+
+    internal void ForgetReader(SimulatedDbDataReader reader)
+    {
+        lock (this.openReaders)
+        {
+            for (var i = this.openReaders.Count - 1; i >= 0; i--)
+            {
+                if (ReferenceEquals(this.openReaders[i], reader)
+                    || (this.openReaders[i] is WeakReference<SimulatedDbDataReader> weak && (!weak.TryGetTarget(out var open) || ReferenceEquals(open, reader))))
+                {
+                    this.openReaders.RemoveAt(i);
+                }
+            }
+        }
+    }
+
+    /// <summary>Closes each reader still open, the latest first (see <see cref="openReaders"/>).</summary>
+    private void CloseOpenReaders()
+    {
+        object[] open;
+        lock (this.openReaders)
+        {
+            if (this.openReaders.Count == 0)
+                return;
+            open = [.. this.openReaders];
+        }
+        for (var i = open.Length - 1; i >= 0; i--)
+        {
+            var reader = open[i] switch
+            {
+                SimulatedDbDataReader held => held,
+                WeakReference<SimulatedDbDataReader> weak => weak.TryGetTarget(out var alive) ? alive : null,
+                _ => null,
+            };
+            reader?.Close();
+        }
+    }
+
     /// <inheritdoc/>
     public override void Close()
     {
         using var culture = CultureScope.Engine();
+        this.CloseOpenReaders();
         this.EndBackgroundProduction();
         this.AbandonSuspendedStreams();
         this.AbandonParkedBulkText();
@@ -2766,6 +2817,7 @@ public sealed class SimulatedDbConnection : DbConnection
         }
         else
         {
+            this.CloseOpenReaders();
             this.Session.Reclaimed = true;
             this.EndBackgroundProduction();
             this.AbandonSuspendedStreams();

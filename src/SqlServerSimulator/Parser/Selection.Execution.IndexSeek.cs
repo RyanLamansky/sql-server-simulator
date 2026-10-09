@@ -4058,13 +4058,16 @@ internal sealed partial class Selection
         var reader = batch.Connection.LockOwner;
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
+        // A row another request of the transaction wrote while the statement
+        // waited on its client reads as the statement found it.
+        var ownWrites = new BatchContext.OwnWriteView(batch, table);
 
         foreach (var (page, slot) in bucketCandidates)
         {
             if (!seen.Add((page, slot)))
                 continue;
             _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
-            if (Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader) is { } resolved)
+            if ((ownWrites.TryRead(batch, table, (page, slot), out var found) ? found : Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader)) is { } resolved)
             {
                 io?.Enter(page, ref lastPage);
                 addresses?.Record(resolved, page, slot);
@@ -4078,7 +4081,7 @@ internal sealed partial class Selection
             if (!seen.Add((page, slot)))
                 continue;
             _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
-            if (Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader) is { } bytes)
+            if ((ownWrites.TryRead(batch, table, (page, slot), out var found) ? found : Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader)) is { } bytes)
             {
                 addresses?.Record(bytes, page, slot);
                 yield return bytes;

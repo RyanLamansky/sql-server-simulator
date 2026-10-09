@@ -198,7 +198,7 @@ Re-pinning the trigger that already holds a slot is not a conflict.
 A `SELECT` in a trigger body **is** the firing statement's result set — real hands it to the client, and several body SELECTs (or several firing triggers) each contribute one, so a plain `INSERT` can return rows.
 
 The body runs inside the DML executor, which returns a single outcome, so the sets can't be yielded in place.
-`RunTriggerBodies` buffers them on `BatchContext.PendingTriggerOutcomes`, with the body's messages and the errors it ran past, in the order the body sent them, and `DispatchOneStatement` drains that ahead of the statement's own outcome.
+`RunTriggerBodies` buffers them on `BatchContext.PendingTriggerOutcomes`, with the body's messages and the errors it ran past, in the order the body sent them, and `DispatchOneStatement` drains that ahead of the statement's own outcome — unless the firing statement runs on a thread of its own, a streaming command's DML in a database with a DML trigger, when they go out as the body produces them and its `SELECT` streams as the reader reads it, the statement waiting mid-way as real's does ([`data-reader.md`](data-reader.md#a-triggers-rows)).
 The body's row counts travel the same way, ahead of the firing statement's own: real sends each body statement's count, so `ExecuteNonQuery` over an `INSERT` of two rows whose trigger writes two more returns 4 and raises `StatementCompleted` for both, unless the body (or the session, which it inherits) sets `NOCOUNT` — EF Core's trigger-safe shape does (probed 2026-09-26 against SQL Server 2025).
 
 Several triggers contribute theirs in their firing order (see [Firing order](#firing-order)).

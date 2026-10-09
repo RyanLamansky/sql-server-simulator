@@ -2349,6 +2349,28 @@ public sealed partial class Simulation
                 batch.FramedStatementDepth--;
             }
         }
+        else if (RunsOnItsOwnThread(batch))
+        {
+            // What a trigger the statement fires sends goes out as the trigger
+            // produces it, the statement waiting mid-way on its client. The
+            // lifecycle runs on the statement's thread in a box, copied back
+            // as the statement ends, so no closure is made for a statement
+            // that doesn't take this way.
+            var box = new StatementLifecycleBox(lifecycle);
+            var coroutine = new StatementCoroutine(batch.Connection);
+            batch.StatementCoroutine = coroutine;
+            try
+            {
+                foreach (var sent in coroutine.Run(this.RunBoxed(box, batch, outcomes, requireSemicolonBeforeCte, atBatchStart)))
+                    yield return sent;
+            }
+            finally
+            {
+                lifecycle = box.Lifecycle;
+                batch.StatementCoroutine = null;
+                batch.FramedStatementDepth--;
+            }
+        }
         else
         {
             try
@@ -3788,6 +3810,12 @@ public sealed partial class Simulation
         }
         if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
             RequireInsertExecAssignable(selection, insertExecTargets, batch);
+        // Inside an EXECUTE … WITH RESULT SETS the statement sends its set
+        // through the contract: a set it can't claim fails it before it sends
+        // anything, and its rows convert as it produces them.
+        var resultSetClaims = batch.ResultSetsSink is { } resultSetsSink && !selection.IsAssignmentOnly
+            ? ClaimResultSet(resultSetsSink, selection.Schema)
+            : null;
         // Materialize rows up-front so @@ROWCOUNT reflects the
         // statement's full row count for the next statement in
         // the same batch (real SQL Server runs server-side and
@@ -3809,6 +3837,8 @@ public sealed partial class Simulation
         try
         {
             executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
+            if (resultSetClaims is not null)
+                executed = SendThroughResultSets(executed, resultSetClaims, batch.ResultSetsSink!);
             // A result larger than real gets ahead of its client goes out as the
             // client reads it, the statement holding its position meanwhile;
             // one that fits is produced whole, as it would be anyway.
@@ -3896,6 +3926,99 @@ public sealed partial class Simulation
         && batch.BindErrors is null
         && !batch.CreateTimeBinding
         && batch.Connection.InsertExecTargetTypes is null;
+
+    /// <summary>A statement's lifecycle as its own thread runs it (see <see cref="RunsOnItsOwnThread"/>).</summary>
+    private sealed class StatementLifecycleBox(StatementLifecycle lifecycle)
+    {
+        public StatementLifecycle Lifecycle = lifecycle;
+    }
+
+    /// <summary>The run of a statement on its own thread, over its boxed lifecycle.</summary>
+    private Action RunBoxed(StatementLifecycleBox box, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart) =>
+        () => box.Lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+
+    /// <summary>
+    /// Whether the statement at the cursor runs on a thread of its own
+    /// (<see cref="StatementCoroutine"/>), so what a trigger it fires sends
+    /// goes out as the trigger produces it, as real sends it: a DML statement
+    /// of a batch whose consumer reads rows as they are produced, at a level
+    /// whose outcomes reach that consumer (as <see cref="StreamsRows"/>
+    /// judges a <c>SELECT</c>), in a database with a DML trigger, outside a
+    /// trigger's own statements and without the <c>STATISTICS</c> reports a
+    /// trigger body's compile would have to go ahead of.
+    /// </summary>
+    private static bool RunsOnItsOwnThread(BatchContext batch) =>
+        batch.StreamsResultRows
+        && batch.StreamingFrames == batch.FramedStatementDepth - 1
+        && batch.StatementCoroutine is null
+        && !batch.IsSkipping
+        && batch.BindErrors is null
+        && !batch.CreateTimeBinding
+        && batch.TriggerFrame is null
+        && batch.CallerTriggerFrame is null
+        && batch.Connection is { InsertExecTargetTypes: null, StatisticsIo: false, StatisticsTime: false }
+        && batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
+        && HasDmlTrigger(batch)
+        && MayFireTrigger(batch);
+
+    /// <summary>Whether any schema of the batch's database holds a DML trigger, cached per schema version.</summary>
+    private static bool HasDmlTrigger(BatchContext batch)
+    {
+        var database = batch.CurrentDatabase;
+        var version = Volatile.Read(ref batch.Connection.Simulation.SchemaVersion);
+        if (Volatile.Read(ref database.DmlTriggerProbeVersion) == version)
+            return database.HasDmlTriggerProbe;
+        var has = false;
+        foreach (var (_, schema) in database.Schemas)
+        {
+            if (!schema.Triggers.IsEmptyLockFree())
+            {
+                has = true;
+                break;
+            }
+        }
+        database.HasDmlTriggerProbe = has;
+        Volatile.Write(ref database.DmlTriggerProbeVersion, version);
+        return has;
+    }
+
+    /// <summary>
+    /// Whether the DML statement at the cursor may fire a trigger: false only
+    /// when the object it names as written — after <c>INSERT [INTO]</c>,
+    /// <c>UPDATE</c>, <c>DELETE [FROM]</c> or <c>MERGE [INTO]</c> — is a table
+    /// or view no trigger is attached to; any shape the look-ahead doesn't
+    /// read, a <c>TOP</c> or an alias among them, may.
+    /// </summary>
+    private static bool MayFireTrigger(BatchContext batch)
+    {
+        var context = batch.Parser;
+        var start = context.SaveCheckpoint();
+        try
+        {
+            var verb = context.Token;
+            context.MoveNextOptional();
+            if ((context.Token is ReservedKeyword { Keyword: Keyword.Into } && verb is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Merge })
+                || (context.Token is ReservedKeyword { Keyword: Keyword.From } && verb is ReservedKeyword { Keyword: Keyword.Delete }))
+            {
+                context.MoveNextOptional();
+            }
+            if (context.Token is not (Name or UnquotedString { ContextualKeyword: ContextualKeyword.None }))
+                return true;
+            var name = BatchContext.ParseObjectName(context);
+            SchemaObject? target = batch.TryResolveTable(name, out var table) ? table
+                : batch.TryResolveView(name, out var view) ? view
+                : null;
+            return target is null || TriggersAttachedTo(batch, target).Length != 0;
+        }
+        catch (SimulatedSqlException)
+        {
+            return true;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(start);
+        }
+    }
 
     /// <summary>
     /// Replays the parse of the <c>SELECT</c> statement at the cursor from

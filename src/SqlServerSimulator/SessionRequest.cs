@@ -78,6 +78,14 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
     public volatile bool HoldsSession;
 
     /// <summary>
+    /// Set while a statement of the request runs on a thread of its own and
+    /// waits mid-statement on its client (<see cref="StatementCoroutine"/>) —
+    /// a firing statement whose trigger's rows are going out — which real
+    /// can't suspend to run another request either.
+    /// </summary>
+    public volatile bool MidStatement;
+
+    /// <summary>
     /// The session's published settings the request began executing from
     /// (see <see cref="SimulatedDbConnection.PublishedSettings"/>); null for
     /// a request that hasn't executed, and for an in-process command that

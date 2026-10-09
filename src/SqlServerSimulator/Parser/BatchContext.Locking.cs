@@ -39,6 +39,13 @@ internal sealed partial class BatchContext
     private HashSet<HeapTable>? noWaitTables;
 
     /// <summary>
+    /// Tables the current statement writes with a <c>PAGLOCK</c> hint, whose
+    /// row locks take the X of their page too (<see cref="LockRowPage"/>);
+    /// cleared with the statement's locks, as <see cref="noWaitTables"/> is.
+    /// </summary>
+    private HashSet<HeapTable>? pageLockedWrites;
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
     /// the current connection, honoring the connection's
     /// <see cref="SimulatedDbConnection.LockTimeoutMillis"/>, and records the
@@ -54,7 +61,7 @@ internal sealed partial class BatchContext
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
-            connection.FinishReadsBeforeWrite(definition: true);
+            connection.RefuseDefinitionBesideSuspendedRead(resource);
         var owner = connection.LockOwner;
         connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode, owner));
@@ -120,7 +127,7 @@ internal sealed partial class BatchContext
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: true));
         var connection = this.Connection;
         if (mode == LockMode.SchemaModification)
-            connection.FinishReadsBeforeWrite(definition: true);
+            connection.RefuseDefinitionBesideSuspendedRead(resource);
         var owner = connection.LockOwner;
         connection.Simulation.LockManager.Acquire(resource, mode, owner, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
@@ -306,7 +313,11 @@ internal sealed partial class BatchContext
 
         if (hints.TabLock)
         {
-            if (isWrite)
+            // A read taking UPDLOCK or XLOCK at the table takes its X, held to
+            // the transaction's end at any level (probed 2026-10-09 against
+            // SQL Server 2025: OBJECT X under READ COMMITTED and REPEATABLE
+            // READ alike).
+            if (isWrite || hints.UpdLock || hints.XLock)
             {
                 this.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive, hints.NoWait);
                 return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
@@ -325,7 +336,43 @@ internal sealed partial class BatchContext
         if (isWrite)
         {
             this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive, hints.NoWait);
+            // A write under PAGLOCK takes the X of each page its rows are on
+            // (AcquireRowLockTxScoped), its row X kept for the reads that
+            // probe rows (probed 2026-10-09 against SQL Server 2025: an
+            // UPDATE of six rows held the X of their two pages).
+            if (hints.PagLock)
+            {
+                _ = (this.pageLockedWrites ??= []).Add(table);
+                this.HasSessionScopedReference = true;
+            }
             return new DataLockPlan(rowMode: LockMode.Exclusive, rowTxScoped: true, skipBlockedRows: false, noLockReader: false);
+        }
+
+        // A PAGLOCK read locks each page its rows are on in place of the rows
+        // — U or X under UPDLOCK / XLOCK, S otherwise — holding them to the
+        // transaction's end under REPEATABLE READ and SERIALIZABLE, which take
+        // no range lock beside them, and under READ COMMITTED only the page it
+        // stands on (probed 2026-10-09 against SQL Server 2025); a versioned
+        // read stays versioned.
+        if (hints.PagLock
+            && (hints.LocksRead || !(isolation == System.Data.IsolationLevel.Snapshot
+                || (isolation == System.Data.IsolationLevel.ReadCommitted && this.DatabaseFor(table).ReadCommittedSnapshot))))
+        {
+            this.HasSessionScopedReference = true;
+            if (hints.XLock || hints.UpdLock)
+            {
+                this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentExclusive, hints.NoWait);
+                return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false,
+                    pages: new PagePosition(hints.XLock ? LockMode.Exclusive : LockMode.Update, held: true));
+            }
+            var holdsPages = hints.Serializable || hints.Repeatable
+                || lockingLevel is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable;
+            if (holdsPages)
+                this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
+            else
+                this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
+            return new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false,
+                pages: new PagePosition(LockMode.Shared, holdsPages));
         }
 
         // Reader path (no TABLOCK*).
@@ -446,8 +493,10 @@ internal sealed partial class BatchContext
     /// </summary>
     public void AcquireRowLockTxScoped(HeapTable table, int pageIndex, int slotIndex, LockMode mode, RowLockPurpose purpose = RowLockPurpose.Read)
     {
-        if (purpose != RowLockPurpose.Read)
-            this.Connection.FinishReadsBeforeWrite();
+        // The page the row is on, while some read or write locks pages of the
+        // table whole.
+        if (Volatile.Read(ref table.ActivePageLocks) != 0 || (purpose != RowLockPurpose.Read && this.WritesPagesOf(table)))
+            this.LockRowPage(table, pageIndex, slotIndex, mode, purpose != RowLockPurpose.Read);
         // Every UPDATE / DELETE path passes through here with a RID in hand,
         // so it is where their key-lock tests hang: the lock comes before the
         // write, so the slot holds the row it is about to supersede. An
@@ -1832,11 +1881,16 @@ internal sealed partial class BatchContext
             // A deleted slot comes through too: the snapshot may predate the
             // delete. Each slot resolves once, against the chain as it stood
             // with the slot, so a write landing mid-scan neither hides a row
-            // nor shows it twice.
+            // nor shows it twice. A row another request of the transaction
+            // wrote while the statement waited on its client reads as the
+            // statement found it, as a locking read's does.
+            var snapshotOwnWrites = new OwnWriteView(batch, table);
             foreach (var (pageIndex, slotIndex, read, sequence) in heap.EnumerateSlots())
             {
                 io?.Enter(pageIndex, ref lastPage);
-                var resolved = Storage.VersionStore.ReadSnapshotSlot(table, (pageIndex, slotIndex), read, sequence, sx, batch.Connection.LockOwner);
+                var resolved = snapshotOwnWrites.TryRead(batch, table, (pageIndex, slotIndex), out var found)
+                    ? found
+                    : Storage.VersionStore.ReadSnapshotSlot(table, (pageIndex, slotIndex), read, sequence, sx, batch.Connection.LockOwner);
                 if (resolved is null)
                     continue;
                 addresses?.Record(resolved, pageIndex, slotIndex);
@@ -1849,7 +1903,9 @@ internal sealed partial class BatchContext
             {
                 if (heap.TryReadSlot(address.PageIndex, address.SlotIndex, out _, out _))
                     continue;
-                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(chain, sx, batch.Connection.LockOwner);
+                var resolved = snapshotOwnWrites.TryRead(batch, table, (address.PageIndex, address.SlotIndex), out var found)
+                    ? found
+                    : Storage.VersionStore.ResolveTombstonedSlotForSnapshot(chain, sx, batch.Connection.LockOwner);
                 if (resolved is null)
                     continue;
                 addresses?.Record(resolved, address.PageIndex, address.SlotIndex);
@@ -2188,7 +2244,6 @@ internal sealed partial class BatchContext
         // data access, which is what a later Msg 3960 judges by.
         if ((plan.LockingRead && !table.IsMemoryOptimized) || snapshotXid is null)
             return null;
-        this.CurrentStatement.ReadsSnapshot = true;
         return snapshotXid;
     }
 
@@ -2292,6 +2347,8 @@ internal sealed partial class BatchContext
     {
         if (plan.NoLockReader)
             return true;
+        if (plan.Pages is { } pages)
+            this.TouchPage(table, pageIndex, slotIndex, pages);
         if (plan.RowMode is { } mode)
         {
             // A SERIALIZABLE UPDLOCK / XLOCK scan locks each key, in its range
@@ -2401,6 +2458,86 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
+    /// A <c>PAGLOCK</c> read's lock on the page the row at
+    /// <paramref name="pageIndex"/> / <paramref name="slotIndex"/> is on, taken
+    /// as the read reaches each next page (see <see cref="PagePosition"/>):
+    /// held to the transaction's end, or let go as a <c>READ COMMITTED</c> read
+    /// moves on, which keeps the page it stands on while it waits on its client.
+    /// </summary>
+    private void TouchPage(HeapTable table, int pageIndex, int slotIndex, PagePosition pages)
+    {
+        if (this.EscalatedModeOf(table) is not null)
+            return;
+        var page = RealPageLayout.For(table).PageOf((pageIndex, slotIndex));
+        if (page == pages.Page)
+            return;
+        pages.Page = page;
+        var resource = table.GetOrCreatePageLock(page);
+        if (pages.Held)
+        {
+            if (this.Connection.Simulation.LockManager.IsHeldBy(resource, pages.Mode, this.Connection.LockOwner))
+                return;
+            this.AcquireTransactionLock(resource, pages.Mode, this.NamedNoWait(table));
+            this.CountLocksForEscalation(table, 1, exclusive: pages.Mode != LockMode.Shared);
+            return;
+        }
+        this.AcquireStatementLock(resource, LockMode.Shared, this.NamedNoWait(table));
+        if (pages.Standing is { } left)
+            this.ReleaseStatementLock(left, LockMode.Shared);
+        pages.Standing = resource;
+    }
+
+    /// <summary>Whether the current statement writes <paramref name="table"/> under <c>PAGLOCK</c>.</summary>
+    internal bool WritesPagesOf(HeapTable table) => this.pageLockedWrites is { Count: > 0 } paged && paged.Contains(table);
+
+    /// <summary>
+    /// Takes the lock of the page the row at <paramref name="pageIndex"/> /
+    /// <paramref name="slotIndex"/> is on, as real's row lock takes its page's
+    /// intent — IS for an S, IU for a U, IX for an X — or, for a write under
+    /// <c>PAGLOCK</c>, the page's X; asked only while some session locks the
+    /// table's pages whole, whose page lock the intent then waits on (probed
+    /// 2026-10-09 against SQL Server 2025: an update of any row of a page a
+    /// <c>PAGLOCK</c> reader held waited, a <c>UPDLOCK</c> read of one under an
+    /// S page lock went ahead and under a U one waited).
+    /// </summary>
+    internal void LockRowPage(HeapTable table, int pageIndex, int slotIndex, LockMode rowMode, bool writes, bool inserted = false)
+    {
+        if (this.EscalatedModeOf(table) is not null)
+            return;
+        var layout = RealPageLayout.For(table);
+        var page = inserted ? layout.InsertPageOf((pageIndex, slotIndex)) : layout.PageOf((pageIndex, slotIndex));
+        var resource = table.GetOrCreatePageLock(page);
+        var mode = writes && this.WritesPagesOf(table) ? LockMode.Exclusive
+            : rowMode switch
+            {
+                LockMode.Shared => LockMode.IntentShared,
+                LockMode.Update => LockMode.IntentUpdate,
+                _ => LockMode.IntentExclusive,
+            };
+        var connection = this.Connection;
+        if (connection.Simulation.LockManager.IsHeldBy(resource, mode, connection.LockOwner))
+            return;
+        this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
+        if (mode == LockMode.Exclusive)
+            this.CountLocksForEscalation(table, 1, exclusive: true);
+    }
+
+    /// <summary>
+    /// Waits out a lock another session holds on the page the row at
+    /// <paramref name="pageIndex"/> / <paramref name="slotIndex"/> is on that a
+    /// read's intent can't pass — a <c>PAGLOCK</c> write's X — as a
+    /// <c>READ COMMITTED</c> read's instant intent lock does.
+    /// </summary>
+    private void AwaitRowPage(HeapTable table, int pageIndex, int slotIndex)
+    {
+        var resource = table.GetOrCreatePageLock(RealPageLayout.For(table).PageOf((pageIndex, slotIndex)));
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        manager.Acquire(resource, LockMode.IntentShared, connection.LockOwner, this.NamedNoWait(table) ? 0 : connection.LockTimeoutMillis);
+        manager.Release(resource, LockMode.IntentShared, connection.LockOwner);
+    }
+
+    /// <summary>
     /// Takes S on the row a <c>READ COMMITTED</c> scan stands on as its
     /// statement suspends on its client, which real's scan holds while it
     /// waits (probed 2026-10-08 against SQL Server 2025: a reader 2, 50, 100
@@ -2429,14 +2566,18 @@ internal sealed partial class BatchContext
     private bool ProbeRowForRead(HeapTable table, int pageIndex, int slotIndex, in DataLockPlan plan)
     {
         var connection = this.Connection;
+        // A page another session locks whole is waited out as real's intent
+        // lock on it would be.
+        if (plan.Pages is null && Volatile.Read(ref table.ActivePageLocks) != 0)
+            this.AwaitRowPage(table, pageIndex, slotIndex);
         // Where a plain READ COMMITTED scan stands, should its statement
-        // suspend on its client here.
-        if (plan.Fence is null && !plan.SkipBlockedRows)
+        // suspend on its client here; a PAGLOCK read stands on its page.
+        if (plan.Fence is null && !plan.SkipBlockedRows && plan.Pages is null)
         {
             var statement = this.CurrentStatement;
             // Compared first: the store's write barrier would cost every row.
             if (!ReferenceEquals(statement.ProbedTable, table))
-                statement.ProbedTable = table;
+                statement.SwitchProbedTable(table);
             statement.ProbedPage = pageIndex;
             statement.ProbedSlot = slotIndex;
             statement.RowsProbed++;
@@ -2522,6 +2663,7 @@ internal sealed partial class BatchContext
         }
         this.StatementSchemaLocks.Clear();
         this.noWaitTables?.Clear();
+        this.pageLockedWrites?.Clear();
     }
 
     /// <summary>Whether the current statement named <paramref name="table"/> with a <c>NOWAIT</c> table hint.</summary>

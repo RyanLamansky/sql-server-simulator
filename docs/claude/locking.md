@@ -162,7 +162,7 @@ A request takes a token of its own only when it begins while another request of 
 Three things keep the split from reaching where the session is one:
 - **The same-thread deadlock check passes over a parked request's locks** (`SessionToken.RequestParked`, set as a request parks and cleared as one resumes under the token): the statement this thread runs doesn't hold them, so a wait on them goes on until the parked request lets go or a timeout ends it — real's deadlock monitor ended 5 of 27 such waits with Msg 1205 ("lock | generic waitable object") within five seconds and let the rest run to their `CommandTimeout` (probed 2026-10-05 and 2026-10-08 against SQL Server 2025), so the simulator waits.
 - **A cursor's scroll locks belong to the session** (`SimulatedDbConnection.SessionScope`, `SessionToken.IsSessionScope`), compatible with every request of it (`LockManager.SharesSessionScope`), so a positioned update meets its cursor's U as its own whichever request runs it; a request's own token likewise shares what the session's token holds while no request is parked on it, its application locks.
-- **A request writing in the transaction a suspended reader works in leaves the reader where it stood**, its rows read as the statement found them (`Storage.OwnWriteImages`), so the reader keeps only the locks its position holds; a definition change under Sch-M, or a reader at a snapshot, runs the reader's statement to its end first (`SimulatedDbConnection.FinishReadsBeforeWrite`) — see [`data-reader.md`](data-reader.md#a-request-of-the-readers-own-transaction).
+- **A request writing in the transaction a suspended reader works in leaves the reader where it stood**, its rows read as the statement found them (`Storage.OwnWriteImages`) — a reader at a snapshot's too — so the reader keeps only the locks its position holds; a redefinition of an object the reader holds is refused with Msg 3970, which dooms the transaction (`SimulatedDbConnection.RefuseDefinitionBesideSuspendedRead`) — see [`data-reader.md`](data-reader.md#a-request-of-the-readers-own-transaction).
 
 ## Abandoned-session reclamation
 
@@ -499,11 +499,12 @@ The two deadlines keep their own errors: `SET LOCK_TIMEOUT` elapsing is Msg 1222
 | `UPDLOCK`                         | Take table-IX + row-U tx-scoped per row returned, plus `RangeS-U` key locks under SERIALIZABLE / `HOLDLOCK`. |
 | `XLOCK`                           | Take table-IX + row-X tx-scoped per row returned, plus `RangeX-X` key locks under SERIALIZABLE / `HOLDLOCK`. |
 | `READPAST`                        | Skip rows another connection holds incompatibly instead of waiting — the row-X a writer holds, and the row-U / row-X the `UPDLOCK` / `XLOCK` pairing meets. |
-| `TABLOCK`                         | Reader: table-S; Writer: table-X. Skip row-level. |
+| `TABLOCK`                         | Reader: table-S, or table-X to the transaction's end beside `UPDLOCK` or `XLOCK` at any level (probed 2026-10-09 against SQL Server 2025); Writer: table-X. Skip row-level. |
 | `TABLOCKX`                        | Take table-X regardless of direction.          |
 | `READCOMMITTED`                   | The default READ COMMITTED read — versioned under `READ_COMMITTED_SNAPSHOT`. |
 | `READCOMMITTEDLOCK`               | A locking READ COMMITTED read, under `READ_COMMITTED_SNAPSHOT` too. |
-| `ROWLOCK` / `PAGLOCK`             | Parse-and-discard (row-level is default; page granularity not modeled). |
+| `ROWLOCK`                         | Parse-and-discard (row-level is default). |
+| `PAGLOCK`                         | Lock the pages the rows are on in place of the rows ([Page locks](#page-locks-paglock)). |
 | `NOWAIT`                          | Zero the lock timeout for the hinted table, so a conflicting acquisition raises Msg 1222 at once rather than waiting. |
 | `KEEPIDENTITY`, etc.              | Parse-and-discard.                             |
 
@@ -535,6 +536,7 @@ A `READCOMMITTED` or `READCOMMITTEDLOCK` hint reads its table at READ COMMITTED 
 A `SELECT` sends its rows as its client reads them and waits on the client between windows (see [`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)), so what it holds while it waits is what its locks have reached by its position, not by the end of a finished scan.
 Its acquisitions are the ones every read makes — the object lock where its source resolves, the row and key locks as its scan reaches each row — and the suspension keeps the statement's own scope open, releasing its statement-scoped locks with its last row.
 One lock is the suspension's own: a plain `READ COMMITTED` scan, which holds no row lock past the row it reads, holds S on the row it stands on — the last it produced — while it waits, and lets it go as it reads on (`ResultStream.Suspend`, `BatchContext.HoldScanPosition`, the position recorded as `ProbeRowForRead` probes each row), so a writer of that row waits on the reader and a writer of any other goes ahead (probed 2026-10-08 against SQL Server 2025: a reader 2, 50, 100 and 300 rows into a result of 2,000 rows of `char(2000)` held `KEY S` on its last row produced, in a transaction or not; a sort, which read every row before its first went out, holds none).
+Every scan the last row came through stands on a row of its own, and each holds its S — a correlated subquery's or an `APPLY` body's over another table beside the outer scan's, one over the same table standing on the outer row (probed 2026-10-09 against SQL Server 2025: two `KEY S` beside a correlated `COUNT(*)`, three beside an `EXISTS` over a third table, one for a correlated read of the same table; `StatementContext.OtherProbed`).
 A reader resuming into a row an uncommitted writer holds waits there, its `LOCK_TIMEOUT`, `NOWAIT`, `READPAST`, cancellation and deadlock detection applying as at any row.
 Another MARS request of the reader's own session meets these locks as another session's would ([Lock owners of a MARS session's requests](#lock-owners-of-a-mars-sessions-requests)).
 
@@ -552,7 +554,7 @@ Probed 2026-10-08 against SQL Server 2025 over a MARS connection, a reader two r
 | `UPDLOCK` / `XLOCK` | `KEY U` / `KEY X` on the 20 rows, `PAGE IU` / `IX`, `OBJECT IX` | the 20 `KEY U` / `X`, `OBJECT IX` |
 | `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `KEY S` on the row it stands on, `OBJECT IS` |
 | `ROWLOCK` | as the level's, row locks, `PAGE IS` | as the level's |
-| `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | as the level's, row locks — the row the scan stands on for the page |
+| `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | the same |
 
 How the read came to its level doesn't matter — `SET TRANSACTION ISOLATION LEVEL` with a transaction begun in SQL, one the API began at the level, or a table hint — and neither does an `ORDER BY` the clustered key satisfies: a row-locking read (`REPEATABLE READ`, `UPDLOCK`, `XLOCK`) takes the ordered scan and locks each row as it reaches it, letting go a row its own `WHERE` rejects (below), and a plain `SERIALIZABLE` read in ascending key order is the table's own scan above.
 A row-locking read lets go the lock of a row its query's own `WHERE` rejects, however the predicate reads the row — a sargable bound or not, beside a `NEWID()` or under an `OR` — as real's scan applies such a predicate itself, while one reached through a subquery or a join's `ON` filters above the scan, which keeps every lock it took (probed 2026-10-09 against SQL Server 2025: `UPDLOCK … WHERE v % 3 = 0` held twenty keys two rows in and 666 at its end, as did `XLOCK` and a `REPEATABLE READ` read; through a correlated subquery or an `ON`, sixty and 2,000).
@@ -581,21 +583,19 @@ A seek through a nonclustered index locks its entries in the range mode and take
   **Settled — don't re-pitch:** real's own position lock isn't deterministic.
   Probed 2026-10-09 against SQL Server 2025 with readers two rows into tables of various widths: the choice between `KEY S` and `PAGE S` turned on both the row count and the row width — `KEY S` through 7,500 rows of 2,000-byte rows and `PAGE S` from 7,700, `KEY S` through 8,000 rows of 100 bytes and `PAGE S` at 9,000, `KEY S` at 10,000 rows of 10 bytes and `PAGE S` at 20,000 — and identical runs held no position lock at all on some passes (100-byte rows at 8,000 rows, 2,000-byte rows at 200, 10-byte rows at 7,500), as the scan happened to stop between rows or pages when its client's window filled.
   The pages themselves were predictable — rows inserted in key order filled them 4, 19, 69 and 299 to a page by width, and the page held was the position's — but a client can't rely on which lock the position holds, so neither is a contract to match.
-- **`PAGLOCK` isn't modeled yet** ([Granularity approximations](#granularity-approximations)): real holds `PAGE S` on the page its position is on under READ COMMITTED, and on the pages produced under REPEATABLE READ, whatever the table's size (probed 2026-10-09 against SQL Server 2025 under READ COMMITTED: the page of rows 17 to 20 of 2,000-byte rows, over 2,000 rows as over 20,000); here the hint reads with the level's row locks.
-  Which page a row is on is the table's load history, not its contents: rows inserted in key order fill pages by their record size, and the 14-byte versioning tag every row written while `ALLOW_SNAPSHOT_ISOLATION` or `READ_COMMITTED_SNAPSHOT` is on carries takes four rows of `int` and `char(2000)` to a page down to three (probed 2026-10-09 against SQL Server 2025), while a page split after an insert into a full page halves it — so modeling the hint means a page per row computed from real's record format over the key order, deterministic for a table loaded in key order only, a `PAGE` resource per page, and a writer's test of the page its row is on, as its key-range test is made.
-  Nor are the page intent locks above row locks, which only `sys.dm_tran_locks` shows.
-  The same granularity is why a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
+- **A `PAGLOCK` read's pages are the ones a load in key order leaves** ([Page locks](#page-locks-paglock)).
+- **The page intent locks above row locks aren't listed**, which only `sys.dm_tran_locks` shows, and a page is locked only under `PAGLOCK` — so a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
 - **An object S or X lock is one lock here**, where real's host takes it on each of its 16 lock partitions (`OBJECT S` ×16 in `sys.dm_tran_locks`).
 - **A few `SERIALIZABLE` reads still take their whole fence as they begin**: one through a nonclustered index read in descending order, a descending or filtered index, a clustered key with a nullable or descending column, and the union of an `OR`'s seeks — past the escalation threshold, the table S or X — where real locks each key as the read reaches it.
   A reader suspended mid-result so blocks writes ahead of it that real lets through, never the reverse.
 - **A row-locking read keeps its lock on a row only a drawing, subquery-reaching or function-calling conjunct of its `WHERE` rejects**, where real lets it go, since asking that conjunct again could answer differently (above).
-- **A `READ COMMITTED` read's correlated subquery leaves its position's `KEY S` held while the statement waits on its client**, where real's holds none (probed 2026-10-09 against SQL Server 2025: `UPDLOCK … WHERE (SELECT COUNT(*) … WHERE u.id = t.id …) = 1` two rows in held sixty `KEY U` and no `KEY S`): the position the suspension holds is the row the statement last probed, which is the subquery's.
+- **A `READ COMMITTED` join holds no position while it waits**, where real's merge or nested-loop join holds one per input (probed 2026-10-09 against SQL Server 2025: two `KEY S` two rows into a join of two 2,000-row tables): the join here reads its build side whole and its probe side's rows come through it unprobed.
 - **A sort over `REPEATABLE READ` escalates** at real's threshold, where real's parallel sort of the same 20,000 rows held its 20,000 key locks.
 
 ## Diagnostic DMVs
 
 - **`sys.dm_tran_locks`** — one row per held / waiting lock across every database — every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks` (and the row locks of rows a session deleted, found through `HeapTable.SupersededKeyImages`), and every key-lock anchor in `HeapTable.KeyLockGroups`.
-  A row lock reports `KEY` on a clustered table, whose row real locks by its key, described by that key, and `RID` on a heap; a row lock and a key-range lock one session holds on the same clustered key fold into one row in the combined mode (see [Divergences](#divergences)), as do a U and the X its holder took over it.
+  A row lock reports `KEY` on a clustered table, whose row real locks by its key, described by that key, and `RID` on a heap; a row lock and a key-range lock one session holds on the same clustered key fold into one row in the combined mode (see [Divergences](#divergences)), as do a U and the X its holder took over it, and a session's modes on one table into the one lock real converts them to (`LockDmvs.FoldObjectModes`).
   A key a session deleted and inserted again is two rows at two addresses here and one key on real, which keeps the key in place, so it reports once per index (probed 2026-10-07 against SQL Server 2025).
   A statement's Sch-S stands for real's compile-time lock, so the view leaves it out beside anything else the session holds or waits for on the object — a read's IS, a write's IX, a redefinition's Sch-M — as real shows that one request (probed 2026-10-07 against SQL Server 2025: a waiting reader's IS, a waiting redefinition's Sch-M); a `NOLOCK` read shows its Sch-S.
   Beside a written row's own lock the view reports the index key locks real takes with it, which the simulator folds into the row's X (`LockDmvs.EmitRowLocks` carries the rule): an inserted or deleted row's key in every index it is in, an updated row's old and new key in every index whose row the update changed, a moved clustered key's old key, and a filtered index only where its filter admits the image (probed 2026-10-01 against SQL Server 2025 over heaps and clustered tables with unique, non-unique, filtered and `INCLUDE` indexes).
@@ -783,10 +783,24 @@ Divergences:
 
 - **A MERGE into a join view keeps U on every row the join reached** until it has written, where real's scan releases the U on a row it doesn't write; and a joined write through a single-table view waits on every row of the table another session holds before its read, where real's scan waits on the rows it reaches.
 
+## Page locks (`PAGLOCK`)
+
+`PAGLOCK` locks the pages a table's rows are on in place of the rows, as real does (probed 2026-10-09 against SQL Server 2025 with readers two rows into 2,000 rows of `int` and `char(2000)`):
+- a `READ COMMITTED` read holds `PAGE S` on the page it stands on, letting it go as it moves on, so while it waits on its client a writer of any row of that page waits;
+- `REPEATABLE READ` and `SERIALIZABLE` hold `PAGE S` on every page read to the transaction's end, with no row or range lock beside them, an insert landing on a held page waiting;
+- `UPDLOCK` and `XLOCK` hold `PAGE U` and `PAGE X`;
+- a write takes `PAGE X` on each page it writes a row of, which `sys.dm_tran_locks` shows in place of its rows' X;
+- a versioned read stays versioned.
+A page lock's timeout is Msg 1222 state 52.
+Which page a row is on comes from `RealPageLayout`: the table's rows in clustered-key order — a heap's in insertion order — filling pages of 8,096 bytes with real's record format and a two-byte slot each, the versioning tag of a database with `ALLOW_SNAPSHOT_ISOLATION` or `READ_COMMITTED_SNAPSHOT` on included, which takes four rows of `int` and `char(2000)` to a page down to three; it reproduces real's page fill for a table loaded in key order exactly (`RealPageLayoutTests`, twenty shapes against `%%physloc%%`).
+A row lock meets a page lock through its page's intent, IS for an S, IU for a U, IX for an X, which `BatchContext.LockRowPage` takes only while some session holds a page lock on the table (`HeapTable.ActivePageLocks`), and a `READ COMMITTED` read tests its row's page the same way; those intents stay out of `sys.dm_tran_locks`, as every other row lock's page intent does.
+
+**Divergences**:
+- A table loaded out of key order, or changed since, has the pages its splits left on real, which follow its history; the layout here is a rebuild's in key order.
+- An insert past a full last page locks that page's X alone, where real's also locks the page it allocates.
+
 ## Granularity approximations
 
-- **Page-level locks (`PAGLOCK`)** — page granularity isn't modeled; the hint parses-and-discards.
-  Locking is row-level by default, so the hint is a no-op semantically.
 - **`ALTER SCHEMA TRANSFER`** — Sch-M on the moved object isn't acquired.
 
 ## Snapshot isolation + MVCC
@@ -912,6 +926,7 @@ A `NOLOCK` read goes ahead, and so does a transaction whose snapshot was taken a
 So `TRUNCATE`, `SWITCH` and the `ALTER TABLE` rebuilds need no versioning of their own: a snapshot old enough to need the rows they replaced is refused the table.
 
 ### Known MVCC limitations
+- **A redefinition inside a `SNAPSHOT` transaction runs**, where real refuses it with Msg 3964 (`Transaction failed because this DDL statement is not allowed inside a snapshot isolation transaction. …`; probed 2026-10-09 against SQL Server 2025 for an `ALTER TABLE … ADD`); which other statements real refuses that way isn't probed.
 - **A failed change outside a transaction still stamps the table**: an autocommit DDL statement draws its stamp as it runs, so one that then fails keeps an older snapshot out as a committed one would.
 - **Msg 3960's state 4**: real reports a conflict it meets scanning a table with a clustered index at state 4 and one it meets seeking at state 2, where the simulator, knowing no access path there, reports 2 for every table with a clustered index (probed 2026-09-28 against SQL Server 2025).
 - **`sys.dm_tran_version_store` timing**: real lists a version while its writer is still in flight and keeps it until its cleanup task runs, where the simulator lists only finalized versions and collects them at commit once no snapshot needs them.

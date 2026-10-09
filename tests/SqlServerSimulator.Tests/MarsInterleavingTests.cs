@@ -270,7 +270,8 @@ public sealed class MarsInterleavingTests
     /// <summary>
     /// A row lock the transaction converts — a <c>REPEATABLE READ</c> read's S
     /// on a row it then updates — lists once, in the mode it was converted to,
-    /// as real's one lock per row does.
+    /// as real's one lock per row does, and so does the table's IS under the
+    /// update's IX.
     /// </summary>
     [TestMethod]
     public void ConvertedRowLock_ListsOnceInItsStrongerMode()
@@ -284,27 +285,110 @@ public sealed class MarsInterleavingTests
         AreEqual(20, ReaderLocks(other, spid));
         AreEqual(0, Attempt(connection, "update big set v = 'u' where k = 1", transaction));
         AreEqual(19, ReaderLocks(other, spid));
-        AreEqual("KEY Sx19, KEY X, OBJECT IS, OBJECT IX", Locks(other, spid));
+        AreEqual("KEY Sx19, KEY X, OBJECT IX", Locks(other, spid));
         rows.Dispose();
         transaction.Rollback();
     }
 
     /// <summary>
-    /// A definition change by a request in the reader's own transaction finds
-    /// the reader's statement run to its end first, its rest read as it began.
+    /// A definition change by a request in the reader's own transaction of an
+    /// object the reader doesn't hold goes ahead beside it, the reader still
+    /// suspended (probed 2026-10-09 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void DefinitionChangeInTheReadersTransaction_FinishesTheReadFirst()
+    public void DefinitionChangeOfAnotherObject_GoesAheadBesideTheReader()
     {
         var sim = Big();
         using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(connection);
         using var transaction = connection.BeginTransaction(IsolationLevel.RepeatableRead);
         using var rows = Read(connection, "select k, v from big", 2, transaction);
         AreEqual(0, Attempt(connection, "alter table heap add c int", transaction));
+        AreEqual(20, ReaderLocks(other, spid));
         AreEqual(0, Attempt(connection, "update big set v = 'u' where k = 1500", transaction));
         var read = Rest(rows).ToDictionary(row => row.Key, row => row.Value);
         HasCount(Rows - 2, read);
         AreEqual("x", read[1500]);
+        transaction.Rollback();
+    }
+
+    /// <summary>
+    /// A definition change by a request in the reader's own transaction of a
+    /// table the reader holds — whatever its level, under <c>NOLOCK</c> too —
+    /// is Msg 3970, which ends its batch and dooms the transaction: every
+    /// request until the reader's batch ends is Msg 3989, and the reader reads
+    /// its rows to the end, its batch ending with Msg 3998 (probed 2026-10-09
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(IsolationLevel.ReadCommitted, "", "alter table big add c int")]
+    [DataRow(IsolationLevel.ReadCommitted, "", "alter table big alter column v char(2001) not null")]
+    [DataRow(IsolationLevel.ReadCommitted, "", "truncate table big")]
+    [DataRow(IsolationLevel.ReadCommitted, "", "drop table big")]
+    [DataRow(IsolationLevel.ReadCommitted, "", "create index ix on big (v)")]
+    [DataRow(IsolationLevel.ReadCommitted, " with (nolock)", "alter table big add c int")]
+    [DataRow(IsolationLevel.RepeatableRead, "", "alter table big add c int")]
+    [DataRow(IsolationLevel.Snapshot, "", "alter table big add c int")]
+    public void DefinitionChangeOfTheReadersTable_IsMsg3970(IsolationLevel level, string hint, string change)
+    {
+        var sim = Big(level == IsolationLevel.Snapshot ? "alter database current set allow_snapshot_isolation on" : "");
+        using var connection = sim.CreateOpenConnection();
+        using var transaction = connection.BeginTransaction(level);
+        using var rows = Read(connection, $"select k, v from big{hint}", 2, transaction);
+        AreEqual(3970, Attempt(connection, change + "; select 1", transaction));
+        AreEqual(3989, Attempt(connection, "select 1", transaction));
+        HasCount(Rows - 2, Rest(rows));
+        AreEqual(3998, Throws<SimulatedSqlException>(() => rows.NextResult()).Number);
+        AreEqual(0, (int)connection.CreateCommand("select @@trancount").ExecuteScalar()!);
+    }
+
+    [TestMethod]
+    public void DefinitionChangeOfTheReadersTable_CaughtDoomsTheTransaction()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+        using var rows = Read(connection, "select k, v from big", 2, transaction);
+        using var command = connection.CreateCommand("begin try alter table big add c int end try begin catch select concat(error_number(), ' ', xact_state(), ' ', @@trancount) end catch");
+        command.Transaction = transaction;
+        using (var caught = command.ExecuteReader())
+        {
+            IsTrue(caught.Read());
+            AreEqual("3970 -1 1", caught.GetString(0));
+            AreEqual(3998, Throws<SimulatedSqlException>(() => caught.NextResult()).Number);
+        }
+        HasCount(Rows - 2, Rest(rows));
+        AreEqual(3998, Throws<SimulatedSqlException>(() => rows.NextResult()).Number);
+    }
+
+    /// <summary>
+    /// A statement reading at a snapshot — a <c>SNAPSHOT</c> transaction's, or
+    /// <c>READ_COMMITTED_SNAPSHOT</c>'s — goes on reading past what another
+    /// request of its transaction writes while it waits on its client, as it
+    /// found the rows, rather than running to its end first (probed
+    /// 2026-10-09 against SQL Server 2025: an update and a delete ahead read as
+    /// before, an insert ahead not at all).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter database current set allow_snapshot_isolation on", IsolationLevel.Snapshot, "")]
+    [DataRow("alter database current set read_committed_snapshot on", IsolationLevel.ReadCommitted, "")]
+    [DataRow("alter database current set read_committed_snapshot on", IsolationLevel.ReadCommitted, " where k between 1 and 1800")]
+    public void SnapshotReader_ReadsPastTheTransactionsOtherWrites(string database, IsolationLevel level, string where)
+    {
+        var sim = Big(database);
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(connection);
+        using var transaction = connection.BeginTransaction(level);
+        using var rows = Read(connection, "select k, v from big" + where, 2, transaction);
+        AreEqual(0, Attempt(connection, "update big set v = 'u' where k in (1200, 1300); delete big where k = 1400; insert big values (-1, 'i'), (2500, 'i')", transaction));
+        AreEqual("suspended", string.Join(", ", Extensions.FirstColumn(other, $"select status from sys.dm_exec_requests where session_id = {spid}")));
+        var read = Rest(rows).ToDictionary(row => row.Key, row => row.Value);
+        HasCount(where.Length == 0 ? Rows - 2 : 1798, read);
+        AreEqual("x", read[1200]);
+        AreEqual("x", read[1400]);
+        IsFalse(read.ContainsKey(2500));
         transaction.Rollback();
     }
 

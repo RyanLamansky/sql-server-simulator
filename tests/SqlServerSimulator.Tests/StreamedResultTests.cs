@@ -240,11 +240,12 @@ public sealed class StreamedResultTests
     /// A table hint decides what the suspended reader holds through the same
     /// resolution a statement's locks take, so each hint's footprint is real's
     /// own as of the reader's position (probed 2026-10-08 against SQL Server
-    /// 2025 over a MARS connection), less the page locks and the sixteen
-    /// partitions of an object lock real takes on its host, neither of which
-    /// the simulator models — a scan that locks rows holds the S of the row it
-    /// stands on, as real's does over a table this size, where <c>PAGLOCK</c>'s
-    /// holds the page's: <paramref name="rowOne"/> is what an update of
+    /// 2025 over a MARS connection), less the page intent locks and the
+    /// sixteen partitions of an object lock real takes on its host, neither of
+    /// which the simulator models — a scan that locks rows holds the S of the
+    /// row it stands on, as real's does over a table this size, and
+    /// <c>PAGLOCK</c>'s the page's, its pages under <c>REPEATABLE READ</c>
+    /// (probed 2026-10-09): <paramref name="rowOne"/> is what an update of
     /// the first row meets, <paramref name="tableX"/> what a <c>TABLOCKX</c>
     /// update of a row ahead meets, and a column added to the table always
     /// waits.
@@ -264,7 +265,8 @@ public sealed class StreamedResultTests
     [DataRow(IsolationLevel.RepeatableRead, "", "readcommittedlock", "KEY S, OBJECT IS", 0, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "updlock", "KEY Ux20, OBJECT IX", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "xlock", "KEY Xx20, OBJECT IX", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "paglock", "KEY S, OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "paglock", "OBJECT IS, PAGE S", 0, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "paglock", "OBJECT IS, PAGE Sx5", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "rowlock", "KEY S, OBJECT IS", 0, 1222)]
     [DataRow(IsolationLevel.RepeatableRead, "", "rowlock", "KEY Sx20, OBJECT IS", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommitted", "OBJECT Sch-S", 0, 0)]
@@ -780,6 +782,25 @@ public sealed class StreamedResultTests
         AreEqual(Rows, reader.CreateCommand("select @@rowcount").ExecuteScalar());
     }
 
+    /// <summary>
+    /// Closing the connection closes its reader first, which runs the rest of
+    /// the batch to its end, as SqlClient's close does (probed 2026-10-09
+    /// against SQL Server 2025: a transaction the batch began and committed
+    /// after the result committed).
+    /// </summary>
+    [TestMethod]
+    public void ConnectionClose_RunsTheRestOfTheBatch()
+    {
+        var sim = Big("create table l (m varchar(20))");
+        var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var rows = ReadTwo(reader, "begin tran; insert l values ('in tran'); select * from big; insert l values ('after'); commit");
+        reader.Close();
+        AreEqual(2, other.CreateCommand("select count(*) from l").ExecuteScalar());
+        _ = Throws<InvalidOperationException>(() => rows.Read());
+        reader.Dispose();
+    }
+
     [TestMethod]
     public void ConnectionClose_Releases()
     {
@@ -940,5 +961,127 @@ public sealed class StreamedResultTests
         IsTrue(reader.NextResult());
         IsTrue(reader.Read());
         AreEqual(Rows, reader.GetInt32(0));
+    }
+
+    /// <summary>
+    /// A procedure or dynamic batch an <c>EXECUTE … WITH RESULT SETS</c> runs
+    /// streams its rows through the declared types, so a <c>REPEATABLE
+    /// READ</c> reader two rows in holds the keys of the twenty rows produced,
+    /// and a value that won't convert raises where the rows reach it (probed
+    /// 2026-10-09 against SQL Server 2025: twenty keys, the error after 1,499
+    /// rows for a failure at row 1,500).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec p with result sets ((k bigint, v char(2000)))")]
+    [DataRow("exec ('select k, v from big') with result sets ((k bigint, v char(2000)))")]
+    [DataRow("exec sp_executesql N'select k, v from big' with result sets ((k bigint, v char(2000)))")]
+    public void WithResultSets_StreamsThroughTheDeclaredTypes(string exec)
+    {
+        var sim = Big();
+        _ = sim.ExecuteNonQuery("create procedure p as select k, v from big");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
+        using (var rows = ReadTwo(reader, exec, transaction))
+        {
+            AreEqual("KEY Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual("suspended ASYNC_NETWORK_IO SELECT", Request(other, spid));
+            AreEqual(typeof(long), rows.GetFieldType(0));
+            AreEqual(0, Attempt(other, "update big set v = v where k = 21"));
+            // Another request of the session runs beside the suspended body.
+            using var beside = reader.CreateCommand("select count(*) from big");
+            beside.Transaction = transaction;
+            AreEqual(Rows, beside.ExecuteScalar());
+            AreEqual(Rows, ReadRest(rows));
+        }
+        transaction.Rollback();
+    }
+
+    [TestMethod]
+    public void WithResultSets_ConversionFailureRaisesWhereTheRowsReachIt()
+    {
+        var sim = Big();
+        _ = sim.ExecuteNonQuery("create procedure p as select k, case when k = 1500 then 'x' else cast(k as varchar(10)) end as n, v from big");
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
+        using var rows = ReadTwo(reader, "exec p with result sets ((k int, n int, v char(2000)))", transaction);
+        AreEqual("KEY Sx20, OBJECT IS", Locks(other, spid));
+        var read = 2;
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            while (rows.Read())
+                read++;
+        });
+        AreEqual(8114, error.Number);
+        AreEqual(1499, read);
+    }
+
+    /// <summary>
+    /// Under <c>READ COMMITTED</c> each scan the last row came through holds
+    /// the S of the row it stands on while the reader waits — the outer
+    /// table's and a correlated subquery's alike — as real's do (probed
+    /// 2026-10-09 against SQL Server 2025: two <c>KEY S</c>, three beside an
+    /// <c>EXISTS</c> over a third table); a subquery over the same table
+    /// stands on the row the outer scan does.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1", "KEY Sx2, OBJECT ISx2", 1222)]
+    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1 and exists (select 1 from w where w.k = big.k)", "KEY Sx3, OBJECT ISx3", 1222)]
+    [DataRow("select * from big cross apply (select top (1) n from u where u.k = big.k) x", "KEY Sx2, OBJECT ISx2", 1222)]
+    [DataRow("select * from big where (select count(*) from big b where b.k = big.k) = 1", "KEY S, OBJECT IS", 0)]
+    public void ReadCommitted_EachScanOfTheLastRowHoldsItsPosition(string query, string held, int innerRowWaits)
+    {
+        var sim = Big("""
+            create table u (k int primary key, n int not null); insert u select value, value from generate_series(1, 2000);
+            create table w (k int primary key, n int not null); insert w select value, value from generate_series(1, 2000);
+            """);
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using (var rows = ReadTwo(reader, query))
+        {
+            AreEqual(held, Locks(other, spid));
+            AreEqual(1222, Attempt(other, "update big set v = v where k = 20"));
+            AreEqual(innerRowWaits, Attempt(other, "update u set n = n where k = 20"));
+            AreEqual(0, Attempt(other, "update u set n = n where k = 21"));
+            AreEqual(Rows, ReadRest(rows));
+        }
+        AreEqual("", Locks(other, spid));
+    }
+
+    /// <summary>
+    /// The statement refills its window three packets at a time, as its
+    /// client reads into each third packet, so a <c>REPEATABLE READ</c>
+    /// reader holds real's count of keys wherever it stands (probed
+    /// 2026-10-09 against SQL Server 2025 with 2,007-byte rows).
+    /// </summary>
+    [TestMethod]
+    [DataRow(2, 20)]
+    [DataRow(10, 32)]
+    [DataRow(20, 32)]
+    [DataRow(21, 44)]
+    [DataRow(68, 80)]
+    [DataRow(69, 92)]
+    [DataRow(100, 116)]
+    [DataRow(300, 319)]
+    public void RepeatableRead_WindowRefillsThreePacketsAtATime(int read, int held)
+    {
+        var sim = Big();
+        using var reader = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(reader);
+        using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
+        using var command = reader.CreateCommand("select * from big");
+        command.Transaction = transaction;
+        using (var rows = command.ExecuteReader())
+        {
+            for (var i = 0; i < read; i++)
+                IsTrue(rows.Read());
+            AreEqual(held, KeyLocks(other, spid, "S"));
+        }
+        transaction.Rollback();
     }
 }

@@ -191,7 +191,7 @@ Msg 7133 is what forces the classic initialization dance: a cell that has never 
 
 ## Not modeled yet
 
-- **A bulk form in a trigger, in a procedure an RPC, `INSERT … EXEC` or `WITH RESULT SETS` calls, or on a MARS session** raises `NotSupportedException`.
+- **A bulk form in a trigger, in a procedure an RPC, `INSERT … EXEC` or `WITH RESULT SETS` calls, or on a MARS session** raises `NotSupportedException`, though a trigger's and a `WITH RESULT SETS` call's other outcomes stream.
   Those bodies send their outcomes with the statement that ran them, which has nowhere to suspend — a trigger's is a DML statement still writing; real suspends inside a trigger too, the firing statement's DONE and the rest of the batch following the data, and a `TRY` around the firing statement catches the trigger's Msg 4022 (probed 2026-10-07 against SQL Server 2025).
 - **`TEXTPTR` in a joined `UPDATE` / `DELETE`, a write through a join view, or a `MERGE`** raises `NotSupportedException`: those statements' row resolvers don't carry a row locator.
   A single-target `UPDATE` / `DELETE` and every read path do.

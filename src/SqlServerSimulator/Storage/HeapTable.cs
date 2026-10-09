@@ -859,6 +859,24 @@ internal sealed class HeapTable : SchemaObject
     public int ActiveUpdateLocks;
 
     /// <summary>
+    /// The page locks taken on the table, by page in its
+    /// <see cref="RealPageLayout"/>, interned on first use and leaking as
+    /// <see cref="RowLocks"/> do.
+    /// </summary>
+    public readonly ConcurrentDictionary<int, LockResource> PageLocks = new();
+
+    /// <summary>
+    /// The S, U and X page locks held on the table, maintained by
+    /// <see cref="LockManager"/> under its gate, so a row lock tests the page
+    /// its row is on only while somebody holds one.
+    /// </summary>
+    public int ActivePageLocks;
+
+    /// <summary>The lock on the table's page <paramref name="page"/>, interned on first use.</summary>
+    public LockResource GetOrCreatePageLock(int page) =>
+        this.PageLocks.GetOrAdd(page, static (ordinal, t) => new LockResource { PageOfTable = t, PageOrdinal = ordinal }, this);
+
+    /// <summary>
     /// Returns the <see cref="LockResource"/> for <paramref name="pageIndex"/>
     /// / <paramref name="slotIndex"/>, allocating one (back-referenced to this
     /// table) on first reference.

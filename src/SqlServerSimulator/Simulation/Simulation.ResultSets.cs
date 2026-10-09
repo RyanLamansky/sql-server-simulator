@@ -361,79 +361,150 @@ partial class Simulation
         : $"{typeWord}({length})";
 
     /// <summary>
-    /// Layers an <c>EXEC … WITH RESULT SETS</c> contract over the outcomes an
-    /// invoked module produced: each result set is renamed / retyped to its
-    /// declaration, and the declared and actual set counts are reconciled.
-    /// Non-result outcomes (row counts, dynamic-SQL scope markers) pass
-    /// through and don't count toward the contract — probe-confirmed: a
-    /// procedure whose only statement is an INSERT satisfies
-    /// <c>RESULT SETS NONE</c>.
+    /// The sink an <c>EXEC … WITH RESULT SETS</c> hands the batch it runs:
+    /// the contract's declared sets, or the caller's own sink when the clause
+    /// declares none (<c>UNDEFINED</c>, or no clause); null for a call whose
+    /// sets never reach the client, an <c>INSERT … EXEC</c> source's.
     /// </summary>
-    /// <remarks>
-    /// The per-row conversion / NOT NULL checks fire as the rows are drained
-    /// rather than up front, so a row-level violation surfaces mid-stream the
-    /// way real's does. A <em>set</em>-level violation doesn't: this iterator
-    /// raises after yielding the sets that matched, but the dispatch loop
-    /// materializes a statement's outcomes before yielding any of them, so the
-    /// whole EXECUTE fails where real would have streamed the earlier sets
-    /// first.
-    /// </remarks>
+    private static ResultSetsSink? ResultSetsSinkFor(BatchContext batch, ResultSetsContract? contract, bool insertExecSource) =>
+        insertExecSource ? null
+        : contract?.Shapes is { } shapes ? new ResultSetsSink(shapes, batch.ResultSetsSink)
+        : batch.ResultSetsSink;
+
+    /// <summary>
+    /// Layers an <c>EXEC … WITH RESULT SETS</c> contract over the outcomes an
+    /// invoked module produced, for the result sets its own statements didn't
+    /// already send through <paramref name="sink"/> — a <c>SELECT</c> of the
+    /// module claims its set and converts its rows as it produces them (see
+    /// <see cref="SendThroughResultSets"/>), while a set some other producer
+    /// sent (a DML <c>OUTPUT</c>, a system procedure's, a trigger's) is claimed
+    /// here and converts as its reader reads it. Non-result outcomes (row
+    /// counts, dynamic-SQL scope markers) pass through and don't count toward
+    /// the contract — probe-confirmed: a procedure whose only statement is an
+    /// INSERT satisfies <c>RESULT SETS NONE</c>. Fewer sets than declared is
+    /// the <c>EXECUTE</c>'s own Msg 11536 once the module ends.
+    /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> ApplyResultSetsContract(
         IEnumerable<SimulatedStatementOutcome> outcomes,
-        ResultSetsContract contract)
+        ResultSetsSink? sink)
     {
-        var sent = 0;
+        if (sink is null)
+        {
+            foreach (var outcome in outcomes)
+                yield return outcome;
+            yield break;
+        }
         foreach (var outcome in outcomes)
         {
-            if (outcome is not SimulatedQueryResult query)
+            if (outcome is not SimulatedQueryResult query
+                || (query is SimulatedSqlResultSet { SentThrough: { } through } && through.Reaches(sink)))
             {
                 yield return outcome;
                 continue;
             }
-            if (contract.Shapes is not { } shapes)
-            {
-                yield return query;
-                continue;
-            }
-            yield return sent == shapes.Length
-                ? throw AttributeToOrigin(SimulatedSqlException.ResultSetsTooManySent(shapes.Length), query)
-                : ProjectResultSet(query, shapes[sent], ++sent);
+            var claim = ClaimResultSet(sink, query.Schema, alone: true, query);
+            yield return ConvertedResultSet(query, claim, through: null, query);
         }
-        if (contract.Shapes is { } declared && sent < declared.Length)
-            throw SimulatedSqlException.ResultSetsTooFewSent(declared.Length, sent);
+        if (sink.Sent < sink.Shapes.Length)
+            throw SimulatedSqlException.ResultSetsTooFewSent(sink.Shapes.Length, sink.Sent);
     }
 
     /// <summary>
-    /// Re-labels one result set to its declared shape. The column count and
-    /// per-column convertibility are checked here (before any row is read,
-    /// matching real); the values themselves convert lazily in
-    /// <see cref="ConvertResultSetRows"/>.
+    /// A <c>SELECT</c>'s claim on the next declared set of
+    /// <paramref name="sink"/> and of every sink enclosing it, each judging
+    /// the columns the one inside it declared: past the declared count is Msg
+    /// 11535, a column count that differs Msg 11537 and a type no implicit
+    /// conversion reaches Msg 11538, raised by the statement before it sends
+    /// anything, as real raises them (probed 2026-10-09 against SQL Server
+    /// 2025: a <c>TRY</c> around the module's <c>SELECT</c> catches each, and
+    /// the client sees no column metadata).
     /// </summary>
-    private static SimulatedSqlResultSet ProjectResultSet(SimulatedQueryResult source, ResultSetShape shape, int setNumber)
+    internal static ResultSetClaim[] ClaimResultSet(ResultSetsSink sink, SqlType[] schema) =>
+        ClaimResultSet(sink, schema, alone: false, origin: null);
+
+    private static ResultSetClaim[] ClaimResultSet(ResultSetsSink sink, SqlType[] schema, bool alone, SimulatedQueryResult? origin)
     {
-        var sourceSchema = source.Schema;
-        if (sourceSchema.Length != shape.Types.Length)
+        var depth = 0;
+        for (var level = sink; level is not null && (depth == 0 || !alone); level = level.Outer)
+            depth++;
+        var claims = new ResultSetClaim[depth];
+        var sentTypes = schema;
+        var at = sink;
+        for (var i = 0; i < claims.Length; i++, at = at.Outer!)
         {
-            throw AttributeToOrigin(
-                SimulatedSqlException.ResultSetsColumnCountMismatch(shape.Types.Length, setNumber, sourceSchema.Length), source);
-        }
-        for (var i = 0; i < sourceSchema.Length; i++)
-        {
-            if (!IsImplicitlyConvertible(sourceSchema[i], shape.Types[i]))
+            if (at.Sent == at.Shapes.Length)
+                throw AttributeToOrigin(SimulatedSqlException.ResultSetsTooManySent(at.Shapes.Length), origin);
+            var shape = at.Shapes[at.Sent];
+            var setNumber = ++at.Sent;
+            if (sentTypes.Length != shape.Types.Length)
             {
                 throw AttributeToOrigin(
-                    SimulatedSqlException.ResultSetsNoConversion(shape.BareTypeNames[i], i + 1, setNumber, sourceSchema[i].SqlServerName),
-                    source);
+                    SimulatedSqlException.ResultSetsColumnCountMismatch(shape.Types.Length, setNumber, sentTypes.Length), origin);
             }
+            for (var c = 0; c < sentTypes.Length; c++)
+            {
+                if (!IsImplicitlyConvertible(sentTypes[c], shape.Types[c]))
+                {
+                    throw AttributeToOrigin(
+                        SimulatedSqlException.ResultSetsNoConversion(shape.BareTypeNames[c], c + 1, setNumber, sentTypes[c].SqlServerName),
+                        origin);
+                }
+            }
+            claims[i] = new ResultSetClaim(shape, setNumber);
+            sentTypes = shape.Types;
         }
-        return new SimulatedSqlResultSet(shape.Types, shape.Names, ConvertResultSetRows(source, shape, setNumber))
+        return claims;
+    }
+
+    /// <summary>
+    /// A <c>SELECT</c>'s rows as the sinks it claimed (see
+    /// <see cref="ClaimResultSet(ResultSetsSink, SqlType[])"/>) send them, converted
+    /// as the statement produces each, so a value that won't convert is the
+    /// statement's own run-time error — caught by a <c>TRY</c> around it inside
+    /// the module, ending the module there, and failing the batch as a
+    /// conversion failure does (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlResultSet SendThroughResultSets(SimulatedSqlResultSet produced, ResultSetClaim[] claims, ResultSetsSink sink) =>
+        ConvertedResultSet(produced, claims, sink, origin: null);
+
+    private static SimulatedSqlResultSet ConvertedResultSet(SimulatedQueryResult source, ResultSetClaim[] claims, ResultSetsSink? through, SimulatedQueryResult? origin)
+    {
+        var rows = source is SimulatedSqlResultSet resultSet ? resultSet.RowValues : CursorRows(source);
+        foreach (var claim in claims)
+            rows = ConvertResultSetRows(rows, claim.Shape, claim.SetNumber, origin);
+        var last = claims[^1].Shape;
+        var converted = new SimulatedSqlResultSet(last.Types, last.Names, rows)
         {
             ClientTextSize = source.ClientTextSize,
-            ColumnNullability = shape.Nullability,
-            ColumnReportsNumeric = shape.ReportsNumeric,
+            ColumnNullability = last.Nullability,
+            ColumnReportsNumeric = last.ReportsNumeric,
             OriginLine = source.OriginLine,
             OriginProcedure = source.OriginProcedure,
+            SentThrough = through,
         };
+        // Rows another statement still produces as they are read — a DML
+        // statement's OUTPUT — go on being produced for the consumer of the
+        // converted set.
+        if (source is SimulatedSqlResultSet { Stream: { } stream })
+        {
+            converted.Stream = stream;
+            stream.Result = converted;
+        }
+        return converted;
+    }
+
+    /// <summary>A result that is not a <see cref="SimulatedSqlResultSet"/>'s rows, read through its cursor.</summary>
+    private static IEnumerable<SqlValue[]> CursorRows(SimulatedQueryResult source)
+    {
+        using var cursor = source.CreateCursor();
+        var width = source.Schema.Length;
+        while (cursor.MoveNext())
+        {
+            var row = new SqlValue[width];
+            for (var i = 0; i < row.Length; i++)
+                row[i] = cursor[i];
+            yield return row;
+        }
     }
 
     /// <summary>
@@ -442,21 +513,22 @@ partial class Simulation
     /// truncation and rounding all behave as they do in a CAST) but reports
     /// every failure as Msg 8114 state 2 naming both decorated type names,
     /// which is what real does here regardless of which conversion rule was
-    /// violated (state probed 2026-10-02 against SQL Server 2025).
+    /// violated (state probed 2026-10-02 against SQL Server 2025) — a failure
+    /// that ends the batch and rolls its transaction back uncaught, and dooms
+    /// it caught, as a conversion failure does (probed 2026-10-09).
     /// </summary>
-    private static IEnumerable<SqlValue[]> ConvertResultSetRows(SimulatedQueryResult source, ResultSetShape shape, int setNumber)
+    private static IEnumerable<SqlValue[]> ConvertResultSetRows(IEnumerable<SqlValue[]> source, ResultSetShape shape, int setNumber, SimulatedQueryResult? origin)
     {
-        using var cursor = source.CreateCursor();
-        while (cursor.MoveNext())
+        foreach (var sent in source)
         {
             var row = new SqlValue[shape.Types.Length];
             for (var i = 0; i < row.Length; i++)
             {
-                var value = cursor[i];
+                var value = sent[i];
                 if (value.IsNull)
                 {
                     if (!shape.Nullability[i])
-                        throw AttributeToOrigin(SimulatedSqlException.ResultSetsNullInNonNullableColumn(i + 1, setNumber), source);
+                        throw AttributeToOrigin(SimulatedSqlException.ResultSetsNullInNonNullableColumn(i + 1, setNumber), origin);
                     row[i] = SqlValue.Null(shape.Types[i]);
                     continue;
                 }
@@ -467,7 +539,7 @@ partial class Simulation
                 catch (SimulatedSqlException ex) when (Cast.IsConversionFailure(ex.Number))
                 {
                     throw AttributeToOrigin(
-                        SimulatedSqlException.ConvertingDataTypeError(value.Type.ToString()!, shape.TypeNames[i], state: 2), source);
+                        SimulatedSqlException.ConvertingDataTypeError(value.Type.ToString()!, shape.TypeNames[i], state: 2).AbortingAsUnderXactAbort(), origin);
                 }
             }
             yield return row;
@@ -476,16 +548,18 @@ partial class Simulation
 
     /// <summary>
     /// Stamps the producing statement's line and procedure onto a contract
-    /// violation so it reads as raised where the rows came from — real
-    /// attributes Msg 11535 / 11537 / 11538 / 11553 and the conversion
-    /// failure to the module's own SELECT, not to the EXECUTE statement
-    /// (Msg 11536 is the exception and is left for the EXECUTE's own frame).
-    /// A result produced outside a dispatch frame carries no origin and falls
-    /// back to that same default.
+    /// violation raised outside that statement — as a reader reads a set the
+    /// <c>EXECUTE</c> claimed rather than the module's own <c>SELECT</c> —
+    /// so it reads as raised where the rows came from, as real attributes
+    /// Msg 11535 / 11537 / 11538 / 11553 and the conversion failure (Msg 11536
+    /// is the exception and is left for the EXECUTE's own frame). A result
+    /// produced outside a dispatch frame carries no origin and falls back to
+    /// that same default; a statement's own claim has none, its dispatch
+    /// stamping it.
     /// </summary>
-    private static SimulatedSqlException AttributeToOrigin(SimulatedSqlException exception, SimulatedQueryResult source)
+    private static SimulatedSqlException AttributeToOrigin(SimulatedSqlException exception, SimulatedQueryResult? source)
     {
-        if (source.OriginLine != 0)
+        if (source is { OriginLine: not 0 })
             exception.PreserveDiagnostics(source.OriginLine, source.OriginProcedure);
         return exception;
     }
@@ -607,6 +681,36 @@ internal sealed class ResultSetsContract(ResultSetShape[]? shapes)
     public static readonly ResultSetsContract Undefined = new(null);
 
     public readonly ResultSetShape[]? Shapes = shapes;
+}
+
+/// <summary>
+/// What the batch an <c>EXEC … WITH RESULT SETS</c> runs sends its result sets
+/// through: the declared sets, how many have been claimed, and the sink of an
+/// enclosing call's clause, whose declarations each set meets in turn.
+/// </summary>
+internal sealed class ResultSetsSink(ResultSetShape[] shapes, ResultSetsSink? outer)
+{
+    public readonly ResultSetShape[] Shapes = shapes;
+    public readonly ResultSetsSink? Outer = outer;
+    public int Sent;
+
+    /// <summary>Whether a set sent through this sink was sent through <paramref name="sink"/> too.</summary>
+    public bool Reaches(ResultSetsSink sink)
+    {
+        for (var level = this; level is not null; level = level.Outer)
+        {
+            if (level == sink)
+                return true;
+        }
+        return false;
+    }
+}
+
+/// <summary>One sink's declared set a result set claimed, and its number.</summary>
+internal readonly struct ResultSetClaim(ResultSetShape shape, int setNumber)
+{
+    public readonly ResultSetShape Shape = shape;
+    public readonly int SetNumber = setNumber;
 }
 
 /// <summary>

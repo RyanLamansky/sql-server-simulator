@@ -22,8 +22,14 @@ partial class Simulation
     private static void LockTableForIndexBuild(BatchContext batch, HeapTable table, bool clustered)
     {
         if (clustered)
+        {
             batch.AcquireTableRedefinitionLock(table);
-        else if (IsLockableTable(table) || BatchContext.IsLocalTempName(table.Name))
+            return;
+        }
+        // A nonclustered build changes the table's definition too, which a
+        // suspended read of the transaction refuses (probed 2026-10-09).
+        batch.Connection.RefuseDefinitionBesideSuspendedRead(table.SchemaLock);
+        if (IsLockableTable(table) || BatchContext.IsLocalTempName(table.Name))
             batch.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
     }
 

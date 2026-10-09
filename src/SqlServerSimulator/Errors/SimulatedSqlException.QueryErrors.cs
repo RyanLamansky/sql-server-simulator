@@ -1614,9 +1614,13 @@ partial class SimulatedSqlException
     /// <c>"specified 0 result set(s)"</c>. Wording and State 1 probe-confirmed
     /// against SQL Server 2025; the sets that did match are streamed to the
     /// client before this fires.
+    /// <para>Uncaught, it ends the batch and leaves a transaction open, as a
+    /// <c>THROW</c> does, and a <c>TRY</c> catches it leaving the transaction
+    /// committable — inside the module too, for the ones its statement
+    /// raises (probed 2026-10-09 against SQL Server 2025).</para>
     /// </summary>
     internal static SimulatedSqlException ResultSetsTooManySent(int declaredCount) =>
-        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), and the statement tried to send more result sets than this.", 11535, 16, 1);
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), and the statement tried to send more result sets than this.", 11535, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 11536: the executed module sent fewer result
@@ -1624,18 +1628,26 @@ partial class SimulatedSqlException
     /// result-set-contract errors this one is attributed to the <c>EXECUTE</c>
     /// statement itself rather than the module's producing statement
     /// (probe-confirmed: <c>ERROR_PROCEDURE()</c> reads NULL).
+    /// <para>Uncaught, it ends the batch and leaves a transaction open, as a
+    /// <c>THROW</c> does, and a <c>TRY</c> catches it leaving the transaction
+    /// committable — inside the module too, for the ones its statement
+    /// raises (probed 2026-10-09 against SQL Server 2025).</para>
     /// </summary>
     internal static SimulatedSqlException ResultSetsTooFewSent(int declaredCount, int sentCount) =>
-        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), but the statement only sent {sentCount} result set(s) at run time.", 11536, 16, 1);
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} result set(s), but the statement only sent {sentCount} result set(s) at run time.", 11536, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 11537: a result set's column count doesn't
     /// match the count its <c>WITH RESULT SETS</c> definition declared. Note
     /// the wording asymmetry real uses — <c>"result set number N"</c> here
     /// versus <c>"result set #N"</c> in Msg 11538 / 11553.
+    /// <para>Uncaught, it ends the batch and leaves a transaction open, as a
+    /// <c>THROW</c> does, and a <c>TRY</c> catches it leaving the transaction
+    /// committable — inside the module too, for the ones its statement
+    /// raises (probed 2026-10-09 against SQL Server 2025).</para>
     /// </summary>
     internal static SimulatedSqlException ResultSetsColumnCountMismatch(int declaredCount, int setNumber, int sentCount) =>
-        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} column(s) for result set number {setNumber}, but the statement sent {sentCount} column(s) at run time.", 11537, 16, 1);
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified {declaredCount} column(s) for result set number {setNumber}, but the statement sent {sentCount} column(s) at run time.", 11537, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 11538: a <c>WITH RESULT SETS</c> column
@@ -1644,9 +1656,13 @@ partial class SimulatedSqlException
     /// decoration) — probe-confirmed: a <c>decimal(5,2)</c> declaration
     /// reports <c>'decimal'</c> and a <c>time(3)</c> run-time column reports
     /// <c>'time'</c>.
+    /// <para>Uncaught, it ends the batch and leaves a transaction open, as a
+    /// <c>THROW</c> does, and a <c>TRY</c> catches it leaving the transaction
+    /// committable — inside the module too, for the ones its statement
+    /// raises (probed 2026-10-09 against SQL Server 2025).</para>
     /// </summary>
     internal static SimulatedSqlException ResultSetsNoConversion(string declaredTypeName, int columnNumber, int setNumber, string runtimeTypeName) =>
-        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified type '{declaredTypeName}' for column #{columnNumber} in result set #{setNumber}, and the corresponding type sent at run time was '{runtimeTypeName}'; there is no conversion between the two types.", 11538, 16, 1);
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified type '{declaredTypeName}' for column #{columnNumber} in result set #{setNumber}, and the corresponding type sent at run time was '{runtimeTypeName}'; there is no conversion between the two types.", 11538, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 404: an <c>OUTPUT</c> clause names an
@@ -1690,7 +1706,11 @@ partial class SimulatedSqlException
     /// declared <c>NOT NULL</c> received a NULL at run time. Raised per row as
     /// the result set streams, so rows preceding the offending one reach the
     /// client.
+    /// <para>Uncaught, it ends the batch and leaves a transaction open, as a
+    /// <c>THROW</c> does, and a <c>TRY</c> catches it leaving the transaction
+    /// committable — inside the module too, for the ones its statement
+    /// raises (probed 2026-10-09 against SQL Server 2025).</para>
     /// </summary>
     internal static SimulatedSqlException ResultSetsNullInNonNullableColumn(int columnNumber, int setNumber) =>
-        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified a non-nullable type for column #{columnNumber} in result set #{setNumber}, and the corresponding value sent at run time was null.", 11553, 16, 1);
+        new($"EXECUTE statement failed because its WITH RESULT SETS clause specified a non-nullable type for column #{columnNumber} in result set #{setNumber}, and the corresponding value sent at run time was null.", 11553, 16, 1) { TerminatesBatch = true };
 }

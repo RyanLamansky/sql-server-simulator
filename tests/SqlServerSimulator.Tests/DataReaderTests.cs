@@ -583,5 +583,28 @@ public sealed class DataReaderTests
         AreEqual("<a/>", reader.GetString(1));
         AreEqual("<a />", simulation.ExecuteScalar("select cast('<a/>' as xml)"));
     }
-}
 
+    /// <summary>
+    /// A closed reader refuses what it can no longer answer as SqlClient's
+    /// does, naming the member it was asked for (probed 2026-10-09 with
+    /// SqlClient 7.0.2), while <c>IsClosed</c> and <c>RecordsAffected</c>
+    /// still answer.
+    /// </summary>
+    [TestMethod]
+    public void ClosedReader_RefusesWhatItCanNoLongerAnswer()
+    {
+        var sim = new Simulation();
+        using var reader = sim.ExecuteReader("select value from generate_series(1, 5000); select 1");
+        IsTrue(reader.Read());
+        reader.Close();
+        AreEqual("Invalid attempt to call Read when reader is closed.", Throws<InvalidOperationException>(() => reader.Read()).Message);
+        AreEqual("Invalid attempt to call NextResult when reader is closed.", Throws<InvalidOperationException>(() => reader.NextResult()).Message);
+        AreEqual("Invalid attempt to call FieldCount when reader is closed.", Throws<InvalidOperationException>(() => reader.FieldCount).Message);
+        AreEqual("Invalid attempt to call HasRows when reader is closed.", Throws<InvalidOperationException>(() => reader.HasRows).Message);
+        AreEqual("Invalid attempt to call Depth when reader is closed.", Throws<InvalidOperationException>(() => reader.Depth).Message);
+        AreEqual("Invalid attempt to call CheckDataIsReady when reader is closed.", Throws<InvalidOperationException>(() => reader.GetValue(0)).Message);
+        AreEqual("Invalid attempt to call MetaData when reader is closed.", Throws<InvalidOperationException>(() => reader.GetName(0)).Message);
+        IsTrue(reader.IsClosed);
+        AreEqual(-1, reader.RecordsAffected);
+    }
+}

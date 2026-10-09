@@ -1705,7 +1705,6 @@ partial class Simulation
         BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true, UniqueKeyWriteGuard? guard = null, SqlValue[]? storedValues = null)
     {
         RejectLobOnEmptyFilegroup(batch, table, image);
-        batch.Connection.FinishReadsBeforeWrite();
         if (!IsLockableTable(table))
             return table.Heap.Insert(image, undoLog);
         batch.ProbeKeyLocksForInsert(table, image);
@@ -1722,7 +1721,13 @@ partial class Simulation
             guard,
             storedValues);
         if (address.PageIndex >= 0)
+        {
             batch.NoteKeyPutBack(table, image);
+            // The page the row landed on, while some read or write locks
+            // pages of the table whole.
+            if (Volatile.Read(ref table.ActivePageLocks) != 0 || batch.WritesPagesOf(table))
+                batch.LockRowPage(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive, writes: true, inserted: true);
+        }
         return address;
     }
 
@@ -1754,7 +1759,6 @@ partial class Simulation
     {
         var (pageIndex, slotIndex, _, _) = affected[row];
         RejectLobOnEmptyFilegroup(batch, table, newImage);
-        batch.Connection.FinishReadsBeforeWrite();
         if (guard is null)
         {
             table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, reclaimSuperseded);

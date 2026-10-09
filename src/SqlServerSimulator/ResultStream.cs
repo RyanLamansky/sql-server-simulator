@@ -63,19 +63,11 @@ internal abstract class ResultStream
     public bool Draining;
 
     /// <summary>
-    /// Set when the statement has to finish before something else runs on the
-    /// session — another request's write in the same transaction (see
-    /// <see cref="SimulatedDbConnection.FinishReadsBeforeWrite"/>): the rest of
-    /// the rows are produced into the buffer at once.
-    /// </summary>
-    public bool Unbounded;
-
-    /// <summary>
     /// The rows another request of the statement's transaction writes while
     /// the statement waits on its client, as the statement found them, which
     /// its reads take in their place (see <see cref="OwnWriteImages"/>); null
-    /// until it first waits inside a transaction, and for a statement whose
-    /// reads resolve a snapshot or a DML statement's <c>OUTPUT</c> rows.
+    /// until it first waits inside a transaction, and for a DML statement's
+    /// <c>OUTPUT</c> rows.
     /// </summary>
     public OwnWriteImages? OwnWrites;
 
@@ -147,6 +139,15 @@ internal abstract class ResultStream
     /// <summary>The result set the rows belong to, which a row's error marks as cut short.</summary>
     public SimulatedSqlResultSet? Result;
 
+    /// <summary>
+    /// Whether the statement runs on a thread of its own (<see cref="StatementCoroutine"/>),
+    /// which keeps the session reachable: its consumer is then named only
+    /// weakly by <see cref="Pull"/> and <see cref="AbandonByConsumer"/>, so a
+    /// consumer dropped without being closed can still be collected, which
+    /// the statement's thread notices and ends the statement on.
+    /// </summary>
+    public readonly bool HoldsConsumerWeakly = StatementCoroutine.OnAnyStatementThread;
+
     /// <summary>The outcome the statement yields after each window it produces, which only the consumer reads.</summary>
     public static readonly SimulatedRowsProduced Marker = new();
 
@@ -157,22 +158,32 @@ internal abstract class ResultStream
     private protected long clientBytes;
 
     /// <summary>
-    /// How far the statement produces ahead of a client that has read
-    /// <paramref name="read"/> bytes: through the packet the client is
-    /// reading and the four after it (<see cref="LeadPackets"/>). Real refills its window as the client
-    /// reads each packet (probed 2026-10-08 against SQL Server 2025: a
-    /// reader 2, 50, 100 and 300 rows into a result of 2,007-byte rows held
-    /// the locks of 20, 68, 116 and 318).
+    /// How far the statement produces ahead of a client reading a row that
+    /// begins <paramref name="read"/> bytes in. A client reading the rows
+    /// itself has the five packets of the first window, then three more each
+    /// time it reads into a third packet — the third, the sixth, the ninth —
+    /// as real's statement refills (probed 2026-10-09 against SQL Server 2025:
+    /// a reader of 2,007-byte rows held the keys of 20 rows two rows in, 32
+    /// from its tenth, 44 from its twenty-first, 56 from its thirty-second,
+    /// and 116 a hundred rows in; of 107-byte rows 373 until it read into the
+    /// third packet, then 596, then 820 from its 380th). The MARS endpoint's
+    /// writer has the statement a packet past the one it sends
+    /// (<see cref="LeadPackets"/>).
     /// </summary>
-    private protected long WindowEnd(long read) => ((read / PacketBytes) + this.LeadPackets) * PacketBytes;
+    private protected long WindowEnd(long read) => this.LeadPackets == 1
+        ? ((read / PacketBytes) + 1) * PacketBytes
+        : (FirstWindowPackets + (RefillPackets * (((read / PacketBytes) + 1) / RefillPackets))) * PacketBytes;
+
+    /// <summary>The packets a refill adds to the window (<see cref="WindowEnd"/>).</summary>
+    private const int RefillPackets = 3;
 
     /// <summary>
     /// How many packets past the one its consumer is on the statement
-    /// produces (<see cref="WindowEnd"/>): five for a client reading the rows
-    /// itself; one for the MARS endpoint's writer, whose packets wait in the
-    /// client's four-packet window beside it.
+    /// produces (<see cref="WindowEnd"/>): one for the MARS endpoint's writer,
+    /// whose packets wait in the client's four-packet window beside it;
+    /// otherwise the window steps as a client reading the rows itself reads.
     /// </summary>
-    public int LeadPackets = 5;
+    public int LeadPackets = FirstWindowPackets;
 
     /// <summary>
     /// Whether the session reported an executing thread as the statement
@@ -197,20 +208,27 @@ internal abstract class ResultStream
     /// </summary>
     private protected bool lastRowProbed;
 
-    /// <summary>The S the suspended statement holds on the row its scan stands on (see <see cref="Suspend"/>).</summary>
-    private LockResource? positionLock;
+    /// <summary>
+    /// The statement's <see cref="StatementContext.RowsProbed"/> as its last
+    /// row began: a table it probed since stands where that row's production
+    /// left it (<see cref="StatementContext.OtherProbed"/>).
+    /// </summary>
+    private protected long lastRowProbesFrom;
+
+    /// <summary>The S the suspended statement holds on the row each of its scans stands on (see <see cref="Suspend"/>).</summary>
+    private List<LockResource>? positionLocks;
 
     private SessionToken? positionOwner;
 
     /// <summary>
     /// Produces the next window of rows into the buffer, or the rest
-    /// when <see cref="Draining"/> or <see cref="Unbounded"/>; sets
+    /// when <see cref="Draining"/>; sets
     /// <see cref="Complete"/> once the source ends. An error a row raises ends
     /// the statement there, kept in <see cref="Error"/>.
     /// </summary>
     public void Produce()
     {
-        var limit = this.Draining || this.Unbounded ? long.MaxValue : WindowEnd(this.clientBytes);
+        var limit = this.Draining ? long.MaxValue : WindowEnd(this.clientBytes);
         try
         {
             this.ProduceUntil(limit);
@@ -253,10 +271,11 @@ internal abstract class ResultStream
     /// <summary>Lets go of the row S <see cref="Suspend"/> took, as the scan moves on or ends.</summary>
     private void ReleasePosition(SimulatedDbConnection connection)
     {
-        if (this.positionLock is not { } held)
+        if (this.positionLocks is not { Count: > 0 } held)
             return;
-        this.positionLock = null;
-        connection.Simulation.LockManager.Release(held, LockMode.Shared, this.positionOwner!);
+        foreach (var position in held)
+            connection.Simulation.LockManager.Release(position, LockMode.Shared, this.positionOwner!);
+        held.Clear();
         this.positionOwner = null;
     }
 
@@ -285,7 +304,7 @@ internal abstract class ResultStream
         connection.PauseExecutionTimeout();
         // Inside a transaction, what another request of it writes while the
         // statement waits keeps out of the statement's reads.
-        if (this.OwnWrites is null && this.PendingWrite is null && this.statement is { ReadsSnapshot: false } && connection.CurrentTransaction is { } transaction)
+        if (this.OwnWrites is null && this.PendingWrite is null && connection.CurrentTransaction is { } transaction)
         {
             this.OwnWrites = new OwnWriteImages();
             this.watchedLog = transaction.UndoLog;
@@ -293,11 +312,21 @@ internal abstract class ResultStream
             transaction.UndoLog.Watch(this.OwnWrites);
         }
         connection.ActiveOwnWriteImages = null;
-        // A READ COMMITTED scan holds the row it stands on while it waits.
-        if (this.lastRowProbed && this.statement is { ProbedTable: { } table } frame)
+        this.statementLocks = batch.StatementSchemaLocks;
+        // A READ COMMITTED scan holds the row it stands on while it waits, and
+        // so does every other scan the statement's last row came through.
+        if (this.statement is { } frame)
         {
-            this.positionLock = batch.HoldScanPosition(table, frame.ProbedPage, frame.ProbedSlot);
-            this.positionOwner = this.positionLock is null ? null : connection.LockOwner;
+            if (this.lastRowProbed && frame.ProbedTable is { } table)
+                this.HoldPosition(batch, table, frame.ProbedPage, frame.ProbedSlot);
+            if (frame.OtherProbed is { Count: > 0 } others)
+            {
+                foreach (var other in others)
+                {
+                    if (other.Stamp > this.lastRowProbesFrom)
+                        this.HoldPosition(batch, other.Table, other.Page, other.Slot);
+                }
+            }
         }
         var suspended = connection.SuspendedStreams ??= [];
         lock (suspended)
@@ -328,6 +357,30 @@ internal abstract class ResultStream
         // Another request's statements ran meanwhile, publishing their own.
         DateOrder.Current = connection.DateFormat;
         Language.Current = connection.Language;
+    }
+
+    /// <summary>The statement-scoped locks of the statement as it last suspended, which a definition change of the transaction meets (<see cref="HoldsStatementLock"/>).</summary>
+    private List<(LockResource Resource, LockMode Mode, SessionToken Owner)>? statementLocks;
+
+    /// <summary>Whether the suspended statement holds a statement-scoped lock on <paramref name="resource"/> — the Sch-S every object it names takes.</summary>
+    public bool HoldsStatementLock(LockResource resource)
+    {
+        if (!this.Suspended || this.statementLocks is not { } held)
+            return false;
+        foreach (var (locked, _, _) in held)
+        {
+            if (ReferenceEquals(locked, resource))
+                return true;
+        }
+        return false;
+    }
+
+    private void HoldPosition(BatchContext batch, HeapTable table, int page, int slot)
+    {
+        if (batch.HoldScanPosition(table, page, slot) is not { } held)
+            return;
+        (this.positionLocks ??= []).Add(held);
+        this.positionOwner = batch.Connection.LockOwner;
     }
 
     /// <summary>
@@ -606,22 +659,12 @@ internal abstract class ResultStream
     private Lock Gate() => LazyInitializer.EnsureInitialized(ref this.gate);
 
     /// <summary>
-    /// Runs the statement to its end on the consumer's behalf, keeping the
-    /// rest of its rows for the consumer to read later.
-    /// </summary>
-    public void Finish()
-    {
-        this.JoinBackground();
-        this.Unbounded = true;
-        while (!this.Complete && this.Pull is { } pull)
-            this.PullLocked(pull);
-    }
-
-    /// <summary>
     /// The first window: what the statement produces before its client reads
     /// anything — the packet the client is reading and the four ahead of it.
     /// </summary>
-    private protected const long FirstWindowBytes = 5 * PacketBytes;
+    private protected const long FirstWindowBytes = FirstWindowPackets * PacketBytes;
+
+    private const int FirstWindowPackets = 5;
 
     /// <summary>
     /// An estimate of the bytes a column metadata token takes, which the first
@@ -725,6 +768,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
         try
         {
             var probed = false;
+            long probesFrom = 0;
             while (bytes < window)
             {
                 var probes = statement?.RowsProbed ?? 0;
@@ -734,6 +778,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                     return null;
                 }
                 probed = statement is not null && statement.RowsProbed != probes;
+                probesFrom = probes;
                 var row = source.Current;
                 produced.Add(row);
                 bytes += measure.Of(row);
@@ -742,6 +787,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
             {
                 statement = statement,
                 lastRowProbed = probed,
+                lastRowProbesFrom = probesFrom,
                 connection = connection,
                 owner = owner,
                 producesAhead = contended,
@@ -825,6 +871,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 return;
             }
             this.lastRowProbed = statement is not null && statement.RowsProbed != probes;
+            this.lastRowProbesFrom = probes;
             var row = source.Current;
             var size = this.measure.Of(row);
             lock (staged)
@@ -860,6 +907,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 return;
             }
             this.lastRowProbed = statement is not null && statement.RowsProbed != probes;
+            this.lastRowProbesFrom = probes;
             var row = source.Current;
             this.RowCount++;
             if (this.Draining)
@@ -906,9 +954,11 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 {
                     var row = this.Buffer[this.Head];
                     this.Buffer[this.Head++] = null!;
-                    // Into another packet, the client lets the statement run on.
+                    // Into another packet, the client lets the statement run on:
+                    // the endpoint's writer as it sends the row a packet ends
+                    // in, a reader as it reads the first row beginning past it.
                     this.rowsRead++;
-                    if (this.packetEnds.TryPeek(out var end) && end.Row == this.rowsRead)
+                    if (this.packetEnds.TryPeek(out var end) && end.Row == (this.LeadPackets == 1 ? this.rowsRead : this.rowsRead - 1))
                     {
                         _ = this.packetEnds.Dequeue();
                         this.clientBytes = end.Bytes;
@@ -940,6 +990,10 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                 }
                 if (this.Complete || this.Pull is not { } pull)
                     yield break;
+                // A reader that has read every row produced stands where the
+                // next one begins, however far into it the last one reached.
+                if (this.LeadPackets != 1)
+                    this.clientBytes = Math.Max(this.clientBytes, this.producedBytes);
                 if (!this.Draining && this.Contended())
                 {
                     this.StartBackground(pull);

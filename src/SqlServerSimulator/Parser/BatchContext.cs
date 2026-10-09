@@ -731,6 +731,23 @@ internal sealed partial class BatchContext
     public bool StreamsResultRows;
 
     /// <summary>
+    /// The <c>WITH RESULT SETS</c> contract the result sets this batch's
+    /// statements send pass through, when an <c>EXECUTE</c> carrying one runs
+    /// the batch or a batch it calls (<c>Simulation.ResultSetsSinkFor</c>):
+    /// each client <c>SELECT</c> claims its declared set and converts its rows
+    /// as it produces them, so a contract violation is that statement's own
+    /// error. Null where no such call encloses the batch.
+    /// </summary>
+    public ResultSetsSink? ResultSetsSink;
+
+    /// <summary>
+    /// The thread the batch's current statement runs on when it isn't the
+    /// caller's — a statement whose triggers send what they produce as it is
+    /// produced (<c>Simulation.RunsOnItsOwnThread</c>); null otherwise.
+    /// </summary>
+    public StatementCoroutine? StatementCoroutine;
+
+    /// <summary>
     /// Whether this batch runs inside a procedure an RPC called
     /// (<c>CommandType.StoredProcedure</c>), whose body streams but whose
     /// request can't park for a bulk text form's data.

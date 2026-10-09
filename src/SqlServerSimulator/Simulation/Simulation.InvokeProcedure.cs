@@ -62,7 +62,8 @@ partial class Simulation
         Synonym? viaSynonym = null,
         bool framesScope = false,
         bool recompile = false,
-        bool streams = false)
+        bool streams = false,
+        ResultSetsSink? resultSetsSink = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -380,6 +381,7 @@ partial class Simulation
                     ModuleObjectId = procedure.ObjectId,
                     ModuleDefinitionText = procedure.DefinitionText,
                     ModuleSchema = procedure.Schema,
+                    ResultSetsSink = resultSetsSink,
                 };
                 // Seed cursor parameters as unallocated cursor variables in the
                 // child frame; the body SETs and OPENs a cursor on each.

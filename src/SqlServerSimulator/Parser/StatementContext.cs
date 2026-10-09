@@ -539,6 +539,7 @@ internal sealed class StatementContext
         this.PendingCompileRefusal = null;
         this.DdlTriggerCreatedThisStatement = null;
         this.ProbedTable = null;
+        this.OtherProbed?.Clear();
     }
 
     /// <summary>
@@ -556,21 +557,52 @@ internal sealed class StatementContext
     public long RowsProbed;
 
     /// <summary>
+    /// The row each other table a <c>READ COMMITTED</c> read of the statement
+    /// probed stands on — a correlated subquery's, an <c>APPLY</c> body's —
+    /// and <see cref="RowsProbed"/> as it was probed: real holds the S of
+    /// every scan's position while the statement waits on its client, so the
+    /// tables probed while its last row was produced hold theirs too (probed
+    /// 2026-10-09 against SQL Server 2025: a reader two rows into a scan
+    /// filtered by a correlated <c>COUNT(*)</c> over another table held two
+    /// <c>KEY S</c>, and three beside an <c>EXISTS</c> over a third).
+    /// </summary>
+    public List<ProbedPosition>? OtherProbed;
+
+    /// <summary>
+    /// Moves the probe position to <paramref name="table"/>, keeping the one it
+    /// leaves among <see cref="OtherProbed"/>.
+    /// </summary>
+    public void SwitchProbedTable(Storage.HeapTable table)
+    {
+        if (this.ProbedTable is { } left)
+        {
+            var others = this.OtherProbed ??= [];
+            var kept = false;
+            for (var i = 0; i < others.Count; i++)
+            {
+                if (ReferenceEquals(others[i].Table, left))
+                {
+                    others[i] = new ProbedPosition(left, this.ProbedPage, this.ProbedSlot, this.RowsProbed);
+                    kept = true;
+                }
+                else if (ReferenceEquals(others[i].Table, table))
+                {
+                    others.RemoveAt(i--);
+                }
+            }
+            if (!kept)
+                others.Add(new ProbedPosition(left, this.ProbedPage, this.ProbedSlot, this.RowsProbed));
+        }
+        this.ProbedTable = table;
+    }
+
+    /// <summary>
     /// How many times a <c>SELECT</c> of the batch has waited on its client
     /// mid-result (<see cref="ResultStream"/>): a scan that sees it move reads
     /// on as the table stands after another request's or session's writes.
     /// Only ever counts up.
     /// </summary>
     public int Suspensions;
-
-    /// <summary>
-    /// Set once a read of the statement resolved a snapshot to read at: a
-    /// <c>SELECT</c> suspended on its client then finishes before another
-    /// request of its transaction writes, rather than keeping its rows through
-    /// <see cref="Storage.OwnWriteImages"/>, which its snapshot reads don't
-    /// consult.
-    /// </summary>
-    public bool ReadsSnapshot;
 
     /// <summary>
     /// The rows a <c>SELECT</c> left to produce as its client reads them,
@@ -603,7 +635,6 @@ internal sealed class StatementContext
         this.EscalatedTables = null;
         this.RemoteWrite = null;
         this.RemoteWriteAlias = null;
-        this.ReadsSnapshot = false;
     }
 }
 
@@ -650,4 +681,13 @@ internal sealed class LockEscalationTally
 
     /// <summary>How many more locks a refused attempt waits for.</summary>
     public const int RetryInterval = 1250;
+}
+
+/// <summary>Where a <c>READ COMMITTED</c> read of one table stands, and the statement's probe count as it got there.</summary>
+internal readonly struct ProbedPosition(Storage.HeapTable table, int page, int slot, long stamp)
+{
+    public readonly Storage.HeapTable Table = table;
+    public readonly int Page = page;
+    public readonly int Slot = slot;
+    public readonly long Stamp = stamp;
 }

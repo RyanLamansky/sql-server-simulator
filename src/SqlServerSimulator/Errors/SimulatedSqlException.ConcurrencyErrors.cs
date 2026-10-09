@@ -106,6 +106,18 @@ partial class SimulatedSqlException
         new("New request is not allowed to start because it should come with valid transaction descriptor.", 3989, 16, 1);
 
     /// <summary>
+    /// Msg 3970: a statement redefining an object — <c>ALTER</c>,
+    /// <c>TRUNCATE</c>, <c>DROP</c>, an index build — while a statement of
+    /// another MARS request working in the same transaction is suspended on
+    /// its client holding a lock on it. It ends the batch and dooms the
+    /// transaction, as an error under <c>XACT_ABORT</c> does, so the requests
+    /// still running in it end with Msg 3998 (probed 2026-10-09 against SQL
+    /// Server 2025, at every isolation level and under <c>NOLOCK</c>).
+    /// </summary>
+    internal static SimulatedSqlException DefinitionConflictsWithPendingOperation() =>
+        new("This operation conflicts with another pending operation on this transaction. The operation failed.", 3970, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
     /// Msg 3980: a request arriving on a MARS connection while a DML
     /// statement's <c>OUTPUT</c> rows — an <c>INSERT</c>, <c>UPDATE</c>,
     /// <c>DELETE</c> or <c>MERGE</c>, directly or in a procedure — are still

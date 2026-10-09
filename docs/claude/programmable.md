@@ -851,19 +851,20 @@ Values convert through the CAST value path, so the `varchar` asterisk fallback, 
 - **Msg 8114** state 2 — a value-level conversion failure, with both type names *decorated* (`Error converting data type varchar(5) to numeric(5,2).`; state probed 2026-10-02).
   Real routes every conversion rule through this one number here, so the simulator remaps the CAST path's own failures (Msg 245 / 8115 / 8170 / …) onto it.
 
-**Error attribution**: Msg 11535 / 11537 / 11538 / 11553 and the Msg 8114 failure name the module's producing statement, not the `EXECUTE` — `ERROR_PROCEDURE()` reads the innermost producing procedure and `ERROR_LINE()` its statement's line.
-`SimulatedQueryResult.OriginLine` / `OriginProcedure`, stamped by the dispatch loop beside `ClientTextSize`, carry that; the innermost frame wins because an already-stamped result passes through untouched.
-Msg 11536 is the exception — it belongs to the `EXECUTE` statement itself and leaves `ERROR_PROCEDURE()` NULL.
-All of them are catchable by `TRY` / `CATCH`.
+**Where the contract applies**: each client `SELECT` of the called module — or of a procedure or dynamic batch it calls in turn — claims its declared set and converts its rows as it produces them (`BatchContext.ResultSetsSink`, `Simulation.ClaimResultSet`), so Msg 11535 / 11537 / 11538 are raised by that statement before it sends anything, and Msg 11553 and the Msg 8114 failure by it as it produces the failing row, the rows before it out first.
+They are that statement's own errors: `ERROR_PROCEDURE()` reads the innermost producing procedure and `ERROR_LINE()` its statement's line, a `TRY` around the `SELECT` inside the module catches them, and nothing after the failing statement runs — the module's later statements included (probed 2026-10-09 against SQL Server 2025).
+Uncaught, Msg 11535 / 11536 / 11537 / 11538 / 11553 end the batch and leave a transaction open, as a `THROW` does, and caught leave it committable; the Msg 8114 failure ends the batch and rolls the transaction back, as a conversion failure does, and caught dooms it (probed 2026-10-09).
+A nested `EXECUTE … WITH RESULT SETS` converts through its own contract and then the enclosing one's.
+A set something other than a module's `SELECT` sends — a DML statement's `OUTPUT`, a system procedure's, a trigger's — is claimed as the `EXECUTE` receives it and converts as its reader reads it, attributed through `SimulatedQueryResult.OriginLine` / `OriginProcedure`.
+Msg 11536 belongs to the `EXECUTE` statement itself and leaves `ERROR_PROCEDURE()` NULL.
+The module's rows stream as its client reads them, as an `EXEC` without the clause does ([`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)): a `REPEATABLE READ` reader two rows in holds the keys of the twenty rows produced, and a value failing at row 1,500 raises once the client reads there (probed 2026-10-09 against SQL Server 2025).
 
 **Not modeled yet**:
 - **`rowversion`** rides the binary family in the implicit-conversion matrix; real treats `timestamp` more narrowly than `varbinary` there (it declines `nvarchar` and `sql_variant`).
 - A pair the gate **allows** but `SqlValue.CoerceTo` hasn't built raises that path's own error rather than converting — `money` / `float` → `varbinary`, `money` ↔ `float`, `<string>` → `image` / `hierarchyid`, `varbinary` → `datetime`.
   The same gaps show for a plain `CAST`, so they close there, not here.
 
-**Divergence**: a set-level violation (11535 / 11537 / 11538) fails the whole `EXECUTE`, so sets that preceded it don't reach the client — real streams the matched sets first and then raises.
-The dispatch loop materializes a statement's outcomes before yielding any of them, which is what hoists the error.
-Row-level violations inside an accepted set still stream (11553 and the Msg 8114 failure surface mid-drain, after the earlier rows).
+**Divergence**: a set a module sends other than through a `SELECT` of its own converts as its reader reads it, outside the statement that sent it, so a failure there isn't that statement's to catch.
 
 ## Replacing a module — `ALTER` / `CREATE OR ALTER`
 

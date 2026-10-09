@@ -148,10 +148,16 @@ partial class Simulation
             ApplyExecuteAs(connection, connection.CurrentDatabase, asLogin, asName, ModuleGuard);
         try
         {
+            // A linked server's sets reach the contract only as the EXECUTE
+            // receives them.
+            var resultSetsSink = linkedServerName is null ? ResultSetsSinkFor(batch, resultSets, insertExecSource)
+                : resultSets?.Shapes is { } linkedShapes ? new ResultSetsSink(linkedShapes, outer: null)
+                : null;
             var dynamicBatch = linkedServerName is null
-                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null, streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource, declarations: "EXEC")
+                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null, streams: batch.SendsAsStatementsEnd && !insertExecSource, declarations: "EXEC",
+                    resultSetsSink: resultSetsSink)
                 : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
-            foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
+            foreach (var outcome in resultSets?.Shapes is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSetsSink))
                 yield return outcome;
         }
         finally
@@ -438,16 +444,18 @@ partial class Simulation
         // Server 2025).
         // A call whose outcomes reach the client as they are produced sends
         // the batch's as it runs; the status and the OUTPUT writeback follow.
-        var streams = batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource;
+        var streams = batch.SendsAsStatementsEnd && !insertExecSource;
+        var resultSetsSink = ResultSetsSinkFor(batch, resultSets, insertExecSource);
         var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared, viaSystemProcedure: true, tableVariables: tableArguments,
             runsIn: calledInDatabase is null ? null
                 : this.Databases.TryGetValue(calledInDatabase, out var calledIn) ? calledIn
                 : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase),
             streams: streams,
-            declarations: "sp_executesql " + paramDefsText);
+            declarations: "sp_executesql " + paramDefsText,
+            resultSetsSink: resultSetsSink);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? failure = null;
-        using (var sent = (resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets)).GetEnumerator())
+        using (var sent = (resultSets?.Shapes is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSetsSink)).GetEnumerator())
         {
             while (NextBodyOutcome(sent, ref failure))
             {
@@ -934,7 +942,8 @@ partial class Simulation
         Database? runsIn = null,
         Dictionary<string, HeapTable>? tableVariables = null,
         bool streams = false,
-        string? declarations = null)
+        string? declarations = null,
+        ResultSetsSink? resultSetsSink = null)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -953,7 +962,7 @@ partial class Simulation
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
-        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch) };
+        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch), ResultSetsSink = resultSetsSink };
 
         connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;

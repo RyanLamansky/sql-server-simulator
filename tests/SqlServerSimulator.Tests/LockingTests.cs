@@ -946,4 +946,34 @@ public sealed class LockingTests
         _ = survivor.CreateCommand("commit").ExecuteNonQuery();
         AreEqual("1:11,2:20", sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
     }
+
+    /// <summary>
+    /// A transaction's locks on a table list as real's one converted lock:
+    /// an <c>IS</c> under an <c>IX</c> or <c>S</c> as the stronger, an
+    /// <c>S</c> beside an <c>IX</c> as <c>SIX</c>, anything beside an
+    /// <c>X</c> as the <c>X</c> — and a read taking <c>UPDLOCK</c> or
+    /// <c>XLOCK</c> with <c>TABLOCK</c> takes the table's X at any level
+    /// (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select v from t with (repeatableread) where id = 1; update t set v = v where id = 2", "IX")]
+    [DataRow("update t set v = v where id = 2; select v from t with (repeatableread) where id = 1", "IX")]
+    [DataRow("select count(*) from t with (tablock, holdlock); update t set v = v where id = 2", "SIX")]
+    [DataRow("select v from t with (repeatableread) where id = 1; select count(*) from t with (tablock, holdlock)", "S")]
+    [DataRow("update t set v = v where id = 2; select count(*) from t with (tablockx, holdlock)", "X")]
+    [DataRow("select count(*) from t with (tablock, updlock)", "X")]
+    [DataRow("select count(*) from t with (tablock, xlock)", "X")]
+    [DataRow("set transaction isolation level repeatable read; select v from t with (tablock, updlock) where id = 5", "X")]
+    public void TransactionsTableLocks_ListAsOneConvertedLock(string statements, string mode)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int not null); insert t select value, value from generate_series(1, 100)");
+        using var connection = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        var spid = connection.CreateCommand("select @@spid").ExecuteScalar();
+        _ = connection.CreateCommand("begin tran; " + statements).ExecuteNonQuery();
+        AreEqual(mode, string.Join(", ", Extensions.FirstColumn(observer,
+            $"select request_mode from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'OBJECT'")));
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

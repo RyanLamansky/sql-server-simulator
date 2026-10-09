@@ -555,6 +555,13 @@ partial class Simulation
                 }
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
+                // A firing statement running on a thread of its own sends what
+                // the body produces as it produces it, the body's rows going
+                // out as its client reads them (probed 2026-10-09 against SQL
+                // Server 2025).
+                var sending = compileAt < 0 ? SendingCoroutine(outerBatch) : null;
+                if (sending is not null)
+                    innerBatch.CallerStreams = innerBatch.StreamsResultRows = true;
                 foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
                 {
                     // A body's result sets, messages, continued-past errors and
@@ -563,8 +570,23 @@ partial class Simulation
                     // writes two rows reports four to ExecuteNonQuery unless the
                     // body sets NOCOUNT (probed 2026-09-26) — so buffer them in
                     // order for the dispatcher to yield when the statement
-                    // completes.
-                    (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
+                    // completes, unless they go out as they come.
+                    if (sending is null)
+                    {
+                        (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
+                        continue;
+                    }
+                    // What the firing statement queued goes first, as it would
+                    // ahead of the buffered outcomes.
+                    foreach (var queued in DrainPendingMessages(connection))
+                        sending.Send(queued);
+                    if (outerBatch.PendingTriggerOutcomes is { Count: > 0 } pending)
+                    {
+                        outerBatch.PendingTriggerOutcomes = null;
+                        foreach (var queued in pending)
+                            sending.Send(queued);
+                    }
+                    sending.Send(bodyOutcome);
                 }
                 if (compileAt >= 0)
                     (outerBatch.PendingTriggerOutcomes ??= []).Insert(compileAt, new SimulatedInfoOutcome(CompileTime(innerBatch, clock: null, innerBatch.LastTopLevelStatementLine + innerBatch.LineOffset, triggerName)));
@@ -614,6 +636,14 @@ partial class Simulation
             connection.TriggerTransactionEnded = savedTransactionEnded;
         }
     }
+
+    /// <summary>
+    /// The thread of its own a trigger's firing statement runs on, which the
+    /// body's outcomes go out of as it produces them; null when the statement
+    /// runs on its caller's.
+    /// </summary>
+    private static StatementCoroutine? SendingCoroutine(BatchContext firing) =>
+        firing.StatementCoroutine is { OnStatementThread: true } coroutine ? coroutine : null;
 
     /// <summary>
     /// Fast-path predicate: returns true when at least one enabled

@@ -383,4 +383,40 @@ public sealed class StreamedResultWireTests
             }
         });
     }
+
+    /// <summary>
+    /// A trigger's result set goes out over the wire as the client reads it,
+    /// the statement that fired it waiting mid-way with its writes' locks and
+    /// the trigger's statements after the <c>SELECT</c> not yet run, MARS or
+    /// not (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task TriggerRows_GoOutWhileTheFiringStatementWaits(bool mars)
+    {
+        var simulation = Big();
+        Wire.ExecInProc(simulation, "create table t (id int primary key, v int not null); insert t values (1, 1); create table l (m varchar(20))");
+        Wire.ExecInProc(simulation, "create trigger tr on t after update as begin select k, v from big order by k; insert l values ('after'); end");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, mars ? ";MultipleActiveResultSets=True" : "");
+        await using var observer = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var spid = await SpidAsync(connection);
+        await using var command = new SqlCommand("update t set v = 2 where id = 1", connection);
+        await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            await AwaitSuspendedAsync(observer, spid);
+            AreEqual(1, await HeldKeysAsync(observer, spid, "X"));
+            await using (var logged = new SqlCommand("select count(*) from l with (nolock)", observer))
+                AreEqual(0, await logged.ExecuteScalarAsync(TestContext.CancellationToken));
+            var read = 2;
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+                read++;
+            AreEqual(Rows, read);
+        }
+        await using (var logged = new SqlCommand("select count(*) from l", observer))
+            AreEqual(1, await logged.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

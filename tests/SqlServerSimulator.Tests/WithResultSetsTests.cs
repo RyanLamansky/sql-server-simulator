@@ -228,17 +228,17 @@ public sealed class WithResultSetsTests
     }
 
     [TestMethod]
-    public void ALaterSetsMismatch_FailsTheWholeStatement()
+    public void ALaterSetsMismatch_SendsTheEarlierSetFirst()
     {
-        // Divergence: real streams the sets that matched before raising, so a
-        // client sees set #1's rows and then the error. The simulator
-        // materializes a statement's outcomes before yielding any, so the
-        // set-level violation fails the EXECUTE as a whole. Row-level
-        // violations inside an accepted set still stream (see
-        // NotNullViolation_StreamsPrecedingRows).
+        // The second SELECT fails to claim its set as it runs, after the
+        // first has gone out.
         var sim = new Simulation();
         sim.ExecuteBatches("create procedure dbo.p as begin select 1 as a; select 2 as b end");
-        var ex = sim.AssertSqlError("exec dbo.p with result sets ((one bigint), (two date))", 11538);
+        using var reader = sim.ExecuteReader("exec dbo.p with result sets ((one bigint), (two date))");
+        IsTrue(reader.Read());
+        AreEqual(1L, reader.GetInt64(0));
+        var ex = Throws<SimulatedSqlException>(() => reader.NextResult());
+        AreEqual(11538, ex.Number);
         Contains("result set #2", ex.Message);
     }
 
@@ -548,5 +548,210 @@ public sealed class WithResultSetsTests
         AreEqual(typeof(short), reader.GetFieldType(0));
         IsTrue(reader.Read());
         AreEqual((short)1, reader.GetInt16(0));
+    }
+
+    /// <summary>
+    /// A table of four varchar values the third of which converts to no
+    /// number, a log table, and a procedure selecting the values before it
+    /// logs, for the run-time contract tests.
+    /// </summary>
+    private static Simulation WithConversionFailure(string body = "select v from dbo.t order by id;\ninsert dbo.l values ('after');")
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int primary key, v varchar(10) null); insert dbo.t values (1, '1'), (2, '2'), (3, 'x'), (4, '4'); create table dbo.l (m varchar(50))",
+            $"create procedure dbo.p as\n{body}");
+        return sim;
+    }
+
+    /// <summary>The first value of the last result set <paramref name="batch"/> sends, past the rows a procedure sent ahead of it.</summary>
+    private static object LastResultValue(Simulation sim, string batch)
+    {
+        using var reader = sim.ExecuteReader(batch);
+        object? value = null;
+        do
+        {
+            if (reader.Read())
+                value = reader.GetValue(0);
+            while (reader.Read())
+            {
+            }
+        }
+        while (reader.NextResult());
+        return value!;
+    }
+
+    private static string Log(Simulation sim) =>
+        (string)sim.ExecuteScalar("select isnull(string_agg(m, ',') within group (order by m), '') from dbo.l")!;
+
+    [TestMethod]
+    public void ValueConversionFailure_IsCaughtAroundTheExecute_AndEndsTheProcedure()
+    {
+        // The failure is the producing SELECT's own, so a TRY around the
+        // EXECUTE catches it there and nothing after it runs — neither the
+        // procedure's later statements nor the TRY's (probed 2026-10-09
+        // against SQL Server 2025).
+        var sim = WithConversionFailure();
+        using (var reader = sim.ExecuteReader("""
+            begin try
+                exec dbo.p with result sets ((v int));
+                insert dbo.l values ('after exec');
+            end try
+            begin catch
+                select error_number(), error_line(), error_procedure(), error_state(), error_message();
+            end catch
+            """))
+        {
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            IsTrue(reader.Read());
+            AreEqual(2, reader.GetInt32(0));
+            IsFalse(reader.Read());
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(8114, reader.GetInt32(0));
+            AreEqual(2, reader.GetInt32(1));
+            AreEqual("dbo.p", reader.GetString(2));
+            AreEqual(2, reader.GetInt32(3));
+            AreEqual("Error converting data type varchar(10) to int.", reader.GetString(4));
+        }
+        AreEqual("", Log(sim));
+    }
+
+    [TestMethod]
+    public void ValueConversionFailure_IsCaughtByTheModulesOwnTry()
+    {
+        var sim = WithConversionFailure("""
+            begin try
+              select v from dbo.t order by id;
+              insert dbo.l values ('after in try');
+            end try
+            begin catch
+              insert dbo.l values ('caught ' + cast(error_number() as varchar(10)) + ' at ' + cast(error_line() as varchar(10)));
+            end catch
+            insert dbo.l values ('after');
+            """);
+        sim.ExecuteBatches("exec dbo.p with result sets ((v int)); insert dbo.l values ('after exec')");
+        AreEqual("after,after exec,caught 8114 at 3", Log(sim));
+    }
+
+    [TestMethod]
+    public void ValueConversionFailure_Uncaught_EndsTheBatchAndRollsBack()
+    {
+        var sim = WithConversionFailure();
+        using var connection = sim.CreateOpenConnection();
+        using (var begin = connection.CreateCommand("begin tran; insert dbo.l values ('in tran')"))
+            _ = begin.ExecuteNonQuery();
+        using (var exec = connection.CreateCommand("exec dbo.p with result sets ((v int)); insert dbo.l values ('after exec')"))
+            AreEqual(8114, Throws<SimulatedSqlException>(() => exec.ExecuteNonQuery()).Number);
+        using (var after = connection.CreateCommand("select @@trancount"))
+            AreEqual(0, after.ExecuteScalar());
+        AreEqual("", Log(sim));
+    }
+
+    [TestMethod]
+    public void ValueConversionFailure_Caught_DoomsTheTransaction()
+        => AreEqual((short)-1, LastResultValue(WithConversionFailure(), """
+            begin tran;
+            begin try
+                exec dbo.p with result sets ((v int));
+            end try
+            begin catch
+                declare @state smallint = xact_state();
+                rollback;
+                select @state;
+            end catch
+            """));
+
+    [TestMethod]
+    [DataRow("select case when id = 3 then null else v end from dbo.t order by id;\ninsert dbo.l values ('after');", "((v varchar(10) not null))", 11553, DisplayName = "11553")]
+    [DataRow("select v, id from dbo.t order by id;\ninsert dbo.l values ('after');", "((v int))", 11537, DisplayName = "11537")]
+    [DataRow("select cast(v as xml) from dbo.t where id = 1;\ninsert dbo.l values ('after');", "((v int))", 11538, DisplayName = "11538")]
+    [DataRow("insert dbo.l values ('in p');", "((v int))", 11536, DisplayName = "11536")]
+    [DataRow("select 1;\nselect 2;\ninsert dbo.l values ('after');", "((a int))", 11535, DisplayName = "11535")]
+    public void ContractViolation_Uncaught_EndsTheBatch_LeavingTheTransactionOpen(string body, string contract, int number)
+    {
+        var sim = WithConversionFailure(body);
+        using var connection = sim.CreateOpenConnection();
+        using (var begin = connection.CreateCommand("begin tran; insert dbo.l values ('in tran')"))
+            _ = begin.ExecuteNonQuery();
+        using (var exec = connection.CreateCommand($"exec dbo.p with result sets {contract}; insert dbo.l values ('after exec')"))
+        {
+            var ex = Throws<SimulatedSqlException>(() =>
+            {
+                using var reader = exec.ExecuteReader();
+                do
+                {
+                    while (reader.Read())
+                    {
+                    }
+                }
+                while (reader.NextResult());
+            });
+            AreEqual(number, ex.Number);
+        }
+        using (var after = connection.CreateCommand("select @@trancount, (select string_agg(m, ',') within group (order by m) from dbo.l); rollback"))
+        using (var reader = after.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            AreEqual(number == 11536 ? "in p,in tran" : "in tran", reader.GetString(1));
+        }
+    }
+
+    [TestMethod]
+    [DataRow("select v, id from dbo.t order by id;", "((v int))", 11537, 3, DisplayName = "11537")]
+    [DataRow("select cast(v as xml) from dbo.t where id = 1;", "((v int))", 11538, 3, DisplayName = "11538")]
+    [DataRow("select case when id = 3 then null else v end from dbo.t order by id;", "((v varchar(10) not null))", 11553, 3, DisplayName = "11553")]
+    [DataRow("select 1;\n  select 2;", "((a int))", 11535, 4, DisplayName = "11535")]
+    public void ContractViolation_IsCaughtByTheModulesOwnTry(string statements, string contract, int number, int line)
+    {
+        var sim = WithConversionFailure($"""
+            begin try
+              {statements}
+              insert dbo.l values ('after in try');
+            end try
+            begin catch
+              insert dbo.l values ('caught ' + cast(error_number() as varchar(10)) + ' at ' + cast(error_line() as varchar(10)));
+            end catch
+            insert dbo.l values ('after');
+            """);
+        sim.ExecuteBatches($"exec dbo.p with result sets {contract}; insert dbo.l values ('after exec')");
+        AreEqual($"after,after exec,caught {number} at {line}", Log(sim));
+    }
+
+    [TestMethod]
+    [DataRow("exec ('select v from dbo.t order by id; insert dbo.l values (''after'')') with result sets ((v int))", DisplayName = "EXEC string")]
+    [DataRow("exec sp_executesql N'select v from dbo.t order by id; insert dbo.l values (''after'')' with result sets ((v int))", DisplayName = "sp_executesql")]
+    public void ValueConversionFailure_InDynamicSql_EndsTheBatchThere(string exec)
+    {
+        var sim = WithConversionFailure();
+        AreEqual("8114 1 ", LastResultValue(sim, $"""
+            begin try
+                {exec};
+                insert dbo.l values ('after exec');
+            end try
+            begin catch
+                select concat(error_number(), ' ', error_line(), ' ', error_procedure());
+            end catch
+            """));
+        AreEqual("", Log(sim));
+    }
+
+    [TestMethod]
+    public void ValueConversionFailure_InANestedProcedure_EndsEveryLevel()
+    {
+        var sim = WithConversionFailure("select v from dbo.t order by id;\ninsert dbo.l values ('after q');");
+        sim.ExecuteBatches("create procedure dbo.outer_p as\nexec dbo.p;\ninsert dbo.l values ('after outer');");
+        AreEqual("8114 2 dbo.p", LastResultValue(sim, """
+            begin try
+                exec dbo.outer_p with result sets ((v int));
+                insert dbo.l values ('after exec');
+            end try
+            begin catch
+                select concat(error_number(), ' ', error_line(), ' ', error_procedure());
+            end catch
+            """));
+        AreEqual("", Log(sim));
     }
 }

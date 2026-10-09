@@ -302,6 +302,53 @@ public sealed class AbandonedSessionReclamationTests
         AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
     }
 
+    /// <summary>
+    /// A reader abandoned partway through a trigger's rows — the firing
+    /// statement waiting on its own thread, which keeps the session reachable
+    /// — lets the statement notice it's gone: the statement ends, its writes
+    /// rolled back, and the session is collected and reclaimed.
+    /// </summary>
+    [TestMethod]
+    public async Task GarbageCollected_ReaderOfATriggersRows_IsReclaimed()
+    {
+        var simulation = new Simulation();
+        using var observer = simulation.CreateDbConnection();
+        observer.Open();
+        Exec(observer, "CREATE TABLE dbo.t (id int PRIMARY KEY, v int); INSERT dbo.t VALUES (1, 1); CREATE TABLE dbo.big (k int PRIMARY KEY, v char(2000) NOT NULL); INSERT dbo.big SELECT value, 'x' FROM generate_series(1, 200)");
+        Exec(observer, "CREATE TRIGGER tr ON dbo.t AFTER UPDATE AS SELECT k, v FROM dbo.big ORDER BY k");
+
+        var session = LeakTriggerReader(simulation);
+        AreNotEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type = 'KEY' AND request_mode = 'X'"), null));
+
+        var deadline = Environment.TickCount64 + 10_000;
+        while (!session.Reclaimed && Environment.TickCount64 < deadline)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            _ = simulation.ReclaimAbandonedSessions();
+            if (!session.Reclaimed)
+                await Task.Delay(50, this.TestContext.CancellationToken);
+        }
+        IsTrue(session.Reclaimed);
+        AreEqual(1, Convert.ToInt32(Scalar(observer, "SELECT v FROM dbo.t WHERE id = 1"), null));
+        AreEqual(0, Convert.ToInt32(Scalar(observer, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type <> 'DATABASE'"), null));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static SessionToken LeakTriggerReader(Simulation simulation)
+    {
+#pragma warning disable CA2000 // Abandoning the connection and its reader undisposed is the scenario under test.
+        var connection = simulation.CreateDbConnection();
+        connection.Open();
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE dbo.t SET v = 2 WHERE id = 1";
+        var reader = command.ExecuteReader();
+#pragma warning restore CA2000
+        IsTrue(reader.Read());
+        return connection.Session;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakSuspendedReader(Simulation simulation)
     {

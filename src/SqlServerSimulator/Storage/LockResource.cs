@@ -28,6 +28,12 @@ internal enum LockMode
     IntentShared,
     /// <summary>Intent-exclusive (IX) — table-level signal that some row-X is held by this owner.</summary>
     IntentExclusive,
+    /// <summary>
+    /// Intent-update (IU) — what a row-U reader takes on the page its row is
+    /// on: compatible with IS, IU, IX and S, not with a page's U, SIX or X.
+    /// Taken only on a page another session locks whole (<c>PAGLOCK</c>).
+    /// </summary>
+    IntentUpdate,
     /// <summary>Shared-with-intent-exclusive (SIX) — full table read + intent to write some rows.</summary>
     SharedIntentExclusive,
     /// <summary>Data shared (S) — non-exclusive read. Multiple S holders allowed; coexists with U.</summary>
@@ -112,6 +118,18 @@ internal sealed class LockResource
     /// the table on every grant / release.
     /// </summary>
     public HeapTable? OwningTable;
+
+    /// <summary>
+    /// The table whose page this resource locks, for a page lock
+    /// (<see cref="HeapTable.GetOrCreatePageLock"/>), with <see cref="PageOrdinal"/>
+    /// its page in the table's <see cref="RealPageLayout"/>; <c>null</c>
+    /// otherwise. Kept apart from <see cref="OwningTable"/>, whose counts
+    /// are of row and key locks.
+    /// </summary>
+    public HeapTable? PageOfTable;
+
+    /// <inheritdoc cref="PageOfTable"/>
+    public int PageOrdinal;
 
     /// <summary>
     /// The row this resource locks, for a row lock; <c>null</c> otherwise.
@@ -356,14 +374,15 @@ internal sealed class LockManager
     /// Msg 1222's state, which names the kind of lock that timed out: 51 for
     /// a key lock — a row of a table with a clustered index is one — 45 for a
     /// heap's row, 56 for a table or schema lock (probed 2026-09-28 against
-    /// SQL Server 2025), and 48 for an insert's test of a fenced gap
-    /// (probed 2026-10-03). A uniqueness check's wait reports 47
-    /// (<c>Simulation.AwaitUncommittedKeyWriters</c>).
+    /// SQL Server 2025), 48 for an insert's test of a fenced gap (probed
+    /// 2026-10-03) and 52 for a page lock (probed 2026-10-09). A uniqueness
+    /// check's wait reports 47 (<c>Simulation.AwaitUncommittedKeyWriters</c>).
     /// </summary>
     private static byte TimeoutState(LockResource resource, LockMode mode) => resource switch
     {
         _ when mode == LockMode.RangeInsertNull => 48,
         { KeyGroup: not null } => 51,
+        { PageOfTable: not null } => 52,
         { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? (byte)51 : (byte)45,
         _ => 56,
     };
@@ -609,6 +628,8 @@ internal sealed class LockManager
                     {
                         resource.Holders.RemoveAt(i);
                         this.CountBlockingHold(owner, mode, -1);
+                        if (resource.PageOfTable is { } paged && mode is LockMode.Shared or LockMode.Update or LockMode.Exclusive)
+                            _ = Interlocked.Decrement(ref paged.ActivePageLocks);
                         if (resource.OwningTable is { } table)
                         {
                             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
@@ -699,6 +720,8 @@ internal sealed class LockManager
         }
         resource.Holders.Add(new LockResource.Hold(owner, mode, 1));
         this.CountBlockingHold(owner, mode, +1);
+        if (resource.PageOfTable is { } paged && mode is LockMode.Shared or LockMode.Update or LockMode.Exclusive)
+            _ = Interlocked.Increment(ref paged.ActivePageLocks);
         if (resource.OwningTable is { } table)
         {
             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
@@ -777,6 +800,8 @@ internal sealed class LockManager
     /// </summary>
     private static void CountHoldEntry(LockResource resource, LockMode mode, int delta)
     {
+        if (resource.PageOfTable is { } paged && mode is LockMode.Shared or LockMode.Update or LockMode.Exclusive)
+            _ = Interlocked.Add(ref paged.ActivePageLocks, delta);
         if (resource.OwningTable is not { } table)
             return;
         if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
@@ -1068,6 +1093,11 @@ internal sealed class LockManager
             // Sch-S is compatible with everything else.
             (LockMode.SchemaStability, _) => true,
             (_, LockMode.SchemaStability) => true,
+            // IU passes the intents and S, not U, SIX or X.
+            (LockMode.IntentUpdate, LockMode.IntentShared or LockMode.IntentUpdate or LockMode.IntentExclusive or LockMode.Shared) => true,
+            (LockMode.IntentShared or LockMode.IntentUpdate or LockMode.IntentExclusive or LockMode.Shared, LockMode.IntentUpdate) => true,
+            (LockMode.IntentUpdate, _) => false,
+            (_, LockMode.IntentUpdate) => false,
             // X is exclusive against every other data/intent mode.
             (LockMode.Exclusive, _) => false,
             (_, LockMode.Exclusive) => false,

@@ -38,7 +38,11 @@ public sealed class SimulatedDbDataReader : DbDataReader
         this.connection = connection;
         this.command = command;
         _ = this.AdvanceToNextResult(initial: true);
+        connection?.TrackReader(this, this.heldWeakly);
     }
+
+    /// <summary>Whether the connection names the reader only weakly (<see cref="SimulatedDbConnection.HoldReaderWeakly"/>).</summary>
+    private bool heldWeakly;
 
     /// <summary>The command whose request this reader keeps outstanding until it has read past its end.</summary>
     private readonly SimulatedDbCommand? command;
@@ -191,6 +195,26 @@ public sealed class SimulatedDbDataReader : DbDataReader
     {
         if (outcome is SimulatedSqlResultSet { Stream: { Complete: false } stream })
         {
+            if (stream.HoldsConsumerWeakly)
+            {
+                if (!this.heldWeakly)
+                {
+                    this.heldWeakly = true;
+                    this.connection?.HoldReaderWeakly(this);
+                }
+                var reader = new WeakReference<SimulatedDbDataReader>(this);
+                stream.Pull = () =>
+                {
+                    if (reader.TryGetTarget(out var pulling))
+                        pulling.PullRows();
+                };
+                stream.AbandonByConsumer = () =>
+                {
+                    if (reader.TryGetTarget(out var abandoning))
+                        abandoning.Abandon();
+                };
+                return;
+            }
             stream.Pull = this.PullRows;
             stream.AbandonByConsumer = this.Abandon;
         }
@@ -207,6 +231,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             return;
         this.closed = true;
         this.abandoned = true;
+        this.connection?.ForgetReader(this);
         this.cursor.Dispose();
         this.outcomes.Dispose();
         this.streamEnded = true;
@@ -237,7 +262,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// nesting level of the current row; SQL Server doesn't surface a
     /// non-zero value for in-band result sets, and the simulator follows.
     /// </summary>
-    public override int Depth => 0;
+    public override int Depth => this.closed ? throw ClosedReader("Depth") : 0;
 
     /// <inheritdoc/>
     public override int FieldCount => cursor.FieldCount;
@@ -493,6 +518,8 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override string GetName(int ordinal)
     {
+        if (this.closed)
+            throw ClosedReader("MetaData");
         if (ordinal >= this.FieldCount)
 #pragma warning disable CA2201 // Do not raise reserved exception types
             // This is thrown by the official SqlDataReader class so we do it here, too.
@@ -602,6 +629,8 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override bool NextResult()
     {
+        if (this.closed)
+            throw ClosedReader("NextResult");
         // The rest of a result the reader moves off are produced and passed
         // over, as SqlClient reads past them.
         if (this.currentResult is { } current)
@@ -748,6 +777,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             return;
 
         this.closed = true;
+        this.connection?.ForgetReader(this);
         using var culture = CultureScope.Engine();
         if (this.currentResult is { } current)
             PassOver(current);
@@ -776,6 +806,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
 
         this.outcomes.Dispose();
         this.Consume();
+        this.cursor = ClosedCursor.Instance;
         this.AfterClose?.Invoke();
     }
 
@@ -826,6 +857,30 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// </summary>
     private SimulatedQueryResult CurrentQuery =>
         this.currentResult ?? throw new InvalidOperationException("The reader is not positioned on a result set.");
+
+    /// <summary>
+    /// SqlClient's refusal of a member a closed reader can't answer, naming
+    /// the member as its message does — <c>Read</c>, <c>NextResult</c>,
+    /// <c>FieldCount</c>, <c>HasRows</c>, <c>Depth</c>, and for a value
+    /// getter its <c>CheckDataIsReady</c>, for a column's metadata its
+    /// <c>MetaData</c> (probed 2026-10-09 with SqlClient 7.0.2).
+    /// </summary>
+    private static InvalidOperationException ClosedReader(string member) =>
+        new($"Invalid attempt to call {member} when reader is closed.");
+
+    /// <summary>The cursor of a closed reader, which answers nothing (<see cref="ClosedReader"/>).</summary>
+    private sealed class ClosedCursor : RowCursor
+    {
+        public static readonly ClosedCursor Instance = new();
+
+        public override int FieldCount => throw ClosedReader("FieldCount");
+
+        public override bool HasRows => throw ClosedReader("HasRows");
+
+        public override bool MoveNext() => throw ClosedReader("Read");
+
+        public override SqlValue this[int ordinal] => throw ClosedReader("CheckDataIsReady");
+    }
 
     /// <summary>Stand-in cursor used before any result-set is opened or after the last is exhausted.</summary>
     private sealed class EmptyCursor : RowCursor

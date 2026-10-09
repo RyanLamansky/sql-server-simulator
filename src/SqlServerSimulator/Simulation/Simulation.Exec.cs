@@ -248,7 +248,7 @@ partial class Simulation
             if (batch.IsSkipping)
                 yield break;
             var remoteCall = InvokeRemoteProcedure(batch, remoteProcedure, remoteArguments, returnCodeVar, insertExecSource);
-            foreach (var outcome in remoteResultSets is null ? remoteCall : ApplyResultSetsContract(remoteCall, remoteResultSets))
+            foreach (var outcome in remoteResultSets?.Shapes is not { } remoteShapes ? remoteCall : ApplyResultSetsContract(remoteCall, new ResultSetsSink(remoteShapes, outer: null)))
                 yield return outcome;
             batch.CurrentStatement.SuppressErrorReset = true;
             yield break;
@@ -522,11 +522,12 @@ partial class Simulation
         }
 
         RefuseProcedureFromFunctionBody(batch, procedure.Name);
+        var resultSetsSink = ResultSetsSinkFor(batch, resultSets, insertExecSource);
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym,
             framesScope: batch.Connection.FramesEveryStatement && !insertExecSource, recompile: recompile,
-            streams: batch.SendsAsStatementsEnd && resultSets is null && !insertExecSource);
-        foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
+            streams: batch.SendsAsStatementsEnd && !insertExecSource, resultSetsSink: resultSetsSink);
+        foreach (var outcome in resultSets?.Shapes is null ? invocation : ApplyResultSetsContract(invocation, resultSetsSink))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;
     }
