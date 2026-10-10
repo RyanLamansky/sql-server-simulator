@@ -161,7 +161,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// command's connection, the in-process analogue of <c>SqlCommand.Cancel()</c>
     /// sending a server attention. Safe to call from another thread while an
     /// execute is in flight: the engine observes it at the next safe point
-    /// (statement boundary, <c>WAITFOR DELAY</c> wait) and aborts the batch —
+    /// (statement boundary, <c>WAITFOR</c> wait) and aborts the batch —
     /// remaining statements are discarded and, under <c>SET XACT_ABORT ON</c>,
     /// an open transaction rolls back. A result larger than what the server
     /// gets ahead of its client is produced as the reader reads it, so a

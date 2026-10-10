@@ -1402,7 +1402,7 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 148 — the string operand of <c>WAITFOR DELAY</c>
-    /// (or <c>WAITFOR TIME</c>, not modeled) wasn't a valid time format. Probe-
+    /// or <c>WAITFOR TIME</c> wasn't a valid time format. Probe-
     /// confirmed against SQL Server 2025 (2026-05-11): Class 15, State 1,
     /// verbatim wording. Valid format is <c>HH:MM:SS[.fff]</c> with hours
     /// 0-23 and no leading sign. Negative, day-component, and over-24h

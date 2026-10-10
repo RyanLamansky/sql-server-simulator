@@ -510,7 +510,7 @@ The rendering is the implicit conversion to a character string real applies, not
 | everything else | the ordinary coercion to `varchar` |
 
 ## `WAITFOR DELAY`
-`WAITFOR DELAY '<time>'` and `WAITFOR DELAY @variable` block the calling thread via `Thread.Sleep(TimeSpan)`, matching real SQL Server's "blocks the connection" semantics.
+`WAITFOR DELAY '<time>'` and `WAITFOR DELAY @variable` block the calling thread on a cancellable wait, matching real SQL Server's "blocks the connection" semantics.
 Operand grammar is strict (matches probe of SQL Server 2025): only a varchar/nvarchar string literal or an `@-variable` reference; `cast(...)`, an integer literal and a bare `NULL` literal fail at parse (Msg 102/156), and any word but `DELAY` / `TIME` after `WAITFOR` is Msg 155 (probed 2026-10-02).
 The operand is a time of day as real's `datetime` conversion reads one (`TryParseWaitForTime`, probed 2026-09-28 and 2026-10-02 against SQL Server 2025): surrounding blanks ignored, `h:m[:s[.fff | :fff]]` with any number of digits per field, minutes and seconds under 60, at most three fraction digits, and an optional `AM` / `PM` (`12 AM`, `00:00:00.01AM`); a date part, a bare number or `'00:00:00.0001'` is out.
 - A literal is read while the batch compiles, so a malformed one is **Msg 148** with nothing in the batch run, from an untaken branch too.
@@ -518,7 +518,17 @@ The operand is a time of day as real's `datetime` conversion reads one (`TryPars
 Empty string and NULL-valued variable both silently succeed as zero delay.
 `@@ROWCOUNT` resets to 0.
 Skip-mode suppresses the sleep entirely (an `IF 1=0 WAITFOR DELAY '00:00:10'` returns instantly).
-**`WAITFOR TIME`** (absolute-time wait) raises `NotSupportedException` — scheduling-style primitive not yet needed.
+
+**`WAITFOR TIME`** reads its operand exactly as `DELAY` does — the same grammar, the same Msg 148 / 241 / 9815 / 102 refusals, the same Msg 443 inside a function — and waits until the server's clock next reads that time of day (probed 2026-10-10 against SQL Server 2025).
+- The clock is `GETDATE()`'s, the server's local time — UTC in the simulator, so the time is compared with UTC, never the host's zone.
+- A time already passed today waits until tomorrow, however recently it passed: a target 5 ms behind the clock, or an `'hh:mm:ss'` truncating a moment just past, waits the day around, while one 300 ms ahead waits about 300 ms — real honors the milliseconds.
+- An empty string, an `int` / `smallint` variable and `'00:00:00'` are midnight, so they wait until then, while a NULL-valued variable of any accepted type returns at once — unlike `DELAY`, where empty and NULL are alike a zero wait.
+- A `datetime` variable's date is ignored; only its time of day counts.
+- `@@ROWCOUNT` resets to 0, an open transaction is untouched, and `sys.dm_exec_requests` reports `command` and `wait_type` `WAITFOR`, all as for `DELAY`.
+
+The day-around arithmetic is `Simulation.WaitForTimeDelay`, held to a fixed clock by `WaitForTimeDelayTests` (Tests.Internal), since the engine reads the live clock and has no injectable one; the public tests build their targets from `GETDATE()` a few hundred milliseconds ahead and prove a passed target's day-long wait by cancelling it.
+
+Cancellation and `CommandTimeout` below apply to both forms.
 **Cancellation**: an `ExecuteReaderAsync` caller's `CancellationToken` *is* observed — the sleep waits on the per-execution `CancellationTokenSource`'s handle (see [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so a token cancelled 400 ms into a 5-second `WAITFOR` ends the wait at 400 ms and aborts the batch at the statement boundary (a trailing `SELECT 42` in the same batch doesn't run).
 The cancelled execution then surfaces as **Msg 0** (`SimulatedSqlException`) from `ExecuteReader` / `ExecuteNonQuery` / `ExecuteScalar` and their async forms — the exception real SqlClient manufactures for an attention, so a caller can't mistake a cancelled batch for a legitimately empty answer.
 A token already cancelled *before* execute, and one observed while draining an already-open reader, both keep the ADO.NET base class's `TaskCanceledException` — matching real, which reserves the Msg 0 shape for the mid-execution case.

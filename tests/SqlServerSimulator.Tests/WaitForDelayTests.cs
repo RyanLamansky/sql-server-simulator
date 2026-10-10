@@ -219,11 +219,6 @@ public sealed class WaitForDelayTests
                 "waitfor delay cast('00:00:00.050' as time)"));
 
     [TestMethod]
-    public void WaitforTime_NotSupported()
-        => _ = Throws<NotSupportedException>(
-            () => _ = new Simulation().ExecuteNonQuery("waitfor time '23:59:59'"));
-
-    [TestMethod]
     public void Delay_BetweenSelects_BothRun()
     {
         using var reader = new Simulation().ExecuteReader(

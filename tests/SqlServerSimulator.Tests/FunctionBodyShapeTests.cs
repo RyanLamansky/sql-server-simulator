@@ -189,6 +189,7 @@ public sealed class FunctionBodyShapeTests
     [DataRow("raiserror('x', 16, 1)", "RAISERROR", 14)]
     [DataRow("throw 50000, 'x', 1", "THROW", 14)]
     [DataRow("waitfor delay '00:00:01'", "WAITFOR", 14)]
+    [DataRow("waitfor time '10:00'", "WAITFOR", 14)]
     [DataRow("exec('select 1')", "EXECUTE STRING", 14)]
     public void SideEffectingStatement_IsMsg443(string body, string operatorName, int state)
     {

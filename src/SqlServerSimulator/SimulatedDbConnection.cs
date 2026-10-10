@@ -1249,7 +1249,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// The cancellation source for the command currently executing on this
     /// connection, replaced at the start of each top-level command execution
     /// (<see cref="Simulation.CreateResultSetsForCommand"/>). The engine polls
-    /// its token at statement boundaries and inside <c>WAITFOR DELAY</c>; the
+    /// its token at statement boundaries and inside <c>WAITFOR</c>; the
     /// TDS endpoint's attention watcher and <see cref="SimulatedDbCommand.Cancel"/>
     /// trigger it. Connection-scoped rather than command-scoped so a proc /
     /// UDF / dynamic-SQL body (which shares the connection but wraps a fresh

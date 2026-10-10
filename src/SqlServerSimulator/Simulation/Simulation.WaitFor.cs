@@ -7,25 +7,31 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses and runs <c>WAITFOR DELAY '&lt;time&gt;'</c> or
-    /// <c>WAITFOR DELAY @variable</c>. The operand grammar is strict — only a
-    /// string literal or a <c>@variable</c> reference; <c>cast(...)</c>,
-    /// integer literals and the bare <c>NULL</c> literal are syntax errors
-    /// (probed 2026-05-11 against SQL Server 2025). <c>WAITFOR TIME</c> (the
-    /// absolute-time form) raises <see cref="NotSupportedException"/>, and any
-    /// other word there is Msg 155.
+    /// Parses and runs <c>WAITFOR DELAY</c> or <c>WAITFOR TIME</c>, each taking
+    /// a string literal or a <c>@variable</c>. The operand grammar is strict —
+    /// <c>cast(...)</c>, integer literals and the bare <c>NULL</c> literal are
+    /// syntax errors (probed 2026-05-11 against SQL Server 2025, and for
+    /// <c>TIME</c> 2026-10-10 against SQL Server 2025) — and any other word
+    /// after <c>WAITFOR</c> is Msg 155.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A literal is read as a time of day (see <see cref="TryParseWaitForTime"/>)
-    /// while the batch compiles, so a malformed one is Msg 148 before anything
-    /// runs, an untaken branch included. A variable is read as it runs, as a
-    /// <c>datetime</c> whose time of day is the delay: a string one (a MAX one
-    /// never converts) failing the same grammar is the conversion's Msg 241,
-    /// an <c>int</c> or <c>smallint</c> one counts days and so waits nothing,
-    /// and any other type is Msg 9815, which ends only its statement (probed
-    /// 2026-10-02 against SQL Server 2025). An empty string or a NULL-valued
-    /// variable is a zero delay.
+    /// Both forms read their operand identically, as a time of day: a literal
+    /// (see <see cref="TryParseWaitForTime"/>) while the batch compiles, so a
+    /// malformed one is Msg 148 before anything runs, an untaken branch
+    /// included; a variable as it runs, as a <c>datetime</c> whose time of day
+    /// is taken (see <see cref="WaitForVariableTimeOfDay"/>). <c>DELAY</c>
+    /// waits that long, an empty string or a NULL-valued variable waiting
+    /// nothing.
+    /// </para>
+    /// <para>
+    /// <c>TIME</c> waits until the next moment the server's clock reads that
+    /// time of day, which is tomorrow once it has passed today, however
+    /// recently (see <see cref="WaitForTimeDelay"/>). The server's local clock
+    /// is UTC here, so the time is compared with UTC. An empty string is
+    /// midnight, as is an <c>int</c> or <c>smallint</c> variable, while a
+    /// NULL-valued variable of any accepted type returns at once (probed
+    /// 2026-10-10 against SQL Server 2025).
     /// </para>
     /// <para>
     /// Sleep mechanism: a cancellable wait on the calling thread (see
@@ -45,33 +51,29 @@ partial class Simulation
         context.MoveNextRequired(); // consume WAITFOR
 
         // DELAY and TIME are contextual keywords (not in the reserved list),
-        // tokenized as UnquotedString. WAITFOR TIME isn't modeled — it's an
-        // absolute-time wait whose primary use case is scheduling.
-        switch (context.Token)
+        // tokenized as UnquotedString.
+        var untilTimeOfDay = context.Token switch
         {
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Time }:
-                throw new NotSupportedException("WAITFOR TIME (absolute-time wait) isn't modeled — WAITFOR DELAY is.");
-            case UnquotedString { ContextualKeyword: ContextualKeyword.Delay }:
-                break;
-            case UnquotedString word:
-                throw SimulatedSqlException.WaitForOptionNotRecognized(word.Value);
-            default:
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
+            UnquotedString { ContextualKeyword: ContextualKeyword.Time } => true,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Delay } => false,
+            UnquotedString word => throw SimulatedSqlException.WaitForOptionNotRecognized(word.Value),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
 
-        context.MoveNextRequired(); // consume DELAY
+        context.MoveNextRequired(); // consume DELAY / TIME
 
-        TimeSpan delay;
+        TimeSpan? timeOfDay;
         switch (context.Token)
         {
             case Literal lit when lit.Value.Type is VarcharSqlType or NVarcharSqlType:
                 {
                     var text = lit.Value.IsNull ? string.Empty : lit.Value.AsString;
-                    if (!TryParseWaitForTime(text, out delay))
+                    if (!TryParseWaitForTime(text, out var parsed))
                         throw SimulatedSqlException.IncorrectWaitForTimeSyntax(text);
                     context.MoveNextOptional();
                     if (batch.IsSkipping)
                         return;
+                    timeOfDay = parsed;
                     break;
                 }
 
@@ -81,7 +83,7 @@ partial class Simulation
                     context.MoveNextOptional();
                     if (batch.IsSkipping)
                         return;
-                    delay = WaitForVariableDelay(slot);
+                    timeOfDay = WaitForVariableTimeOfDay(slot);
                     break;
                 }
 
@@ -89,32 +91,56 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
+        if (timeOfDay is not { } value)
+            return;
+        var delay = untilTimeOfDay ? WaitForTimeDelay(value, DateTime.UtcNow) : value;
         if (delay.Ticks > 0)
             WaitInterruptibly(batch, delay);
     }
 
-    /// <summary>The delay a <c>WAITFOR DELAY @variable</c> waits; see <see cref="ParseWaitForStatement"/>.</summary>
-    private static TimeSpan WaitForVariableDelay(VariableSlot slot)
+    /// <summary>
+    /// The time of day a <c>WAITFOR</c> variable operand holds, or null when
+    /// it is NULL; see <see cref="ParseWaitForStatement"/>. A string one (a MAX
+    /// one never converts) failing the literal grammar is the conversion's
+    /// Msg 241, which ends the batch; an <c>int</c> or <c>smallint</c> one
+    /// counts days, so its time of day is midnight; any other type than those
+    /// and <c>datetime</c> is Msg 9815, which ends only its statement, whatever
+    /// the value (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static TimeSpan? WaitForVariableTimeOfDay(VariableSlot slot)
     {
         var type = slot.DeclaredType;
         switch (type)
         {
             case VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType:
                 if (slot.Value.IsNull)
-                    return TimeSpan.Zero;
+                    return null;
                 if (type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
-                    || !TryParseWaitForTime(slot.Value.AsString, out var delay))
+                    || !TryParseWaitForTime(slot.Value.AsString, out var timeOfDay))
                 {
                     throw SimulatedSqlException.ConversionFailedDateTimeFromString();
                 }
-                return delay;
+                return timeOfDay;
             case Int32SqlType or SmallIntSqlType:
-                return TimeSpan.Zero;
+                return slot.Value.IsNull ? null : TimeSpan.Zero;
             case DateTimeSqlType:
-                return slot.Value.IsNull ? TimeSpan.Zero : slot.Value.AsDateTime.TimeOfDay;
+                return slot.Value.IsNull ? null : slot.Value.AsDateTime.TimeOfDay;
             default:
                 throw SimulatedSqlException.WaitForOperandTypeRefused(SimulatedSqlException.FamilyRootName(type));
         }
+    }
+
+    /// <summary>
+    /// How long a <c>WAITFOR TIME</c> for <paramref name="timeOfDay"/> waits
+    /// when the server's clock reads <paramref name="utcNow"/>: until that time
+    /// today, or tomorrow when it has already passed — a target even a few
+    /// milliseconds behind the clock waits the day around (probed 2026-10-10
+    /// against SQL Server 2025). A target equal to the clock waits nothing.
+    /// </summary>
+    internal static TimeSpan WaitForTimeDelay(TimeSpan timeOfDay, DateTime utcNow)
+    {
+        var delay = timeOfDay - utcNow.TimeOfDay;
+        return delay.Ticks < 0 ? delay + TimeSpan.FromDays(1) : delay;
     }
 
     /// <summary>
@@ -150,14 +176,15 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Reads a <c>WAITFOR DELAY</c> time of day the way real's
+    /// Reads a <c>WAITFOR DELAY</c> / <c>WAITFOR TIME</c> time of day the way real's
     /// <c>datetime</c> conversion reads a time-only string (probed 2026-09-28
     /// and 2026-10-02 against SQL Server 2025): surrounding blanks ignored,
     /// <c>h:m</c> with an optional <c>:s</c> and a fraction of at most three
     /// digits after <c>.</c> or <c>:</c>, any number of digits per field,
     /// minutes and seconds under 60, and an optional <c>AM</c> / <c>PM</c>
     /// suffix taking an hour of 12 at most (and at least 1 for <c>PM</c>) —
-    /// which also stands alone with a bare hour (<c>12 AM</c>). The empty string is a zero delay.
+    /// which also stands alone with a bare hour (<c>12 AM</c>). The empty string is
+    /// midnight: a zero delay, or a <c>WAITFOR TIME</c> until midnight.
     /// </summary>
     private static bool TryParseWaitForTime(string value, out TimeSpan result)
     {
