@@ -277,7 +277,11 @@ public sealed class MarsInterleavingWireTests
     /// <summary>
     /// A request meeting a DML statement's <c>OUTPUT</c> rows still going out
     /// waits before Msg 3980 refuses it, so a reader draining the rows
-    /// meanwhile lets it run, as real's deadlock monitor does.
+    /// meanwhile lets it run, as real's deadlock monitor does. The reader
+    /// reads all but a hundred rows before the request arrives — more than
+    /// the server sends ahead of its reader, so the statement is still sending
+    /// — and draining those takes a fraction of the four-second window even on
+    /// a loaded runner, where draining every row once outlasted it.
     /// </summary>
     [TestMethod]
     public async Task OutputRowsDrainedWhileARequestWaits_LetItRun()
@@ -288,10 +292,14 @@ public sealed class MarsInterleavingWireTests
 
         await using var command = new SqlCommand("update big set v = 'y' output inserted.k, inserted.v", connection);
         await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
-        IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
+        const int leftDuringTheWait = 100;
+        for (var read = 0; read < Rows - leftDuringTheWait; read++)
+            IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
         await using var probe = new SqlCommand("select count(*) from big where v = 'y'", connection);
         var waiting = probe.ExecuteScalarAsync(TestContext.CancellationToken);
-        HasCount(Rows - 1, await this.RestAsync(rows));
+        await Task.Delay(200, TestContext.CancellationToken);
+        IsFalse(waiting.IsCompleted);
+        HasCount(leftDuringTheWait, await this.RestAsync(rows));
         await rows.DisposeAsync();
         AreEqual(Rows, await waiting);
     }
