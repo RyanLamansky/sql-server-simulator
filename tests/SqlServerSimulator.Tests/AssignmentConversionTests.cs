@@ -41,6 +41,14 @@ public sealed class AssignmentConversionTests
         => AreEqual(1, new Simulation().ExecuteScalar("declare @x xml = null; declare @u uniqueidentifier; set @u = null; select 1"));
 
     [TestMethod]
+    [DataRow("create table t (a uniqueidentifier default(null), b xml default (null), c datetimeoffset default ((null)), d geography default(null), e hierarchyid default(null), f int); insert t (f) values (1); select count(*) from t where a is null and b is null and c is null and d is null and e is null")]
+    [DataRow("create table t (a uniqueidentifier, f int); alter table t add constraint df default ((null)) for a; insert t (f) values (1); select count(*) from t where a is null")]
+    [DataRow("declare @u uniqueidentifier = (null); set @u = ((null)); select count(*) where @u is null")]
+    [DataRow("create table t (g uniqueidentifier, x xml); insert t values ((null), (null)); update t set g = (null); select count(*) from t")]
+    public void ParenthesizedNull_IsAssignableToAnything(string sql)
+        => AreEqual(1, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
     [DataRow("declare @d decimal(10, 2); set @d = getdate()")]
     [DataRow("declare @d decimal(10, 2); select @d = getdate()")]
     [DataRow("create table t (d decimal(10, 2)); insert t values (getdate())")]

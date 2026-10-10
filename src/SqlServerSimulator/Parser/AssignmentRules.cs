@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -18,14 +17,16 @@ internal static class AssignmentRules
     /// <summary>
     /// Raises real's error when <paramref name="source"/>, of
     /// <paramref name="sourceType"/>, can't be assigned to
-    /// <paramref name="target"/>. A bare <c>NULL</c> has no type to judge and
-    /// is always assignable. <paramref name="targetSource"/> is the expression
+    /// <paramref name="target"/>. A bare <c>NULL</c>, parenthesized or not,
+    /// has no type to judge and is always assignable (probed 2026-10-09
+    /// against SQL Server 2025: a <c>DEFAULT((NULL))</c>, a <c>SET</c> or an
+    /// <c>INSERT</c> value of <c>(NULL)</c> on a <c>uniqueidentifier</c>). <paramref name="targetSource"/> is the expression
     /// the target's type comes from, where there is one, so a <c>decimal</c>
     /// it spells <c>numeric</c> is named that way.
     /// </summary>
     public static void RequireAssignable(Expression source, SqlType sourceType, SqlType target, Expression? targetSource = null)
     {
-        if (source is Value { IsUntypedNull: true })
+        if (Expression.IsUntypedNullLiteral(source))
             return;
         if (SqlType.OperandPairError(TypePairOperation.Assign, new TypePairOperand(sourceType, source), new TypePairOperand(target, targetSource), "assign") is { } error)
             throw error;
@@ -45,7 +46,7 @@ internal static class AssignmentRules
     public static SqlType ArgumentType(Expression argument, SqlType parameter, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var type = argument.GetSqlType(batch, resolveColumnType);
-        if (argument is not Value { IsUntypedNull: true }
+        if (!Expression.IsUntypedNullLiteral(argument)
             && SqlType.OperandPairError(TypePairOperation.Assign, Expression.PairOperand(argument, type, batch), new TypePairOperand(parameter), "assign") is { } error)
         {
             throw error;
