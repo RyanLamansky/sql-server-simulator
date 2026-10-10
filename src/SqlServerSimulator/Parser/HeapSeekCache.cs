@@ -755,6 +755,11 @@ internal sealed class HeapSeekCache
             }
         }
 
+        // A removal short of the bucket's last address goes into a fresh list,
+        // as a placed AddRid does: removing in place would shift the addresses
+        // after it under a reader still enumerating a span over the old one,
+        // which would then skip a live row, where a stale address left in an
+        // old list is only the false positive every reader filters out.
         private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
         {
             this.keyOrder = null;
@@ -762,7 +767,7 @@ internal sealed class HeapSeekCache
             {
                 var at = bucket.BinarySearch(rid);
                 if (at >= 0)
-                    bucket.RemoveAt(at);
+                    this.Buckets[key] = bucket = Without(bucket, at);
                 var emptied = bucket.Count == 0;
                 if (emptied)
                 {
@@ -788,10 +793,27 @@ internal sealed class HeapSeekCache
                                 continue;
                             }
                         }
-                        _ = group.Rids?.Remove(rid);
+                        if (group.Rids is { } rids && rids.IndexOf(rid) is >= 0 and var listedAt)
+                            group.Rids = Without(rids, listedAt);
                     }
                 }
             }
+        }
+
+        // `list` less its element at `at`: the same list when that is its last
+        // element, which removes without shifting anything, else a copy.
+        private static List<(int Page, int Slot)> Without(List<(int Page, int Slot)> list, int at)
+        {
+            if (at == list.Count - 1)
+            {
+                list.RemoveAt(at);
+                return list;
+            }
+            var listed = CollectionsMarshal.AsSpan(list);
+            var kept = new List<(int Page, int Slot)>(list.Count - 1);
+            kept.AddRange(listed[..at]);
+            kept.AddRange(listed[(at + 1)..]);
+            return kept;
         }
 
         private SortedSet<SqlValueKey> EnsureSorted()

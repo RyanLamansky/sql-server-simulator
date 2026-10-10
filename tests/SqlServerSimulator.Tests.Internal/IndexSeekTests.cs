@@ -3054,4 +3054,26 @@ public sealed class IndexSeekTests
         DoesNotContain("CacheReplay", trace);
         AreEqual("2,4,6,8", Seq(ReadRows(c, "select id from t order by id")));
     }
+
+    [TestMethod]
+    public void RemovalReplayedIntoABucket_LeavesASpanAReaderHoldsIntact()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, "create table t (id int primary key, a int); create index ix on t(a); insert t values (1, 1), (2, 1), (3, 1), (4, 1)");
+        var table = c.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var heap = table.Heap;
+        int[] ordinals = [Array.FindIndex(table.StoredColumns, column => column.Name == "a")];
+        var probe = new SqlValueKey([Storage.SqlValue.FromInt32(1)]);
+        var cache = HeapSeekCache.For(heap);
+
+        var held = cache.Seek(heap, table.StoredColumns, heap, ordinals, [Storage.SqlType.Int32], probe);
+        var before = held.ToArray();
+        Exec(c, "delete t where id = 2");
+        AreEqual(3, cache.Seek(heap, table.StoredColumns, heap, ordinals, [Storage.SqlType.Int32], probe).Length);
+
+        // The removal replays into a fresh bucket; shifting the old one in place
+        // would hand the reader still enumerating it a skipped row.
+        CollectionAssert.AreEqual(before, held.ToArray());
+    }
 }
