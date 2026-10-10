@@ -435,7 +435,7 @@ internal sealed class FromSource(
     /// <see cref="CatalogView.PushdownColumns"/> / <see cref="CatalogView.FilteredRowGenerator"/>)
     /// from here to decide whether a WHERE equality can be pushed into the
     /// generator, then rebuilds <see cref="LateralPlan"/> via the pushdown-carrying
-    /// <see cref="Selection.ForCatalogView(CatalogView,Database,string,Expression[])"/>.
+    /// <see cref="Selection.ForCatalogView(CatalogView,Database,string,Expression[],bool)"/>.
     /// </summary>
     public readonly CatalogView? BackingCatalogView = backingCatalogView;
 

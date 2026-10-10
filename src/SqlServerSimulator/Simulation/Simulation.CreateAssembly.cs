@@ -193,6 +193,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.Batch.LockDefinitionName(schema, functionName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
@@ -233,6 +234,7 @@ partial class Simulation
         };
         if (replaced is not null)
             clrFunction.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, clrFunction, created: true);
         schema.Functions[functionName.Leaf] = clrFunction;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         return true;

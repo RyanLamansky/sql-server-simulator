@@ -66,6 +66,7 @@ partial class Simulation
             throw SimulatedSqlException.InvalidOptionForCreateStatement("FUNCTION", 1);
         RejectStreamingResultShape(outputColumns, keyConstraints, checkConstraints);
 
+        context.Batch.LockDefinitionName(schema, functionName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
@@ -115,6 +116,7 @@ partial class Simulation
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, function, created: true);
         schema.Functions[functionName.Leaf] = function;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)

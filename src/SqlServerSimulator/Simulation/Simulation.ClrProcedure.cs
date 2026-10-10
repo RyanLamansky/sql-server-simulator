@@ -52,6 +52,7 @@ partial class Simulation
         if (groupNumber > 1 && !isAlter && !createOrAlter && schema.HasNameInSharedNamespace(procName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(procName.Leaf, state: 51);
 
+        context.Batch.LockDefinitionName(schema, procName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE PROCEDURE", procName, schema, isAlter, createOrAlter,
             schema.Procedures.GetValueOrDefault(procName.Leaf));
@@ -104,6 +105,7 @@ partial class Simulation
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, procedure, created: true);
         schema.Procedures[procName.Leaf] = procedure;
         RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
         if (replaced is not null)

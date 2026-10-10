@@ -182,6 +182,7 @@ partial class Simulation
         // DDL gate: db-scope CREATE PROCEDURE + schema ALTER when the statement
         // creates (Msg 262 state 18 / Msg 2760), object ALTER when it replaces
         // an existing proc (Msg 3701 state 20).
+        context.Batch.LockDefinitionName(schema, procName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE PROCEDURE", procName, schema, isAlter, createOrAlter,
             schema.Procedures.GetValueOrDefault(procName.Leaf));
@@ -257,6 +258,7 @@ partial class Simulation
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, procedure, created: true);
         schema.Procedures[procName.Leaf] = procedure;
         RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
         if (replaced is not null)

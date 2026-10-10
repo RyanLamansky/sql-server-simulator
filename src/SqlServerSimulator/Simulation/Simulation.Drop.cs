@@ -429,11 +429,16 @@ partial class Simulation
             return;
         }
 
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
+        {
+            context.Batch.LockDefinitionName(schema, name.Leaf);
             RejectDropOfOtherKind(schema, name, "TRIGGER");
+        }
         if (schema is null || !schema.Triggers.TryGetValue(name.Leaf, out var existing))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
@@ -450,7 +455,11 @@ partial class Simulation
         {
             throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
         }
-        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, existing);
+        if (existing.Parent is HeapTable parent)
+            context.Batch.AcquireTableRedefinitionLock(parent);
+        else
+            context.Batch.AcquireTransactionLock(existing.Parent.SchemaLock, LockMode.SchemaModification);
         if (!schema.Triggers.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
         if (removed is not null)
@@ -514,11 +523,16 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
+        {
+            context.Batch.LockDefinitionName(schema, name.Leaf);
             RejectDropOfOtherKind(schema, name, "SEQUENCE");
+        }
         if (schema is null || !schema.Sequences.TryGetValue(name.Leaf, out var existing))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
@@ -534,7 +548,7 @@ partial class Simulation
         // the default constraint (probed 2026-10-04 against SQL Server 2025).
         if (DefaultConstraintDrawingFrom(schema.Database, existing) is { } holder)
             throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP SEQUENCE", name.ToString(), holder);
-        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, existing);
         if (!schema.Sequences.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         if (removed is not null)
@@ -586,7 +600,9 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveCallerTypeSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: true, out var resolved) ? resolved : null;
+        if (schema is not null)
+            context.Batch.LockDefinitionName(schema, name.Leaf, types: true);
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
         {
             schema.Database.RejectWriteWhenReadOnly();
@@ -603,6 +619,8 @@ partial class Simulation
         }
         if (schema is null || !schema.TableTypes.TryGetValue(name.Leaf, out var tableType))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf, types: true);
             if (ifExists)
                 return;
             throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
@@ -613,7 +631,7 @@ partial class Simulation
         schema.Database.RejectWriteWhenReadOnly();
 
         RejectUnauthorizedTypeDrop(context, schema, name, tableType.UserTypeId);
-        context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, tableType, types: true);
         // Scan every procedure and function in every schema of the current
         // database for a parameter that references this table type.
         foreach (var (_, s) in context.CurrentDatabase.Schemas)
@@ -701,11 +719,16 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
+        {
+            context.Batch.LockDefinitionName(schema, name.Leaf);
             RejectDropOfOtherKind(schema, name, "PROCEDURE");
+        }
         if (schema is null || !schema.Procedures.TryGetValue(name.Leaf, out var existing))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
@@ -717,7 +740,7 @@ partial class Simulation
 
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("procedure", name.Leaf);
-        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, existing);
         if (!schema.Procedures.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         if (removed is not null)
@@ -734,11 +757,16 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
+        {
+            context.Batch.LockDefinitionName(schema, name.Leaf);
             RejectDropOfOtherKind(schema, name, "VIEW");
+        }
         if (schema is null || !schema.Views.TryGetValue(name.Leaf, out var droppedView))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
@@ -750,7 +778,7 @@ partial class Simulation
 
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, droppedView.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("view", name.Leaf);
-        context.Batch.AcquireStatementLock(droppedView.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, droppedView);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, droppedView, "DROP VIEW", name);
         if (!schema.Views.TryRemove(name.Leaf, out _))
         {
@@ -784,11 +812,16 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
+        {
+            context.Batch.LockDefinitionName(schema, name.Leaf);
             RejectDropOfOtherKind(schema, name, aggregate ? "AGGREGATE" : "FUNCTION");
+        }
         if (schema is null || !schema.Functions.TryGetValue(name.Leaf, out var existing))
         {
+            if (schema is not null)
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
             if (ifExists)
                 return;
             throw aggregate
@@ -802,7 +835,7 @@ partial class Simulation
 
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
-        context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+        context.Batch.LockDefinition(schema, existing);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
         if (existing is UserDefinedFunction function && SchemaBinding.FindReferencingConstraint(context.CurrentDatabase, function) is { } constraint)
             throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP FUNCTION", name.ToString(), constraint);
@@ -836,7 +869,9 @@ partial class Simulation
             ? context.Batch.Connection.TempTables
             : isGlobalTempTable
                 ? context.Batch.Connection.Simulation.GlobalTempTables
-                : context.Batch.TryResolveSchema(name, out schema) ? schema.HeapTables : null;
+                : context.Batch.TryResolveSchemaToChange(name, types: false, out schema) ? schema.HeapTables : null;
+        if (schema is not null)
+            context.Batch.LockDefinitionName(schema, name.Leaf);
         if (destination is null || !destination.TryGetValue(name.Leaf, out var removedTable))
         {
             // A name belonging to another object kind — a synonym above all,
@@ -844,7 +879,10 @@ partial class Simulation
             // at — raises Msg 3705 naming that kind, and IF EXISTS doesn't
             // suppress it (the object does exist).
             if (schema is not null)
+            {
                 RejectDropOfOtherKind(schema, name, "TABLE");
+                context.Batch.ReleaseDefinitionName(schema, name.Leaf);
+            }
             if (ifExists)
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.Written);
@@ -860,14 +898,21 @@ partial class Simulation
         // are session-owned and exempt.
         if (!isTempTable && schema is not null && !PermissionEnforcement.HasDropAuthority(context.Batch, schema, removedTable.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("table", name.Leaf);
-        // Sch-M on the target table for the duration of the statement.
-        // Waits for any concurrent Sch-S holders (readers / writers) to drain
-        // before we proceed; honors the connection's @@LOCK_TIMEOUT so a
-        // stuck reader on another connection surfaces Msg 1222 instead of
-        // hanging this DROP indefinitely. Temp tables are session-local and
-        // not concurrency-reachable, but acquiring uniformly keeps the path
-        // simple and is effectively free for the single-owner case.
-        context.Batch.AcquireStatementLock(removedTable.SchemaLock, LockMode.SchemaModification);
+        // Sch-M on the target table, waiting for any concurrent reader or
+        // writer to drain and honoring the connection's @@LOCK_TIMEOUT so a
+        // stuck one surfaces Msg 1222 instead of hanging the DROP. A
+        // permanent table's is held to the transaction's end, which a reader
+        // finding it meanwhile waits on; a temp table's, out of every other
+        // session's reach, to the statement's.
+        if (schema is not null)
+        {
+            context.Batch.AcquireTableRedefinitionLock(removedTable);
+            context.Batch.NoteDefinedObject(schema, name.Leaf, removedTable.ObjectId, prior: true);
+        }
+        else
+        {
+            context.Batch.AcquireStatementLock(removedTable.SchemaLock, LockMode.SchemaModification);
+        }
         // DROP TABLE on a system-versioned temporal parent or its history
         // sibling is rejected — caller must ALTER TABLE … SET (SYSTEM_VERSIONING
         // = OFF) first (probe-confirmed Msg 13552 wording against SQL Server

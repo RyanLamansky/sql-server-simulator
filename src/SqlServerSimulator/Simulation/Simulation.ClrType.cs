@@ -40,6 +40,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.Batch.LockDefinitionName(schema, typeName.Leaf, DefinitionNameUse.Creates, types: true);
         if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 

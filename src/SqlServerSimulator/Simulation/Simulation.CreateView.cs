@@ -211,6 +211,7 @@ partial class Simulation
         // creates (Msg 262 state 18 with the view as Procedure attribution, else
         // Msg 2760), object ALTER when it replaces an existing view (Msg 3701
         // state 20).
+        context.Batch.LockDefinitionName(schema, viewName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE VIEW", viewName, schema, isAlter, createOrAlter,
             schema.Views.GetValueOrDefault(viewName.Leaf),
@@ -288,6 +289,7 @@ partial class Simulation
             DetachIndexedViewDependencies(replaced);
             ReseatTriggerParents(context.CurrentDatabase, replaced, view);
         }
+        context.Batch.LockDefinition(schema, view, created: true);
         schema.Views[viewName.Leaf] = view;
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, view);

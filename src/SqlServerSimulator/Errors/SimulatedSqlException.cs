@@ -268,6 +268,17 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool XactAbortPromoted;
 
     /// <summary>
+    /// Set on the lock timeout of a statement creating, altering or dropping
+    /// an object or a type, a synonym aside: inside a transaction, uncaught, it ends
+    /// the batch and rolls the transaction back, while a <c>CATCH</c> leaves
+    /// the transaction committable (probed 2026-10-10 against SQL Server
+    /// 2025, <c>XACT_STATE()</c> 1 in the handler) — where a structural
+    /// statement's dooms it. Outside a transaction it ends its statement
+    /// alone.
+    /// </summary>
+    internal bool EndsDefinitionTransaction;
+
+    /// <summary>
     /// Set when this error ended the batch of the procedure or dynamic SQL it
     /// was raised in, which is as far as real lets it reach: in the caller the
     /// <c>EXEC</c> fails like any other statement and the caller's batch goes on

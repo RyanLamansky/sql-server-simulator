@@ -154,6 +154,17 @@ internal sealed class CatalogView(
     internal MetadataVisibilityKey? MetadataKey;
 
     /// <summary>
+    /// Whether this view lists the database's objects, their modules,
+    /// columns or parameters — rows real reads from the catalog rows a
+    /// definition change locks, so a read of one waits on another
+    /// transaction's uncommitted change it meets (see
+    /// <see cref="BatchContext.AwaitCatalogDefinitions"/>). Set once at
+    /// registration by <c>BuiltInResources</c>, alongside
+    /// <see cref="MetadataKey"/>.
+    /// </summary>
+    internal bool ListsObjects;
+
+    /// <summary>
     /// How a restricted session's server-state gate treats this DMV;
     /// <see langword="null"/> for every non-DMV view and the three ungated DMVs
     /// (<c>sys.dm_os_host_info</c> / <c>sys.fn_helpcollations</c> /

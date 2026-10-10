@@ -45,12 +45,12 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// schema-modification (Sch-M) acquisition. Every read of this object
     /// (DML, FROM-source, EXEC, NEXT VALUE FOR, DECLARE @t MyType, etc.)
     /// acquires Sch-S for the duration of the statement; every DDL on the
-    /// object (DROP / ALTER / TRUNCATE) acquires Sch-M. Owner = the running
-    /// <see cref="SimulatedDbConnection"/>. The resource is allocated once
-    /// at object construction and lives for the object's lifetime; DROP
-    /// discards the object reference entirely, so any pending Sch-S waits
-    /// behind the DROP's Sch-M resolve naturally — the post-DROP dict
-    /// lookup will miss and the caller surfaces Msg 208.
+    /// object (CREATE / ALTER / DROP / TRUNCATE) acquires Sch-M, a definition
+    /// change to the transaction's end. The resource is allocated once at
+    /// object construction and lives for the object's lifetime; an ALTER
+    /// publishes a new instance with a lock of its own and DROP discards the
+    /// object, so a Sch-S granted after waiting one out finds the name moved
+    /// on and the resolver looks again (<c>BatchContext.LockResolved</c>).
     /// </summary>
     public readonly LockResource SchemaLock = new();
 

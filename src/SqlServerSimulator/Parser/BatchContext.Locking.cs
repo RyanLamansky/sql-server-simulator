@@ -1,4 +1,5 @@
 using SqlServerSimulator.Storage;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator.Parser;
@@ -106,6 +107,212 @@ internal sealed partial class BatchContext
         this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         if (Simulation.IsLockableTable(table) || IsLocalTempName(table.Name))
             this.AcquireTransactionLock(table.TableDataLock, LockMode.SchemaModification);
+    }
+
+    /// <summary>
+    /// Takes the Sch-M of <paramref name="leaf"/>'s name in
+    /// <paramref name="schema"/> — its object namespace, or with
+    /// <paramref name="types"/> its type namespace — to the transaction's end,
+    /// before a statement creating, altering, dropping or renaming the object
+    /// under it looks the name up: it waits out another transaction's
+    /// uncommitted change to the name, then finds the name as that change
+    /// left it, and a session resolving the name meanwhile waits for this one
+    /// (see <see cref="DefinitionLock"/>). <paramref name="use"/> says how the
+    /// statement meets the name, which decides the state its lock timeout or
+    /// deadlock reports and whether a plain create waits at all; with
+    /// <paramref name="abortsTransaction"/> the timeout ends an open
+    /// transaction (<see cref="SimulatedSqlException.EndsDefinitionTransaction"/>),
+    /// as real's does for every object and type but a synonym.
+    /// </summary>
+    public void LockDefinitionName(Schema schema, string leaf, DefinitionNameUse use = DefinitionNameUse.Changes, bool types = false, bool abortsTransaction = true)
+    {
+        if (this.IsSkipping)
+            return;
+        var registry = types ? schema.TypeDefinitionLocks : schema.DefinitionLocks;
+        // A table, synonym, sequence or type's CREATE meets a name an object
+        // held before the change holding it as taken at once, Msg 2714 rather
+        // than a wait (probed 2026-10-10 against SQL Server 2025: CREATE TABLE
+        // over a function another transaction altered), so the caller's own
+        // check raises it.
+        if (use == DefinitionNameUse.Creates && !types && registry.TryGetValue(leaf, out var held)
+            && schema.TryFindInSharedNamespace(leaf, out var present) && held.HeldBefore(present.ObjectId))
+        {
+            return;
+        }
+        var connection = this.Connection;
+        var owner = connection.LockOwner;
+        var locks = connection.Simulation.LockManager;
+        while (true)
+        {
+            var nameLock = registry.GetOrAdd(leaf, static (name, names) => new DefinitionLock(names, name), registry);
+            try
+            {
+                locks.Acquire(nameLock.Resource, LockMode.SchemaModification, owner, connection.LockTimeoutMillis);
+            }
+            catch (SimulatedSqlException waited) when (waited.Number is 1222 or 1205)
+            {
+                var state = use == DefinitionNameUse.Creates ? (byte)47
+                    : (types ? schema.HoldsTypeNamed(leaf) : schema.HoldsObjectNamed(leaf)) ? (byte)56
+                    : (byte)51;
+                if (waited.Number == 1205)
+                    throw SimulatedSqlException.TransactionDeadlocked(owner.Acting.Spid, state, waited.WaitsOnOwnThread);
+                var error = SimulatedSqlException.LockRequestTimeOutExceeded(state);
+                error.EndsDefinitionTransaction = abortsTransaction;
+                throw error;
+            }
+            // The lock left the registry while this statement waited for it:
+            // its holder ended, and a later change registers another.
+            if (!registry.TryGetValue(leaf, out var registered) || !ReferenceEquals(registered, nameLock))
+            {
+                locks.Release(nameLock.Resource, LockMode.SchemaModification, owner);
+                continue;
+            }
+            if (connection.CurrentTransaction is { } transaction)
+                transaction.HeldLocks.Add((nameLock.Resource, LockMode.SchemaModification, owner));
+            else
+                this.StatementSchemaLocks.Add((nameLock.Resource, LockMode.SchemaModification, owner));
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Lets go of one hold <see cref="LockDefinitionName"/> took on
+    /// <paramref name="leaf"/>'s name for a statement that found nothing to
+    /// change under it — a <c>DROP</c> of a missing object — so the name isn't
+    /// held to the transaction's end for a change that never happened.
+    /// </summary>
+    public void ReleaseDefinitionName(Schema schema, string leaf, bool types = false)
+    {
+        if (this.IsSkipping || !(types ? schema.TypeDefinitionLocks : schema.DefinitionLocks).TryGetValue(leaf, out var nameLock))
+            return;
+        var connection = this.Connection;
+        var held = connection.CurrentTransaction is { } transaction ? transaction.HeldLocks : this.StatementSchemaLocks;
+        for (var i = held.Count - 1; i >= 0; i--)
+        {
+            var (resource, mode, owner) = held[i];
+            if (ReferenceEquals(resource, nameLock.Resource) && mode == LockMode.SchemaModification)
+            {
+                held.RemoveAt(i);
+                connection.Simulation.LockManager.Release(resource, mode, owner);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Takes Sch-M on <paramref name="target"/> to the transaction's end — an
+    /// object a statement replaces or drops, or the one it is about to publish
+    /// — so a session that found the object waits for the change to settle,
+    /// as real's object Sch-M holds it (probed 2026-10-10 against SQL Server
+    /// 2025), and notes the object against the name's
+    /// <see cref="LockDefinitionName"/> lock for the catalog reads seeking its
+    /// id. <paramref name="schema"/> holds the name in its object namespace,
+    /// or with <paramref name="types"/> in its type namespace;
+    /// <paramref name="created"/> says the statement creates the object rather
+    /// than finding it under the name.
+    /// </summary>
+    public void LockDefinition(Schema schema, Schemas.SchemaObject target, bool created = false, bool types = false, bool abortsTransaction = true)
+    {
+        if (this.IsSkipping)
+            return;
+        try
+        {
+            this.AcquireTransactionLock(target.SchemaLock, LockMode.SchemaModification);
+        }
+        catch (SimulatedSqlException timedOut) when (timedOut.Number == 1222 && abortsTransaction)
+        {
+            timedOut.EndsDefinitionTransaction = true;
+            throw;
+        }
+        this.NoteDefinedObject(schema, target.Name, target.ObjectId, prior: !created, types);
+    }
+
+    /// <summary>
+    /// Notes <paramref name="objectId"/> against the lock this session's
+    /// statement holds on <paramref name="leaf"/>'s name, if any — what a
+    /// catalog read seeking that id meets once the object is gone — and with
+    /// <paramref name="prior"/> as an object that held the name before the
+    /// change (see <see cref="DefinitionNameUse.Creates"/>).
+    /// </summary>
+    public void NoteDefinedObject(Schema schema, string leaf, int objectId, bool prior, bool types = false)
+    {
+        if (!this.IsSkipping && (types ? schema.TypeDefinitionLocks : schema.DefinitionLocks).TryGetValue(leaf, out var nameLock))
+            nameLock.NoteObject(objectId, prior);
+    }
+
+    /// <summary>
+    /// Waits while another transaction's uncommitted change holds
+    /// <paramref name="leaf"/>'s name in <paramref name="registry"/> — a name a
+    /// resolution found no object under, which real's lookup meets as the
+    /// change's lock on the name's catalog row (probed 2026-10-10 against SQL
+    /// Server 2025: <c>LCK_M_S</c> on a key, however the session reads). A
+    /// name an object answers to waits on that object's Sch-S instead.
+    /// </summary>
+    public void AwaitDefinitionName(ConcurrentDictionary<string, DefinitionLock> registry, string leaf)
+    {
+        if (registry.IsEmptyLockFree() || !registry.TryGetValue(leaf, out var nameLock))
+            return;
+        var connection = this.Connection;
+        var owner = connection.LockOwner;
+        var locks = connection.Simulation.LockManager;
+        locks.Acquire(nameLock.Resource, LockMode.Shared, owner, connection.LockTimeoutMillis);
+        locks.Release(nameLock.Resource, LockMode.Shared, owner);
+    }
+
+    /// <summary>
+    /// Waits on every uncommitted definition change another transaction holds
+    /// in <paramref name="database"/> that a read of <paramref name="view"/>
+    /// meets, before the read generates its rows. Real reads the catalog
+    /// rows such a change locks under every isolation level but
+    /// <c>READ UNCOMMITTED</c> — <c>SNAPSHOT</c> and <c>READ_COMMITTED_SNAPSHOT</c>
+    /// included — and seeks them where the query's predicate offers an
+    /// equality on a name or an object id, so a seek waits only on the change
+    /// to that name or object while a scan waits on every change (probed
+    /// 2026-10-10 against SQL Server 2025: <c>WHERE name = 'other'</c> and
+    /// <c>sys.schemas</c> read on, <c>WHERE type = 'U'</c> and an unfiltered
+    /// <c>sys.columns</c> wait). <paramref name="seekColumn"/> and
+    /// <paramref name="seekValues"/> carry the pushed-down equality, null for
+    /// a scan.
+    /// </summary>
+    public void AwaitCatalogDefinitions(Schemas.CatalogView view, Database database, string? seekColumn, SqlValue[]? seekValues)
+    {
+        if (!view.ListsObjects || this.IsSkipping || this.Connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadUncommitted)
+            return;
+        foreach (var (_, schema) in database.Schemas)
+        {
+            if (schema.DefinitionLocks.IsEmptyLockFree())
+                continue;
+            foreach (var (_, nameLock) in schema.DefinitionLocks)
+            {
+                if (SeekMeets(nameLock, database.Collation, seekColumn, seekValues))
+                    this.AwaitDefinitionName(schema.DefinitionLocks, nameLock.Name);
+            }
+        }
+    }
+
+    // Whether a catalog read seeking seekColumn for seekValues reads the row
+    // of nameLock's name: a name column seeks the name, an object-id column
+    // the objects the change touched, and any other column is read as a scan.
+    private static bool SeekMeets(DefinitionLock nameLock, Collation collation, string? seekColumn, SqlValue[]? seekValues)
+    {
+        if (seekColumn is null || seekValues is null)
+            return true;
+        var byName = BuiltInToken.Equals(seekColumn, "name") || seekColumn.EndsWith("_NAME", StringComparison.OrdinalIgnoreCase);
+        var byId = BuiltInToken.Equals(seekColumn, "object_id") || BuiltInToken.Equals(seekColumn, "major_id");
+        if (!byName && !byId)
+            return true;
+        foreach (var value in seekValues)
+        {
+            if (value.IsNull)
+                continue;
+            if (byName
+                ? value.Type.Category != SqlTypeCategory.String || collation.Equals(value.CoerceTo(SqlType.NVarchar).AsString, nameLock.Name)
+                : value.Type.Category != SqlTypeCategory.Integer || Array.IndexOf(nameLock.ObjectIds, (int)value.CoerceTo(SqlType.BigInt).AsInt64) >= 0)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -2747,4 +2954,28 @@ internal sealed partial class BatchContext
             throw SimulatedSqlException.MemoryOptimizedWriteConflict(conflictIsDelete);
         }
     }
+}
+
+/// <summary>
+/// How a definition statement meets the name it locks
+/// (<see cref="BatchContext.LockDefinitionName"/>), which decides the state
+/// its lock timeout reports — real's lock on the object (56), on the name's
+/// catalog row (51), or on the row a create inserts (47) — probed 2026-10-10
+/// against SQL Server 2025.
+/// </summary>
+internal enum DefinitionNameUse
+{
+    /// <summary>
+    /// A module's <c>CREATE</c>, <c>ALTER</c> or <c>CREATE OR ALTER</c>, a
+    /// <c>DROP</c> or a rename's old name: 56 where an object holds the name,
+    /// else 51.
+    /// </summary>
+    Changes,
+
+    /// <summary>
+    /// A table, synonym, sequence or type's <c>CREATE</c>, a <c>SELECT … INTO</c>
+    /// or a rename's new name: 47, and no wait at all on a name an object held
+    /// before the change holding it.
+    /// </summary>
+    Creates,
 }

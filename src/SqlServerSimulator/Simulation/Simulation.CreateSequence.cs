@@ -169,6 +169,7 @@ partial class Simulation
 
         schema.Database.RejectWriteWhenReadOnly();
 
+        context.Batch.LockDefinitionName(schema, sequenceName.Leaf, DefinitionNameUse.Creates);
         var sequence = new Sequence(
             schema,
             sequenceName.Leaf,
@@ -188,6 +189,7 @@ partial class Simulation
         // The object namespace is shared with tables / views / functions / procs;
         // duplicate names across kinds raise Msg 2714. Check cross-kind before
         // the sequence-specific insert.
+        context.Batch.LockDefinition(schema, sequence, created: true);
         if (schema.HasNameInSharedNamespace(sequence.Name) || !schema.Sequences.TryAdd(sequence.Name, sequence))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(sequenceName.ToString(), state: 8);
         RecordSlotUndo<Sequence>(context, schema.Sequences, sequence.Name, null);

@@ -323,6 +323,7 @@ partial class Simulation
         // creates (Msg 262 state 18 with the function as Procedure attribution,
         // else Msg 2760), object ALTER when it replaces an existing function
         // (Msg 3701 state 20).
+        context.Batch.LockDefinitionName(schema, functionName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
@@ -377,6 +378,7 @@ partial class Simulation
         // An inline INDEX shapes nothing a read returns, so only the catalog
         // carries it, under the function as real lists it.
         AddInlineIndexes(context.Batch, function.CatalogShape(), "@" + returnVariableName, returnTableIndexes, indexObjectIds);
+        context.Batch.LockDefinition(schema, function, created: true);
         schema.Functions[functionName.Leaf] = function;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)
@@ -492,6 +494,7 @@ partial class Simulation
         // creates (Msg 262 state 18 with the function as Procedure attribution,
         // else Msg 2760), object ALTER when it replaces an existing function
         // (Msg 3701 state 20).
+        context.Batch.LockDefinitionName(schema, functionName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
@@ -543,6 +546,7 @@ partial class Simulation
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, function, created: true);
         schema.Functions[functionName.Leaf] = function;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)
@@ -634,6 +638,7 @@ partial class Simulation
         // creates (Msg 262 state 18 with the function as Procedure attribution,
         // else Msg 2760), object ALTER when it replaces an existing function
         // (Msg 3701 state 20).
+        context.Batch.LockDefinitionName(schema, functionName.Leaf);
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf),
@@ -673,6 +678,7 @@ partial class Simulation
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(schema, function, created: true);
         schema.Functions[functionName.Leaf] = function;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)

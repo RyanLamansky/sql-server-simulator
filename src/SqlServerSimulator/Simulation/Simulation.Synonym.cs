@@ -46,7 +46,12 @@ partial class Simulation
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name, terminatesBatch: false);
 
         var leaf = synonymName.Leaf;
+        // A synonym's change holds its name as any object's does, but its lock
+        // timeout ends only the statement (probed 2026-10-10 against SQL
+        // Server 2025).
+        context.Batch.LockDefinitionName(schema, leaf, DefinitionNameUse.Creates, abortsTransaction: false);
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
+        context.Batch.LockDefinition(schema, synonym, created: true, abortsTransaction: false);
         if (schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym))
             throw SimulatedSqlException.NameTakenEndingOnlyStatement(synonymName.ToString(), state: 8);
         RecordSlotUndo<Synonym>(context, schema.Synonyms, leaf, null);
@@ -85,16 +90,21 @@ partial class Simulation
         // included, where a refused drop names the leaf (probed 2026-10-06
         // against SQL Server 2025).
         var written = synonymName.ImmediateQualifier is { } writtenSchema ? $"{writtenSchema}.{leaf}" : leaf;
-        if (!context.Batch.TryResolveSchema(synonymName, out var schema))
+        if (!context.Batch.TryResolveSchemaToChange(synonymName, types: false, out var schema))
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(written);
+        context.Batch.LockDefinitionName(schema, leaf, abortsTransaction: false);
         RejectDropOfOtherKind(schema, synonymName, "SYNONYM");
-        if (schema.Synonyms.TryGetValue(leaf, out var target)
-            && !PermissionEnforcement.HasDropAuthority(context.Batch, schema, target.ObjectId))
+        if (schema.Synonyms.TryGetValue(leaf, out var target))
         {
-            throw SimulatedSqlException.DropObjectPermissionDenied("synonym", leaf);
+            if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, target.ObjectId))
+                throw SimulatedSqlException.DropObjectPermissionDenied("synonym", leaf);
+            context.Batch.LockDefinition(schema, target, abortsTransaction: false);
         }
         if (!schema.Synonyms.TryRemove(leaf, out var dropped))
+        {
+            context.Batch.ReleaseDefinitionName(schema, leaf);
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(written);
+        }
         RecordSlotUndo(context, schema.Synonyms, leaf, dropped);
         RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
         return true;

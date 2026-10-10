@@ -967,6 +967,9 @@ internal static class LockDmvs
     /// </summary>
     internal static string DescribeResource(Simulation sim, LockResource resource)
     {
+        // A name's lock is real's key lock on the name's catalog row.
+        if (resource.Definition is { } definition)
+            return $"KEY: {definition.Name}";
         foreach (var (_, db) in sim.Databases)
         {
             foreach (var (_, schema) in db.Schemas)
@@ -987,6 +990,11 @@ internal static class LockDmvs
                     {
                         return $"KEY: {t.Name} {group.Describe(resource.AnchorKey)}";
                     }
+                }
+                foreach (var other in schema.SchemaObjects())
+                {
+                    if (ReferenceEquals(other.SchemaLock, resource))
+                        return $"OBJECT: {other.Name}";
                 }
             }
         }

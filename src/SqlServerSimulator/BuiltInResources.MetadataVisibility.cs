@@ -72,12 +72,18 @@ internal static partial class BuiltInResources
         foreach (var key in ObjectIdKeyedMetadataViews)
         {
             if (views.TryGetValue(key, out var view))
+            {
                 view.MetadataKey = new MetadataVisibilityKey(GoverningObjectIdOrdinal(view), -1, -1, DefinitionOrdinal(key, view));
+                view.ListsObjects = true;
+            }
         }
         foreach (var (key, schemaColumn, objectColumn) in NameKeyedMetadataViews)
         {
             if (views.TryGetValue(key, out var view))
+            {
                 view.MetadataKey = new MetadataVisibilityKey(-1, OrdinalOf(view, schemaColumn), OrdinalOf(view, objectColumn), DefinitionOrdinal(key, view));
+                view.ListsObjects = true;
+            }
         }
         // A restricted principal sees the fixed principals, itself, the roles
         // it belongs to, what it owns and what it holds a permission on; a

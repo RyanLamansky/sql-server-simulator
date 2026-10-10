@@ -2822,6 +2822,7 @@ public sealed partial class Simulation
         // under XACT_ABORT, dooming it when caught, from a procedure body too
         // (probed 2026-09-28 against SQL Server 2025).
         var arithmeticAbort = connection.Arithabort && !connection.AnsiWarnings && ex.Number is 220 or 232 or 8115 or 8134 && !ex.IsIdentityOverflow;
+        var definitionAbort = ex.EndsDefinitionTransaction && connection.CurrentTransaction is not null;
         // An error inside a natively compiled module's atomic block rolls the
         // block back — its own transaction, or its savepoint in the caller's
         // (ParseBeginAtomicBlock) — and, uncaught, ends the batch, leaving the
@@ -2834,7 +2835,7 @@ public sealed partial class Simulation
                 ex.XactAbortPromoted = true;
             return;
         }
-        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort)
+        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort || definitionAbort)
             || ex.XactAbortPromoted
             || ex.AbortsTransaction
             || ex.Class is not ((>= 11 and <= 14) or 16)
@@ -2861,6 +2862,10 @@ public sealed partial class Simulation
         // 2026-10-02 against SQL Server 2025).
         if (connection.OpenTryFrames - framesThatCannotCatch > 0)
         {
+            // A definition statement's lock timeout leaves a caught
+            // transaction committable.
+            if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort))
+                return;
             if (connection.CurrentTransaction is { } doomed)
                 doomed.Doomed = true;
             else if (connection.TriggerStatementUndoLog is not null)

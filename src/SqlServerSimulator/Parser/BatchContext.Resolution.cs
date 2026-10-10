@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
+using System.Collections.Concurrent;
 
 namespace SqlServerSimulator.Parser;
 
@@ -209,7 +210,8 @@ internal sealed partial class BatchContext
         if (schema.HeapTables.TryGetValue(name.Leaf, out table))
         {
             this.CurrentStatement.ReadsPermanentObject = true;
-            this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
+            if (!this.LockResolved(schema.HeapTables, name.Leaf, table))
+                return this.TryResolveTable(name, out table);
             _ = this.DependencySink?.Tables.Add(table);
             return true;
         }
@@ -372,7 +374,7 @@ internal sealed partial class BatchContext
     /// A <c>CREATE</c> asks <see cref="TryResolveCreateSchema"/> instead.
     /// </summary>
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
-        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, out schema);
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, NameSpace.Objects, out schema);
 
     /// <summary>
     /// <see cref="TryResolveSchema"/> as the caller
@@ -381,7 +383,7 @@ internal sealed partial class BatchContext
     /// <c>COL_LENGTH</c>, …) reads at run time.
     /// </summary>
     public bool TryResolveCallerSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
-        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: true, types: false, out schema);
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: true, types: false, NameSpace.Objects, out schema);
 
     /// <summary>
     /// <see cref="TryResolveSchema"/> for a type
@@ -389,7 +391,18 @@ internal sealed partial class BatchContext
     /// a batch's unqualified type through <see cref="CompiledDefaultSchemaName"/>.
     /// </summary>
     public bool TryResolveTypeSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
-        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: false, types: true, out schema);
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: false, types: true, NameSpace.Types, out schema);
+
+    /// <summary>
+    /// <see cref="TryResolveSchema"/> — or with <paramref name="types"/>
+    /// <see cref="TryResolveCallerTypeSchema"/> — for a statement about to
+    /// change the object under the name, which then waits on the name in
+    /// <see cref="LockDefinitionName"/> rather than here.
+    /// </summary>
+    public bool TryResolveSchemaToChange(MultiPartName name, bool types, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        types
+            ? this.TryResolveSchemaOf(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: true, types: false, out schema)
+            : this.TryResolveSchemaOf(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, out schema);
 
     /// <summary>
     /// <see cref="TryResolveTypeSchema"/> as the caller resolves a type name
@@ -398,16 +411,48 @@ internal sealed partial class BatchContext
     /// stands rather than as the batch compiled.
     /// </summary>
     public bool TryResolveCallerTypeSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
-        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: true, types: false, out schema);
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: true, types: false, NameSpace.Types, out schema);
 
     /// <summary>
     /// <see cref="TryResolveTypeSchema"/> for an XML schema collection, whose
     /// names are a namespace of their own.
     /// </summary>
     public bool TryResolveXmlSchemaCollectionSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
-        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.XmlSchemaCollections.ContainsKey(leaf), callerScope: false, types: true, out schema);
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.XmlSchemaCollections.ContainsKey(leaf), callerScope: false, types: true, NameSpace.Other, out schema);
 
-    private bool TryResolveSchemaCore(MultiPartName name, Func<Schema, string, bool> holds, bool callerScope, bool types, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
+    /// <summary>The namespace a schema resolution looks a name up in, which says whose uncommitted changes it waits on.</summary>
+    private enum NameSpace
+    {
+        Objects,
+        Types,
+        Other,
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="name"/>'s schema and, past the compile walk,
+    /// waits on another transaction's uncommitted change to the name where no
+    /// object answers to it (<see cref="AwaitDefinitionName"/>) — a dropped
+    /// object's, or a renamed one's old name. A type name waits whether or
+    /// not a type answers to it, and while the batch compiles too, since a
+    /// type's reference takes no lock of its own.
+    /// </summary>
+    private bool TryResolveSchemaCore(MultiPartName name, Func<Schema, string, bool> holds, bool callerScope, bool types, NameSpace nameSpace, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
+    {
+        if (!this.TryResolveSchemaOf(name, holds, callerScope, types, out schema))
+            return false;
+        switch (nameSpace)
+        {
+            case NameSpace.Objects when !this.IsSkipping && !schema.DefinitionLocks.IsEmptyLockFree() && !holds(schema, name.Leaf):
+                this.AwaitDefinitionName(schema.DefinitionLocks, name.Leaf);
+                break;
+            case NameSpace.Types:
+                this.AwaitDefinitionName(schema.TypeDefinitionLocks, name.Leaf);
+                break;
+        }
+        return true;
+    }
+
+    private bool TryResolveSchemaOf(MultiPartName name, Func<Schema, string, bool> holds, bool callerScope, bool types, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)
         {
@@ -470,6 +515,28 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
+    /// Takes the statement's Sch-S on <paramref name="found"/>, which
+    /// <paramref name="slots"/> held under <paramref name="leaf"/>, and says
+    /// whether it still does. The lock may have waited out another
+    /// transaction's change to the object, which can end with it replaced — an
+    /// <c>ALTER</c> committed or rolled back — or gone — a <c>CREATE</c> rolled
+    /// back, a <c>DROP</c> committed; the lock is then let go for the caller to
+    /// look the name up again, as real compiles the statement again (probed
+    /// 2026-10-10 against SQL Server 2025: a call waiting on a function another
+    /// transaction dropped and created runs the original once that rolls
+    /// back).
+    /// </summary>
+    private bool LockResolved<T>(ConcurrentDictionary<string, T> slots, string leaf, T found)
+        where T : SchemaObject
+    {
+        this.AcquireStatementLock(found.SchemaLock, LockMode.SchemaStability);
+        if (slots.TryGetValue(leaf, out var current) && ReferenceEquals(current, found))
+            return true;
+        this.ReleaseStatementLock(found.SchemaLock, LockMode.SchemaStability);
+        return false;
+    }
+
+    /// <summary>
     /// Resolves the schema a <c>CREATE</c> (or <c>SELECT … INTO</c>) of
     /// <paramref name="name"/> places its object in: a written schema as
     /// <see cref="TryResolveSchema"/> finds it, an
@@ -482,8 +549,10 @@ internal sealed partial class BatchContext
     /// </summary>
     public bool TryResolveCreateSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema, byte missingDefaultState = 1, bool statementOnly = false)
     {
+        // The CREATE locks the name itself (LockDefinitionName), so the schema
+        // lookup doesn't wait on another transaction's change to it.
         if (name.Count != 1 && !name.SchemaOmitted)
-            return this.TryResolveSchema(name, out schema);
+            return this.TryResolveSchemaOf(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, out schema);
         var database = name.Count == 3 && this.Connection.Simulation.Databases.TryGetValue(name[0], out var named) ? named : this.CurrentDatabase;
         if (this.CreateSchemaElementScope is { } elementScope)
             return database.Schemas.TryGetValue(elementScope, out schema);
@@ -530,7 +599,8 @@ internal sealed partial class BatchContext
             return this.TryRedirectThroughSynonym(schema, name, out var functionBase)
                 && this.TryResolveFunctionCore(functionBase, out function);
         }
-        this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
+        if (!this.LockResolved(schema.Functions, name.Leaf, function))
+            return this.TryResolveFunctionCore(name, out function);
         this.CurrentStatement.MarkOpensTransaction();
         this.CurrentStatement.CallsUserFunction = true;
         return true;
@@ -566,7 +636,8 @@ internal sealed partial class BatchContext
                 && this.TryResolveView(viewBase, out view);
         }
         this.CurrentStatement.ReadsPermanentObject = true;
-        this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
+        if (!this.LockResolved(schema.Views, name.Leaf, view))
+            return this.TryResolveView(name, out view);
         _ = this.DependencySink?.Views.Add(view);
         return true;
     }
@@ -589,8 +660,7 @@ internal sealed partial class BatchContext
         {
             return false;
         }
-        this.AcquireStatementLock(procedure.SchemaLock, LockMode.SchemaStability);
-        return true;
+        return this.LockResolved(schema.Procedures, name.Leaf, procedure) || this.TryResolveProcedure(name, out procedure);
     }
 
     /// <summary>
@@ -609,8 +679,7 @@ internal sealed partial class BatchContext
         {
             return false;
         }
-        this.AcquireStatementLock(trigger.SchemaLock, LockMode.SchemaStability);
-        return true;
+        return this.LockResolved(schema.Triggers, name.Leaf, trigger) || this.TryResolveTrigger(name, out trigger);
     }
 
     /// <summary>
@@ -629,8 +698,7 @@ internal sealed partial class BatchContext
         {
             return false;
         }
-        this.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaStability);
-        return true;
+        return this.LockResolved(schema.TableTypes, name.Leaf, tableType) || this.TryResolveTableType(name, out tableType);
     }
 
     /// <summary>
@@ -667,8 +735,7 @@ internal sealed partial class BatchContext
         {
             return false;
         }
-        this.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaStability);
-        return true;
+        return this.LockResolved(schema.Sequences, name.Leaf, sequence) || this.TryResolveSequence(name, out sequence);
     }
 
     /// <summary>
@@ -684,8 +751,7 @@ internal sealed partial class BatchContext
         synonym = null;
         if (!this.TryResolveSchema(name, out var schema) || !schema.Synonyms.TryGetValue(name.Leaf, out synonym))
             return false;
-        this.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaStability);
-        return true;
+        return this.LockResolved(schema.Synonyms, name.Leaf, synonym) || this.TryResolveSynonym(name, out synonym);
     }
 
     /// <summary>
@@ -771,7 +837,8 @@ internal sealed partial class BatchContext
             baseName = default;
             return false;
         }
-        this.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaStability);
+        if (!this.LockResolved(schema.Synonyms, name.Leaf, synonym))
+            return this.TryRedirectThroughSynonym(schema, name, out baseName);
         baseName = synonym.BaseObject;
         return this.TryResolveSchema(baseName, out var baseSchema) && baseSchema.Synonyms.ContainsKey(baseName.Leaf)
             ? throw SimulatedSqlException.SynonymChainingNotAllowed(name.ToString(), baseName.ToString())

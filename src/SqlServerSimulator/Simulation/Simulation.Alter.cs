@@ -1320,10 +1320,11 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotAlterSequence(sequenceName.Leaf);
         }
-        // TryResolveSequence took Sch-S; upgrade to Sch-M before mutating
-        // the sequence's option fields. Other connections reading the
-        // sequence (NEXT VALUE FOR) will wait on the Sch-M acquire.
-        context.Batch.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaModification);
+        // TryResolveSequence took Sch-S; upgrade to Sch-M, to the
+        // transaction's end, before mutating the sequence's option fields.
+        // Other connections reading the sequence (NEXT VALUE FOR) wait on it.
+        context.Batch.LockDefinitionName(sequence.Schema, sequence.Name);
+        context.Batch.LockDefinition(sequence.Schema, sequence);
 
         var displayName = sequenceName.ToString();
         var type = sequence.DeclaredType;

@@ -347,6 +347,15 @@ partial class Simulation
             }
         }
 
+        // The change holds the trigger's name and its parent to the
+        // transaction's end, so a write to the parent waits it out (probed
+        // 2026-10-10 against SQL Server 2025: an INSERT behind an open ALTER
+        // TRIGGER waits LCK_M_SCH_S on the table).
+        context.Batch.LockDefinitionName(triggerSchema, triggerName.Leaf);
+        if (parent is HeapTable redefinedParent)
+            context.Batch.AcquireTableRedefinitionLock(redefinedParent);
+        else
+            context.Batch.AcquireTransactionLock(parent.SchemaLock, LockMode.SchemaModification);
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
         // A CLR trigger reports the clash at state 5, a T-SQL one at state 2
         // (probed 2026-09-28 against SQL Server 2025).
@@ -379,7 +388,7 @@ partial class Simulation
         // Sch-M on the existing trigger instance's SchemaLock before
         // replacement — same pattern as ALTER PROCEDURE.
         if (existed)
-            context.Batch.AcquireStatementLock(existing!.SchemaLock, LockMode.SchemaModification);
+            context.Batch.LockDefinition(triggerSchema, existing!);
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
         var trigger = new Trigger(
@@ -407,6 +416,7 @@ partial class Simulation
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        context.Batch.LockDefinition(triggerSchema, trigger, created: true);
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         RecordSlotUndo(context, triggerSchema.Triggers, triggerName.Leaf, existed ? existing : null);
         if (parent is HeapTable redefined)

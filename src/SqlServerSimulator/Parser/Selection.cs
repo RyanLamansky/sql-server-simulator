@@ -373,7 +373,7 @@ internal sealed partial class Selection
     /// the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE) appears in the
     /// next read, since each such change invalidates the cache.
     /// </summary>
-    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase)
+    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, bool dirtyRead)
     {
         var (schema, columnNames) = CatalogViewShape(view);
         return new Selection(
@@ -381,7 +381,15 @@ internal sealed partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, _) => ScanCatalogView(view, targetDatabase, batch, checkedRead: false));
+            rowSource: (batch, _) =>
+            {
+                if (!dirtyRead)
+                    batch.AwaitCatalogDefinitions(view, targetDatabase, seekColumn: null, seekValues: null);
+                return ScanCatalogView(view, targetDatabase, batch, checkedRead: false);
+            })
+        {
+            ReadsCatalogDirty = dirtyRead,
+        };
     }
 
     /// <summary>
@@ -465,7 +473,7 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Predicate-pushdown variant of <see cref="ForCatalogView(CatalogView,Database)"/>:
+    /// Predicate-pushdown variant of <see cref="ForCatalogView(CatalogView,Database,bool)"/>:
     /// the WHERE equality <c>&lt;pushdownColumn&gt; = &lt;comparand&gt;</c> — or
     /// the equality family of an <c>IN</c> list, one comparand per member — is
     /// evaluated once per execution (each comparand holds one value for the
@@ -479,7 +487,7 @@ internal sealed partial class Selection
     /// values are resolved per execution (variables / parameters differ between
     /// runs), keeping the compiled plan shareable across sessions.
     /// </summary>
-    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression[] comparands)
+    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression[] comparands, bool dirtyRead)
     {
         var (schema, columnNames) = CatalogViewShape(view);
         var ordinal = Array.FindIndex(view.Columns, column => BuiltInToken.Equals(column.Name, pushdownColumn));
@@ -511,6 +519,8 @@ internal sealed partial class Selection
                 }
                 CatalogPushdownDiagnostics.Sink?.Add(
                     allNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
+                if (!dirtyRead)
+                    batch.AwaitCatalogDefinitions(view, targetDatabase, pushdownColumn, values);
                 PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
                 if (CachedCatalogRows(view, batch, targetDatabase) is { } set)
                     return set.Seek(ordinal, values);
@@ -525,7 +535,10 @@ internal sealed partial class Selection
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, generated);
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
                 return rows.Select(row => RowEncoder.EncodeRow(view.Columns, view.Conform(row)));
-            });
+            })
+        {
+            ReadsCatalogDirty = dirtyRead,
+        };
     }
 
     private static (SqlType[] Schema, string[] ColumnNames) CatalogViewShape(CatalogView view)

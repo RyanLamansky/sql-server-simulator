@@ -127,9 +127,17 @@ partial class Simulation
         // SELECT INTO creates a table, so it collides with every name in the
         // shared object namespace — a synonym, view or procedure of that name
         // raises Msg 2714 just as another table would (probe-confirmed).
+        if (schema is not null)
+            batch.LockDefinitionName(schema, leaf, DefinitionNameUse.Creates);
         if (schema is not null && schema.HasNameInSharedNamespace(leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         VersionStore.NoteDefinitionChange(batch, destTable);
+        // The new table is held to the transaction's end, as CREATE TABLE's is.
+        if (schema is not null)
+        {
+            batch.AcquireTableRedefinitionLock(destTable);
+            batch.NoteDefinedObject(schema, leaf, destTable.ObjectId, prior: false);
+        }
         if (!(isLocalTemp ? batch.Connection.TryAddTempTable(destTable) : destination.TryAdd(leaf, destTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         // The new table joins the catalog views without passing the DDL arm —

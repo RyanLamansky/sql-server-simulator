@@ -168,6 +168,13 @@ internal sealed class LockResource
     public Parser.SqlValueKey? AnchorKey;
 
     /// <summary>
+    /// The name this resource locks, for a <see cref="DefinitionLock"/>;
+    /// <c>null</c> otherwise. Lets the final release take the name out of its
+    /// schema's registry.
+    /// </summary>
+    public DefinitionLock? Definition;
+
+    /// <summary>
     /// One owner's hold on this resource, with re-entrance count. Stored
     /// as a struct in <see cref="Holders"/>; same-owner / same-mode re-
     /// acquires bump <see cref="Count"/> instead of appending a second
@@ -377,11 +384,14 @@ internal sealed class LockManager
     /// SQL Server 2025), 48 for an insert's test of a fenced gap (probed
     /// 2026-10-03) and 52 for a page lock (probed 2026-10-09). A uniqueness
     /// check's wait reports 47 (<c>Simulation.AwaitUncommittedKeyWriters</c>).
+    /// A name's lock is real's key lock on its catalog row, 51 (probed
+    /// 2026-10-10), save where a definition statement waits on it
+    /// (<c>BatchContext.LockDefinitionName</c>).
     /// </summary>
     private static byte TimeoutState(LockResource resource, LockMode mode) => resource switch
     {
         _ when mode == LockMode.RangeInsertNull => 48,
-        { KeyGroup: not null } => 51,
+        { KeyGroup: not null } or { Definition: not null } => 51,
         { PageOfTable: not null } => 52,
         { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? (byte)51 : (byte)45,
         _ => 56,
@@ -663,6 +673,8 @@ internal sealed class LockManager
                                 _ = Interlocked.Decrement(ref table.ActiveKeyRangeLocks);
                             }
                         }
+                        if (resource.Definition is { } definition && resource.Holders.Count == 0 && resource.Queue is not { Count: > 0 })
+                            definition.Unregister();
                         Monitor.PulseAll(this.gate);
                     }
                     else

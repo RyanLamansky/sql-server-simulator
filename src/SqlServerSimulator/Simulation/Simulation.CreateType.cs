@@ -162,6 +162,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        context.Batch.LockDefinitionName(schema, typeName.Leaf, DefinitionNameUse.Creates, types: true);
         if (TypeNameIsTaken(context, schema, typeName))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
         // A memory-optimized table type needs an index, though no primary key
@@ -207,6 +208,7 @@ partial class Simulation
         AddInlineIndexes(context.Batch, shape, backingName, tableType.PendingIndexes, indexObjectIds);
         tableType.CatalogShape = shape;
         WarnOfOversizedMaximumRow(context.Batch, tableType.Columns, typeName.Leaf, state: 2);
+        context.Batch.LockDefinition(schema, tableType, created: true, types: true);
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
@@ -432,6 +434,7 @@ partial class Simulation
         if (refusal is not null)
             throw refusal;
 
+        context.Batch.LockDefinitionName(schema, typeName.Leaf, DefinitionNameUse.Creates, types: true);
         if (TypeNameIsTaken(context, schema, typeName))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 

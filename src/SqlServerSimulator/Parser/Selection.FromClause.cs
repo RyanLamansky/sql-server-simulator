@@ -1444,7 +1444,10 @@ internal sealed partial class Selection
                     // an unrecognized hint name applies to sys.* targets too).
                     // An index hint is ignored with real's view warning, Msg
                     // 4430 (probed 2026-10-05 against SQL Server 2025).
-                    if (ParseOptionalTableHints(context).IndexArguments is not null && !context.Batch.IsSkipping)
+                    // NOLOCK reads past another transaction's uncommitted
+                    // definition change (BatchContext.AwaitCatalogDefinitions).
+                    var catalogHints = ParseOptionalTableHints(context);
+                    if (catalogHints.IndexArguments is not null && !context.Batch.IsSkipping)
                         context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, objectName.ToString()));
                     if (catalogView.EnforcesJoinOrder)
                         context.JoinOrderEnforced = true;
@@ -1456,7 +1459,7 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb),
+                        lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb, catalogHints.NoLock),
                         materializeOnce: true,
                         backingCatalogView: catalogView,
                         backingCatalogDatabase: catalogTargetDb,

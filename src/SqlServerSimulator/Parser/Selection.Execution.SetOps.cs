@@ -112,6 +112,14 @@ internal sealed partial class Selection
     /// </summary>
     internal bool IsSingleConstantRow;
 
+    /// <summary>
+    /// For a catalog view's rows, whether the reference carries <c>NOLOCK</c>
+    /// or <c>READUNCOMMITTED</c>, which reads past another transaction's
+    /// uncommitted definition change (<see cref="BatchContext.AwaitCatalogDefinitions"/>);
+    /// kept for the pushdown that rebuilds the source.
+    /// </summary>
+    internal bool ReadsCatalogDirty;
+
     /// <summary>The browse-mode metadata the statement's result carries; see <see cref="SimulatedQueryResult.Browse"/>.</summary>
     internal BrowseInfo? Browse;
 

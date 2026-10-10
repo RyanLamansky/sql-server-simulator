@@ -1631,7 +1631,7 @@ internal sealed partial class Selection
                 storageOrdinals: pushSource.StorageOrdinals,
                 lobStore: pushSource.LobStore,
                 rows: pushSource.Rows,
-                lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparands),
+                lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparands, pushSource.LateralPlan?.ReadsCatalogDirty == true),
                 materializeOnce: true,
                 backingCatalogView: pushSource.BackingCatalogView,
                 backingCatalogDatabase: pushSource.BackingCatalogDatabase,
@@ -3023,6 +3023,8 @@ internal sealed partial class Selection
             // as is so a hash join can probe the rowset's persisted index.
             if (sources[i] is { BackingCatalogView: { Cacheable: true } view, BackingCatalogDatabase: { } catalogDatabase, CatalogSeek: false })
             {
+                if (!plan.ReadsCatalogDirty)
+                    batch.AwaitCatalogDefinitions(view, catalogDatabase, seekColumn: null, seekValues: null);
                 PermissionEnforcement.CheckCatalogViewRead(batch, view, catalogDatabase);
                 if (CachedCatalogRows(view, batch, catalogDatabase) is { } set)
                 {

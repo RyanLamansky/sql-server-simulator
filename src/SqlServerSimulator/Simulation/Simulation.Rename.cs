@@ -252,8 +252,21 @@ partial class Simulation
             string Move<T>(System.Collections.Concurrent.ConcurrentDictionary<string, T> objects, T renamed, string eventType)
                 where T : SchemaObject
             {
+                // The rename holds both names and the object to the
+                // transaction's end (probed 2026-10-10 against SQL Server 2025:
+                // a reference to the old name waits on the name, one to the
+                // new name on the object).
+                batch.LockDefinitionName(schema, renamed.Name, abortsTransaction: false);
+                batch.LockDefinitionName(schema, newName, DefinitionNameUse.Creates, abortsTransaction: false);
                 if (renamed is HeapTable table)
-                    batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+                {
+                    batch.AcquireTableRedefinitionLock(table);
+                    batch.NoteDefinedObject(schema, table.Name, table.ObjectId, prior: true);
+                }
+                else
+                {
+                    batch.LockDefinition(schema, renamed, abortsTransaction: false);
+                }
                 var (oldName, oldModifyDate) = (renamed.Name, renamed.ModifyDate);
                 _ = objects.TryRemove(renamed.Name, out _);
                 renamed.Name = newName;

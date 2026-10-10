@@ -79,14 +79,22 @@ internal sealed class ObjectId : Expression
         var suspended = batch.SuspendsModuleSchema;
         batch.SuspendsModuleSchema = true;
         SqlValue value;
+        SchemaObject? contested;
         try
         {
-            value = this.Resolve(runtime);
+            value = this.Resolve(runtime, out contested);
         }
         finally
         {
             batch.SuspendsModuleSchema = suspended;
         }
+        // A name another transaction's uncommitted change held answers with
+        // the id the lookup found before waiting the change out, so NULL once
+        // that object is gone — a CREATE rolled back answers NULL though the
+        // object it replaced is back (probed 2026-10-10 against SQL Server
+        // 2025).
+        if (contested is not null && !value.IsNull && value.AsInt32 != contested.ObjectId)
+            value = SqlValue.Null(SqlType.Int32);
         if (freezable)
         {
             (frame.StatementScopedValues ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[this] = value;
@@ -94,8 +102,9 @@ internal sealed class ObjectId : Expression
         return value;
     }
 
-    private SqlValue Resolve(RuntimeContext runtime)
+    private SqlValue Resolve(RuntimeContext runtime, out SchemaObject? contested)
     {
+        contested = null;
         var nameValue = this.nameArg.Run(runtime);
         if (nameValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
@@ -127,6 +136,11 @@ internal sealed class ObjectId : Expression
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!TryParseObjectName(nameStr, out var parsed))
             return SqlValue.Null(SqlType.Int32);
+        if (runtime.Batch.TryResolveCallerSchema(parsed, out var holder) && !holder.DefinitionLocks.IsEmptyLockFree()
+            && holder.DefinitionLocks.ContainsKey(parsed.Leaf) && holder.TryFindInSharedNamespace(parsed.Leaf, out var found))
+        {
+            contested = found;
+        }
         // A temp table lives in tempdb, so a name not naming that database
         // finds it only while tempdb is the current one (probed 2026-10-01
         // against SQL Server 2025: OBJECT_ID('#t') is NULL elsewhere).

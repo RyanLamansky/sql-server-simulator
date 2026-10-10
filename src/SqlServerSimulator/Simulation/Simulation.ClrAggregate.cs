@@ -100,6 +100,7 @@ partial class Simulation
             terminate,
             serialization,
             context.Batch.CurrentStatement.UtcNow);
+        context.Batch.LockDefinition(schema, aggregate, created: true);
         schema.Functions[aggregateName.Leaf] = aggregate;
         RecordSlotUndo(context, schema.Functions, aggregateName.Leaf, previous: null);
         return true;

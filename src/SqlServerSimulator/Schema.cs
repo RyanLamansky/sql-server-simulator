@@ -69,6 +69,8 @@ internal sealed class Schema
         this.Defaults = new(collation);
         this.Rules = new(collation);
         this.SecurityPolicies = new(collation);
+        this.DefinitionLocks = new(collation);
+        this.TypeDefinitionLocks = new(collation);
     }
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
@@ -184,6 +186,19 @@ internal sealed class Schema
     /// <see cref="SecurityPolicy"/>), sharing the object-name namespace.
     /// </summary>
     public readonly ConcurrentDictionary<string, SecurityPolicy> SecurityPolicies;
+
+    /// <summary>
+    /// The names of the shared object namespace a statement's uncommitted
+    /// create, alter, drop or rename holds, each while it is held (see
+    /// <see cref="DefinitionLock"/>); empty while no change is pending.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DefinitionLock> DefinitionLocks;
+
+    /// <summary>
+    /// <see cref="DefinitionLocks"/> for the type namespace — table types and
+    /// alias types, whose names real keeps apart from the objects'.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DefinitionLock> TypeDefinitionLocks;
 
     /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's

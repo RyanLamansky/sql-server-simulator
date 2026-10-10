@@ -19,6 +19,7 @@ User-visible behaviors:
 - `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` / `WITH (REPEATABLEREAD)` acquires row-S tx-scoped on each row it returns; concurrent INSERTs of *new* rows still succeed (RR doesn't prevent phantoms).
 - A tx-scoped row lock (RR, `UPDLOCK`, `XLOCK`) taken on a row the read's sargable predicate rejects is released again, as real's is, so the transaction keeps only the rows it returns.
 - `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED` makes every read behave like `WITH (NOLOCK)` (dirty reads).
+- A transaction's `CREATE`, `ALTER`, `DROP` or rename of an object holds the object and its name to the transaction's end, so another session's call, `OBJECT_ID`, catalog read or change of the same name waits for it — see [Definition changes across transactions](#definition-changes-across-transactions).
 - A statement taking past real's escalation point on one table trades its row and key locks for a table S or X — see [Escalation](#escalation).
 
 ## Lock modes
@@ -104,7 +105,8 @@ Scope (when the lock releases) depends on the mode and surrounding transaction s
 | Acquired at                   | Scope                                 |
 | ----------------------------- | ------------------------------------- |
 | `TryResolve*` Sch-S           | Statement end                         |
-| DDL site Sch-M                | Statement end                         |
+| Definition Sch-M — the object and its name | COMMIT / ROLLBACK ([Definition changes across transactions](#definition-changes-across-transactions)) |
+| Other DDL site Sch-M          | Statement end                         |
 | Reader RC default IS          | Statement end                         |
 | Reader HOLDLOCK / SER table-IS | COMMIT / ROLLBACK (tx-scoped)        |
 | Reader HOLDLOCK / SER key locks | COMMIT / ROLLBACK (tx-scoped)       |
@@ -435,7 +437,7 @@ A table set `LOCK_ESCALATION = DISABLE` (`HeapTable.LockEscalation`) never escal
 Skipped for temp tables / table variables / trigger `INSERTED` / `DELETED` pseudo-tables / system tables.
 A procedure call lets its procedure's go once the body has compiled (`BatchContext.ReleaseStatementLock`), as real holds it only to compile: a body running, or suspended mid-result, holds none, and another session drops or alters the procedure meanwhile (probed 2026-10-09 against SQL Server 2025).
 
-**Sch-M** — every DDL site: `DROP {TABLE,VIEW,FUNCTION,PROCEDURE,TYPE, SEQUENCE,TRIGGER}` after the lookup; `TRUNCATE TABLE`; `ALTER TABLE`; `DROP INDEX` and a clustered `CREATE INDEX`, while a nonclustered `CREATE INDEX` takes the table's S (see [Table-level and schema-lock behaviors](#table-level-and-schema-lock-behaviors)).
+**Sch-M** — every DDL site: the object a `CREATE`, `ALTER`, `DROP` or rename changes and the name it changes it under, to the transaction's end (`BatchContext.LockDefinitionName` / `LockDefinition`, see [Definition changes across transactions](#definition-changes-across-transactions)); `TRUNCATE TABLE`; `ALTER TABLE`; `DROP INDEX` and a clustered `CREATE INDEX`, while a nonclustered `CREATE INDEX` takes the table's S (see [Table-level and schema-lock behaviors](#table-level-and-schema-lock-behaviors)).
 
 **Data locks** — `BatchContext.AcquireDataLockIfApplicable(table, hints, isWrite)` from FROM-source resolution in `Selection.FromClause.cs` and INSERT / UPDATE / DELETE / MERGE target / MERGE bare-table-source sites.
 
@@ -929,6 +931,7 @@ A `NOLOCK` read goes ahead, and so does a transaction whose snapshot was taken a
 So `TRUNCATE`, `SWITCH` and the `ALTER TABLE` rebuilds need no versioning of their own: a snapshot old enough to need the rows they replaced is refused the table.
 
 ### Known MVCC limitations
+- **A SNAPSHOT transaction reaching a module another transaction changed since its snapshot began runs the module as it stands**, where real raises Msg 3961 and rolls the transaction back, a `TRY` around the reference catching nothing: probed 2026-10-10 against SQL Server 2025 for an altered scalar function, inline function and view, and a function dropped and created again; an altered procedure runs its new body there too, and a function whose name was free when the snapshot began answers.
 - **A redefinition inside a `SNAPSHOT` transaction runs**, where real refuses it with Msg 3964 (`Transaction failed because this DDL statement is not allowed inside a snapshot isolation transaction. …`; probed 2026-10-09 against SQL Server 2025 for an `ALTER TABLE … ADD`); which other statements real refuses that way isn't probed.
 - **A failed change outside a transaction still stamps the table**: an autocommit DDL statement draws its stamp as it runs, so one that then fails keeps an older snapshot out as a committed one would.
 - **Msg 3960's state 4**: real reports a conflict it meets scanning a table with a clustered index at state 4 and one it meets seeking at state 2, where the simulator, knowing no access path there, reports 2 for every table with a clustered index (probed 2026-09-28 against SQL Server 2025).
@@ -964,3 +967,30 @@ Retained at table / schema granularity:
 - Same-thread-deadlock short-circuit.
 - HOLDLOCK retain-until-tx-end semantic, over a key range where the predicate offers one and table-S otherwise, in the range mode any `UPDLOCK` / `XLOCK` alongside it names.
 - NOLOCK / READ UNCOMMITTED dirty-read semantic.
+
+## Definition changes across transactions
+
+Probed 2026-10-10 against SQL Server 2025 with one session's change left open in a transaction while another reads or changes the same name:
+- the change holds the object it alters, drops or creates in Sch-M to its transaction's end, and the X of the name's catalog row;
+- a call, an `EXEC`, a `NEXT VALUE FOR`, an `OBJECT_ID`, a `CREATE`, `ALTER` or `DROP` of the name, and a write to a table whose trigger the change alters all wait for it, whatever the waiting session's isolation level — `READ UNCOMMITTED` included;
+- a reference that waited on an object a rolled-back `CREATE` made compiles again and finds the name as the rollback left it, while `OBJECT_ID` answers NULL for it, though the object that `CREATE` replaced is back;
+- a `CREATE` of a table, synonym or sequence, or a `SELECT … INTO`, over a name an object held before the change raises Msg 2714 at once, where a module's `CREATE` waits on the object;
+- a catalog view listing objects, their modules, columns or parameters waits on the rows it reads, under `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` too, while `NOLOCK` and `READ UNCOMMITTED` read past them: a seek on a name or an object id waits only on that name's change, a scan on every change in the database, and `sys.schemas` on none.
+
+The model is two locks per change, both held to the transaction's end:
+- **The name's lock**, a `DefinitionLock` registered under the name in `Schema.DefinitionLocks` (or `TypeDefinitionLocks`) only while held, which `BatchContext.LockDefinitionName` takes in Sch-M before the statement looks the name up, so two changes to one name serialize and the second finds the name as the first left it.
+  A resolution that finds no object under the name waits on it in S (`BatchContext.AwaitDefinitionName`, from `TryResolveSchemaCore` past the compile walk, a type name in it too), and so does a catalog read meeting it (`BatchContext.AwaitCatalogDefinitions`, seeking through the pushed-down equality).
+- **The object's own Sch-M** (`BatchContext.LockDefinition`, a table's through `AcquireTableRedefinitionLock`) on the object a statement replaces or drops and on the one it creates before it is published, which a resolution finding the object waits on in Sch-S (`BatchContext.LockResolved`), looking again once it is granted, since the wait can end with the object replaced or gone.
+
+A rollback restores the change's own catalog slot, which nothing else can have changed meanwhile, the name being held.
+Without the locks both were released with the statement: two transactions each dropping and creating one function went ahead together, and the first's rollback put the original back over the second's committed body.
+
+A definition statement's lock timeout reports state 56 where an object holds the name, 51 where none does, and 47 for a table, synonym, sequence or type's `CREATE`; inside a transaction, uncaught, it ends the batch and rolls the transaction back, a synonym's aside, while a `CATCH` leaves the transaction committable (`SimulatedSqlException.EndsDefinitionTransaction`; see [`transactions.md`](transactions.md#set-xact_abort)).
+A read's ends its statement alone.
+Two transactions each changing the object the other changed deadlock, the victim's Msg 1205 at state 56.
+
+**Divergences**:
+- A statement waiting on another's change to the name waits in Sch-M or S on the name, where real waits on the object (`LCK_M_SCH_M`) or on the name's catalog key (`LCK_M_S`); `sys.dm_os_waiting_tasks` describes the name's lock as `KEY: <name>`.
+- `sys.dm_tran_locks` lists the Sch-M of the objects still in the catalog — an altered or created one — but not a dropped object's, nor the name's lock and the catalog `KEY` and `METADATA` rows real lists beside them.
+- A catalog read's predicate seeks only through an equality the pushdown recognizes, so a `LIKE` prefix or a `parent_object_id` seek waits on every change as a scan does, where real seeks past a name outside its range.
+

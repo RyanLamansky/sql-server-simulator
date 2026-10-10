@@ -2,7 +2,6 @@ using System.Text.RegularExpressions;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
-using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -30,8 +29,9 @@ public sealed partial class Simulation
     /// Probe-confirmed against SQL Server 2025 (2026-07-31): kind mismatch →
     /// <strong>Msg 2010</strong> on both ALTER legs and <strong>Msg 2714</strong>
     /// on a plain CREATE; a name nothing holds → <strong>Msg 208</strong> for
-    /// ALTER. Sch-M is taken on the object being replaced so a concurrent
-    /// reader holding Sch-S blocks the swap.
+    /// ALTER. Sch-M is taken on the object being replaced, to the
+    /// transaction's end, so a concurrent reader holding Sch-S blocks the swap
+    /// and a reader arriving later waits for the change to settle.
     /// </para>
     /// <para>
     /// Replacing a view or function a <c>WITH SCHEMABINDING</c> module
@@ -53,7 +53,7 @@ public sealed partial class Simulation
         {
             if (!isAlter && !createOrAlter)
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3);
-            context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
+            context.Batch.LockDefinition(schema, existing);
             return existing is View or UserDefinedFunction
                 && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
                 ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(

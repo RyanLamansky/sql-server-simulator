@@ -426,6 +426,8 @@ partial class Simulation
         // Cross-kind name-collision check for permanent tables (Msg 2714).
         // Temp tables live in a session-scoped dict that doesn't share the
         // database object-name namespace.
+        if (!isTempTable)
+            context.Batch.LockDefinitionName(schema!, tableName.Leaf, DefinitionNameUse.Creates);
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
         RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null, pendingEdgeConstraints);
@@ -517,6 +519,14 @@ partial class Simulation
         if (isLocalTempTable)
             heapTable.TempScopeId = context.Batch.TempTableScopeId();
         VersionStore.NoteDefinitionChange(context.Batch, heapTable);
+        // A new permanent table is held to the transaction's end, so another
+        // session finding it waits for the CREATE to settle (probed 2026-10-10
+        // against SQL Server 2025: LCK_M_SCH_S on the new object).
+        if (!isTempTable)
+        {
+            context.Batch.AcquireTableRedefinitionLock(heapTable);
+            context.Batch.NoteDefinedObject(schema!, heapTable.Name, heapTable.ObjectId, prior: false);
+        }
         if (!(isLocalTempTable ? context.Batch.Connection.TryAddTempTable(heapTable) : destination.TryAdd(heapTable.Name, heapTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // A local temp created inside a module body (proc / trigger / dynamic
