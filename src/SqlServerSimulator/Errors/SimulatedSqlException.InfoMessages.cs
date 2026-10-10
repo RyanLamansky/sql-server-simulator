@@ -108,6 +108,22 @@ partial class SimulatedSqlException
     internal static SimulatedError DatabaseNameSetMessage(BatchContext batch, string databaseName) =>
         batch.InfoMessage(@class: 0, state: 2, number: 5021, $"The database name '{databaseName}' has been set.");
 
+    /// <summary>Msg 3082, <c>SUSPEND_FOR_SNAPSHOT_BACKUP = OFF</c> on a database not suspended (probed 2026-10-09).</summary>
+    internal static SimulatedError NotSuspendedForSnapshotBackupMessage(BatchContext batch, string databaseName) =>
+        batch.InfoMessage(@class: 0, state: 5, number: 3082, $"Database '{databaseName}' is not suspended for snapshot backup.");
+
+    /// <summary>
+    /// Msg 5060, sent twice — state 2 at 0%, state 1 at 100% — when an
+    /// <c>ALTER DATABASE … WITH ROLLBACK</c> state change ends other sessions'
+    /// work in the database (probed 2026-10-10).
+    /// </summary>
+    internal static SimulatedError NonqualifiedTransactionsRolledBackMessage(BatchContext batch, int percent) =>
+        batch.InfoMessage(@class: 0, state: percent == 0 ? (byte)2 : (byte)1, number: 5060, $"Nonqualified transactions are being rolled back. Estimated rollback completion: {percent}%.");
+
+    /// <summary>Msg 5068, when a session takes its own current database offline and lands in <c>master</c> (probed 2026-10-10).</summary>
+    internal static SimulatedError CurrentDatabaseSwitchedToMasterMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 5068, "Failed to restart the current database. The current database is switched to master.");
+
     /// <summary>Msg 5701, after every <c>USE</c> and after renaming the session's own database.</summary>
     internal static SimulatedError DatabaseContextChangedMessage(BatchContext batch, string databaseName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 5701, $"Changed database context to '{databaseName}'.");

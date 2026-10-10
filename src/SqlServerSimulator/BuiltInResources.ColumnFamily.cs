@@ -168,8 +168,6 @@ internal static partial class BuiltInResources
                     SqlValue.Null(SqlType.GetDecimal(25, 0)),
                 }));
 
-        // sys.database_filestream_options: FILESTREAM isn't modeled, so the
-        // view is empty with the documented SQL Server 2025 shape.
 
         Sys("change_tracking_databases",
         [
@@ -200,7 +198,24 @@ internal static partial class BuiltInResources
             new("non_transacted_access", SqlType.TinyInt, null, false),
             new("non_transacted_access_desc", nvarchar60Catalog, 60, false),
             new("directory_name", NVarcharSqlType.Get(256, Collation.Catalog, Coercibility.Implicit), 256, true),
-        ], static (batch, database) => []);
+        ], static (batch, database) =>
+            // Server-wide like sys.databases, one row per database with what
+            // ALTER DATABASE … SET FILESTREAM recorded; there's no FILESTREAM
+            // storage behind it. Real adds a row whose database_id is NULL.
+            Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation)
+                .Where(entry => batch.Connection.Simulation.CanSeeDatabase(batch.Connection, entry.Database))
+                .Select(entry => new SqlValue[]
+                {
+                    SqlValue.FromInt32(entry.Id),
+                    SqlValue.FromByte(entry.Database.FileStreamNonTransactedAccess),
+                    SqlValue.FromNVarchar(entry.Database.FileStreamNonTransactedAccess switch
+                    {
+                        1 => "READ_ONLY",
+                        2 => "FULL",
+                        _ => "OFF",
+                    }),
+                    entry.Database.FileStreamDirectoryName is { } directory ? SqlValue.FromNVarchar(directory) : SqlValue.Null(SqlType.NVarchar),
+                }));
 
         // sys.external_data_sources: PolyBase / external data sources aren't
         // modeled, so this is an empty view with the documented SQL Server 2025

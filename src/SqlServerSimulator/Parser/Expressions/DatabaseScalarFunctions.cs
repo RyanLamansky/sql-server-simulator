@@ -180,6 +180,8 @@ internal sealed class HasDbAccess : Expression
         var connection = runtime.Batch.Connection;
         if (!connection.Simulation.Databases.TryGetValue(name, out var database))
             return SqlValue.Null(SqlType.Int32);
+        if (database.State == DatabaseState.Offline)
+            return SqlValue.FromInt32(0);
         // An identity minted in the session's database — EXECUTE AS USER, an
         // application role — answers there by its own CONNECT and elsewhere
         // by whether guest may connect (probed 2026-10-04 against SQL Server
@@ -207,8 +209,9 @@ internal sealed class HasDbAccess : Expression
     /// ordinary login).
     /// </summary>
     internal static bool IsAccessible(SimulatedDbConnection connection, Database database) =>
-        PermissionEnforcement.Bypasses(connection, database)
-        || PermissionEnforcement.TryResolveCrossDatabasePrincipal(connection, database, out _);
+        database.State != DatabaseState.Offline
+        && (PermissionEnforcement.Bypasses(connection, database)
+        || PermissionEnforcement.TryResolveCrossDatabasePrincipal(connection, database, out _));
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

@@ -434,6 +434,39 @@ internal sealed partial class Database
     public bool BrokerEnabled = true;
 
     /// <summary>
+    /// <c>sys.databases.delayed_durability</c>: 0 DISABLED, 1 ALLOWED, 2
+    /// FORCED, set by <c>ALTER DATABASE … SET DELAYED_DURABILITY</c> —
+    /// recorded, every commit being durable at once in memory anyway.
+    /// </summary>
+    public byte DelayedDurability;
+
+    /// <summary>
+    /// <c>sys.databases.state</c>, moved by <c>ALTER DATABASE … SET { ONLINE |
+    /// OFFLINE | EMERGENCY }</c>. Every reference to an offline database
+    /// raises Msg 942 through <see cref="RejectWhenOffline"/>, and an
+    /// emergency one refuses writes through
+    /// <see cref="RejectWriteWhenReadOnly"/>.
+    /// </summary>
+    public DatabaseState State;
+
+    /// <summary>Raises Msg 942 when this database is <see cref="DatabaseState.Offline"/>.</summary>
+    public void RejectWhenOffline()
+    {
+        if (this.State == DatabaseState.Offline)
+            throw SimulatedSqlException.DatabaseIsOffline(this.Name);
+    }
+
+    /// <summary>
+    /// <c>sys.database_filestream_options.non_transacted_access</c>: 0 OFF, 1
+    /// READ_ONLY, 2 FULL, set by <c>ALTER DATABASE … SET FILESTREAM</c> —
+    /// recorded, with no FILESTREAM storage behind it.
+    /// </summary>
+    public byte FileStreamNonTransactedAccess;
+
+    /// <summary><c>sys.database_filestream_options.directory_name</c>, set beside <see cref="FileStreamNonTransactedAccess"/>.</summary>
+    public string? FileStreamDirectoryName;
+
+    /// <summary>
     /// <c>sys.databases.target_recovery_time_in_seconds</c>, set by
     /// <c>ALTER DATABASE … SET TARGET_RECOVERY_TIME</c> — recorded, with no
     /// checkpoint to drive.
@@ -488,6 +521,8 @@ internal sealed partial class Database
     /// </param>
     public void RejectWriteWhenReadOnly(byte state = 1)
     {
+        if (this.State == DatabaseState.Emergency)
+            throw SimulatedSqlException.CannotBeginTransactionInEmergencyDatabase(this.Name);
         if (this.IsReadOnly)
             throw SimulatedSqlException.DatabaseIsReadOnly(this.Name, state);
     }

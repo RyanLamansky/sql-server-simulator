@@ -202,6 +202,9 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // An offline database can't be renamed (probed 2026-10-10 against SQL
+        // Server 2025), though its SET options still move.
+        target.RejectWhenOffline();
         RenameDatabaseTo(context.Batch, target, newNameToken.Value);
         return true;
     }
@@ -548,6 +551,16 @@ partial class Simulation
         /// <see cref="Database.BrokerEnabled"/>; at most one per SET list.
         /// </summary>
         Broker,
+        /// <summary>
+        /// A bare database state (ONLINE / OFFLINE / EMERGENCY) with an optional
+        /// termination clause, read by <see cref="ConsumeDatabaseStateOption"/>.
+        /// </summary>
+        State,
+        /// <summary>
+        /// An option with a value grammar of its own, read by
+        /// <see cref="ConsumeSpecialDatabaseOption"/>.
+        /// </summary>
+        Special,
     }
 
     /// <summary>
@@ -579,6 +592,9 @@ partial class Simulation
         ["AUTO_UPDATE_STATISTICS_ASYNC"] = AlterDatabaseOptionKind.OnOff,
         ["CURSOR_CLOSE_ON_COMMIT"] = AlterDatabaseOptionKind.OnOff,
         ["DATE_CORRELATION_OPTIMIZATION"] = AlterDatabaseOptionKind.OnOff,
+        ["HONOR_BROKER_PRIORITY"] = AlterDatabaseOptionKind.OnOff,
+        ["MIXED_PAGE_ALLOCATION"] = AlterDatabaseOptionKind.OnOff,
+        ["SUPPLEMENTAL_LOGGING"] = AlterDatabaseOptionKind.OnOff,
         ["PARAMETERIZATION"] = AlterDatabaseOptionKind.EnumIdent,
         ["RECOVERY"] = AlterDatabaseOptionKind.EnumIdent,
         ["PAGE_VERIFY"] = AlterDatabaseOptionKind.EnumIdent,
@@ -594,6 +610,21 @@ partial class Simulation
         ["DISABLE_BROKER"] = AlterDatabaseOptionKind.Broker,
         ["NEW_BROKER"] = AlterDatabaseOptionKind.Broker,
         ["ERROR_BROKER_CONVERSATIONS"] = AlterDatabaseOptionKind.Broker,
+        ["ONLINE"] = AlterDatabaseOptionKind.State,
+        ["OFFLINE"] = AlterDatabaseOptionKind.State,
+        ["EMERGENCY"] = AlterDatabaseOptionKind.State,
+        ["AUTOMATIC_TUNING"] = AlterDatabaseOptionKind.Special,
+        ["CONTAINMENT"] = AlterDatabaseOptionKind.Special,
+        ["DEFAULT_FULLTEXT_LANGUAGE"] = AlterDatabaseOptionKind.Special,
+        ["DEFAULT_LANGUAGE"] = AlterDatabaseOptionKind.Special,
+        ["DELAYED_DURABILITY"] = AlterDatabaseOptionKind.Special,
+        ["ENCRYPTION"] = AlterDatabaseOptionKind.Special,
+        ["FILESTREAM"] = AlterDatabaseOptionKind.Special,
+        ["NESTED_TRIGGERS"] = AlterDatabaseOptionKind.Special,
+        ["REMOTE_DATA_ARCHIVE"] = AlterDatabaseOptionKind.Special,
+        ["SUSPEND_FOR_SNAPSHOT_BACKUP"] = AlterDatabaseOptionKind.Special,
+        ["TRANSFORM_NOISE_WORDS"] = AlterDatabaseOptionKind.Special,
+        ["TWO_DIGIT_YEAR_CUTOFF"] = AlterDatabaseOptionKind.Special,
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -615,8 +646,15 @@ partial class Simulation
         switch (kind)
         {
             case AlterDatabaseOptionKind.OnOff:
+                var atName = context.SaveCheckpoint();
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle)
+                {
+                    // An `=` where the bare toggle belongs is Msg 102 near the
+                    // option's name (probed 2026-10-09 against SQL Server 2025).
+                    if (context.Token is Operator { Character: '=' })
+                        context.RestoreCheckpoint(atName);
                     return false;
+                }
                 // AUTO_CREATE_STATISTICS ON takes an optional (INCREMENTAL = ON | OFF).
                 bool? incremental = null;
                 if (toggle.Keyword == Keyword.On && name.Equals("AUTO_CREATE_STATISTICS", StringComparison.OrdinalIgnoreCase))
@@ -645,6 +683,7 @@ partial class Simulation
                 }
                 if (!context.Batch.IsSkipping)
                 {
+                    RejectPinnedSwitch(target, name);
                     // The batch compiled its CREATE TABLEs' nullability under
                     // the value it began with (probed 2026-09-28 against SQL
                     // Server 2025).
@@ -669,6 +708,10 @@ partial class Simulation
                 if (!context.Batch.IsSkipping)
                     target.BrokerEnabled = !BuiltInToken.Equals(name, "DISABLE_BROKER");
                 return true;
+            case AlterDatabaseOptionKind.State:
+                return ConsumeDatabaseStateOption(context, target, name);
+            case AlterDatabaseOptionKind.Special:
+                return ConsumeSpecialDatabaseOption(context, target, name);
             case AlterDatabaseOptionKind.AccessMode:
                 if (!ConsumeTerminationClause(context))
                     return false;
@@ -712,9 +755,12 @@ partial class Simulation
             "CONCAT_NULL_YIELDS_NULL" => DatabaseSwitches.ConcatNullYieldsNull,
             "CURSOR_CLOSE_ON_COMMIT" => DatabaseSwitches.CursorCloseOnCommit,
             "DATE_CORRELATION_OPTIMIZATION" => DatabaseSwitches.DateCorrelationOptimization,
+            "HONOR_BROKER_PRIORITY" => DatabaseSwitches.HonorBrokerPriority,
             "MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT" => DatabaseSwitches.MemoryOptimizedElevateToSnapshot,
+            "MIXED_PAGE_ALLOCATION" => DatabaseSwitches.MixedPageAllocation,
             "NUMERIC_ROUNDABORT" => DatabaseSwitches.NumericRoundAbort,
             "QUOTED_IDENTIFIER" => DatabaseSwitches.QuotedIdentifier,
+            "SUPPLEMENTAL_LOGGING" => DatabaseSwitches.SupplementalLogging,
             "TEMPORAL_HISTORY_RETENTION" => DatabaseSwitches.TemporalHistoryRetention,
             _ => DatabaseSwitches.None,
         };
@@ -759,8 +805,25 @@ partial class Simulation
     /// clause's last token (or where it was when no WITH follows), per the
     /// leave-on-last-token convention the other tail consumers use.
     /// </summary>
-    private static bool ConsumeTerminationClause(ParserContext context)
+    private static bool ConsumeTerminationClause(ParserContext context) =>
+        TryConsumeTerminationClause(context, out _, out _);
+
+    /// <summary>Which termination clause an <c>ALTER DATABASE … SET</c> option ended with.</summary>
+    private enum TerminationClause
     {
+        None,
+        NoWait,
+        Rollback,
+    }
+
+    /// <summary>
+    /// <see cref="ConsumeTerminationClause"/>, reporting which clause it read and,
+    /// for <c>ROLLBACK AFTER n</c>, its seconds (0 for <c>ROLLBACK IMMEDIATE</c>).
+    /// </summary>
+    private static bool TryConsumeTerminationClause(ParserContext context, out TerminationClause clause, out int rollbackAfterSeconds)
+    {
+        clause = TerminationClause.None;
+        rollbackAfterSeconds = 0;
         var beforeWith = context.SaveCheckpoint();
         if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.With })
         {
@@ -774,16 +837,21 @@ partial class Simulation
         // starting keyword. Cursor is left on the clause's last token.
         var termination = context.GetNextRequired();
         if (IsBareWord(termination, "NO_WAIT"))
+        {
+            clause = TerminationClause.NoWait;
             return true;
+        }
         if (termination is not ReservedKeyword { Keyword: Keyword.Rollback })
             return false;
+        clause = TerminationClause.Rollback;
         var rollbackKind = context.GetNextRequired();
         if (IsBareWord(rollbackKind, "IMMEDIATE"))
             return true;
         if (!IsBareWord(rollbackKind, "AFTER"))
             return false;
-        if (context.GetNextRequired() is not Numeric { Value.IsNull: false })
+        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } seconds })
             return false;
+        rollbackAfterSeconds = seconds.AsInt32;
         // Optional trailing SECONDS.
         var beforeSeconds = context.SaveCheckpoint();
         if (!IsBareWord(context.GetNextOptional(), "SECONDS"))

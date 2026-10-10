@@ -97,7 +97,10 @@ partial class Simulation
         // SELECT INTO creates the destination, so a read-only database refuses
         // it whatever the source produces — including no rows at all
         // (probe-confirmed). A #temp destination resolves no schema and stays
-        // legal.
+        // legal. An emergency-mode database's refusal (Msg 3908) comes before
+        // any row is written, so real sends no Msg 3621 after it.
+        if (owningDatabase is { State: DatabaseState.Emergency })
+            batch.CurrentStatement.WritesRows = false;
         owningDatabase?.RejectWriteWhenReadOnly();
         // tempdb carries no user CLR type, so a temporary destination can't
         // take a column of one (probed 2026-09-28 against SQL Server 2025).

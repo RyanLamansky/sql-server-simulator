@@ -17,6 +17,9 @@ partial class Simulation
     /// <summary><c>configuration_id</c> of <c>clr strict security</c>.</summary>
     private const int ClrStrictSecurityConfigurationId = 1587;
 
+    /// <summary><c>configuration_id</c> of <c>contained database authentication</c>.</summary>
+    private const int ContainedDatabaseAuthenticationConfigurationId = 16393;
+
     private static readonly SqlType[] SpConfigureSchema =
     [
         SqlType.NVarchar, SqlType.Int32, SqlType.Int32, SqlType.Int32, SqlType.Int32,

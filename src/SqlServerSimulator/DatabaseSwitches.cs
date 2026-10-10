@@ -37,6 +37,13 @@ internal enum DatabaseSwitches
     /// </summary>
     MemoryOptimizedElevateToSnapshot = 1 << 19,
 
+    HonorBrokerPriority = 1 << 20,
+
+    /// <summary>On in <c>master</c>, <c>model</c> and <c>msdb</c>, which pin it, and off in every other database (probed 2026-10-09 against SQL Server 2025).</summary>
+    MixedPageAllocation = 1 << 21,
+
+    SupplementalLogging = 1 << 22,
+
     /// <summary>What every database, system or user, starts with (probed 2026-09-26 against SQL Server 2025).</summary>
     Defaults = AutoCreateStatistics | AutoUpdateStatistics | TemporalHistoryRetention,
 }

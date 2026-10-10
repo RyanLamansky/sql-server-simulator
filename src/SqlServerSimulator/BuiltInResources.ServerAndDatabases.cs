@@ -1214,9 +1214,10 @@ internal static partial class BuiltInResources
         var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
         var zeroGuid = SqlValue.FromGuid(Guid.Empty);
         var online = SqlValue.FromNVarchar("ONLINE");
+        var emergency = SqlValue.FromNVarchar("EMERGENCY");
+        var offline = SqlValue.FromNVarchar("OFFLINE");
         var nothing = SqlValue.FromNVarchar("NOTHING");
         var none = SqlValue.FromNVarchar("NONE");
-        var disabled = SqlValue.FromNVarchar("DISABLED");
         var databaseDefault = SqlValue.FromNVarchar("DATABASE_DEFAULT");
         var unsupported = SqlValue.FromNVarchar("UNSUPPORTED");
         var zeroInt = SqlValue.FromInt32(0);
@@ -1258,11 +1259,16 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(db.IsReadOnly), // is_read_only
                 Switch(DatabaseSwitches.AutoClose),
                 Switch(DatabaseSwitches.AutoShrink),
-                zeroByte,
-                online,
+                SqlValue.FromByte((byte)db.State),
+                db.State switch
+                {
+                    DatabaseState.Emergency => emergency,
+                    DatabaseState.Offline => offline,
+                    _ => online,
+                },
                 falseBit,
                 falseBit,
-                falseBit,
+                Switch(DatabaseSwitches.SupplementalLogging),
                 SqlValue.FromByte((byte)(snapshotOn ? 1 : 0)),
                 SqlValue.FromNVarchar(snapshotOn ? "ON" : "OFF"),
                 SqlValue.FromBoolean(db.ReadCommittedSnapshot),
@@ -1315,7 +1321,7 @@ internal static partial class BuiltInResources
                 Switch(DatabaseSwitches.DateCorrelationOptimization),
                 falseBit,
                 falseBit,
-                falseBit,
+                Switch(DatabaseSwitches.HonorBrokerPriority),
                 nullGuid,
                 nullGuid,
                 nullInt,
@@ -1329,12 +1335,17 @@ internal static partial class BuiltInResources
                 zeroByte,
                 none,
                 SqlValue.FromInt32(db.TargetRecoveryTimeSeconds),
-                zeroInt,
-                disabled,
+                SqlValue.FromInt32(db.DelayedDurability),
+                SqlValue.FromNVarchar(db.DelayedDurability switch
+                {
+                    1 => "ALLOWED",
+                    2 => "FORCED",
+                    _ => "DISABLED",
+                }),
                 Switch(DatabaseSwitches.MemoryOptimizedElevateToSnapshot),
                 falseBit, // is_federation_member
                 falseBit, // is_remote_data_archive_enabled
-                falseBit, // is_mixed_page_allocation_on
+                Switch(DatabaseSwitches.MixedPageAllocation),
                 Switch(DatabaseSwitches.TemporalHistoryRetention),
                 zeroInt,
                 databaseDefault,

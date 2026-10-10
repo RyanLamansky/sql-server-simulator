@@ -337,8 +337,99 @@ partial class SimulatedSqlException
     /// <c>model</c> and <c>msdb</c> both accept it.
     /// </summary>
     internal static SimulatedSqlException OptionCannotBeSetInDatabase(string option, string databaseName) =>
-        new($"Option '{option}' cannot be set in database '{databaseName}'.", 5058, 16,
-            Collation.Baseline.Equals(databaseName, Simulation.TempdbDatabaseName) ? (byte)4 : (byte)5);
+        OptionCannotBeSetInDatabase(option, databaseName, Collation.Baseline.Equals(databaseName, Simulation.TempdbDatabaseName) ? (byte)4 : (byte)5);
+
+    /// <summary>
+    /// Msg 5058 at the state real gives <paramref name="option"/>, which
+    /// varies by option (probed 2026-10-09 against SQL Server 2025:
+    /// HONOR_BROKER_PRIORITY 10, MIXED_PAGE_ALLOCATION 9, SUPPLEMENTAL_LOGGING
+    /// 2 in <c>master</c> and 1 in <c>tempdb</c>).
+    /// </summary>
+    internal static SimulatedSqlException OptionCannotBeSetInDatabase(string option, string databaseName, byte state) =>
+        new($"Option '{option}' cannot be set in database '{databaseName}'.", 5058, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 12807: an <c>ALTER DATABASE … SET</c> option
+    /// only a contained database takes, named in lower case whatever its
+    /// spelling (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OptionNeedsContainedDatabase(string option) =>
+        new($"The option '{option}' cannot be set on non-contained database.", 12807, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 12824: <c>ALTER DATABASE … SET CONTAINMENT =
+    /// PARTIAL</c> while the server option is off (probed 2026-10-09 against
+    /// SQL Server 2025; the double space is real's).
+    /// </summary>
+    internal static SimulatedSqlException ContainedDatabaseAuthenticationRequired() =>
+        new("The sp_configure value 'contained database authentication' must be set to 1 in order to alter a contained database.  You may need to use RECONFIGURE to set the value_in_use.", 12824, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 33106: <c>ALTER DATABASE … SET ENCRYPTION</c>
+    /// on a database with no database encryption key (probed 2026-10-09
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoDatabaseEncryptionKey() =>
+        new("Cannot change database encryption state because no database encryption key is set.", 33106, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 942: a reference to an offline database — a
+    /// <c>USE</c>, a three-part name, a call into it — as the statement runs.
+    /// It ends the batch past any <c>TRY</c> and rolls the transaction back
+    /// (probed 2026-10-10 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseIsOffline(string databaseName) =>
+        new($"Database '{databaseName}' cannot be opened because it is offline.", 942, 14, 4) { AbortsTransaction = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 3908: a write that changes rows in a database in
+    /// emergency mode. A <c>TRY</c> catches it; uncaught, it ends the batch
+    /// and leaves an open transaction committable (probed 2026-10-10 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotBeginTransactionInEmergencyDatabase(string databaseName) =>
+        new($"Could not run BEGIN TRANSACTION in database '{databaseName}' because the database is in emergency mode or is damaged and must be restarted.", 3908, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 5070: <c>ALTER DATABASE … SET</c> a new state
+    /// <c>WITH NO_WAIT</c> while another session uses the database (probed
+    /// 2026-10-10 against SQL Server 2025, which answers it after a wait of
+    /// its own).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseStateInUse(string databaseName) =>
+        new($"Database state cannot be changed while other users are using the database '{databaseName}'", 5070, 16, 2);
+
+
+    /// <summary>
+    /// Mimics SQL Server error 15702: <c>ALTER DATABASE … SET
+    /// AUTOMATIC_TUNING</c> on <c>master</c> or <c>tempdb</c> (probed
+    /// 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AutomaticTuningOnSystemDatabase(string databaseName) =>
+        new($"Cannot perform action because Automatic Tuning cannot be enabled on system database {databaseName}.", 15702, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 33401: <c>ALTER DATABASE … SET FILESTREAM</c>
+    /// on any system database (probed 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FileStreamOptionsOnSystemDatabase(string databaseName) =>
+        new($"FILESTREAM database options cannot be set on system databases such as '{databaseName}'.", 33401, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10770: <c>REMOTE_DATA_ARCHIVE = ON ( … )</c>
+    /// without both a server and a credential, a compile error (probed
+    /// 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RemoteDataArchiveOptionsRequired() =>
+        new("The SERVER option and one of CREDENTIAL or FEDERATED_SERVICE_ACCOUNT = ON options are required for setting REMOTE_DATA_ARCHIVE on a database.", 10770, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 190, which <c>ALTER DATABASE … SET
+    /// TWO_DIGIT_YEAR_CUTOFF</c> raises for a year outside 1753–9999 (probed
+    /// 2026-10-09 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidDateOrTimeInStatement() =>
+        new("An invalid date or time was specified in the statement.", 190, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 12438: <c>ALTER DATABASE … SET QUERY_STORE</c>

@@ -369,4 +369,94 @@ public class AlterDatabaseOptionsTests
             select concat_ws(',', cast(databasepropertyex('master', 'IsFulltextEnabled') as int), cast(databasepropertyex('model', 'IsFulltextEnabled') as int),
                 cast(databasepropertyex('tempdb', 'IsFulltextEnabled') as int), cast(databasepropertyex('msdb', 'IsFulltextEnabled') as int), cast(databasepropertyex(db_name(), 'IsFulltextEnabled') as int))
             """));
+
+    // ---- options probed 2026-10-09 against SQL Server 2025 ----
+
+    [TestMethod]
+    [DataRow("ALTER DATABASE simulated SET HONOR_BROKER_PRIORITY OFF")]
+    [DataRow("ALTER DATABASE CURRENT SET HONOR_BROKER_PRIORITY ON")]
+    [DataRow("ALTER DATABASE simulated SET DELAYED_DURABILITY = ALLOWED WITH ROLLBACK IMMEDIATE")]
+    [DataRow("ALTER DATABASE simulated SET MIXED_PAGE_ALLOCATION OFF")]
+    [DataRow("ALTER DATABASE simulated SET SUPPLEMENTAL_LOGGING OFF")]
+    [DataRow("ALTER DATABASE simulated SET ONLINE")]
+    [DataRow("ALTER DATABASE simulated SET ONLINE WITH ROLLBACK IMMEDIATE")]
+    [DataRow("ALTER DATABASE simulated SET ONLINE, HONOR_BROKER_PRIORITY ON")]
+    [DataRow("ALTER DATABASE simulated SET CONTAINMENT = NONE WITH NO_WAIT")]
+    [DataRow("ALTER DATABASE simulated SET AUTOMATIC_TUNING = AUTO")]
+    [DataRow("ALTER DATABASE simulated SET AUTOMATIC_TUNING = CUSTOM WITH NO_WAIT")]
+    [DataRow("ALTER DATABASE simulated SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = DEFAULT)")]
+    [DataRow("ALTER DATABASE simulated SET FILESTREAM (NON_TRANSACTED_ACCESS = FULL) WITH NO_WAIT")]
+    [DataRow("ALTER DATABASE simulated SET REMOTE_DATA_ARCHIVE = OFF")]
+    [DataRow("ALTER DATABASE tempdb SET HONOR_BROKER_PRIORITY ON")]
+    [DataRow("ALTER DATABASE model SET ONLINE")]
+    [DataRow("ALTER DATABASE msdb SET SUPPLEMENTAL_LOGGING ON")]
+    [DataRow("ALTER DATABASE model SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON)")]
+    public void ProbedOption_IsAccepted(string sql)
+        => AreEqual(-1, new Simulation().ExecuteNonQuery(sql));
+
+    [TestMethod]
+    public void RecordedOptions_ShowInTheCatalog()
+        => AreEqual("1|2|FORCED|1|1|1|0|READ_ONLY|zz", new Simulation().ExecuteScalar("""
+            ALTER DATABASE simulated SET HONOR_BROKER_PRIORITY ON, DELAYED_DURABILITY = FORCED, MIXED_PAGE_ALLOCATION ON, SUPPLEMENTAL_LOGGING ON;
+            ALTER DATABASE simulated SET FILESTREAM (NON_TRANSACTED_ACCESS = READ_ONLY, DIRECTORY_NAME = N'zz');
+            select concat_ws('|', d.is_honor_broker_priority_on, d.delayed_durability, d.delayed_durability_desc collate database_default, d.is_mixed_page_allocation_on,
+                d.is_supplemental_logging_enabled, m.is_mixed_page_allocation_on, t.is_mixed_page_allocation_on, f.non_transacted_access_desc collate database_default, f.directory_name collate database_default)
+            from sys.databases d
+            join sys.databases m on m.name = 'master'
+            join sys.databases t on t.name = 'tempdb'
+            join sys.database_filestream_options f on f.database_id = d.database_id
+            where d.name = 'simulated'
+            """));
+
+    [TestMethod]
+    [DataRow("ALTER DATABASE simulated SET DELAYED_DURABILITY = BOGUS", 102, "Incorrect syntax near 'BOGUS'.")]
+    [DataRow("ALTER DATABASE simulated SET DELAYED_DURABILITY DISABLED", 102, "Incorrect syntax near 'DISABLED'.")]
+    [DataRow("ALTER DATABASE simulated SET HONOR_BROKER_PRIORITY = ON", 102, "Incorrect syntax near 'HONOR_BROKER_PRIORITY'.")]
+    [DataRow("ALTER DATABASE simulated SET ANSI_NULLS = ON", 102, "Incorrect syntax near 'ANSI_NULLS'.")]
+    [DataRow("ALTER DATABASE simulated SET HONOR_BROKER_PRIORITY MAYBE", 102, "Incorrect syntax near 'MAYBE'.")]
+    [DataRow("ALTER DATABASE simulated SET AUTOMATIC_TUNING = INHERIT", 102, "Incorrect syntax near 'INHERIT'.")]
+    [DataRow("ALTER DATABASE simulated SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON, CREATE_INDEX = ON)", 102, "Incorrect syntax near 'CREATE_INDEX'.")]
+    [DataRow("ALTER DATABASE simulated SET NESTED_TRIGGERS = MAYBE", 102, "Incorrect syntax near 'NESTED_TRIGGERS'.")]
+    [DataRow("ALTER DATABASE simulated SET REMOTE_DATA_ARCHIVE = ON (SERVER = N'x')", 10770, "The SERVER option and one of CREDENTIAL or FEDERATED_SERVICE_ACCOUNT = ON options are required for setting REMOTE_DATA_ARCHIVE on a database.")]
+    [DataRow("ALTER DATABASE simulated SET TWO_DIGIT_YEAR_CUTOFF = 1752", 190, "An invalid date or time was specified in the statement.")]
+    [DataRow("ALTER DATABASE master SET MIXED_PAGE_ALLOCATION ON", 5058, "Option 'MIXED_PAGE_ALLOCATION' cannot be set in database 'master'.")]
+    [DataRow("ALTER DATABASE tempdb SET SUPPLEMENTAL_LOGGING ON", 5058, "Option 'SUPPLEMENTAL_LOGGING' cannot be set in database 'tempdb'.")]
+    [DataRow("ALTER DATABASE master SET ONLINE", 5058, "Option 'ONLINE' cannot be set in database 'master'.")]
+    public void ProbedOption_RaisesRealsError(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    [DataRow("ALTER DATABASE simulated SET Two_Digit_Year_Cutoff = 2049", 12807, "The option 'two_digit_year_cutoff' cannot be set on non-contained database.")]
+    [DataRow("ALTER DATABASE simulated SET DEFAULT_LANGUAGE = English", 12807, "The option 'default_language' cannot be set on non-contained database.")]
+    [DataRow("ALTER DATABASE simulated SET DEFAULT_FULLTEXT_LANGUAGE = 1033", 12807, "The option 'default_fulltext_language' cannot be set on non-contained database.")]
+    [DataRow("ALTER DATABASE simulated SET NESTED_TRIGGERS = OFF", 12807, "The option 'nested_triggers' cannot be set on non-contained database.")]
+    [DataRow("ALTER DATABASE simulated SET TRANSFORM_NOISE_WORDS = ON", 12807, "The option 'transform_noise_words' cannot be set on non-contained database.")]
+    [DataRow("ALTER DATABASE simulated SET ENCRYPTION ON", 33106, "Cannot change database encryption state because no database encryption key is set.")]
+    [DataRow("ALTER DATABASE simulated SET HONOR_BROKER_PRIORITY ON, ENCRYPTION SUSPEND", 33106, "Cannot change database encryption state because no database encryption key is set.")]
+    [DataRow("ALTER DATABASE simulated SET CONTAINMENT = PARTIAL", 12824, "The sp_configure value 'contained database authentication' must be set to 1 in order to alter a contained database.  You may need to use RECONFIGURE to set the value_in_use.")]
+    [DataRow("ALTER DATABASE tempdb SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON)", 15702, "Cannot perform action because Automatic Tuning cannot be enabled on system database tempdb.")]
+    [DataRow("ALTER DATABASE msdb SET FILESTREAM (NON_TRANSACTED_ACCESS = OFF)", 33401, "FILESTREAM database options cannot be set on system databases such as 'msdb'.")]
+    [DataRow("ALTER DATABASE model SET HONOR_BROKER_PRIORITY ON", 5058, "Option 'HONOR_BROKER_PRIORITY' cannot be set in database 'model'.")]
+    public void ProbedOption_RaisesRealsErrorThenMsg5069(string sql, int number, string message)
+    {
+        var error = new Simulation().AssertSqlError(sql, number);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual(2, error.Errors.Count);
+        AreEqual(5069, error.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void SuspendForSnapshotBackupOff_OnADatabaseNotSuspended_SendsMsg3082()
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add($"{e.Errors[0].Number}:{e.Message}");
+        _ = connection.CreateCommand("ALTER DATABASE simulated SET SUSPEND_FOR_SNAPSHOT_BACKUP = OFF").ExecuteNonQuery();
+        AreEqual("3082:Database 'simulated' is not suspended for snapshot backup.", string.Join("\n", messages));
+    }
+
+    [TestMethod]
+    [DataRow("ALTER DATABASE simulated SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON")]
+    public void UnmodeledDatabaseState_IsNotSupported(string sql)
+        => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(sql));
 }

@@ -70,6 +70,9 @@ public sealed partial class Simulation
         master.TargetRecoveryTimeSeconds = 0;
         master.BrokerEnabled = false;
         this.Databases[ModelDatabaseName].BrokerEnabled = false;
+        master.Switches |= DatabaseSwitches.MixedPageAllocation;
+        this.Databases[ModelDatabaseName].Switches |= DatabaseSwitches.MixedPageAllocation;
+        msdb.Switches |= DatabaseSwitches.MixedPageAllocation;
         // Query Store: model ships on, which is why a fresh user database does
         // too (the QueryStoreOptions field default). master / tempdb refuse the
         // option outright and msdb ships off (probe-confirmed against SQL
@@ -2697,6 +2700,10 @@ public sealed partial class Simulation
     /// lock's 56; probed 2026-10-03), and a trigger body's write refused in the
     /// unit a caught error doomed (Msg 3930; probed 2026-10-04), and a block
     /// predicate refusing a row (Msg 33504; probed 2026-10-04).
+    /// An <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c> or <c>MERGE</c> an
+    /// emergency-mode database refuses (Msg 3908) earns it though the error
+    /// ends the batch, where a <c>SELECT … INTO</c> or <c>TRUNCATE</c> earns
+    /// none (probed 2026-10-10).
     /// A <c>WRITETEXT</c> or <c>UPDATETEXT</c> its pointer's value, offset or
     /// bulk data failed earns it though the error ends the batch, at line 1
     /// (probed 2026-10-07; see <see cref="StatementContext.WritesText"/>).
@@ -2707,6 +2714,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
+        || (error.Number == 3908 && batch.CurrentStatement.WritesRows)
         || ((batch.CurrentStatement.WritesText || error.EndedTextWrite) && error.Number is 518 or 4002 or 4022 or 7116 or 7123 or 7125 or 7133 or 7135)
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127) && !error.RefusedRecompilingDeferred

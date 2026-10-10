@@ -128,11 +128,16 @@ internal sealed class DatabasePropertyEx : Expression
             }),
             "SNAPSHOTISOLATIONSTATE" => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0),
             "SQLSORTORDER" => SqlValue.FromByte(SortIdFor(db.CollationName)),
-            "STATUS" => SqlValue.FromNVarchar(Name128, "ONLINE"),
+            "STATUS" => SqlValue.FromNVarchar(Name128, db.State switch
+            {
+                DatabaseState.Emergency => "EMERGENCY",
+                DatabaseState.Offline => "OFFLINE",
+                _ => "ONLINE",
+            }),
             // The database's access mode, moved by ALTER DATABASE … SET
             // { READ_ONLY | READ_WRITE }. SMO's database-properties preamble
             // reads it as [IsUpdateable].
-            "UPDATEABILITY" => SqlValue.FromNVarchar(Name128, db.IsReadOnly ? "READ_ONLY" : "READ_WRITE"),
+            "UPDATEABILITY" => SqlValue.FromNVarchar(Name128, db.IsReadOnly || db.State == DatabaseState.Emergency ? "READ_ONLY" : "READ_WRITE"),
             "USERACCESS" => SqlValue.FromNVarchar(Name128, db.UserAccess switch
             {
                 1 => "SINGLE_USER",

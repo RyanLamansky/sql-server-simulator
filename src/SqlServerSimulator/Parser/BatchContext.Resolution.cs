@@ -471,6 +471,11 @@ internal sealed partial class BatchContext
                 schema = null;
                 return false;
             }
+            // An offline database refuses the reference as the statement runs,
+            // so an untaken branch naming it compiles (probed 2026-10-10
+            // against SQL Server 2025).
+            if (!this.IsSkipping)
+                database.RejectWhenOffline();
         }
         return name.Count == 1 || name.SchemaOmitted
             ? this.TryResolveUnqualified(database, name.Leaf, holds, callerScope, types, out schema)
@@ -554,6 +559,8 @@ internal sealed partial class BatchContext
         if (name.Count != 1 && !name.SchemaOmitted)
             return this.TryResolveSchemaOf(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, out schema);
         var database = name.Count == 3 && this.Connection.Simulation.Databases.TryGetValue(name[0], out var named) ? named : this.CurrentDatabase;
+        if (!this.IsSkipping)
+            database.RejectWhenOffline();
         if (this.CreateSchemaElementScope is { } elementScope)
             return database.Schemas.TryGetValue(elementScope, out schema);
         var target = ReferenceEquals(database, this.CurrentDatabase) ? this.DefaultSchemaName : Database.DefaultSchemaName;
@@ -877,6 +884,8 @@ internal sealed partial class BatchContext
         targetDatabase = this.CurrentDatabase;
         if (name.Count == 3 && !this.Connection.Simulation.Databases.TryGetValue(name[0], out targetDatabase))
             return false;
+        if (!this.IsSkipping)
+            targetDatabase.RejectWhenOffline();
         // A 1-part name resolves only the legacy compatibility views registered
         // under a bare (dot-less) key — sysobjects / sysusers, which live in the
         // sys schema but resolve unqualified (probe-confirmed: bare `sysobjects`

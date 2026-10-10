@@ -2911,9 +2911,17 @@ public sealed class SimulatedDbConnection : DbConnection
         // 4060 shapes. No User ID keeps exactly today's behavior — the default
         // dbo identity — with an optional Initial Catalog switch.
         if (this.pendingUserId is { } userId)
+        {
             this.AuthenticateConnectionStringLogin(userId, this.pendingPassword ?? "", this.pendingInitialCatalog);
+        }
         else if (this.pendingInitialCatalog is { Length: > 0 } catalog)
+        {
+            // An offline database refuses the login as a missing one does
+            // (probed 2026-10-10 against SQL Server 2025: Msg 4060).
+            if (this.Simulation.Databases.TryGetValue(catalog, out var requested) && requested.State == DatabaseState.Offline)
+                throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(catalog);
             this.ChangeDatabase(catalog);
+        }
         this.state = ConnectionState.Open;
     }
 
@@ -2931,7 +2939,7 @@ public sealed class SimulatedDbConnection : DbConnection
         var target = this.CurrentDatabase;
         if (initialCatalog is { Length: > 0 })
         {
-            if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested))
+            if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested) || requested.State == DatabaseState.Offline)
                 throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(initialCatalog);
             target = requested;
         }

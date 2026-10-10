@@ -428,6 +428,8 @@ partial class Simulation
             if (procName.Count >= 3 && systemProcName != "sp_executesql"
                 && batch.Connection.Simulation.Databases.TryGetValue(procName[procName.Count - 3], out var procedureDatabase))
             {
+                if (!batch.IsSkipping)
+                    procedureDatabase.RejectWhenOffline();
                 systemProc = ModuleDatabaseScope.Enumerate(batch.Connection, procedureDatabase, systemProc);
             }
             try

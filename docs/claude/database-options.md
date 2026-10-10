@@ -19,7 +19,10 @@ Only `SET` follows a refusal with Msg 5069: the `COLLATE`, `MODIFY`, `ADD` and `
 ## Recognized options by value shape
 
 **`OnOff`** (`SET <name> {ON | OFF}`):
-- `ANSI_NULL_DEFAULT` / `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` / `NUMERIC_ROUNDABORT` / `QUOTED_IDENTIFIER` / `TORN_PAGE_DETECTION` / `TEMPORAL_HISTORY_RETENTION` / `AUTO_CLOSE` / `AUTO_SHRINK` / `AUTO_CREATE_STATISTICS` (whose `ON` takes an optional `(INCREMENTAL = ON | OFF)`) / `AUTO_UPDATE_STATISTICS` / `AUTO_UPDATE_STATISTICS_ASYNC` / `CURSOR_CLOSE_ON_COMMIT` / `DATE_CORRELATION_OPTIMIZATION`
+- `ANSI_NULL_DEFAULT` / `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` / `NUMERIC_ROUNDABORT` / `QUOTED_IDENTIFIER` / `TORN_PAGE_DETECTION` / `TEMPORAL_HISTORY_RETENTION` / `AUTO_CLOSE` / `AUTO_SHRINK` / `AUTO_CREATE_STATISTICS` (whose `ON` takes an optional `(INCREMENTAL = ON | OFF)`) / `AUTO_UPDATE_STATISTICS` / `AUTO_UPDATE_STATISTICS_ASYNC` / `CURSOR_CLOSE_ON_COMMIT` / `DATE_CORRELATION_OPTIMIZATION` / `HONOR_BROKER_PRIORITY` / `MIXED_PAGE_ALLOCATION` / `SUPPLEMENTAL_LOGGING`
+- An `=` before the toggle is Msg 102 near the option's name, any other wrong word Msg 102 near that word (probed 2026-10-09 against SQL Server 2025).
+- System databases pin three of them, each Msg 5058 at a state of its own (probed 2026-10-09): `HONOR_BROKER_PRIORITY` in `master` and `model` (state 10, then Msg 5069), `MIXED_PAGE_ALLOCATION` in all four (state 9), `SUPPLEMENTAL_LOGGING` in `master` (state 2) and `tempdb` (state 1).
+  `master`, `model` and `msdb` ship with mixed page allocation on.
 
 **`EnumIdent`** (`SET <name> <bareIdent>`):
 - `RECOVERY`: `FULL` / `BULK_LOGGED` / `SIMPLE`
@@ -43,12 +46,26 @@ The state is recorded for the catalog and the termination clause discarded — t
 Load-bearing for `DROP DATABASE`: every ORM/app test-teardown runs `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before the drop (Django/mssql-django).
 Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
 
+**`State`**: `SET {ONLINE | OFFLINE | EMERGENCY}` with the access mode's termination clause — see [Database states](#database-states).
+
+**`Special`** — options with a value grammar of their own, all probed 2026-10-09 against SQL Server 2025 (`Simulation.AlterDatabaseOptions.cs`):
+- `DELAYED_DURABILITY = {DISABLED | ALLOWED | FORCED}`, recorded for `sys.databases`.
+- `FILESTREAM ( NON_TRANSACTED_ACCESS = {OFF | READ_ONLY | FULL} | DIRECTORY_NAME = '…' [, …] )`, recorded for `sys.database_filestream_options`, which lists every database; every system database refuses it (Msg 33401, then 5069).
+  Real's view also carries a row whose `database_id` is NULL, which the simulator leaves out.
+- `AUTOMATIC_TUNING = {AUTO | CUSTOM}` or `AUTOMATIC_TUNING ( FORCE_LAST_GOOD_PLAN = {ON | OFF | DEFAULT} [, …] )`, discarded; `INHERIT` and the other tuning options are Azure SQL Database's and Msg 102 here as on a boxed server, and `master` / `tempdb` refuse it (Msg 15702, then 5069).
+- `CONTAINMENT = {NONE | PARTIAL}`: `NONE` changes nothing, `PARTIAL` is Msg 12824 then 5069 while `contained database authentication` is off.
+- `DEFAULT_LANGUAGE` / `DEFAULT_FULLTEXT_LANGUAGE` / `NESTED_TRIGGERS` / `TRANSFORM_NOISE_WORDS` / `TWO_DIGIT_YEAR_CUTOFF`: every database being non-contained, each is Msg 12807 naming the option in lower case, then 5069 — after `TWO_DIGIT_YEAR_CUTOFF`'s own range check, Msg 190 outside 1753–9999.
+  A value of the wrong shape is Msg 102 near the option's name.
+- `ENCRYPTION {ON | OFF | SUSPEND | RESUME}`: no database encryption key can exist, so each is Msg 33106 then 5069.
+- `SUSPEND_FOR_SNAPSHOT_BACKUP = OFF` sends Msg 3082's notice that the database isn't suspended.
+- `REMOTE_DATA_ARCHIVE = OFF` changes nothing; `= ON ( … )` without both `SERVER` and a `CREDENTIAL` or `FEDERATED_SERVICE_ACCOUNT = ON` is Msg 10770 as the batch compiles.
+
 **`QueryStore`** is not in this list — it is load-bearing, and the only ALTER DATABASE option with a sub-grammar of its own.
 See [Query Store](#query-store).
 
 ## Recorded switches
 
-The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION`, the access mode, `TARGET_RECOVERY_TIME` and the broker switches are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess` / `TargetRecoveryTimeSeconds` / `BrokerEnabled`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
+The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION`, the access mode, `TARGET_RECOVERY_TIME`, `DELAYED_DURABILITY`, `FILESTREAM` and the broker switches are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess` / `TargetRecoveryTimeSeconds` / `DelayedDurability` / `FileStreamNonTransactedAccess` / `BrokerEnabled`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
 Every database, system or user, starts from the same defaults: automatic statistics creation and update and temporal history retention on, page verification `CHECKSUM`, `MULTI_USER`, a target recovery time of 60 seconds, Service Broker enabled, everything else off — save what the system databases ship with (`master` a recovery time of 0, `master` and `model` the broker off, `master` and `msdb` snapshot isolation allowed; probed 2026-09-30).
 `TORN_PAGE_DETECTION OFF` clears torn-page detection alone: a `CHECKSUM` database stays `CHECKSUM` (probed 2026-09-30).
 Turning `AUTO_CREATE_STATISTICS` off takes its incremental mode with it.
@@ -286,6 +303,27 @@ Per-column declarations, the postfix `expr COLLATE name` operator, coercibility 
 
 Not handled here — emitted by SqlPackage as `EXEC sp_fulltext_database 'enable|disable'`, a system sproc the simulator doesn't model.
 See [`full-text.md`](full-text.md) for the broader full-text deferral.
+
+## Database states
+
+`ALTER DATABASE … SET {ONLINE | OFFLINE | EMERGENCY}` moves `Database.State`, which `sys.databases.state` / `state_desc` and `DATABASEPROPERTYEX`'s `Status` report (probed 2026-10-10 against SQL Server 2025, as is everything here).
+- **OFFLINE**: every reference to the database as a statement runs — `USE`, a three-part name, its catalog views, a call into it, `OBJECT_ID` of a name in it, `MODIFY NAME` — is Msg 942 (class 14), which no `TRY` catches and which ends the batch and rolls the transaction back; an untaken branch naming it runs, since the check waits for the statement to run (`!IsSkipping`), and a state change bumps `SchemaVersion` so no cached plan reads past it.
+  A connection naming it is refused with Msg 4060 (then 18456 on the wire), `HAS_DBACCESS` answers 0 and `sp_helpdb` sends its Msg 15622 notice; its other `SET` options still move, and `DROP DATABASE` drops it.
+- **EMERGENCY**: every user still opens and reads it, and `DATABASEPROPERTYEX`'s `Updateability` reads `READ_ONLY`; a write that would change rows is Msg 3908 through the read-only gate (`Database.RejectWriteWhenReadOnly`), which a `TRY` catches and which, uncaught, ends the batch leaving the transaction open and committable, followed by Msg 3621 for a DML statement but not for `SELECT … INTO` or `TRUNCATE`; an `UPDATE` or `DELETE` matching no row runs.
+- **Moving between states** waits for every other session using the database — as its current database, a module's, or one its transaction touched, the sessions `sys.dm_tran_locks` gives a `DATABASE` lock — to leave it, past any `LOCK_TIMEOUT` as real waits, while a cancel or `CommandTimeout` ends the wait.
+  `WITH NO_WAIT` refuses at once with Msg 5070 then 5069; `WITH ROLLBACK IMMEDIATE` (or `AFTER n`, past its wait) sends Msg 5060 twice and ends the sessions in the way as `KILL` does — every other session going offline, only those holding a transaction going into emergency.
+  A session taking its own current database offline lands in `master` with Msg 5068, and setting the state a database already has does nothing.
+
+### Divergences
+
+- Real answers `NO_WAIT`'s Msg 5070 only after a wait of its own, about twenty seconds when probed; the simulator answers at once.
+- `master` and `tempdb` refuse every state as they refuse `ONLINE` (Msg 5058, state 5 and 4); `OFFLINE` and `EMERGENCY` on a system database were not probed, so as not to take one of the reference server's own offline, and `model` and `msdb` take them here.
+
+## Not modeled yet (options)
+
+- A contained database (`CONTAINMENT = PARTIAL` with the server option on, and the five options only it takes), Stretch Database (`REMOTE_DATA_ARCHIVE = ON` with its server and credential) and `SUSPEND_FOR_SNAPSHOT_BACKUP = ON` each raise `NotSupportedException`.
+- `ROLLBACK`'s ending of other sessions' work when a database returns `ONLINE`, which wasn't probed: the simulator ends every other session, as going offline does.
+- `DEFAULT_LANGUAGE` / `DEFAULT_FULLTEXT_LANGUAGE` take any LCID or name, where real raises Msg 9802 for an unsupported LCID before its Msg 12807.
 
 ## Error paths
 

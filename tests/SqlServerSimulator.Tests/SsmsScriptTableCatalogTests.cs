@@ -223,7 +223,6 @@ public sealed class SsmsScriptTableCatalogTests
     [DataRow("sys.registered_search_property_lists", 5)]
     [DataRow("sys.assembly_modules", 6)]
     [DataRow("sys.change_tracking_databases", 6)]
-    [DataRow("sys.database_filestream_options", 4)]
     public void EmptyView_ResolvesWithShape_ZeroRows(string view, int columnCount)
     {
         using var reader = new Simulation().ExecuteReader($"select * from {view}");

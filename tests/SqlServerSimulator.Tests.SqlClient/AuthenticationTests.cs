@@ -172,6 +172,27 @@ public sealed class AuthenticationTests
         AreEqual((byte)14, ex.Errors[1].Class);
     }
 
+    // An offline database refuses the login as a missing one does (probed
+    // 2026-10-10 against SQL Server 2025).
+    [TestMethod]
+    public async Task LoginToOfflineDatabase_Fails4060Then18456()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create database zz; alter database zz set offline");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var connection = new SqlConnection(
+                $"Server=127.0.0.1,{listener.Port};User ID=sa;Password=anything;Database=zz;TrustServerCertificate=True;Pooling=False;Connect Timeout=15;ConnectRetryInterval=1");
+            await connection.OpenAsync(TestContext.CancellationToken);
+        });
+
+        AreEqual(4060, ex.Number);
+        AreEqual("Cannot open database \"zz\" requested by the login. The login failed.", ex.Errors[0].Message);
+        AreEqual(18456, ex.Errors[1].Number);
+    }
+
     // The LOGIN7 requested database maps genuinely: Database=master lands in
     // the real master system database (every Simulation seeds one), no longer
     // aliased to the default. An empty requested database still maps to the
