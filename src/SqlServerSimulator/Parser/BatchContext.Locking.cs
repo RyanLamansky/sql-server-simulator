@@ -90,6 +90,25 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
+    /// Lets go of every Sch-S the statement took since it held
+    /// <paramref name="mark"/> statement-scoped locks — a name lookup's, which
+    /// waits out another transaction's change to the object and keeps
+    /// nothing, as real's metadata functions keep no object lock.
+    /// </summary>
+    public void ReleaseStatementSchemaStabilitySince(int mark)
+    {
+        var held = this.StatementSchemaLocks;
+        for (var i = held.Count - 1; i >= mark; i--)
+        {
+            var (locked, lockedMode, owner) = held[i];
+            if (lockedMode != LockMode.SchemaStability)
+                continue;
+            held.RemoveAt(i);
+            this.Connection.Simulation.LockManager.Release(locked, lockedMode, owner);
+        }
+    }
+
+    /// <summary>
     /// The Sch-M a statement that redefines <paramref name="table"/> or
     /// rewrites its rows wholesale — <c>ALTER TABLE</c>, <c>TRUNCATE</c>,
     /// <c>SWITCH</c> — takes on the table's one object lock, for the statement

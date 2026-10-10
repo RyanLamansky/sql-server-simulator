@@ -160,6 +160,20 @@ partial class Simulation
     /// <paramref name="reported"/> for the caller to emit; one a TRY frame
     /// catches, or that ends the batch, propagates as the statement's own.
     /// </summary>
+    /// <remarks>
+    /// The condition is a statement of its own for locking too: the
+    /// statement-scoped locks it took — the Sch-S of an object it names, a
+    /// <c>READ COMMITTED</c> read's IS — go as it ends, before the branch or
+    /// loop body runs (probed 2026-10-10 against SQL Server 2025:
+    /// <c>sys.dm_tran_locks</c> lists no object lock inside the body of
+    /// <c>IF OBJECT_ID(N'dbo.f') IS NOT NULL</c>, <c>IF dbo.f() = 0</c>,
+    /// <c>IF EXISTS (SELECT * FROM dbo.t)</c> or a <c>WHILE</c> naming the
+    /// function, and another transaction's <c>DROP FUNCTION</c> goes ahead
+    /// beside such a body). Held into the body, the Sch-S deadlocked two
+    /// transactions each running <c>IF EXISTS (… OBJECT_ID(N'dbo.f') …) DROP
+    /// FUNCTION dbo.f</c> at once, each one's drop waiting on the other's
+    /// Sch-S.
+    /// </remarks>
     private static bool RunCondition(BooleanExpression condition, BatchContext batch, out SimulatedSqlException? reported)
     {
         reported = null;
@@ -180,6 +194,10 @@ partial class Simulation
                 ex.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
             reported = ex;
             return false;
+        }
+        finally
+        {
+            batch.ReleaseStatementSchemaLocks();
         }
     }
 

@@ -80,6 +80,12 @@ internal sealed class ObjectId : Expression
         batch.SuspendsModuleSchema = true;
         SqlValue value;
         SchemaObject? contested;
+        // The lookup keeps no lock on what it finds: its Sch-S waits out
+        // another transaction's change to the object and goes at once (probed
+        // 2026-10-10 against SQL Server 2025: sys.dm_tran_locks lists no object
+        // lock in the statement that calls OBJECT_ID, where a call of the
+        // function holds its Sch-S).
+        var heldBefore = batch.StatementSchemaLocks.Count;
         try
         {
             value = this.Resolve(runtime, out contested);
@@ -87,6 +93,7 @@ internal sealed class ObjectId : Expression
         finally
         {
             batch.SuspendsModuleSchema = suspended;
+            batch.ReleaseStatementSchemaStabilitySince(heldBefore);
         }
         // A name another transaction's uncommitted change held answers with
         // the id the lookup found before waiting the change out, so NULL once

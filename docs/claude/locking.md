@@ -104,7 +104,7 @@ Scope (when the lock releases) depends on the mode and surrounding transaction s
 
 | Acquired at                   | Scope                                 |
 | ----------------------------- | ------------------------------------- |
-| `TryResolve*` Sch-S           | Statement end                         |
+| `TryResolve*` Sch-S           | Statement end; an `IF` / `WHILE` condition's as the condition ends (`RunCondition`), an `OBJECT_ID` lookup's at once |
 | Definition Sch-M — the object and its name | COMMIT / ROLLBACK ([Definition changes across transactions](#definition-changes-across-transactions)) |
 | Other DDL site Sch-M          | Statement end                         |
 | Reader RC default IS          | Statement end                         |
@@ -984,6 +984,7 @@ The model is two locks per change, both held to the transaction's end:
 
 A rollback restores the change's own catalog slot, which nothing else can have changed meanwhile, the name being held.
 Without the locks both were released with the statement: two transactions each dropping and creating one function went ahead together, and the first's rollback put the original back over the second's committed body.
+An `IF` condition's locks must not last into its branch, either: two transactions each running `IF EXISTS (… OBJECT_ID(N'dbo.f') …) DROP FUNCTION dbo.f` at once deadlocked while the condition's Sch-S lasted into the `DROP`, each drop waiting on the other's Sch-S, where on real one drops and the other waits and then finds nothing to drop (Msg 3701), or skips the drop (probed 2026-10-10 against SQL Server 2025: no object lock inside such a body, none in a statement calling `OBJECT_ID`).
 
 A definition statement's lock timeout reports state 56 where an object holds the name, 51 where none does, and 47 for a table, synonym, sequence or type's `CREATE`; inside a transaction, uncaught, it ends the batch and rolls the transaction back, a synonym's aside, while a `CATCH` leaves the transaction committable (`SimulatedSqlException.EndsDefinitionTransaction`; see [`transactions.md`](transactions.md#set-xact_abort)).
 A read's ends its statement alone.
