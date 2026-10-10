@@ -124,8 +124,10 @@ An empty table keeps its declared seed.
 - **Two database options are written only when they differ from DacFx's model defaults, which a fresh database doesn't share.**
   An omitted `ServiceBrokerOption` means the broker disabled and an omitted `TargetRecoveryTimePeriod` a recovery time of 0, so the loader applies both when the model leaves them out (probed 2026-09-30 against SQL Server 2025: the reference's imports of WideWorldImporters and InsiteCommerce read 0, and of WideWorldImporters and AdventureWorks the broker off).
   `IsTornPageProtectionOn="False"` becomes `TORN_PAGE_DETECTION OFF`, which leaves a `CHECKSUM` database `CHECKSUM`.
-- **A module body keeps its CRLF line breaks and joins its header with nothing between.**
+- **A module body keeps its CRLF line breaks, joins its header with nothing between, and is followed by its footer.**
   The `HeaderContents` annotation ends where the body's own leading line break begins, and the CDATA body carries raw CRLFs that `XmlReader.Create` would fold to LF, so the model is read without end-of-line normalization; the stored definition then matches the reference's byte for byte (probed 2026-09-30 against SQL Server 2025, WideWorldImporters).
+  Text after the body in the source batch other than trailing whitespace (a `;` ending a view or an inline function — a procedure's stays in its body) is the annotation's `FooterContents`, which the reference's import keeps, so the loader appends it; `Length` equals header + body + footer (probed 2026-10-10 against SQL Server 2025: a sqlpackage export and import of nineteen modules with every ending, each definition matching the simulator's import).
+  DacFx's extract drops a definition's trailing line break, and that round trip restored none; a SQL Server 2022 import of a Configured Commerce bacpac restored one for 27 of its 115 modules, procedures and functions only, with nothing in the model telling them apart (`Length`, `CreateOffset`, the SET-option attributes and the body's last token all fail to), so those definitions end two characters short of that import's.
 - **A column's `MaskingFunction` property is its Dynamic Data Masking function**, and a table's `FilegroupForTextImage` relationship its `TEXTIMAGE_ON` filegroup.
 
 ## BCP wire format

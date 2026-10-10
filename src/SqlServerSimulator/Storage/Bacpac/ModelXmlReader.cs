@@ -2090,7 +2090,11 @@ internal static class ModelXmlReader
     /// SqlMultiStatementTableValuedFunction it lives one level deeper on the
     /// nested <c>SqlScriptFunctionImplementation</c> reached through the
     /// FunctionBody relationship. The emitter concatenates HeaderContents +
-    /// body verbatim and runs the result through the simulator's parser.
+    /// body + FooterContents verbatim and runs the result through the
+    /// simulator's parser. The optional FooterContents is the text that
+    /// followed the body in the original CREATE batch (a trailing <c>;</c>);
+    /// sqlpackage's import keeps it in the stored definition, so it is part
+    /// of the executed text rather than dropped.
     /// </summary>
     /// <remarks>
     /// When a <c>retry</c> list is supplied, a CREATE that fails is queued
@@ -2113,11 +2117,12 @@ internal static class ModelXmlReader
             .FirstOrDefault(e => e.Attribute("Type")?.Value == "SqlScriptFunctionImplementation")
             ?? element;
 
-        var headerContents = bodyHost.Elements(Ns + "Annotation")
+        var annotationProperties = bodyHost.Elements(Ns + "Annotation")
             .Where(a => a.Attribute("Type")?.Value == "SysCommentsObjectAnnotation")
             .SelectMany(a => a.Elements(Ns + "Property"))
-            .FirstOrDefault(p => p.Attribute("Name")?.Value == "HeaderContents")
-            ?.Attribute("Value")?.Value;
+            .ToList();
+        var headerContents = ReadAnnotationValue(annotationProperties, "HeaderContents");
+        var footerContents = ReadAnnotationValue(annotationProperties, "FooterContents");
 
         var body = ReadScriptProperty(bodyHost, bodyPropertyName);
 
@@ -2132,7 +2137,7 @@ internal static class ModelXmlReader
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         // DacFx's body carries its own leading line break, which the stored
         // definition keeps verbatim; a body without one takes a separator.
-        command.CommandText = char.IsWhiteSpace(body[0]) ? headerContents + body : headerContents + "\n" + body;
+        command.CommandText = (char.IsWhiteSpace(body[0]) ? headerContents + body : headerContents + "\n" + body) + footerContents;
 #pragma warning restore CA2100
         try
         {
@@ -2156,6 +2161,12 @@ internal static class ModelXmlReader
                 $"CREATE {objectType} hit unsupported feature: {ex.Message}"));
         }
     }
+
+    /// <summary>The <c>Value</c> of the named property among a <c>SysCommentsObjectAnnotation</c>'s properties, or null when absent.</summary>
+    private static string? ReadAnnotationValue(List<XElement> annotationProperties, string propertyName)
+        => annotationProperties
+            .FirstOrDefault(p => p.Attribute("Name")?.Value == propertyName)
+            ?.Attribute("Value")?.Value;
 
     /// <summary>Whether a <c>SqlIndex</c> element indexes a view.</summary>
     private static bool IndexesAView(XElement element, HashSet<string> viewNames)

@@ -2522,6 +2522,52 @@ public class BacpacLoaderTests
         AreEqual("\r\nCREATE PROCEDURE dbo.p\r\nAS\r\nBEGIN\r\n    SELECT 1;\r\nEND", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.p')"));
     }
 
+    /// <summary>
+    /// DacFx stores text that followed a module's body in the original batch —
+    /// a trailing semicolon — in the annotation's <c>FooterContents</c>, and
+    /// sqlpackage's import keeps it: the stored definition is header, body and
+    /// footer joined, as long as the annotation's <c>Length</c> (probed
+    /// 2026-10-10 against SQL Server 2025 through a sqlpackage round trip).
+    /// </summary>
+    [TestMethod]
+    public void ModuleText_KeepsFooterAfterBody()
+    {
+        const string header = "\ncreate view dbo.V with schemabinding\r\nas";
+        const string body = "\r\n\r\n-- counts per key\r\nselect\r\n\tK,\r\n\tcount_big(*) \"Count\"\r\nfrom dbo.T\r\ngroup by\r\n\tK";
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t.Column("K", "int"))
+            .View("dbo", "V", header, body, ";")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(header + body + ";", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.V')"));
+    }
+
+    /// <summary>
+    /// Every module kind carries its footer the same way — a scalar function's
+    /// on the nested <c>SqlScriptFunctionImplementation</c> — and a footer
+    /// holding whitespace or a trailing comment rather than a semicolon still
+    /// parses as the end of the CREATE.
+    /// </summary>
+    [TestMethod]
+    public void ModuleText_KeepsFooterOnEveryModuleKind()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t.Column("Id", "int"))
+            .Procedure("dbo", "p", "\r\nCREATE PROCEDURE dbo.p\r\nAS", "\r\nBEGIN\r\n    SELECT 1;\r\nEND", ";\r\n-- trailing note")
+            .ScalarFunction("dbo", "f", "\r\nCREATE FUNCTION dbo.f()\r\nRETURNS int\r\nAS", "\r\nBEGIN\r\n    RETURN 1;\r\nEND", "  -- after body")
+            .Trigger("dbo", "T", "tr", "\r\nCREATE TRIGGER dbo.tr ON dbo.T AFTER INSERT\r\nAS", "\r\nSET NOCOUNT ON", ";")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("\r\nCREATE PROCEDURE dbo.p\r\nAS\r\nBEGIN\r\n    SELECT 1;\r\nEND;\r\n-- trailing note", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.p')"));
+        AreEqual("\r\nCREATE FUNCTION dbo.f()\r\nRETURNS int\r\nAS\r\nBEGIN\r\n    RETURN 1;\r\nEND  -- after body", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.f')"));
+        AreEqual("\r\nCREATE TRIGGER dbo.tr ON dbo.T AFTER INSERT\r\nAS\r\nSET NOCOUNT ON;", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.tr')"));
+        AreEqual(1, sim.ExecuteScalar("select dbo.f()"));
+    }
+
     /// <summary>A column's <c>MaskingFunction</c> property imports as its mask.</summary>
     [TestMethod]
     public void MaskingFunction_ImportsAsColumnMask()

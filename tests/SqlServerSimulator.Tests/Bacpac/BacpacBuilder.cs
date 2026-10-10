@@ -99,6 +99,18 @@ public sealed partial class BacpacBuilder
         return this;
     }
 
+    /// <summary>
+    /// Adds a view as DacFx writes one: the <c>CREATE VIEW … AS</c> header in
+    /// the <c>HeaderContents</c> annotation, the query in <c>QueryScript</c>,
+    /// and whatever followed it in the original batch in <c>FooterContents</c>.
+    /// </summary>
+    public BacpacBuilder View(string schemaName, string viewName, string header, string body, string footer)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlView", "QueryScript", schemaName, viewName, body, FunctionBodyHost: false, Header: header, Footer: footer));
+        return this;
+    }
+
     /// <summary>Adds a CREATE PROCEDURE emission.</summary>
     public BacpacBuilder Procedure(string schemaName, string procedureName, string createStatement)
     {
@@ -110,11 +122,12 @@ public sealed partial class BacpacBuilder
     /// <summary>
     /// Adds a procedure as DacFx writes one: the <c>CREATE PROCEDURE … AS</c>
     /// header in the <c>HeaderContents</c> annotation, and the body — which
-    /// starts with its own line break — in <c>BodyScript</c>.
+    /// starts with its own line break — in <c>BodyScript</c>, and an optional
+    /// <c>FooterContents</c> annotation for text that followed the body.
     /// </summary>
-    public BacpacBuilder Procedure(string schemaName, string procedureName, string header, string body)
+    public BacpacBuilder Procedure(string schemaName, string procedureName, string header, string body, string? footer = null)
     {
-        _programmableObjects.Add(new ProgrammableObjectDef("SqlProcedure", "BodyScript", schemaName, procedureName, body, FunctionBodyHost: false, Header: header));
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlProcedure", "BodyScript", schemaName, procedureName, body, FunctionBodyHost: false, Header: header, Footer: footer));
         return this;
     }
 
@@ -123,6 +136,17 @@ public sealed partial class BacpacBuilder
     {
         _ = _schemas.Add(schemaName);
         _programmableObjects.Add(new ProgrammableObjectDef("SqlScalarFunction", "BodyScript", schemaName, functionName, createStatement, FunctionBodyHost: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a scalar function as DacFx writes one, its header, body and footer
+    /// on the nested <c>SqlScriptFunctionImplementation</c>.
+    /// </summary>
+    public BacpacBuilder ScalarFunction(string schemaName, string functionName, string header, string body, string footer)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlScalarFunction", "BodyScript", schemaName, functionName, body, FunctionBodyHost: true, Header: header, Footer: footer));
         return this;
     }
 
@@ -144,6 +168,14 @@ public sealed partial class BacpacBuilder
     {
         _ = _schemas.Add(schemaName);
         _programmableObjects.Add(new ProgrammableObjectDef("SqlDmlTrigger", "BodyScript", schemaName, triggerName, createStatement, FunctionBodyHost: false, ParentTable: parentTable));
+        return this;
+    }
+
+    /// <summary>Adds a DML trigger as DacFx writes one, with its header, body and footer apart.</summary>
+    public BacpacBuilder Trigger(string schemaName, string parentTable, string triggerName, string header, string body, string footer)
+    {
+        _ = _schemas.Add(schemaName);
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlDmlTrigger", "BodyScript", schemaName, triggerName, body, FunctionBodyHost: false, ParentTable: parentTable, Header: header, Footer: footer));
         return this;
     }
 
@@ -332,7 +364,7 @@ public sealed partial class BacpacBuilder
     /// <summary>
     /// Emits an <c>SqlIndex</c> element whose IndexedObject points at a view
     /// — an indexed view. The referenced view must be created (via
-    /// <see cref="View"/>) <c>WITH SCHEMABINDING</c>. Defaults to
+    /// <see cref="View(string, string, string)"/>) <c>WITH SCHEMABINDING</c>. Defaults to
     /// <c>IsUnique=True IsClustered=True</c> (the required first index on a
     /// view); the loader emits <c>CREATE UNIQUE CLUSTERED INDEX … ON
     /// &lt;view&gt;</c>.
@@ -1314,11 +1346,19 @@ public sealed partial class BacpacBuilder
             bodyHost = element;
         }
 
-        bodyHost.Add(new XElement(ns + "Annotation",
+        var annotation = new XElement(ns + "Annotation",
             new XAttribute("Type", "SysCommentsObjectAnnotation"),
             new XElement(ns + "Property",
                 new XAttribute("Name", "HeaderContents"),
-                new XAttribute("Value", prog.Header ?? "-- header"))));
+                new XAttribute("Value", prog.Header ?? "-- header")));
+        if (prog.Footer is not null)
+        {
+            annotation.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "FooterContents"),
+                new XAttribute("Value", prog.Footer)));
+        }
+
+        bodyHost.Add(annotation);
         bodyHost.Add(new XElement(ns + "Property",
             new XAttribute("Name", prog.BodyPropertyName),
             new XElement(ns + "Value", new XCData(prog.CreateStatement))));
@@ -1339,7 +1379,8 @@ internal sealed record ProgrammableObjectDef(
     string CreateStatement,
     bool FunctionBodyHost,
     string? ParentTable = null,
-    string? Header = null);
+    string? Header = null,
+    string? Footer = null);
 
 internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint, Unknown, DdlTrigger, Filegroup }
 
