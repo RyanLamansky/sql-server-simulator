@@ -874,15 +874,20 @@ internal sealed partial class Selection
         return deleted;
     }
 
-    // Orders a stored value against a probe; a pair that doesn't compare
-    // cleanly reads as equal, so the wait errs toward waiting.
+    // Orders a stored value against a probe, both brought to the type the
+    // comparison promotes them to — a probe arrives as written, so an
+    // nvarchar(5) literal meets an nvarchar(8) column — and a pair that
+    // doesn't compare cleanly reads as equal, so the wait errs toward waiting.
     private static int ProbeCompare(SqlValue stored, SqlValue probe)
     {
         try
         {
-            return stored.CompareTo(probe);
+            if (stored.Type == probe.Type)
+                return stored.CompareTo(probe);
+            var common = SqlType.Promote(stored.Type, probe.Type);
+            return stored.CoerceTo(common).CompareTo(probe.CoerceTo(common));
         }
-        catch (Exception e) when (e is SimulatedSqlException or InvalidOperationException or InvalidCastException)
+        catch (Exception e) when (e is SimulatedSqlException or InvalidOperationException or InvalidCastException or NotSupportedException)
         {
             return 0;
         }

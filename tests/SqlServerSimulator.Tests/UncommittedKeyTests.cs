@@ -243,6 +243,35 @@ public sealed class UncommittedKeyTests
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// A seek's probe meets the deleted row's stored key as its own type — a
+    /// literal shorter than the column, here — and still matches it and waits,
+    /// where comparing the two unconverted raised NotSupportedException in the
+    /// reader.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from a where d = N'Eagle'", true)]
+    [DataRow("select id from a where d in (N'Eagle', N'Kiwi')", true)]
+    [DataRow("select id from a where d = 'Eagle'", true)]
+    [DataRow("select id from a where d = N'Rose'", false)]
+    public void SeekOverAnUncommittedDelete_ByAShorterLiteral_Waits(string read, bool waits)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table a (id int primary key, d nvarchar(8) not null); create index ix on a(d); insert a values (1, N'Eagle'), (2, N'Kiwi'), (3, N'Rose')");
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; delete a where id = 1").ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        if (waits)
+            AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand(read).ExecuteScalar()).Number);
+        else
+            AreEqual(3, other.CreateCommand(read).ExecuteScalar());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
     [TestMethod]
     public async Task ScanOverAnUncommittedDelete_SeesTheRowAgainAfterRollback()
     {
