@@ -101,6 +101,8 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   The session notices it *concurrently* — see [Mid-stream attention](#mid-stream-attention-cancel) below — aborts the batch at the next safe point, ends the interrupted response with a `DONE_ERROR` DONE, and acknowledges with a DONE carrying `DONE_ATTN` as a message of its own, with **no error token** (SqlClient synthesizes the surfaced exception itself: Msg -2 "Execution Timeout Expired" for a timeout, Msg 0 for an explicit cancel).
   The session stays alive and reusable.
   An idle attention (or one racing a just-completed response) is acked with the `DONE_ATTN` alone.
+  The attention is the only deadline a wire command has: real ends nothing on a server-side timer — a 35-second `WAITFOR` under `CommandTimeout = 3600` returned after 35 seconds, and a `CommandTimeout` shorter than a `WAITFOR` raised Msg -2 with the connection still open (probed 2026-10-10 against SQL Server 2025) — so the session's commands carry no timeout of their own (`TdsSession.CreateCommand`).
+  `CommandDeadlineWireTests` shortens the in-process default per simulation (`Simulation.DefaultCommandTimeout`) so a wire command outlasting it needs no 30-second wait.
 - **Bulk-load (7)**: `SqlBulkCopy` — the `INSERT BULK` SQL batch opens bulk mode and the following BulkLoadBCP data packet streams rows.
   Full flow + options matrix in [Bulk load](#bulk-load-sqlbulkcopy) below.
   A `WRITETEXT BULK` / `UPDATETEXT BULK` takes the same packet type for its data, a 4-byte length and the bytes: its batch's response ends where the statement waits, and the next message resumes the batch, whatever it is (`TdsSession.ResumeBulkTextAsync`) — the behavior is in [`legacy-lob.md`](legacy-lob.md#the-bulk-forms).

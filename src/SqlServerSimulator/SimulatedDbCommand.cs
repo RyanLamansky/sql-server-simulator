@@ -78,6 +78,7 @@ public sealed class SimulatedDbCommand : DbCommand
     {
         this.simulation = simulation;
         this.Connection = connection;
+        this.CommandTimeout = simulation.DefaultCommandTimeout;
     }
 
     /// <inheritdoc/>
@@ -96,7 +97,7 @@ public sealed class SimulatedDbCommand : DbCommand
             value :
             throw new ArgumentException($"Invalid {nameof(CommandTimeout)} value {value}; the value must be >= 0.", nameof(CommandTimeout));
         // ArgumentOutOfRangeException would be more appropriate but the official SQL Client uses ArgumentException, so this is more consistent.
-    } = 30;
+    }
 
     /// <inheritdoc/>
     public override CommandType CommandType

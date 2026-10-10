@@ -249,7 +249,7 @@ internal sealed partial class TdsSession
         Cursor cursor;
         try
         {
-            using var command = connection.CreateCommand();
+            using var command = CreateCommand(connection);
 #pragma warning disable CA2100 // This IS a SQL endpoint: the statement is the client's query by design.
             command.CommandText = declareOpen;
 #pragma warning restore CA2100
@@ -291,7 +291,7 @@ internal sealed partial class TdsSession
         // a zero row count (probed 2026-10-06 against SQL Server 2025).
         if ((scrollopt & 0x8000) != 0 && (scrollopt & ((effScroll & 0x1F) << 16)) == 0)
         {
-            using (var drop = connection.CreateCommand())
+            using (var drop = CreateCommand(connection))
             {
 #pragma warning disable CA2100 // The name is the endpoint's own synthesized cursor name.
                 drop.CommandText = $"DEALLOCATE {name};";
@@ -405,7 +405,7 @@ internal sealed partial class TdsSession
     {
         api.Buffer.Clear();
         var rows = new List<SqlValue[]>();
-        using var fetchCommand = this.connection!.CreateCommand();
+        using var fetchCommand = CreateCommand(this.connection!);
         fetchCommand.CommandText = " ";
         foreach (var wire in api.BoundParameters)
             _ = AddParameter(fetchCommand, wire);
@@ -482,7 +482,7 @@ internal sealed partial class TdsSession
         var table = parameters.Count > 3 ? AsString(parameters, 3) : "";
         try
         {
-            using var command = this.connection!.CreateCommand();
+            using var command = CreateCommand(this.connection!);
             if ((optype & 0x2) != 0)
             {
 #pragma warning disable CA2100 // Object name is the cursor's registered base table; the engine re-validates it.

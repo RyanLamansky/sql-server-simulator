@@ -198,7 +198,7 @@ internal sealed partial class TdsSession
         bool moreRequests,
         CancellationToken cancellationToken)
     {
-        using var command = this.connection!.CreateCommand();
+        using var command = CreateCommand(this.connection!);
 #pragma warning disable CA2100 // This IS a SQL endpoint: the statement is the client's query by design.
         command.CommandText = statement;
 #pragma warning restore CA2100
@@ -254,7 +254,7 @@ internal sealed partial class TdsSession
     /// <summary>Direct stored-procedure invocation by name.</summary>
     private async ValueTask ExecuteProcedureRpcAsync(TdsRpcRequest request, TdsTokenWriter writer, bool moreRequests, CancellationToken cancellationToken)
     {
-        using var command = this.connection!.CreateCommand();
+        using var command = CreateCommand(this.connection!);
         command.CommandType = CommandType.StoredProcedure;
 #pragma warning disable CA2100 // This IS a SQL endpoint: the procedure name is the client's request by design.
         command.CommandText = request.ProcName;

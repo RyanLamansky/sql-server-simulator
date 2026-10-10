@@ -811,6 +811,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
+    /// A command on the session's connection with no deadline of its own, for
+    /// every command the session runs for its client. A client's
+    /// <c>CommandTimeout</c> is the client's to enforce — SqlClient sends an
+    /// attention when it expires, which the session honors — and real SQL
+    /// Server ends nothing on a timer of its own, so a command left at the
+    /// in-process default would end every request running past 30 seconds,
+    /// whatever timeout the client chose.
+    /// </summary>
+    private static SimulatedDbCommand CreateCommand(SimulatedDbConnection connection) =>
+        new(connection.Simulation, connection) { CommandTimeout = 0 };
+
+    /// <summary>
     /// Runs a SQL batch's text and streams its response, converting an error
     /// that escapes it into the response's closing tokens.
     /// </summary>
@@ -819,7 +831,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         this.databaseAtMessageStart = this.connection!.Database;
         try
         {
-            using var command = this.connection.CreateCommand();
+            using var command = CreateCommand(this.connection);
 #pragma warning disable CA2100 // This IS a SQL endpoint: the batch text is the client's query by design.
             command.CommandText = batchText;
 #pragma warning restore CA2100

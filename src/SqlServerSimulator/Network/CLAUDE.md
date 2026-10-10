@@ -23,6 +23,7 @@ These notes are the local implementation contracts.
 
   The forcing seam for the terminal tier is a per-`Simulation` internal hook (`NetworkBatchCrashHookForTesting`, never public) invoked *before* the handler's try, so it still escapes to the terminal boundary; the statement tier is forced by a genuinely unmodeled statement instead.
   **A new message handler needs the statement-tier catch too** — without it, its unanticipated faults fall through to the terminal tier and cost the session.
+  **A command the session runs for its client comes from `TdsSession.CreateCommand`**, never `connection.CreateCommand()`: the client enforces its own timeout through an attention, and a command keeping the in-process 30-second default cuts off any longer request.
   Oracles: `CrashBoundaryTests` (both tiers), `TokenBoundaryTests`.
 - **MARS / SMP layer** (`SmpMultiplexer` / `SmpSession` / `SmpSessionStream`): active only when the client requested MARS in prelogin (`ParsePreloginMars` → ack `1`, strictly additive — non-MARS stays byte-identical).
   After the raw login response, `RunAsync` hands the post-TLS stream to `SmpMultiplexer`, which owns it: one read loop demuxes 16-byte SMP frames ([MC-SMP]) into per-`SmpSession` pipes, and `RunMarsSessionAsync` runs one TDS batch loop per session over an `SmpSessionStream`-backed `TdsPacketTransport`.

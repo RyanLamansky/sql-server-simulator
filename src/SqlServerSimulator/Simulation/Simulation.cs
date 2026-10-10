@@ -178,6 +178,15 @@ public sealed partial class Simulation
     internal Action? NetworkBatchCrashHookForTesting;
 
     /// <summary>
+    /// The <c>CommandTimeout</c>, in seconds, a new command starts with:
+    /// SqlClient's 30. Per instance so a test can shorten it to prove a path
+    /// doesn't inherit it — the TDS endpoint's commands, whose deadline is the
+    /// client's to enforce, without waiting out 30 seconds. Never changed
+    /// outside tests.
+    /// </summary>
+    internal int DefaultCommandTimeout = 30;
+
+    /// <summary>
     /// Creates a simulated database connection.
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>
