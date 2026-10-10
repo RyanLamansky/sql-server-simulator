@@ -53,18 +53,21 @@ internal sealed class HeapSeekCache
     // share (theirs build a fresh list the caller owns and may reorder). The
     // span also snapshots pointer and length together, so a concurrent Add
     // that grows the bucket leaves the reader on the intact old array rather
-    // than racing a List's separate _items / _size reads.
+    // than racing a List's separate _items / _size reads. `widenTo` names the
+    // full key of the index the seek reads, whose order the candidates follow
+    // (see ResolveEntry).
     public ReadOnlySpan<(int Page, int Slot)> Seek(
         Heap heap,
         HeapColumn[] schema,
         Heap? lobStore,
         int[] ordinals,
         SqlType[] commons,
-        SqlValueKey probeKey)
+        SqlValueKey probeKey,
+        int[]? widenTo = null)
     {
         lock (this.gate)
         {
-            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, widenTo: widenTo);
             return entry.EqualityCandidates(probeKey);
         }
     }
@@ -80,11 +83,11 @@ internal sealed class HeapSeekCache
     public List<(int Page, int Slot)>? RangeScan(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int ordinal, SqlType common,
         bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive,
-        int candidateCap)
+        int candidateCap, int[]? widenTo = null)
     {
         lock (this.gate)
         {
-            var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common]);
+            var entry = this.ResolveEntry(heap, schema, lobStore, [ordinal], [common], widenTo: widenTo);
             return entry.RangeCandidates(hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive, candidateCap);
         }
     }
@@ -107,11 +110,11 @@ internal sealed class HeapSeekCache
     // threshold is pure cost policy, never correctness.
     public List<(int Page, int Slot)> PrefixRangeSeek(
         Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
-        SqlValueKey prefixKey, SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
+        SqlValueKey prefixKey, SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int[]? widenTo = null)
     {
         lock (this.gate)
         {
-            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, widenTo: widenTo);
             var group = entry.EqualityCandidates(prefixKey);
             if (group.Length <= RangeSliceMinGroupRids)
             {
@@ -185,6 +188,18 @@ internal sealed class HeapSeekCache
             var ordered = entry.CappedCandidates(null, false, null, false, int.MaxValue, keys)!;
             return entry.NoteKeyOrderWalk(ordered) && !keyed ? null : ordered;
         }
+    }
+
+    /// <summary>
+    /// Whether ascending heap addresses read the rows in ascending order of the
+    /// key <paramref name="ordinals"/>, erring toward false as the entry's
+    /// tracking does (a restored or reused address clears it until an ordered
+    /// walk finds the heap in order again).
+    /// </summary>
+    public bool HeapInKeyOrder(Heap heap, HeapColumn[] schema, int[] ordinals, SqlType[] commons)
+    {
+        lock (this.gate)
+            return this.ResolveEntry(heap, schema, heap, ordinals, commons, traced: false).HeapOrdered;
     }
 
     /// <summary>
@@ -289,10 +304,32 @@ internal sealed class HeapSeekCache
     // widened entry never narrows back and starts thrashing. Caller holds the gate.
     // `traced` is false for the clustered-scan order check, which reads the
     // cache without being a seek, so the seek diagnostics stay the seeks'.
+    //
+    // `widenTo`, a key the requested ordinals lead, asks for an entry that wide:
+    // its buckets then list a shorter probe's rows by the rest of that key, the
+    // order the index it names reads them in, where a narrower entry lists them
+    // by address. An entry already reaching past the request along some other
+    // key is left as it is, so two indexes sharing a leading column never take
+    // turns rebuilding it; widening along the key's own path only grows it, so
+    // whatever the narrower entry served the wider one serves too.
     [MethodImpl(Tiering.OptimizeFirstCall)]
-    private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool traced = true)
+    private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool traced = true, int[]? widenTo = null)
     {
         var lead = ordinals[0];
+        if (widenTo is not null && widenTo.Length > ordinals.Length && LeadsKey(ordinals, widenTo))
+        {
+            var existing = this.byLeadOrdinal.TryGetValue(lead, out var current) && current.Covers(ordinals, commons) ? current : null;
+            if (existing is null || (existing.Ordinals.Length < widenTo.Length && LeadsKey(existing.Ordinals, widenTo)))
+            {
+                var basis = existing?.Commons ?? commons;
+                var widened = new SqlType[widenTo.Length];
+                basis.CopyTo(widened, 0);
+                for (var i = basis.Length; i < widened.Length; i++)
+                    widened[i] = schema[widenTo[i]].Type;
+                (ordinals, commons) = (widenTo, widened);
+            }
+        }
+
         if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Covers(ordinals, commons))
         {
             if (entry.Generation != heap.MutationGeneration)
@@ -315,6 +352,9 @@ internal sealed class HeapSeekCache
 
         return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead, traced);
     }
+
+    private static bool LeadsKey(int[] ordinals, int[] key) =>
+        ordinals.Length <= key.Length && key.AsSpan(0, ordinals.Length).SequenceEqual(ordinals);
 
     [MethodImpl(Tiering.OptimizeFirstCall)]
     private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead, bool traced)
@@ -470,14 +510,25 @@ internal sealed class HeapSeekCache
 
         // Hash views for shorter-arity equality probes against this (widened)
         // entry, keyed by probe arity, each mapping a leading-prefix key to the
-        // union of its full-key buckets. Built lazily on the first probe of an
-        // arity and then maintained in lockstep with Buckets by AddRid /
-        // RemoveRid. Restores the O(1) hash hit a narrow probe had before the
-        // entry widened (walking the ordered view instead measured ~2× on a
-        // 500-row group lookup), at the cost of duplicating the rid lists per
-        // active arity. Null until a narrow probe occurs, so exact-arity
+        // full keys under it. Built lazily on the first probe of an arity and
+        // then maintained in lockstep with Buckets by AddRid / RemoveRid.
+        // Restores the O(1) hash hit a narrow probe had before the entry
+        // widened (walking the ordered view instead measured ~2× on a 500-row
+        // group lookup). Null until a narrow probe occurs, so exact-arity
         // workloads never pay for it.
-        private Dictionary<int, Dictionary<SqlValueKey, List<(int Page, int Slot)>>>? narrowViews;
+        private Dictionary<int, Dictionary<SqlValueKey, NarrowGroup>>? narrowViews;
+
+        // One leading prefix's share of a widened entry: its full keys in
+        // ascending order, and their addresses in the order an index seek on
+        // the prefix reads them — by the rest of the key, then by address as
+        // each bucket lists them. The address list is a cache, dropped by a
+        // write that lands anywhere but its end and rebuilt by the next probe,
+        // so a reader still holding the old list keeps an intact one.
+        private sealed class NarrowGroup
+        {
+            public readonly List<SqlValueKey> Keys = [];
+            public List<(int Page, int Slot)>? Rids;
+        }
 
         // Reuse is sound when the cached prefix COVERS the request: the request's
         // column sequence and promoted types are a leading prefix of the entry's.
@@ -501,31 +552,53 @@ internal sealed class HeapSeekCache
         }
 
         // Equality candidates for a probe of this entry's full arity (one hash
-        // bucket) or a shorter leading prefix (one bucket of the lazily-built
-        // narrow view for that arity) — both O(1) per probe.
+        // bucket) or a shorter leading prefix (one group of the lazily-built
+        // narrow view for that arity) — both O(1) per probe. Either comes back
+        // in the order an index seek reads equal keys, by row locator, which
+        // is address order here (a bucket keeps its addresses ascending).
         public ReadOnlySpan<(int Page, int Slot)> EqualityCandidates(SqlValueKey probeKey)
         {
-            var buckets = probeKey.ComponentCount == this.Ordinals.Length
-                ? this.Buckets
-                : this.EnsureNarrowView(probeKey.ComponentCount);
-            return buckets.TryGetValue(probeKey, out var bucket) ? CollectionsMarshal.AsSpan(bucket) : [];
+            if (probeKey.ComponentCount == this.Ordinals.Length)
+                return this.Buckets.TryGetValue(probeKey, out var bucket) ? CollectionsMarshal.AsSpan(bucket) : [];
+            return this.EnsureNarrowView(probeKey.ComponentCount).TryGetValue(probeKey, out var group)
+                ? CollectionsMarshal.AsSpan(this.GroupRids(group))
+                : [];
         }
 
-        private Dictionary<SqlValueKey, List<(int Page, int Slot)>> EnsureNarrowView(int arity)
+        private Dictionary<SqlValueKey, NarrowGroup> EnsureNarrowView(int arity)
         {
             this.narrowViews ??= [];
             if (!this.narrowViews.TryGetValue(arity, out var view))
             {
                 this.narrowViews[arity] = view = [];
-                foreach (var (key, bucket) in this.Buckets)
+                foreach (var (key, _) in this.Buckets)
                 {
-                    if (!view.TryGetValue(key.Prefix(arity), out var narrow))
-                        view[key.Prefix(arity)] = narrow = [];
-                    narrow.AddRange(bucket);
+                    var prefix = key.Prefix(arity);
+                    if (!view.TryGetValue(prefix, out var group))
+                        view[prefix] = group = new();
+                    group.Keys.Add(key);
+                }
+                foreach (var (_, group) in view)
+                {
+                    if (group.Keys.Count > 1)
+                        group.Keys.Sort(KeyTupleComparer.Instance);
                 }
             }
 
             return view;
+        }
+
+        private List<(int Page, int Slot)> GroupRids(NarrowGroup group)
+        {
+            if (group.Rids is { } rids)
+                return rids;
+            rids = [];
+            foreach (var key in group.Keys)
+            {
+                if (this.Buckets.TryGetValue(key, out var bucket))
+                    rids.AddRange(bucket);
+            }
+            return group.Rids = rids;
         }
 
         // Applies the journal delta to this entry's buckets. Insert adds the
@@ -621,25 +694,64 @@ internal sealed class HeapSeekCache
 
         // Instance add that keeps the lazily-built sorted and narrow views in
         // sync — a key joins sortedKeys exactly when its bucket is first created.
+        // A bucket keeps its addresses ascending, the row-locator order an index
+        // reads equal keys in (probed 2026-10-10 against SQL Server 2025): an
+        // address below the bucket's last — a rolled-back delete's row back at
+        // its address, a row an UPDATE moves to this key — goes in at its
+        // place rather than at the end, in a fresh list so a reader still
+        // enumerating the old one keeps an intact one. An address already
+        // listed (a write the building scan saw, replayed) is left alone.
         private void AddRid(SqlValueKey key, (int Page, int Slot) rid)
         {
             this.keyOrder = null;
+            var added = false;
             if (!this.Buckets.TryGetValue(key, out var bucket))
             {
                 this.Buckets[key] = bucket = [];
                 _ = this.sortedKeys?.Add(key);
+                added = true;
             }
 
-            bucket.Add(rid);
-
-            if (this.narrowViews is { } views)
+            var count = bucket.Count;
+            if (count == 0 || bucket[count - 1].CompareTo(rid) < 0)
             {
-                foreach (var (arity, view) in views)
+                bucket.Add(rid);
+            }
+            else
+            {
+                var at = bucket.BinarySearch(rid);
+                if (at >= 0)
+                    return;
+                var listed = CollectionsMarshal.AsSpan(bucket);
+                var placed = new List<(int Page, int Slot)>(count + 1);
+                placed.AddRange(listed[..~at]);
+                placed.Add(rid);
+                placed.AddRange(listed[~at..]);
+                this.Buckets[key] = placed;
+            }
+
+            if (this.narrowViews is not { } views)
+                return;
+            foreach (var (arity, view) in views)
+            {
+                var prefix = key.Prefix(arity);
+                if (!view.TryGetValue(prefix, out var group))
+                    view[prefix] = group = new();
+                var last = group.Keys.Count == 0 || KeyTupleComparer.Instance.Compare(group.Keys[^1], key) <= 0;
+                if (added)
                 {
-                    if (!view.TryGetValue(key.Prefix(arity), out var narrow))
-                        view[key.Prefix(arity)] = narrow = [];
-                    narrow.Add(rid);
+                    if (last)
+                        group.Keys.Add(key);
+                    else
+                        group.Keys.Insert(~group.Keys.BinarySearch(key, KeyTupleComparer.Instance), key);
                 }
+                // The group's addresses stay in order on an append to its last
+                // key, or of a new last key; anything else rebuilds them on the
+                // next probe.
+                if (group.Rids is { } rids && (!last || (!added && rids.Count != 0 && rids[^1].CompareTo(rid) > 0)))
+                    group.Rids = null;
+                else
+                    group.Rids?.Add(rid);
             }
         }
 
@@ -648,8 +760,11 @@ internal sealed class HeapSeekCache
             this.keyOrder = null;
             if (this.Buckets.TryGetValue(key, out var bucket))
             {
-                _ = bucket.Remove(rid);
-                if (bucket.Count == 0)
+                var at = bucket.BinarySearch(rid);
+                if (at >= 0)
+                    bucket.RemoveAt(at);
+                var emptied = bucket.Count == 0;
+                if (emptied)
                 {
                     _ = this.Buckets.Remove(key);
                     _ = this.sortedKeys?.Remove(key);
@@ -659,12 +774,21 @@ internal sealed class HeapSeekCache
                 {
                     foreach (var (arity, view) in views)
                     {
-                        if (view.TryGetValue(key.Prefix(arity), out var narrow))
+                        var prefix = key.Prefix(arity);
+                        if (!view.TryGetValue(prefix, out var group))
+                            continue;
+                        if (emptied)
                         {
-                            _ = narrow.Remove(rid);
-                            if (narrow.Count == 0)
-                                _ = view.Remove(key.Prefix(arity));
+                            var keyAt = group.Keys.BinarySearch(key, KeyTupleComparer.Instance);
+                            if (keyAt >= 0)
+                                group.Keys.RemoveAt(keyAt);
+                            if (group.Keys.Count == 0)
+                            {
+                                _ = view.Remove(prefix);
+                                continue;
+                            }
                         }
+                        _ = group.Rids?.Remove(rid);
                     }
                 }
             }

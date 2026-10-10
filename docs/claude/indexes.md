@@ -177,6 +177,7 @@ The next seek replays it like any write, so statement-level rollback, `ROLLBACK 
 It once invalidated the journal instead, and the next seek rebuilt the whole entry: `BEGIN TRAN; DELETE ord WHERE cust_id = @c; ROLLBACK` over a 200k-row `ord` measured 35 ms against 0.13 ms now and real's 0.6 ms (2026-10-07), which is the shape every test suite that rolls each test back hits.
 A rollback undoing more row writes on one heap than its journal keeps invalidates under each group's hold as before, since the replay would find the journal trimmed anyway.
 A restored row reads as an insert below the entry's last address, so a clustered entry's heap-order flag (`HeapOrdered`) goes false and the next unordered scan walks the key order once, which restores it.
+The replay files it at its address rather than at its bucket's end, which keeps its seek order (see [Seek row order](#seek-row-order)).
 `TRUNCATE` and its rollback swap the page list wholesale and still invalidate (`Heap.InvalidateSeekJournal`).
 ALTER TABLE replaces the heap instance, so the new heap starts journal-free.
 One entry serves each leading column, widening to the longest prefix any request named (a uniqueness check of `(r, d)` widens `r`'s entry), so a row whose key is NULL past its lead still files in it, under a NULL component sorting first: a full-arity probe never contains NULL and so never matches it, while a shorter probe (`WHERE r = 1`) must reach it — filing only all-non-NULL keys lost exactly those rows from the narrower seek.
@@ -764,6 +765,24 @@ A scan of a table with a clustered index reads its rows in key order, as real's 
 The heap stays in write order, so a scan of a clustered table walks the seek cache's ordered view of the key instead — except when heap order already *is* key order, the common case of a key assigned in insertion order, which the cache entry tracks incrementally (`CacheEntry.HeapOrdered`: an append past the last address with a key no lower than any live one keeps it, anything else clears it, and a full ordered walk that finds the addresses ascending restores it), so those scans keep the sequential walk and its cost (measured: a full scan of WWI `Sales.OrderLines` doubled on the ordered walk and is unchanged with the flag).
 A key the ordered view can't serve — a nullable or a descending column — sorts every row's key once per heap generation instead, NULLs first under an ascending column and last under a descending one.
 A heap keeps write order, as real's allocation-order scan does, and a SNAPSHOT / RCSI read keeps the version sweep's order.
+
+## Seek row order
+
+A seek with no ORDER BY reads its rows in the order of the index it seeks: by the index key, then by the row locator — the clustered key on a clustered table, the RID on a heap — and an IN list's values (constants or variables alike) in ascending order (probed 2026-10-10 against SQL Server 2025; `SeekRowOrderTests`).
+That order holds whatever placed the rows: written out of key order, moved into the key by an UPDATE, or put back by a rolled-back DELETE.
+Three pieces reproduce it, each free in the common case:
+
+- **A bucket keeps its addresses ascending** (`CacheEntry.AddRid`): an address arriving below its bucket's last — a rollback's restored row, an UPDATE moving a row into the key — goes in at its place, so a full-arity probe reads by address, which is real's locator order on a heap and on a clustered table whose heap follows its key.
+  An append past the last address, every ordinary insert, pays one comparison.
+- **A shorter probe reads by the rest of the key**: a narrow view's group lists its full keys in order and their addresses key by key, rebuilt on the next probe after a write lands anywhere but its end, and a seek asks for an entry as wide as the index it chose (`ResolveEntry`'s `widenTo`), so `WHERE a = 1` over `ix(a, b)` reads by `b`.
+  The wider entry holds a bucket per distinct full key where the narrower held one per prefix, the cost a uniqueness check's widening already pays.
+  An entry already wider along another index sharing the lead column is left alone rather than rebuilt in turns; which of two such indexes real reads is the optimizer's choice anyway.
+- **A clustered table whose heap has drifted from its key sorts** (`ClusteredScan.OrderSeekCandidates`): a nonclustered seek's candidates there sort by the index key, then the clustered key, then the uniquifier; the clustered entry's `HeapOrdered` flag says when the sort is needed, so a key assigned in insertion order never sorts.
+  The flag errs toward false after a rollback until the next ordered walk restores it, which costs those seeks a sort, never their order.
+
+Which index real reads is the optimizer's, and these orders are only real's when the simulator's choice (the longest equality prefix, keys before indexes) is real's too.
+A probed shape where it isn't, left alone: a heap whose index doesn't cover the select list, which real scans in RID order, so `SELECT * … WHERE a IN (3, 1)` reads by RID there.
+Nor is a heap's RID placement modeled: after a DELETE then INSERT in one transaction real's insert took the deleted row's RID, where the simulator's lands at the heap's end.
 
 ## Columnstore indexes
 

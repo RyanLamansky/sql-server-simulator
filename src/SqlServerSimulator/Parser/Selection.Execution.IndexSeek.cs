@@ -928,8 +928,9 @@ internal sealed partial class Selection
     {
         candidates = [];
 
-        if (bounds.Count == 0 || FindRangeLeadingOrdinal(table, bounds) is not { } ordinal)
+        if (bounds.Count == 0 || FindRangeLeadingKey(table, bounds, out var clustered) is not { } key)
             return false;
+        var ordinal = key[0];
 
         var bound = bounds[ordinal];
         switch (EvaluateRangeBounds(bound, source.StoredSchema[ordinal].Type, batch, outerResolver,
@@ -944,7 +945,8 @@ internal sealed partial class Selection
         var found = cache.RangeScan(
             table.Heap, source.StoredSchema, source.LobStore, ordinal, common,
             hasLower, lowerValue, bound.LowerInclusive, hasUpper, upperValue, bound.UpperInclusive,
-            rowCount >= RangeSpanGateMinRows ? rowCount / RangeSpanGateDivisor : int.MaxValue);
+            rowCount >= RangeSpanGateMinRows ? rowCount / RangeSpanGateDivisor : int.MaxValue,
+            Array.IndexOf(key, -1) < 0 ? key : null);
 
         if (found is null)
         {
@@ -952,6 +954,8 @@ internal sealed partial class Selection
             return false;
         }
 
+        if (!clustered)
+            ClusteredScan.OrderSeekCandidates(table, key, found);
         candidates = found;
         return true;
     }
@@ -1093,21 +1097,30 @@ internal sealed partial class Selection
         _ => RangeComparison.GreaterOrEqual,
     };
 
-    // The leading storage ordinal of the first key / index whose lead column
-    // carries a bound, or null if none does. Keys (PK / UNIQUE) are preferred
-    // over CREATE INDEX entries, matching the equality path's order.
-    private static int? FindRangeLeadingOrdinal(HeapTable table, Dictionary<int, RangeBoundExprs> bounds)
+    // The storage ordinals of the first key / index whose lead column carries
+    // a bound, and whether it is the clustered one — the whole key, for the
+    // order the seek lists its rows in — or null if none does. Keys (PK /
+    // UNIQUE) are preferred over CREATE INDEX entries, matching the equality
+    // path's order.
+    private static int[]? FindRangeLeadingKey(HeapTable table, Dictionary<int, RangeBoundExprs> bounds, out bool clustered)
     {
         foreach (var key in table.KeyConstraints)
         {
             if (key.StorageOrdinals.Length > 0 && bounds.ContainsKey(key.StorageOrdinals[0]))
-                return key.StorageOrdinals[0];
+            {
+                clustered = key.IsClustered;
+                return key.StorageOrdinals;
+            }
         }
         foreach (var index in table.Indexes)
         {
             if (index.KeyColumns.Length > 0 && bounds.ContainsKey(index.KeyColumns[0].StorageOrdinal))
-                return index.KeyColumns[0].StorageOrdinal;
+            {
+                clustered = index.IsClustered;
+                return index.KeyStorageOrdinals;
+            }
         }
+        clustered = false;
         return null;
     }
 
@@ -3023,6 +3036,7 @@ internal sealed partial class Selection
         var bestContinues = false;
         int[]? bestKeyOrdinals = null;
         Storage.Index? bestIndex = null;
+        var bestClustered = false;
 
         foreach (var key in table.KeyConstraints)
         {
@@ -3037,6 +3051,7 @@ internal sealed partial class Selection
                 bestContinues = continues;
                 bestKeyOrdinals = ordinals;
                 bestIndex = null;
+                bestClustered = key.IsClustered;
             }
         }
 
@@ -3053,6 +3068,7 @@ internal sealed partial class Selection
                 bestContinues = continues;
                 bestIndex = index;
                 bestKeyOrdinals = null;
+                bestClustered = index.IsClustered;
             }
         }
 
@@ -3078,6 +3094,9 @@ internal sealed partial class Selection
         if (seeks == 1 && !bestContinues && (bestKeyOrdinals is { } whole ? whole.Length == bestLen : bestIndex!.IsUnique && bestIndex.KeyColumns.Length == bestLen))
             seeks = 0;
 
+        // The chosen key in full: the seek lists its rows in that key's order.
+        var chosenKey = bestKeyOrdinals ?? bestIndex!.KeyStorageOrdinals;
+        var widenTo = Array.IndexOf(chosenKey, -1) < 0 ? chosenKey : null;
         var cache = HeapSeekCache.For(table.Heap);
         if (bestContinues)
         {
@@ -3105,9 +3124,10 @@ internal sealed partial class Selection
                             table.Heap, source.StoredSchema, source.LobStore, extendedPrefix, extendedCommons,
                             new SqlValueKey(tuple),
                             ComposeBound(tuple, hasLower, lowerValue), !hasLower || bound.LowerInclusive,
-                            ComposeBound(tuple, hasUpper, upperValue), !hasUpper || bound.UpperInclusive));
+                            ComposeBound(tuple, hasUpper, upperValue), !hasUpper || bound.UpperInclusive, widenTo));
                     }
 
+                    OrderByLocator(candidates);
                     width = bestLen;
                     rangeExtended = true;
                     return true;
@@ -3119,13 +3139,22 @@ internal sealed partial class Selection
 
         foreach (var tuple in CartesianProduct(probesPerColumn))
         {
-            var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple));
+            var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple), widenTo);
             if (bucket.Length != 0)
                 candidates.AddRange(bucket);
         }
 
+        OrderByLocator(candidates);
         width = bestLen;
         return true;
+
+        // A clustered index's own seek reads its key order, which the cache
+        // serves; any other reads its equal keys by the clustered key.
+        void OrderByLocator(List<(int Page, int Slot)> seeked)
+        {
+            if (!bestClustered)
+                ClusteredScan.OrderSeekCandidates(table, chosenKey, seeked);
+        }
 
         // Resolves (and memoizes) the probe components for one column, but only
         // for columns that carry a stable-value equality conjunct (or IN-list /
@@ -3423,6 +3452,12 @@ internal sealed partial class Selection
                 return null;
             }
         }
+
+        // Real seeks an IN list's values in ascending order, written as
+        // constants or as variables (probed 2026-10-10 against SQL Server
+        // 2025: `a IN (3, 1)` over ix(a) reads a = 1's rows first).
+        if (probes.Length > 1)
+            Array.Sort(probes, static (x, y) => x.CompareTo(y));
 
         return (common, probes);
     }
@@ -3910,7 +3945,7 @@ internal sealed partial class Selection
                     (bestLen, bestContinues, owner) = (len, continues, candidate);
             }
         }
-        else if (FindRangeLeadingOrdinal(table, bounds) is { } ordinal)
+        else if (FindRangeLeadingKey(table, bounds, out _) is [var ordinal, ..])
         {
             owner = table.KeyConstraints.Find(key => key.StorageOrdinals is [var first, ..] && first == ordinal)
                 ?? (object?)table.Indexes.Find(index => index.KeyColumns is [var first, ..] && first.StorageOrdinal == ordinal);

@@ -206,7 +206,8 @@ internal sealed class Heap(bool sessionPrivate = false)
     /// 2025: a KEYSET member so updated fetches as <c>@@FETCH_STATUS = -2</c>,
     /// and a DYNAMIC cursor meets it again after the key's other duplicates).
     /// A row never so updated has no entry and reads 0. Null until the first
-    /// such update; read by cursor identity and order only.
+    /// such update; read by cursor identity and order and by the order a seek
+    /// lists equal clustered keys in.
     /// </summary>
     internal ConcurrentDictionary<(int Page, int Slot), long>? Uniquifiers;
 

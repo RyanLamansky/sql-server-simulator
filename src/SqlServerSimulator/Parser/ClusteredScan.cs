@@ -125,6 +125,74 @@ internal static class ClusteredScan
     }
 
     /// <summary>
+    /// Puts a seek's <paramref name="candidates"/> over <paramref name="table"/>
+    /// in the order real's nonclustered index reads them: by the index's key
+    /// <paramref name="indexOrdinals"/>, then by its row locator, which on a
+    /// clustered table is the clustered key (probed 2026-10-10 against SQL
+    /// Server 2025: <c>WHERE a = 1</c> over <c>ix(a)</c> reads ids 3, 5, 7, 9
+    /// however the rows were inserted, and a non-unique clustered key's equal
+    /// keys in insertion order).
+    /// </summary>
+    /// <remarks>
+    /// The seek cache lists equal keys by address, which already is that order
+    /// for a heap and wherever the heap's addresses follow the clustered key —
+    /// the common case of a key assigned in insertion order, which costs one
+    /// flag read here — so the candidates are sorted only once the two have
+    /// drifted apart. A key column with no stored value (a non-persisted
+    /// computed one) ends the comparison there.
+    /// </remarks>
+    public static void OrderSeekCandidates(HeapTable table, int[] indexOrdinals, List<(int Page, int Slot)> candidates)
+    {
+        if (candidates.Count < 2 || ClusteredKey(table) is not var (ordinals, descending))
+            return;
+        var schema = table.StoredColumns;
+        var heap = table.Heap;
+        var commons = new SqlType[ordinals.Length];
+        var tracked = true;
+        for (var i = 0; i < ordinals.Length; i++)
+        {
+            tracked &= !schema[ordinals[i]].Nullable && !descending[i];
+            commons[i] = schema[ordinals[i]].Type;
+        }
+        if (tracked && HeapSeekCache.For(heap).HeapInKeyOrder(heap, schema, ordinals, commons))
+            return;
+
+        var leading = 0;
+        while (leading < indexOrdinals.Length && indexOrdinals[leading] >= 0)
+            leading++;
+        var directions = new bool[leading + ordinals.Length];
+        descending.CopyTo(directions, leading);
+        var comparer = new KeyComparer(directions);
+        var rows = new (SqlValue[]? Key, long Uniquifier, (int Page, int Slot) Address)[candidates.Count];
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var address = candidates[i];
+            SqlValue[]? key = null;
+            if (heap.ReadLiveRow(address.Page, address.Slot) is { } bytes)
+            {
+                key = new SqlValue[directions.Length];
+                for (var c = 0; c < key.Length; c++)
+                    key[c] = RowDecoder.DecodeColumn(schema, bytes, c < leading ? indexOrdinals[c] : ordinals[c - leading], heap);
+            }
+            rows[i] = (key, heap.UniquifierOf(address), address);
+        }
+
+        // A row deleted since the seek listed it sorts last; the materializer
+        // skips it. Equal keys fall back to the uniquifier, then the address.
+        Array.Sort(rows, (x, y) =>
+        {
+            if (x.Key is null || y.Key is null)
+                return (x.Key is null) == (y.Key is null) ? x.Address.CompareTo(y.Address) : x.Key is null ? 1 : -1;
+            var c = comparer.Compare(x.Key, y.Key);
+            if (c == 0)
+                c = x.Uniquifier.CompareTo(y.Uniquifier);
+            return c != 0 ? c : x.Address.CompareTo(y.Address);
+        });
+        for (var i = 0; i < rows.Length; i++)
+            candidates[i] = rows[i].Address;
+    }
+
+    /// <summary>
     /// <paramref name="table"/>'s rows in scan order, for a read that takes no
     /// per-row lock (a <c>NOLOCK</c> read, a table variable). Lazy: the order
     /// is taken when an enumeration starts, since a parsed source is
