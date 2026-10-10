@@ -2206,6 +2206,20 @@ internal sealed partial class Selection
         int[]? seekedCandidates = null;
         for (var i = 0; i < sources.Length; i++)
         {
+            if (TryNarrowMaterializedSource(sources[i], conjuncts, sources, batch, outerResolver) is { } kept)
+            {
+                narrowed ??= (FromSource[])sources.Clone();
+                if (seekedCandidates is null)
+                {
+                    seekedCandidates = new int[sources.Length];
+                    Array.Fill(seekedCandidates, -1);
+                }
+
+                narrowed[i] = sources[i].WithFilteredRows(kept);
+                seekedCandidates[i] = kept.Count;
+                continue;
+            }
+
             if (i > 0 && !IsSeekNarrowingTarget(sources[i]))
                 continue;
             var seeked = MaybeApplyIndexSeek(

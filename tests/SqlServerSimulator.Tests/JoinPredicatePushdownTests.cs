@@ -570,6 +570,85 @@ public sealed class JoinPredicatePushdownTests
         AreEqual(126, sim.ExecuteScalar(query));
     }
 
+    // ---- a materialized derived table narrowed by the WHERE ------------------
+
+    // A derived table the join can't seek into — a UNION, which no WHERE
+    // conjunct is pushed into — reading no outer row, so it materializes once
+    // and the WHERE's own conjunct on it narrows its rows before the join.
+    private const string OrdersUnion = "(select ord_id, cust_id, ord_total from ord union select ord_id, cust_id, ord_total from ord)";
+
+    /// <summary>
+    /// An <c>APPLY</c> body joining the materialized union, narrowed per outer
+    /// row by its equality with the outer customer — each customer's item-100
+    /// lines, and none for the customer with no orders (probed 2026-10-10
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ApplyBodyOverAMaterializedUnion_NarrowedByTheOuterRow()
+        => CollectionAssert.AreEqual(
+            new[] { "1|1", "1|3", "2|5", "3|9", "4|13", "5|17", "6|21" },
+            Rows(Sales(), $"""
+                select c.cust_id, x.qty from cust c cross apply (
+                    select l.qty from line l join {OrdersUnion} o on l.ord_id = o.ord_id
+                    where o.cust_id = c.cust_id and l.item_id = 100) x
+                order by 1, 2
+                """));
+
+    /// <summary>
+    /// The same body under <c>EXISTS</c> and <c>NOT EXISTS</c>: only customer 6
+    /// has a line over qty 20.
+    /// </summary>
+    [TestMethod]
+    public void ExistsBodyOverAMaterializedUnion_NarrowedByTheOuterRow()
+    {
+        var sim = Sales();
+        const string body = $"select 1 from line l join {OrdersUnion} o on l.ord_id = o.ord_id where o.cust_id = c.cust_id and l.qty > 20";
+        CollectionAssert.AreEqual(new[] { "6" }, Rows(sim, $"select c.cust_id from cust c where exists ({body}) order by 1"));
+        CollectionAssert.AreEqual(
+            new[] { "1", "2", "3", "4", "5", "7" },
+            Rows(sim, $"select c.cust_id from cust c where not exists ({body}) order by 1"));
+    }
+
+    /// <summary>
+    /// A scalar subquery over the narrowed union totals each customer's lines,
+    /// NULL for the one with no orders.
+    /// </summary>
+    [TestMethod]
+    public void ScalarSubqueryOverAMaterializedUnion_TotalsPerOuterRow()
+        => CollectionAssert.AreEqual(
+            new[] { "1|10", "2|26", "3|42", "4|58", "5|74", "6|90", "7|" },
+            Rows(Sales(), $"""
+                select c.cust_id,
+                       (select sum(l.qty) from line l join {OrdersUnion} o on l.ord_id = o.ord_id
+                        where o.cust_id = c.cust_id)
+                from cust c order by 1
+                """));
+
+    /// <summary>
+    /// Narrowing either side of an outer join is a pure narrowing: the conjunct
+    /// stays in the WHERE and rejects the NULL-extended tuple the narrowed side
+    /// would otherwise leave behind.
+    /// </summary>
+    [TestMethod]
+    public void OuterJoinToAMaterializedUnion_KeepsItsRows()
+    {
+        var sim = Sales();
+        CollectionAssert.AreEqual(
+            new[] { "2|21" },
+            Rows(sim, $"select c.cust_id, o.ord_id from cust c left join {OrdersUnion} o on o.cust_id = c.cust_id where o.ord_total = 30"));
+        CollectionAssert.AreEqual(
+            new[] { "6|61", "6|62" },
+            Rows(sim, $"select c.cust_id, o.ord_id from cust c right join {OrdersUnion} o on o.cust_id = c.cust_id where o.ord_total > 100 order by 2"));
+    }
+
+    /// <summary>A NULL probe equals nothing, so the narrowed union keeps no row.</summary>
+    [TestMethod]
+    public void MaterializedUnionNarrowedByANullVariable_KeepsNothing()
+        => AreEqual(0, Sales().ExecuteScalar($"""
+            declare @v int = null;
+            select count(*) from line l join {OrdersUnion} o on l.ord_id = o.ord_id where o.cust_id = @v
+            """));
+
     // ---- a comma list written out of join order -----------------------------
 
     /// <summary>

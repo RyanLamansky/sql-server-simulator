@@ -310,6 +310,7 @@ Cost is one predicate evaluation per source row against whatever the join saves,
 Past `PrefilterProbeRows` (4096) rows a pass rate above one half switches the filter off for the rest of the enumeration — sound at any point, since removing no rows is a correct outcome for a pure narrowing.
 
 The pass is the seek's fallback, not its peer: a source the seek narrowed never takes it, and the join **reorder** ignores prefiltered sources (it picks its driver by seeked candidate count, which a lazy filtered stream doesn't have — with nothing seeked the written order stands).
+A derived source the materialization pass already holds in a list takes the same conjuncts eagerly instead, which does give the reorder a count — see [`joins.md`](joins.md#the-where-narrows-a-materialized-source).
 What it buys is the join's own strategy switch: a driving table cut to a handful of rows lands under `EquiJoinSeekOrHash`'s outer cap and takes the per-outer-row seek instead of hashing the whole inner.
 
 Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.

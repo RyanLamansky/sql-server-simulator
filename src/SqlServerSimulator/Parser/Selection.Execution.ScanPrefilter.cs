@@ -92,6 +92,60 @@ partial class Selection
         return source.WithFilteredRows(PrefilteredRows(source, [.. pushed], batch, outerResolver));
     }
 
+    /// <summary>
+    /// Narrows a deferred source the materialization pass already ran — a
+    /// derived table, CTE or view whose rows are held in a list for this
+    /// execution (<see cref="FromSource.MaterializedRows"/>) — by the same
+    /// source-local sargable WHERE conjuncts the scan prefilter pushes, and
+    /// returns the rows that pass, or <see langword="null"/> when no conjunct
+    /// qualifies.
+    /// <para>
+    /// A body nothing can seek into is otherwise read whole by the join however
+    /// selective the WHERE is on it, and the conjunct that would have narrowed
+    /// it — typically one equating its column with an enclosing query's, as a
+    /// correlated <c>EXISTS</c> or <c>APPLY</c> body joining a body that reads
+    /// no outer row does — is only asked once the join has paired every row of
+    /// it, after whichever conjuncts precede it in the WHERE. Evaluated here,
+    /// eagerly since the rows are already in hand, the narrowing hands back a
+    /// count, so a source it cuts to a few rows can drive the chain
+    /// (<see cref="ReorderJoinChain"/>) and seek its base-table partner per row
+    /// instead of the partner's whole table pairing with it on every execution.
+    /// </para>
+    /// <para>
+    /// It is a pure narrowing on the scan prefilter's terms: every pushed
+    /// conjunct stays in the residual WHERE and is NULL-rejecting on this
+    /// source's column, and a conjunct that raises keeps its row for the
+    /// residual to decide. A source whose columns the reader re-draws per
+    /// output row (<see cref="FromSource.VolatileRefresh"/>) declines, since the
+    /// materialized value a conjunct here would read isn't the one the residual
+    /// reads.
+    /// </para>
+    /// </summary>
+    private static List<byte[]>? TryNarrowMaterializedSource(
+        FromSource source,
+        List<BooleanExpression> conjuncts,
+        FromSource[] planSources,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        if (source.MaterializedRows is null || source.VolatileRefresh is not null || source.Qualifier is null)
+            return null;
+
+        List<BooleanExpression>? pushed = null;
+        foreach (var conjunct in conjuncts)
+        {
+            if (IsSourceLocalSargable(source, conjunct, planSources))
+                (pushed ??= []).Add(conjunct);
+        }
+
+        if (pushed is null)
+            return null;
+
+        List<byte[]> kept = [.. PrefilteredRows(source, [.. pushed], batch, outerResolver)];
+        IndexSeekDiagnostics.Sink?.Add($"MaterializedFilter({source.Qualifier},{pushed.Count},{kept.Count})");
+        return kept;
+    }
+
     // Whether a top-level conjunct compares a bare column of THIS source against
     // a value that is fixed for one execution of the plan — the only shapes the
     // prefilter pushes. Every other conjunct (a sibling comparison, a subquery,

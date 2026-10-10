@@ -234,7 +234,7 @@ An order identical to the written one returns nothing: the comma rewrite already
 Measured on sqllogictest's `select5.test` (64 ten-row tables, 732 queries joining 4 to 64 of them as comma lists in shuffled order, each with one key filter), in-process with a 15-second `CommandTimeout`: before, 20-table joins took 2.3–4.9 s and the run stopped at its 211th query, a 21-table join that ran past a 40-second wall without honoring its timeout; after, all 732 answer in **7.9 s total, the slowest in 47 ms** (a 63-table join), and a differential run against SQL Server 2025 matched all 732.
 On WWI, a four-table comma list written out of join order (`InvoiceLines, Customers, StockItems, Invoices` filtered to one customer) went **196 ms → 3.4 ms** (live 1.0 ms), level with its in-order spelling; the unfiltered three-table one **211 ms → 102 ms**, whose remaining gap to its in-order spelling measured as warm-up rather than plan (both ~40 ms once tiered up).
 
-A materialized derived table (see below) can be a reorder *member* — its rows are fixed for the enumeration — but never the driver, since only a seek-narrowed base table drives.
+A materialized derived table (see below) can be a reorder *member* — its rows are fixed for the enumeration — and drives once the WHERE has [narrowed its rows](#the-where-narrows-a-materialized-source), which hands back a count as a seek does; unnarrowed, it never drives.
 
 A joined UPDATE / DELETE and a write through a join view reorder too, unless a `TOP` or `SET ROWCOUNT` keeps the rows the written order reaches first; the target can drive or be sought like any base table, since its rows reach the write through the addresses its write-target read records — see [`dml.md`](dml.md#joined-row-sources).
 Measured 2026-10-07 on a generated `ord` (200k) ⋈ `cust` (20k) filtered on `c.id = 77`, medians: the joined `UPDATE` **58–72 → 0.2 ms** whichever source the FROM names first (live 1.0 ms), the joined `DELETE` of a different customer's rows each run **41–58 → 0.15 ms** (live 2.5 ms), and the write through the join view **110–115 → 0.27 ms** (live 1.0 ms).
@@ -335,6 +335,17 @@ It declines in skip mode: a skipped statement commits nothing, so the pass is pu
 The pass runs the plan to completion before the join driver asks for a row, so `FROM <empty t> JOIN (<body that raises at runtime>) d ON …` raises where real, which never drives a row into the derived table, answers the empty rowset (probe-confirmed against SQL Server 2025, for both the SELECT and the joined-UPDATE spelling).
 A non-empty left side raises on both engines.
 Making the materialization demand-driven would close it, but the volatility gate samples `VolatileEvaluations` *around* the execution to decide whether the source may be reused at all, so the decision can't be deferred to the first demand without restructuring that gate.
+
+#### The WHERE narrows a materialized source
+
+A materialized source is still read whole by the join, and nothing can seek into a body: a set operation, which no WHERE conjunct is [pushed into](#where-pushdown-into-a-view--derived-table-body), keeps every row however selective the WHERE is on it.
+So `NarrowJoinSources` cuts the materialized list itself by the conjuncts the [scan prefilter](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek) would push (`TryNarrowMaterializedSource`, traced `MaterializedFilter(alias,conjuncts,kept)`) — eagerly, since the rows are already in hand, so the narrowing reports how many rows it kept and a source cut to a few can drive the [reorder](#join-order-reorder), seeking its base-table partner per row.
+It is a pure narrowing on the prefilter's own terms (every pushed conjunct stays in the WHERE, each is NULL-rejecting on the source's column, a conjunct that raises keeps its row for the WHERE to decide), and a source whose columns the reader re-draws per output row declines, since the value a conjunct would read here isn't the re-drawn one.
+`Tests.Internal/MaterializedSourceNarrowingTests` guards the trace (the narrowing, the reorder and the per-row seek it buys), and `JoinPredicatePushdownTests` pins the rows.
+
+The shape that needs it is a correlated body — an `APPLY`, an `EXISTS`, a scalar subquery — joining a body that reads no outer row, with the correlation on the body's column: `… CROSS APPLY (SELECT … FROM f JOIN (<UNION>) d ON f.k = d.k WHERE d.parent = outer.k AND NOT EXISTS (…f…))`.
+The union materializes once per statement, but the conjunct naming the outer row could only reject a tuple after the join had paired the partner's whole table with the whole union, and after every conjunct written ahead of it — a correlated `NOT EXISTS` over the partner — had run for each of those tuples, on every outer row.
+An EF Core split query from a commerce platform's search-index rebuild over its `ContentItem` / `ContentItemField` tables (a `CROSS APPLY` and an `EXISTS` of that shape over 881 and 5,859 rows, with a dozen `NOT EXISTS` latest-version filters) went **26–28 s → 2.3–2.8 s** on a fresh simulation and **0.6 s** once warm, allocation 34 GB → 0.4 GB (measured 2026-10-10 in process; SQL Server 2022 answers the same 4,909 rows in ~0.45 s).
 
 ### Nested-loop fallback
 

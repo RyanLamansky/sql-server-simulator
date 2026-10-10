@@ -465,6 +465,16 @@ internal sealed class FromSource(
     public readonly CatalogRowSet? CatalogRows = catalogRows;
 
     /// <summary>
+    /// The rows a deferred source's body produced, when the materialization
+    /// pass replaced its plan with them for this execution (see
+    /// <c>Selection.MaterializeUncorrelatedDeferredSources</c>) — the same list
+    /// <see cref="Rows"/> is, which the join pushdown may narrow by the WHERE
+    /// before the join reads it. Null for every other source, including a
+    /// cached catalog rowset and a narrowed copy of a materialized one.
+    /// </summary>
+    public List<byte[]>? MaterializedRows;
+
+    /// <summary>
     /// The columns a joined reader re-draws per output row, taken from the
     /// query body this source reads (<see cref="Selection.VolatileColumns"/>) — null
     /// when there are none, or when the body draws its values once itself.
@@ -580,6 +590,7 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            MaterializedRows = catalogRows is null ? rows : null,
         };
 }
 
