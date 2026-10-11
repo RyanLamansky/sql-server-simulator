@@ -323,7 +323,7 @@ partial class Selection
     /// </summary>
     private static int RankWindowEnd(TopSpec top, int? offsetCount, int? fetchCount, int count)
     {
-        var end = top.Percent is { } percent ? (long)Math.Ceiling(count * percent / 100.0)
+        var end = top.Percent is { } percent ? (long)Math.Ceiling(count * percent.Value / 100.0)
             : (top.Count ?? fetchCount) is { } take ? (long)(offsetCount ?? 0) + take
             : count;
         return (int)Math.Min(end, count);

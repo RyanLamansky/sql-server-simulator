@@ -86,9 +86,13 @@ public sealed class MergeTopTests
             "create trigger tr on t after insert as insert log select count(*) from inserted",
             "merge top (2) t using s on t.id = s.id when not matched then insert values (s.id, s.v); select n from log"));
 
+    /// <summary>
+    /// The written <c>TOP</c> replaces <c>SET ROWCOUNT</c>, as for the other
+    /// verbs (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void ComposesWithSetRowCount()
-        => AreEqual(1, new Simulation().ExecuteScalar($"""
+    public void ReplacesSetRowCount()
+        => AreEqual(2, new Simulation().ExecuteScalar($"""
             {Seed}
             insert s values (1, 100), (2, 200), (3, 300);
             set rowcount 1;

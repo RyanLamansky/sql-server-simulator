@@ -650,11 +650,11 @@ partial class Simulation
             // Stable by key: a NOT MATCHED BY SOURCE delete, keyed past every
             // source row, keeps its heap order.
             var ordered = deferredSteps.OrderBy(step => step.Key).ToList();
+            // A written TOP replaces SET ROWCOUNT, as for the other verbs (see
+            // ApplyDmlTopCap).
             var cap = top is { } limit
                 ? Selection.ResolveDmlTopCap(limit, limit.Percent ? ordered.Count(StepQualifies) : int.MaxValue, context.Batch)
-                : long.MaxValue;
-            if (context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
-                cap = rowCountLimit;
+                : context.Connection.RowCountLimit;
             foreach (var step in ordered)
             {
                 if (pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count >= cap)

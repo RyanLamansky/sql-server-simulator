@@ -1663,16 +1663,38 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// A <c>TOP (n) PERCENT</c>'s percentage, resolved when the rows it caps
+    /// have been counted rather than as the plan starts: real judges the value
+    /// past its count, so an error the counted rows raise precedes Msg 1031,
+    /// which an empty input still raises (probed 2026-10-11 against SQL Server
+    /// 2025).
+    /// </summary>
+    /// <param name="resolve">Reads and validates the percentage.</param>
+    /// <param name="insertSource">
+    /// Whether the cap is an <c>INSERT</c>'s, applied by its source plan, whose
+    /// select list real computes past the count whatever the source filters or
+    /// joins, where a <c>SELECT</c>'s own computes it past the count only over
+    /// a lone unfiltered source (probed 2026-10-11 against SQL Server 2025).
+    /// </param>
+    private sealed class TopPercent(Func<double> resolve, bool insertSource = false)
+    {
+        public readonly bool InsertSource = insertSource;
+        private double? value;
+
+        public double Value => this.value ??= resolve();
+    }
+
+    /// <summary>
     /// The resolved SELECT <c>TOP</c> row cap: an integer count, a percentage
     /// (<see cref="Percent"/> non-null), and whether <c>WITH TIES</c> extends
     /// the cap to include rows tying the boundary row's ORDER BY key. Built
     /// per execution (the count/percent expression may carry variables) and
     /// applied by the buffered projection paths.
     /// </summary>
-    private readonly struct TopSpec(int? count, double? percent, bool withTies)
+    private readonly struct TopSpec(int? count, TopPercent? percent, bool withTies)
     {
         public readonly int? Count = count;
-        public readonly double? Percent = percent;
+        public readonly TopPercent? Percent = percent;
         public readonly bool WithTies = withTies;
 
         /// <summary>True when a PERCENT or WITH TIES cap needs the buffered path.</summary>
@@ -1689,7 +1711,7 @@ internal sealed partial class Selection
     private static int? ComputeTopCap<T>(List<T> rows, Func<T, SqlValue[]> keysOf, List<OrderBySpec> orderBy, TopSpec top, int? fetchCount)
     {
         var cap = top.Percent is { } pct
-            ? (int)Math.Ceiling(rows.Count * pct / 100.0)
+            ? (int)Math.Ceiling(rows.Count * pct.Value / 100.0)
             : top.Count ?? fetchCount;
         if (cap is not { } c || !top.WithTies || orderBy.Count == 0 || c <= 0 || c >= rows.Count)
             return cap;
@@ -1697,6 +1719,16 @@ internal sealed partial class Selection
         while (c < rows.Count && SortOrderKeys(keysOf(rows[c]), boundary, orderBy) == 0)
             c++;
         return c;
+    }
+
+    /// <summary>
+    /// Takes the <see cref="BatchContext.SourceTopPercent"/> handed to the plan
+    /// running, clearing it so its <c>INSERT</c> knows the cap is applied.
+    /// </summary>
+    private static TopSpec TakeSourceTopPercent(BatchContext batch, DmlTopLimit limit)
+    {
+        batch.SourceTopPercent = null;
+        return new TopSpec(null, new TopPercent(() => ResolveDmlTopPercent(limit, batch), insertSource: true), withTies: false);
     }
 
     /// <summary>
@@ -1787,27 +1819,54 @@ internal sealed partial class Selection
         }
         catch (SimulatedSqlException ex) when (!limit.Expression.IsWrittenConstant || !batch.IsSkipping)
         {
-            // A value read while running reports at the statement's first line,
-            // where a class-15 error otherwise takes the parser's current one.
-            foreach (var error in ex.Errors)
-                error.LineNumber = batch.CurrentStatement.StartLine;
-            ex.RefusedRecompilingDeferred = limit.Expression.IsWrittenConstant;
+            ReportAtStatementStart(ex, limit, batch);
             throw;
         }
     }
 
+    /// <summary>
+    /// The percentage of a DML <c>TOP (n) PERCENT</c>, validated as
+    /// <see cref="ResolveDmlTopCap"/> validates it, for a source plan that
+    /// applies it beneath its select list.
+    /// </summary>
+    private static double ResolveDmlTopPercent(DmlTopLimit limit, BatchContext batch)
+    {
+        try
+        {
+            return DmlTopPercentOf(RunDmlTopValue(limit, batch));
+        }
+        catch (SimulatedSqlException ex) when (!limit.Expression.IsWrittenConstant || !batch.IsSkipping)
+        {
+            ReportAtStatementStart(ex, limit, batch);
+            throw;
+        }
+    }
+
+    private static void ReportAtStatementStart(SimulatedSqlException ex, DmlTopLimit limit, BatchContext batch)
+    {
+        // A value read while running reports at the statement's first line,
+        // where a class-15 error otherwise takes the parser's current one.
+        foreach (var error in ex.Errors)
+            error.LineNumber = batch.CurrentStatement.StartLine;
+        ex.RefusedRecompilingDeferred = limit.Expression.IsWrittenConstant;
+    }
+
+    private static SqlValue RunDmlTopValue(DmlTopLimit limit, BatchContext batch) =>
+        limit.Expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+
+    private static double DmlTopPercentOf(SqlValue resolved)
+    {
+        var pct = resolved.IsNull
+            ? throw SimulatedSqlException.TopClauseInvalidValue()
+            : resolved.CoerceTo(SqlType.Float).AsDouble;
+        return pct is < 0 or > 100 ? throw SimulatedSqlException.TopPercentOutOfRange() : pct;
+    }
+
     private static int ResolveDmlTopCapCore(DmlTopLimit limit, int candidateCount, BatchContext batch)
     {
-        var resolved = limit.Expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+        var resolved = RunDmlTopValue(limit, batch);
         if (limit.Percent)
-        {
-            var pct = resolved.IsNull
-                ? throw SimulatedSqlException.TopClauseInvalidValue()
-                : resolved.CoerceTo(SqlType.Float).AsDouble;
-            return pct is < 0 or > 100
-                ? throw SimulatedSqlException.TopPercentOutOfRange()
-                : (int)Math.Ceiling(candidateCount * pct / 100.0);
-        }
+            return (int)Math.Ceiling(candidateCount * DmlTopPercentOf(resolved) / 100.0);
         var count = resolved.IsNull ? throw NullRowCount(resolved, limit.Expression)
             : !IsRowCountType(resolved.Type, limit.Expression) ? throw SimulatedSqlException.TopFetchRequiresInteger()
             : resolved.CoerceTo(SqlType.BigInt).AsInt64;
@@ -1923,7 +1982,9 @@ internal sealed partial class Selection
             {
                 if (!topPercent)
                     _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
-                else if (!context.Batch.CreateTimeBinding || topExpression.IsWrittenConstant)
+                // A percentage read as the statement runs is judged past the
+                // rows' count (see TopPercent).
+                else if (topExpression.IsWrittenConstant)
                     _ = ResolveTopPercentValue(topExpression, context.Batch);
             }
         }

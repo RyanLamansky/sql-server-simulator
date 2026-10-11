@@ -347,9 +347,10 @@ partial class Simulation
         IEnumerable<byte[]> DeleteAsRead()
         {
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
-            var cap = top is { Percent: false } countLimit ? Selection.ResolveDmlTopCap(countLimit, int.MaxValue, context.Batch) : int.MaxValue;
-            if (context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
-                cap = (int)rowCountLimit;
+            // A written TOP replaces SET ROWCOUNT (see ApplyDmlTopCap).
+            var cap = top is { } limit ? (limit.Percent ? int.MaxValue : Selection.ResolveDmlTopCap(limit, int.MaxValue, context.Batch))
+                : context.Connection.RowCountLimit is > 0 and var rowCountLimit ? (int)Math.Min(rowCountLimit, int.MaxValue)
+                : int.MaxValue;
             var written = 0;
             var walk = new TargetWalk();
             List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> row = [];

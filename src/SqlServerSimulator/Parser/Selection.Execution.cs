@@ -2214,10 +2214,15 @@ internal sealed partial class Selection
                 // parameters, and this closure replays across executions of a
                 // plan-cached SELECT (EF's Skip/Take shape), so the values
                 // must come from the EXECUTING batch, not the parse.
+                // An INSERT TOP (n) PERCENT hands its source plan the
+                // percentage, which real applies beneath the select list as the
+                // plan's own would be.
                 var top = topExpression is null
-                    ? default
+                    ? batch.SourceTopPercent is { Plan: var percentPlan, Limit: var sourceLimit } && ReferenceEquals(percentPlan, self) && offsetExpression is null
+                        ? TakeSourceTopPercent(batch, sourceLimit)
+                        : default
                     : topPercent
-                        ? new TopSpec(null, ResolveTopPercentValue(topExpression, batch, outerResolver), topWithTies)
+                        ? new TopSpec(null, new TopPercent(() => ResolveTopPercentValue(topExpression, batch, outerResolver)), topWithTies)
                         : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch, outerResolver), null, topWithTies);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch, outerResolver);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch, outerResolver);
@@ -3224,6 +3229,8 @@ internal sealed partial class Selection
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0 && !top.RequiresBuffering
             ? ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver)
+            : !distinct && orderBy.Count == 0 && top.Percent is { } percent && (percent.InsertSource || (joins.Length == 0 && excluders.TrueForAll(excluder => FoldsTrue(excluder, batch))))
+            ? ProjectPercentOfRows(sources, joins, expressions, excluders, percent, batch, outerResolver)
             : !distinct && orderBy.Count > 0
             ? ProjectSorted(sources, joins, expressions, excluders, outputColumnNames, orderBy, top, offsetCount, fetchCount, batch, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
@@ -3357,6 +3364,95 @@ internal sealed partial class Selection
 
                 yield return projected;
             }
+        }
+    }
+
+    /// <summary>
+    /// Whether a WHERE conjunct is a written constant that is TRUE, which
+    /// real's plan folds away, so <c>WHERE 1 = 1</c> leaves a read unfiltered.
+    /// </summary>
+    private static bool FoldsTrue(BooleanExpression excluder, BatchContext batch)
+    {
+        if (!excluder.IsWrittenConstant)
+            return false;
+        try
+        {
+            return excluder.Run(new RuntimeContext(static _ => throw new NotSupportedException(), batch)) == true;
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            // It raises again as the rows are read.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// An unordered <c>TOP (n) PERCENT</c> without <c>DISTINCT</c> whose select
+    /// list real computes past its count (see <see cref="TopPercent"/>): counts
+    /// the rows the WHERE keeps, then projects only the first
+    /// <c>ceil(count × n / 100)</c>, so an expression that would raise on a row
+    /// past the cap never runs.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> ProjectPercentOfRows(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        List<BooleanExpression> excluders,
+        TopPercent percent,
+        BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        // Hoisted per-row resolution scaffolding — see ProjectStreaming.
+        var memo = new SourceColumnMemo();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveSource = null!;
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
+        var rowRuntime = new RuntimeContext(resolveSource, batch);
+
+        var counted = new List<byte[]?[]>();
+        // The count reads every row before the first leaves it, so an error
+        // the WHERE raises on any row precedes every INSERT identity draw.
+        try
+        {
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+            {
+                currentTuple = tuple;
+                var include = true;
+                foreach (var excluder in excluders)
+                {
+                    if (excluder.Run(rowRuntime) != true)
+                    {
+                        include = false;
+                        break;
+                    }
+                }
+                if (include)
+                    counted.Add([.. tuple]);
+            }
+        }
+        catch (SimulatedSqlException countError)
+        {
+            countError.RaisedInRowProjection = false;
+            throw;
+        }
+
+        var cap = (int)Math.Ceiling(counted.Count * percent.Value / 100.0);
+        for (var r = 0; r < cap; r++)
+        {
+            currentTuple = counted[r];
+            batch.BumpRowStamp();
+            var projected = new SqlValue[expressions.Count];
+            try
+            {
+                for (var i = 0; i < projected.Length; i++)
+                    projected[i] = expressions[i].Run(rowRuntime);
+            }
+            catch (SimulatedSqlException projectionError)
+            {
+                // Above the spool, as real's projection is.
+                projectionError.RaisedInRowProjection = true;
+                throw;
+            }
+            yield return projected;
         }
     }
 

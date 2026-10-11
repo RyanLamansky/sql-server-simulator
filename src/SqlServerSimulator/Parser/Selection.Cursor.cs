@@ -921,7 +921,7 @@ internal sealed partial class Selection
         var top = limit.Top is null
             ? default
             : limit.Percent
-                ? new TopSpec(null, ResolveTopPercentValue(limit.Top, batch), limit.WithTies)
+                ? new TopSpec(null, new TopPercent(() => ResolveTopPercentValue(limit.Top, batch)), limit.WithTies)
                 : new TopSpec(ResolveRowCountLimit(limit.Top, RowLimitKind.Top, batch), null, limit.WithTies);
         var offset = ResolveRowCountLimit(limit.Offset, RowLimitKind.Offset, batch) ?? 0;
         var cap = ComputeTopCap(rows, row => row.OrderKey, plan.OrderBy, top, ResolveRowCountLimit(limit.Fetch, RowLimitKind.Fetch, batch));

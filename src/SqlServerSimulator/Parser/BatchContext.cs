@@ -398,6 +398,15 @@ internal sealed partial class BatchContext
     public Selection? RowAddressProbe;
 
     /// <summary>
+    /// The source plan an <c>INSERT TOP (n) PERCENT</c> is reading, with the
+    /// limit, which that plan applies as a <c>TOP (n) PERCENT</c> of its own
+    /// when it carries no row limit — clearing this, so the <c>INSERT</c>
+    /// knows its cap is taken; null otherwise. A nested plan the source
+    /// executes is never it.
+    /// </summary>
+    public (Selection Plan, Selection.DmlTopLimit Limit)? SourceTopPercent;
+
+    /// <summary>
     /// Set while a write through a level over a partitioned view reads that
     /// level's rows for one member, which real evaluates per member: a
     /// reference to the partitioned view then yields only that member's rows,

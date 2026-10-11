@@ -902,7 +902,8 @@ partial class Simulation
         IEnumerable<byte[]> UpdateAsRead()
         {
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
-            var cap = context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < rowCap ? (int)rowCountLimit : rowCap;
+            // A written TOP replaces SET ROWCOUNT (see ApplyDmlTopCap).
+            var cap = top is null && context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < rowCap ? (int)rowCountLimit : rowCap;
             var written = 0;
             var walk = new TargetWalk();
             List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> row = [];
@@ -1558,26 +1559,30 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Trims an affected-row list to the DML <c>TOP</c> cap in place. Always
-    /// resolves the limit (even when the list is empty) so a bad value
-    /// (negative / non-integer / out-of-range percent) raises before commit,
-    /// matching SQL Server's rejection with no rows changed. No-op when
-    /// <paramref name="top"/> is null.
+    /// Trims an affected-row list to the DML <c>TOP</c> cap, or with no
+    /// <c>TOP</c> the <c>SET ROWCOUNT</c> one, in place. Always resolves the
+    /// limit (even when the list is empty) so a bad value (negative /
+    /// non-integer / out-of-range percent) raises before commit, matching SQL
+    /// Server's rejection with no rows changed. No-op when the rows' source
+    /// already applied the cap (<paramref name="capApplied"/>), as an
+    /// <c>INSERT</c>'s source plan applies its <c>PERCENT</c>.
     /// </summary>
-    private static void ApplyDmlTopCap<T>(Selection.DmlTopLimit? top, List<T> rows, BatchContext batch)
+    private static void ApplyDmlTopCap<T>(Selection.DmlTopLimit? top, List<T> rows, BatchContext batch, bool capApplied = false)
     {
         // The limit is read when the statement runs; a skipped statement's
         // variables were declared but never assigned.
-        if (batch.IsSkipping)
+        if (batch.IsSkipping || capApplied)
             return;
-        var cap = top is { } limit ? Selection.ResolveDmlTopCap(limit, rows.Count, batch) : rows.Count;
-        // SET ROWCOUNT caps a DML statement's affected rows the same way TOP
-        // does, and the two compose as a minimum (probe-confirmed: TOP 5 under
-        // ROWCOUNT 3 changes 3 rows, TOP 3 under ROWCOUNT 5 changes 3). This is
-        // the seam every INSERT / UPDATE / DELETE already collects its rows
+        // SET ROWCOUNT caps a DML statement's affected rows only where it
+        // writes no TOP of its own, which replaces it (probed 2026-10-11
+        // against SQL Server 2025: UPDATE TOP (2) and MERGE TOP (2) under
+        // ROWCOUNT 1 change two rows, DELETE TOP (4) under ROWCOUNT 2 deletes
+        // four, 100 PERCENT under ROWCOUNT 1 inserts every row). This is the
+        // seam every INSERT / UPDATE / DELETE already collects its rows
         // through, so the cap lands once for all of them.
-        if (batch.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
-            cap = (int)rowCountLimit;
+        var cap = top is { } limit ? Selection.ResolveDmlTopCap(limit, rows.Count, batch)
+            : batch.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < rows.Count ? (int)rowCountLimit
+            : rows.Count;
         if (cap < rows.Count)
             rows.RemoveRange(cap, rows.Count - cap);
     }

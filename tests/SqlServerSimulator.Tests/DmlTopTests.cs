@@ -287,4 +287,83 @@ public sealed class DmlTopTests
             "insert t (v) values (0)");
         AreEqual("1:-5,2:-10,3:0", sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
     }
+
+    private const string PercentSource = "create table src (k int primary key, v varchar(10)); insert src values (1, '1'), (2, '2'), (3, 'x'), (4, '4');";
+
+    /// <summary>
+    /// An unordered <c>TOP (n) PERCENT</c> over a lone unfiltered table counts
+    /// its rows before computing any select list, so a row past the cap never
+    /// raises; a filter or join, folded-true <c>WHERE 1 = 1</c> aside, has
+    /// real compute every row's first (probed 2026-10-11 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top 50 percent cast(v as int) n from src", null)]
+    [DataRow("select top 50 percent cast(v as int) n from src where 1 = 1", null)]
+    [DataRow("select top 50 percent cast(v as int) n from src where k > 0", 245)]
+    [DataRow("select top 50 percent cast(a.v as int) n from src a join src b on a.k = b.k", 245)]
+    [DataRow("select distinct top 50 percent cast(v as int) n from src", 245)]
+    public void SelectTopPercent_ComputesTheSelectListPastTheCount(string query, int? error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(PercentSource);
+        if (error is { } number)
+            _ = simulation.AssertSqlError(query, number);
+        else
+            AreEqual("1,2", simulation.ExecuteScalar($"select string_agg(n, ',') from ({query}) q"));
+    }
+
+    /// <summary>
+    /// A percentage read as the statement runs is judged past the count: a
+    /// row's error comes first, and an empty input still refuses it (probed
+    /// 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top (@p) percent v from src where 10 / (k - 3) > -50", 8134)]
+    [DataRow("select top (@p) percent v from src where k > 100", 1031)]
+    [DataRow("insert top (@p) percent src (k, v) select k + 10, v from src where 10 / (k - 3) > -50", 8134)]
+    public void TopPercentVariable_IsJudgedPastTheCount(string statement, int error)
+        => new Simulation().AssertSqlError($"{PercentSource} declare @p float = 150; {statement}", error);
+
+    /// <summary>
+    /// An <c>INSERT TOP (n) PERCENT</c>'s source computes its select list past
+    /// the count whatever it filters or joins, the rows it writes drawing
+    /// identity values up to the one that fails; a source that fails while it
+    /// is counted draws none (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert top (50) percent t (v) select cast(v as int) from src", "1:1,2:2,3:0")]
+    [DataRow("insert top (50) percent t (v) select cast(a.v as int) from src a join src b on a.k = b.k where b.k > 0", "1:1,2:2,3:0")]
+    [DataRow("insert top (75) percent t (v) select cast(v as int) from src", "4:0")]
+    [DataRow("insert top (50) percent t (v) select top 3 cast(v as int) from src order by k", "1:0")]
+    [DataRow("insert top (50) percent t (v) select cast(v as int) from src union all select 5", "1:0")]
+    public void InsertTopPercent_ComputesTheSourcePastTheCount(string insert, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            PercentSource,
+            "create table t (id int identity, v int)",
+            $"begin try {insert} end try begin catch end catch",
+            "insert t (v) values (0)");
+        AreEqual(expected, sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
+    }
+
+    /// <summary>
+    /// A DML statement's own <c>TOP</c> replaces <c>SET ROWCOUNT</c> rather
+    /// than composing with it, which caps only a statement without one
+    /// (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update top (2) t set v = 0", 2)]
+    [DataRow("delete top (4) t", 4)]
+    [DataRow("delete top (50) percent t", 5)]
+    [DataRow("insert top (100) percent t (v) select v from t", 10)]
+    [DataRow("insert top (3) t (v) select v from t", 3)]
+    [DataRow("update t set v = 0", 1)]
+    [DataRow("insert t (v) select v from t", 1)]
+    public void DmlTop_ReplacesSetRowCount(string statement, int expected)
+    {
+        var simulation = Seed(10);
+        AreEqual(expected, simulation.ExecuteScalar<int>($"set rowcount 1; {statement}; select @@rowcount"));
+    }
 }

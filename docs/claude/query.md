@@ -248,7 +248,11 @@ A sort no index serves ranks the rows by their keys and projects only the page �
 - `TOP n` — the plain integer row cap; streams when no ORDER BY / DISTINCT, else read off the [Top-N selection](#top-n-selection).
 - `TOP n PERCENT` — the cap is `ceil(rowcount × n / 100)` (probe-confirmed against SQL Server 2025).
   The percent value must resolve to a numeric in `[0, 100]` — outside → **Msg 1031**, NULL → **Msg 1014**.
+  A written constant is judged while compiling; a variable or subquery only once the rows are counted, so an error a counted row raises comes first, and an empty input still refuses the value (probed 2026-10-11 against SQL Server 2025).
   PERCENT buffers every row (the total rowcount must be known).
+  Real spools the rows to count them beneath its select list only over a lone unfiltered table (a `WHERE 1 = 1` folds away), so an expression that would raise on a row past the cap never runs there; any other filter or a join has every row's select list computed first, as does `DISTINCT` (probed 2026-10-11).
+  An `INSERT`'s source computes it past the count whatever the source filters or joins — see [`dml.md`](dml.md#top-expr-percent-on-update--delete--insert--merge).
+  **Divergences**: a derived table that filters inside has real compute every row's select list, where the simulator counts first, and a cross join to a one-row constant table folds away on real, where here it is a join that computes them all.
 - `TOP n WITH TIES` — after the cap, additionally emits every following row whose ORDER BY key equals the boundary row's.
   Requires an ORDER BY (else **Msg 1062**).
 - Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build).
@@ -311,7 +315,8 @@ The session-wide sibling of `TOP`: a cap on how many rows a statement returns or
 Session state on `SimulatedDbConnection.RowCountLimit`, `bigint`-wide because real accepts a `bigint` variable there even though the literal form is int-bounded.
 Probed against SQL Server 2025 (2026-08-06).
 
-- **The two caps compose as a minimum**, in both directions: `TOP 5` under `ROWCOUNT 3` returns 3, `TOP 3` under `ROWCOUNT 5` returns 3.
+- **A `SELECT`'s `TOP` composes with it as a minimum**, in both directions: `TOP 5` under `ROWCOUNT 3` returns 3, `TOP 3` under `ROWCOUNT 5` returns 3.
+  A DML statement's own `TOP`, `PERCENT` included, **replaces** it instead: `UPDATE TOP (2)` and `MERGE TOP (2)` under `ROWCOUNT 1` change two rows, `DELETE TOP (4)` under `ROWCOUNT 2` deletes four (probed 2026-10-11 against SQL Server 2025).
 - **The cap is on what the statement emits, not what it reads**: `SELECT COUNT(*)` under `ROWCOUNT 3` still answers over the whole table and reports one row.
 - `@@ROWCOUNT` reports the capped count.
 - Every row-emitting shape takes it — a plain `SELECT`, an `OFFSET … FETCH`, a `SELECT … INTO`, a `SELECT @v = …` assignment (which then keeps the last row inside the cap), and `INSERT` / `UPDATE` / `DELETE` / `MERGE`.
@@ -319,7 +324,7 @@ Probed against SQL Server 2025 (2026-08-06).
   Which rows fill the cap follows each engine's processing order — real's comes from its join plan (key order over a primary key), the simulator's is target order and then the unmatched source rows.
 - `NEXT VALUE FOR` under an active cap is **Msg 11739**, the message real writes naming all three sources ("if ROWCOUNT option has been set, or the query contains TOP or OFFSET").
 
-Enforcement is three seams, not sprinkled checks: `SimulatedSqlResultSet.WithRowCountLimit` wraps the statement's own row sequence lazily at the SELECT / `SELECT … INTO` dispatch, `ApplyDmlTopCap` — the list every `INSERT` / `UPDATE` / `DELETE` already collects its rows through — folds the session cap in beside `TOP`, and `MERGE` stops queuing actions once its pending lists hold the cap.
+Enforcement is three seams, not sprinkled checks: `SimulatedSqlResultSet.WithRowCountLimit` wraps the statement's own row sequence lazily at the SELECT / `SELECT … INTO` dispatch, `ApplyDmlTopCap` — the list every `INSERT` / `UPDATE` / `DELETE` already collects its rows through — takes the session cap where the statement has no `TOP`, and `MERGE` stops queuing actions once its pending lists hold the cap.
 Inner plans (a join's sources, a subquery, a view body) are untouched, matching real.
 
 **Scoping.** The cap persists into a called procedure, while a body's own `SET ROWCOUNT` reverts when it returns — dynamic SQL the same — through `SimulatedDbConnection.SessionOptionScope`, shared with `XACT_ABORT` and `DATEFIRST`.

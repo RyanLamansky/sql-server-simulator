@@ -550,8 +550,15 @@ partial class Simulation
         var insert = plan.Insert;
         if (plan.Source is not { } selection)
             return InsertRows(context, insert, [[]], valueTupleStamps: null);
-        var sourceRows = ReadSelectSource(context, selection, insert.DestinationColumns, insert.DestinationTable, SourceRowLimit(insert.Top, context.Batch), sourceStamps);
-        return InsertRows(context, insert, sourceRows, valueTupleStamps: StampsByRow(sourceStamps));
+        var batch = context.Batch;
+        // A PERCENT cap is the source plan's to apply, beneath its select
+        // list, as real counts the source's rows before it computes any (probed
+        // 2026-10-11 against SQL Server 2025); a source with a row limit of its
+        // own, or no plan to hand it to, leaves the cap to the rows it returns.
+        using var sourcePercent = ParserScope.Enter(ref batch.SourceTopPercent, insert.Top is { Percent: true } percent ? (selection, percent) : null);
+        var sourceRows = ReadSelectSource(context, selection, insert.DestinationColumns, insert.DestinationTable, SourceRowLimit(insert.Top, batch), sourceStamps);
+        var percentTaken = insert.Top is { Percent: true } && batch.SourceTopPercent is null;
+        return InsertRows(context, insert, sourceRows, valueTupleStamps: StampsByRow(sourceStamps), topTaken: percentTaken);
     }
 
     /// <summary>
@@ -687,7 +694,7 @@ partial class Simulation
     /// source is read, then per row the defaults, identity, computed columns,
     /// constraints and the heap write, then the triggers and <c>OUTPUT</c>.
     /// </summary>
-    private static SimulatedStatementOutcome InsertRows(ParserContext context, InsertPlan plan, List<SqlValue[]> sourceRows, long[]? valueTupleStamps)
+    private static SimulatedStatementOutcome InsertRows(ParserContext context, InsertPlan plan, List<SqlValue[]> sourceRows, long[]? valueTupleStamps, bool topTaken = false)
     {
         var (destinationTable, destinationView, joinViewPlan, destinationColumns) = (plan.DestinationTable, plan.DestinationView, plan.JoinViewPlan, plan.DestinationColumns);
         var (output, top, valueTuples) = (plan.Output, plan.Top, plan.ValueTuples);
@@ -747,7 +754,7 @@ partial class Simulation
         if (valueTuples is not null)
             UnifyValueRows(valueTuples, sourceRows, context.Batch);
 
-        ApplyDmlTopCap(top, sourceRows, context.Batch);
+        ApplyDmlTopCap(top, sourceRows, context.Batch, capApplied: topTaken);
         // Keep the parsed tuples aligned 1:1 with sourceRows so per-cell DEFAULT
         // lookup by row index stays valid — TOP trims from the tail, matching
         // ApplyDmlTopCap's tail removal on sourceRows. A copy, since the plan
@@ -1831,27 +1838,28 @@ partial class Simulation
         }
         catch (SimulatedSqlException sourceError) when (destinationTable is not null)
         {
-            UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+            // A PERCENT cap the source plan didn't take is applied over the
+            // whole read, which real finishes before its first row is written,
+            // so a source failing partway draws nothing (probed 2026-10-11
+            // against SQL Server 2025).
+            var readsWhole = context.Batch.SourceTopPercent is { Plan: var percentPlan } && ReferenceEquals(percentPlan, selection);
+            UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
             throw;
         }
     }
 
     /// <summary>
     /// How many rows an <c>INSERT</c>'s source query is read for: a
-    /// <c>TOP (n)</c>'s count, or a <c>SET ROWCOUNT</c>'s when lower, after
-    /// which real's plan stops reading, so a later row's error never raises
-    /// (probed 2026-10-06 against SQL Server 2025). Null for no limit, a
-    /// <c>PERCENT</c> one included, which needs every row counted.
+    /// <c>TOP (n)</c>'s count, or with no <c>TOP</c> a <c>SET ROWCOUNT</c>'s,
+    /// after which real's plan stops reading, so a later row's error never
+    /// raises (probed 2026-10-06 against SQL Server 2025). Null for no limit,
+    /// and for a <c>PERCENT</c> one, which needs every row counted.
     /// </summary>
-    private static int? SourceRowLimit(Selection.DmlTopLimit? top, BatchContext batch)
-    {
-        if (batch.IsSkipping)
-            return null;
-        var cap = top is { Percent: false } limit ? Selection.ResolveDmlTopCap(limit, int.MaxValue, batch) : int.MaxValue;
-        if (batch.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
-            cap = (int)rowCountLimit;
-        return cap == int.MaxValue ? null : cap;
-    }
+    private static int? SourceRowLimit(Selection.DmlTopLimit? top, BatchContext batch) =>
+        batch.IsSkipping ? null
+        : top is { } limit ? (limit.Percent ? null : Selection.ResolveDmlTopCap(limit, int.MaxValue, batch))
+        : batch.Connection.RowCountLimit is > 0 and var rowCountLimit ? (int)Math.Min(rowCountLimit, int.MaxValue)
+        : null;
 
     /// <summary>
     /// Runs an <c>INSERT</c>'s source query into <paramref name="rows"/>, which
