@@ -2237,6 +2237,7 @@ internal abstract class Expression : ExpressionNode
             {
                 "BASE64_DECODE" => new Base64Decode(context),
                 "BASE64_ENCODE" => new Base64Encode(context),
+                "COLLATIONNAME" => new CollationName(context),
                 "CURSOR_STATUS" => new CursorStatusFunction(context),
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),

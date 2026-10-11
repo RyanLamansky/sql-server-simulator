@@ -104,6 +104,18 @@ internal sealed partial class TdsSession
         if (procId == 0 && request.ProcName.Length != 0)
             procId = WellKnownProcId(request.ProcName);
 
+        // SQL Server's OLE DB provider resets a pooled session by calling
+        // sp_reset_connection by name, where SqlClient sets the message's
+        // reset flag; either way the session starts over.
+        if (procId == 0 && string.Equals(request.ProcName, "sp_reset_connection", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!this.TryResetConnection(writer))
+                return;
+            writer.WriteReturnStatus(0);
+            writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
+            return;
+        }
+
         switch (procId)
         {
             case 0:
@@ -123,7 +135,7 @@ internal sealed partial class TdsSession
             case Tds.ProcIdExecuteSql:
                 {
                     var statement = ParameterText(request.Parameters, 0);
-                    var declaration = request.Parameters.Count >= 2 ? ParameterText(request.Parameters, 1) : null;
+                    var declaration = request.Parameters.Count >= 2 ? DeclarationText(request.Parameters, 1) : null;
                     // Value params (index 2+) arrive positional/unnamed (name='')
                     // from native drivers like mssql-jdbc's PreparedStatement;
                     // name them from the declaration (index 1) so `@P0` binds, the
@@ -138,7 +150,17 @@ internal sealed partial class TdsSession
 
             case Tds.ProcIdPrepare:
                 {
-                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), ParameterText(request.Parameters, 1));
+                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
+                    // The RETURN_METADATA option (1) describes the statement's
+                    // result as an empty result set ahead of the handle — what
+                    // SQL Server's OLE DB provider reads an OPENQUERY's
+                    // columns from.
+                    if (request.Parameters.Count > 3 && request.Parameters[3].Value is not (null or DBNull)
+                        && (Convert.ToInt32(request.Parameters[3].Value, CultureInfo.InvariantCulture) & 1) != 0
+                        && await this.DescribePreparedStatementAsync(this.preparedStatements[handle], writer, cancellationToken).ConfigureAwait(false))
+                    {
+                        return;
+                    }
                     TdsTypeCodec.WriteReturnValue(writer, 0, request.Parameters[0].Name, DbType.Int32, handle);
                     writer.WriteReturnStatus(0);
                     writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
@@ -163,7 +185,7 @@ internal sealed partial class TdsSession
             case Tds.ProcIdPrepExec:
                 {
                     var handleName = request.Parameters[0].Name;
-                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), ParameterText(request.Parameters, 1));
+                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
                     var prepared = this.preparedStatements[handle];
                     // The value params (index 3+) arrive positional/unnamed from
                     // native ODBC / OLE DB (name=''); name them from the prepared
@@ -185,6 +207,45 @@ internal sealed partial class TdsSession
                     "SIMULATED", "", 1);
                 writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Sends a prepared statement's result metadata: the statement run under
+    /// <c>SET FMTONLY ON</c>, which answers each query with its columns and no
+    /// rows and runs nothing. True when an attention cancelled it.
+    /// </summary>
+    private async ValueTask<bool> DescribePreparedStatementAsync(PreparedStatement prepared, TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        using var command = CreateCommand(this.connection!);
+#pragma warning disable CA2100 // This IS a SQL endpoint: the statement is the client's query by design.
+        command.CommandText = prepared.Statement;
+#pragma warning restore CA2100
+        command.ScopeTempTablesToBatch = true;
+        command.ParameterDeclaration = prepared.Declaration.Length == 0 ? null : prepared.Declaration;
+        // Nothing runs, but each declared parameter is supplied — as NULL —
+        // so the statement binds as an execution with values would.
+        foreach (var name in prepared.ParameterNames)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = name;
+            parameter.DbType = DbType.String;
+            parameter.Value = DBNull.Value;
+            _ = command.Parameters.Add(parameter);
+        }
+        command.YieldsBetweenStatements = this.multiplexer is not null;
+        command.StreamsResultRows = true;
+        var connection = this.connection!;
+        var savedFmtOnly = connection.FmtOnly;
+        connection.FmtOnly = true;
+        try
+        {
+            return await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            connection.FmtOnly = savedFmtOnly;
+            this.rpcEndingError = null;
         }
     }
 
@@ -300,8 +361,8 @@ internal sealed partial class TdsSession
 
     /// <summary>
     /// The well-known RPC procedures SqlClient (and legacy ODBC / OLE DB) may
-    /// send by name rather than by numeric ProcID — <c>sp_executesql</c> and the
-    /// API-server-cursor family. Returns 0 for any other name (a genuine
+    /// send by name rather than by numeric ProcID — <c>sp_executesql</c>, the
+    /// prepared-statement family and the API-server-cursor family. Returns 0 for any other name (a genuine
     /// stored-procedure call routed to <see cref="ExecuteProcedureRpcAsync"/>).
     /// </summary>
     private static ushort WellKnownProcId(string procName) =>
@@ -319,6 +380,10 @@ internal sealed partial class TdsSession
         ["sp_cursorfetch"] = Tds.ProcIdCursorFetch,
         ["sp_cursoroption"] = Tds.ProcIdCursorOption,
         ["sp_cursorclose"] = Tds.ProcIdCursorClose,
+        ["sp_prepare"] = Tds.ProcIdPrepare,
+        ["sp_execute"] = Tds.ProcIdExecute,
+        ["sp_prepexec"] = Tds.ProcIdPrepExec,
+        ["sp_unprepare"] = Tds.ProcIdUnprepare,
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -406,6 +471,14 @@ internal sealed partial class TdsSession
         index < parameters.Count && parameters[index].Value is string text
             ? text
             : throw new InvalidDataException($"RPC parameter {index} was expected to be a statement or declaration string.");
+
+    /// <summary>
+    /// A parameter-declaration argument, which may be NULL for a statement
+    /// taking no parameters — SQL Server's OLE DB provider prepares a linked
+    /// server's statements so — and reads as an empty declaration then.
+    /// </summary>
+    private static string DeclarationText(List<TdsRpcParameter> parameters, int index) =>
+        index < parameters.Count && parameters[index].Value is null or DBNull ? "" : ParameterText(parameters, index);
 
     /// <summary>
     /// Extracts the parameter names from a declaration string like

@@ -18,6 +18,12 @@ internal static class StatementDoneKind
     public const ushort OpenCursor = 0x20;
 
     /// <summary>
+    /// The row an <c>sp_cursor</c> write reached (probed 2026-10-11 against
+    /// SQL Server 2025).
+    /// </summary>
+    public const ushort CursorOperation = 0x7D;
+
+    /// <summary>
     /// The error ending a security or schema statement that sends no DONE
     /// when it succeeds — <c>CREATE</c> / <c>ALTER</c> / <c>DROP</c> of a user,
     /// role, application role, login or server role, <c>GRANT</c> /

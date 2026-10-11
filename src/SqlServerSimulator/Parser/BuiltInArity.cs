@@ -321,6 +321,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
         ["CHECKSUM"] = AtLeast("checksum", 1),
         ["CHECKSUM_AGG"] = Exactly("checksum_agg", 1),
         ["CHOOSE"] = AtLeast("choose", 2),
+        ["COLLATIONNAME"] = Between("collationname", 1, 2),
         ["COLLATIONPROPERTY"] = Exactly("collationproperty", 2),
         ["COLUMNPROPERTY"] = Exactly("columnproperty", 3),
         ["COLUMNS_UPDATED"] = Exactly("columns_updated", 0),

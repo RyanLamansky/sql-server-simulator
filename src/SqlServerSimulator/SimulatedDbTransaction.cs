@@ -229,6 +229,18 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal readonly List<(LockResource Resource, LockMode Mode, SessionToken Owner)> HeldLocks = [];
 
     /// <summary>
+    /// The schema-stability locks <c>sp_getschemalock</c> took in this
+    /// transaction, by the handle it returned, which <c>sp_releaseschemalock</c>
+    /// gives back early; each rides <see cref="HeldLocks"/> too, so the rest go
+    /// at the transaction's end. Handles count up from 1 per transaction and
+    /// aren't reused. Null until the first.
+    /// </summary>
+    internal List<(int Handle, Schemas.SchemaObject Object)>? SchemaLockHandles;
+
+    /// <summary>The last handle <see cref="SchemaLockHandles"/> gave out.</summary>
+    internal int LastSchemaLockHandle;
+
+    /// <summary>
     /// Transaction-owned application locks (<c>sp_getapplock @LockOwner =
     /// 'Transaction'</c>), one entry per successful acquire. The manager
     /// holds themselves also ride <see cref="HeldLocks"/> (which releases

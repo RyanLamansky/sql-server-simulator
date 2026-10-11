@@ -68,7 +68,8 @@ partial class Simulation
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
         or "sp_tables" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
-        or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread";
+        or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        || IsOleDbRowsetProcedure(systemProcName);
 
     /// <summary>
     /// <c>EXEC @v</c>: the procedure named by a character-string variable,
@@ -411,7 +412,11 @@ partial class Simulation
             "xp_msver" => InvokeXpMsver(batch),
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
             "xp_regread" => InvokeXpInstanceRegread(batch, instanceMapped: false),
-            _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
+            "sp_getschemalock" => InvokeSpGetSchemaLock(batch, CalledName(procName)),
+            "sp_releaseschemalock" => InvokeSpReleaseSchemaLock(batch, CalledName(procName)),
+            "sp_table_statistics2_rowset" => Uncounted(InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))!),
+            _ => InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))
+                ?? throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
         };
         if (systemProc is not null)
         {

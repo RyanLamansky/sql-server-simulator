@@ -609,9 +609,10 @@ internal sealed class Cursor(
     /// <c>FETCH</c> without <c>INTO</c> and every <c>sp_cursorfetch</c> carries
     /// on real, even when no row is fetched (probed 2026-09-25 against SQL
     /// Server 2025). Each row already ends in its ROWSTAT (see
-    /// <see cref="WithRowStat"/>).
+    /// <see cref="WithRowStat"/>). <paramref name="keyed"/> marks the base
+    /// tables' key columns, as an API cursor's metadata does.
     /// </summary>
-    public SimulatedSqlResultSet FetchResult(IEnumerable<SqlValue[]> rows)
+    public SimulatedSqlResultSet FetchResult(IEnumerable<SqlValue[]> rows, bool keyed = false)
     {
         var selection = this.Selection;
         var width = selection.Schema.Length;
@@ -627,9 +628,10 @@ internal sealed class Cursor(
             // The browse tokens name each column's base table — every column
             // an expression when the query reads none — and the ROWSTAT
             // hidden and an expression (probed 2026-09-28 against SQL Server
-            // 2025).
+            // 2025); an API cursor that identifies its rows by key marks the
+            // key's columns (probed 2026-10-11).
             Browse = selection.CursorBrowse is { } browse
-                ? new BrowseInfo(browse.Tables, [.. browse.Columns, (0, 0x14, null)])
+                ? new BrowseInfo(browse.Tables, [.. keyed ? browse.Columns : browse.Columns.Select(static column => (column.Table, (byte)(column.Status & ~0x08), column.BaseName)), (0, 0x14, null)])
                 : new BrowseInfo([], [.. Parser.Selection.SetOperationBrowseInfo(width).Columns, (0, 0x14, null)]),
         };
     }

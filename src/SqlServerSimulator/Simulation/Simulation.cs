@@ -1903,7 +1903,7 @@ public sealed partial class Simulation
         // xp_msver — which named-argument synthesis would reject as duplicates.
         if (ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf) is { } systemProcName)
         {
-            foreach (var outcome in InvokeSystemProcedureFromRpc(batch.Connection, systemProcName, command.Parameters))
+            foreach (var outcome in InvokeSystemProcedureFromRpc(batch.Connection, systemProcName, procName, command.Parameters))
                 yield return outcome;
             yield break;
         }
@@ -2057,26 +2057,55 @@ public sealed partial class Simulation
     /// Dispatches a name-form RPC call to a modeled system procedure by
     /// synthesizing an equivalent top-level <c>EXEC &lt;name&gt; &lt;args&gt;</c>
     /// batch, then running it through the standard statement dispatch so the
-    /// call reuses <see cref="ParseExec"/>'s system-proc switch. Each
-    /// non-<see cref="ParameterDirection.ReturnValue"/> parameter is literalized
-    /// positionally (see <see cref="LiteralizeRpcArgument"/>); output/return
-    /// writeback isn't wired for system procs (the modeled ones — xp_msver and
-    /// friends — return result sets, not OUTPUT values). Result sets stream back
-    /// through the yielded outcomes.
+    /// call reuses <see cref="ParseExec"/>'s system-proc switch. The database
+    /// part of the name the call used carries over, so the procedure runs in
+    /// that database as an <c>EXEC</c> naming it does. Each
+    /// non-<see cref="ParameterDirection.ReturnValue"/> parameter is passed
+    /// positionally: an input literalized (see <see cref="LiteralizeRpcArgument"/>),
+    /// an output one as a variable of the batch the call writes back through,
+    /// as the return value is. Result sets stream back through the yielded
+    /// outcomes.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSystemProcedureFromRpc(
         SimulatedDbConnection connection,
         string canonicalName,
+        MultiPartName calledName,
         DbParameterCollection parameters)
     {
-        var sql = new System.Text.StringBuilder("EXEC ").Append(canonicalName);
+        var sql = new System.Text.StringBuilder("EXEC ");
+        var slots = new List<(string Name, DbParameter Parameter, VariableSlot Slot)>();
+        foreach (DbParameter parameter in parameters)
+        {
+            if (parameter.Direction is ParameterDirection.ReturnValue)
+            {
+                slots.Add(("__rpc_rc", parameter, new VariableSlot(SqlType.Int32, declaredMaxLength: null, SqlValue.FromInt32(0), parameter)));
+                _ = sql.Append("@__rpc_rc = ");
+                break;
+            }
+        }
+        if (calledName.Count >= 3)
+        {
+            var schema = calledName[calledName.Count - 2];
+            _ = sql.Append(QuoteName(calledName[calledName.Count - 3])).Append('.').Append(schema.Length == 0 ? "" : QuoteName(schema)).Append('.');
+        }
+        _ = sql.Append(canonicalName);
         var first = true;
         foreach (DbParameter parameter in parameters)
         {
             if (parameter.Direction is ParameterDirection.ReturnValue)
                 continue;
-            _ = sql.Append(first ? " " : ", ").Append(LiteralizeRpcArgument(parameter));
+            _ = sql.Append(first ? " " : ", ");
             first = false;
+            if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
+            {
+                var type = SqlType.GetByDbType(parameter.DbType);
+                var value = parameter.Value is null or DBNull ? SqlValue.Null(type) : type.ConvertParameter(parameter.Value);
+                var name = "__rpc_o" + slots.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                slots.Add((name, parameter, new VariableSlot(type, declaredMaxLength: null, value, parameter)));
+                _ = sql.Append('@').Append(name).Append(" OUTPUT");
+                continue;
+            }
+            _ = sql.Append(LiteralizeRpcArgument(parameter));
         }
 
         using var childCommand = new SimulatedDbCommand(this, connection);
@@ -2084,6 +2113,8 @@ public sealed partial class Simulation
         childCommand.CommandText = sql.ToString();
 #pragma warning restore CA2100
         var childBatch = new BatchContext(childCommand);
+        foreach (var (name, _, slot) in slots)
+            childBatch.Variables[name] = slot;
         var parser = childBatch.Parser;
         parser.MoveNextOptional();
         // The RPC is the procedure's scope, so the scope markers the
@@ -2099,7 +2130,18 @@ public sealed partial class Simulation
             }
             yield return outcome;
         }
+
+        // The procedure wrote its outputs and return code through the
+        // variables, which go back to the parameters the call bound.
+        foreach (var (_, parameter, slot) in slots)
+        {
+            if (parameter is SimulatedDbParameter simulated && parameter.Direction is not ParameterDirection.ReturnValue)
+                simulated.OutputSqlValue = slot.Value;
+            parameter.Value = slot.Value.IsNull ? DBNull.Value : slot.Value.ToObject();
+        }
     }
+
+    private static string QuoteName(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
     /// <summary>
     /// Renders one RPC parameter value as a T-SQL literal for the synthesized

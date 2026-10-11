@@ -316,7 +316,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   An unqualified name searches the principal's default schema before `dbo`, but a module body's queries search the module's own schema, so a new module-body batch site sets `BatchContext.ModuleSchema`.
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf.
   A module body runs in the database that owns it, entered through `ModuleDatabaseScope`, which a new module-invocation path must enter too → [`schemas.md`](docs/claude/schemas.md).
-- **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_describe_first_result_set`, `sp_who`, `sp_configure`, and the expression-dependency surfaces.
+- **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_describe_first_result_set`, `sp_who`, `sp_configure`, the OLE DB schema-rowset procedures a real server's linked server reads the simulator through, and the expression-dependency surfaces.
   All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules.
   The metadata views' rows persist **across statements** (`Simulation.CatalogRows`), so a new path that changes what one projects must invalidate that cache → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL, the `ALTER` / `CREATE OR ALTER` path, `WITH RESULT SETS`, `WITH SCHEMABINDING`, DML through views, CTEs and derived tables, partitioned views**.

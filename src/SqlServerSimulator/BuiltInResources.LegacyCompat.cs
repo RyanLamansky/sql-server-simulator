@@ -58,6 +58,59 @@ internal static partial class BuiltInResources
         "sp_releaseapplock",
         // Reserves a range of a sequence's values through OUTPUT parameters.
         "sp_sequence_get_range",
+        // The schema-rowset procedures SQL Server's OLE DB provider reads a
+        // linked server's catalog through, and the schema-lock pair it
+        // brackets a four-part statement with.
+        "sp_catalogs_rowset",
+        "sp_catalogs_rowset2",
+        "sp_check_constbytable_rowset",
+        "sp_check_constbytable_rowset2",
+        "sp_column_privileges_rowset",
+        "sp_column_privileges_rowset2",
+        "sp_columns_100_rowset",
+        "sp_columns_100_rowset2",
+        "sp_columns_90_rowset",
+        "sp_columns_90_rowset2",
+        "sp_columns_rowset",
+        "sp_columns_rowset2",
+        "sp_foreign_keys_rowset",
+        "sp_foreign_keys_rowset2",
+        "sp_foreign_keys_rowset3",
+        "sp_getschemalock",
+        "sp_indexes_100_rowset",
+        "sp_indexes_100_rowset2",
+        "sp_indexes_90_rowset",
+        "sp_indexes_90_rowset2",
+        "sp_indexes_rowset",
+        "sp_indexes_rowset2",
+        "sp_primary_keys_rowset",
+        "sp_primary_keys_rowset2",
+        "sp_procedure_params_100_rowset",
+        "sp_procedure_params_100_rowset2",
+        "sp_procedure_params_90_rowset",
+        "sp_procedure_params_90_rowset2",
+        "sp_procedure_params_rowset",
+        "sp_procedure_params_rowset2",
+        "sp_procedures_rowset",
+        "sp_procedures_rowset2",
+        "sp_provider_types_100_rowset",
+        "sp_provider_types_90_rowset",
+        "sp_provider_types_rowset",
+        "sp_releaseschemalock",
+        "sp_table_privileges_rowset",
+        "sp_table_privileges_rowset2",
+        "sp_table_statistics2_rowset",
+        "sp_table_statistics_rowset",
+        "sp_tables_info_90_rowset",
+        "sp_tables_info_90_rowset2",
+        "sp_tables_info_90_rowset2_64",
+        "sp_tables_info_90_rowset_64",
+        "sp_tables_info_rowset",
+        "sp_tables_info_rowset2",
+        "sp_tables_info_rowset2_64",
+        "sp_tables_info_rowset_64",
+        "sp_tables_rowset",
+        "sp_tables_rowset2",
         // Application-role activation: sp_setapprole swaps the session's
         // database principal for the role's and pins the session to its
         // database; sp_unsetapprole takes it back with the issued cookie.
@@ -928,7 +981,7 @@ internal static partial class BuiltInResources
     internal static bool IsExtendedProcedure(string proc) =>
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
-        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
     internal static bool TryResolveSystemObject(int objectId, out SystemObject system)

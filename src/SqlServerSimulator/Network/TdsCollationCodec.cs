@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 using SqlServerSimulator.Storage;
@@ -60,6 +61,36 @@ internal sealed class TdsCollationCodec
             info |= Binary2;
         var sortId = this.SortId switch { 218 => (byte)212, 219 => (byte)211, var own => own };
         return [(byte)info, (byte)(info >> 8), (byte)(info >> 16), (byte)(info >> 24), sortId];
+    }
+
+    /// <summary>
+    /// The collation whose <see cref="PropertyBytes"/> are
+    /// <paramref name="bytes"/> — of several sharing them, the one of smallest
+    /// collation id — or null for bytes no collation has.
+    /// </summary>
+    public static string? NameForPropertyBytes(byte[] bytes) =>
+        bytes.Length == 5 && ByPropertyBytes.Value.TryGetValue(PropertyKey(bytes), out var name) ? name : null;
+
+    private static readonly Lazy<FrozenDictionary<ulong, string>> ByPropertyBytes = new(static () =>
+    {
+        var byKey = new Dictionary<ulong, (string Name, int Id)>();
+        foreach (var (name, _) in Collation.EnumerateRecognized())
+        {
+            if (!Collation.TryGetMetrics(name, out var metrics))
+                continue;
+            var key = PropertyKey(For(Collation.Get(name)).PropertyBytes(name.Contains("_BIN2", StringComparison.OrdinalIgnoreCase)));
+            if (!byKey.TryGetValue(key, out var held) || metrics.CollationId < held.Id)
+                byKey[key] = (name, metrics.CollationId);
+        }
+        return byKey.ToDictionary(static entry => entry.Key, static entry => entry.Value.Name).ToFrozenDictionary();
+    });
+
+    private static ulong PropertyKey(byte[] bytes)
+    {
+        ulong key = 0;
+        foreach (var b in bytes)
+            key = (key << 8) | b;
+        return key;
     }
 
     private TdsCollationCodec(Collation collation)

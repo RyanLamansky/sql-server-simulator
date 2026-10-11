@@ -380,4 +380,28 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ExecuteArgumentsWithoutServer() =>
         new("Incorrect syntax near ')'.", 102, 15, 3);
+
+    /// <summary>
+    /// Msg 208 at state 132: the object <c>sp_getschemalock</c> names doesn't
+    /// exist. It ends the batch and rolls the transaction back, and caught
+    /// it dooms the transaction (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaLockObjectNotFound(string name) =>
+        new($"Invalid object name '{name}'.", 208, 16, 132) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 8174: <c>sp_releaseschemalock</c> of a handle the transaction
+    /// holds no schema lock under, which ends the batch and rolls the
+    /// transaction back (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaLockHandleNotFound(int handle) =>
+        new($"Schema lock with handle {handle.ToString(System.Globalization.CultureInfo.InvariantCulture)} not found.", 8174, 16, 71) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 20001, a replication message <c>sp_table_statistics2_rowset</c>
+    /// raises for a table name nothing in the database has (probed 2026-10-11
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoNicknameForArticle() =>
+        new("There is no nickname for article '(null)' in publication '(null)'.", 20001, 16, 1);
 }

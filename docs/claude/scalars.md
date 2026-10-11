@@ -814,6 +814,13 @@ Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → Code
 - **Version** — the version ordinal from the numeric name token: unversioned / SQL_\* → 0, 90 → 1, 100 → 2, 140 → 3, 160 → 4.
 - **Name** — the collation's canonical name.
 
+## `COLLATIONNAME(tds_collation [, flags])`
+
+`Parser/Expressions/CollationName.cs`, undocumented: the inverse of `COLLATIONPROPERTY(…, 'TDSCollation')`, which SQL Server's OLE DB provider asks of a server it links to.
+Five bytes some collation's property bytes are answer that collation's name as `nvarchar(128)`; any other bytes, another length or NULL answer NULL.
+Collations sharing their bytes — one with `_SC` and one without, a Japanese 140 `_VSS` pair, the two EBCDIC sort variants — answer with the one of smallest collation id, which is how real picks across all 5540 (`TdsCollationCodec.NameForPropertyBytes`; probed 2026-10-11 against SQL Server 2025).
+The argument converts as an assignment to `varbinary` does (a string is Msg 257, an `int` converts), and a second argument makes the answer NULL once it converts to `int`.
+
 ## `FILEPROPERTY(file_name, property)`
 
 `Parser/Expressions/FileProperty.cs`: per-file metadata for a file of the **current** database.

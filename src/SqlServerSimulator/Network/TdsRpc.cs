@@ -17,11 +17,19 @@ internal sealed class TdsRpcRequest
     /// <summary>The RPC parameters in declaration order.</summary>
     public readonly List<TdsRpcParameter> Parameters;
 
-    private TdsRpcRequest(string procName, ushort procId, List<TdsRpcParameter> parameters)
+    /// <summary>
+    /// The request's fNoMetaData option: the client already holds the result's
+    /// metadata, so the result goes out with a COLMETADATA of no columns
+    /// (count <c>0xFFFF</c>) — SQL Server's OLE DB provider fetches a cursor so.
+    /// </summary>
+    public readonly bool NoMetadata;
+
+    private TdsRpcRequest(string procName, ushort procId, List<TdsRpcParameter> parameters, bool noMetadata)
     {
         this.ProcName = procName;
         this.ProcId = procId;
         this.Parameters = parameters;
+        this.NoMetadata = noMetadata;
     }
 
     /// <summary>
@@ -56,8 +64,8 @@ internal sealed class TdsRpcRequest
         else
             procName = reader.ReadUcs2(nameLenProcId);
 
-        // OptionFlags (fWithRecomp / fNoMetaData / fReuseMetaData); no behavior here.
-        _ = reader.ReadUInt16();
+        // OptionFlags: fWithRecomp (0x1), fNoMetaData (0x2), fReuseMetaData (0x4).
+        var optionFlags = reader.ReadUInt16();
 
         var parameters = new List<TdsRpcParameter>();
         while (!reader.AtEnd)
@@ -73,7 +81,7 @@ internal sealed class TdsRpcRequest
             parameters.Add(ParseParameter(reader, currentDatabase, parameters.Count + 1));
         }
 
-        return new TdsRpcRequest(procName, procId, parameters);
+        return new TdsRpcRequest(procName, procId, parameters, (optionFlags & 0x2) != 0);
     }
 
     private static TdsRpcParameter ParseParameter(TdsValueReader reader, string currentDatabase, int ordinal)

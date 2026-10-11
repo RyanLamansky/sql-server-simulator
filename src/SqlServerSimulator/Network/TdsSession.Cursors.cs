@@ -345,6 +345,7 @@ internal sealed partial class TdsSession
         this.CompleteCursorRpc(writer, moreRequests, error: false);
     }
 
+
     // ---- sp_cursorfetch ---------------------------------------------------
 
     private void CursorFetch(TdsRpcRequest request, TdsTokenWriter writer, bool moreRequests)
@@ -391,7 +392,7 @@ internal sealed partial class TdsSession
         var (firstDirection, offset) = MapFetchType(fetchType, rownum);
         var rows = this.FetchIntoBuffer(api, firstDirection, offset, nrows);
 
-        WriteCursorMetadata(writer, api.Cursor, rows);
+        WriteCursorMetadata(writer, api.Cursor, rows, request.NoMetadata);
         writer.WriteReturnStatus(0);
         this.CompleteCursorRpc(writer, moreRequests, error: false);
     }
@@ -455,6 +456,15 @@ internal sealed partial class TdsSession
             return;
         }
 
+        // INSERT (0x4) adds a row through the cursor's table, whatever the
+        // fetch buffer holds — SQL Server's OLE DB provider writes a linked
+        // server's INSERT so, over a cursor it never fetched from.
+        if ((optype & 0x4) != 0)
+        {
+            this.CursorInsert(parameters, writer, moreRequests);
+            return;
+        }
+
         if (api.Buffer.Count == 0)
         {
             WriteFetchBufferError(writer, 16931, "There are no rows in the current fetch buffer.");
@@ -504,7 +514,50 @@ internal sealed partial class TdsSession
 #pragma warning restore CA2100
             }
 
-            _ = command.ExecuteNonQuery();
+            // A positioned write reports its row twice, in two DONEINPROC
+            // tokens, which SQL Server's OLE DB provider reads a linked
+            // server's write from (probed 2026-10-11 against SQL Server 2025).
+            var affected = command.ExecuteNonQuery();
+            writer.WriteDoneToken(Tds.TokenDoneInProc, Tds.DoneCount | Tds.DoneMore, affected, StatementDoneKind.CursorOperation);
+            writer.WriteDoneToken(Tds.TokenDoneInProc, Tds.DoneCount | Tds.DoneMore, affected, StatementDoneKind.CursorOperation);
+        }
+        catch (SimulatedSqlException ex)
+        {
+            foreach (var error in ex.Errors)
+                writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, TdsSession.ServerName, error.Procedure, error.LineNumber);
+            writer.WriteReturnStatus(ex.Errors[0].Number);
+            this.CompleteCursorRpc(writer, moreRequests, error: true);
+            return;
+        }
+
+        writer.WriteReturnStatus(0);
+        this.CompleteCursorRpc(writer, moreRequests, error: false);
+    }
+
+    /// <summary>
+    /// <c>sp_cursor</c>'s INSERT: the named parameters after the table name
+    /// are the new row's columns.
+    /// </summary>
+    private void CursorInsert(List<TdsRpcParameter> parameters, TdsTokenWriter writer, bool moreRequests)
+    {
+        var table = parameters.Count > 3 ? AsString(parameters, 3) : "";
+        try
+        {
+            using var command = CreateCommand(this.connection!);
+            var columns = new List<string>();
+            var values = new List<string>();
+            for (var i = 4; i < parameters.Count; i++)
+            {
+                columns.Add("[" + parameters[i].Name.TrimStart('@').Replace("]", "]]", StringComparison.Ordinal) + "]");
+                values.Add(parameters[i].Name);
+                _ = AddParameter(command, parameters[i]);
+            }
+#pragma warning disable CA2100 // Object / column names are the cursor's own; the engine re-validates them.
+            command.CommandText = columns.Count == 0
+                ? $"INSERT INTO {table} DEFAULT VALUES;"
+                : $"INSERT INTO {table} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});";
+#pragma warning restore CA2100
+            writer.WriteDoneToken(Tds.TokenDoneInProc, Tds.DoneCount | Tds.DoneMore, command.ExecuteNonQuery(), StatementDoneKind.CursorOperation);
         }
         catch (SimulatedSqlException ex)
         {
@@ -547,19 +600,42 @@ internal sealed partial class TdsSession
     /// ending in the hidden <c>ROWSTAT</c> column) and,
     /// when <paramref name="rows"/> is non-null, one ROW per fetched row, each
     /// already ending in its ROWSTAT. A null rows list is the metadata-only
-    /// announce (sp_cursoropen).
+    /// announce (sp_cursoropen); <paramref name="noMetadata"/> sends the rows
+    /// under an empty COLMETADATA, for a fetch whose RPC asked for none.
     /// </summary>
-    private static void WriteCursorMetadata(TdsTokenWriter writer, Cursor cursor, List<SqlValue[]>? rows)
+    private static void WriteCursorMetadata(TdsTokenWriter writer, Cursor cursor, List<SqlValue[]>? rows, bool noMetadata = false)
     {
-        var result = cursor.FetchResult(rows ?? []);
-        TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags);
+        // The browse tokens name each column's base table, and a cursor that
+        // identifies its rows by key — keyset, dynamic, forward-only — marks
+        // the key's columns, which SQL Server's OLE DB provider reads a
+        // linked server's writable columns from (probed 2026-10-11 against
+        // SQL Server 2025).
+        var result = cursor.FetchResult(rows ?? [], keyed: !cursor.FastForward && cursor.Sensitivity != CursorSensitivity.Static);
+        if (noMetadata)
+        {
+            // A fetch asking for no metadata gets a COLMETADATA of no columns
+            // (probed 2026-10-11 against SQL Server 2025, SQL Server's OLE DB
+            // provider fetching a linked server's cursor).
+            writer.WriteByte(Tds.TokenColMetadata);
+            writer.WriteUInt16(0xFFFF);
+        }
+        else
+        {
+            TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags, browse: result.Browse);
+        }
 
-        if (rows is null)
-            return;
+        if (rows is not null)
+        {
+            using var cur = result.CreateCursor();
+            while (cur.MoveNext())
+                TdsTypeCodec.WriteRow(writer, result.Schema, cur, result.ColumnNullability);
+        }
 
-        using var cur = result.CreateCursor();
-        while (cur.MoveNext())
-            TdsTypeCodec.WriteRow(writer, result.Schema, cur, result.ColumnNullability);
+        // Real closes the metadata, and each fetch's rows, with a
+        // DONEINPROC counting them, which SQL Server's OLE DB provider reads
+        // how many rows a fetch brought from (probed 2026-10-11 against SQL
+        // Server 2025).
+        writer.WriteDoneToken(Tds.TokenDoneInProc, Tds.DoneCount | Tds.DoneMore, rows?.Count ?? 0, StatementDoneKind.Select);
     }
 
     /// <summary>
