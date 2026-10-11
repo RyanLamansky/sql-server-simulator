@@ -132,6 +132,7 @@ internal sealed class DatabasePropertyEx : Expression
             {
                 DatabaseState.Emergency => "EMERGENCY",
                 DatabaseState.Offline => "OFFLINE",
+                DatabaseState.Restoring => "RESTORING",
                 _ => "ONLINE",
             }),
             // The database's access mode, moved by ALTER DATABASE … SET

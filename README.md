@@ -99,6 +99,23 @@ That reporting is worth wiring up: `Skipped` names what the loader couldn't tran
 Import is create-only, so a database name already present in the simulation raises `InvalidOperationException`.
 A `Stream` overload covers bacpacs that don't come from a file path.
 
+## Backup and restore
+
+`BACKUP DATABASE … TO DISK` and `RESTORE DATABASE … FROM DISK` work, so a suite can capture a database once and put it back before every test the way it would against SQL Server.
+Restoring a database that still has the backup's definitions only replaces its data, which takes a fraction of a second even for a database of a few hundred tables.
+
+The backup file is the simulator's own format, readable only by the simulator build that wrote it — not a real `.bak`.
+By default backups live in memory inside the simulation; to read and write real files, supply `OpenBackupFile`:
+
+```C#
+var simulation = new Simulation
+{
+    OpenBackupFile = (path, access) => access == FileAccess.Read
+        ? (File.Exists(path) ? File.OpenRead(path) : null)
+        : File.Create(path),
+};
+```
+
 ## Fidelity
 
 Behavior was probed against a live SQL Server reference instance before being modeled.
@@ -132,7 +149,7 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
   Logins, users, and database + server roles (fixed and custom), with authenticated logins mapped to their database user the way SQL Server does.
   `GRANT`/`DENY`/`REVOKE` are enforced for restricted principals at column, object, schema, and database scope — alongside `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, ownership chaining, catalog metadata filtered to a principal's visibility, and `VIEW SERVER STATE`-gated DMVs.
 - **Scale-out shapes.**
-  Multiple databases with cross-database reads, linked servers between simulations, and BACPAC import for bootstrapping from a real database.
+  Multiple databases with cross-database reads, linked servers between simulations, BACPAC import for bootstrapping from a real database, and full-database `BACKUP` / `RESTORE`.
 
 Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 

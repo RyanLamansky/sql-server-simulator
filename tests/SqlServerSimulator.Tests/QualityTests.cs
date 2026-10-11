@@ -32,6 +32,7 @@ public partial class QualityTests
                 nameof(Simulation.ServerCollationName),
                 nameof(Simulation.EnableClr),
                 nameof(Simulation.OpenBulkFile),
+                nameof(Simulation.OpenBackupFile),
                 nameof(Simulation.ListenLocalAsync),
                 nameof(Simulation.ListenNetworkAsync),
             ],

@@ -54,9 +54,11 @@ internal sealed class DefaultConstraint(string name, Expression expression, int 
     /// <summary>
     /// True when the name was auto-generated (inline DEFAULT at CREATE TABLE,
     /// or anonymous ALTER TABLE ADD DEFAULT). Surfaces in
-    /// <c>sys.default_constraints.is_system_named</c>.
+    /// <c>sys.default_constraints.is_system_named</c>. Mutable for
+    /// <c>RESTORE DATABASE</c>, which recreates the constraint under its
+    /// stored name and then stamps the flag it was backed up with.
     /// </summary>
-    public readonly bool IsSystemNamed = isSystemNamed;
+    public bool IsSystemNamed = isSystemNamed;
 
     /// <summary>
     /// Text form of <see cref="Expression"/> for

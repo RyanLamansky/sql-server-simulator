@@ -237,10 +237,10 @@ partial class Simulation
         // Msg 3702 for a self-drop: the executing session sitting in the target
         // database (USE foo; DROP DATABASE foo). Real also blocks *other* active
         // sessions, but the teardown idiom every app runs first —
-        // SET SINGLE_USER WITH ROLLBACK IMMEDIATE — evicts those; the simulator
-        // treats that ALTER as parse-and-discard (no eviction model), so it
-        // mirrors the idiom's intent by treating other sessions as already
-        // evicted and blocking only the executing one.
+        // SET SINGLE_USER WITH ROLLBACK IMMEDIATE — evicts those, here as on
+        // real; the simulator mirrors the idiom's intent for a teardown that
+        // skips it by treating other sessions as already evicted and blocking
+        // only the executing one.
         if (BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, name))
             throw SimulatedSqlException.CannotDropDatabaseInUse(name);
         bool removed;

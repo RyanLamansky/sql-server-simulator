@@ -79,7 +79,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
         if (!connection.Simulation.Databases.TryGetValue(databaseName, out var target))
             throw SimulatedSqlException.DatabaseDoesNotExist(databaseName, fromUse);
-        target.RejectWhenOffline();
+        target.RejectWhenOffline(connection);
         if (!PermissionEnforcement.Bypasses(connection, target))
         {
             var principal = PermissionEnforcement.ResolveCrossDatabasePrincipal(connection, target);
@@ -87,5 +87,6 @@ partial class Simulation
         }
 
         connection.CurrentDatabase = target;
+        target.ClaimSingleUserSlot(connection);
     }
 }

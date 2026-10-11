@@ -449,11 +449,23 @@ internal sealed partial class Database
     /// </summary>
     public DatabaseState State;
 
-    /// <summary>Raises Msg 942 when this database is <see cref="DatabaseState.Offline"/>.</summary>
-    public void RejectWhenOffline()
+    /// <summary>The session <c>RESTORE DATABASE</c> rebuilds this database on while it is <see cref="DatabaseState.Restoring"/>, or null.</summary>
+    internal SimulatedDbConnection? RestoringConnection;
+
+    /// <summary>
+    /// Raises Msg 942 when this database is <see cref="DatabaseState.Offline"/>,
+    /// Msg 927 while it is <see cref="DatabaseState.Restoring"/> unless
+    /// <paramref name="connection"/> is the one rebuilding it, and Msg 924 when
+    /// it is single-user and another session keeps holding it past the wait.
+    /// </summary>
+    public void RejectWhenOffline(SimulatedDbConnection connection)
     {
         if (this.State == DatabaseState.Offline)
             throw SimulatedSqlException.DatabaseIsOffline(this.Name);
+        if (this.State == DatabaseState.Restoring && !ReferenceEquals(connection, this.RestoringConnection))
+            throw SimulatedSqlException.DatabaseIsRestoring(this.Name);
+        if (!this.WaitForSingleUserSlot(connection))
+            throw SimulatedSqlException.DatabaseInSingleUserUse(this.Name);
     }
 
     /// <summary>
@@ -477,21 +489,73 @@ internal sealed partial class Database
     /// <c>sys.database_recovery_status.database_guid</c>: this database's
     /// identity, drawn when it's created.
     /// </summary>
-    public readonly Guid DatabaseGuid = Guid.NewGuid();
+    public Guid DatabaseGuid = Guid.NewGuid();
 
     /// <summary>
     /// <c>sys.database_recovery_status</c>'s <c>family_guid</c> and
     /// <c>recovery_fork_guid</c>, one value for a database that has never been
     /// restored.
     /// </summary>
-    public readonly Guid RecoveryForkGuid = Guid.NewGuid();
+    public Guid RecoveryForkGuid = Guid.NewGuid();
 
     /// <summary>
     /// <c>sys.databases.user_access</c>: 0 MULTI_USER, 1 SINGLE_USER,
-    /// 2 RESTRICTED_USER — recorded; the simulator never restricts a
-    /// connection by it.
+    /// 2 RESTRICTED_USER. A single-user database admits only
+    /// <see cref="SingleUserHolder"/>; <c>RESTRICTED_USER</c> is recorded only.
     /// </summary>
     public byte UserAccess;
+
+    /// <summary>
+    /// The one session a <c>SINGLE_USER</c> database admits: the session that
+    /// set the mode — from <c>master</c> too, which is how a restore harness
+    /// keeps the database to itself between its <c>ALTER DATABASE</c> and its
+    /// <c>RESTORE</c> — or, once that session ends, the first to enter it
+    /// (probed 2026-10-11 against SQL Server 2022 and 2025). Null while nobody holds it;
+    /// named by its token, so a session closed or dropped without disposal
+    /// lets go of it.
+    /// </summary>
+    internal SessionToken? SingleUserHolder;
+
+    /// <summary>How long a session waits for the single-user slot before it is refused: about two seconds (probed 2026-10-11 against SQL Server 2022 and 2025).</summary>
+    private const int SingleUserWaitMillis = 2000;
+
+    /// <summary>The live session other than <paramref name="asking"/> holding this single-user database, or null when it admits <paramref name="asking"/>.</summary>
+    internal SimulatedDbConnection? SingleUserOccupant(SimulatedDbConnection asking)
+    {
+        if (this.UserAccess != 1 || Volatile.Read(ref this.SingleUserHolder) is not { } holder || ReferenceEquals(holder, asking.Session))
+            return null;
+        foreach (var candidate in asking.Simulation.SnapshotConnections())
+        {
+            if (ReferenceEquals(candidate.Session, holder) && candidate.State == System.Data.ConnectionState.Open && !candidate.Killed)
+                return candidate;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="asking"/> may enter this database, waiting as
+    /// real does for another session's single-user slot to come free.
+    /// </summary>
+    internal bool WaitForSingleUserSlot(SimulatedDbConnection asking)
+    {
+        if (this.SingleUserOccupant(asking) is null)
+            return true;
+        var deadline = Environment.TickCount64 + SingleUserWaitMillis;
+        while (Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(5);
+            if (this.SingleUserOccupant(asking) is null)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Makes <paramref name="entering"/> the single user when this single-user database has none.</summary>
+    internal void ClaimSingleUserSlot(SimulatedDbConnection entering)
+    {
+        if (this.UserAccess == 1 && this.SingleUserOccupant(entering) is null)
+            Volatile.Write(ref this.SingleUserHolder, entering.Session);
+    }
 
     /// <summary>
     /// This database's Query Store configuration, set by
@@ -549,7 +613,31 @@ internal sealed partial class Database
     /// INSERT — rolling back doesn't return IDs to the pool). Backs
     /// <c>OBJECT_ID()</c> and the upcoming <c>sys.objects</c> catalog view.
     /// </summary>
-    public int AllocateObjectId() => Interlocked.Increment(ref this.nextObjectId);
+    public int AllocateObjectId()
+    {
+        if (this.RestoredObjectIds is not { } restored)
+            return Interlocked.Increment(ref this.nextObjectId);
+        this.RestoredAllocations++;
+        return restored.Count > 0 ? restored.Dequeue() : Interlocked.Increment(ref this.nextObjectId);
+    }
+
+    /// <summary>How many object ids the definition <see cref="RestoredObjectIds"/> serves has drawn.</summary>
+    internal int RestoredAllocations;
+
+    /// <summary>
+    /// While <c>RESTORE DATABASE</c> replays one definition into this
+    /// database, the source's object ids, in the order the definition
+    /// allocates them, so every object comes back under the id it was backed
+    /// up with; null otherwise. Only the restoring session reaches the
+    /// database then, so the queue takes no lock.
+    /// </summary>
+    internal Queue<int>? RestoredObjectIds;
+
+    /// <summary>The <see cref="RestoredObjectIds"/> companion for <see cref="AllocateUserTypeId"/>.</summary>
+    internal Queue<int>? RestoredUserTypeIds;
+
+    /// <summary>The <see cref="RestoredObjectIds"/> companion for <see cref="AllocateXmlCollectionId"/>.</summary>
+    internal Queue<int>? RestoredXmlCollectionIds;
 
     private int nextUserTypeId = 256;
 
@@ -561,7 +649,8 @@ internal sealed partial class Database
     /// at 256. The counter is monotonic and never reuses a value — same
     /// invariant as <see cref="AllocateObjectId"/>.
     /// </summary>
-    public int AllocateUserTypeId() => Interlocked.Increment(ref this.nextUserTypeId);
+    public int AllocateUserTypeId() =>
+        this.RestoredUserTypeIds is { Count: > 0 } restored ? restored.Dequeue() : Interlocked.Increment(ref this.nextUserTypeId);
 
     /// <summary>
     /// Per-database extended-properties dictionary. Keyed by
@@ -807,7 +896,8 @@ internal sealed partial class Database
     /// against SQL Server 2025). The counter is seeded at 65535 so the first
     /// allocation returns 65536, matching that convention.
     /// </summary>
-    public int AllocateXmlCollectionId() => Interlocked.Increment(ref this.nextXmlCollectionId);
+    public int AllocateXmlCollectionId() =>
+        this.RestoredXmlCollectionIds is { Count: > 0 } restored ? restored.Dequeue() : Interlocked.Increment(ref this.nextXmlCollectionId);
 
     /// <summary>
     /// The database's partition functions by name, compared under its
@@ -839,6 +929,41 @@ internal sealed partial class Database
     /// Server 2025); which failures consume one is the caller's ordering.
     /// </summary>
     public int AllocatePartitionSchemeId() => Interlocked.Increment(ref this.nextPartitionSchemeId);
+
+    /// <summary>
+    /// The database's id allocators and counters, which a backup carries so a
+    /// restored database hands out the ids and values the source would have
+    /// handed out next.
+    /// </summary>
+    internal long[] CaptureCounters() =>
+    [
+        Volatile.Read(ref this.nextSchemaId), Volatile.Read(ref this.nextObjectId), Volatile.Read(ref this.nextUserTypeId),
+        Volatile.Read(ref this.nextPrincipalId), Volatile.Read(ref this.nextFullTextCatalogId), Volatile.Read(ref this.nextAssemblyId),
+        Volatile.Read(ref this.nextXmlCollectionId), Volatile.Read(ref this.nextPartitionFunctionId), Volatile.Read(ref this.nextPartitionSchemeId),
+        Interlocked.Read(ref this.rowVersionCounter), Interlocked.Read(ref this.changeTrackingVersion),
+    ];
+
+    /// <summary>
+    /// Restores what <see cref="CaptureCounters"/> captured; with
+    /// <paramref name="raiseOnly"/>, only the id allocators an id handed out
+    /// since passed are left where they stand.
+    /// </summary>
+    internal void RestoreCounters(long[] counters, bool raiseOnly = false)
+    {
+        static void Set(ref int field, long value, bool raiseOnly) => field = raiseOnly ? Math.Max(field, (int)value) : (int)value;
+
+        Set(ref this.nextSchemaId, counters[0], raiseOnly);
+        Set(ref this.nextObjectId, counters[1], raiseOnly);
+        Set(ref this.nextUserTypeId, counters[2], raiseOnly);
+        Set(ref this.nextPrincipalId, counters[3], raiseOnly);
+        Set(ref this.nextFullTextCatalogId, counters[4], raiseOnly);
+        Set(ref this.nextAssemblyId, counters[5], raiseOnly);
+        Set(ref this.nextXmlCollectionId, counters[6], raiseOnly);
+        Set(ref this.nextPartitionFunctionId, counters[7], raiseOnly);
+        Set(ref this.nextPartitionSchemeId, counters[8], raiseOnly);
+        _ = Interlocked.Exchange(ref this.rowVersionCounter, counters[9]);
+        _ = Interlocked.Exchange(ref this.changeTrackingVersion, counters[10]);
+    }
 }
 
 /// <summary>

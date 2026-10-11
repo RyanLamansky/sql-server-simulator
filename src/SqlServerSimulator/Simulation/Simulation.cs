@@ -3217,6 +3217,8 @@ public sealed partial class Simulation
         context.CtePrefixLeadsSelectStatement = false;
         context.XmlNamespaces = null;
         batch.CurrentStatement.BeginExecution();
+        if (connection.PinnedUtcNow is { } pinned)
+            batch.CurrentStatement.UtcNow = pinned;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings
@@ -3590,6 +3592,12 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Kill } when ParseKill(context, batch):
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Backup } when this.ParseBackup(context, batch):
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Restore } when this.ParseRestore(context, batch):
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Shutdown } when ParseShutdown(context, batch):

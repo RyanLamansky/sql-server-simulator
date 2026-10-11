@@ -42,8 +42,13 @@ Only `SET` follows a refusal with Msg 5069: the `COLLATE`, `MODIFY`, `ADD` and `
 
 **`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
 `READ_ONLY` / `READ_WRITE` take the same shape and the same termination clause but are load-bearing — see [Read-only databases](#read-only-databases).
-The state is recorded for the catalog and the termination clause discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
-Load-bearing for `DROP DATABASE`: every ORM/app test-teardown runs `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before the drop (Django/mssql-django).
+The state is recorded for the catalog (and comes back with a restored database).
+Moving to `SINGLE_USER` honors the termination clause as the state options do (probed 2026-10-11 against SQL Server 2022): with none it waits for every other session using the database to leave, `WITH NO_WAIT` refuses at once with Msg 5070 then 5069, and `WITH ROLLBACK IMMEDIATE` (or `AFTER n`, past its wait) sends Msg 5060 twice and ends those sessions as `KILL` does.
+The session that sets `SINGLE_USER` becomes the single user wherever it is, `master` included, until it ends; the first session to enter the database after that holds it next (`Database.SingleUserHolder`).
+Every other session waits about two seconds for the slot, then a `USE` or three-part reference is Msg 924 and a login naming the database Msg 4060; `sys.databases` stays readable.
+Moving out of `SINGLE_USER` is the single user's: anyone else waits about eight seconds, then gets Msg 5064 then 5069.
+`RESTRICTED_USER` only records.
+Load-bearing for `DROP DATABASE` and `RESTORE DATABASE`: ORM test teardowns (Django/mssql-django) and restore harnesses run `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before them; see [`backup-restore.md`](backup-restore.md).
 Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
 
 **`State`**: `SET {ONLINE | OFFLINE | EMERGENCY}` with the access mode's termination clause — see [Database states](#database-states).

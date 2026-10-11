@@ -1216,6 +1216,7 @@ internal static partial class BuiltInResources
         var online = SqlValue.FromNVarchar("ONLINE");
         var emergency = SqlValue.FromNVarchar("EMERGENCY");
         var offline = SqlValue.FromNVarchar("OFFLINE");
+        var restoring = SqlValue.FromNVarchar("RESTORING");
         var nothing = SqlValue.FromNVarchar("NOTHING");
         var none = SqlValue.FromNVarchar("NONE");
         var databaseDefault = SqlValue.FromNVarchar("DATABASE_DEFAULT");
@@ -1264,6 +1265,7 @@ internal static partial class BuiltInResources
                 {
                     DatabaseState.Emergency => emergency,
                     DatabaseState.Offline => offline,
+                    DatabaseState.Restoring => restoring,
                     _ => online,
                 },
                 falseBit,

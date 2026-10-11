@@ -100,8 +100,10 @@ internal sealed class ForeignKey(
     /// <summary>
     /// True when the FK's name was auto-generated rather than user-supplied
     /// via <c>CONSTRAINT name</c>. Surfaces in <c>sys.foreign_keys.is_system_named</c>.
+    /// Mutable for <c>RESTORE DATABASE</c>, which recreates the key under its
+    /// stored name and then stamps the flag it was backed up with.
     /// </summary>
-    public readonly bool IsSystemNamed = isSystemNamed;
+    public bool IsSystemNamed = isSystemNamed;
 
     /// <summary>
     /// True iff the FK was added via <c>ALTER TABLE … WITH NOCHECK ADD

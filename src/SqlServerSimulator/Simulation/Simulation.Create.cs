@@ -3034,10 +3034,13 @@ partial class Simulation
             // surfaces in sys.default_constraints — auto-name when no
             // CONSTRAINT name was given. Real SQL Server's inline-DEFAULT
             // names look like DF__<table8>__<col>__<8hex>.
+            // The walk a batch takes in skip mode before it runs keeps nothing
+            // it parses, so it takes no id: one it took would leave a gap in
+            // the database's ids that a restore's replay can't reproduce.
             newColumn.DefaultConstraint = new DefaultConstraint(
                 inlineDefaultName ?? AutoDefaultName(tableName, columnName.Value),
                 defaultExpression,
-                context.CurrentDatabase.AllocateObjectId(),
+                context.Batch.IsSkipping ? 0 : context.CurrentDatabase.AllocateObjectId(),
                 isSystemNamed: inlineDefaultName is null,
                 definition: defaultDefinition,
                 createDate: context.Batch.CurrentStatement.UtcNow);

@@ -2374,6 +2374,21 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool SuppressDdlTriggers;
 
     /// <summary>
+    /// The instant every statement on this session takes as its time instead of
+    /// the clock, or null for the clock: <c>RESTORE DATABASE</c> replays each
+    /// object's DDL at the object's own creation instant, so its
+    /// <c>create_date</c> comes back as it was backed up.
+    /// </summary>
+    internal DateTime? PinnedUtcNow;
+
+    /// <summary>
+    /// The schema an unqualified name created on this session lands in instead
+    /// of the principal's default, or null: <c>RESTORE DATABASE</c> replays a
+    /// module's verbatim definition in the schema the module was in.
+    /// </summary>
+    internal string? ReplayDefaultSchema;
+
+    /// <summary>
     /// <c>@@IDENTITY</c>: the last identity value an INSERT on this session
     /// produced, in any scope but a function's. Cleared (set to <c>null</c>)
     /// by an INSERT that doesn't generate or accept one, except that a trigger
@@ -2918,8 +2933,13 @@ public sealed class SimulatedDbConnection : DbConnection
         {
             // An offline database refuses the login as a missing one does
             // (probed 2026-10-10 against SQL Server 2025: Msg 4060).
-            if (this.Simulation.Databases.TryGetValue(catalog, out var requested) && requested.State == DatabaseState.Offline)
+            // So does a single-user database another session holds, once the
+            // login has waited for it (probed 2026-10-11 against SQL Server 2022).
+            if (this.Simulation.Databases.TryGetValue(catalog, out var requested)
+                && (requested.State is DatabaseState.Offline or DatabaseState.Restoring || !requested.WaitForSingleUserSlot(this)))
+            {
                 throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(catalog);
+            }
             this.ChangeDatabase(catalog);
         }
         this.state = ConnectionState.Open;
@@ -2939,7 +2959,7 @@ public sealed class SimulatedDbConnection : DbConnection
         var target = this.CurrentDatabase;
         if (initialCatalog is { Length: > 0 })
         {
-            if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested) || requested.State == DatabaseState.Offline)
+            if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested) || requested.State is DatabaseState.Offline or DatabaseState.Restoring || !requested.WaitForSingleUserSlot(this))
                 throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(initialCatalog);
             target = requested;
         }

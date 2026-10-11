@@ -314,7 +314,7 @@ The database registers with the smallest-free id (above) and is immediately usab
 
 `DROP DATABASE [IF EXISTS] <name> [, …]` (`Simulation.Drop.cs`): a system database raises **Msg 3708**; the **executing** session sitting in the target (`USE foo; DROP DATABASE foo`) raises **Msg 3702**; a missing database raises **Msg 3701** unless `IF EXISTS` (then a silent no-op).
 Removing the database frees its id for reuse.
-Divergence from real: real also blocks *other* active sessions on the target (Msg 3702), but the teardown idiom apps run first — `ALTER DATABASE … SET SINGLE_USER WITH ROLLBACK IMMEDIATE` (parse-and-discarded, [`database-options.md`](database-options.md)) — evicts those on a real server; the simulator has no eviction model, so it treats other sessions as already evicted and blocks only the executing one, matching the idiom's intent.
+Divergence from real: real also blocks *other* active sessions on the target (Msg 3702), but the teardown idiom apps run first — `ALTER DATABASE … SET SINGLE_USER WITH ROLLBACK IMMEDIATE` ([`database-options.md`](database-options.md)) — evicts those, on a real server and here; for a teardown that skips it, the simulator treats other sessions as already evicted and blocks only the executing one, matching the idiom's intent.
 This is what lets an ORM's unmodified test runner (Django/mssql-django) create → migrate → run → drop its `test_*` database against the simulator with no configuration override.
 
 `ALTER DATABASE <name> MODIFY NAME = <newname>` renames in place — the `Database` object keeps its id and contents and is re-keyed in `Simulation.Databases` — and answers Msg 5021, plus Msg 5701 naming the new name when the session sits in it (probed 2026-09-25 against SQL Server 2025).

@@ -204,7 +204,7 @@ partial class Simulation
 
         // An offline database can't be renamed (probed 2026-10-10 against SQL
         // Server 2025), though its SET options still move.
-        target.RejectWhenOffline();
+        target.RejectWhenOffline(context.Connection);
         RenameDatabaseTo(context.Batch, target, newNameToken.Value);
         return true;
     }
@@ -538,11 +538,10 @@ partial class Simulation
         /// <summary>
         /// A bare access-mode state (SINGLE_USER / MULTI_USER / RESTRICTED_USER)
         /// with no <c>=</c> value, optionally followed by a termination clause
-        /// <c>WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT</c>
-        /// — parse-and-discarded (the simulator has no connection-count access
-        /// model, so it never actually restricts). Emitted by mssql-django's
-        /// test-database teardown (<c>SET SINGLE_USER WITH ROLLBACK IMMEDIATE</c>
-        /// before DROP DATABASE).
+        /// <c>WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT</c>,
+        /// read by <see cref="ConsumeAccessModeOption"/>. Emitted by mssql-django's
+        /// test-database teardown and by restore harnesses (<c>SET SINGLE_USER WITH
+        /// ROLLBACK IMMEDIATE</c> before DROP DATABASE or RESTORE DATABASE).
         /// </summary>
         AccessMode,
         /// <summary>
@@ -713,15 +712,7 @@ partial class Simulation
             case AlterDatabaseOptionKind.Special:
                 return ConsumeSpecialDatabaseOption(context, target, name);
             case AlterDatabaseOptionKind.AccessMode:
-                if (!ConsumeTerminationClause(context))
-                    return false;
-                if (!context.Batch.IsSkipping)
-                {
-                    target.UserAccess = BuiltInToken.Equals(name, "RESTRICTED_USER") ? (byte)2
-                        : BuiltInToken.Equals(name, "SINGLE_USER") ? (byte)1
-                        : (byte)0;
-                }
-                return true;
+                return ConsumeAccessModeOption(context, target, name);
             default:
                 return false;
         }

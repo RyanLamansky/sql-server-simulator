@@ -23,6 +23,7 @@ partial class Simulation
         ReservedKeyword { Keyword: var keyword } => keyword switch
         {
             Keyword.Alter => AlterDoneKind(PeekAfterLead(context)),
+            Keyword.Backup => StatementDoneKind.Backup,
             Keyword.Begin => PeekAfterLead(context) is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }
                 ? StatementDoneKind.BeginTransaction
                 : null,
@@ -48,6 +49,7 @@ partial class Simulation
             Keyword.RaisError => StatementDoneKind.RaisError,
             Keyword.ReadText => StatementDoneKind.ReadText,
             Keyword.Reconfigure => StatementDoneKind.Reconfigure,
+            Keyword.Restore => StatementDoneKind.Restore,
             Keyword.Return => StatementDoneKind.Return,
             Keyword.Rollback => StatementDoneKind.Rollback,
             Keyword.Save => StatementDoneKind.Save,

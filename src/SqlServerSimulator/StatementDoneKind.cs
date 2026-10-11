@@ -114,6 +114,13 @@ internal static class StatementDoneKind
 
     public const ushort DropTrigger = 0xE1;
     public const ushort Use = 0xE2;
+
+    /// <summary><c>BACKUP DATABASE</c> and <c>BACKUP LOG</c> (probed 2026-10-11 against SQL Server 2022).</summary>
+    public const ushort Backup = 0xE4;
+
+    /// <summary><c>RESTORE DATABASE</c> (probed 2026-10-11 against SQL Server 2022).</summary>
+    public const ushort Restore = 0xE5;
+
     public const ushort Dbcc = 0xE6;
     public const ushort Checkpoint = 0xE7;
     public const ushort CreateDefault = 0xE9;

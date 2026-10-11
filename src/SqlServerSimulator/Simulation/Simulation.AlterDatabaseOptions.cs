@@ -68,7 +68,7 @@ partial class Simulation
                 break;
             case TerminationClause.Rollback:
                 if (rollbackAfterSeconds > 0)
-                    WaitForOtherSessionsToLeave(batch, target, TimeSpan.FromSeconds(rollbackAfterSeconds));
+                    _ = WaitForOtherSessionsToLeave(batch, target, TimeSpan.FromSeconds(rollbackAfterSeconds));
                 var others = OtherSessionsUsing(connection, target);
                 if (others.Count != 0)
                 {
@@ -82,7 +82,7 @@ partial class Simulation
                 }
                 break;
             default:
-                WaitForOtherSessionsToLeave(batch, target, timeout: null);
+                _ = WaitForOtherSessionsToLeave(batch, target, timeout: null);
                 break;
         }
 
@@ -95,6 +95,90 @@ partial class Simulation
             connection.PendingMessages.Enqueue(SimulatedSqlException.CurrentDatabaseSwitchedToMasterMessage(batch));
         }
         return true;
+    }
+
+    /// <summary>
+    /// <c>SINGLE_USER | RESTRICTED_USER | MULTI_USER</c>, each with an optional
+    /// termination clause, recorded on <see cref="Database.UserAccess"/>.
+    /// Moving to <c>SINGLE_USER</c> waits for every other session using the
+    /// database to leave it, <c>NO_WAIT</c> refusing at once (Msg 5070) and
+    /// <c>ROLLBACK</c> ending them, announced by Msg 5060 twice, as the state
+    /// options do (probed 2026-10-11 against SQL Server 2022 and 2025). The simulator
+    /// keeps no tally of the one user a single-user database admits, so a later
+    /// connection isn't refused (real's Msg 924).
+    /// </summary>
+    private static bool ConsumeAccessModeOption(ParserContext context, Database target, string name)
+    {
+        if (!TryConsumeTerminationClause(context, out var termination, out var rollbackAfterSeconds))
+            return false;
+        var batch = context.Batch;
+        if (batch.IsSkipping)
+            return true;
+        var access = BuiltInToken.Equals(name, "RESTRICTED_USER") ? (byte)2
+            : BuiltInToken.Equals(name, "SINGLE_USER") ? (byte)1
+            : (byte)0;
+        var connection = batch.Connection;
+        if (access == 1)
+        {
+            switch (termination)
+            {
+                case TerminationClause.NoWait:
+                    if (SessionsHolding(connection, target).Count != 0)
+                        throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.DatabaseStateInUse(target.Name));
+                    break;
+                case TerminationClause.Rollback:
+                    if (rollbackAfterSeconds > 0)
+                        _ = WaitForOtherSessionsToLeave(batch, target, TimeSpan.FromSeconds(rollbackAfterSeconds), singleUserToo: true);
+                    var others = SessionsHolding(connection, target);
+                    if (others.Count != 0)
+                    {
+                        connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 0));
+                        foreach (var other in others)
+                            other.Kill();
+                        connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 100));
+                    }
+                    break;
+                default:
+                    _ = WaitForOtherSessionsToLeave(batch, target, timeout: null, singleUserToo: true);
+                    break;
+            }
+            target.UserAccess = 1;
+            Volatile.Write(ref target.SingleUserHolder, connection.Session);
+            return true;
+        }
+
+        // Only the single user may take the database out of single-user mode;
+        // anyone else waits about eight seconds for it to leave, then is
+        // refused (probed 2026-10-11 against SQL Server 2022 and 2025).
+        if (target.SingleUserOccupant(connection) is not null)
+        {
+            var deadline = Environment.TickCount64 + SingleUserChangeWaitMillis;
+            while (target.SingleUserOccupant(connection) is not null)
+            {
+                if (Environment.TickCount64 >= deadline)
+                    throw SimulatedSqlException.SingleUserDatabaseInUse(target.Name);
+                batch.PollCancellation();
+                Thread.Sleep(5);
+            }
+        }
+        target.UserAccess = access;
+        Volatile.Write(ref target.SingleUserHolder, null);
+        return true;
+    }
+
+    /// <summary>How long a session other than a single-user database's single user waits to change its mode before Msg 5064.</summary>
+    private const int SingleUserChangeWaitMillis = 8000;
+
+    /// <summary>
+    /// <see cref="OtherSessionsUsing"/>, plus the session holding the
+    /// database's single-user slot when another one does, wherever it is.
+    /// </summary>
+    private static List<SimulatedDbConnection> SessionsHolding(SimulatedDbConnection connection, Database database)
+    {
+        var others = OtherSessionsUsing(connection, database);
+        if (database.SingleUserOccupant(connection) is { } holder && !others.Contains(holder))
+            others.Add(holder);
+        return others;
     }
 
     /// <summary>
@@ -122,17 +206,22 @@ partial class Simulation
 
     /// <summary>
     /// Waits, past any <c>LOCK_TIMEOUT</c> as real does, until no other
-    /// session uses <paramref name="database"/> or <paramref name="timeout"/>
-    /// passes; a cancel or <c>CommandTimeout</c> ends the wait.
+    /// session uses <paramref name="database"/> — nor, with
+    /// <paramref name="singleUserToo"/>, holds its single-user slot — or
+    /// <paramref name="timeout"/> passes; a cancel or <c>CommandTimeout</c>
+    /// ends the wait. True when they all left.
     /// </summary>
-    private static void WaitForOtherSessionsToLeave(BatchContext batch, Database database, TimeSpan? timeout)
+    private static bool WaitForOtherSessionsToLeave(BatchContext batch, Database database, TimeSpan? timeout, bool singleUserToo = false)
     {
         var deadline = timeout is { } limit ? Environment.TickCount64 + (long)limit.TotalMilliseconds : long.MaxValue;
-        while (OtherSessionsUsing(batch.Connection, database).Count != 0 && Environment.TickCount64 < deadline)
+        while ((singleUserToo ? SessionsHolding(batch.Connection, database) : OtherSessionsUsing(batch.Connection, database)).Count != 0)
         {
+            if (Environment.TickCount64 >= deadline)
+                return false;
             batch.PollCancellation();
             Thread.Sleep(5);
         }
+        return true;
     }
 
     /// <summary>Reads the value grammar of each <see cref="AlterDatabaseOptionKind.Special"/> option, the cursor on its name.</summary>
