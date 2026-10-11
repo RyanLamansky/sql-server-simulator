@@ -136,6 +136,7 @@ That covers the NULL-supplied side of LEFT / RIGHT / FULL and the unmatched-righ
 
 A source is narrowed by whichever seek shape its conjuncts offer, the cross-column `OR`'s [union of seeks](indexes.md#union-of-seeks-a-cross-column-or) included — that pass reports its deduped candidate count like any other seek, so an OR-narrowed non-leftmost source drives the reorder below on the same terms.
 A disjunct naming a **sibling** source (`t.a = 1 OR j.jid = 11`) declines it for the same reason a sibling probe value does.
+A source the seek leaves with many rows is filtered further by the WHERE's other sargable conjuncts on it, as one no key can seek is filtered by all of them — see [`indexes.md`](indexes.md#a-seeked-source-is-filtered-by-its-other-conjuncts).
 
 A narrowed source drops its `DataLockPlan`, so it is never re-seeked per outer row by the join; it becomes a small hash build side instead.
 Past the leftmost slot the pass skips a source whose lock plan owes a SERIALIZABLE / `HOLDLOCK` phantom fence — the fence is settled inside the seek attempt, so probing every source would change which key ranges a SERIALIZABLE reader locks and when.
@@ -218,6 +219,7 @@ It engages only when every one of these holds:
 
 **The driver** is the best **non-leftmost** narrowed prefix source (`CanDrive`): one seeking at most `SeekOuterRowCap` rows, or up to `SeekOuterBufferCap` where the written driver reads `SeekInnerRowsPerOuterRow` times more — the ratio at which `EquiJoinSeekOrHash` keeps seeking the next link, so the narrowed outer still seeks where the written one would have scanned.
 The written driver's count is its own seek's, or its table's row count when nothing narrowed it; a prefiltered written driver (whose lazy stream has no count) admits only the 128-row rule.
+A filtered source — the scan prefilter's or a seek's filter — counts once a sample of its first `SeekOuterRowCap` + 1 rows runs dry, taken where the written driver would hash over it and the join from it would seek a partner per row (see [`indexes.md`](indexes.md#a-filtered-source-is-counted-by-a-sample)); one whose filter keeps more never drives.
 Several narrowed sources compete on the seek's own candidate count (ties break on the written order); a narrowed leftmost that seeks at least as few already drives, and a wider narrowing leaves the leftmost driving rather than trading a small outer's per-outer seeks for a large one's hash probes.
 A chain with a `Cross` level and no such driver drives from its leftmost source.
 

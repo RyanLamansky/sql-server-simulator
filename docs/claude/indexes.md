@@ -188,6 +188,23 @@ It **declines** — falling back to the full scan — for:
 
 - non-base-table sources (derived tables, table variables, `FOR SYSTEM_TIME`), a WHERE with no equality conjunct on any index's leading column (a range-only predicate is handled separately — see [Range seeks](#range-seeks)), and `NULL` / non-resolvable-collation value sides.
 
+### The equality seek's span gate
+
+An equality on a **low-cardinality** column — a flag whose bucket holds most of the table — gives way to the scan once its bucket holds more than three quarters of the rows (`EqualitySpanGateNumerator` / `Denominator`, traced `EqualitySpanTooWide(table)` beside `Scan(table)`), on the range gate's 1024-row floor.
+The crossover sits far later than the [range gate's quarter](#the-span-gate) because a hash hit pays no ordered-view walk and its bucket's addresses come back ascending, so the per-address reads walk the heap in order: measured 2026-10-11 over 200k rows (medians of interleaved runs, steady state), a bucket of 50–70% of the table read as fast seeked as scanned, and one of 80% / 90% / 100% read 6–13% / 13–17% / 16–24% faster scanned, over a clustered table and a heap alike, aggregated or drained to the client.
+
+The gate is pure cost policy, and it applies only where the scan is indistinguishable from the seek but for speed:
+
+- **A lone source** — a joined source keeps its seek, since rows outside the bucket would reach the join's `ON`, which runs before any WHERE.
+- **The rows come back in the seek's order** — one probe, on the clustered key's prefix or on a whole index key, whose equal keys read by the row locator, which is the order the scan reads ([Clustered scan order](#clustered-scan-order)).
+  An `IN` list, or a prefix of a wider nonclustered index, which reads by the rest of its key, keeps its seek.
+- **No error moves** — the scan hands every row to the residual WHERE, so the WHERE must open with the keyed equalities and nothing else, each on a non-nullable column read without a conversion that could fail (`KeyedEqualityColumn`), and it then rejects a row outside the bucket before it asks anything that could raise.
+  A table under a row-level security filter keeps its seek, since the filter would run over those rows too.
+- **No lock moves** — a read taking locks of its own (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK` / `XLOCK`, `PAGLOCK`, a joined write's target) keeps its seek, as does a snapshot read, whose scan keeps the version sweep's order, and the UPDATE / DELETE target paths never take the gate.
+  A READ COMMITTED read, which holds no row lock, waits on another session's row the equality rejects once it gives way, as real's scan of the same shape does (probed 2026-10-11 against SQL Server 2025: `SUM(v) … WHERE f = 1` over 2,000 rows, nine in ten at `f = 1`, waited on an uncommitted update of an `f = 2` row; under `REPEATABLE READ` it kept 1,800 key locks, the rows it returned).
+
+`LowCardinalityEqualityTests` pins the rows, their order, the errors and the locks against real's answers; `Tests.Internal/ScanPrefilterTests` guards the trace.
+
 ### Snapshot / RCSI seeks (version-aware materialization)
 
 A SNAPSHOT / RCSI reader sees the version visible at its snapshot, which can carry a *different key* than the live heap row — so a live-key-only bucket lookup could miss a row whose key was changed out from under the snapshot.
@@ -309,12 +326,31 @@ Correctness rests on the same residual invariant the seek narrowing does — **t
 Cost is one predicate evaluation per source row against whatever the join saves, so a predicate that drops almost nothing is pure overhead.
 Past `PrefilterProbeRows` (4096) rows a pass rate above one half switches the filter off for the rest of the enumeration — sound at any point, since removing no rows is a correct outcome for a pure narrowing.
 
-The pass is the seek's fallback, not its peer: a source the seek narrowed never takes it, and the join **reorder** ignores prefiltered sources (it picks its driver by seeked candidate count, which a lazy filtered stream doesn't have — with nothing seeked the written order stands).
-A derived source the materialization pass already holds in a list takes the same conjuncts eagerly instead, which does give the reorder a count — see [`joins.md`](joins.md#the-where-narrows-a-materialized-source).
+The pass is the seek's fallback, not its peer: a source the seek narrowed takes the seek and then the [filter below](#a-seeked-source-is-filtered-by-its-other-conjuncts) instead.
+The join **reorder** picks its driver by candidate count, which a lazy filtered stream doesn't have, so a filtered source drives only once [a sample](#a-filtered-source-is-counted-by-a-sample) counts it.
+A derived source the materialization pass already holds in a list takes the same conjuncts eagerly instead, which gives the reorder an exact count — see [`joins.md`](joins.md#the-where-narrows-a-materialized-source).
 What it buys is the join's own strategy switch: a driving table cut to a handful of rows lands under `EquiJoinSeekOrHash`'s outer cap and takes the per-outer-row seek instead of hashing the whole inner.
 
 Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.
 A year-wide range on the same shape (38% of the table, so the filter keeps filtering but the join still hashes) went 92.0 → 74.4 ms.
+
+#### A seeked source is filtered by its other conjuncts
+
+A joined source a seek narrowed to more than `SeekOuterRowCap` rows is filtered by the WHERE's other sargable conjuncts on it as well (`TryPrefilterSeekedSource`, traced `SeekPrefilter(table,n)`), so `WHERE o.CustomerID = @c AND o.OrderDate BETWEEN @a AND @b` seeks on the customer and the date then cuts the customer's rows before the join reads them, rather than per joined tuple.
+It runs on the prefilter's terms — every conjunct stays in the WHERE, each is NULL-rejecting on the source's column, a row a conjunct raises on is kept for the WHERE to decide — and two more keep the WHERE's own errors where they were: only the **leading run** of the WHERE's conjuncts is pushed, every one of them source-local and sargable, and a row is dropped only on a conjunct answering FALSE, never UNKNOWN.
+A dropped row is then one the WHERE, asking the same conjuncts first, rejects before it asks anything that could raise; `… AND 10 / o.v > 0 AND o.OrderDate BETWEEN …` pushes nothing past the division.
+An equality on a column the seek keyed on isn't pushed (every candidate answers it), so a source with nothing else to push isn't wrapped at all, and a seek of `SeekOuterRowCap` rows or fewer isn't either — the join already seeks those rows' partners one by one, and the filter's setup would land on every execution of a correlated body.
+The filter judges itself over its first `SeekOuterRowCap` rows rather than `PrefilterProbeRows`, since a seek's rows are few enough that the long probe would be most of them: over a 1,000-row seek, a conjunct keeping every row read 7% slower over the long probe and 1% over the short one, at the price of a conjunct keeping four rows in five, which read 7% faster over the long probe and level over the short one (measured 2026-10-11).
+A filtered seek's count is still the seek's, an upper bound, which [the sample below](#a-filtered-source-is-counted-by-a-sample) refines where the source could drive.
+
+Measured 2026-10-11 (medians, steady state), `ord` (200k) ⋈ `line` (200k, indexed on its order) summed: `o.cust = @c AND o.odate BETWEEN …` over a 1,000-row customer 1.4 → 0.23 ms, the same over a 20,000-row customer 64–78 → 4.2–4.8 ms, `o.cust = @c AND o.status = @s` (one in five) 1.25 → 0.36 ms; a conjunct keeping four rows in five read as before.
+
+#### A filtered source is counted by a sample
+
+A filtered source in the [reorder](joins.md#join-order-reorder)'s commuting prefix past its first slot — the scan prefilter's or a seek's filter — is counted by a sample (`SampleFilteredSource`, traced `SampledFilter(table,n)`, `n` -1 past the sample): its first `SeekOuterRowCap` + 1 rows are read ahead, and a filter that runs dry within them hands the reorder its count, so it can drive.
+It is sampled only where the join from it would seek a partner per row — an equi-join edge to a base table with a key or index leading on its side (`SeeksAPartner`) — since that is the plan real drives from the filtered side with, and the one whose order a chain driven from it returns: probed 2026-10-11 against SQL Server 2025, three noted orders joined to their lines, written lines-first, come back order by order where the lines are indexed on their order, and in the lines' own order where they aren't, real then hashing over the filtered orders and probing with the lines, which is the written plan's order (`FilteredJoinSourceTests`).
+The sample is the start of the read the join makes anyway — the join's first read of the source replays the sampled rows and reads on from where the sample stopped, a later one reads afresh — and it is taken only where the written order reads the source whole: a written driver known to read more than `SeekOuterRowCap` rows, and too many for the join to seek the source per row, so it hashes over it.
+Measured 2026-10-11 (medians, steady state): `FROM line l JOIN ord o ON l.ord_id = o.id WHERE o.note = N'rare'` over a 200k-row `line` and `ord`, five orders noted, went 62–70 → 41–46 ms, the remainder being the filtered scan of `ord`; `FROM ord o JOIN cust c ON c.id = o.cust WHERE c.note = N'vip'` (5 of 20k customers) 26–30 → 4.6 ms; a filter keeping 500 rows, past the sample, and one keeping 60% of `ord` read as before (the latter within 1–2%, the host's noise).
 
 A joined `UPDATE` / `DELETE` prefilters its **target** too where no key seeks it, the filter passing on the very row instances the target's write-target read recorded the addresses of — see [`dml.md`](dml.md#joined-row-sources).
 

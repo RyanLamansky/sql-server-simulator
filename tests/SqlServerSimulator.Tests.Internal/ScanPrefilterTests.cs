@@ -4,19 +4,26 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Perf-regression guard for the two range-predicate access-path decisions that
-/// no correctness test can see, since both are result-transparent:
+/// Perf-regression guard for the access-path decisions that no correctness
+/// test can see, since all are result-transparent:
 /// <list type="bullet">
 /// <item>the range seek's <b>span gate</b> — an interval selecting more than a
 /// quarter of a table's rows abandons the seek and keeps the scan
 /// (<c>RangeSpanTooWide(table)</c>), because the seek's per-address reads and
 /// ordered-view walk lose to the sequential scan once the range is that wide;</item>
+/// <item>the equality seek's span gate — a lone source's bucket holding more
+/// than three quarters of the table gives way to the scan
+/// (<c>EqualitySpanTooWide(table)</c>) where nothing but the access path
+/// changes;</item>
 /// <item>the <b>scan prefilter</b> — a joined source no key can seek still has
 /// its own sargable WHERE conjuncts applied to its row stream before the join
 /// runs (<c>ScanPrefilter(table,n)</c>), which is the access path a range on an
-/// unindexed column gets.</item>
+/// unindexed column gets, and a seeked one its conjuncts the seek didn't
+/// answer (<c>SeekPrefilter(table,n)</c>);</item>
+/// <item>the <b>sampled count</b> — a filtered source the reorder may drive
+/// from is counted over its first rows (<c>SampledFilter(table,n)</c>).</item>
 /// </list>
-/// Both read the opt-in <see cref="IndexSeekDiagnostics"/> trace, recorded at
+/// All read the opt-in <see cref="IndexSeekDiagnostics"/> trace, recorded at
 /// the decision point, and assert the rows stay exactly what the scan produced.
 /// </summary>
 [TestClass]
@@ -403,5 +410,211 @@ public sealed class ScanPrefilterTests
 
         var (_, rows) = Run(connection, "select sum(tag) from hdr");
         AreEqual(7 + 7 + 40 + 50, rows[0]);
+    }
+
+    // ---- equality span gate: a bucket holding most of the table scans ----
+
+    // 4,000 rows: f and the nullable g at 1 for nine rows in ten, e for 76 in a
+    // hundred and d for 74, (a, b) a composite index led by a nine-in-ten a.
+    private static SimulatedDbConnection OpenFlags()
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, """
+            create table flags (id int not null primary key, f int not null, g int null, e int not null, d int not null, a int not null, b int not null);
+            create index ix_f on flags (f);
+            create index ix_g on flags (g);
+            create index ix_e on flags (e);
+            create index ix_d on flags (d);
+            create index ix_ab on flags (a, b);
+            insert flags select value, iif(value % 10 = 0, 2, 1), iif(value % 10 = 0, 2, 1), iif(value % 100 < 76, 1, 2), iif(value % 100 < 74, 1, 2),
+                iif(value % 10 = 0, 2, 1), value % 7
+                from generate_series(1, 4000);
+            create table other (id int not null primary key);
+            insert other values (1), (2)
+            """);
+        return connection;
+    }
+
+    [TestMethod]
+    public void WideEquality_GivesWayToTheScan()
+    {
+        using var connection = OpenFlags();
+        foreach (var column in new[] { "f", "e" })
+        {
+            var (trace, rows) = Run(connection, $"select count(*) from flags where {column} = 1");
+            Contains("EqualitySpanTooWide(flags)", trace);
+            Contains("Scan(flags)", trace);
+            DoesNotContain("Seek(flags)", trace);
+            AreEqual(column == "f" ? 3600 : 3040, rows[0]);
+        }
+    }
+
+    [TestMethod]
+    public void EqualityUnderThreeQuarters_Seeks()
+    {
+        using var connection = OpenFlags();
+        var (trace, rows) = Run(connection, "select count(*) from flags where d = 1");
+        Contains("Seek(flags)", trace);
+        DoesNotContain("EqualitySpanTooWide(flags)", trace);
+        AreEqual(2960, rows[0]);
+    }
+
+    [TestMethod]
+    [DataRow("select count(*) from flags where 10 / id > -1 and f = 1")]
+    [DataRow("select count(*) from flags where b >= 0 and f = 1")]
+    [DataRow("select count(*) from flags where b = 3 and f = 1")]
+    [DataRow("select count(*) from flags where g = 1")]
+    [DataRow("select count(*) from flags where f in (1, 3)")]
+    [DataRow("select count(*) from flags where a = 1")]
+    [DataRow("select count(*) from flags with (repeatableread) where f = 1")]
+    [DataRow("select count(*) from flags f join other o on o.id = f.f where f.f = 1")]
+    public void WideEquality_KeepsTheSeekWhereTheScanWouldShowIt(string query)
+    {
+        // An equality the WHERE doesn't open with, on a nullable column, among
+        // several probes, on a prefix of a wider index (which reads by the
+        // rest of its key), under a lock held to the transaction's end, or on
+        // a joined source each keep the seek.
+        using var connection = OpenFlags();
+        var (trace, _) = Run(connection, query);
+        Contains("Seek(flags)", trace);
+        DoesNotContain("EqualitySpanTooWide(flags)", trace);
+    }
+
+    // ---- a seeked source is filtered by its other conjuncts ----
+
+    // 2,000 orders over ten customers, 200 each, dated over a hundred days, and
+    // three of them noted `rare`; 6,000 lines, three per order.
+    private static SimulatedDbConnection OpenOrders()
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, """
+            create table o (id int not null primary key, cust int not null, d date not null, v int not null, note nvarchar(10) not null);
+            create index ix_cust on o (cust);
+            insert o select value, value % 10, dateadd(day, value % 100, '2024-01-01'), 1,
+                iif(value in (1503, 977, 31), N'rare', N'n') from generate_series(1, 2000);
+            create table l (id int not null primary key, oid int not null, q int not null);
+            create index ix_oid on l (oid);
+            insert l select value, (value * 7) % 2000 + 1, value % 13 from generate_series(1, 6000)
+            """);
+        return connection;
+    }
+
+    [TestMethod]
+    public void SeekedSource_FilteredByItsOtherConjuncts()
+    {
+        using var connection = OpenOrders();
+        var (trace, rows) = Run(connection, "select count(*) from o join l on l.oid = o.id where o.cust = 1 and o.d between '2024-01-01' and '2024-01-21'");
+        Contains("Seek(o)", trace);
+        Contains("SeekPrefilter(o,1)", trace);
+        AreEqual(120, rows[0]);
+    }
+
+    [TestMethod]
+    [DataRow("where o.cust = 1")]
+    [DataRow("where o.cust = 1 and 10 / o.v > 0 and o.d between '2024-01-01' and '2024-01-21'")]
+    [DataRow("where o.id < 100 and o.d between '2024-01-01' and '2024-01-21'")]
+    public void SeekedSource_NotFiltered(string where)
+    {
+        // Nothing past the keyed equality, a conjunct after one that isn't
+        // sargable, and a seek leaving the join few rows.
+        using var connection = OpenOrders();
+        var (trace, _) = Run(connection, $"select count(*) from o join l on l.oid = o.id {where}");
+        Contains("Seek(o)", trace);
+        DoesNotContain("SeekPrefilter(o,1)", trace);
+    }
+
+    // ---- a filtered source is counted by a sample ----
+
+    private static (List<string> Trace, List<string> Joins) RunJoined(SimulatedDbConnection connection, string query)
+    {
+        JoinDiagnostics.Sink = [];
+        try
+        {
+            var (trace, _) = Run(connection, query);
+            return (trace, JoinDiagnostics.Sink);
+        }
+        finally
+        {
+            JoinDiagnostics.Sink = null;
+        }
+    }
+
+    [TestMethod]
+    public void FilteredSourceCutToAFew_DrivesTheChain()
+    {
+        using var connection = OpenOrders();
+        var (trace, joins) = RunJoined(connection, "select sum(l.q) from l join o on l.oid = o.id where o.note = N'rare'");
+        Contains("ScanPrefilter(o,1)", trace);
+        Contains("SampledFilter(o,3)", trace);
+        Contains("Reorder(1,0)", joins);
+        Contains("Inner:NestedLoopIndexSeek(keys=1)", joins);
+    }
+
+    [TestMethod]
+    public void SeekFilteredSourceCutToAFew_DrivesTheChain()
+    {
+        using var connection = OpenOrders();
+        var (trace, joins) = RunJoined(connection, "select sum(l.q) from l join o on l.oid = o.id where o.cust = 1 and o.d = '2024-01-02'");
+        Contains("SeekPrefilter(o,1)", trace);
+        Contains("SampledFilter(o,20)", trace);
+        Contains("Reorder(1,0)", joins);
+    }
+
+    [TestMethod]
+    public void FilteredSourceWithNoPartnerToSeek_SamplesNothing()
+    {
+        // Driving from o would hash over it rather than seek l per row.
+        using var connection = OpenOrders();
+        Exec(connection, "drop index ix_oid on l");
+        var (trace, joins) = RunJoined(connection, "select sum(l.q) from l join o on l.oid = o.id where o.note = N'rare'");
+        Contains("ScanPrefilter(o,1)", trace);
+        Assert.IsFalse(trace.Exists(entry => entry.StartsWith("SampledFilter(", StringComparison.Ordinal)));
+        Assert.IsFalse(joins.Exists(entry => entry.StartsWith("Reorder(", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public void FilteredSourcePastTheSample_KeepsTheWrittenOrder()
+    {
+        using var connection = OpenOrders();
+        var (trace, joins) = RunJoined(connection, "select sum(l.q) from l join o on l.oid = o.id where o.note = N'n'");
+        Contains("SampledFilter(o,-1)", trace);
+        DoesNotContain("Reorder(1,0)", joins);
+    }
+
+    [TestMethod]
+    public void SmallWrittenDriver_SamplesNothing()
+    {
+        // A written driver of 128 rows or fewer seeks its partners per row
+        // whatever the filter keeps, so counting the filter buys nothing.
+        using var connection = OpenOrders();
+        var (trace, _) = RunJoined(connection, "select sum(l.q) from l join o on l.oid = o.id where l.id < 50 and o.note = N'rare'");
+        Contains("ScanPrefilter(o,1)", trace);
+        Assert.IsFalse(trace.Exists(entry => entry.StartsWith("SampledFilter(", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    [DataRow("x", "SampledFilter(b,5)", 584)]
+    [DataRow("n", "SampledFilter(b,-1)", 39316)]
+    public void SampledSourceTheChainDoesNotDriveFrom_IsReadPerRow(string note, string sampled, int count)
+    {
+        // b is sampled for the seek into c its key offers, and the subquery
+        // in the ON keeps the written order, so b stays the inner of a nested
+        // loop that reads it once per row of a.
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        Exec(connection, """
+            create table a (id int not null primary key, k int not null);
+            insert a select value, value % 300 from generate_series(1, 1000);
+            create table b (id int not null primary key, note nvarchar(10) not null);
+            insert b select value, iif(value % 60 = 7, N'x', N'n') from generate_series(1, 300);
+            create table c (id int not null primary key);
+            insert c select value from generate_series(1, 300)
+            """);
+        var (trace, joins) = RunJoined(connection, $"select count(*) from a join b on a.k < b.id join c on c.id = b.id and (select 1) = 1 where a.id <= 200 and b.note = N'{note}'");
+        Contains(sampled, trace);
+        Assert.IsFalse(joins.Exists(entry => entry.StartsWith("Reorder(", StringComparison.Ordinal)));
+        AreEqual(count, Run(connection, $"select count(*) from a join b on a.k < b.id join c on c.id = b.id and (select 1) = 1 where a.id <= 200 and b.note = N'{note}'").Rows[0]);
     }
 }

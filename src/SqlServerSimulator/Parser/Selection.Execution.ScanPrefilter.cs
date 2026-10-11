@@ -93,6 +93,139 @@ partial class Selection
     }
 
     /// <summary>
+    /// The scan prefilter's narrowing for a source a seek already narrowed:
+    /// filters <paramref name="seeked"/>'s rows by the source-local sargable
+    /// WHERE conjuncts the seek didn't answer, or returns <see langword="null"/>
+    /// when there are none. <c>WHERE o.CustomerID = @c AND o.OrderDate BETWEEN
+    /// @a AND @b</c> seeks on the customer, and the date then cuts the
+    /// customer's rows before the join reads them rather than per joined
+    /// tuple — the shape a low-cardinality equality and a selective range on
+    /// another column make, where the seek alone leaves the join most of a
+    /// bucket.
+    /// <para>
+    /// The terms of <see cref="TryPrefilterJoinSource"/> hold — the conjuncts
+    /// stay in the residual WHERE, each is NULL-rejecting on the source's
+    /// column, and one that raises keeps its row for the WHERE to decide — and
+    /// two more keep the WHERE's own errors where they were: only the leading
+    /// run of the WHERE's conjuncts is pushed, every one of them source-local
+    /// and sargable, and a row is dropped only on a conjunct answering FALSE,
+    /// never UNKNOWN. A dropped row is then one the WHERE, asking the same
+    /// conjuncts first, would have rejected before it asked anything that
+    /// could raise. An equality on a column the seek keyed on
+    /// (<paramref name="keyedOrdinals"/>) isn't pushed, since every candidate
+    /// already answers it.
+    /// </para>
+    /// <para>
+    /// The filter judges itself over its first <see cref="SeekOuterRowCap"/>
+    /// rows rather than <see cref="PrefilterProbeRows"/>: a conjunct keeping
+    /// most of a seek's rows costs an evaluation each and saves the join
+    /// nothing, and a seek's rows are few enough that a long probe would be
+    /// most of them (measured 2026-10-11 over a 1,000-row seek joined per row
+    /// to a 200k-row table: a conjunct keeping every row read 7% slower than
+    /// the unfiltered seek over the full probe and 1% over the shorter one,
+    /// at the price of one keeping four rows in five, which read 7% faster
+    /// over the full probe and level over the shorter).
+    /// </para>
+    /// </summary>
+    private static FromSource? TryPrefilterSeekedSource(
+        FromSource source,
+        FromSource seeked,
+        int[]? keyedOrdinals,
+        List<BooleanExpression> conjuncts,
+        FromSource[] planSources,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        List<BooleanExpression>? pushed = null;
+        foreach (var conjunct in conjuncts)
+        {
+            if (!IsSourceLocalSargable(source, conjunct, planSources))
+                break;
+            if (keyedOrdinals is null || !IsKeyedEquality(source, conjunct, keyedOrdinals))
+                (pushed ??= []).Add(conjunct);
+        }
+
+        if (pushed is null)
+            return null;
+
+        IndexSeekDiagnostics.Sink?.Add($"SeekPrefilter({source.BackingTable!.Name},{pushed.Count})");
+        return seeked.WithFilteredRows(PrefilteredRows(seeked, [.. pushed], batch, outerResolver, SeekOuterRowCap, dropOnUnknown: false));
+    }
+
+    // Whether a sargable conjunct is an equality on one of the columns a seek
+    // keyed on, which every row the seek yields answers already.
+    private static bool IsKeyedEquality(FromSource source, BooleanExpression conjunct, int[] keyedOrdinals) =>
+        conjunct.TryGetEqualityOperands(out var left, out var right)
+        && ((TryIdentifyIndexableColumn(source, left, out var ordinal) && Array.IndexOf(keyedOrdinals, ordinal) >= 0)
+            || (TryIdentifyIndexableColumn(source, right, out ordinal) && Array.IndexOf(keyedOrdinals, ordinal) >= 0));
+
+    /// <summary>
+    /// Reads <paramref name="source"/>'s first <see cref="SeekOuterRowCap"/> + 1
+    /// rows ahead and reports how many it has — <paramref name="count"/>, or -1
+    /// when the rows ran past the sample — returning the source the join reads
+    /// in its place. Its first read replays the rows read ahead and then reads
+    /// on from where the sample stopped, so the sample is the start of the read
+    /// the join makes anyway rather than an extra one; any later read (a nested
+    /// loop's next pass) reads the rows afresh, as it did before.
+    /// </summary>
+    private static FromSource SampleFilteredSource(FromSource source, BatchContext batch, out int count)
+    {
+        var rows = source.RowsFor(batch);
+        var reader = rows.GetEnumerator();
+        var sample = new List<byte[]>();
+        var more = true;
+        while (sample.Count <= SeekOuterRowCap && (more = reader.MoveNext()))
+            sample.Add(reader.Current);
+        if (!more)
+        {
+            reader.Dispose();
+            reader = null;
+        }
+
+        count = more ? -1 : sample.Count;
+        IndexSeekDiagnostics.Sink?.Add($"SampledFilter({source.BackingTable!.Name},{count})");
+        return source.WithFilteredRows(new SampledRows(sample, reader, rows));
+    }
+
+    /// <summary>
+    /// A filtered source's rows after <see cref="SampleFilteredSource"/> read
+    /// some ahead: the first enumeration yields those and then the rest of the
+    /// read they began, every later one reads <c>rows</c> afresh.
+    /// </summary>
+    private sealed class SampledRows(List<byte[]> sample, IEnumerator<byte[]>? rest, IEnumerable<byte[]> rows) : IEnumerable<byte[]>
+    {
+        private List<byte[]>? sample = sample;
+        private IEnumerator<byte[]>? rest = rest;
+
+        public IEnumerator<byte[]> GetEnumerator()
+        {
+            if (this.sample is not { } first)
+                return rows.GetEnumerator();
+            var reader = this.rest;
+            this.sample = null;
+            this.rest = null;
+            return Resume(first, reader);
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+
+        private static IEnumerator<byte[]> Resume(List<byte[]> sample, IEnumerator<byte[]>? rest)
+        {
+            try
+            {
+                foreach (var row in sample)
+                    yield return row;
+                while (rest is not null && rest.MoveNext())
+                    yield return rest.Current;
+            }
+            finally
+            {
+                rest?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// Narrows a deferred source the materialization pass already ran — a
     /// derived table, CTE or view whose rows are held in a list for this
     /// execution (<see cref="FromSource.MaterializedRows"/>) — by the same
@@ -183,15 +316,18 @@ partial class Selection
         || (TryIdentifyIndexableColumn(source, b, out _)
             && IsStableValueSide(a, source, allowCorrelatedColumnValue: true, planSources));
 
-    // Streams the source's rows, dropping the ones every pushed conjunct answers
-    // anything but TRUE for. Re-enumerable (the counters and the scaffolding are
+    // Streams the source's rows, dropping the ones a pushed conjunct answers
+    // FALSE for — or UNKNOWN, with dropOnUnknown — and keeping one a conjunct
+    // raises on. Re-enumerable (the counters and the scaffolding are
     // per-enumeration locals), so a nested-loop inner re-reading this source
     // filters afresh each pass.
     private static IEnumerable<byte[]> PrefilteredRows(
         FromSource source,
         BooleanExpression[] pushed,
         BatchContext batch,
-        Func<MultiPartName, SqlValue>? outerResolver)
+        Func<MultiPartName, SqlValue>? outerResolver,
+        int probeRows = PrefilterProbeRows,
+        bool dropOnUnknown = true)
     {
         // Hoisted per-row scaffolding: one single-slot tuple, one cached
         // self-referencing resolver lambda (never a local function passed as its
@@ -232,7 +368,7 @@ partial class Selection
                     break;
                 }
 
-                if (answer != true)
+                if (answer == false || (answer is null && dropOnUnknown))
                 {
                     keep = false;
                     break;
@@ -246,7 +382,7 @@ partial class Selection
                 yield return row;
             }
 
-            if (probed >= PrefilterProbeRows && kept * PrefilterKeepRateDivisor > probed)
+            if (probed >= probeRows && kept * PrefilterKeepRateDivisor > probed)
                 filtering = false;
         }
 

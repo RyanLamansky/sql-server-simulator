@@ -55,7 +55,7 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver,
         FromSource[]? planSources = null,
         bool where = false)
-        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _, where);
+        => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _, out _, where);
 
     /// <summary>
     /// The narrowing above, additionally reporting how many candidate row
@@ -65,6 +65,10 @@ internal sealed partial class Selection
     /// from above — the lock / snapshot materializer can still drop a
     /// tombstoned or invisible candidate. <c>NarrowJoinSources</c> reads it to
     /// pick which narrowed source drives a reordered join chain.
+    /// <paramref name="keyedOrdinals"/> names the storage ordinals of the
+    /// columns the seek positioned on, every candidate already answering the
+    /// conjuncts on them; null when the seek can't say (a union of seeks, a
+    /// fenced key walk) or declined.
     /// </summary>
     private static FromSource[] MaybeApplyIndexSeek(
         FromSource[] sources,
@@ -74,9 +78,11 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver,
         FromSource[]? planSources,
         out int seekedCandidates,
+        out int[]? keyedOrdinals,
         bool where = false)
     {
         seekedCandidates = -1;
+        keyedOrdinals = null;
         if (sources.Length != 1 || joins.Length != 0 || excluders.Count == 0)
             return sources;
         var source = sources[0];
@@ -178,15 +184,39 @@ internal sealed partial class Selection
         // its live bytes. See MaterializeSnapshotCandidates.
         var snapshotXid = batch.ResolveSnapshotXidForRead(table, plan);
 
+        // A bucket holding most of the table is read faster by the scan (see
+        // EqualitySpanGateNumerator), which a lone source takes where nothing
+        // changes but the access path. The read must take no lock of its own
+        // on the rows it reads, so the scan changes which rows it waits on at
+        // most, never which it locks or fences, and a snapshot read's scan
+        // keeps the version sweep's order, which isn't the seek's. A joined
+        // source keeps its seek, its rows reaching the join's ON before any
+        // WHERE. The rest is settled only for a bucket that large
+        // (TryComputeEqualityCandidates' GivesWay).
+        var spanGate = planSources is null && snapshotXid is null && qualifier is null
+            && plan is { RowMode: null, SerializableRangeMode: null, Pages: null, WriteTargetAddresses: null }
+                ? conjuncts
+                : null;
+        var width = 0;
         if (equalities.Count != 0
-            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, qualifier, out var seekRows, out var width, out var rangeExtended, out var equalityCandidates))
+            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, qualifier, spanGate, out var seekRows, out width, out var rangeExtended, out var equalityCandidates, out var equalityKeyed))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
             if (rangeExtended)
                 IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
             seekedCandidates = equalityCandidates;
+            keyedOrdinals = equalityKeyed;
             return SeekedSource(source, RowSecurity.FilterRows(table, seekRows, batch));
+        }
+        // The equality's bucket held too much of the table to seek: the read
+        // scans, as it does with nothing to seek on, rather than trying the
+        // narrower access paths below, which would read its rows in another
+        // index's order.
+        if (width < 0)
+        {
+            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
+            return sources;
         }
 
         // No equality seek on the conjunction — try the union of seeks a
@@ -227,6 +257,7 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
             seekedCandidates = rangeCandidates;
+            keyedOrdinals = FindRangeLeadingKey(table, bounds, out _) is { } rangeKey ? [rangeKey[0]] : null;
             return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch));
         }
 
@@ -917,6 +948,23 @@ internal sealed partial class Selection
     /// <em>next</em> narrow range on it free.
     /// </summary>
     private const int RangeSpanGateDivisor = 4;
+
+    /// <summary>
+    /// The share of a table's rows, as a fraction of <see cref="EqualitySpanGateDenominator"/>,
+    /// past which an equality seek's bucket stops paying for itself and the
+    /// read scans instead — three quarters. A hash hit is cheaper than the
+    /// range walk's ordered view, and its addresses come back ascending, so
+    /// the seek holds level with the sequential scan far longer than a range
+    /// does: over 200k rows, a bucket of 50–70% of the table read as fast
+    /// seeked as scanned, and one of 80% / 90% / 100% 6–13% / 13–17% / 16–24%
+    /// faster scanned (measured 2026-10-11, the crossover the same over a heap
+    /// and a clustered table). The floor is the range gate's,
+    /// <see cref="RangeSpanGateMinRows"/>.
+    /// </summary>
+    private const int EqualitySpanGateNumerator = 3;
+
+    /// <summary>See <see cref="EqualitySpanGateNumerator"/>.</summary>
+    private const int EqualitySpanGateDenominator = 4;
 
     // Address-only core of the single-column leading range seek, shared by the
     // query path (TrySeekByRange) and the mutation path. Returns true with the
@@ -2209,6 +2257,8 @@ internal sealed partial class Selection
 
         FromSource[]? narrowed = null;
         int[]? seekedCandidates = null;
+        // The slots whose rows reach the join through a lazy filter.
+        bool[]? filtered = null;
         for (var i = 0; i < sources.Length; i++)
         {
             if (TryNarrowMaterializedSource(sources[i], conjuncts, sources, batch, outerResolver) is { } kept)
@@ -2228,13 +2278,14 @@ internal sealed partial class Selection
             if (i > 0 && !IsSeekNarrowingTarget(sources[i]))
                 continue;
             var seeked = MaybeApplyIndexSeek(
-                [sources[i]], NoJoins, excluders, batch, outerResolver, planSources: sources, out var candidates);
+                [sources[i]], NoJoins, excluders, batch, outerResolver, planSources: sources, out var candidates, out var keyed);
             if (ReferenceEquals(seeked[0], sources[i]))
             {
                 if (TryPrefilterJoinSource(sources[i], conjuncts, sources, batch, outerResolver) is { } prefiltered)
                 {
                     narrowed ??= (FromSource[])sources.Clone();
                     narrowed[i] = prefiltered;
+                    (filtered ??= new bool[sources.Length])[i] = true;
                 }
 
                 continue;
@@ -2247,21 +2298,145 @@ internal sealed partial class Selection
                 Array.Fill(seekedCandidates, -1);
             }
 
-            narrowed[i] = seeked[0];
             seekedCandidates[i] = candidates;
+            // A seek leaving at most SeekOuterRowCap rows already lets the join
+            // seek their partners row by row, where a filter would cost every
+            // execution of a correlated body its setup for a few rows' work.
+            if (candidates > SeekOuterRowCap && TryPrefilterSeekedSource(sources[i], seeked[0], keyed, conjuncts, sources, batch, outerResolver) is { } seekFiltered)
+            {
+                narrowed[i] = seekFiltered;
+                (filtered ??= new bool[sources.Length])[i] = true;
+            }
+            else
+            {
+                narrowed[i] = seeked[0];
+            }
         }
 
-        // The reorder picks its driver by seeked candidate count, which a
-        // prefiltered source doesn't have (its stream is lazy and counting it
-        // would materialize the table). With nothing seeked, only a chain whose
-        // written order leaves a CROSS level the WHERE could connect reorders.
-        // The written driver's row count is known when the seek narrowed it or
-        // nothing did; a prefiltered one could yield anything up to its table.
+        // The reorder picks its driver by candidate count. The written
+        // driver's is known when the seek narrowed it or nothing did; a
+        // prefiltered one could yield anything up to its table. With nothing
+        // counted, only a chain whose written order leaves a CROSS level the
+        // WHERE could connect reorders.
         var current = narrowed ?? sources;
         var writtenDriverRows = seekedCandidates is { } counts && counts[0] >= 0 ? counts[0]
             : ReferenceEquals(current[0], sources[0]) && IsSeekNarrowingTarget(sources[0]) ? sources[0].BackingTable!.Heap.RowCount
             : -1;
+        if (filtered is not null && writtenDriverRows > SeekOuterRowCap && !batch.IsSkipping)
+            SampleFilteredCounts(current, joins, conjuncts, filtered, ref seekedCandidates, writtenDriverRows, batch);
         return ReorderJoinChain(current, joins, conjuncts, seekedCandidates, writtenDriverRows) ?? (current, joins);
+    }
+
+    /// <summary>
+    /// Counts a lazily filtered source of the reorder's commuting prefix — one
+    /// the scan prefilter or a seek's own prefilter reads through — by reading
+    /// its first <see cref="SeekOuterRowCap"/> + 1 rows ahead, so one the
+    /// filter cuts to a few rows can drive the chain as a seeked source does.
+    /// Only a source the written order would read whole is sampled: the written
+    /// driver reads more than <see cref="SeekOuterRowCap"/> rows and is too
+    /// many for <see cref="EquiJoinSeekOrHash"/> to seek the source per row, so
+    /// its join hashes over it. And only a source the join from it would seek a
+    /// partner of per row is sampled (<see cref="SeeksAPartner"/>): driving
+    /// from it otherwise trades the written hash for one built over the
+    /// filtered rows and probed by the partner's, which buys little and reads
+    /// the rows in the filtered source's order where real, hashing the same
+    /// way, reads them in the partner's (probed 2026-10-11 against SQL Server
+    /// 2025). The sample is the start of the join's own read (see
+    /// <see cref="SampleFilteredSource"/>), so a source that doesn't drive
+    /// reads no row twice.
+    /// </summary>
+    private static void SampleFilteredCounts(
+        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, bool[] filtered, ref int[]? seekedCandidates, long writtenDriverRows, BatchContext batch)
+    {
+        var count = CommutingPrefixLength(joins, out var hasCross);
+        List<JoinEdge>? edges = null;
+        for (var i = 1; i < count; i++)
+        {
+            if (!filtered[i] || sources[i].BackingTable is not { } table
+                || (writtenDriverRows <= SeekOuterBufferCap && writtenDriverRows * SeekInnerRowsPerOuterRow <= table.Heap.RowCount)
+                || !SeeksAPartner(i, edges ??= PrefixEdges(sources[..count], joins, whereConjuncts, hasCross), sources))
+            {
+                continue;
+            }
+
+            sources[i] = SampleFilteredSource(sources[i], batch, out var sampled);
+            if (sampled < 0)
+                continue;
+            if (seekedCandidates is null)
+            {
+                seekedCandidates = new int[sources.Length];
+                Array.Fill(seekedCandidates, -1);
+            }
+            seekedCandidates[i] = sampled;
+        }
+    }
+
+    /// <summary>
+    /// The equi-join edges of a commuting <paramref name="prefix"/>: its ON
+    /// conjuncts', and the WHERE's too where a CROSS level lets the reorder
+    /// read them as edges.
+    /// </summary>
+    private static List<JoinEdge> PrefixEdges(FromSource[] prefix, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, bool hasCross)
+    {
+        var edges = new List<JoinEdge>();
+        var conjuncts = new List<BooleanExpression>();
+        for (var level = 0; level < prefix.Length - 1; level++)
+            joins[level].OnPredicate?.CollectConjuncts(conjuncts);
+        if (hasCross)
+            conjuncts.AddRange(whereConjuncts);
+        foreach (var conjunct in conjuncts)
+        {
+            if (TryExtractEquiEdge(conjunct, prefix, out var edge))
+                edges.Add(edge);
+        }
+        return edges;
+    }
+
+    /// <summary>
+    /// Whether some source joined to <paramref name="source"/> by an
+    /// equi-join edge is one <see cref="EquiJoinSeekOrHash"/> could seek per
+    /// row of it: a base table still read by its own plan, a key or index
+    /// leading on its side of the edge.
+    /// </summary>
+    private static bool SeeksAPartner(int source, List<JoinEdge> edges, FromSource[] sources)
+    {
+        foreach (var edge in edges)
+        {
+            var (partner, column) = edge.LeftSource == source ? (edge.RightSource, edge.RightColumn)
+                : edge.RightSource == source ? (edge.LeftSource, edge.LeftColumn)
+                : (-1, null!);
+            if (partner >= 0 && sources[partner] is { BackingTable: { } table, LateralPlan: null, HeapPlan: not null } candidate
+                && TryIdentifyIndexableColumn(candidate, column, out var ordinal) && LeadsSomeKeyOrIndex(table, ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The length of a chain's commuting prefix: the leading run of INNER
+    /// joins with an <c>ON</c> and CROSS joins without one, counted in sources,
+    /// <paramref name="hasCross"/> saying whether a CROSS level is among them.
+    /// Whatever joins after it — an outer join, an APPLY, a parenthesized
+    /// group — joins the prefix's rows as a whole, a set no order inside the
+    /// prefix changes.
+    /// </summary>
+    private static int CommutingPrefixLength(JoinSpec[] joins, out bool hasCross)
+    {
+        var count = 1;
+        hasCross = false;
+        foreach (var join in joins)
+        {
+            if (join.GroupCount != 1)
+                break;
+            if (join.Kind == JoinKind.Cross && join.OnPredicate is null)
+                hasCross = true;
+            else if (join.Kind != JoinKind.Inner || join.OnPredicate is null)
+                break;
+            count++;
+        }
+        return count;
     }
 
     /// <summary>
@@ -2312,7 +2487,7 @@ internal sealed partial class Selection
             if (!IsSeekNarrowingTarget(sources[i]))
                 continue;
             var seeked = MaybeApplyIndexSeek(
-                [sources[i]], NoJoins, narrowing, batch, outerResolver: null, planSources: sources, out var candidates);
+                [sources[i]], NoJoins, narrowing, batch, outerResolver: null, planSources: sources, out var candidates, out _);
             var replacement = ReferenceEquals(seeked[0], sources[i])
                 ? TryPrefilterJoinSource(sources[i], conjuncts, sources, batch, outerResolver: null)
                 : seeked[0];
@@ -2412,22 +2587,7 @@ internal sealed partial class Selection
     private static (FromSource[] Sources, JoinSpec[] Joins)? ReorderJoinChain(
         FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, int[]? seekedCandidates, long writtenDriverRows)
     {
-        // The commuting prefix: the leading run of INNER and CROSS levels.
-        // Whatever joins after it — an outer join, an APPLY, a parenthesized
-        // group — joins the prefix's rows as a whole, a set no order inside the
-        // prefix changes.
-        var count = 1;
-        var hasCross = false;
-        foreach (var join in joins)
-        {
-            if (join.GroupCount != 1)
-                break;
-            if (join.Kind == JoinKind.Cross && join.OnPredicate is null)
-                hasCross = true;
-            else if (join.Kind != JoinKind.Inner || join.OnPredicate is null)
-                break;
-            count++;
-        }
+        var count = CommutingPrefixLength(joins, out var hasCross);
         if (count < 2)
             return null;
 
@@ -2914,13 +3074,15 @@ internal sealed partial class Selection
         Dictionary<int, Expression[]> equalities,
         Dictionary<int, RangeBoundExprs> bounds,
         RowLockQualifier? qualifier,
+        List<BooleanExpression>? spanGate,
         out IEnumerable<byte[]> seekRows,
         out int width,
         out bool rangeExtended,
-        out int candidateCount)
+        out int candidateCount,
+        out int[]? keyed)
     {
         var keysPutBack = Volatile.Read(ref table.KeysPutBack);
-        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended, out var seeks))
+        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended, out var seeks, out keyed, spanGate))
         {
             seekRows = [];
             candidateCount = -1;
@@ -2935,7 +3097,7 @@ internal sealed partial class Selection
             if (!AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities) && Volatile.Read(ref table.KeysPutBack) == keysPutBack)
                 break;
             keysPutBack = Volatile.Read(ref table.KeysPutBack);
-            _ = TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out candidates, out width, out rangeExtended, out seeks);
+            _ = TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out candidates, out width, out rangeExtended, out seeks, out keyed);
         }
         candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
@@ -2943,7 +3105,7 @@ internal sealed partial class Selection
             : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks, recompute: () => SettledCandidates(
                 table,
                 () => AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities),
-                () => TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var current, out _, out _, out _) ? current : []));
+                () => TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var current, out _, out _, out _, out _) ? current : []));
         return true;
     }
 
@@ -3042,12 +3204,18 @@ internal sealed partial class Selection
         out List<(int Page, int Slot)> candidates,
         out int width,
         out bool rangeExtended,
-        out int seeks)
+        out int seeks,
+        out int[]? keyed,
+        List<BooleanExpression>? spanGate = null)
     {
+        // With spanGate holding the conjuncts of a read that may give way to
+        // the scan, a bucket holding too much of the table to be worth
+        // seeking returns false with width -1, which the caller reads as "scan".
         candidates = [];
         width = 0;
         rangeExtended = false;
         seeks = 0;
+        keyed = null;
 
         var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
 
@@ -3105,6 +3273,8 @@ internal sealed partial class Selection
             probesPerColumn[i] = probes;
         }
 
+        keyed = prefix;
+
         // What STATISTICS IO counts as scans: one per probed key, none for the
         // single lookup of a whole unique key or index, as real counts it.
         seeks = 1;
@@ -3149,6 +3319,7 @@ internal sealed partial class Selection
                     OrderByLocator(candidates);
                     width = bestLen;
                     rangeExtended = true;
+                    keyed = extendedPrefix;
                     return true;
             }
 
@@ -3156,9 +3327,24 @@ internal sealed partial class Selection
             // to the pure equality seek on the same prefix.
         }
 
+        // The span gate (EqualitySpanGateNumerator) applies only where the scan
+        // returns the rows in the seek's own order: one probe, and either the
+        // clustered key's prefix or a whole index key, whose equal keys read
+        // by the row locator — the clustered key's order, or a heap's
+        // addresses, which are its scan's.
+        var gateRows = spanGate is not null && seeks == 1 && (bestClustered || bestLen == chosenKey.Length)
+            && table.Heap.RowCount >= RangeSpanGateMinRows
+                ? (long)table.Heap.RowCount * EqualitySpanGateNumerator / EqualitySpanGateDenominator
+                : long.MaxValue;
         foreach (var tuple in CartesianProduct(probesPerColumn))
         {
             var bucket = cache.Seek(table.Heap, source.StoredSchema, source.LobStore, prefix, commons, new SqlValueKey(tuple), widenTo);
+            if (bucket.Length > gateRows && GivesWay())
+            {
+                IndexSeekDiagnostics.Sink?.Add($"EqualitySpanTooWide({table.Name})");
+                width = -1;
+                return false;
+            }
             if (bucket.Length != 0)
                 candidates.AddRange(bucket);
         }
@@ -3166,6 +3352,38 @@ internal sealed partial class Selection
         OrderByLocator(candidates);
         width = bestLen;
         return true;
+
+        // The scan hands the rows outside the bucket to the residual WHERE,
+        // which must reject each before it asks anything that could raise: the
+        // WHERE opens with the keyed equalities and nothing else
+        // (KeyedEqualityColumn), each reading its column without a conversion
+        // that could fail. A row-level security filter would run over those
+        // rows too.
+        bool GivesWay()
+        {
+            if (RowSecurity.For(batch, table) is { Filter: not null })
+                return false;
+            for (var i = 0; i < bestLen; i++)
+            {
+                if (!ConvertsWithoutError(source.StoredSchema[prefix[i]].Type, commons[i]))
+                    return false;
+            }
+            var led = new bool[bestLen];
+            var leading = 0;
+            foreach (var conjunct in spanGate!)
+            {
+                var at = Array.IndexOf(prefix, KeyedEqualityColumn(source, conjunct));
+                if (at < 0)
+                    return false;
+                if (!led[at])
+                {
+                    led[at] = true;
+                    if (++leading == bestLen)
+                        return true;
+                }
+            }
+            return false;
+        }
 
         // A clustered index's own seek reads its key order, which the cache
         // serves; any other reads its equal keys by the clustered key.
@@ -3190,6 +3408,30 @@ internal sealed partial class Selection
             return component;
         }
     }
+
+    /// <summary>
+    /// The storage ordinal of the column <paramref name="conjunct"/> equates
+    /// with a value fixed for the execution, when that column is a bare,
+    /// non-nullable column of <paramref name="source"/> — so the conjunct
+    /// answers TRUE or FALSE for every row, never UNKNOWN — or -1.
+    /// </summary>
+    private static int KeyedEqualityColumn(FromSource source, BooleanExpression conjunct) =>
+        conjunct.TryGetEqualityOperands(out var left, out var right)
+        && ((TryIdentifyIndexableColumn(source, left, out var ordinal) && IsStableValueSide(right, source))
+            || (TryIdentifyIndexableColumn(source, right, out ordinal) && IsStableValueSide(left, source)))
+        && !source.StoredSchema[ordinal].Nullable
+            ? ordinal
+            : -1;
+
+    /// <summary>
+    /// Whether every value of <paramref name="from"/> converts to
+    /// <paramref name="to"/>, the type an equality promotes it to, without
+    /// raising: the same type, or a promotion within the integers, the
+    /// strings or <c>uniqueidentifier</c>.
+    /// </summary>
+    private static bool ConvertsWithoutError(SqlType from, SqlType to) =>
+        ReferenceEquals(from, to)
+        || (from.Category == to.Category && from.Category is SqlTypeCategory.Integer or SqlTypeCategory.String or SqlTypeCategory.UniqueIdentifier);
 
     // Yields every cartesian-product tuple across the per-column probe arrays.
     // For an N-column prefix where the i-th column has c_i probe values, the
@@ -3381,7 +3623,7 @@ internal sealed partial class Selection
         var seen = new HashSet<(int, int)>();
         foreach (var (equalities, bounds) in planned)
         {
-            if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var part, out _, out _, out _))
+            if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var part, out _, out _, out _, out _))
                 return false;
             foreach (var address in part)
             {
@@ -3769,7 +4011,7 @@ internal sealed partial class Selection
         var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
 
         if (equalities.Count != 0
-            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _, out var eqSeeks))
+            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _, out var eqSeeks, out _))
         {
             return MaterializeMutationCandidates(table, eqCandidates, batch, eqSeeks);
         }
@@ -4018,7 +4260,7 @@ internal sealed partial class Selection
         return HasSeekableLeadingPrefix(table, equalities) ? Seek : null;
 
         IEnumerable<(int Page, int Slot, byte[] Bytes)> Seek(Func<MultiPartName, SqlValue> outerResolver) =>
-            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out _, out _, out var seeks)
+            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out _, out _, out var seeks, out _)
                 ? MaterializeMutationCandidates(table, candidates, batch, seeks)
                 : [];
     }
