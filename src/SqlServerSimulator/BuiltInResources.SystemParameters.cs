@@ -1,0 +1,151 @@
+using System.Collections.Frozen;
+
+namespace SqlServerSimulator;
+
+partial class BuiltInResources
+{
+    /// <summary>
+    /// The parameters of each system procedure the simulator carries, as
+    /// <c>sys.system_parameters</c> lists them on SQL Server 2025 (read
+    /// 2026-10-11): name, <c>user_type_id</c> (<c>sysname</c>'s 256 on a
+    /// <c>system_type_id</c> of 231), <c>max_length</c>, <c>precision</c>,
+    /// <c>scale</c> and <c>is_output</c>. Every other column holds the same
+    /// value for all of them — no default, XML document or collection,
+    /// nullable — except <c>is_cursor_ref</c>, set on the <c>@cursor_return</c>
+    /// output an <c>int</c> stands for; a procedure taking none is absent.
+    /// </summary>
+    internal static readonly FrozenDictionary<string, SystemParameter[]> SystemProcedureParameters =
+        new Dictionary<string, SystemParameter[]>(StringComparer.Ordinal)
+        {
+            ["sp_MSforeach_worker"] = [new("@command1", 231, 4000, 0, 0), new("@replacechar", 239, 2, 0, 0), new("@command2", 231, 4000, 0, 0), new("@command3", 231, 4000, 0, 0), new("@worker_type", 56, 4, 10, 0)],
+            ["sp_MSforeachdb"] = [new("@command1", 231, 4000, 0, 0), new("@replacechar", 239, 2, 0, 0), new("@command2", 231, 4000, 0, 0), new("@command3", 231, 4000, 0, 0), new("@precommand", 231, 4000, 0, 0), new("@postcommand", 231, 4000, 0, 0)],
+            ["sp_MSforeachtable"] = [new("@command1", 231, 4000, 0, 0), new("@replacechar", 239, 2, 0, 0), new("@command2", 231, 4000, 0, 0), new("@command3", 231, 4000, 0, 0), new("@whereand", 231, 4000, 0, 0), new("@precommand", 231, 4000, 0, 0), new("@postcommand", 231, 4000, 0, 0)],
+            ["sp_addextendedproperty"] = [new("@name", 256, 256, 0, 0), new("@value", 98, 8016, 0, 0), new("@level0type", 167, 128, 0, 0), new("@level0name", 256, 256, 0, 0), new("@level1type", 167, 128, 0, 0), new("@level1name", 256, 256, 0, 0), new("@level2type", 167, 128, 0, 0), new("@level2name", 256, 256, 0, 0)],
+            ["sp_addlinkedserver"] = [new("@server", 256, 256, 0, 0), new("@srvproduct", 231, 256, 0, 0), new("@provider", 231, 256, 0, 0), new("@datasrc", 231, 8000, 0, 0), new("@location", 231, 8000, 0, 0), new("@provstr", 231, 8000, 0, 0), new("@catalog", 256, 256, 0, 0), new("@linkedstyle", 104, 1, 1, 0)],
+            ["sp_addlinkedsrvlogin"] = [new("@rmtsrvname", 256, 256, 0, 0), new("@useself", 167, 8, 0, 0), new("@locallogin", 256, 256, 0, 0), new("@rmtuser", 256, 256, 0, 0), new("@rmtpassword", 256, 256, 0, 0)],
+            ["sp_addlogin"] = [new("@loginame", 256, 256, 0, 0), new("@passwd", 256, 256, 0, 0), new("@defdb", 256, 256, 0, 0), new("@deflanguage", 256, 256, 0, 0), new("@sid", 165, 16, 0, 0), new("@encryptopt", 167, 20, 0, 0)],
+            ["sp_addmessage"] = [new("@msgnum", 56, 4, 10, 0), new("@severity", 52, 2, 5, 0), new("@msgtext", 231, 510, 0, 0), new("@lang", 256, 256, 0, 0), new("@with_log", 167, 5, 0, 0), new("@replace", 167, 7, 0, 0)],
+            ["sp_addrole"] = [new("@rolename", 256, 256, 0, 0), new("@ownername", 256, 256, 0, 0)],
+            ["sp_addrolemember"] = [new("@rolename", 256, 256, 0, 0), new("@membername", 256, 256, 0, 0)],
+            ["sp_addsrvrolemember"] = [new("@loginame", 256, 256, 0, 0), new("@rolename", 256, 256, 0, 0)],
+            ["sp_addtype"] = [new("@typename", 256, 256, 0, 0), new("@phystype", 256, 256, 0, 0), new("@nulltype", 167, 8, 0, 0), new("@owner", 256, 256, 0, 0)],
+            ["sp_adduser"] = [new("@loginame", 256, 256, 0, 0), new("@name_in_db", 256, 256, 0, 0), new("@grpname", 256, 256, 0, 0)],
+            ["sp_altermessage"] = [new("@message_id", 56, 4, 10, 0), new("@parameter", 256, 256, 0, 0), new("@parameter_value", 167, 5, 0, 0)],
+            ["sp_autostats"] = [new("@tblname", 231, 1552, 0, 0), new("@flagc", 167, 10, 0, 0), new("@indname", 256, 256, 0, 0)],
+            ["sp_bindefault"] = [new("@defname", 231, 1552, 0, 0), new("@objname", 231, 1552, 0, 0), new("@futureonly", 167, 15, 0, 0)],
+            ["sp_bindrule"] = [new("@rulename", 231, 1552, 0, 0), new("@objname", 231, 1552, 0, 0), new("@futureonly", 167, 15, 0, 0)],
+            ["sp_catalogs"] = [new("@server_name", 256, 256, 0, 0)],
+            ["sp_change_users_login"] = [new("@Action", 167, 10, 0, 0), new("@UserNamePattern", 256, 256, 0, 0), new("@LoginName", 256, 256, 0, 0), new("@Password", 256, 256, 0, 0)],
+            ["sp_changedbowner"] = [new("@loginame", 256, 256, 0, 0), new("@map", 167, 5, 0, 0)],
+            ["sp_column_privileges"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0)],
+            ["sp_columns"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@ODBCVer", 56, 4, 10, 0)],
+            ["sp_columns_100"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@NameScope", 56, 4, 10, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_columns_ex"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0), new("@column_name", 256, 256, 0, 0), new("@ODBCVer", 56, 4, 10, 0)],
+            ["sp_configure"] = [new("@configname", 167, 35, 0, 0), new("@configvalue", 56, 4, 10, 0)],
+            ["sp_createstats"] = [new("@indexonly", 175, 9, 0, 0), new("@fullscan", 175, 9, 0, 0), new("@norecompute", 175, 12, 0, 0), new("@incremental", 175, 12, 0, 0)],
+            ["sp_cursor_list"] = [new("@cursor_return", 56, 4, 10, 0, isOutput: true), new("@cursor_scope", 56, 4, 10, 0)],
+            ["sp_datatype_info"] = [new("@data_type", 56, 4, 10, 0), new("@ODBCVer", 48, 1, 3, 0)],
+            ["sp_datatype_info_100"] = [new("@data_type", 56, 4, 10, 0), new("@ODBCVer", 48, 1, 3, 0)],
+            ["sp_dbfixedrolepermission"] = [new("@rolename", 256, 256, 0, 0)],
+            ["sp_defaultdb"] = [new("@loginame", 256, 256, 0, 0), new("@defdb", 256, 256, 0, 0)],
+            ["sp_defaultlanguage"] = [new("@loginame", 256, 256, 0, 0), new("@language", 256, 256, 0, 0)],
+            ["sp_depends"] = [new("@objname", 231, 1552, 0, 0)],
+            ["sp_describe_cursor"] = [new("@cursor_return", 56, 4, 10, 0, isOutput: true), new("@cursor_source", 231, 60, 0, 0), new("@cursor_identity", 231, 256, 0, 0)],
+            ["sp_describe_cursor_columns"] = [new("@cursor_return", 56, 4, 10, 0, isOutput: true), new("@cursor_source", 231, 60, 0, 0), new("@cursor_identity", 231, 256, 0, 0)],
+            ["sp_describe_cursor_tables"] = [new("@cursor_return", 56, 4, 10, 0, isOutput: true), new("@cursor_source", 231, 60, 0, 0), new("@cursor_identity", 231, 256, 0, 0)],
+            ["sp_dropextendedproperty"] = [new("@name", 256, 256, 0, 0), new("@level0type", 167, 128, 0, 0), new("@level0name", 256, 256, 0, 0), new("@level1type", 167, 128, 0, 0), new("@level1name", 256, 256, 0, 0), new("@level2type", 167, 128, 0, 0), new("@level2name", 256, 256, 0, 0)],
+            ["sp_droplinkedsrvlogin"] = [new("@rmtsrvname", 256, 256, 0, 0), new("@locallogin", 256, 256, 0, 0)],
+            ["sp_droplogin"] = [new("@loginame", 256, 256, 0, 0)],
+            ["sp_dropmessage"] = [new("@msgnum", 56, 4, 10, 0), new("@lang", 256, 256, 0, 0)],
+            ["sp_droprole"] = [new("@rolename", 256, 256, 0, 0)],
+            ["sp_droprolemember"] = [new("@rolename", 256, 256, 0, 0), new("@membername", 256, 256, 0, 0)],
+            ["sp_dropserver"] = [new("@server", 256, 256, 0, 0), new("@droplogins", 175, 10, 0, 0)],
+            ["sp_dropsrvrolemember"] = [new("@loginame", 256, 256, 0, 0), new("@rolename", 256, 256, 0, 0)],
+            ["sp_droptype"] = [new("@typename", 256, 256, 0, 0)],
+            ["sp_dropuser"] = [new("@name_in_db", 256, 256, 0, 0)],
+            ["sp_fkeys"] = [new("@pktable_name", 256, 256, 0, 0), new("@pktable_owner", 256, 256, 0, 0), new("@pktable_qualifier", 256, 256, 0, 0), new("@fktable_name", 256, 256, 0, 0), new("@fktable_owner", 256, 256, 0, 0), new("@fktable_qualifier", 256, 256, 0, 0)],
+            ["sp_fulltext_database"] = [new("@action", 167, 20, 0, 0)],
+            ["sp_fulltext_load_thesaurus_file"] = [new("@lcid", 56, 4, 10, 0), new("@loadOnlyIfNotLoaded", 104, 1, 1, 0)],
+            ["sp_getapplock"] = [new("@Resource", 231, 510, 0, 0), new("@LockMode", 167, 32, 0, 0), new("@LockOwner", 167, 32, 0, 0), new("@LockTimeout", 56, 4, 10, 0), new("@DbPrincipal", 256, 256, 0, 0)],
+            ["sp_grantdbaccess"] = [new("@loginame", 256, 256, 0, 0), new("@name_in_db", 256, 256, 0, 0, isOutput: true)],
+            ["sp_help"] = [new("@objname", 231, 1552, 0, 0)],
+            ["sp_help_fulltext_catalogs"] = [new("@fulltext_catalog_name", 256, 256, 0, 0)],
+            ["sp_help_fulltext_columns"] = [new("@table_name", 231, 1034, 0, 0), new("@column_name", 256, 256, 0, 0)],
+            ["sp_help_fulltext_system_components"] = [new("@component_type", 256, 256, 0, 0), new("@param", 256, 256, 0, 0)],
+            ["sp_help_fulltext_tables"] = [new("@fulltext_catalog_name", 256, 256, 0, 0), new("@table_name", 231, 1034, 0, 0)],
+            ["sp_helpconstraint"] = [new("@objname", 231, 1552, 0, 0), new("@nomsg", 167, 5, 0, 0)],
+            ["sp_helpdb"] = [new("@dbname", 256, 256, 0, 0)],
+            ["sp_helpdbfixedrole"] = [new("@rolename", 256, 256, 0, 0)],
+            ["sp_helpdevice"] = [new("@devname", 256, 256, 0, 0)],
+            ["sp_helpextendedproc"] = [new("@funcname", 256, 256, 0, 0)],
+            ["sp_helpfile"] = [new("@filename", 256, 256, 0, 0)],
+            ["sp_helpfilegroup"] = [new("@filegroupname", 256, 256, 0, 0)],
+            ["sp_helpindex"] = [new("@objname", 231, 1552, 0, 0)],
+            ["sp_helplanguage"] = [new("@language", 256, 256, 0, 0)],
+            ["sp_helplinkedsrvlogin"] = [new("@rmtsrvname", 256, 256, 0, 0), new("@locallogin", 256, 256, 0, 0)],
+            ["sp_helplogins"] = [new("@LoginNamePattern", 256, 256, 0, 0)],
+            ["sp_helpntgroup"] = [new("@ntname", 256, 256, 0, 0)],
+            ["sp_helprole"] = [new("@rolename", 256, 256, 0, 0)],
+            ["sp_helprolemember"] = [new("@rolename", 256, 256, 0, 0)],
+            ["sp_helprotect"] = [new("@name", 231, 1552, 0, 0), new("@username", 256, 256, 0, 0), new("@grantorname", 256, 256, 0, 0), new("@permissionarea", 167, 10, 0, 0)],
+            ["sp_helpserver"] = [new("@server", 256, 256, 0, 0), new("@optname", 167, 35, 0, 0), new("@show_topology", 167, 1, 0, 0)],
+            ["sp_helpsrvrole"] = [new("@srvrolename", 256, 256, 0, 0)],
+            ["sp_helpsrvrolemember"] = [new("@srvrolename", 256, 256, 0, 0)],
+            ["sp_helpstats"] = [new("@objname", 231, 1552, 0, 0), new("@results", 231, 10, 0, 0)],
+            ["sp_helptext"] = [new("@objname", 231, 1552, 0, 0), new("@columnname", 256, 256, 0, 0)],
+            ["sp_helptrigger"] = [new("@tabname", 231, 1552, 0, 0), new("@triggertype", 175, 6, 0, 0)],
+            ["sp_helpuser"] = [new("@name_in_db", 256, 256, 0, 0)],
+            ["sp_indexoption"] = [new("@IndexNamePattern", 231, 2070, 0, 0), new("@OptionName", 167, 35, 0, 0), new("@OptionValue", 167, 12, 0, 0)],
+            ["sp_lock"] = [new("@spid1", 56, 4, 10, 0), new("@spid2", 56, 4, 10, 0)],
+            ["sp_password"] = [new("@old", 256, 256, 0, 0), new("@new", 256, 256, 0, 0), new("@loginame", 256, 256, 0, 0)],
+            ["sp_pkeys"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0)],
+            ["sp_recompile"] = [new("@objname", 231, 1552, 0, 0)],
+            ["sp_refreshsqlmodule"] = [new("@name", 231, 1552, 0, 0), new("@namespace", 231, 40, 0, 0)],
+            ["sp_refreshview"] = [new("@viewname", 231, 1552, 0, 0)],
+            ["sp_releaseapplock"] = [new("@Resource", 231, 510, 0, 0), new("@LockOwner", 167, 32, 0, 0), new("@DbPrincipal", 256, 256, 0, 0)],
+            ["sp_rename"] = [new("@objname", 231, 2070, 0, 0), new("@newname", 256, 256, 0, 0), new("@objtype", 167, 13, 0, 0)],
+            ["sp_revokedbaccess"] = [new("@name_in_db", 256, 256, 0, 0)],
+            ["sp_sequence_get_range"] = [new("@sequence_name", 231, 1552, 0, 0), new("@range_size", 127, 8, 19, 0), new("@range_first_value", 98, 8016, 0, 0, isOutput: true), new("@range_last_value", 98, 8016, 0, 0, isOutput: true), new("@range_cycle_count", 56, 4, 10, 0, isOutput: true), new("@sequence_increment", 98, 8016, 0, 0, isOutput: true), new("@sequence_min_value", 98, 8016, 0, 0, isOutput: true), new("@sequence_max_value", 98, 8016, 0, 0, isOutput: true)],
+            ["sp_server_info"] = [new("@attribute_id", 56, 4, 10, 0)],
+            ["sp_serveroption"] = [new("@server", 256, 256, 0, 0), new("@optname", 167, 35, 0, 0), new("@optvalue", 231, 256, 0, 0)],
+            ["sp_setapprole"] = [new("@rolename", 256, 256, 0, 0), new("@password", 256, 256, 0, 0), new("@encrypt", 167, 10, 0, 0), new("@fCreateCookie", 104, 1, 1, 0), new("@cookie", 165, 8000, 0, 0, isOutput: true)],
+            ["sp_settriggerorder"] = [new("@triggername", 231, 1034, 0, 0), new("@order", 167, 10, 0, 0), new("@stmttype", 167, 50, 0, 0), new("@namespace", 167, 10, 0, 0)],
+            ["sp_spaceused"] = [new("@objname", 231, 1552, 0, 0), new("@updateusage", 167, 5, 0, 0), new("@mode", 167, 11, 0, 0), new("@oneresultset", 104, 1, 1, 0), new("@include_total_xtp_storage", 104, 1, 1, 0)],
+            ["sp_special_columns"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@col_type", 175, 1, 0, 0), new("@scope", 175, 1, 0, 0), new("@nullable", 175, 1, 0, 0), new("@ODBCVer", 56, 4, 10, 0)],
+            ["sp_special_columns_100"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@col_type", 175, 1, 0, 0), new("@scope", 175, 1, 0, 0), new("@nullable", 175, 1, 0, 0), new("@ODBCVer", 56, 4, 10, 0)],
+            ["sp_sproc_columns"] = [new("@procedure_name", 231, 780, 0, 0), new("@procedure_owner", 231, 768, 0, 0), new("@procedure_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_sproc_columns_100"] = [new("@procedure_name", 231, 780, 0, 0), new("@procedure_owner", 231, 768, 0, 0), new("@procedure_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_statistics"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@index_name", 256, 256, 0, 0), new("@is_unique", 175, 1, 0, 0), new("@accuracy", 175, 1, 0, 0)],
+            ["sp_statistics_100"] = [new("@table_name", 256, 256, 0, 0), new("@table_owner", 256, 256, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@index_name", 256, 256, 0, 0), new("@is_unique", 175, 1, 0, 0), new("@accuracy", 175, 1, 0, 0)],
+            ["sp_stored_procedures"] = [new("@sp_name", 231, 780, 0, 0), new("@sp_owner", 231, 768, 0, 0), new("@sp_qualifier", 256, 256, 0, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_table_privileges"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_tablecollations_100"] = [new("@object", 231, 8000, 0, 0)],
+            ["sp_tableoption"] = [new("@TableNamePattern", 231, 1552, 0, 0), new("@OptionName", 167, 35, 0, 0), new("@OptionValue", 167, 12, 0, 0)],
+            ["sp_tables"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@table_type", 167, 100, 0, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_tables_ex"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0), new("@table_type", 256, 256, 0, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_unbindefault"] = [new("@objname", 231, 1552, 0, 0), new("@futureonly", 167, 15, 0, 0)],
+            ["sp_unbindrule"] = [new("@objname", 231, 1552, 0, 0), new("@futureonly", 167, 15, 0, 0)],
+            ["sp_unsetapprole"] = [new("@cookie", 165, 8000, 0, 0)],
+            ["sp_updateextendedproperty"] = [new("@name", 256, 256, 0, 0), new("@value", 98, 8016, 0, 0), new("@level0type", 167, 128, 0, 0), new("@level0name", 256, 256, 0, 0), new("@level1type", 167, 128, 0, 0), new("@level1name", 256, 256, 0, 0), new("@level2type", 167, 128, 0, 0), new("@level2name", 256, 256, 0, 0)],
+            ["sp_updatestats"] = [new("@resample", 175, 8, 0, 0)],
+            ["sp_validname"] = [new("@name", 256, 256, 0, 0), new("@raise_error", 104, 1, 1, 0)],
+            ["sp_who"] = [new("@loginame", 256, 256, 0, 0)],
+            ["sp_who2"] = [new("@loginame", 256, 256, 0, 0)],
+        }.ToFrozenDictionary(StringComparer.Ordinal);
+
+    /// <summary>One row of <see cref="SystemProcedureParameters"/>.</summary>
+    internal readonly struct SystemParameter(string name, int userTypeId, short maxLength, byte precision, byte scale, bool isOutput = false)
+    {
+        public readonly string Name = name;
+        public readonly int UserTypeId = userTypeId;
+        public readonly short MaxLength = maxLength;
+        public readonly byte Precision = precision;
+        public readonly byte Scale = scale;
+        public readonly bool IsOutput = isOutput;
+
+        /// <summary><c>sysname</c> is an alias of <c>nvarchar</c> (231).</summary>
+        public byte SystemTypeId => this.UserTypeId == 256 ? (byte)231 : (byte)this.UserTypeId;
+
+        public bool IsCursorRef => this.Name == "@cursor_return";
+    }
+}

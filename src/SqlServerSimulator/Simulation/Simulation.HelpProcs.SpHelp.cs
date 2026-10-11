@@ -163,6 +163,13 @@ partial class Simulation
                 yield break;
             }
 
+            if (TryResolveHelpSystemProcedure(database, parsedName, out var systemProcedure))
+            {
+                foreach (var outcome in HelpSystemProcedure(batch, systemProcedure, procedureName))
+                    yield return outcome;
+                yield break;
+            }
+
             var typeRows = HelpNamedUserType(batch, objectName) is { Count: > 0 } found
                 ? found
                 : throw SimulatedSqlException.HelpObjectDoesNotExist(objectName, database.Name);
@@ -287,6 +294,91 @@ partial class Simulation
         yield return HelpRowGuidColResultSet(view.Columns);
         foreach (var outcome in HelpViewTail(batch, null, objectName, procedureName))
             yield return outcome;
+    }
+
+    // A system procedure answers to its bare name, to sys.<name> and, named
+    // sp_, to dbo.<name>, an xp_ one not (probed 2026-10-11 against SQL
+    // Server 2025).
+    private static bool TryResolveHelpSystemProcedure(Database database, MultiPartName name, out string procedure)
+    {
+        procedure = null!;
+        if (name.Count is 0 or > 3)
+            return false;
+        if (name.ImmediateQualifier is { Length: > 0 } qualifier
+            && !BuiltInToken.Equals(qualifier, "sys")
+            && !(BuiltInToken.Equals(qualifier, Database.DefaultSchemaName) && name.Leaf.StartsWith("sp_", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+        if (ResolveSystemProcedureName(database.Collation, name.Leaf) is not { } canonical)
+            return false;
+        procedure = canonical;
+        return true;
+    }
+
+    /// <summary>
+    /// <c>sp_help</c> over a system procedure, which real describes as a
+    /// <c>stored procedure</c> or an <c>extended stored proc</c> owned by
+    /// <c>sys</c>, then its parameters as <c>sys.system_parameters</c> lists
+    /// them (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> HelpSystemProcedure(BatchContext batch, string procedure, string procedureName)
+    {
+        List<SqlValue[]> objectInfo =
+        [
+            [
+                SqlValue.FromSystemName(procedure),
+                SqlValue.FromSystemName("sys"),
+                SqlValue.FromString(HelpObjectTypeType, BuiltInResources.IsExtendedProcedure(procedure) ? "extended stored proc" : "stored procedure"),
+                SqlValue.FromDateTime(BuiltInResources.SystemObjectDate),
+            ],
+        ];
+        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo) { ColumnNullability = SpHelpObjectNullability };
+        yield return HelpBlankLine(batch, procedureName, 122);
+        if (!BuiltInResources.SystemProcedureParameters.TryGetValue(procedure, out var parameters))
+            yield break;
+
+        var serverCollation = batch.Connection.Simulation.ServerCollationName;
+        var rows = new List<SqlValue[]>(parameters.Length);
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var parameter = parameters[i];
+            var (typeName, isCharacter, isInteger) = parameter.UserTypeId switch
+            {
+                48 => ("tinyint", false, true),
+                52 => ("smallint", false, true),
+                56 => ("int", false, true),
+                98 => ("sql_variant", false, false),
+                104 => ("bit", false, false),
+                127 => ("bigint", false, true),
+                165 => ("varbinary", false, false),
+                167 => ("varchar", true, false),
+                175 => ("char", true, false),
+                231 => ("nvarchar", true, false),
+                239 => ("nchar", true, false),
+                256 => ("sysname", true, false),
+                _ => throw new InvalidOperationException($"No sp_help spelling for user_type_id {parameter.UserTypeId}."),
+            };
+            // A character or binary parameter reads its length in characters
+            // as its precision, where sys.system_parameters reads 0.
+            var precision = parameter.UserTypeId switch
+            {
+                165 or 167 or 175 => parameter.MaxLength,
+                231 or 239 or 256 => parameter.MaxLength / 2,
+                _ => parameter.Precision,
+            };
+            rows.Add([
+                SqlValue.FromSystemName(parameter.Name),
+                SqlValue.FromSystemName(typeName),
+                SqlValue.FromInt16(parameter.MaxLength),
+                SqlValue.FromInt32(precision),
+                isInteger ? SqlValue.FromInt32(parameter.Scale) : SqlValue.Null(SqlType.Int32),
+                SqlValue.FromInt32(i + 1),
+                isCharacter ? SqlValue.FromSystemName(serverCollation) : SqlValue.Null(SqlType.SystemName),
+            ]);
+        }
+        yield return HelpBlankLine(batch, procedureName, 184);
+        yield return new SimulatedSqlResultSet(SpHelpParameterSchema, SpHelpParameterColumnNames, rows) { ColumnNullability = SpHelpParameterNullability };
     }
 
     // sp_help's own resolution, which must not raise when the name is a type

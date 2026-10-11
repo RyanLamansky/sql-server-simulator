@@ -257,6 +257,10 @@ internal static partial class BuiltInResources
         "sp_helpfilegroup",
         "sp_helpdevice",
         "sp_helpntgroup",
+        // sp_helplogins / sp_helpextendedproc: the logins with the users they
+        // map to, and the extended procedures.
+        "sp_helplogins",
+        "sp_helpextendedproc",
         "sp_getbindtoken",
         "sp_bindsession",
         "sp_validname",
@@ -909,17 +913,22 @@ internal static partial class BuiltInResources
         }
         foreach (var proc in SystemProcedureNames)
         {
-            // Real types these as extended procedures although they're named
-            // sp_ (probed 2026-09-24).
-            var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
-                || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
-                || proc is "sp_bindsession" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+            var isExtended = IsExtendedProcedure(proc);
             objects.Add(new SystemObject(
                 Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(proc, out var realId) ? realId : SystemObjectId(proc), proc, Database.SysSchemaId,
                 isExtended ? "X " : "P ", isExtended ? "EXTENDED_STORED_PROCEDURE" : "SQL_STORED_PROCEDURE"));
         }
         return [.. objects];
     });
+
+    /// <summary>
+    /// Whether real types a system procedure as an extended procedure — every
+    /// <c>xp_</c> one, and some named <c>sp_</c> (probed 2026-09-24).
+    /// </summary>
+    internal static bool IsExtendedProcedure(string proc) =>
+        proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
+        || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
+        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
     internal static bool TryResolveSystemObject(int objectId, out SystemObject system)

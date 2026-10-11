@@ -99,6 +99,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BackupDeviceDoesNotExist(string deviceName) =>
         new($"The device '{deviceName}' does not exist. Use sys.backup_devices to show available devices.", 15012, 16, 1);
 
+    /// <summary>Mimics SQL Server's Msg 15019 — <c>sp_helpextendedproc</c> naming something that is no extended procedure.</summary>
+    internal static SimulatedSqlException NotAnExtendedProcedure(string name) =>
+        new($"The extended stored procedure '{name}' does not exist.", 15019, 16, 1);
+
     /// <summary>Mimics SQL Server's Msg 15420 — <c>sp_helpntgroup</c> naming a Windows group the database has no user for.</summary>
     internal static SimulatedSqlException WindowsGroupDoesNotExist(string groupName) =>
         new($"The group '{groupName}' does not exist in this database.", 15420, 16, 1);

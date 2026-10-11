@@ -131,15 +131,15 @@ internal static partial class BuiltInResources
         ];
         SysP("parameters", parameterColumns, ["object_id"], EnumerateParameters);
 
-        // sys.all_parameters: identical shape to sys.parameters in real SQL
-        // Server (parameters of user objects + system objects). The simulator
-        // enumerates only user-object parameters, so it shares sys.parameters'
-        // rows verbatim. SMO's UserDefinedFunction / StoredProcedure scripting
+        // sys.all_parameters: the user objects' parameters, then the system
+        // procedures'. SMO's UserDefinedFunction / StoredProcedure scripting
         // reads the return/parameter metadata through sys.all_parameters
         // (LEFT JOIN … ret_param.object_id = udf.object_id AND
         // ret_param.is_output = 1); without the view every such property errors
         // Msg 208.
-        SysP("all_parameters", parameterColumns, ["object_id"], EnumerateParameters);
+        SysP("all_parameters", parameterColumns, ["object_id"], static (batch, database, filter) =>
+            EnumerateParameters(batch, database, filter).Concat(EnumerateSystemParameters(filter)));
+        SysP("system_parameters", parameterColumns, ["object_id"], static (_, _, filter) => EnumerateSystemParameters(filter));
 
         // sys.views: per-view rows. Load-bearing subset of real SQL Server's
         // sys.views shape — object_id / name / schema_id / with_check_option /
@@ -1158,6 +1158,52 @@ internal static partial class BuiltInResources
                     ledgerViewTypeNone,
                     SqlValue.FromBoolean(view.HasViewMetadata),
                     falseBit,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// The system procedures' parameters (<see cref="SystemProcedureParameters"/>),
+    /// in object-id order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSystemParameters(CatalogFilter filter)
+    {
+        var hasIdFilter = filter.TargetsInt("object_id", out var wantObjectId, out var idMatchesNothing);
+        if (hasIdFilter && idMatchesNothing)
+            yield break;
+        var falseBit = SqlValue.FromBoolean(false);
+        var zeroInt = SqlValue.FromInt32(0);
+        foreach (var system in SystemObjects.Value.OrderBy(static o => o.ObjectId))
+        {
+            if (hasIdFilter && system.ObjectId != wantObjectId)
+                continue;
+            if (!SystemProcedureParameters.TryGetValue(system.Name, out var parameters))
+                continue;
+            var objectId = SqlValue.FromInt32(system.ObjectId);
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var parameter = parameters[i];
+                yield return [
+                    objectId,
+                    SqlValue.FromSystemName(parameter.Name),
+                    SqlValue.FromInt32(i + 1),
+                    SqlValue.FromByte(parameter.SystemTypeId),
+                    SqlValue.FromInt32(parameter.UserTypeId),
+                    SqlValue.FromInt16(parameter.MaxLength),
+                    SqlValue.FromByte(parameter.Precision),
+                    SqlValue.FromByte(parameter.Scale),
+                    SqlValue.FromBoolean(parameter.IsOutput),
+                    SqlValue.FromBoolean(parameter.IsCursorRef),
+                    falseBit,
+                    falseBit,
+                    SqlValue.Null(SqlType.SqlVariant),
+                    zeroInt,
+                    falseBit,
+                    SqlValue.FromBoolean(true),
+                    SqlValue.Null(SqlType.Int32),
+                    SqlValue.Null(SqlType.NVarchar),
+                    SqlValue.Null(SqlType.TinyInt),
                 ];
             }
         }

@@ -823,6 +823,148 @@ public sealed class HelpProcTests
     }
 
     /// <summary>
+    /// sp_helplogins (probed 2026-10-11 against SQL Server 2025): the login,
+    /// then each database's user for it and the roles that user is directly
+    /// in, sorted by login, database and name; the name is exact rather than a
+    /// pattern, and each name column is as wide as its longest value's
+    /// datalength, or its header when it has no rows.
+    /// </summary>
+    [TestMethod]
+    public void SpHelpLogins_ReportsTheLoginAndItsUsers()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create login zzlg with password = 'Zz!12345abc', check_policy = off
+            create database zzrow
+            """,
+            """
+            use zzrow
+            create user zzlg for login zzlg
+            create role zzr1
+            create role zzr2
+            alter role zzr2 add member zzr1
+            alter role zzr1 add member zzlg
+            alter role db_datareader add member zzlg
+            """);
+        var (sets, widths) = HelpLoginsRun(sim, "exec sp_helplogins N'ZZLG'");
+        CollectionAssert.AreEqual(new object?[] { "zzlg", "master", "us_english", "yes  ", "no     " }, new[] { sets[0][0][0], sets[0][0][2], sets[0][0][3], sets[0][0][4], sets[0][0][5] });
+        CollectionAssert.AreEqual(
+            new[] { "zzrow|db_datareader|MemberOf", "zzrow|zzlg|User    ", "zzrow|zzr1|MemberOf" },
+            sets[1].ConvertAll(static row => $"{row[1]}|{row[2]}|{row[3]}"));
+        AreEqual("8,12,20|8,10,26", widths);
+
+        var (none, noneWidths) = HelpLoginsRun(sim, "exec sp_helplogins N'zz%'");
+        IsTrue(none.TrueForAll(static set => set.Count == 0));
+        AreEqual("9,9,11|9,6,8", noneWidths);
+
+        var (all, _) = HelpLoginsRun(sim, "exec sp_helplogins");
+        CollectionAssert.AreEqual(new[] { "sa|yes  ", "zzlg|yes  " }, all[0].ConvertAll(static row => $"{row[0]}|{row[4]}"));
+        CollectionAssert.AreEqual(new byte[] { 1 }, (byte[])all[0][0][1]!);
+        CollectionAssert.Contains(all[1].ConvertAll(static row => $"{row[0]}|{row[1]}|{row[2]}"), "sa|tempdb|dbo");
+    }
+
+    // Each set's rows, and the nvarchar widths of its name columns as
+    // "set0|set1".
+    private static (List<List<object?[]>> Sets, string Widths) HelpLoginsRun(Simulation simulation, string commandText)
+    {
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        using var reader = command.ExecuteReader();
+        var sets = new List<List<object?[]>>();
+        var widths = new List<string>();
+        do
+        {
+            widths.Add(string.Join(",", reader.GetSchemaTable()!.Rows.Cast<System.Data.DataRow>()
+                .Where(static row => (string)row["DataTypeName"] == "nvarchar")
+                .Select(static row => row["ColumnSize"])));
+            var rows = new List<object?[]>();
+            while (reader.Read())
+            {
+                var values = new object?[reader.FieldCount];
+                for (var i = 0; i < values.Length; i++)
+                    values[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                rows.Add(values);
+            }
+            sets.Add(rows);
+        }
+        while (reader.NextResult());
+        return (sets, string.Join("|", widths));
+    }
+
+    /// <summary>
+    /// sp_help over a system procedure (probed 2026-10-11 against SQL Server
+    /// 2025): the object row owned by sys, typed stored procedure or extended
+    /// stored proc, then the parameters sys.system_parameters lists, a
+    /// character one reading its length in characters as its precision.
+    /// </summary>
+    [TestMethod]
+    public void SpHelp_SystemProcedure_DescribesItsParameters()
+    {
+        var sim = new Simulation();
+        var sets = ResultSets(sim, "exec sp_help 'sys.sp_getapplock'");
+        CollectionAssert.AreEqual(new object?[] { "sp_getapplock", "sys", "stored procedure" }, sets[0].Rows.Single()[..3]);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "@Resource|nvarchar|510|255||1|SQL_Latin1_General_CP1_CI_AS",
+                "@LockMode|varchar|32|32||2|SQL_Latin1_General_CP1_CI_AS",
+                "@LockOwner|varchar|32|32||3|SQL_Latin1_General_CP1_CI_AS",
+                "@LockTimeout|int|4|10|0|4|",
+                "@DbPrincipal|sysname|256|128||5|SQL_Latin1_General_CP1_CI_AS",
+            },
+            sets[1].Rows.ConvertAll(static row => string.Join("|", row)));
+        CollectionAssert.AreEqual(new object?[] { "@value", "sql_variant", (short)8016, 0, null, 2, null }, ResultSets(sim, "exec sp_help 'sp_addextendedproperty'")[1].Rows[1]);
+        var extended = ResultSets(sim, "exec sp_help 'xp_msver'");
+        AreEqual("extended stored proc", extended[0].Rows.Single()[2]);
+        HasCount(1, extended);
+        AreEqual("sp_who", ResultSets(sim, "exec sp_help 'dbo.SP_WHO'")[0].Rows.Single()[0]);
+        AreEqual("sp_who", ResultSets(sim, "exec sp_help 'simulated..sp_who'")[0].Rows.Single()[0]);
+        _ = sim.AssertSqlError("exec sp_help 'dbo.xp_msver'", 15009);
+        _ = sim.AssertSqlError("exec sp_help 'guest.sp_who'", 15009);
+    }
+
+    /// <summary>
+    /// sys.system_parameters, and sys.all_parameters after the user objects'
+    /// rows, list the system procedures' parameters — a cursor output
+    /// flagged is_cursor_ref (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SystemParameters_ListTheSystemProceduresParameters()
+    {
+        var sim = new Simulation();
+        AreEqual(
+            "@cursor_return|56|56|1|1,@cursor_scope|56|56|0|0",
+            sim.ExecuteScalar("select string_agg(concat(name, '|', system_type_id, '|', user_type_id, '|', is_output, '|', is_cursor_ref), ',') within group (order by parameter_id) from sys.system_parameters where object_id = object_id('sys.sp_cursor_list')"));
+        AreEqual(
+            "@loginame|231|256|256",
+            sim.ExecuteScalar("select concat(name, '|', system_type_id, '|', user_type_id, '|', max_length) from sys.all_parameters where object_id = object_id('sys.sp_who')"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.parameters where object_id = object_id('sys.sp_who')"));
+    }
+
+    /// <summary>
+    /// sp_helpextendedproc (probed 2026-10-11 against SQL Server 2025): the
+    /// extended procedures in name order with their library, one by exact
+    /// name, and Msg 15019 with return code 1 for a name that is none.
+    /// </summary>
+    [TestMethod]
+    public void SpHelpExtendedProc_ListsExtendedProcedures()
+    {
+        var sim = new Simulation();
+        var all = ResultSets(sim, "exec sp_helpextendedproc")[0].Rows;
+        CollectionAssert.Contains(all.ConvertAll(static row => $"{row[0]}|{row[1]}"), "sp_executesql|(server internal)");
+        CollectionAssert.AreEqual(all.ConvertAll(static row => (string)row[0]!).Order(StringComparer.OrdinalIgnoreCase).ToList(), all.ConvertAll(static row => (string)row[0]!));
+        CollectionAssert.AreEqual(new object?[] { "xp_msver", "xplog70.dll" }, ResultSets(sim, "exec sp_helpextendedproc N'XP_MSVER'")[0].Rows.Single());
+        var refused = sim.AssertSqlError("exec sp_helpextendedproc N'sp_help'", 15019);
+        AreEqual((15, "sp_helpextendedproc"), (refused.Errors[0].LineNumber, refused.Errors[0].Procedure));
+        sim.ExecuteBatches("create table dbo.rc (rc int)");
+        _ = sim.AssertSqlError("declare @rc int = -1; exec @rc = sp_helpextendedproc N'nosuch'; insert dbo.rc values (@rc)", 15019);
+        AreEqual(1, sim.ExecuteScalar("select rc from dbo.rc"));
+    }
+
+    /// <summary>
     /// sp_validname, sp_getbindtoken and sp_bindsession (probed 2026-10-04
     /// against SQL Server 2025): a token takes a transaction and an OUTPUT
     /// variable, and their refusals end the batch.

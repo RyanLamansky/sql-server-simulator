@@ -673,6 +673,7 @@ partial class Simulation
         ("sp_helpconstraint", 15250) => (39, null),
         ("sp_helpdb", 15010) => (45, null),
         ("sp_helpdevice", 15012) => (34, null),
+        ("sp_helpextendedproc", 15019) => (15, null),
         ("sp_helpfile", 15325) => (28, null),
         ("sp_helpfilegroup", 15325) => (19, null),
         ("sp_helpindex", 15009) => (41, null),

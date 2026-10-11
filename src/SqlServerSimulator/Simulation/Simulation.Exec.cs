@@ -58,6 +58,7 @@ partial class Simulation
         or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
         or "sp_getbindtoken" or "sp_helpdbfixedrole" or "sp_helpdevice" or "sp_helpfilegroup" or "sp_helpntgroup" or "sp_helprole"
+        or "sp_helpextendedproc" or "sp_helplogins"
         or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
         or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_query_store_clear_hints"
         or "sp_query_store_clear_message_queues" or "sp_query_store_consistency_check" or "sp_query_store_flush_db" or "sp_query_store_force_plan"
@@ -344,9 +345,11 @@ partial class Simulation
             "sp_helpdb" => Uncounted(InvokeSpHelpDb(batch)),
             "sp_helpdbfixedrole" => InvokeSpHelpDbFixedRole(batch),
             "sp_helpdevice" => InvokeSpHelpDevice(batch),
+            "sp_helpextendedproc" => Uncounted(InvokeSpHelpExtendedProc(batch)),
             "sp_helpfile" => Uncounted(InvokeSpHelpFile(batch)),
             "sp_helpfilegroup" => Uncounted(InvokeSpHelpFilegroup(batch)),
             "sp_helpindex" => Uncounted(InvokeSpHelpIndex(batch, CalledName(procName))),
+            "sp_helplogins" => InvokeSpHelpLogins(batch),
             "sp_helpntgroup" => InvokeSpHelpNtGroup(batch),
             "sp_helprole" => InvokeSpHelpRole(batch),
             "sp_helprotect" => InvokeSpHelpProtect(batch),
