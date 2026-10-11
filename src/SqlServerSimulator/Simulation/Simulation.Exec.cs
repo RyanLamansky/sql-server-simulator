@@ -413,6 +413,7 @@ partial class Simulation
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
             "xp_regread" => InvokeXpInstanceRegread(batch, instanceMapped: false),
             "sp_getschemalock" => InvokeSpGetSchemaLock(batch, CalledName(procName)),
+            "sp_reset_connection" => InvokeSpResetConnection(batch, CalledName(procName)),
             "sp_releaseschemalock" => InvokeSpReleaseSchemaLock(batch, CalledName(procName)),
             "sp_table_statistics2_rowset" => Uncounted(InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))!),
             _ => InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))
@@ -506,6 +507,15 @@ partial class Simulation
             // An aggregate and a table-valued function are named by kind
             // (probed 2026-09-28 and 2026-10-06 against SQL Server 2025).
             _ = batch.TryResolveFunctionName(procName, out var function);
+            // A system view or table-valued function is named by its leaf
+            // however it was written (probed 2026-10-11 against SQL Server 2025).
+            if (function is null)
+            {
+                if (BatchContext.IsSystemTableValuedFunction(procName))
+                    throw SimulatedSqlException.ExecOfFunctionObject(procName.Leaf, "table valued");
+                if (batch.TryResolveCatalogView(procName, out var catalogView, out _))
+                    throw SimulatedSqlException.ExecOfNonProcedureObject(catalogView.Name, "view");
+            }
             throw function switch
             {
                 Schemas.ClrAggregateFunction => SimulatedSqlException.ExecOfFunctionObject(function.Name, "aggregate"),

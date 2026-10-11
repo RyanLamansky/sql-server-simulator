@@ -149,18 +149,116 @@ public sealed class CollationMetadataTests
             "SELECT collation_name FROM sys.columns WHERE name = 'b'"));
     }
 
+    /// <summary>
+    /// A system function resolves without its <c>sys</c> qualifier, after an
+    /// omitted schema, and as <c>master.dbo</c>'s (probed 2026-10-11 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from fn_helpcollations()")]
+    [DataRow("select count(*) from FN_HELPCOLLATIONS() c")]
+    [DataRow("select count(*) from master..fn_helpcollations()")]
+    [DataRow("select count(*) from simulated..fn_helpcollations()")]
+    [DataRow("select count(*) from master.dbo.fn_helpcollations()")]
+    [DataRow("select count(*) from sys.databases d cross apply fn_helpcollations() c where d.database_id = 1")]
+    [DataRow("select count(*) from sys.databases d outer apply master..fn_helpcollations() c where d.database_id = 1")]
+    public void FnHelpCollations_ResolvesWithoutTheSysQualifier(string query)
+        => AreEqual(5540, new Simulation().ExecuteScalar(query));
+
+    [TestMethod]
+    [DataRow("select count(*) from dbo.fn_helpcollations()")]
+    [DataRow("select count(*) from tempdb.dbo.fn_helpcollations()")]
+    [DataRow("select count(*) from dbo..fn_helpcollations()")]
+    public void FnHelpCollations_ThroughDboOutsideMaster_IsMsg208(string query)
+        => _ = new Simulation().AssertSqlError(query, 208);
+
+    /// <summary>
+    /// The system function wins an unqualified or schema-omitted name over a
+    /// <c>dbo</c> function of the same name, which the <c>dbo</c> form still
+    /// reaches.
+    /// </summary>
+    [TestMethod]
+    public void FnHelpCollations_BeatsADboFunctionOfTheSameName()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.fn_helpcollations() returns table as return select 'mine' as name");
+        AreEqual("5540|5540|1|1", sim.ExecuteScalar("""
+            select concat_ws('|', (select count(*) from fn_helpcollations()), (select count(*) from simulated..fn_helpcollations()),
+                (select count(*) from dbo.fn_helpcollations()), (select count(*) from simulated.dbo.fn_helpcollations()))
+            """));
+    }
+
+    /// <summary>
+    /// A function takes its parentheses and no arguments: both misses are
+    /// settled while the statement compiles, at line 12 when the name is
+    /// qualified.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from fn_helpcollations", 216, 1, 1, "Parameters were not supplied for the function 'fn_helpcollations'.")]
+    [DataRow("select 1\nselect count(*) from sys.fn_helpcollations", 216, 1, 12, "Parameters were not supplied for the function 'sys.fn_helpcollations'.")]
+    [DataRow("select count(*) from fn_helpcollations(1)", 8144, 3, 1, "Procedure or function fn_helpcollations has too many arguments specified.")]
+    [DataRow("select 1\nselect count(*) from sys.fn_helpcollations(1, 2)", 8144, 3, 12, "Procedure or function sys.fn_helpcollations has too many arguments specified.")]
+    public void FnHelpCollations_ArgumentListMisses(string query, int number, int state, int line, string message)
+    {
+        var error = new Simulation().AssertSqlError(query, number);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual((byte)state, error.State);
+        AreEqual(line, error.LineNumber);
+    }
+
+    /// <summary>
+    /// A hint after the call is read as the start of a column schema, as for
+    /// any rowset function, and so refused.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from sys.fn_helpcollations() with (nolock)", 102)]
+    [DataRow("select count(*) from sys.fn_helpcollations() x with (nolock)", 319)]
+    public void FnHelpCollations_TableHintAfterTheCall_IsRefused(string query, int number)
+        => _ = new Simulation().AssertSqlError(query, number);
+
+    /// <summary>
+    /// A table-valued system function called as a scalar is a function name
+    /// real recognizes (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("fn_helpcollations()")]
+    [DataRow("fn_my_permissions(null, 'database')")]
+    [DataRow("fn_virtualfilestats(1, 1)")]
+    public void TableValuedSystemFunction_AsAScalar_IsNotARecognizedFunctionName(string call)
+        => AreEqual(
+            $"'{call[..call.IndexOf('(', StringComparison.Ordinal)]}' is not a recognized function name.",
+            new Simulation().AssertSqlError($"select {call}", 195).Errors[0].Message);
+
+    /// <summary>
+    /// The rows come in real's own order rather than by name: a family's
+    /// binary pair, its flag combinations tier by tier, and the SQL_
+    /// collations last with the underscore ahead of the digits.
+    /// </summary>
+    [TestMethod]
+    public void FnHelpCollations_RowsFollowRealsOrder()
+    {
+        var sim = new Simulation();
+        AreEqual("Albanian_BIN|Albanian_BIN2|Albanian_CI_AI|Albanian_CI_AI_WS|Albanian_CI_AI_KS", sim.ExecuteScalar("""
+            select string_agg(name, '|') from (select top 5 name from fn_helpcollations()) x
+            """));
+        AreEqual("Japanese_XJIS_140_CI_AI_VSS|Japanese_XJIS_140_CI_AI|Japanese_XJIS_140_CI_AI_VSS_UTF8|Japanese_XJIS_140_CI_AI_UTF8", sim.ExecuteScalar("""
+            select string_agg(name, '|') from fn_helpcollations() where name in
+                ('Japanese_XJIS_140_CI_AI', 'Japanese_XJIS_140_CI_AI_UTF8', 'Japanese_XJIS_140_CI_AI_VSS', 'Japanese_XJIS_140_CI_AI_VSS_UTF8')
+            """));
+        AreEqual("Latin1_General_100_BIN2_UTF8|SQL_1xCompat_CP850_CI_AS|SQL_AltDiction_Pref_CP850_CI_AS|SQL_AltDiction2_CP1253_CS_AS", sim.ExecuteScalar("""
+            select string_agg(name, '|') from fn_helpcollations() where name in
+                ('SQL_AltDiction2_CP1253_CS_AS', 'SQL_AltDiction_Pref_CP850_CI_AS', 'SQL_1xCompat_CP850_CI_AS', 'Latin1_General_100_BIN2_UTF8')
+            """));
+    }
+
     [TestMethod]
     public void FnHelpCollations_ColumnsAreNameAndDescription()
     {
-        // The view's row shape mirrors real SQL Server's
-        // (name sysname NULL, description nvarchar(1000) NULL).
-        // Drop the parens — the parens form has a pre-existing parser path
-        // that bypasses WHERE; the non-parens form is more permissive than
-        // real SQL Server (which requires `()` on TVF calls) but exercises
-        // the WHERE filter correctly.
+        // The function's row shape mirrors real SQL Server's
+        // (name sysname, description nvarchar(1000)).
         var sim = new Simulation();
         AreEqual("Latin1_General_100_CI_AS", sim.ExecuteScalar(
-            "SELECT name FROM sys.fn_helpcollations WHERE name = 'Latin1_General_100_CI_AS'"));
+            "SELECT name FROM sys.fn_helpcollations() WHERE name = 'Latin1_General_100_CI_AS'"));
     }
 
     /// <summary>
@@ -177,9 +275,13 @@ public sealed class CollationMetadataTests
     [DataRow("SQL_Polish_CP1250_CS_AS", "Polish, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 87 on Code Page 1250 for non-Unicode Data")]
     [DataRow("Japanese_XJIS_140_CI_AS_KS_WS_VSS", "Japanese-XJIS-140, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive, supplementary characters, variation selector sensitive")]
     [DataRow("German_PhoneBook_100_CI_AS_KS_WS_SC_UTF8", "German-PhoneBook-100, case-insensitive, accent-sensitive, kanatype-sensitive, width-sensitive, supplementary characters, UTF8")]
+    [DataRow("Latin1_General_BIN", "Latin1-General, binary sort")]
+    [DataRow("Latin1_General_100_BIN2_UTF8", "Latin1-General-100, binary code point comparison sort, UTF8")]
+    [DataRow("Chinese_Simplified_Pinyin_160_CI_AI_SC_UTF8", "Chinese-Simplified-Pinyin-160, case-insensitive, accent-insensitive, kanatype-insensitive, width-insensitive, supplementary characters, UTF8")]
+    [DataRow("SQL_EBCDIC277_2_CP1_CS_AS", "Danish-Norwegian, case-sensitive, accent-sensitive, kanatype-insensitive, width-insensitive for Unicode Data, SQL Server Sort Order 218 on Code Page 1252 for non-Unicode Data")]
     public void FnHelpCollations_Description_MatchesProbedSqlServer(string name, string description)
         => AreEqual(description, new Simulation().ExecuteScalar(
-            $"SELECT description FROM sys.fn_helpcollations WHERE name = '{name}'"));
+            $"SELECT description FROM sys.fn_helpcollations() WHERE name = '{name}'"));
 
     /// <summary>
     /// Grammar-valid but never-shipped name combinations reject — the

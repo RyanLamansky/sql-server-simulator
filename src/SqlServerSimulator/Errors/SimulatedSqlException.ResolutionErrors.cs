@@ -228,6 +228,13 @@ partial class SimulatedSqlException
         new($"An insufficient number of arguments were supplied for the procedure or function {name}.", 313, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 216 — a table-valued function named in FROM with
+    /// no parenthesized argument list.
+    /// </summary>
+    internal static SimulatedSqlException ParametersNotSuppliedForFunction(string name) =>
+        new($"Parameters were not supplied for the function '{name}'.", 216, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8144 — fired by a function/procedure call that
     /// supplies more arguments than the parameter list. Wording probe-confirmed.
     /// </summary>

@@ -339,6 +339,6 @@ The strong-named case is unprobed.
 - **`clr enabled` set to 0 while `EnableClr` is on.**
   The option reports `EnableClr` whatever `sp_configure` writes, so registered code always runs.
   Real (probed 2026-10-07 against SQL Server 2025) still creates CLR procedures, functions, aggregates, types and triggers with the option off, but refuses running one with **Msg 6263**: a procedure call fails as its own statement, a reference to a CLR function, table-valued function or aggregate fails the batch as it compiles (a skipped branch's included, a procedure body's when the procedure compiles), and a CLR trigger's error dooms the transaction.
-  The four routine kinds' execution gates are in place, wired to `EnableClr` alone.
+  Building it means a gate at each of the four routine kinds' invocation sites; none ships, since `EnableClr` is fixed at construction and registering code requires it, so no routine can exist while it is off.
 - Out-of-process execution.
   Measured cost of a cross-process round trip is ~56 µs versus ~0.12 µs for an in-process cached delegate — roughly 470× — and a child process is not a sandbox without per-OS restriction work (seccomp/namespaces, restricted tokens, `sandbox_init`), so it is only worth building together with that.

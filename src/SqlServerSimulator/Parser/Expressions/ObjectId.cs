@@ -227,6 +227,13 @@ internal sealed class ObjectId : Expression
                 if (kindMatches)
                     return Gate(function);
             }
+            // The system table-valued function is an inline one.
+            if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.InlineTableValuedFunction
+                && runtime.Batch.TryResolveCatalogView(parsed, out var systemFunction, out _)
+                && systemFunction.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
+            {
+                return SqlValue.FromInt32(systemFunction.ObjectId);
+            }
             if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -242,8 +249,11 @@ internal sealed class ObjectId : Expression
             // byte-identical to real SQL Server's fixed system-view ids; the
             // load-bearing property is non-NULL — SSMS's Query Store probe
             // gates on OBJECT_ID('[sys].[database_query_store_options]').
-            if (runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out _))
+            if (runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out _)
+                && !catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
+            {
                 return SqlValue.FromInt32(catalogView.ObjectId);
+            }
             if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -258,8 +268,12 @@ internal sealed class ObjectId : Expression
             // A system procedure resolves under any schema qualifier, as it
             // does on real (probed 2026-09-24: sp_help, sys.sp_help and
             // dbo.sp_help share one id).
-            if (parsed.Count <= 2 && SystemProcedureId(parsed.Leaf) is { } systemProcedureId)
+            // Under any database that exists, too (probed 2026-10-11).
+            if ((parsed.Count <= 2 || (parsed.Count == 3 && runtime.Batch.Connection.Simulation.Databases.ContainsKey(parsed[0])))
+                && SystemProcedureId(parsed.Leaf) is { } systemProcedureId)
+            {
                 return SqlValue.FromInt32(systemProcedureId);
+            }
             if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }

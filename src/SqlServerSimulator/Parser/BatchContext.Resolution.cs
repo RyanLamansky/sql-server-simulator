@@ -894,7 +894,8 @@ internal sealed partial class BatchContext
         // user-table name never collides.
         var key = name.Count == 1 ? name.Leaf : $"{name.ImmediateQualifier}.{name.Leaf}";
         if (!Simulation.CatalogViews.TryGetValue(key, out view)
-            && !TryResolveCompatibilityViewThroughDbo(name, targetDatabase, out view))
+            && !TryResolveCompatibilityViewThroughDbo(name, targetDatabase, out view)
+            && !TryResolveSystemFunctionOffSys(name, targetDatabase, out view))
         {
             return false;
         }
@@ -925,6 +926,43 @@ internal sealed partial class BatchContext
             && Simulation.CatalogViews.TryGetValue(name.Leaf, out view)
             && !(targetDatabase.Schemas.TryGetValue(Database.DefaultSchemaName, out var dbo)
                 && (dbo.HeapTables.ContainsKey(name.Leaf) || dbo.Views.ContainsKey(name.Leaf) || dbo.Synonyms.ContainsKey(name.Leaf)));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="name"/> reaches one of the system
+    /// table-valued functions by any spelling real accepts.
+    /// </summary>
+    public static bool IsSystemTableValuedFunction(MultiPartName name)
+    {
+        if (name.Count > 3 || !BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_virtualfilestats"))
+            return false;
+        return name.Count == 1
+            || (name.Count == 2 && BuiltInToken.Equals(name.ImmediateQualifier, "sys"))
+            || (name.Count == 3 && (name.SchemaOmitted
+                || BuiltInToken.Equals(name.ImmediateQualifier, "sys")
+                || (BuiltInToken.Equals(name.ImmediateQualifier, Database.DefaultSchemaName) && Collation.Baseline.Equals(name[0], Simulation.MasterDatabaseName))));
+    }
+
+    /// <summary>
+    /// A system function (<c>fn_helpcollations</c>) resolves without its
+    /// <c>sys</c> qualifier — bare, and after an omitted schema
+    /// (<c>db..fn_helpcollations</c>), where it wins over a <c>dbo</c> function
+    /// of the same name — and as <c>master.dbo.fn_helpcollations</c>, which
+    /// is <c>master</c>'s alone: <c>dbo.fn_helpcollations</c> and the
+    /// <c>dbo</c> form in any other database are Msg 208 (probed 2026-10-11
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool TryResolveSystemFunctionOffSys(MultiPartName name, Database targetDatabase, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view)
+    {
+        view = null;
+        var searchesSystemFirst = name.Count == 1
+            || (name.Count == 3 && name.SchemaOmitted)
+            || (name.Count == 3
+                && Collation.Baseline.Equals(name.ImmediateQualifier, Database.DefaultSchemaName)
+                && Collation.Baseline.Equals(targetDatabase.Name, Simulation.MasterDatabaseName));
+        return searchesSystemFirst
+            && name.Leaf.StartsWith("fn_", StringComparison.OrdinalIgnoreCase)
+            && Simulation.CatalogViews.TryGetValue("sys." + name.Leaf, out view);
     }
 
     /// <summary>

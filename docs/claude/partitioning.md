@@ -172,6 +172,7 @@ The loader creates the functions and schemes and places tables, indexes and key 
 
 ## Not modeled yet
 
+- **A partition number list's entries are expressions on real** — `DATA_COMPRESSION = PAGE ON PARTITIONS (a)` is Msg 128 for a column name, Msg 137 for an undeclared variable, and `(1 + 1)`, `(-1)` and `('x')` parse and meet Msg 7729 on an unpartitioned index — where the simulator reads integer literals only and is Msg 102 at anything else (probed 2026-10-11 against SQL Server 2025).
 - **A `FILESTREAM` column** is a syntax error here, where real raises Msg 5508 for a string `(max)` type, Msg 1969 for `varbinary(max)` with no FILESTREAM filegroup to default to, Msg 1921 state 3 for a `FILESTREAM_ON` naming no filegroup and Msg 1724 for one naming a filegroup that isn't a FILESTREAM one (probed 2026-09-30); `FILESTREAM_ON` on a table without one is Msg 1716.
 - **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place — storage the simulator doesn't keep, not chased.
 - **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table; which lock real escalates to rides its storage engine's per-partition lock counts, not chased.

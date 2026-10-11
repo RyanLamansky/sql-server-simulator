@@ -159,6 +159,26 @@ public sealed class CollationCodePageTests
     }
 
     /// <summary>
+    /// The value an overflowing insert quotes is narrowed to the column's code
+    /// page as the write narrows it: characters it lacks best-fit or become
+    /// question marks, a supplementary one two (probed 2026-10-11 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("a varchar(3)", "N'Ŵ😀Ŵ'", "W??")]
+    [DataRow("a varchar(3)", "N'ŴŴŴŴ'", "WWW")]
+    [DataRow("b char(4)", "N'😀😀😀'", "????")]
+    public void Insert_Overflowing_QuotesTheValueNarrowedToTheCodePage(string column, string value, string quoted)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t ({column})");
+        sim.AssertSqlError(
+            $"insert t values ({value})",
+            2628,
+            $"String or binary data would be truncated in table 'simulated.dbo.t', column '{column[..1]}'. Truncated value: '{quoted}'.");
+    }
+
+    /// <summary>
     /// Two kana fit a <c>varchar(5)</c> budget, so the row inserts and stores
     /// its four bytes — the guard is on bytes, not on the character count.
     /// </summary>

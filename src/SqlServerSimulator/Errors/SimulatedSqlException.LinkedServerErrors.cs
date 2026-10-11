@@ -390,6 +390,15 @@ partial class SimulatedSqlException
         new($"Invalid object name '{name}'.", 208, 16, 132) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
+    /// Msg 208 at state 130: <c>sp_reset_connection</c> called from T-SQL, which
+    /// only a TDS reset flag or RPC reaches. It ends the batch the way
+    /// <see cref="SchemaLockObjectNotFound"/> does (probed 2026-10-11 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ResetConnectionFromBatch() =>
+        new("Invalid object name 'sp_reset_connection'.", 208, 16, 130) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
     /// Msg 8174: <c>sp_releaseschemalock</c> of a handle the transaction
     /// holds no schema lock under, which ends the batch and rolls the
     /// transaction back (probed 2026-10-11 against SQL Server 2025).

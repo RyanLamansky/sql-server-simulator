@@ -1682,4 +1682,21 @@ public sealed class CatalogViewTests
             from sys.objects where parent_object_id in (select type_table_object_id from sys.table_types) and object_name(object_id) = name
             """));
     }
+
+    /// <summary>
+    /// <c>EXEC</c> of a system view or table-valued function is Msg 2809
+    /// naming the leaf, however the call spelled it; <c>dbo</c> reaches
+    /// neither (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sys.fn_helpcollations", 2809, "The request for procedure 'fn_helpcollations' failed because 'fn_helpcollations' is a table valued function object.")]
+    [DataRow("exec fn_helpcollations", 2809, "The request for procedure 'fn_helpcollations' failed because 'fn_helpcollations' is a table valued function object.")]
+    [DataRow("exec master..fn_helpcollations", 2809, "The request for procedure 'fn_helpcollations' failed because 'fn_helpcollations' is a table valued function object.")]
+    [DataRow("exec sys.fn_virtualfilestats", 2809, "The request for procedure 'fn_virtualfilestats' failed because 'fn_virtualfilestats' is a table valued function object.")]
+    [DataRow("exec sys.fn_my_permissions", 2809, "The request for procedure 'fn_my_permissions' failed because 'fn_my_permissions' is a table valued function object.")]
+    [DataRow("exec sys.objects", 2809, "The request for procedure 'objects' failed because 'objects' is a view object.")]
+    [DataRow("exec sys.dm_os_sys_info", 2809, "The request for procedure 'dm_os_sys_info' failed because 'dm_os_sys_info' is a view object.")]
+    [DataRow("exec dbo.fn_helpcollations", 2812, "Could not find stored procedure 'dbo.fn_helpcollations'.")]
+    public void ExecOfASystemViewOrFunction_NamesTheObjectKind(string statement, int number, string message)
+        => new Simulation().AssertSqlError(statement, number, message);
 }

@@ -458,7 +458,7 @@ partial class Simulation
             return null;
         var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
         foreach (var (row, address) in ViewRowsWithAddresses(context.Batch, view))
-            rows[address ?? throw RowWithoutAddressNotModeled(view.Name)] = row;
+            rows[address!.Value] = row;
         return rows;
     }
 
@@ -482,13 +482,6 @@ partial class Simulation
         }
         return rows;
     }
-
-    /// <summary>
-    /// A write through a view whose body yielded a row carrying no base
-    /// address, which only a body reaching no single base table could.
-    /// </summary>
-    private static NotSupportedException RowWithoutAddressNotModeled(string viewLabel) =>
-        new($"DML through '{viewLabel}' isn't modeled for this shape: a row its body yields carries no base row to write.");
 
     /// <summary>The leaf names an UPDATE's SET list assigns, read from the cursor on; null when no SET follows.</summary>
     private static List<string>? PeekSetTargets(ParserContext context)

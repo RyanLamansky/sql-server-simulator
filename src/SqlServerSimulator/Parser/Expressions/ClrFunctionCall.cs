@@ -45,9 +45,6 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
         if (runtime.Batch.IsSkipping)
             return SqlValue.Null(this.function.ReturnType);
 
-        if (!runtime.Batch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
-
         var parameters = this.function.Entry.Method!.GetParameters();
         var values = new object?[parameters.Length];
         for (var i = 0; i < parameters.Length; i++)

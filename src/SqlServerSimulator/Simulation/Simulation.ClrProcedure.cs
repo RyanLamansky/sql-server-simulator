@@ -142,9 +142,6 @@ partial class Simulation
         string attributionName)
     {
         var connection = outerBatch.Connection;
-        if (!connection.Simulation.EnableClr)
-            return Attributed(SimulatedSqlException.ClrExecutionDisabled());
-
         var method = entry.Method!;
         var clrParameters = method.GetParameters();
         var arguments = new object?[clrParameters.Length];

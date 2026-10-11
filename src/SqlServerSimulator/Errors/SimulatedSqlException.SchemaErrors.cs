@@ -231,6 +231,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException TooManyNamePrefixes(MultiPartName name, int maximum) => TooManyNamePrefixes(name.ToString(), maximum);
 
+    /// <summary>
+    /// Msg 117 at state 2 for a variable's type name written with more than a
+    /// schema prefix (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TooManyTypeNamePrefixes(string name) =>
+        new($"The type name '{name}' contains more than the maximum number of prefixes. The maximum is 1.", 117, 15, 2);
+
     /// <inheritdoc cref="TooManyNamePrefixes(MultiPartName, int)"/>
     internal static SimulatedSqlException TooManyNamePrefixes(string name, int maximum) =>
         new($"The object name '{name}' contains more than the maximum number of prefixes. The maximum is {maximum}.", 117, 15, 1);

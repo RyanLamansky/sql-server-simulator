@@ -73,44 +73,92 @@ internal static class SpatialGeodeticBuffer
             foreach (var ring in polygon.Figures)
                 Sweep(Distinct(ring, closed: true), closed: true, distance, tolerance, relative, pieces);
         }
-        return Valid(UnionAll(pieces), distance);
+        return Valid(UnionAll(pieces));
     }
 
     /// <summary>
-    /// Pieces meeting at a vertex can leave a sliver of a hole where their
-    /// snapped edges part by a grid step; a hole far smaller than the
-    /// buffer's own reach is dropped, and anything still invalid is rebuilt.
+    /// Pieces meeting at a vertex can leave the union invalid by a spike or a
+    /// needle a grid step wide; cutting those off settles every invalid union
+    /// seen across thousands of random line and polygon buffers.
     /// </summary>
-    private static SpatialShape Valid(SpatialShape shape, double distance)
-    {
-        if (SpatialGeodeticValidator.IsValid(shape))
-            return shape;
-        var trimmed = WithoutSlivers(shape, distance * distance * 1e-3);
-        return SpatialGeodeticValidator.IsValid(trimmed) ? trimmed : SpatialGeodeticConstructive.MakeValid(trimmed);
-    }
+    private static SpatialShape Valid(SpatialShape shape) =>
+        SpatialGeodeticValidator.IsValid(shape) ? shape : WithoutSpikes(shape);
 
-    private static SpatialShape WithoutSlivers(SpatialShape shape, double smallest)
+    /// <summary>
+    /// A ring the union leaves with a spike — an edge out to a vertex and back
+    /// along itself, the vertex sometimes split in two a hair apart — bounds
+    /// nothing there and is invalid for it; the spike is cut off.
+    /// </summary>
+    private static SpatialShape WithoutSpikes(SpatialShape shape) =>
+        WithoutSpikesOrNull(shape) ?? SpatialShape.Empty(SpatialShapeType.GeometryCollection);
+
+    private static SpatialShape? WithoutSpikesOrNull(SpatialShape shape)
     {
         if (shape.Type == SpatialShapeType.Polygon)
         {
-            var rings = new List<SpatialCoordinate[]> { shape.Figures[0] };
-            for (var i = 1; i < shape.Figures.Length; i++)
+            var rings = new List<SpatialCoordinate[]>(shape.Figures.Length);
+            for (var i = 0; i < shape.Figures.Length; i++)
             {
-                // A sliver's area is near zero read either way round.
-                var hole = SpatialShape.Leaf(SpatialShapeType.Polygon, [shape.Figures[i]]);
-                var reversed = SpatialShape.Leaf(SpatialShapeType.Polygon, [[.. shape.Figures[i].Reverse()]]);
-                if (Math.Min(SpatialMeasures.GeographyArea(hole), SpatialMeasures.GeographyArea(reversed)) >= smallest)
-                    rings.Add(shape.Figures[i]);
+                if (WithoutSpikes(shape.Figures[i]) is { } ring)
+                    rings.Add(ring);
+                else if (i == 0)
+                    return null;
             }
             return SpatialShape.Leaf(SpatialShapeType.Polygon, [.. rings]);
         }
         if (shape.Children.Length == 0)
             return shape;
-        var children = new SpatialShape[shape.Children.Length];
-        for (var i = 0; i < children.Length; i++)
-            children[i] = WithoutSlivers(shape.Children[i], smallest);
-        return SpatialShape.Collection(shape.Type, children);
+        var children = new List<SpatialShape>(shape.Children.Length);
+        foreach (var child in shape.Children)
+        {
+            if (WithoutSpikesOrNull(child) is { } kept)
+                children.Add(kept);
+        }
+        // A hole that collapses to a line is no hole, and a polygon whose
+        // shell does is no polygon, which a collection then simply lacks.
+        return children.Count == 0 ? null : children.Count == 1 && shape.Type == SpatialShapeType.MultiPolygon ? children[0] : SpatialShape.Collection(shape.Type, [.. children]);
     }
+
+    /// <summary>The ring with its spikes cut off, or null when nothing but a line is left of it.</summary>
+    private static SpatialCoordinate[]? WithoutSpikes(SpatialCoordinate[] ring)
+    {
+        var points = new List<SpatialCoordinate>(ring.Length);
+        for (var i = 0; i < ring.Length - 1; i++)
+            points.Add(ring[i]);
+        var changed = false;
+        for (var again = true; again && points.Count > 2;)
+        {
+            again = false;
+            for (var i = 0; i < points.Count && points.Count > 2; i++)
+            {
+                var previous = points[(i + points.Count - 1) % points.Count];
+                var next = points[(i + 1) % points.Count];
+                if (SameVertex(points[i], next))
+                {
+                    points.RemoveAt(i);
+                    again = changed = true;
+                    i--;
+                }
+                else if (SameVertex(previous, next) && points.Count > 3)
+                {
+                    // previous → here → previous: drop here and the return.
+                    points.RemoveAt(i);
+                    points.RemoveAt(i % points.Count);
+                    again = changed = true;
+                    i--;
+                }
+            }
+        }
+        if (points.Count < 3)
+            return null;
+        if (!changed)
+            return ring;
+        points.Add(points[0]);
+        return [.. points];
+    }
+
+    private static bool SameVertex(SpatialCoordinate a, SpatialCoordinate b) =>
+        SpatialGeodeticTopology.Same(SpatialEllipsoid.ToCartesian(a), SpatialEllipsoid.ToCartesian(b));
 
     /// <summary>A negative buffer: each polygon less the band its rings sweep.</summary>
     private static SpatialShape Erode(List<SpatialShape> polygons, double distance, double tolerance, bool relative)
@@ -122,7 +170,7 @@ internal static class SpatialGeodeticBuffer
                 Sweep(Distinct(ring, closed: true), closed: true, distance, tolerance, relative, bands);
         }
         var area = UnionAll(polygons);
-        return bands.Count == 0 ? area : Valid(SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Difference, area, UnionAll(bands)), distance);
+        return bands.Count == 0 ? area : Valid(SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Difference, area, UnionAll(bands)));
     }
 
     private static SpatialShape UnionAll(List<SpatialShape> pieces) => SpatialGeodeticConstructive.UnionAll(pieces);

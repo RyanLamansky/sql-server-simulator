@@ -97,6 +97,34 @@ public sealed class CrashBoundaryTests
     }
 
     /// <summary>
+    /// An exception a consumer's callback throws is no modeled error and no
+    /// unbuilt feature: it is reported by type as a severity-16 error, and the
+    /// session survives.
+    /// </summary>
+    [TestMethod]
+    public async Task ExceptionFromAConsumerCallback_IsNamedByType_AndKeepsTheSession()
+    {
+        var simulation = new Simulation { OpenBulkFile = _ => throw new InvalidOperationException("the file source failed") };
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var setup = new SqlCommand("create table t (a int)", connection))
+            _ = await setup.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        await using (var faulting = new SqlCommand("bulk insert t from '/data/t.csv'", connection))
+        {
+            var exception = await Assert.ThrowsExactlyAsync<SqlException>(
+                async () => await faulting.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(50000, exception.Number);
+            AreEqual((byte)16, exception.Class);
+            Contains("unhandled InvalidOperationException: the file source failed", exception.Message);
+        }
+
+        AreEqual(System.Data.ConnectionState.Open, connection.State);
+        await using var next = new SqlCommand("select 42", connection);
+        AreEqual(42, await next.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
     /// A modeled SQL error keeps its own number and severity — the statement
     /// tier only catches what the typed handlers didn't.
     /// </summary>

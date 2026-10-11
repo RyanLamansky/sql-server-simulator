@@ -163,7 +163,6 @@ partial class Simulation
                 missingType.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
                 missingType.PreemptsBinderErrors = true;
                 bindErrors.Add(missingType);
-                SkipPastTypeSpec(context);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = (SqlType.SqlVariant, null, null);
             }
 
@@ -299,7 +298,16 @@ partial class Simulation
                 && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml")
                 && PeekIsXmlSchemaArgument(context))
             {
-                (xmlSchemaCollection, xmlDocument) = ParseXmlSchemaCollectionArgument(context);
+                try
+                {
+                    (xmlSchemaCollection, xmlDocument) = ParseXmlSchemaCollectionArgument(context);
+                }
+                catch (SimulatedSqlException missingCollection) when (missingCollection.Number == 6314)
+                {
+                    context.MoveNextOptional();
+                    ExpectDeclarationFollower(context);
+                    throw;
+                }
                 context.MoveNextOptional();
                 return (SqlType.Xml, null, xmlSchemaCollection);
             }
@@ -330,10 +338,20 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        (var resolved, var maxLength, _, aliasType) = ResolveTypeReference(
-            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            // Real numbers a variable among every one the batch declares.
-            context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, "@" + variableName);
+        SqlType resolved;
+        int? maxLength;
+        try
+        {
+            (resolved, maxLength, _, aliasType) = ResolveTypeReference(
+                context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+                // Real numbers a variable among every one the batch declares.
+                context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, "@" + variableName);
+        }
+        catch (SimulatedSqlException unbound) when (unbound.Number is 2715 or 2716 or 2717 or 2750)
+        {
+            ExpectDeclarationFollower(context);
+            throw;
+        }
         // The legacy LOB types are column-only — real refuses them for a local
         // variable outright (probe-confirmed), which is why no string function
         // ever sees one through a variable.
@@ -357,20 +375,53 @@ partial class Simulation
     /// this resolver provides a default by raising Msg 207.
     /// </summary>
     internal static SqlValue NoColumnResolver(MultiPartName name) =>
-        throw SimulatedSqlException.InvalidColumnName(name);
+        throw NoSuchColumn(name);
+
+    /// <summary>A qualifier names nothing here, which real reports on the whole name (Msg 4104); an unqualified name is Msg 207.</summary>
+    private static SimulatedSqlException NoSuchColumn(MultiPartName name) => name.Count > 1
+        ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
+        : SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>
-    /// Moves past the rest of a type spec whose lookup failed, to the
-    /// initializer, the next declaration, or the end of the statement.
+    /// Real reads a declaration's whole type spec — its name, width list and
+    /// the token that ends it — before it binds the name, so a malformed one
+    /// is a syntax error ahead of a missing or misused type. The cursor is on
+    /// the token past the spec.
     /// </summary>
-    private static void SkipPastTypeSpec(ParserContext context)
+    private static void ExpectDeclarationFollower(ParserContext context)
     {
-        while (context.Token is not (null or Operator { Character: ',' or '=' or ';' }) && !IsStatementBoundary(context.Token))
+        if (context.Token is not (null or Operator { Character: ',' or '=' or ';' }) && !IsStatementBoundary(context.Token))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Reads the <c>(n)</c> / <c>(MAX)</c> / <c>(n, m)</c> width list after a
+    /// type name real can't bind, the cursor on the token past the name and
+    /// left past the list; <c>MAX</c> takes no second number. Answers the
+    /// numbers read, null for each absent one.
+    /// </summary>
+    private static (int? Precision, int? Scale) ReadUnboundWidthSpec(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return (null, null);
+        var isMax = context.GetNextRequired() is UnquotedString { ContextualKeyword: ContextualKeyword.Max };
+        int? precision = null, scale = null;
+        if (!isMax)
+            precision = context.Token is Numeric { Value: { IsNull: false, Type: Int32SqlType } first } ? first.AsInt32 : throw SimulatedSqlException.SyntaxErrorNear(context);
+        switch (context.GetNextRequired())
         {
-            if (context.Token is Operator { Character: '(' })
-                SkipBalancedParens(context);
-            context.MoveNextOptional();
+            case Operator { Character: ',' } when !isMax:
+                scale = context.GetNextRequired() is Numeric { Value: { IsNull: false, Type: Int32SqlType } second } ? second.AsInt32 : throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                break;
+            case Operator { Character: ')' }:
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        context.MoveNextOptional();
+        return (precision, scale);
     }
 
     /// <summary>
@@ -378,7 +429,7 @@ partial class Simulation
     /// a FROM-less condition (<c>IF</c> / <c>WHILE</c>) while compiling.
     /// </summary>
     internal static SqlType NoColumnTypeResolver(MultiPartName name) =>
-        throw SimulatedSqlException.InvalidColumnName(name);
+        throw NoSuchColumn(name);
 
     /// <summary>
     /// Tries to bind <paramref name="variableName"/> to a user-defined
@@ -401,9 +452,13 @@ partial class Simulation
         if (sawDot)
         {
             var objectName = BatchContext.ParseObjectName(context);
+            // A type name takes at most a schema prefix.
+            if (objectName.Count > 2)
+                throw SimulatedSqlException.TooManyTypeNamePrefixes(objectName.ToString());
             if (context.Batch.TryResolveTableType(objectName, out var tableType))
             {
                 context.MoveNextOptional();
+                RefuseWidthOnTableType(context, objectName.ToString(), variableIndex);
                 RegisterTableTypeVariable(context, variableName, tableType, reExecution);
                 return true;
             }
@@ -415,6 +470,9 @@ partial class Simulation
                 context.RestoreCheckpoint(checkpoint);
                 return false;
             }
+            context.MoveNextOptional();
+            _ = ReadUnboundWidthSpec(context);
+            ExpectDeclarationFollower(context);
             throw SimulatedSqlException.CannotFindDataType(variableIndex, objectName.ToString(), "@" + variableName);
         }
 
@@ -423,8 +481,25 @@ partial class Simulation
         if (!context.Batch.TryResolveTableType(new MultiPartName(firstNameToken.Value), out var singleType))
             return false;
         context.MoveNextOptional();
+        RefuseWidthOnTableType(context, firstNameToken.Value, variableIndex);
         RegisterTableTypeVariable(context, variableName, singleType, reExecution);
         return true;
+    }
+
+    /// <summary>
+    /// A width list after a table type's name parses, then binds as Msg 2716
+    /// (state 3) naming the type as written, the cursor on the token past the
+    /// name; a scale past the precision is Msg 192 first.
+    /// </summary>
+    private static void RefuseWidthOnTableType(ParserContext context, string writtenName, int variableIndex)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return;
+        var (precision, scale) = ReadUnboundWidthSpec(context);
+        ExpectDeclarationFollower(context);
+        throw precision < scale
+            ? SimulatedSqlException.ScaleExceedsPrecision()
+            : SimulatedSqlException.CannotSpecifyColumnWidthOnAlias(writtenName, variableIndex);
     }
 
     private static void RegisterTableTypeVariable(ParserContext context, string variableName, TableType tableType, bool reExecution)

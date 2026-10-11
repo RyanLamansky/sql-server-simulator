@@ -130,6 +130,21 @@ public sealed class PartitionedViewTests
         AreEqual(inSecond, simulation.ExecuteScalar("select count(*) from a2"));
     }
 
+    /// <summary>A parenthesized query is an insert source into a partitioned view as it is into a table (probed 2026-10-11 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("insert av (k, v) (select 1, 10 union all select 11, 20)", "1:10 11:20")]
+    [DataRow("insert av (k, v) ((select 11, 20))", "11:20")]
+    [DataRow("insert av (k, v) (select 11, 20 where 1 = 0)", "")]
+    public void InsertFromAParenthesizedQuery_RoutesEachRowToItsMember(string insert, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table a1 (k int not null check (k < 10), v int, primary key (k)); create table a2 (k int not null check (k >= 10), v int, primary key (k))",
+            "create view av as select k, v from a1 union all select k, v from a2");
+        _ = simulation.ExecuteNonQuery(insert);
+        AreEqual(expected, simulation.ExecuteScalar("select isnull(string_agg(concat(k, ':', v), ' ') within group (order by k), '') from av"));
+    }
+
     [TestMethod]
     [DataRow("k int not null, v int, primary key (k)", "k int not null, v int, primary key (k)", "select k, v from a1 union all select k, v from a2", "update av set v = 1", 4436, "UNION ALL view 'simulated.dbo.av' is not updatable because a partitioning column was not found.", DisplayName = "No CHECK")]
     [DataRow("k int not null check (k < 10), v int, primary key (k)", "k int not null check (k >= 5), v int, primary key (k)", "select k, v from a1 union all select k, v from a2", "update av set v = 1", 4436, "UNION ALL view 'simulated.dbo.av' is not updatable because a partitioning column was not found.", DisplayName = "Overlapping ranges")]

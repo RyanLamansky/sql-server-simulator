@@ -173,10 +173,17 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     /// a parameter without a declared default. Msg 8144 when too many args
     /// are supplied.
     /// </exception>
-    public static Expression?[] ParseFunctionArguments(UserDefinedFunction function, ParserContext context)
+    public static Expression?[] ParseFunctionArguments(UserDefinedFunction function, ParserContext context, MultiPartName? writtenName = null)
     {
         var arguments = new List<Expression?>();
         var declaredName = $"{function.Schema.Name}.{function.Name}";
+
+        // A table-valued function named in FROM reports its count mismatches
+        // under the name as written, at state 3, and at line 12 when that name
+        // is qualified (probed 2026-10-11 against SQL Server 2025).
+        SimulatedSqlException TooMany() => writtenName is { } written
+            ? PinnedWhenQualified(SimulatedSqlException.TooManyArgumentsToFunction(written.ToString(), 3), written)
+            : SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
 
         if (context.Token is not Operator { Character: ')' })
         {
@@ -187,7 +194,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
                 {
                     if (slot >= function.Parameters.Length)
-                        throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
+                        throw TooMany();
                     // A table-valued parameter's DEFAULT is an empty table, save
                     // in an inline function, whose plan has no table to stand in
                     // (probed 2026-10-04 against SQL Server 2025).
@@ -221,11 +228,16 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // line real gives what its function binding raises (probed 2026-10-04
         // against SQL Server 2025).
         return arguments.Count > function.Parameters.Length
-            ? throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName)
+            ? throw TooMany()
             : arguments.Count < function.Parameters.Length
                 ? throw (function is ScalarFunction
                     ? SimulatedSqlException.InsufficientArgumentsToFunction(declaredName)
-                    : SimulatedSqlException.InsufficientArgumentsToFunction(declaredName, state: 3).PinLine(12))
+                    : writtenName is { } shortWritten
+                        ? PinnedWhenQualified(SimulatedSqlException.InsufficientArgumentsToFunction(shortWritten.ToString(), state: 3), shortWritten)
+                        : SimulatedSqlException.InsufficientArgumentsToFunction(declaredName, state: 3).PinLine(12))
                 : [.. arguments];
     }
+
+    private static SimulatedSqlException PinnedWhenQualified(SimulatedSqlException exception, MultiPartName written) =>
+        written.Count > 1 ? exception.PinLine(12) : exception;
 }

@@ -49,4 +49,45 @@ public sealed class DeclaredWidthTests
     [DataRow("exec sp_executesql N'select @p', N'@p nvarchar(5000)', 'a'", 2717, "The size (5000) given to the parameter '@p' exceeds the maximum allowed (4000).")]
     public void AnInvalidDeclaredWidth_IsWordedForItsSite(string statement, int number, string message)
         => new Simulation().AssertSqlError(statement, number, message);
+
+    /// <summary>
+    /// Real reads a declaration's whole type spec — name, width list and the
+    /// token that ends it — before it binds the name, so a malformed one is a
+    /// syntax error ahead of a missing type, however many parts the name has
+    /// and in a module as at top level (probed 2026-10-11 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @a nosuch x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("declare @a dbo.nosuch x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("declare @a dbo.nosuch(1) x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("declare @a dbo.nosuch(1 + 2)", 102, "Incorrect syntax near '+'.")]
+    [DataRow("declare @a dbo.nosuch(1, 2, 3)", 102, "Incorrect syntax near ','.")]
+    [DataRow("declare @a dbo.nosuch(max, 5)", 102, "Incorrect syntax near ','.")]
+    [DataRow("declare @a dbo.nosuch()", 102, "Incorrect syntax near ')'.")]
+    [DataRow("declare @a dbo.nosuch(abc)", 102, "Incorrect syntax near 'abc'.")]
+    [DataRow("declare @a dbo.nosuch(-5)", 102, "Incorrect syntax near '-'.")]
+    [DataRow("declare @a dbo.nosuch('x')", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("declare @a dbo.nosuch(1.5)", 102, "Incorrect syntax near '1.5'.")]
+    [DataRow("declare @a dbo.nosuch((1))", 102, "Incorrect syntax near '('.")]
+    [DataRow("declare @a xml(nosuchcol) x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("declare @a x.dbo.nosuch(10)", 117, "The type name 'x.dbo.nosuch' contains more than the maximum number of prefixes. The maximum is 1.")]
+    [DataRow("declare @a x.dbo.tt", 117, "The type name 'x.dbo.tt' contains more than the maximum number of prefixes. The maximum is 1.")]
+    [DataRow("declare @a dbo.nosuch(10, 5), @b int = 1", 2715, "Column, parameter, or variable #1: Cannot find data type dbo.nosuch.")]
+    [DataRow("declare @a dbo.nosuch(max) = 1, @b int = 1", 2715, "Column, parameter, or variable #1: Cannot find data type dbo.nosuch.")]
+    [DataRow("declare @a dbo.tt(1)", 2716, "Column, parameter, or variable #1: Cannot specify a column width on data type dbo.tt.")]
+    [DataRow("declare @a tt(max)", 2716, "Column, parameter, or variable #1: Cannot specify a column width on data type tt.")]
+    [DataRow("declare @a dbo.tt(1, 2)", 192, "The scale must be less than or equal to the precision.")]
+    [DataRow("declare @a dbo.tt(1.5)", 102, "Incorrect syntax near '1.5'.")]
+    [DataRow("declare @a dbo.tt(1) x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("create procedure p as begin declare @a nosuch x; select 1; end", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("create procedure p as begin declare @a dbo.nosuch x; select 1; end", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("create procedure p as begin declare @a dbo.nosuch(1 + (2)); select 1; end", 102, "Incorrect syntax near '+'.")]
+    [DataRow("create procedure p as begin declare @a dbo.tt(1); select 1; end", 2716, "Column, parameter, or variable #1: Cannot specify a column width on data type dbo.tt.")]
+    public void ATypeSpecReadBeforeItsNameBinds_RaisesItsSyntaxErrorFirst(string statement, int number, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.tt as table (a int)");
+        sim.AssertSqlError(statement, number, message);
+    }
 }

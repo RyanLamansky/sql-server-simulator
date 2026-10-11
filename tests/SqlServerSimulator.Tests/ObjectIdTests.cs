@@ -547,4 +547,26 @@ public sealed class ObjectIdTests
             select count(object_id(n)) from (values (' dbo . t '), ('dbo. t'), ('[dbo] .[t]'), ('dbo.[t'), ('dbo.t]'), ('t.'), ('[]'), ('dbo..t')) v(n)
             """));
     }
+
+    /// <summary>
+    /// A system procedure resolves under any database that exists and a
+    /// system function without its <c>sys</c> qualifier, the function as an
+    /// inline one (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ObjectId_SystemObjects_ResolveUnderEveryQualifierReal()
+    {
+        var sim = new Simulation();
+        AreEqual("1|1|1|1|1|1|1|1", sim.ExecuteScalar("""
+            select concat_ws('|',
+                iif(object_id('master.dbo.sp_help') = object_id('sp_help'), 1, 0),
+                iif(object_id('master..sp_help') = object_id('sys.sp_help'), 1, 0),
+                iif(object_id('tempdb.dbo.sp_help') = object_id('sp_help'), 1, 0),
+                iif(object_id('foo.dbo.sp_help') is null, 1, 0),
+                iif(object_id('fn_helpcollations') = object_id('sys.fn_helpcollations'), 1, 0),
+                iif(object_id('master.dbo.fn_helpcollations') = object_id('FN_HELPCOLLATIONS', 'IF'), 1, 0),
+                iif(object_id('fn_helpcollations', 'V') is null and object_id('fn_helpcollations', 'U') is null, 1, 0),
+                iif(object_id('dbo.fn_helpcollations') is null, 1, 0))
+            """));
+    }
 }

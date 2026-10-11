@@ -358,6 +358,13 @@ partial class SimulatedSqlException
         new("The offset specified in a OFFSET clause may not be negative.", 10742, 15, 1);
 
     /// <summary>
+    /// Msg 195 for a table-valued system function called as a scalar, whose
+    /// name real recognizes as an object (probed 2026-10-11 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedSystemFunction(string name) => new($"'{name}' is not a recognized function name.", 195, 15, 10);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10744 — fired when a <c>FETCH</c> clause
     /// resolves to zero or a negative value at execution time. Wording
     /// verbatim, including the literal "greater then zero" typo from the

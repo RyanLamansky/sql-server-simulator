@@ -2367,7 +2367,9 @@ internal abstract class Expression : ExpressionNode
                 _ => null
             },
             _ => null
-        } ?? throw SimulatedSqlException.UnrecognizedBuiltInFunction(name);
+        } ?? throw (BuiltInToken.EqualsAny(name, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_virtualfilestats")
+            ? SimulatedSqlException.UnrecognizedSystemFunction(name)
+            : SimulatedSqlException.UnrecognizedBuiltInFunction(name));
 
     /// <summary>
     /// Handles the <c>NEXT VALUE FOR [schema.]sequence [OVER (ORDER BY ...)]</c>

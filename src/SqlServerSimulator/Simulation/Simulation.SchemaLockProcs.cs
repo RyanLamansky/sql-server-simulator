@@ -54,6 +54,20 @@ partial class Simulation
     }
 
     /// <summary>
+    /// <c>sp_reset_connection</c> run from T-SQL, which real answers as a
+    /// missing object (probed 2026-10-11 against SQL Server 2025): Msg 208
+    /// from line 1 of the procedure under the name the call used, whatever
+    /// the call's arguments.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpResetConnection(BatchContext batch, string calledAs)
+    {
+        _ = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+        throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ResetConnectionFromBatch(), 1);
+    }
+
+    /// <summary>
     /// <c>sp_releaseschemalock @handle</c>: gives back the lock
     /// <c>sp_getschemalock</c> took under the handle. A handle the
     /// transaction doesn't hold is Msg 8174, which ends the batch and the

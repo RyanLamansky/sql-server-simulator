@@ -308,6 +308,7 @@ internal static class CatalogViewObjectIds
         ["sp_foreign_keys_rowset2"] = -120434146,
         ["sp_foreign_keys_rowset3"] = -969909491,
         ["sp_getschemalock"] = -315066412,
+        ["sp_reset_connection"] = -401594603,
         ["sp_helplinkedsrvlogin"] = -449526256,
         ["sp_droplogin"] = -303177665,
         ["sp_dropmessage"] = -447876187,

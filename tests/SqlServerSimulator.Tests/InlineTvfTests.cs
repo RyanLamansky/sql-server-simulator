@@ -465,4 +465,34 @@ public sealed class InlineTvfTests
         sim.ExecuteBatches("create function dbo.f(@a int, @b int) returns table as return select @a a, @b b");
         AreEqual((byte)3, sim.AssertSqlError("select * from dbo.f(1)", 313).State);
     }
+
+    /// <summary>
+    /// A function named in FROM takes its parentheses, and every miss in its
+    /// argument list reports the name as written, at line 12 when that name
+    /// is qualified (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from f", 216, 1, 1, "Parameters were not supplied for the function 'f'.")]
+    [DataRow("select * from dbo.f", 216, 1, 12, "Parameters were not supplied for the function 'dbo.f'.")]
+    [DataRow("select * from dbo.f x", 216, 1, 12, "Parameters were not supplied for the function 'dbo.f'.")]
+    [DataRow("select * from sys.databases d cross apply dbo.f", 216, 1, 12, "Parameters were not supplied for the function 'dbo.f'.")]
+    [DataRow("select * from m", 216, 1, 1, "Parameters were not supplied for the function 'm'.")]
+    [DataRow("select * from dbo.m", 216, 1, 12, "Parameters were not supplied for the function 'dbo.m'.")]
+    [DataRow("select * from f(1)", 8144, 3, 1, "Procedure or function f has too many arguments specified.")]
+    [DataRow("select * from dbo.f(1, 2)", 8144, 3, 12, "Procedure or function dbo.f has too many arguments specified.")]
+    [DataRow("select * from dbo.m(1)", 8144, 3, 12, "Procedure or function dbo.m has too many arguments specified.")]
+    [DataRow("select * from g()", 313, 3, 1, "An insufficient number of arguments were supplied for the procedure or function g.")]
+    [DataRow("select * from dbo.g()", 313, 3, 12, "An insufficient number of arguments were supplied for the procedure or function dbo.g.")]
+    public void ArgumentListMisses_ReportTheNameAsWritten(string query, int number, int state, int line, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.f() returns table as return select 1 a",
+            "create function dbo.g(@a int) returns table as return select @a a",
+            "create function dbo.m() returns @t table (a int) as begin insert @t values (1); return end");
+        var error = sim.AssertSqlError(query, number);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual((byte)state, error.State);
+        AreEqual(line, error.LineNumber);
+    }
 }

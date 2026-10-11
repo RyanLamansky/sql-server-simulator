@@ -559,4 +559,53 @@ public sealed class SpatialConstructiveTests
         Assert.StartsWith("MULTIPOLYGON (((11 13.1, 12 10.1, 15 10.1, 15 13.1, 11 13.1)), ((5 8.1, 5 5.1, ",
             Text("geography::Parse('MULTIPOLYGON(((8 8.1, 5 8.1, 5 5.1, 8 5.1, 8 8.1)),((15 10.1, 15 13.1, 11 13.1, 12 10.1, 15 10.1)))')"
                 + ".STDifference(geography::Parse('POLYGON((8 7.8, 7 7.8, 7 3.5, 12.8 3.5, 12.8 4.5, 8 4.5, 8 7.8))'))"));
+
+    /// <summary>
+    /// A line's or polygon's round-earth buffer is valid whatever the union of
+    /// its pieces leaves behind — a spike where pieces meet, a needle of a hole
+    /// or of a whole polygon, a vertex a piece's edge passes through unsplit —
+    /// and matches real's area (real's areas probed 2026-10-11 against SQL
+    /// Server 2025; the buffers match in area rather than vertices).
+    /// </summary>
+    [TestMethod]
+    [DataRow("LINESTRING(-46.15126 23.149049, -46.027331 23.046139, -46.163002 22.886799, -46.111359 22.876134, -46.081498 23.018382, -46.083161 23.156502)", 96565.892, 36856791937.20024)]
+    [DataRow("LINESTRING(-98.134506 16.95777, -98.302383 17.089391, -98.770007 16.931009)", 38525.166, 10428716987.656534)]
+    [DataRow("POLYGON((82.688833 -31.480033, 81.843217 -32.208381, 82.062063 -33.365072, 82.688833 -31.480033))", 635927.908, 1566911064191.4219)]
+    [DataRow("POLYGON((70.649486 15.565804, 70.518304 15.669807, 70.363328 15.610757, 70.181695 15.557469, 70.343562 15.38661, 70.53641 15.288067, 70.649486 15.565804))", -13175.293, 43805763.75521946)]
+    [DataRow("LINESTRING(0 0, 40 0)", 100000, 922487288211.5819)]
+    public void Geography_LineAndPolygonBuffers_AreValidAndMatchRealsArea(string wkt, double distance, double realArea)
+    {
+        var sim = new Simulation();
+        var query = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"declare @b geography = geography::STGeomFromText('{wkt}', 4326).STBuffer({distance}); select @b.STArea(), @b.STIsValid()");
+        using var reader = sim.ExecuteReader(query);
+        IsTrue(reader.Read());
+        AreEqual(realArea, reader.GetDouble(0), realArea * 1e-3);
+        IsTrue(reader.GetBoolean(1));
+    }
+
+    [TestMethod]
+    public void Geography_PolygonBuffer_ErodingToNeedlesIsEmpty()
+        => AreEqual(0d, Eval("geography::STGeomFromText('POLYGON((-134.046891 55.025345, -136.724804 57.085032, -139.086639 60.190418, -139.345202 56.711679, -139.911458 54.504869, -133.978069 53.180875, -130.141672 52.298607, -130.174632 52.359412, -134.046891 55.025345))', 4326).STBuffer(-147581.946).STArea()"));
+
+    /// <summary>
+    /// <c>geography</c>'s <c>MakeValid()</c> answers real's shape — type, member count, area and length (probed 2026-10-11
+    /// against SQL Server 2025) — with vertices carrying noise of the grid's last digits and a start of their own.
+    /// </summary>
+    [TestMethod]
+    [DataRow("POLYGON((0 0, 10 0, 0 10, 10 10, 0 0))", "MultiPolygon", 2, 613957252866.1315, 5339764.689329807)]
+    [DataRow("LINESTRING(0 0, 10 0, 10 0, 5 0)", "LineString", 1, 0d, 1113194.908108537)]
+    [DataRow("POLYGON((0 0, 20 0, 20 20, 0 20, 0 0), (5 5, 5 25, 15 15, 5 5))", "MultiPolygon", 2, 3949188410288.4624, 14034296.616537109)]
+    [DataRow("MULTIPOLYGON(((0 0, 10 0, 10 10, 0 10, 0 0)), ((5 5, 15 5, 15 15, 5 15, 5 5)))", "MultiPolygon", 2, 1830226610883.127, 8817853.976147164)]
+    [DataRow("POLYGON((0 0, 10 0, 0 0, 0 0))", "LineString", 1, 0d, 1113194.9192238452)]
+    [DataRow("POLYGON((0 0, 10 0, 10 10, 5 5, 0 10, 0 0, 5 -5, 0 0))", "GeometryCollection", 2, 922076474558.2979, 5671145.909055687)]
+    public void Geography_MakeValid_MatchesRealsShapeAndMeasures(string wkt, string type, int members, double area, double length)
+    {
+        using var reader = new Simulation().ExecuteReader(
+            $"declare @v geography = geography::STGeomFromText('{wkt}', 4326).MakeValid(); select cast(@v.STGeometryType() as varchar(30)), @v.STNumGeometries(), @v.STArea(), @v.STLength()");
+        IsTrue(reader.Read());
+        AreEqual(type, reader.GetString(0));
+        AreEqual(members, reader.GetInt32(1));
+        AreEqual(area, reader.GetDouble(2), (area * 1e-6) + 1e-6);
+        AreEqual(length, reader.GetDouble(3), length * 1e-6);
+    }
 }

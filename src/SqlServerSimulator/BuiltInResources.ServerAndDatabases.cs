@@ -2062,17 +2062,59 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.fn_helpcollations()</c>. Emits one row per entry in
-    /// <see cref="Collation.IsRecognized"/> — the simulator's whitelist of
-    /// metadata-accepted collation names. Real SQL Server returns ~5540
-    /// rows here; the simulator's shorter list is honest about which
-    /// collation names round-trip through <see cref="Database.CollationName"/>
-    /// / <see cref="HeapColumn.Collation"/>.
+    /// <see cref="Collation.EnumerateRecognized"/> in real's own order: the
+    /// Windows collations by family (ordinal) and generation, each family's
+    /// binary pair first and then its flag combinations tier by tier, and the
+    /// <c>SQL_</c> collations last, by name with the underscore ahead of every
+    /// letter and digit (probed 2026-10-11 against SQL Server 2025, all 5540
+    /// rows).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateFnHelpCollations(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        foreach (var (entryName, entryDesc) in Collation.EnumerateRecognized().OrderBy(e => e.Name, StringComparer.Ordinal))
-            yield return [SqlValue.FromSystemName(entryName), SqlValue.FromNVarchar(entryDesc)];
+        return Collation.EnumerateRecognized()
+            .Select(static entry => (entry.Name, entry.Description, Key: FnHelpCollationsOrder(entry.Name)))
+            .OrderBy(static entry => entry.Key.Group)
+            .ThenBy(static entry => entry.Key.Family, StringComparer.Ordinal)
+            .ThenBy(static entry => entry.Key.Generation)
+            .ThenBy(static entry => entry.Key.Kind)
+            .ThenBy(static entry => entry.Key.Tier)
+            .ThenBy(static entry => entry.Key.Flags)
+            .Select(static entry => (SqlValue[])[SqlValue.FromSystemName(entry.Name), SqlValue.FromNVarchar(entry.Description)]);
+    }
+
+    /// <summary>
+    /// The sort key of a collation name in <c>sys.fn_helpcollations()</c>:
+    /// group (Windows, then <c>SQL_</c>), family, generation (none, 90, 100,
+    /// 140), kind (binary pair, flag combinations, <c>BIN2_UTF8</c>), tier (the
+    /// <c>VSS</c> / <c>SC</c> / <c>UTF8</c> suffix combination) and the case,
+    /// accent, kana and width flags in that significance.
+    /// </summary>
+    private static (int Group, string Family, int Generation, int Kind, int Tier, int Flags) FnHelpCollationsOrder(string name)
+    {
+        if (name.StartsWith("SQL_", StringComparison.Ordinal))
+            return (1, name.ToUpperInvariant().Replace('_', '\0'), 0, 0, 0, 0);
+        var tokens = name.Split('_');
+        var rest = Array.FindIndex(tokens, static token => token is "BIN" or "BIN2" or "CI" or "CS");
+        var generation = rest > 0 ? tokens[rest - 1] switch { "100" => 2, "140" => 3, "90" => 1, _ => 0 } : 0;
+        var family = string.Join('_', tokens, 0, generation == 0 ? rest : rest - 1);
+        var suffix = tokens[rest..];
+        if (suffix[0] is "BIN" or "BIN2")
+            return (0, family, generation, suffix.Length > 1 ? 2 : 0, suffix[0] == "BIN2" ? 1 : 0, 0);
+        var vss = Array.IndexOf(suffix, "VSS") >= 0;
+        var supplementary = Array.IndexOf(suffix, "SC") >= 0;
+        var utf8 = Array.IndexOf(suffix, "UTF8") >= 0;
+        var tier = (vss, supplementary, utf8) switch
+        {
+            (true, _, false) => 0,
+            (false, false, false) => 1,
+            (_, true, false) => 2,
+            (true, _, true) => 3,
+            (_, true, true) => 4,
+            _ => 5,
+        };
+        var flags = (suffix[0] == "CS" ? 8 : 0) | (suffix[1] == "AS" ? 4 : 0) | (Array.IndexOf(suffix, "KS") >= 0 ? 2 : 0) | (Array.IndexOf(suffix, "WS") >= 0 ? 1 : 0);
+        return (0, family, generation, 1, tier, flags);
     }
 
     /// <summary>

@@ -22,9 +22,12 @@ partial class SimulatedSqlException
     /// </remarks>
     internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max, System.Text.Encoding? encoding)
     {
+        // A value arriving as Unicode text is quoted as the column's code page
+        // narrows it (probed 2026-10-11 against SQL Server 2025: N'Ŵ😀Ŵ' into
+        // varchar(3) quotes 'W??').
         var prefix = encoding is null
             ? (value.Length <= max ? value : value[..max])
-            : Collation.ClipToByteBudget(value, max, encoding);
+            : Collation.ClipToByteBudget(encoding.GetString(encoding.GetBytes(value)), max, encoding);
         // Real quotes at most the first 100 characters (probed 2026-10-05
         // against SQL Server 2025, varchar and nvarchar alike).
         if (prefix.Length > 100)

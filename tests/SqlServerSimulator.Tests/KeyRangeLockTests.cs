@@ -824,4 +824,28 @@ public sealed class KeyRangeLockTests
 
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// A SERIALIZABLE read of an interval of an index a read can't walk — one
+    /// with a descending key column — still fences the interval's keys up
+    /// front: an insert into it, or a row moved into it, waits, and one outside
+    /// does not (probed 2026-10-11 against SQL Server 2025 over 3,000 rows).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t values (5000, 1005, 0)", true)]
+    [DataRow("insert t values (5001, 2500, 0)", false)]
+    [DataRow("update t set n = 1006 where k = 2500", true)]
+    [DataRow("update t set n = 2501 where k = 2500", false)]
+    public async Task SerializableIntervalOfADescendingIndex_FencesItsKeys(string write, bool waits)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (k int primary key, n int, v int); insert t select value, value, 0 from generate_series(1, 3000); create index ixd on t (n desc)");
+        using var reader = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t with (index (ixd)) where n between 1000 and 1010").ExecuteScalar();
+        if (waits)
+            await AssertBlocksUntil(sim, reader, writer, write, "commit");
+        else
+            await AssertProceeds(writer, write);
+    }
 }

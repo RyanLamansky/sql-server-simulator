@@ -73,15 +73,6 @@ internal readonly struct SpatialArc
     /// </summary>
     public double SegmentArea => this.IsStraight ? 0 : this.Radius * this.Radius / 2 * (this.Sweep - Math.Sin(this.Sweep));
 
-    /// <summary>The point <paramref name="fraction"/> of the way along the arc by angle.</summary>
-    public SpatialCoordinate At(double fraction)
-    {
-        if (this.IsStraight)
-            return new SpatialCoordinate(this.Start.X + ((this.End.X - this.Start.X) * fraction), this.Start.Y + ((this.End.Y - this.Start.Y) * fraction), this.Start.Z, this.Start.M);
-        var angle = this.StartAngle + (this.Sweep * fraction);
-        return new SpatialCoordinate(this.CenterX + (this.Radius * Math.Cos(angle)), this.CenterY + (this.Radius * Math.Sin(angle)), this.Start.Z, Interpolate(this.Start.M, this.End.M, fraction));
-    }
-
     /// <summary>Whether the arc passes through the direction <paramref name="angle"/> about its centre.</summary>
     public bool Covers(double angle)
     {

@@ -153,6 +153,30 @@ public sealed class PageLockTests
         AreEqual("", Locks(other, spid));
     }
 
+    /// <summary>
+    /// A delete under <c>PAGLOCK</c> takes the X of the pages its rows were on,
+    /// the deleted rows' own X folded under them as an update's are (probed
+    /// 2026-10-11 against SQL Server 2025, a clustered table and a heap alike).
+    /// </summary>
+    [TestMethod]
+    [DataRow("")]
+    [DataRow(" primary key")]
+    public void Delete_LocksItsPages(string key)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            create table d (id int{key}, v int not null, pad char(2000) not null default 'x');
+            insert d (id, v) select value, value from generate_series(1, 30)
+            """);
+        using var writer = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        var spid = Spid(writer);
+        _ = writer.CreateCommand("begin tran; delete d with (paglock) where id between 5 and 10").ExecuteNonQuery();
+        AreEqual("OBJECT IX, PAGE Xx2", Locks(other, spid));
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual("", Locks(other, spid));
+    }
+
     /// <summary>An insert lands on the last page, which a reader holding every page keeps it off.</summary>
     [TestMethod]
     public void Insert_MeetsTheLastPagesLock()

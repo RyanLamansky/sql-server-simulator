@@ -396,8 +396,8 @@ partial class Simulation
         }
         foreach (var outcome in outcomes)
         {
-            if (outcome is not SimulatedQueryResult query
-                || (query is SimulatedSqlResultSet { SentThrough: { } through } && through.Reaches(sink)))
+            if (outcome is not SimulatedSqlResultSet query
+                || (query is { SentThrough: { } through } && through.Reaches(sink)))
             {
                 yield return outcome;
                 continue;
@@ -467,9 +467,9 @@ partial class Simulation
     internal static SimulatedSqlResultSet SendThroughResultSets(SimulatedSqlResultSet produced, ResultSetClaim[] claims, ResultSetsSink sink) =>
         ConvertedResultSet(produced, claims, sink, origin: null);
 
-    private static SimulatedSqlResultSet ConvertedResultSet(SimulatedQueryResult source, ResultSetClaim[] claims, ResultSetsSink? through, SimulatedQueryResult? origin)
+    private static SimulatedSqlResultSet ConvertedResultSet(SimulatedSqlResultSet source, ResultSetClaim[] claims, ResultSetsSink? through, SimulatedSqlResultSet? origin)
     {
-        var rows = source is SimulatedSqlResultSet resultSet ? resultSet.RowValues : CursorRows(source);
+        var rows = source.RowValues;
         foreach (var claim in claims)
             rows = ConvertResultSetRows(rows, claim.Shape, claim.SetNumber, origin);
         var last = claims[^1].Shape;
@@ -485,26 +485,12 @@ partial class Simulation
         // Rows another statement still produces as they are read — a DML
         // statement's OUTPUT — go on being produced for the consumer of the
         // converted set.
-        if (source is SimulatedSqlResultSet { Stream: { } stream })
+        if (source is { Stream: { } stream })
         {
             converted.Stream = stream;
             stream.Result = converted;
         }
         return converted;
-    }
-
-    /// <summary>A result that is not a <see cref="SimulatedSqlResultSet"/>'s rows, read through its cursor.</summary>
-    private static IEnumerable<SqlValue[]> CursorRows(SimulatedQueryResult source)
-    {
-        using var cursor = source.CreateCursor();
-        var width = source.Schema.Length;
-        while (cursor.MoveNext())
-        {
-            var row = new SqlValue[width];
-            for (var i = 0; i < row.Length; i++)
-                row[i] = cursor[i];
-            yield return row;
-        }
     }
 
     /// <summary>

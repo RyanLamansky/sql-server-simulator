@@ -655,6 +655,7 @@ The rules the translation adds, each probed 2026-09-28:
 **Not modeled yet**:
 - `OUTPUT` through a join view whose written table sits under a **nested join view** raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
   Under a single-table view source it ships: `INSERTED` computes that view's row from the written one, a derived column included, and `DELETED` reads the row's own join tuple (probed 2026-09-30 against SQL Server 2025).
+- A join view or CTE whose body takes a `TOP` over a join of one written table (`WITH c AS (SELECT TOP (1) a.k, a.v FROM a CROSS JOIN b ORDER BY a.k) UPDATE c …`) writes every row its join shows where real writes the row the limit chose, and a `DELETE` through it is Msg 4405 where real deletes that row (probed 2026-10-11 against SQL Server 2025).
 - The broken-chain check gathers only the outermost chain's own base tables, and real reports the SELECT and the write denials together where the simulator raises the first.
 
 ## Partitioned views

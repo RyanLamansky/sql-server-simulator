@@ -818,7 +818,9 @@ internal sealed partial class Selection
             }
 
             var resolvedIsTvf = IsSysRowsetFunction(resolvedName)
-                || context.Batch.TryResolveTableValuedFunction(resolvedName, out _);
+                || context.Batch.TryResolveTableValuedFunction(resolvedName, out _)
+                || (context.Batch.TryResolveCatalogView(resolvedName, out var resolvedCatalogView, out _)
+                    && resolvedCatalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase));
             // A '(' after the name marks a function-call shape (TVF invocation).
             // ParseObjectName leaves the cursor on the leaf; peek one past it.
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
@@ -1427,10 +1429,21 @@ internal sealed partial class Selection
                     // (`sys.tables`) has no parens at all.
                     var afterCatalogName = context.SaveCheckpoint();
                     context.MoveNextOptional();
-                    if (context.Token is Operator { Character: '(' }
+                    var openedParentheses = context.Token is Operator { Character: '(' };
+                    if (openedParentheses
                         && context.GetNextOptional() is Operator { Character: ')' })
                     {
                         // Cursor now rests on the closing `)`.
+                    }
+                    else if (catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // A function takes its parentheses: real settles both
+                        // misses while compiling, whatever follows (probed
+                        // 2026-10-11 against SQL Server 2025).
+                        var missed = openedParentheses
+                            ? SimulatedSqlException.TooManyArgumentsToFunction(objectName.ToString(), 3)
+                            : SimulatedSqlException.ParametersNotSuppliedForFunction(objectName.ToString());
+                        throw objectName.Count > 1 ? missed.PinLine(12) : missed;
                     }
                     else
                     {
@@ -1438,6 +1451,8 @@ internal sealed partial class Selection
                     }
 
                     var catalogAlias = ConsumeOptionalAlias(context);
+                    if (catalogAlias is null && catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
+                        RejectRowsetFunctionWith(context);
                     // Catalog views are read-only metadata so the hints have no
                     // semantic effect, but the name-validation gate must still
                     // run (probe-confirmed against SQL Server 2025: Msg 321 on
@@ -1446,7 +1461,9 @@ internal sealed partial class Selection
                     // 4430 (probed 2026-10-05 against SQL Server 2025).
                     // NOLOCK reads past another transaction's uncommitted
                     // definition change (BatchContext.AwaitCatalogDefinitions).
-                    var catalogHints = ParseOptionalTableHints(context);
+                    var catalogHints = catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase)
+                        ? default
+                        : ParseOptionalTableHints(context);
                     if (catalogHints.IndexArguments is not null && !context.Batch.IsSkipping)
                         context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, objectName.ToString()));
                     if (catalogView.EnforcesJoinOrder)
@@ -1556,7 +1573,7 @@ internal sealed partial class Selection
                     if (context.Token is Operator { Character: '(' })
                     {
                         context.MoveNextRequired();
-                        var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context));
+                        var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context, objectName));
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
                         if (tvfAlias is null)
@@ -1628,6 +1645,14 @@ internal sealed partial class Selection
                                 ? objectName.ToString()
                                 : null,
                         };
+                    }
+                    // A table-valued function takes its parentheses (probed
+                    // 2026-10-11 against SQL Server 2025).
+                    if (!context.Batch.IsSkipping)
+                    {
+                        throw objectName.Count > 1
+                            ? SimulatedSqlException.ParametersNotSuppliedForFunction(objectName.ToString()).PinLine(12)
+                            : SimulatedSqlException.ParametersNotSuppliedForFunction(objectName.ToString());
                     }
                     context.RestoreCheckpoint(checkpoint);
                 }

@@ -66,6 +66,20 @@ public sealed class InsteadOfTriggerTests
         AreEqual(expected, reader.GetString(0));
     }
 
+    /// <summary>The trigger sees what a parenthesized query supplies, as it sees any other source (probed 2026-10-11 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void InsteadOfInsert_FromAParenthesizedQuery_SeesTheRows()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table base (a int, b int); create table seen (a int, b int)",
+            "create view v as select a, b from base",
+            "create trigger tr on v instead of insert as insert seen select a, b from inserted");
+        _ = sim.ExecuteNonQuery("insert v (a, b) (select 1, 2 union all select 3, 4)");
+        AreEqual("1:2 3:4", sim.ExecuteScalar("select string_agg(concat(a, ':', b), ' ') within group (order by a) from seen"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from base"));
+    }
+
     [TestMethod]
     public void InsteadOfInsert_SkipsHeapWrite_FiresTrigger()
     {

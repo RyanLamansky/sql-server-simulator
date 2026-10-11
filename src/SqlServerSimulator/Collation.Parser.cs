@@ -447,7 +447,8 @@ internal abstract partial class Collation
             humanPrefix = sortOrder.HumanPrefix;
 
         var sb = new StringBuilder().Append(humanPrefix);
-        if (version is { } v)
+        // A SQL_ name's trailing number (SQL_EBCDIC277_2) is its own, not a generation.
+        if (version is { } v && !isSql)
             _ = sb.Append('-').Append(v);
 
         if (flags.HasFlag(CollationFlags.Binary))
@@ -468,7 +469,8 @@ internal abstract partial class Collation
 
             // v140+ implicitly carries SC + a variation-selector clause; explicit _SC_
             // is needed for v90/v100.
-            var scImplicit = version is >= 140;
+            // Only the 140 generation: Chinese_Simplified_Pinyin_160 is a family named for its 160 ordering.
+            var scImplicit = version is 140;
             if (flags.HasFlag(CollationFlags.SupplementaryCharacters) || scImplicit)
                 _ = sb.Append(", supplementary characters");
             if (scImplicit)

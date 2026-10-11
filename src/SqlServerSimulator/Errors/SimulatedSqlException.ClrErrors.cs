@@ -93,15 +93,6 @@ partial class SimulatedSqlException
         new($"{verb} ASSEMBLY failed because the source assembly is, according to MVID, identical to an assembly that is already registered under the name \"{existingName}\".", 6285, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 6263: a CLR routine was invoked while the
-    /// <c>clr enabled</c> configuration option is 0. Note this gates
-    /// <em>execution</em> only — <c>CREATE ASSEMBLY</c> itself succeeds with
-    /// the option off (probe-confirmed).
-    /// </summary>
-    internal static SimulatedSqlException ClrExecutionDisabled() =>
-        new("Execution of user code in the .NET Framework is disabled. Enable \"clr enabled\" configuration option.", 6263, 16, 1);
-
-    /// <summary>
     /// Mimics SQL Server error 6590: <c>DROP ASSEMBLY</c> named an assembly
     /// still referenced by a CLR module.
     /// </summary>

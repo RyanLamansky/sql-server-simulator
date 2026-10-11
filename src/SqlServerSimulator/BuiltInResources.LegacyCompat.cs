@@ -56,6 +56,9 @@ internal static partial class BuiltInResources
         "sp_drop_trusted_assembly",
         "sp_getapplock",
         "sp_releaseapplock",
+        // The connection reset only a TDS reset flag or RPC runs; called from
+        // T-SQL it is an error.
+        "sp_reset_connection",
         // Reserves a range of a sequence's values through OUTPUT parameters.
         "sp_sequence_get_range",
         // The schema-rowset procedures SQL Server's OLE DB provider reads a
@@ -981,7 +984,7 @@ internal static partial class BuiltInResources
     internal static bool IsExtendedProcedure(string proc) =>
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
-        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
     internal static bool TryResolveSystemObject(int objectId, out SystemObject system)

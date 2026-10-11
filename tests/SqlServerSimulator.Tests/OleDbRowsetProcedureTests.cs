@@ -309,4 +309,50 @@ public sealed class OleDbRowsetProcedureTests
         _ = sim.AssertSqlError("select collationname('abc')", 257);
         _ = sim.AssertSqlError("select collationname()", 189);
     }
+
+    /// <summary>
+    /// <c>sp_reset_connection</c> is an extended procedure only a TDS reset
+    /// flag or RPC runs: from T-SQL it is Msg 208 at state 130 from line 1 of
+    /// the procedure, under the name the call used, whatever the arguments,
+    /// ending the batch and dooming the transaction (probed 2026-10-11
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_reset_connection", "sp_reset_connection")]
+    [DataRow("select 1\nEXEC SP_RESET_CONNECTION 1, 2", "SP_RESET_CONNECTION")]
+    [DataRow("exec master.dbo.sp_reset_connection", "master.dbo.sp_reset_connection")]
+    [DataRow("exec dbo.sp_reset_connection", "dbo.sp_reset_connection")]
+    [DataRow("exec sp_executesql N'exec sys.sp_reset_connection'", "sys.sp_reset_connection")]
+    public void ResetConnection_FromTSql_IsMsg208State130(string statement, string procedure)
+    {
+        var error = new Simulation().AssertSqlError(statement, 208);
+        AreEqual("Invalid object name 'sp_reset_connection'.", error.Errors[0].Message);
+        AreEqual((byte)130, error.State);
+        AreEqual(1, error.LineNumber);
+        AreEqual(procedure, error.Errors[0].Procedure);
+    }
+
+    [TestMethod]
+    public void ResetConnection_FromTSql_IsCaughtAndDoomsTheTransaction()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using (var reader = connection.CreateCommand("""
+            begin tran;
+            begin try
+              exec sp_reset_connection;
+            end try
+            begin catch
+              select concat_ws('|', error_number(), xact_state(), @@trancount);
+            end catch
+            """).ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual("208|-1|1", reader.GetString(0));
+            AreEqual(3998, Throws<SimulatedSqlException>(() => reader.NextResult()).Number);
+        }
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        var ended = Throws<SimulatedSqlException>(() => connection.CreateCommand("select 1; exec sp_reset_connection; select 2").ExecuteScalar());
+        AreEqual(208, ended.Number);
+        AreEqual("sys|X |-401594603", connection.CreateCommand("select concat_ws('|', schema_name(schema_id), type, object_id) from sys.all_objects where name = 'sp_reset_connection'").ExecuteScalar());
+    }
 }

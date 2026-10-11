@@ -482,7 +482,7 @@ partial class Simulation
         var options = XmlIndexOptions.Default;
         var fillFactor = options.FillFactor;
         bool padIndex = options.PadIndex, allowRowLocks = options.AllowRowLocks, allowPageLocks = options.AllowPageLocks, dropExisting = false;
-        SimulatedSqlException? refusal = null;
+        SimulatedSqlException? refusal = null, onlineRefusal = null;
         // Every name the switch below meets is an index option's, none longer than this.
         Span<char> upper = stackalloc char[32];
         while (true)
@@ -544,7 +544,8 @@ partial class Simulation
                         throw SimulatedSqlException.IndexMaxDopOutOfRange(value.Source.ToString());
                     break;
                 case "ONLINE" when on:
-                    refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("ONLINE", statement, state: 3);
+                    onlineRefusal = SimulatedSqlException.InvalidUsageOfIndexOption("ONLINE", statement, state: 3);
+                    refusal ??= onlineRefusal;
                     break;
                 case "OPTIMIZE_FOR_SEQUENTIAL_KEY" when on:
                     refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("OPTIMIZE_FOR_SEQUENTIAL_KEY", statement, state: 6);
@@ -556,20 +557,86 @@ partial class Simulation
                     refusal ??= SimulatedSqlException.InvalidUsageOfIndexOption("RESUMABLE", statement, state: 3);
                     break;
             }
-            // The rest of a value: a unit (COMPRESSION_DELAY = 5 MINUTES), a
-            // nested list, an ON PARTITIONS clause.
-            context.MoveNextRequired();
-            while (context.Token is not Operator { Character: ',' or ')' })
+            // The rest of a value: DATA_COMPRESSION's ON PARTITIONS list, a
+            // unit (MAX_DURATION takes MINUTES, COMPRESSION_DELAY MINUTE or
+            // MINUTES), ONLINE's low-priority clause. Anything else before the
+            // next option or the list's end is a syntax error, as the batch
+            // compiles.
+            var optionName = name;
+            if (optionName.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase) && !IsCompressionLevel(value))
             {
-                if (context.Token is Operator { Character: '(' })
-                    SkipBalancedParens(context);
+                throw SimulatedSqlException.Aggregate([NearToken(value), SimulatedSqlException.UnrecognizedIndexOption("data_compression", statement)]);
+            }
+            context.MoveNextRequired();
+            if (optionName.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase) && context.Token is ReservedKeyword { Keyword: Keyword.On })
+            {
+                if (context.GetNextRequired() is not StringToken { Span: var partitions } || !partitions.Equals("PARTITIONS", StringComparison.OrdinalIgnoreCase)
+                    || context.GetNextRequired() is not Operator { Character: '(' })
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                _ = ReadPartitionRanges(context);
+                context.MoveNextRequired();
+            }
+            else if (context.Token is StringToken { Span: var unit }
+                && (optionName.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase) ? unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase)
+                    : optionName.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase) && (unit.Equals("MINUTE", StringComparison.OrdinalIgnoreCase) || unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase))))
+            {
+                context.MoveNextRequired();
+            }
+            else if (optionName.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && value is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } && context.Token is Operator { Character: '(' })
+            {
+                ReadLowPriorityClause(context);
+                // The clause names no option this statement takes, which real
+                // reports in place of ONLINE's own refusal.
+                var unrecognized = SimulatedSqlException.UnrecognizedIndexOption("WAIT_AT_LOW_PRIORITY", statement);
+                refusal = refusal is null || ReferenceEquals(refusal, onlineRefusal) ? unrecognized : refusal;
                 context.MoveNextRequired();
             }
             if (context.Token is Operator { Character: ')' })
                 break;
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
         return refusal is null ? new(fillFactor, padIndex, allowRowLocks, allowPageLocks, dropExisting) : throw refusal;
+    }
+
+    private static SimulatedSqlException NearToken(Token token) =>
+        token is ReservedKeyword keyword ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword) : SimulatedSqlException.SyntaxErrorNear(token);
+
+    private static bool IsCompressionLevel(Token token) =>
+        token.Source.ToString().ToUpperInvariant() is "COLUMNSTORE" or "COLUMNSTORE_ARCHIVE" or "NONE" or "PAGE" or "ROW";
+
+    /// <summary>
+    /// Reads the clause that follows <c>ONLINE = ON | OFF</c> — <c>( name (
+    /// MAX_DURATION = n [MINUTES], ABORT_AFTER_WAIT = NONE | SELF | BLOCKERS ) )</c>
+    /// — the cursor on its opening parenthesis and left on its closing one.
+    /// Real reads it by that grammar whatever the statement and refuses its
+    /// name, unless <c>WAIT_AT_LOW_PRIORITY</c>, as a syntax error once the
+    /// clause has read (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    private static void ReadLowPriorityClause(ParserContext context)
+    {
+        var clauseName = context.GetNextRequired();
+        if (clauseName is not (StringToken or ReservedKeyword) || context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (!IsWord(context.GetNextRequired(), "MAX_DURATION") || context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } duration } || duration.Type is not Int32SqlType)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (IsWord(context.GetNextRequired(), "MINUTES"))
+            context.MoveNextRequired();
+        if (context.Token is not Operator { Character: ',' }
+            || !IsWord(context.GetNextRequired(), "ABORT_AFTER_WAIT") || context.GetNextRequired() is not Operator { Character: '=' }
+            || !(IsWord(context.GetNextRequired(), "NONE") || IsWord(context.Token, "SELF") || IsWord(context.Token, "BLOCKERS"))
+            || context.GetNextRequired() is not Operator { Character: ')' }
+            || context.GetNextRequired() is not Operator { Character: ')' })
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        if (!IsWord(clauseName, "WAIT_AT_LOW_PRIORITY"))
+            throw NearToken(clauseName);
     }
 
     private static bool ParseDropXmlSchemaCollection(ParserContext context)

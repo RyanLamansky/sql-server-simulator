@@ -258,4 +258,21 @@ public sealed class VariableTests
         AreEqual(1, error.Errors.Count);
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// A column name where no table is in scope — a DECLARE initializer, a
+    /// SET, an IF or a WHILE — is Msg 207 on the leaf, and Msg 4104 on the whole
+    /// name when it carries a qualifier (probed 2026-10-11 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @a int = x", 207, "Invalid column name 'x'.")]
+    [DataRow("declare @a int; set @a = x", 207, "Invalid column name 'x'.")]
+    [DataRow("if x = 1 print 'a'", 207, "Invalid column name 'x'.")]
+    [DataRow("declare @a int = t.x", 4104, "The multi-part identifier \"t.x\" could not be bound.")]
+    [DataRow("declare @a int; set @a = t.x", 4104, "The multi-part identifier \"t.x\" could not be bound.")]
+    [DataRow("if t.x = 1 print 'a'", 4104, "The multi-part identifier \"t.x\" could not be bound.")]
+    [DataRow("while dbo.t.x = 1 print 'a'", 4104, "The multi-part identifier \"dbo.t.x\" could not be bound.")]
+    public void ColumnWithNoTableInScope_IsMsg207OrMsg4104(string statement, int number, string message)
+        => new Simulation().AssertSqlError(statement, number, message);
 }

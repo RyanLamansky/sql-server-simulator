@@ -1220,29 +1220,6 @@ partial class Simulation
         : false;
 
     /// <summary>
-    /// Cursor on the opening <c>(</c>. Walks tokens incrementing/decrementing
-    /// a paren counter, returning when the matching <c>)</c> closes. Used
-    /// wherever a parenthesized clause's inner grammar isn't enforced.
-    /// </summary>
-    private static void SkipBalancedParens(ParserContext context)
-    {
-        var depth = 1;
-        while (depth > 0)
-        {
-            context.MoveNextRequired();
-            switch (context.Token)
-            {
-                case Operator { Character: '(' }:
-                    depth++;
-                    break;
-                case Operator { Character: ')' }:
-                    depth--;
-                    break;
-            }
-        }
-    }
-
-    /// <summary>
     /// Parses <c>ALTER DATABASE name COLLATE &lt;collation_name&gt;</c>.
     /// Validates the name against <see cref="Collation.IsRecognized"/> and
     /// updates the target database's <see cref="Database.Collation"/> +

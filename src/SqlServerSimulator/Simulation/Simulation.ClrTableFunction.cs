@@ -229,9 +229,6 @@ partial class Simulation
         ClrTableValuedFunction function,
         Expression?[] arguments)
     {
-        if (!outerBatch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
-
         var outerRuntime = new RuntimeContext(
             outerResolver ?? (name => throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())),
             outerBatch);

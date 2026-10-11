@@ -383,7 +383,10 @@ internal static class SpatialOverlay
                 break;
             segments = Route(segments, splitters, crossings);
         }
-        return segments;
+        // The last routing can end a piece on another piece's interior, a
+        // vertex that piece has to be split at or the result's boundary stops
+        // closing there; splitting at vertices already on it moves nothing.
+        return Route(segments, splitters, crossings);
     }
 
     /// <summary>A bound on <see cref="Node"/>'s passes, each settling the crossings the previous one's rounding introduced.</summary>

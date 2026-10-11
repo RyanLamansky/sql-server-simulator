@@ -279,4 +279,31 @@ public sealed class TriggerStreamingTests
         AreEqual(2, connection.CreateCommand("update t set v = v + 1 where id = 1").ExecuteNonQuery());
         AreEqual(1, Scalar(connection, "select count(*) from l"));
     }
+
+    /// <summary>
+    /// A statement writing through a three-part name fires the target
+    /// database's trigger as one of its own database's would, its rows going
+    /// out to the client reading them (probed 2026-10-11 against SQL Server
+    /// 2025, the connection in a database holding no trigger of its own).
+    /// </summary>
+    [TestMethod]
+    public void TriggerInAnotherDatabase_SendsItsRowsToTheReader()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create database a",
+            "create database b",
+            "use a; create table dbo.t (id int primary key); create table dbo.log (m varchar(20))",
+            "create trigger dbo.tr on dbo.t after insert as begin insert dbo.log select 'fired'; select 'from trigger' src, count(*) n from inserted; end");
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("use b").ExecuteNonQuery();
+        using (var reader = connection.CreateCommand("insert a.dbo.t values (1), (2)").ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual("from trigger", reader.GetString(0));
+            AreEqual(2, reader.GetInt32(1));
+            IsFalse(reader.Read());
+        }
+        AreEqual("fired", Scalar(connection, "select m from a.dbo.log"));
+    }
 }

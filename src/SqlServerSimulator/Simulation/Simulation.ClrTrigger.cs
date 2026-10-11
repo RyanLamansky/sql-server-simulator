@@ -29,9 +29,6 @@ partial class Simulation
     /// </remarks>
     private static void RunClrTrigger(BatchContext outerBatch, TriggerFrame frame, ClrEntryPoint entry, string triggerName)
     {
-        if (!outerBatch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
-
         (int Action, bool[] UpdatedColumns, string? EventData) fired;
         if (frame.Trigger is { } trigger)
         {
