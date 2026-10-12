@@ -363,7 +363,9 @@ public sealed partial class Simulation
     /// <summary>
     /// <paramref name="text"/>'s key under the session's current settings, or
     /// null where caching can't apply: no current database, a session outside
-    /// the default READ COMMITTED, or one of the options a parse settles.
+    /// the default READ COMMITTED, one of the options a parse settles, or a
+    /// database whose admission a parse checks (see
+    /// <see cref="DatabaseAdmissionRestricted"/>).
     /// </summary>
     private static PlanCacheKey? PlanCacheKeyFor(SimulatedDbConnection connection, string text, string signature) =>
         connection is { CurrentDatabase: { } currentDb }
@@ -375,6 +377,7 @@ public sealed partial class Simulation
             // A replay reports no STATISTICS IO / TIME, and a compile that
             // reports its time has to run.
             && !connection.StatisticsIo && !connection.StatisticsTime
+            && !connection.Simulation.DatabaseAdmissionRestricted
                 ? new PlanCacheKey(text, currentDb.Name, connection.Security.EffectiveDefaultSchemaName(currentDb), signature, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                 : null;
 

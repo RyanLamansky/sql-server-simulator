@@ -40,6 +40,7 @@ Measured 2026-10-11 on a Configured Commerce API database (`ApiReal.bacpac`: 301
 
 A restore needs the database to itself: it waits about 20 seconds for every other session using it — or holding its single-user slot — to leave, going ahead the moment they do, and refuses with Msg 3101 after that, as real does.
 A harness's `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` from `master` makes its own session the single user, so the application connection pools that reconnect between that statement and the `RESTORE` are refused (a login naming the database Msg 4060, a `USE` or three-part reference Msg 924) rather than taking the database back; see [`database-options.md`](database-options.md).
+When that statement ended any session, it first holds the database in transition for about three seconds, refusing logins at once with a lone Msg 18456; the pools that reconnect then fail fast and sit out SqlClient's blocking period instead of meeting the restore, whose refusal SqlClient retries ten seconds later, the pool opening no other connection meanwhile (see [`database-options.md`](database-options.md#settling-the-sessions-a-rollback-ended)).
 
 A restore brings back the backed-up recovery model and user access mode, as real does — a harness that sets `SINGLE_USER` and `RECOVERY SIMPLE` before restoring finds the database `MULTI_USER` and in `FULL` recovery after it.
 

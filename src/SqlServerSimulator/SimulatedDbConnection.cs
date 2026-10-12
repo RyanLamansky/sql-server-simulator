@@ -2959,6 +2959,9 @@ public sealed class SimulatedDbConnection : DbConnection
         var target = this.CurrentDatabase;
         if (initialCatalog is { Length: > 0 })
         {
+            // In transition: a lone Msg 18456, as the TDS login is refused.
+            if (this.Simulation.Databases.TryGetValue(initialCatalog, out var settling) && settling.IsInTransitionFor(this))
+                throw SimulatedSqlException.LoginFailed(userId);
             if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested) || requested.State is DatabaseState.Offline or DatabaseState.Restoring || !requested.WaitForSingleUserSlot(this))
                 throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(initialCatalog);
             target = requested;

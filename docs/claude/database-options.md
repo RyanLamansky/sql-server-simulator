@@ -43,11 +43,12 @@ Only `SET` follows a refusal with Msg 5069: the `COLLATE`, `MODIFY`, `ADD` and `
 **`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
 `READ_ONLY` / `READ_WRITE` take the same shape and the same termination clause but are load-bearing — see [Read-only databases](#read-only-databases).
 The state is recorded for the catalog (and comes back with a restored database).
-Moving to `SINGLE_USER` honors the termination clause as the state options do (probed 2026-10-11 against SQL Server 2022): with none it waits for every other session using the database to leave, `WITH NO_WAIT` refuses at once with Msg 5070 then 5069, and `WITH ROLLBACK IMMEDIATE` (or `AFTER n`, past its wait) sends Msg 5060 twice and ends those sessions as `KILL` does.
+Moving to `SINGLE_USER` or `RESTRICTED_USER` honors the termination clause as the state options do (probed 2026-10-11 against SQL Server 2022 and 2025): with none it waits for every other session using the database to leave, a sysadmin's included, `WITH NO_WAIT` refuses at once with Msg 5070 then 5069, and `WITH ROLLBACK IMMEDIATE` (or `AFTER n`, past its wait) sends Msg 5060 twice and ends those sessions as `KILL` does.
+Finding a session in the way holds the database **in transition** until about three seconds after the mode lands — see [Settling the sessions a rollback ended](#settling-the-sessions-a-rollback-ended).
 The session that sets `SINGLE_USER` becomes the single user wherever it is, `master` included, until it ends; the first session to enter the database after that holds it next (`Database.SingleUserHolder`).
 Every other session waits about two seconds for the slot, then a `USE` or three-part reference is Msg 924 and a login naming the database Msg 4060; `sys.databases` stays readable.
 Moving out of `SINGLE_USER` is the single user's: anyone else waits about eight seconds, then gets Msg 5064 then 5069.
-`RESTRICTED_USER` only records.
+Which logins `RESTRICTED_USER` admits afterwards isn't modeled yet: every session may still enter.
 Load-bearing for `DROP DATABASE` and `RESTORE DATABASE`: ORM test teardowns (Django/mssql-django) and restore harnesses run `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before them; see [`backup-restore.md`](backup-restore.md).
 Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
 
@@ -319,9 +320,19 @@ See [`full-text.md`](full-text.md) for the broader full-text deferral.
   `WITH NO_WAIT` refuses at once with Msg 5070 then 5069; `WITH ROLLBACK IMMEDIATE` (or `AFTER n`, past its wait) sends Msg 5060 twice and ends the sessions in the way as `KILL` does — every other session going offline, only those holding a transaction going into emergency.
   A session taking its own current database offline lands in `master` with Msg 5068, and setting the state a database already has does nothing.
 
+### Settling the sessions a rollback ended
+
+An `ALTER DATABASE … WITH ROLLBACK IMMEDIATE` or `AFTER n` that finds a session in its way spends about three seconds more before its change lands, whatever the number of sessions and whether they held a transaction; finding none costs nothing (probed 2026-10-11 against SQL Server 2022 for `SINGLE_USER`, `RESTRICTED_USER`, `READ_ONLY` and `OFFLINE`, and against SQL Server 2025 for the first two).
+With `AFTER n` the database is in transition from the statement's start, and the wait runs its full length even when the sessions leave on their own: `AFTER 2 SECONDS` takes five seconds either way (probed 2026-10-11 against SQL Server 2025).
+Throughout, `sys.databases` reports the old mode and state, a `USE` or three-part reference is Msg 952 at once, and a login naming the database fails at once with a lone Msg 18456 state 1 — no Msg 4060 — which SqlClient neither retries in the open nor treats as transient (`Database.TransitionConnection`, `Simulation.RollbackSettleMillis`).
+Load-bearing for restore harnesses: an application pool reconnecting in that window fails fast and enters SqlClient's five-second blocking period, which carries it past the `RESTORE` behind.
+Without the window its reconnect lands in the restore instead, where the refusal is a Msg 4060 SqlClient retries after its ten-second `ConnectRetryInterval`, and the pool opens no other connection until that retry ends (measured through a TCP proxy): a harness that waits five seconds after the restore then saw its first application request stall about five more.
+`READ_ONLY`'s own termination clause is parsed without ending anyone yet, so it never settles here.
+
 ### Divergences
 
 - Real answers `NO_WAIT`'s Msg 5070 only after a wait of its own, about twenty seconds when probed; the simulator answers at once.
+- Real's `SET OFFLINE` takes about three seconds even when it ends no session (probed 2026-10-11 against SQL Server 2022; on SQL Server 2025 too in isolation, though it finished in milliseconds right after another mode change); the simulator settles only after ending one.
 - `master` and `tempdb` refuse every state as they refuse `ONLINE` (Msg 5058, state 5 and 4); `OFFLINE` and `EMERGENCY` on a system database were not probed, so as not to take one of the reference server's own offline, and `model` and `msdb` take them here.
 
 ## Not modeled yet (options)

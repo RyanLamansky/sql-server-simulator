@@ -481,6 +481,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var target = opened.CurrentDatabase;
         if (requestedDatabase.Length > 0)
         {
+            // A database an ALTER DATABASE … WITH ROLLBACK holds in transition
+            // refuses the login at once with a lone Msg 18456 state 1 — no
+            // Msg 4060 — which SqlClient doesn't retry (probed 2026-10-11
+            // against SQL Server 2022).
+            if (simulation.Databases.TryGetValue(requestedDatabase, out var requested) && requested.IsInTransitionFor(opened))
+            {
+                var refusal = SimulatedSqlException.LoginFailed(userName);
+                writer.WriteErrorOrInfo(Tds.TokenError, refusal.Number, refusal.State, refusal.Class, refusal.Message, "SIMULATED", "", 1);
+                writer.WriteDone(Tds.DoneError, 0);
+                opened.Dispose();
+                return false;
+            }
             try
             {
                 opened.ChangeDatabase(requestedDatabase);

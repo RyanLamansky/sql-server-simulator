@@ -67,19 +67,10 @@ partial class Simulation
                     throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.DatabaseStateInUse(target.Name));
                 break;
             case TerminationClause.Rollback:
-                if (rollbackAfterSeconds > 0)
-                    _ = WaitForOtherSessionsToLeave(batch, target, TimeSpan.FromSeconds(rollbackAfterSeconds));
-                var others = OtherSessionsUsing(connection, target);
-                if (others.Count != 0)
-                {
-                    connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 0));
-                    foreach (var other in others)
-                    {
-                        if (requested != DatabaseState.Emergency || other.CurrentTransaction is not null)
-                            other.Kill();
-                    }
-                    connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 100));
-                }
+                // Emergency ends only the sessions holding a transaction.
+                RollBackSessionsInTheWay(batch, target, rollbackAfterSeconds,
+                    () => OtherSessionsUsing(connection, target),
+                    requested == DatabaseState.Emergency ? static other => other.CurrentTransaction is not null : static _ => true);
                 break;
             default:
                 _ = WaitForOtherSessionsToLeave(batch, target, timeout: null);
@@ -100,12 +91,11 @@ partial class Simulation
     /// <summary>
     /// <c>SINGLE_USER | RESTRICTED_USER | MULTI_USER</c>, each with an optional
     /// termination clause, recorded on <see cref="Database.UserAccess"/>.
-    /// Moving to <c>SINGLE_USER</c> waits for every other session using the
-    /// database to leave it, <c>NO_WAIT</c> refusing at once (Msg 5070) and
-    /// <c>ROLLBACK</c> ending them, announced by Msg 5060 twice, as the state
-    /// options do (probed 2026-10-11 against SQL Server 2022 and 2025). The simulator
-    /// keeps no tally of the one user a single-user database admits, so a later
-    /// connection isn't refused (real's Msg 924).
+    /// Moving to <c>SINGLE_USER</c> or <c>RESTRICTED_USER</c> waits for every
+    /// other session using the database to leave it, a sysadmin's included,
+    /// <c>NO_WAIT</c> refusing at once (Msg 5070) and <c>ROLLBACK</c> ending
+    /// them, announced by Msg 5060 twice, as the state options do (probed
+    /// 2026-10-11 against SQL Server 2022 and 2025).
     /// </summary>
     private static bool ConsumeAccessModeOption(ParserContext context, Database target, string name)
     {
@@ -118,7 +108,9 @@ partial class Simulation
             : BuiltInToken.Equals(name, "SINGLE_USER") ? (byte)1
             : (byte)0;
         var connection = batch.Connection;
-        if (access == 1)
+        // Restricting a database another session holds single-user is the
+        // single user's, as taking it to MULTI_USER is (below).
+        if (access == 1 || (access == 2 && target.SingleUserOccupant(connection) is null))
         {
             switch (termination)
             {
@@ -127,23 +119,15 @@ partial class Simulation
                         throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.DatabaseStateInUse(target.Name));
                     break;
                 case TerminationClause.Rollback:
-                    if (rollbackAfterSeconds > 0)
-                        _ = WaitForOtherSessionsToLeave(batch, target, TimeSpan.FromSeconds(rollbackAfterSeconds), singleUserToo: true);
-                    var others = SessionsHolding(connection, target);
-                    if (others.Count != 0)
-                    {
-                        connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 0));
-                        foreach (var other in others)
-                            other.Kill();
-                        connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 100));
-                    }
+                    RollBackSessionsInTheWay(batch, target, rollbackAfterSeconds, () => SessionsHolding(connection, target), static _ => true);
                     break;
                 default:
                     _ = WaitForOtherSessionsToLeave(batch, target, timeout: null, singleUserToo: true);
                     break;
             }
-            target.UserAccess = 1;
-            Volatile.Write(ref target.SingleUserHolder, connection.Session);
+            target.UserAccess = access;
+            Volatile.Write(ref target.SingleUserHolder, access == 1 ? connection.Session : null);
+            connection.Simulation.NoteDatabaseAdmissionChanged();
             return true;
         }
 
@@ -163,11 +147,84 @@ partial class Simulation
         }
         target.UserAccess = access;
         Volatile.Write(ref target.SingleUserHolder, null);
+        connection.Simulation.NoteDatabaseAdmissionChanged();
         return true;
     }
 
     /// <summary>How long a session other than a single-user database's single user waits to change its mode before Msg 5064.</summary>
     private const int SingleUserChangeWaitMillis = 8000;
+
+    /// <summary>
+    /// How long an <c>ALTER DATABASE … WITH ROLLBACK</c> that found a session
+    /// in its way holds the database in transition once it has ended them:
+    /// about three seconds, whatever the number of sessions, whether they held
+    /// a transaction, and after the <c>AFTER n</c> wait (probed 2026-10-11
+    /// against SQL Server 2022 and 2025, for SINGLE_USER, RESTRICTED_USER,
+    /// READ_ONLY and OFFLINE alike). Internal so a test can shorten it.
+    /// </summary>
+    internal int RollbackSettleMillis = 3000;
+
+    /// <summary>
+    /// The <c>ROLLBACK IMMEDIATE | AFTER n</c> termination clause: when
+    /// <paramref name="inTheWay"/> names a session <paramref name="ends"/>
+    /// would end, holds <paramref name="database"/> in transition
+    /// (<see cref="Database.TransitionConnection"/>) from the start — through
+    /// the whole <c>AFTER n</c> wait, which a session leaving on its own
+    /// doesn't cut short — ends the sessions still in the way, announced by
+    /// Msg 5060 twice, then settles for <see cref="RollbackSettleMillis"/>
+    /// before the change lands (probed 2026-10-11 against SQL Server 2025:
+    /// <c>AFTER 2 SECONDS</c> takes five seconds whether or not its one session
+    /// leaves after half of one). Finding no one costs nothing. A restore
+    /// harness's application pool meets the window as fast login failures,
+    /// which is what keeps its reconnects out of the restore behind. A cancel or
+    /// <c>CommandTimeout</c> ends the waits.
+    /// </summary>
+    private static void RollBackSessionsInTheWay(BatchContext batch, Database database, int afterSeconds, Func<List<SimulatedDbConnection>> inTheWay, Func<SimulatedDbConnection, bool> ends)
+    {
+        var connection = batch.Connection;
+        var found = inTheWay();
+        if (found.Count == 0)
+            return;
+        if (!found.Exists(other => ends(other)))
+        {
+            connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 0));
+            connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 100));
+            return;
+        }
+        database.TransitionConnection = connection;
+        connection.Simulation.NoteDatabaseAdmissionChanged();
+        try
+        {
+            Pause(batch, afterSeconds * 1000L);
+            var others = inTheWay();
+            if (others.Count != 0)
+            {
+                connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 0));
+                foreach (var other in others)
+                {
+                    if (ends(other))
+                        other.Kill();
+                }
+                connection.PendingMessages.Enqueue(SimulatedSqlException.NonqualifiedTransactionsRolledBackMessage(batch, 100));
+            }
+            Pause(batch, connection.Simulation.RollbackSettleMillis);
+        }
+        finally
+        {
+            database.TransitionConnection = null;
+            connection.Simulation.NoteDatabaseAdmissionChanged();
+        }
+    }
+
+    private static void Pause(BatchContext batch, long millis)
+    {
+        var deadline = Environment.TickCount64 + millis;
+        while (Environment.TickCount64 < deadline)
+        {
+            batch.PollCancellation();
+            Thread.Sleep(5);
+        }
+    }
 
     /// <summary>
     /// <see cref="OtherSessionsUsing"/>, plus the session holding the

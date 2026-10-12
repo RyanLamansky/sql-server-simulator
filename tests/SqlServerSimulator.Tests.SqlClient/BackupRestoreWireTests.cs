@@ -144,6 +144,34 @@ public sealed class BackupRestoreWireTests
         AreEqual(4060, error.Number);
     }
 
+    /// <summary>
+    /// While <c>SET SINGLE_USER WITH ROLLBACK IMMEDIATE</c> settles the
+    /// sessions it ended, a login naming the database fails at once with a
+    /// lone Msg 18456, which SqlClient neither retries in the open nor masks.
+    /// An application pool meeting it there enters its blocking period rather
+    /// than reaching the restore behind it, whose refusal would hold the
+    /// pool's next connection in SqlClient's ten-second login retry.
+    /// </summary>
+    [TestMethod]
+    public async Task LoginWhileRollbackImmediateSettles_IsALoneMsg18456()
+    {
+        var simulation = new Simulation { RollbackSettleMillis = 1500 };
+        Wire.ExecInProc(simulation, "create database app");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var victim = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app");
+        await using var master = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=master");
+        var alter = Execute(master, "ALTER DATABASE [app] SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
+        await Task.Delay(300, TestContext.CancellationToken);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var error = await ThrowsExactlyAsync<SqlException>(async () => await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app;ConnectRetryCount=0"));
+        IsLessThan(1000, started.ElapsedMilliseconds);
+        CollectionAssert.AreEqual(new[] { 18456 }, error.Errors.Cast<SqlError>().Select(entry => entry.Number).ToArray());
+        AreEqual("Login failed for user 'sa'.", error.Message);
+        await alter;
+        await Execute(master, "ALTER DATABASE [app] SET MULTI_USER");
+        await using var after = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app");
+    }
+
     [TestMethod]
     public async Task Refusal_ArrivesAsItsErrorThenMsg3013()
     {

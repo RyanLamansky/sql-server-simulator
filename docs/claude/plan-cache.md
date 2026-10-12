@@ -82,6 +82,7 @@ One gate sits further out, in `TryBuildPlanCacheKey`, so it suppresses the **loo
 The table-level locks a parse takes, and the per-row lock plan it hands its FROM sources, are chosen by the isolation level, so a plan parsed under one level replayed under another would take the wrong locks — a SERIALIZABLE reader's key-range fence most visibly (see [`locking.md`](locking.md#key-range-locks)).
 A session at any other level re-parses per execution.
 The same gate holds `SET IMPLICIT_TRANSACTIONS`, `NOEXEC`, `PARSEONLY` and `FMTONLY` off: each is settled while a statement parses — the transaction it opens, whether it runs at all, and whether it returns only metadata — so a replay would skip it (see [`session-options.md`](session-options.md)).
+It also holds while any database is single-user, restricted or in a rollback's transition (`Simulation.DatabaseAdmissionRestricted`): the admission checks behind Msg 924 and 952 run as a name resolves, per session, so a plan the single user cached would let another session's replay past them; the mode changes also retire every plan cached before them.
 
 ## Disqualifying state: `HasSessionScopedReference`
 

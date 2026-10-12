@@ -147,6 +147,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DatabaseInSingleUserUse(string databaseName) =>
         new($"Database '{databaseName}' is already open and can only have one user at a time.", 924, 14, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 952: a <c>USE</c> or three-part reference reaching
+    /// a database while an <c>ALTER DATABASE … WITH ROLLBACK</c> settles the
+    /// sessions it ended (probed 2026-10-11 against SQL Server 2022).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseInTransition(string databaseName) =>
+        new($"Database '{databaseName}' is in transition. Try the statement later.", 952, 16, 1);
+
     /// <summary>Mimics SQL Server error 5064, then Msg 5069: a single-user database's mode changed by a session other than its single user.</summary>
     internal static SimulatedSqlException SingleUserDatabaseInUse(string databaseName) =>
         FollowedByAlterDatabaseFailed(new($"Changes to the state or options of database '{databaseName}' cannot be made at this time. The database is in single-user mode, and a user is currently connected to it.", 5064, 16, 1));

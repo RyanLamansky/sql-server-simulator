@@ -1123,6 +1123,35 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Whether some database is single-user, restricted or held in transition,
+    /// whose admission checks (Msg 924, 952) run as a statement's names
+    /// resolve. While it holds, the plan cache neither records nor replays (see
+    /// <see cref="PlanCacheKeyFor"/>), so every statement parses where the
+    /// checks run rather than replaying a plan that skips them.
+    /// </summary>
+    internal volatile bool DatabaseAdmissionRestricted;
+
+    /// <summary>
+    /// Recomputes <see cref="DatabaseAdmissionRestricted"/> after a database's
+    /// access mode or transition changed, retiring the plans cached under the
+    /// old admission.
+    /// </summary>
+    internal void NoteDatabaseAdmissionChanged()
+    {
+        var restricted = false;
+        foreach (var (_, database) in this.Databases)
+        {
+            if (database.UserAccess != 0 || database.TransitionConnection is not null)
+            {
+                restricted = true;
+                break;
+            }
+        }
+        this.DatabaseAdmissionRestricted = restricted;
+        this.BumpSchemaVersion();
+    }
+
+    /// <summary>
     /// Increments <see cref="SchemaVersion"/>, signaling that any cached
     /// <see cref="Selection"/> parsed under the prior version is potentially
     /// stale, and invalidates <see cref="CatalogRows"/>. Called by the

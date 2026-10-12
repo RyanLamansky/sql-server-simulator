@@ -455,18 +455,37 @@ internal sealed partial class Database
     /// <summary>
     /// Raises Msg 942 when this database is <see cref="DatabaseState.Offline"/>,
     /// Msg 927 while it is <see cref="DatabaseState.Restoring"/> unless
-    /// <paramref name="connection"/> is the one rebuilding it, and Msg 924 when
+    /// <paramref name="connection"/> is the one rebuilding it, Msg 952 while
+    /// another session's <c>ALTER DATABASE</c> holds it
+    /// <see cref="TransitionConnection">in transition</see>, and Msg 924 when
     /// it is single-user and another session keeps holding it past the wait.
     /// </summary>
     public void RejectWhenOffline(SimulatedDbConnection connection)
     {
         if (this.State == DatabaseState.Offline)
             throw SimulatedSqlException.DatabaseIsOffline(this.Name);
+        if (this.IsInTransitionFor(connection))
+            throw SimulatedSqlException.DatabaseInTransition(this.Name);
         if (this.State == DatabaseState.Restoring && !ReferenceEquals(connection, this.RestoringConnection))
             throw SimulatedSqlException.DatabaseIsRestoring(this.Name);
         if (!this.WaitForSingleUserSlot(connection))
             throw SimulatedSqlException.DatabaseInSingleUserUse(this.Name);
     }
+
+    /// <summary>
+    /// The session whose <c>ALTER DATABASE … WITH ROLLBACK</c> ended other
+    /// sessions and is settling them before its change lands, or null. Real
+    /// spends about three seconds there whenever the termination ended at least
+    /// one session, the database still reporting its old mode and state, while
+    /// a login naming it fails at once with a lone Msg 18456 and a <c>USE</c>
+    /// or three-part reference with Msg 952 (probed 2026-10-11 against SQL
+    /// Server 2022).
+    /// </summary>
+    internal volatile SimulatedDbConnection? TransitionConnection;
+
+    /// <summary>Whether a session other than <paramref name="asking"/> holds this database <see cref="TransitionConnection">in transition</see>.</summary>
+    internal bool IsInTransitionFor(SimulatedDbConnection asking) =>
+        this.TransitionConnection is { } altering && !ReferenceEquals(altering, asking);
 
     /// <summary>
     /// <c>sys.database_filestream_options.non_transacted_access</c>: 0 OFF, 1

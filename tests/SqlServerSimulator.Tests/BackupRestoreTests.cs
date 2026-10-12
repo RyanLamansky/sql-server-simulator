@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -400,6 +401,107 @@ public sealed class BackupRestoreTests
         _ = Throws<SimulatedSqlException>(() => other.CreateCommand("select 1").ExecuteScalar());
         AreEqual(2, connection.CreateCommand("select count(*) from d.dbo.t").ExecuteScalar());
         AreEqual("SINGLE_USER", simulation.ExecuteScalar("select user_access_desc from sys.databases where name = 'd'"));
+    }
+
+    [TestMethod]
+    public void SingleUser_WithRollbackImmediate_HoldsTheDatabaseInTransitionWhileItSettlesTheEndedSessions()
+    {
+        var simulation = WithDatabase();
+        using var victim = simulation.CreateOpenConnection();
+        _ = victim.CreateCommand("use d").ExecuteNonQuery();
+        using var setter = simulation.CreateOpenConnection();
+        var elapsed = Stopwatch.StartNew();
+        var alter = Task.Run(() => setter.CreateCommand("alter database d set single_user with rollback immediate").ExecuteNonQuery(), TestContext.CancellationToken);
+        while (simulation.ExecuteScalar("select count(*) from sys.dm_exec_sessions where database_id = db_id('d')") is not 0)
+            Thread.Sleep(5);
+        AreEqual("Database 'd' is in transition. Try the statement later.", simulation.AssertSqlError("use d", 952).Errors[0].Message);
+        _ = simulation.AssertSqlError("select count(*) from d.dbo.t", 952);
+        AreEqual("MULTI_USER", simulation.ExecuteScalar("select user_access_desc from sys.databases where name = 'd'"));
+        alter.Wait(TestContext.CancellationToken);
+        IsGreaterThanOrEqualTo(2900, elapsed.ElapsedMilliseconds);
+        AreEqual("SINGLE_USER", simulation.ExecuteScalar("select user_access_desc from sys.databases where name = 'd'"));
+    }
+
+    /// <summary>
+    /// <c>RESTRICTED_USER</c>'s termination clause ends every session in the
+    /// way, a sysadmin's included, and settles as <c>SINGLE_USER</c>'s does
+    /// (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RestrictedUser_WithRollbackImmediate_EndsTheOtherSessionsAndSettles()
+    {
+        var simulation = WithDatabase();
+        using var victim = simulation.CreateOpenConnection();
+        _ = victim.CreateCommand("use d").ExecuteNonQuery();
+        var elapsed = Stopwatch.StartNew();
+        _ = simulation.ExecuteNonQuery("alter database d set restricted_user with rollback immediate");
+        IsGreaterThanOrEqualTo(2900, elapsed.ElapsedMilliseconds);
+        _ = Throws<SimulatedSqlException>(() => victim.CreateCommand("select 1").ExecuteScalar());
+        AreEqual("RESTRICTED_USER", simulation.ExecuteScalar("select user_access_desc from sys.databases where name = 'd'"));
+    }
+
+    /// <summary>
+    /// With <c>AFTER n</c> the database is in transition from the start, and
+    /// the wait runs its full length though its one session leaves on its own
+    /// (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SingleUser_WithRollbackAfter_IsInTransitionThroughItsWholeWait()
+    {
+        var simulation = WithDatabase();
+        var victim = simulation.CreateOpenConnection();
+        _ = victim.CreateCommand("use d").ExecuteNonQuery();
+        using var setter = simulation.CreateOpenConnection();
+        var elapsed = Stopwatch.StartNew();
+        var alter = Task.Run(() => setter.CreateCommand("alter database d set single_user with rollback after 2 seconds").ExecuteNonQuery(), TestContext.CancellationToken);
+        while (!InTransition(simulation))
+            Thread.Sleep(5);
+        IsLessThan(2000, elapsed.ElapsedMilliseconds);
+        victim.Dispose();
+        IsTrue(InTransition(simulation));
+        alter.Wait(TestContext.CancellationToken);
+        IsGreaterThanOrEqualTo(4900, elapsed.ElapsedMilliseconds);
+        AreEqual("SINGLE_USER", simulation.ExecuteScalar("select user_access_desc from sys.databases where name = 'd'"));
+    }
+
+    /// <summary>
+    /// A cross-database read the single user's runs left in the plan cache
+    /// still meets the slot when another session runs the same text, as its
+    /// first run would.
+    /// </summary>
+    [TestMethod]
+    public void SingleUser_RefusesAReadAnotherSessionsPlanWouldReplay()
+    {
+        var simulation = WithDatabase();
+        using var holder = simulation.CreateOpenConnection();
+        _ = holder.CreateCommand("use master; alter database d set single_user").ExecuteNonQuery();
+        for (var i = 0; i < 3; i++)
+            AreEqual(2, holder.CreateCommand("select count(*) from d.dbo.t").ExecuteScalar());
+        using var other = simulation.CreateOpenConnection();
+        _ = other.CreateCommand("use master").ExecuteNonQuery();
+        AreEqual(924, Throws<SimulatedSqlException>(() => other.CreateCommand("select count(*) from d.dbo.t").ExecuteScalar()).Number);
+    }
+
+    private static bool InTransition(Simulation simulation)
+    {
+        try
+        {
+            _ = simulation.ExecuteScalar("select count(*) from d.sys.objects");
+            return false;
+        }
+        catch (SimulatedSqlException e) when (e.Number == 952)
+        {
+            return true;
+        }
+    }
+
+    [TestMethod]
+    public void SingleUser_WithRollbackImmediate_EndingNoSession_DoesntSettle()
+    {
+        var simulation = WithDatabase();
+        var elapsed = Stopwatch.StartNew();
+        _ = simulation.ExecuteNonQuery("alter database d set single_user with rollback immediate");
+        IsLessThan(1000, elapsed.ElapsedMilliseconds);
     }
 
     [TestMethod]

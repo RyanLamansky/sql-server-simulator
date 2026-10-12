@@ -429,6 +429,8 @@ partial class Simulation
             if (options.Broker is { } broker)
                 restored.BrokerEnabled = broker;
         }
+        // The restore brings back the backed-up access mode.
+        this.NoteDatabaseAdmissionChanged();
         ReportBackupMessages(batch, options.Stats, targetName, set, options.File, verb, stopwatch.Elapsed.TotalSeconds);
         connection.LastStatementRowCount = 0;
         return true;
