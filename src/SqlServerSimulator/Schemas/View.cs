@@ -224,6 +224,16 @@ internal sealed class View(
     public bool IsRowLimited;
 
     /// <summary>
+    /// The hidden graph columns the catalog lists after <see cref="OutputColumns"/>
+    /// for a view over one node or edge table; empty for every other view.
+    /// </summary>
+    public HeapColumn[] HiddenGraphColumns = [];
+
+    /// <summary>The columns the catalog lists for the view: its own, then its hidden graph ones.</summary>
+    public HeapColumn[] CatalogColumns() =>
+        this.HiddenGraphColumns.Length == 0 ? this.OutputColumns : [.. this.OutputColumns, .. this.HiddenGraphColumns];
+
+    /// <summary>
     /// The body (or a view it reads) projects a window function. An
     /// <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> through it runs the body
     /// once and writes to the base rows its output rows came from, reading the

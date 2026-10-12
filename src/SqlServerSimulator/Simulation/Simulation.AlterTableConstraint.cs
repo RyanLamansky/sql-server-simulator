@@ -215,6 +215,10 @@ partial class Simulation
     private static bool ParseAddEdgeConstraint(ParserContext context, MultiPartName tableName, string? explicitName, bool withNoCheck)
     {
         var pending = ParseEdgeConstraint(context, explicitName);
+        // On a table that isn't an edge table it stops the batch while it
+        // compiles, at state 0 (probed 2026-10-11 against SQL Server 2025).
+        if (context.Batch.TryResolveTable(tableName, out var compiled) && compiled.GraphKind != GraphTableKind.Edge)
+            throw SimulatedSqlException.EdgeConstraintOnNonEdgeTableWhileCompiling(compiled.Name, state: 0);
         if (context.Batch.IsSkipping)
             return true;
         if (!context.Batch.TryResolveTable(tableName, out var table))

@@ -681,13 +681,10 @@ partial class Simulation
                 }
                 throw SimulatedSqlException.InvalidColumnName(new MultiPartName(name.Leaf));
             }
-            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
+            else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes)
+                && MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceCols) is var sourceOrdinal and >= 0)
             {
-                for (var i = 0; i < sourceCols.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
-                        return sourceTypes[i];
-                }
+                return sourceTypes[sourceOrdinal];
             }
             throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
@@ -878,8 +875,8 @@ partial class Simulation
                     ? Array.FindIndex(view?.Columns ?? destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
                         ? view is not null ? view.Columns[ordinal].DerivedMask : DataMask.ForTableColumn(destinationTable, ordinal)
                         : null
-                    : source is var (sourceAlias, sourceColumns, _) && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias)
-                        && Array.FindIndex(sourceColumns, column => batch.CurrentDatabase.Collation.Equals(column, name.Leaf)) is var sourceOrdinal and >= 0
+                    : source is var (sourceAlias, sourceColumns, _)
+                        && MergeSourceOrdinal(batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumns) is var sourceOrdinal and >= 0
                         ? sourceMasks?[sourceOrdinal]
                         : null,
                 typeOf: null);
@@ -976,13 +973,9 @@ partial class Simulation
                     }
                 }
                 else if (source is var (sourceAlias, sourceCols, sourceTypes)
-                    && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
+                    && MergeSourceOrdinal(batch.CurrentDatabase.Collation, name, sourceAlias, sourceCols) is var sourceOrdinal and >= 0)
                 {
-                    for (var i = 0; i < sourceCols.Length; i++)
-                    {
-                        if (batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
-                            return sourceValues is null ? SqlValue.Null(sourceTypes[i]) : sourceValues[i];
-                    }
+                    return sourceValues is null ? SqlValue.Null(sourceTypes[sourceOrdinal]) : sourceValues[sourceOrdinal];
                 }
                 else if (partners is var (partnerSources, tuple))
                 {

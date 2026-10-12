@@ -732,8 +732,9 @@ internal static partial class BuiltInResources
                 if (hasIdFilter && view.ObjectId != wantObjectId)
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
-                for (var i = 0; i < view.OutputColumns.Length; i++)
-                    yield return (Row(viewObjectId, view.OutputColumns[i], i + 1, declared: false), view.OutputColumns[i], ColumnHost.Projection);
+                var viewColumns = view.CatalogColumns();
+                for (var i = 0; i < viewColumns.Length; i++)
+                    yield return (Row(viewObjectId, viewColumns[i], i + 1, declared: false), viewColumns[i], ColumnHost.Projection);
             }
             // Table types surface their columns keyed by type_table_object_id
             // (probe G3).

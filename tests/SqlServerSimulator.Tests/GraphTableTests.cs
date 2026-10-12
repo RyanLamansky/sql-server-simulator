@@ -558,4 +558,199 @@ public sealed class GraphTableTests
             "create table P2 (id int) as node on ps(id)");
         AreEqual("PRIMARY;ps", Rows(sim, "select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('P2') order by i.index_id desc"));
     }
+
+    // ---- probed 2026-10-11 against SQL Server 2025 ----
+
+    private const string Mixed = """
+        create table M (k int) as node;
+        create table F (z int) as edge;
+        insert M values (100), (200), (300);
+        insert F select a.$node_id, b.$node_id, a.k + b.id from M a, N b where a.k = 100 and b.id in (1, 2) or a.k = 200 and b.id = 5;
+        insert F select b.$node_id, a.$node_id, b.id from M a, N b where a.k = 300 and b.id in (2, 3);
+        """;
+
+    [TestMethod]
+    [DataRow("select string_agg(concat(n2.name, '/', n3.name), '->') within group (graph path) from N n1, E for path e1, N for path n2, E for path e2, N for path n3 where match(shortest_path(n1(-(e1)->n2-(e2)->n3)+)) and n1.id = 1", "b/c;c/d;b/c->d/a;c/d->a/b")]
+    [DataRow("select count(*) from N n1, E for path e1, N for path n2, E for path e2, N for path n3 where match(shortest_path(n1(-(e1)->n2-(e2)->n3){1,2}))", "14")]
+    [DataRow("select last_value(n2.name) within group (graph path) from N n1, E for path e1, N for path n2, E for path e2, N for path n3 where match(shortest_path(n1(<-(e1)-n2<-(e2)-n3)+)) and n1.id = 1", "d;b;a;c")]
+    [DataRow("select sum(e1.w) within group (graph path), sum(e2.w) within group (graph path), count(e1.w) within group (graph path), avg(n2.d) within group (graph path) from N n1, E for path e1, N for path n2, E for path e2, N for path n3 where match(shortest_path(n1(-(e1)->n2-(e2)->n3)+)) and n1.id = 4", "41|12|1|1.500000;41|13|1|1.500000;75|54|2|2.750000;64|46|2|2.250000")]
+    [DataRow("select n1.name, string_agg(concat(m.k, '/', n2.name), '->') within group (graph path) from N n1, F for path f1, M for path m, F for path f2, N for path n2 where match(shortest_path(n1(<-(f1)-m-(f2)->n2)+)) order by 1, 2", "a|100/a;a|100/b;b|100/a;b|100/b;e|200/e")]
+    [DataRow("select n1.name, string_agg(m.k, '->') within group (graph path) from N n1, E for path e, N for path n2, F for path f, M for path m where match(shortest_path(n1(-(e)->n2<-(f)-m)+)) order by 1", "a|100;d|100")]
+    [DataRow("select n1.name, string_agg(n2.name, '->') within group (graph path), n3.name, string_agg(n4.name, '->') within group (graph path) from N n1, E for path e1, N for path n2, N n3, E for path e2, N for path n4 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n3(-(e2)->n4)+) and last_node(n2) = last_node(n4)) and n1.id = 1 and n3.id = 2 order by 2", "a|b|b|c->d->a->b;a|c|b|c;a|c->d|b|c->d;a|c->d->a|b|c->d->a")]
+    [DataRow("select count(*) from N n1, E for path e1, N for path n2, N n3, E for path e2, N for path n4 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n3(-(e2)->n4)+) and last_node(n2) = last_node(n4))", "65")]
+    [DataRow("select count(*) from N n1, E for path e1, N for path n2, E for path e2, N for path n4 where match(shortest_path(n1(-(e1)->n2)+)) and match(shortest_path(n1(-(e2)->n4)+))", "65")]
+    [DataRow("select count(*) from N n1, E for path e1, N for path n2, E for path e2, N for path n4 where match(shortest_path(last_node(n2)(-(e2)->n4)+) and shortest_path(n1(-(e1)->n2)+))", "64")]
+    [DataRow("select count(*) from N n1, E for path e1, N for path n2 where match(shortest_path(n1(-(e1)->n2)+)) or n1.id = 99", "17")]
+    public void ShortestPath_Repeated_Sections_And_Several_Paths(string query, string expected) => AreEqual(expected, Rows(Seeded(Paths, Mixed), query));
+
+    [TestMethod]
+    [DataRow("select n1.name, string_agg(n2.name, '->') within group (graph path) from (select * from N where id < 3) n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1", "a|b;a|c;a|c->d;a|c->d->a")]
+    [DataRow("with c as (select * from N) select n1.name, string_agg(n2.name, '->') within group (graph path) from c n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1", "a|b;a|c;a|c->d;a|c->d->a")]
+    [DataRow("select n1.name, string_agg(n2.name, '->') within group (graph path) from N n1, (select * from E where w <> 13) for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1", "a|b;a|b->c;a|b->c->d;a|b->c->d->a")]
+    [DataRow("select n1.name, string_agg(n2.name, '->') within group (graph path), count(n2.id) within group (graph path) from N n1, E for path e, (select * from N where id <> 3) for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1", "a|b|1;a|d|1;a|d->a|2")]
+    public void ShortestPath_Reads_Through_Derived_Sources(string query, string expected) => AreEqual(expected, Rows(Seeded(Paths), query));
+
+    [TestMethod]
+    public void ShortestPath_Walks_Through_A_Missing_Node()
+        => AreEqual("a|?|NULL;a|c|3;a|c->d|4;a|c->d->a|1", Rows(Seeded(Paths, "delete N where id = 2"), """
+            select n1.name, string_agg(isnull(n2.name, '?'), '->') within group (graph path), last_value(n2.id) within group (graph path)
+            from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1
+            """));
+
+    [TestMethod]
+    [DataRow("s p q t", "s>p s>q p>t q>t", "p;q;p>t")]
+    [DataRow("s q p t", "s>p s>q p>t q>t", "q;p;q>t")]
+    [DataRow("s a b x y t", "s>a s>b a>y b>x x>t y>t", "a;b;b>x;a>y;b>x>t")]
+    public void ShortestPath_Reports_Each_Depth_In_Graph_Id_Order(string nodes, string edges, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table XN (name varchar(10)) as node; create table XE as edge",
+            string.Join(";", nodes.Split(' ').Select(node => $"insert XN values ('{node}')")),
+            string.Join(";", edges.Split(' ').Select(edge => $"insert XE select a.$node_id, b.$node_id from XN a, XN b where a.name = '{edge[0]}' and b.name = '{edge[2]}'")));
+        AreEqual(expected, Rows(sim, "select string_agg(n2.name, '>') within group (graph path) from XN n1, XE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.name = 's'"));
+    }
+
+    [TestMethod]
+    [DataRow("select string_agg(concat(n2.name, n4.name), ',') within group (graph path) from N n1, E for path e1, N for path n2, N n3, E for path e2, N for path n4 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n3(-(e2)->n4)+))", 13953, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, E e2, N n4 where match(shortest_path(n1(-(e1)->n2)+) and n2-(e2)->n4)", 13906, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, E for path e2, N for path n4 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n2(-(e2)->n4)+))", 13965, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, N n3 where match(shortest_path(n1(-(e1)->n2)+) and last_node(n2) = last_node(n3))", 13965, 7)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, N n3 where match(shortest_path(n1(-(e1)->n2)+) and last_node(n3) = last_node(n2))", 13962, 6)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, F for path f, M for path m where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n1(<-(f)-m)+) and last_node(n2) = last_node(m))", 13964, 2)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(n1(-(e1)->n2)+))", 13950, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, E for path e2 where match(shortest_path(n1(-(e1)->n2-(e2)->n1)+))", 13948, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, M for path m where match(shortest_path(n1(-(e1)->n2-(e1)->m)+))", 13903, 1)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2 where match(shortest_path(last_node(n1)(-(e1)->n2)+))", 13962, 2)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, N n3, E e2, N x where match(shortest_path(n1(-(e1)->n2)+) and last_node(n3)-(e2)->x)", 13962, 4)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, N n3, E e2, N x where match(shortest_path(n1(-(e1)->n2)+) and x-(e2)->last_node(n3))", 13962, 5)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, E e2, N x where match(shortest_path(n1(-(e1)->n2)+) and last_node(e1)-(e2)->x)", 13962, 4)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2 where match(last_node(n2) = last_node(n2))", 13962, 11)]
+    [DataRow("select 1 from N n1, E for path e1, N for path n2, E for path e2 where match(shortest_path(n1(-(e1)->n2)+) and shortest_path(last_node(n2)(-(e2)->last_node(n2))+))", 102, 1)]
+    [DataRow("select 1 from (select top 2 * from N order by id desc) n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))", 13940, 1)]
+    public void ShortestPath_Refusals_Of_Paths_And_Last_Nodes(string query, int number, int state)
+        => AreEqual(state, Seeded(Paths, Mixed).AssertSqlError(query, number).State);
+
+    [TestMethod]
+    public void ShortestPath_Refuses_Every_Path_Column_Clause_By_Clause()
+    {
+        var ex = Seeded(Paths).AssertSqlError("""
+            select max(n2.d) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and e.w = 1
+            group by n2.id having min(e.m) > 0 order by max(n2.name)
+            """, 13961);
+        AreEqual("n2.name|n2.id|e.m|e.w|n2.d", string.Join("|", ex.Errors.Cast<SimulatedError>().Select(error => error.Message.Split('\'')[1])));
+        AreEqual(2, Seeded(Paths).AssertSqlError("select string_agg(n2.name, '->') within group (order by n2.name) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))", 13961).Errors.Count);
+    }
+
+    [TestMethod]
+    [DataRow("select 1 from E k, N p1, E k2 where match(k-(p1)->k2)", "13902 p1|13901 k|13901 k2")]
+    [DataRow("select 1 from N a, E e, N b, E f, N c where match(a-(b)->c-(e)->f)", "13902 b")]
+    [DataRow("select 1 from (select distinct * from N) n1, (select distinct * from E) e, N n2 where match(n1-(e)->n2)", "13940 e|13940 n1")]
+    [DataRow("select 1 from N p1 cross apply (select * from E) k, N p2 where match(p1-(k)->p2)", "13920 k|13920 p1")]
+    [DataRow("select 1 from N p cross apply (select p2.name from E k, N p2 where match(p-(k)->p2)) q", "13920 p")]
+    [DataRow("select 1 from N p, E k cross apply (select p2.name from N p2 where match(p-(k)->p2)) q", "13920 k")]
+    public void Match_Reports_Binding_Refusals_In_Reals_Order(string query, string expected)
+    {
+        var ex = Seeded(Paths).AssertSqlError(query, int.Parse(expected[..5], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(expected, string.Join("|", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number} {error.Message.Split('\'')[1]}")));
+    }
+
+    [TestMethod]
+    public void Match_Refusal_Under_A_Deferred_Compile_Ends_The_Batch()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("create table A (id int) as node; create table B as edge; select 1 from A a1 join B b on 1 = 1, A a2 where match(a1-(b)->a2); create table Z (id int)", 13920);
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('Z')"));
+    }
+
+    [TestMethod]
+    public void Index_On_An_Endpoint_Keys_Its_Object_And_Graph_Ids()
+    {
+        var sim = Seeded(
+            "create index ix on Likes ($from_id desc) include ($to_id)",
+            "create table K2 (w int, constraint uq unique ($from_id, $to_id)) as edge",
+            "create statistics st on Likes ($to_id)");
+        AreEqual("from_obj_id_*|1|True|False;from_id_*|2|True|False;to_obj_id_*|0|False|True;to_id_*|0|False|True", System.Text.RegularExpressions.Regex.Replace(Rows(sim, """
+            select c.name, ic.key_ordinal, ic.is_descending_key, ic.is_included_column from sys.index_columns ic join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id
+            where ic.object_id = object_id('Likes') and ic.index_id = (select index_id from sys.indexes where name = 'ix') order by ic.index_column_id
+            """), "_[0-9A-F]{32}", "_*"));
+        AreEqual(4, sim.ExecuteScalar("select count(*) from sys.index_columns where object_id = object_id('K2') and index_id = (select index_id from sys.indexes where name = 'uq')"));
+        AreEqual("to_obj_id_*;to_id_*", System.Text.RegularExpressions.Regex.Replace(Rows(sim, "select col_name(object_id('Likes'), column_id) from sys.stats_columns where object_id = object_id('Likes') and stats_id = (select stats_id from sys.stats where name = 'st') order by stats_column_id"), "_[0-9A-F]{32}", "_*"));
+    }
+
+    [TestMethod]
+    public void View_Over_A_Graph_Table_Lists_Its_Hidden_Graph_Columns()
+    {
+        var sim = Seeded(
+            "create view V1 as select $node_id nid, id from Person",
+            "create view V2 as select w, $from_id f from Likes",
+            "create view V3 as select top 2 id from Person",
+            "create view V4 as select id from V3",
+            "create view V5 as select p.id from Person p, City c");
+        AreEqual("nid|2|False;id|NULL|False;graph_id_*|1|True;obj_id_*|9|True", System.Text.RegularExpressions.Regex.Replace(Rows(sim,
+            "select name, graph_type, is_hidden from sys.columns where object_id = object_id('V1') order by column_id"), "_[0-9A-F]{32}", "_*"));
+        AreEqual("w;f;graph_id_*;from_obj_id_*;from_id_*;to_obj_id_*;to_id_*", System.Text.RegularExpressions.Regex.Replace(Rows(sim,
+            "select column_name from information_schema.columns where table_name = 'V2' order by ordinal_position"), "_[0-9A-F]{32}", "_*"));
+        AreEqual("3|0|0", Rows(sim, "select (select count(*) from sys.columns where object_id = object_id('V3')), (select count(*) from sys.columns where object_id = object_id('V4') and is_hidden = 1), (select count(*) from sys.columns where object_id = object_id('V5') and is_hidden = 1)"));
+        AreEqual("GRAPH_IV_NODE_OBJ_ID", sim.ExecuteScalar("select graph_type_desc from sys.columns where object_id = object_id('V1') and graph_type = 9"));
+    }
+
+    [TestMethod]
+    public void Edge_Constraint_On_A_Non_Edge_Table_Stops_The_Batch_While_It_Compiles()
+    {
+        var sim = Seeded();
+        AreEqual(1750, sim.AssertSqlError("create table Z (id int); if 1 = 0 create table T1 (a int, constraint ec connection (Person to City))", 13930).Errors[1].Number);
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('Z')"));
+        AreEqual(0, sim.AssertSqlError("create table Z (id int); alter table Person add constraint ec connection (Person to City)", 13930).State);
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('Z')"));
+        _ = sim.ExecuteNonQuery("begin try exec('create table T1 (a int, constraint ec connection (Person to City))') end try begin catch end catch; create table Z (id int)");
+        AreNotEqual(DBNull.Value, sim.ExecuteScalar("select object_id('Z')"));
+    }
+
+    [TestMethod]
+    [DataRow("grant select (id) on Person to u", "select $node_id from Person", "$node_id_*")]
+    [DataRow("grant select (id) on Person to u", "select $node_id, id from Person", "$node_id_*")]
+    [DataRow("grant select (id) on Person to u", "select id from Person order by $node_id", "$node_id_*")]
+    [DataRow("grant select (w) on Likes to u", "select $from_id, w from Likes", "$from_id_*")]
+    [DataRow("grant select on Person to u; deny select (name) on Person to u", "select $node_id from Person", null)]
+    [DataRow("grant select on Person to u; deny select (id) on Person to u", "select $node_id from Person", null)]
+    public void Pseudo_Column_Read_Asks_Select_On_Itself(string grants, string query, string? denied)
+    {
+        var sim = Seeded("create user u without login", grants);
+        var statement = $"execute as user = 'u'; {query}; revert";
+        if (denied is null)
+        {
+            _ = sim.ExecuteScalar(statement);
+            return;
+        }
+        var ex = sim.AssertSqlError(statement, 230);
+        AreEqual(1, ex.Errors.Count);
+        StartsWith(denied.TrimEnd('*'), ex.Errors[0].Message.Split('\'')[1]);
+    }
+
+    [TestMethod]
+    [DataRow("merge Likes l using Person p1 join Person p2 on p1.id + 2 = p2.id on match(p1-(l)->p2) when not matched then insert values (p1.$node_id, p2.$node_id, 13) when matched then update set w = 0; select w from Likes order by w", "12;13;13;23;99")]
+    [DataRow("merge Likes l using Person p1 cross join Person p2 on match(p1-(l)->p2) when matched then update set w = w + 100; select w from Likes order by w", "112;123;199")]
+    [DataRow("merge Likes l using Person p1 join Person p2 on 1 = 1 on match(p1-(l)->p2) when not matched by source then delete when matched then update set w = 5 when not matched by target then insert values (p1.$node_id, p2.$node_id, 7); select w, count(*) from Likes group by w order by w", "5|3;7|13")]
+    [DataRow("merge Likes l using Person p1 join Person p2 on 1 = 1 on match(p1-(l)->p2) or 1 = 0 when matched then update set w = 6; select count(*) from Likes where w = 6", "3")]
+    [DataRow("merge Likes l using (Person p1 cross join Person p2) on match(p2<-(l)-p1) and p1.id = 1 when matched then delete output deleted.w, p1.name, p2.name;", "12|a|b")]
+    [DataRow("merge Likes l using Person p1 on match(p1-(l)->p1) when matched then delete; select count(*) from Likes", "3")]
+    [DataRow("merge Likes Likes using Person p1 join Person p2 on 1 = 1 on match(p1-(Likes)->p2) when matched then delete; select count(*) from Likes", "0")]
+    public void Merge_Binds_A_Match_Over_Its_Target_And_Joined_Source(string statement, string expected) => AreEqual(expected, Rows(Seeded(), statement));
+
+    [TestMethod]
+    [DataRow("merge Person using Likes l join Person p2 on 1 = 1 on match(Person-(l)->p2) when matched then update set name = 'z';", 13920)]
+    [DataRow("merge Likes l using Person p1 left join Person p2 on p2.id = p1.id + 1 on match(p1-(l)->p2) when matched then delete;", 13920)]
+    [DataRow("merge Likes l using Person p1 join Person p2 on p1.id = p2.id - 1 on match(p1-(l)->p2) when matched then update set w = id;", 209)]
+    [DataRow("merge Likes l using Person p1 join Person p2 on 1 = 1 on match(p1-(l)->p2 and p2-(l)->p1) when matched then delete;", 13903)]
+    [DataRow("merge Likes l using Person p1 join Person p2 on 1 = 1 on match(p1-(x)->p2) when matched then delete;", 13900)]
+    [DataRow("merge Likes l using Person p1, Person p2 on match(p1-(l)->p2) when matched then delete;", 102)]
+    public void Merge_Match_Refusals(string statement, int number) => _ = Seeded().AssertSqlError(statement, number);
+
+    [TestMethod]
+    public void Merge_Match_Over_An_Opaque_Derived_Source_Names_It_For_Each_Position()
+        => AreEqual(2, Seeded().AssertSqlError("""
+            merge Likes using (select p1.$node_id f, p2.$node_id t from Person p1, Person p2 where p1.id = 2 and p2.id = 4) s
+            on match(s-(Likes)->s) when not matched then insert ($from_id, $to_id) values (s.f, s.t);
+            """, 13940).Errors.Count);
 }

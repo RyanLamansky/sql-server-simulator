@@ -17,9 +17,15 @@ The catalog reports them as ordinary columns: `sys.columns.is_computed` 0 and `g
 The hidden ones stay out of `SELECT *` like any hidden column; `SELECT … INTO` copies the pseudo-columns as plain `nvarchar(1000)` columns and makes no graph table.
 A unique nonclustered `GRAPH_UNIQUE_INDEX_<hex>` over `graph_id` is created with the table; it takes index id 2 ahead of the declaration's own nonclustered indexes, which is where its object id is allocated, and on a table placed on a partition scheme it stays unaligned, on PRIMARY.
 A key or index naming `$node_id` / `$edge_id` keys the hidden `graph_id` it renders (`PRIMARY KEY ($node_id)` included), and a node or edge table can be neither memory-optimized (Msg 13910) nor temporal (Msg 13912); `ALTER TABLE … DROP | ALTER COLUMN $node_id` is Msg 102 at the name, and no `ALTER TABLE … AS` form exists (Msg 156) — all probed 2026-10-05 against SQL Server 2025.
+An index, key, `INCLUDE` list or statistic naming `$from_id` / `$to_id` keys the hidden object id and graph id pair it renders from, in that order and the written direction, so it raises no Msg 1945 and a duplicate reports the two integers (probed 2026-10-11 against SQL Server 2025).
+
+A view whose body reads one node or edge table — directly, through a derived table or CTE, or through a view that isn't row-limited, `DISTINCT`, `TOP`, a window or a `UNION ALL`'s first branch included, a `GROUP BY` or a second source not — lists hidden graph columns after its own wherever the catalog lists a view's columns (`sys.columns`, `INFORMATION_SCHEMA.COLUMNS`, `sp_columns`, `sp_help`, `COL_NAME`, `COLUMNPROPERTY`): over a node table the table's `graph_id` and an `obj_id_<hex>` of the view's own (`graph_type` 9, `GRAPH_IV_NODE_OBJ_ID`), over an edge table its `graph_id` and both endpoint pairs (`View.HiddenGraphColumns`, probed 2026-10-11 against SQL Server 2025).
+A view over a view inherits its columns, `obj_id` name and all; a projected pseudo-column keeps its `graph_type` under any alias and describes as updatable, not computed.
+The view's rows carry none of these columns — only the catalog lists them.
 
 A pseudo-column is written `$node_id` (the tokenizer's `$`-word, like `$action`), any case, qualified or not, and resolves to the internal column whose name it prefixes — through a derived table, view or CTE that projects it too, which is why the match is on the name and not on the column's kind.
 A projection of one takes the internal column's full name as its own.
+A read of one asks `SELECT` on the pseudo-column itself, as a computed column's does, and Msg 230 names it by that full name — never the hidden columns it renders from, which only `MATCH`'s desugared equalities read (probed 2026-10-11 against SQL Server 2025).
 The match runs only after an ordinary lookup misses, so it costs nothing on the scan path.
 Only the bare token matches: a delimited `[$node_id]` or `"$node_id"` is an ordinary name, Msg 207 unless a column is called that (`MultiPartName.LeafDelimited`).
 A hidden internal column named in a query by its full name — in a select list, `WHERE`, `ORDER BY` or an aggregate — is Msg 13908 state 1, while a pseudo-column's full name reads it; the check sits in `FindSourceColumn` and fires only for a name read from the statement's text (`MultiPartName.FromText`), since MATCH's desugared equalities name those columns too.
@@ -53,39 +59,61 @@ A disabled constraint checks no edge write and neither refuses nor cascades a no
 
 ## MATCH
 
-`MATCH` is recognized only inside a WHERE (and, to be refused, an ON); anywhere else `match(…)` parses as a call and the pattern's arrows are the syntax error.
+`MATCH` is recognized only inside a WHERE, a `MERGE`'s `ON` (and, to be refused, a join's ON); anywhere else `match(…)` parses as a call and the pattern's arrows are the syntax error.
 It binds while it parses, against the query scope's sources and the joins between them — `JoinSpec.IsComma` tells a comma apart from a written `CROSS JOIN`, which MATCH refuses like any other join.
 An identifier the query's own sources don't answer binds against an enclosing query's (`ParserContext.EnclosingScopes`), so a correlated subquery can match from an outer node, as real's does (probed 2026-10-05 against SQL Server 2025); its desugared equality then reads the outer row like any correlated reference.
+An `APPLY`'s left side is no enclosing query (`ParserContext.ApplyLeftScopes`): an identifier bound there is Msg 13920, as is a source joined to its neighbor.
+
+The refusals come in real's order (probed 2026-10-11 against SQL Server 2025): each hop binds its edge before its two nodes, and the first hop to fail ends the binding, so a later hop's misbound names go unreported; a derived table, view or CTE real can't read through — one with `TOP`, `DISTINCT`, `GROUP BY`, a `UNION`, a second source or no table at all — is Msg 13940 once per position, its edges ahead of its nodes, after the rest; and the joined-source check runs ahead of a name that binds nowhere.
+A derived table on an `APPLY`'s right side is Msg 13920 at state 3 and the check goes on to the next name, while any other joined source's state 1 ends it.
+Every MATCH refusal is a compile error, so one met as a statement over tables its own batch created runs ends the batch (`Simulation.IsDeferredCompileError`).
 Each hop desugars into equalities: over two base tables `e.from_obj_id = <node table's object id>` and `e.from_id = n.graph_id`, which the comma-join rewrite hands to the hash join like any written equi-join; over a derived table, view or CTE, the rendered `$from_id = $node_id` text.
 The predicate object keeps its desugared conjuncts behind `CollectConjuncts`, which is all the planner sees.
 
 Under a MATCH, a bare `SELECT *` expands the sources MATCH doesn't name first, in FROM order, then its edges, then its nodes, each in pattern order with every hop read from its `from` end.
 
+In a `MERGE`'s `ON`, `MATCH` binds the target and the `USING` side's sources (probed 2026-10-11 against SQL Server 2025).
+The `USING` side may be a table source with joins — `USING a JOIN b ON …`, `USING a CROSS JOIN b`, `USING (a CROSS JOIN b)` — whose sources' columns read under their own qualifiers (`Simulation.MergeSourceOrdinal`), a bare name two of them answer to being Msg 209; a pseudo-column reads through a table there but not through a derived table, view or CTE (Msg 207).
+Its nodes may be inner- or cross-joined, but an outer-joined node, and an edge joined to anything, is Msg 13920; the `MATCH` may sit under `OR` or `NOT` there.
+A target alias spelled like the target's own name is an alias still (`MERGE K k USING …`).
+
 ## SHORTEST_PATH
 
-`MATCH(SHORTEST_PATH(start(-(edge)->node)+))`, the `<-(edge)-` direction, and the `{1, n}` quantifier, over an edge and node marked `FOR PATH` in the FROM clause, with graph path aggregates — `STRING_AGG`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `LAST_VALUE` followed by `WITHIN GROUP (GRAPH PATH)` — reading the path, and `LAST_NODE(node)` continuing an ordinary pattern from the path's end.
-Inside the `MATCH`, `LAST_NODE(x) = LAST_NODE(x)` holds for every row; anything but another `LAST_NODE` after the `=` is Msg 102 near it.
-The result is one row per node the start reaches, the start itself included when a cycle leads back to it, carrying the first-found shortest path to it.
+`MATCH(SHORTEST_PATH(start(-(edge)->node …)+))`, the `<-(edge)-` direction, and the `{1, n}` quantifier, over edges and nodes marked `FOR PATH` in the FROM clause, with graph path aggregates — `STRING_AGG`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `LAST_VALUE` followed by `WITHIN GROUP (GRAPH PATH)` — reading the path, and `LAST_NODE(node)` continuing an ordinary pattern from the path's end.
+A recursive section may repeat a chain of hops (`n1(-(e1)->n2-(e2)->n3)+`), through other node tables too; one repetition is one step of the path, which each aggregate reads once, and the walk reaches the section's last node.
+A step repeats only from a node of the start's own table, as real's recursion filters it, so a section ending in another table is one step deep (probed 2026-10-11 against SQL Server 2025).
 
-`ApplyShortestPath` runs once the WHERE is parsed: the two `FOR PATH` sources give way to one lateral source applied after every other source, whose rows the breadth-first walk produces per start row — the reached node's stored columns plus one column per graph path aggregate, all hidden, so `SELECT *` expands the other sources only.
+A WHERE may hold several `SHORTEST_PATH`s, in one MATCH or several; each is a path source of its own, and `LAST_NODE(x) = LAST_NODE(y)` joins two paths' ends on their node identity.
+A path may start at another's last node (`SHORTEST_PATH(LAST_NODE(n2)(-(e2)->n4)+)`), whichever the MATCH writes first.
+An aggregate reads one path: one reading two is Msg 13953.
+`LAST_NODE` names a path's last node and nothing else, refused with real's own number and state per position (Msg 13962 at a hop's start or end, at a path's start, on an equality's left; Msg 13965 on its right and for a path's start written without it), Msg 13964 joins two different tables' ends, and a recursive section's node named outside it without `LAST_NODE` is Msg 13906 — every one probed 2026-10-11 against SQL Server 2025.
+Inside a recursive section a hop's node is a bare name (`LAST_NODE` there is Msg 102), and one node alias serves one section (Msg 13950).
+A MATCH holding only `SHORTEST_PATH`s may sit under `OR`, which leaves the path applied and the MATCH true.
+
+A start, edge or node may be a derived table, view or CTE real reads through, `FOR PATH` written after its closing parenthesis or name: the walk reads its rows, so a filtered edge source leaves its edges out, and a filtered node source's nodes are walked through but never reported.
+Such a source has to project the pseudo-column its role reads (`$node_id`, `$from_id` and `$to_id`) by its own name.
+The result is one row per node the start reaches, the start itself included when a cycle leads back to it, carrying the path to it.
+The walk follows edges whatever their endpoints hold: an edge into a node its table no longer holds leads on, the node reading NULL to the aggregates, and as the path's last node it is a row whose columns are NULL but for its graph id, which a `LAST_NODE` hop reads on.
+
+`ApplyShortestPath` runs once the WHERE is parsed: each path's `FOR PATH` sources give way to one lateral source applied after every other source, whose rows the breadth-first walk produces per start row — the reached node's columns, its identity, then one column per graph path aggregate, all hidden, so `SELECT *` expands the other sources only.
 Each aggregate is bound to its column, and computes its value from an ordinary `Aggregator` fed the path's steps in order, so the result types are the ordinary aggregates' (`LAST_VALUE`'s is its operand's).
-The walk reads a snapshot of the edge adjacency and the node rows keyed on the two heaps' mutation generations, so the start rows of one query, and repeated executions of a cached plan, share one read until either table changes; a step's columns are decoded only when an aggregate reads them.
+Over base tables the walk reads a snapshot of each hop's edge adjacency and node rows keyed on the heaps' mutation generations, so the start rows of one query, and repeated executions of a cached plan, share one read until a table changes; a derived source's rows are read per start row.
 A `SHORTEST_PATH` in a subquery is refused, as real refuses it; a derived table or CTE may hold one.
+A path column outside a graph path aggregate is Msg 13961 for every one, reported clause by clause — `ORDER BY`, `GROUP BY`, `HAVING`, `WHERE`, then the select list — each clause's in the order written (probed 2026-10-11 against SQL Server 2025).
+
+Each depth's newly reached nodes come out in graph id order, which is the order real's plan writes them, so a query from one start row returns real's rows in real's order.
+Real settles each depth in a `DISTINCT` sort over the candidates, the frontier walked in graph id order and each node's edges in scan order; the simulator keeps the first candidate, which is the path real reports when the depth reaches one node by several (a diamond's `p;q;p>t`) and for the depth's lowest node by graph id, but not always for the others (see [Divergences](#divergences)).
 
 ## Divergences
 
-- `MATCH` over an `APPLY`'s right side reports the first Msg 13920 at state 1 alone, where real sends state 3 then a second one for the start node.
-- Among several shortest paths of one length, the path reported is the first the edge scan finds, and an unordered `SHORTEST_PATH` query's row order is the walk's; real's are plan-dependent.
+- Among several shortest paths of one length, the simulator reports the first one found; real's distinct sort keeps a duplicate that is neither the first nor the last in any order a probe of 2026-10-11 against SQL Server 2025 could fit (no heap, quick or merge sort variant over 136 tie shapes), so where a depth reaches more than one node, real can name another path to any but its lowest (`f>c>a;g>e>b` where the simulator says `f>c>a;f>c>b`).
+- An unordered `SHORTEST_PATH` query over several start rows returns each start's rows together; real's returns them depth by depth across every start.
 - Of real's several errors for one misused `FOR PATH` source (Msg 13949 then Msg 4104 and Msg 13952), only the first is raised; a `GROUP BY` over a graph path aggregate names the aggregate's column in its Msg 8120 where real names an internal one.
-- The walk reads the tables' current rows without the reading session's locks or row versions.
+- The walk over base tables reads their current rows without the reading session's locks or row versions.
+- Several `CONNECTION` constraints in one `ALTER TABLE … ADD` are bound and validated one at a time, where real binds them all first: a later constraint's missing table is real's Msg 13931 where the simulator raises the earlier one's Msg 547 against the existing edges.
 
 ## Not modeled yet
 
-- **`MERGE … ON MATCH(…)`** — real binds a `MATCH` in a `MERGE`'s `ON` against the target edge and the `USING` source's joined nodes; the simulator doesn't recognize the predicate there, a syntax error where real answers (or, over a derived table, raises Msg 13940 twice).
-- **`MATCH` reaching across `APPLY`**: an identifier from an `APPLY`'s left side is real's Msg 13920 (`… used with a JOIN clause or APPLY operator`), the simulator's Msg 13900, since the left side isn't an enclosing query's scope.
-- **An index on `$from_id` / `$to_id`** keys the pseudo-column itself, so it warns Msg 1945 where real keys the hidden pair and doesn't.
-- **A view over a node table** lists the hidden `graph_id` and `obj_id` columns real reports in its `sys.columns` (`select $node_id nid, id from P` shows four rows there), where the simulator lists the two it projects.
-- **Msg 13930** for a `CONNECTION` constraint on a table that isn't an edge table stops the whole batch on real while it compiles; here it raises as the statement runs, so earlier statements of the batch have run.
-- Several refusals for one pattern come in a different order (`MATCH(k-(p1)->k2)` over two edges and a node reports the node first on real), and one Msg 13961 for a non-path aggregate over a `FOR PATH` column where real repeats it.
-- A `SHORTEST_PATH` repeating more than one hop (`n1(-(e1)->n2-(e2)->n3)+`), a second `SHORTEST_PATH` in one WHERE — and with it `LAST_NODE(x) = LAST_NODE(y)` over two paths — and one starting from anything but a node table → `NotSupportedException` or a syntax error.
-- **A column-level permission recorded against a pseudo-column read**: real asks for SELECT on the pseudo-column's own `$node_id_<guid>` column and names it in Msg 230 — under `GRANT SELECT (id)` alone `SELECT $node_id` and `SELECT $node_id, id` are both denied, `SELECT *` names `$node_id_<guid>` and then `name`, and under a table-level grant with `DENY SELECT (name)` the pseudo-column still reads — where the simulator names the hidden `graph_id_<hex>` it renders from, lets `SELECT $node_id, id` through and refuses the last shape on `name` (probed 2026-09-30 against SQL Server 2025; an ordinary computed column already checks itself the way real does).
+- **A derived table, view or CTE that doesn't project the pseudo-column `MATCH` reads**, or projects it under another name: real reads through to the node or edge table under it (`FROM (SELECT name FROM N) n1` matches), as the view catalog's hidden columns suggest; the simulator refuses it with Msg 13901 / 13902 (probed 2026-10-11 against SQL Server 2025).
+- **`MATCH` over an edge whose node is gone**: real NULL-extends the missing node rather than dropping the edge's row, and a `SHORTEST_PATH` whose start is unfiltered starts from the missing node too, reporting a NULL start; the simulator drops such rows in an ordinary pattern and starts only from existing rows (probed 2026-10-11 against SQL Server 2025).
+- **`NOT MATCH(SHORTEST_PATH(…))`**: real applies no path and reads every `FOR PATH` source as an ordinary one, the predicate true; the simulator applies the path and finds no row.

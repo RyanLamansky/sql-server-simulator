@@ -1696,7 +1696,11 @@ internal sealed partial class Selection
                 var ordinal = leafOrdinal && sources[s].ColumnNamesAreOrdinalComparable();
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
-                    if (ColumnNameMatches(sources[s].ColumnNames[c], name.Leaf, ordinal))
+                    // A graph pseudo-column is read as itself, the column real
+                    // asks SELECT on, rather than the hidden ones it renders
+                    // from (probed 2026-10-11 against SQL Server 2025).
+                    if (ColumnNameMatches(sources[s].ColumnNames[c], name.Leaf, ordinal)
+                        || (!name.LeafDelimited && GraphColumns.IsPseudoColumnFor(sources[s].ColumnNames[c], name.Leaf)))
                     {
                         matchSource = s;
                         matchColumn = c;

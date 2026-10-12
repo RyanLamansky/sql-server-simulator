@@ -332,7 +332,7 @@ internal sealed partial class Selection
                     }
                     if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                     {
-                        if (nested)
+                        if (nested || context.OnEndsTableSource)
                             return;
                         throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
                     }
@@ -358,7 +358,7 @@ internal sealed partial class Selection
                     {
                         if (context.Token is ReservedKeyword { Keyword: Keyword.On } searchOnToken)
                         {
-                            if (nested)
+                            if (nested || context.OnEndsTableSource)
                             {
                                 joins.Insert(searchJoinIndex, new JoinSpec(kind, null) { GroupCount = 2 });
                                 return;
@@ -393,7 +393,7 @@ internal sealed partial class Selection
                     {
                         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
                         {
-                            if (nested)
+                            if (nested || context.OnEndsTableSource)
                             {
                                 joins.Insert(groupJoinIndex, new JoinSpec(kind, null) { GroupCount = groupCount });
                                 return;
@@ -432,7 +432,7 @@ internal sealed partial class Selection
                 {
                     if (context.Token is ReservedKeyword { Keyword: Keyword.On })
                     {
-                        if (nested)
+                        if (nested || context.OnEndsTableSource)
                         {
                             joins.Add(new JoinSpec(kind, null));
                             return;
@@ -936,6 +936,7 @@ internal sealed partial class Selection
         // The left side encloses the right for what correlates to it — a
         // `.nodes()` column the right side may read only through a method.
         context.EnclosingScopes.Add(leftSources);
+        var pushedApplyLeft = context.ApplyLeftScopes.Add(leftSources);
         try
         {
             using (ParserScope.Enter(ref context.AggregateCollector, boundary))
@@ -946,6 +947,8 @@ internal sealed partial class Selection
         finally
         {
             context.EnclosingScopes.RemoveAt(context.EnclosingScopes.Count - 1);
+            if (pushedApplyLeft)
+                _ = context.ApplyLeftScopes.Remove(leftSources);
         }
         foreach (var aggregate in boundary)
         {
@@ -1349,6 +1352,7 @@ internal sealed partial class Selection
                     // A FOR SYSTEM_TIME after it is read and refused as the
                     // batch compiles, naming the CTE (probed 2026-10-06 against
                     // SQL Server 2025).
+                    var cteForPath = ParseOptionalForPath(context);
                     if (ParseOptionalForSystemTimeClause(context) is not null)
                         throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(cteBinding.Name, state: 1);
 
@@ -1397,6 +1401,7 @@ internal sealed partial class Selection
                         writtenObjectName: cteBinding.Name,
                         cte: cteBinding)
                     {
+                        ForPath = cteForPath,
                         BrowseBody = context.BrowseFlattenFrom ? cteBinding.Plan : null,
                         ForcedSeekThrough = cteHints is { ForceSeek: true } ? cteHints : null,
                     };
@@ -1497,6 +1502,7 @@ internal sealed partial class Selection
                 {
                     // FOR SYSTEM_TIME after a view's name applies to the tables
                     // its body reads (probed 2026-10-04 against SQL Server 2025).
+                    var viewForPath = ParseOptionalForPath(context);
                     var viewSystemTime = ParseOptionalForSystemTimeClause(context);
                     var viewFlattens = context.BrowseFlattenFrom;
                     var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens);
@@ -1549,6 +1555,7 @@ internal sealed partial class Selection
                         writtenObjectName: objectName.ToString(),
                         unaliasedName: viewAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
                     {
+                        ForPath = viewForPath,
                         BrowseBody = viewFlattens ? viewBody : null,
                         BodySeekShape = viewBody?.SeekShape,
                         ForcedSeekThrough = viewHints is { ForceSeek: true, NoExpand: false } ? viewHints : null,
@@ -1677,6 +1684,7 @@ internal sealed partial class Selection
                         else
                             context.RestoreCheckpoint(probe);
                         context.Batch.CurrentStatement.BindsDeferredSource = true;
+                        _ = ParseOptionalForPath(context);
                         // A clause leaves the cursor on the token after it, where an
                         // absent one leaves it on the name (see the resolved path below).
                         var beforeClause = context.Token?.StartIndex;
@@ -1900,7 +1908,9 @@ internal sealed partial class Selection
                 // A derived table has no native name, so the alias is
                 // mandatory: real reports Msg 102 near the token where it
                 // belongs, the closing ')' when the batch ends there (probed
-                // 2026-09-26: `FROM (SELECT 1 a);` is near ';').
+                // 2026-09-26: `FROM (SELECT 1 a);` is near ';'). A FOR PATH
+                // sits ahead of it, as after a table's name.
+                var derivedForPath = ParseOptionalForPath(context);
                 var derivedQualifier = ConsumeOptionalAlias(context)
                     ?? throw SimulatedSqlException.SyntaxErrorNear(context);
                 // A FOR JSON / FOR XML document's column name belongs to the
@@ -1926,6 +1936,7 @@ internal sealed partial class Selection
                     lateralIsQueryBody: true,
                     derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase))
                 {
+                    ForPath = derivedForPath,
                     BrowseBody = derivedFlattens ? derivedSelection : null,
                 };
 

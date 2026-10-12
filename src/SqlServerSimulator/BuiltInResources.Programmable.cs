@@ -1540,8 +1540,9 @@ internal static partial class BuiltInResources
             foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 var viewName = SqlValue.FromSystemName(view.Name);
-                for (var i = 0; i < view.OutputColumns.Length; i++)
-                    yield return Row(schemaName, viewName, view.OutputColumns[i], i + 1);
+                var viewColumns = view.CatalogColumns();
+                for (var i = 0; i < viewColumns.Length; i++)
+                    yield return Row(schemaName, viewName, viewColumns[i], i + 1);
             }
         }
     }

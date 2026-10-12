@@ -129,6 +129,9 @@ partial class Simulation
         if (filter is not null)
             RejectComputedColumnInIndexFilter(context.Batch, table, statisticsName, targetTableName.ToString(), filter, forStatistics: true);
 
+        // An edge's $from_id / $to_id reads the object id and graph id pair
+        // it renders from (probed 2026-10-11 against SQL Server 2025).
+        columnNames = ExpandGraphEndpointKeys(table, columnNames);
         var ordinals = new int[columnNames.Count];
         for (var i = 0; i < columnNames.Count; i++)
         {

@@ -1057,7 +1057,7 @@ internal sealed class HelpTarget
         this.Columns = schemaObject switch
         {
             HeapTable t => t.Columns,
-            View v => v.OutputColumns,
+            View v => v.CatalogColumns(),
             InlineTableValuedFunction f => f.OutputColumns,
             MultiStatementTableValuedFunction f => f.OutputColumns,
             ClrTableValuedFunction f => f.OutputColumns,

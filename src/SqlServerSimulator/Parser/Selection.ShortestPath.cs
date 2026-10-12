@@ -3,37 +3,77 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
 
-// MATCH(SHORTEST_PATH(…)): the FOR PATH edge and node sources give way to one
-// lateral source, run per start row, whose rows are the nodes the start reaches
-// with each path's graph path aggregates alongside. See docs/claude/graph.md.
+// MATCH(SHORTEST_PATH(…)): each path's FOR PATH edges and nodes give way to
+// one lateral source, run per start row, whose rows are the nodes the start
+// reaches with each path's graph path aggregates alongside. See
+// docs/claude/graph.md.
 internal sealed partial class Selection
 {
     /// <summary>
-    /// Settles the query's <c>SHORTEST_PATH</c>, if its WHERE bound one: the
-    /// <c>FOR PATH</c> sources' refusals, then the rewrite of the two recursive
-    /// sources into the path source and of each graph path aggregate into a
-    /// read of the column carrying its value. Runs once the WHERE is parsed and
-    /// before <c>SELECT *</c> expands, which leaves the path's columns out.
+    /// Settles the query's <c>SHORTEST_PATH</c>s, if its WHERE bound any: the
+    /// <c>FOR PATH</c> sources' refusals and the <c>LAST_NODE</c> references',
+    /// then the rewrite of each path's recursive sources into its path source
+    /// and of each graph path aggregate into a read of the column carrying its
+    /// value. Runs once the WHERE is parsed and before <c>SELECT *</c> expands,
+    /// which leaves the paths' columns out.
     /// </summary>
     private static void ApplyShortestPath(ParserContext context, QueryScope scope, List<FromSource> sources, List<JoinSpec> joins, List<Expression> expressions, FromClause fromClause)
     {
         var aggregates = context.GraphPathAggregates ?? [];
-        var spec = fromClause.Match?.ShortestPath;
-        var anyForPath = false;
+        var match = fromClause.Match;
+        var specs = match?.ShortestPaths ?? [];
+        bool Recursive(FromSource source) => specs.Exists(spec => spec.Recurses(source));
+        // LAST_NODE names a path's last node — at a hop, a path's start or
+        // either side of an equality — and a recursive section's node is
+        // named nowhere else (probed 2026-10-11 against SQL Server 2025).
+        bool EndsAPath(FromSource source) => specs.Exists(spec => ReferenceEquals(spec.End, source));
+        if (match is not null)
+        {
+            foreach (var spec in specs)
+            {
+                if (spec.StartIsLastNode && !EndsAPath(spec.Start))
+                {
+                    throw SimulatedSqlException.AndMatchError(
+                        SimulatedSqlException.LastNodeNotAPathEnd(spec.StartWritten, 2),
+                        SimulatedSqlException.LastNodeNotAPathEnd(spec.StartWritten, 1));
+                }
+                if (!spec.StartIsLastNode && Recursive(spec.Start))
+                    throw SimulatedSqlException.LastNodeRequired(spec.StartWritten, 1);
+            }
+            foreach (var (source, written, state) in match.LastNodeUses)
+            {
+                if (!EndsAPath(source))
+                    throw SimulatedSqlException.LastNodeNotAPathEnd(written, state);
+            }
+            foreach (var (left, leftWritten, right, rightWritten) in match.LastNodeEqualities)
+            {
+                if (specs.Count == 0)
+                    throw SimulatedSqlException.LastNodeNotAPathEnd(leftWritten, 11);
+                if (!EndsAPath(left))
+                    throw SimulatedSqlException.LastNodeNotAPathEnd(leftWritten, 6);
+                if (!EndsAPath(right))
+                    throw SimulatedSqlException.LastNodeRequired(rightWritten, 7);
+                if (!ReferenceEquals(UnderlyingObject(left), UnderlyingObject(right)))
+                    throw SimulatedSqlException.LastNodeEqualityOverDifferentObjects(leftWritten, rightWritten);
+            }
+            foreach (var source in match.ForPathNodeUses)
+            {
+                if (Recursive(source))
+                    throw SimulatedSqlException.ForPathNodeOutsideRecursiveSection(source.Qualifier!);
+            }
+        }
         foreach (var source in sources)
         {
-            if (!source.ForPath)
-                continue;
-            anyForPath = true;
-            if (spec is not null && (ReferenceEquals(source, spec.Edge) || ReferenceEquals(source, spec.Node)))
+            if (!source.ForPath || Recursive(source))
                 continue;
             // A FOR PATH source a SHORTEST_PATH names outside its recursive
             // section reads by its alias; one it never names by its whole name.
-            throw spec is not null && ReferenceEquals(source, spec.Start)
+            throw specs.Exists(spec => ReferenceEquals(spec.Start, source))
                 ? SimulatedSqlException.ForPathSourceUnused(source.Qualifier!, 2)
                 : SimulatedSqlException.ForPathSourceUnused(ForPathDisplayName(context, source), 1);
         }
-        if (spec is null)
+
+        if (specs.Count == 0)
         {
             if (aggregates.Count > 0)
                 throw SimulatedSqlException.GraphPathAggregateWithoutPath(aggregates[0].LowerName);
@@ -43,116 +83,188 @@ internal sealed partial class Selection
         // 2026-09-27 against SQL Server 2025).
         if (scope.Position is QueryPosition.Subquery or QueryPosition.Exists)
             throw SimulatedSqlException.RecursiveMatchInSubquery();
-        if (!anyForPath || spec.Edge.BackingTable is not { } edgeTable || spec.Node.BackingTable is not { } nodeTable)
-            throw new NotSupportedException("A SHORTEST_PATH over anything but FOR PATH base tables isn't modeled.");
-        if (spec.Start.BackingTable is not { GraphKind: GraphTableKind.Node } startTable)
-            throw new NotSupportedException("A SHORTEST_PATH starting from anything but a node table isn't modeled.");
 
         var collation = context.Batch.CurrentDatabase.Collation;
-        bool OnPath(MultiPartName name) =>
-            name.ImmediateQualifier is { } qualifier
-            && (collation.Equals(qualifier, spec.Edge.Qualifier!) || collation.Equals(qualifier, spec.Node.Qualifier!));
+        ShortestPathSpec? PathOf(MultiPartName name)
+        {
+            if (name.ImmediateQualifier is not { } qualifier)
+                return null;
+            foreach (var spec in specs)
+            {
+                foreach (var hop in spec.Hops)
+                {
+                    if (collation.Equals(qualifier, hop.Edge.Qualifier!) || collation.Equals(qualifier, hop.Node.Qualifier!))
+                        return spec;
+                }
+            }
+            return null;
+        }
 
         // A path column is legal only inside a graph path aggregate, whose own
-        // operand has to read the path and nothing else.
+        // operand has to read one path and nothing else. Every offending name
+        // is reported.
+        SimulatedSqlException? outside = null;
         void RejectPathColumns(ExpressionNode root) =>
-            root.Walk((node, _) => node switch
+            root.Walk((node, _) =>
             {
-                GraphPathAggregate or MatchPredicate => false,
-                Reference { ReferencedName: var name } when OnPath(name) => throw SimulatedSqlException.ForPathColumnOutsideAggregate(name.ToString()),
-                _ => true,
+                switch (node)
+                {
+                    case GraphPathAggregate or MatchPredicate:
+                        return false;
+                    case Reference { ReferencedName: var name } when PathOf(name) is not null:
+                        var error = SimulatedSqlException.ForPathColumnOutsideAggregate(name.ToString());
+                        outside = outside is null ? error : SimulatedSqlException.AndMatchError(outside, error);
+                        return true;
+                    default:
+                        return true;
+                }
             });
-        foreach (var expression in expressions)
-            RejectPathColumns(expression);
+        // Real reports them clause by clause, ORDER BY first and the select
+        // list last, each clause's in the order written (probed 2026-10-11
+        // against SQL Server 2025).
+        foreach (var order in fromClause.OrderBy)
+        {
+            if (order.Expr is { } orderExpression)
+                RejectPathColumns(orderExpression);
+        }
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+            RejectPathColumns(grouping);
+        if (fromClause.Having is { } having)
+            RejectPathColumns(having);
         // A WHERE may not read the path even through an aggregate.
         foreach (var excluder in fromClause.Excluders)
         {
             excluder.Walk((node, _) =>
             {
                 if (node is GraphPathAggregate inWhere)
+                {
                     RejectPathColumns(inWhere.Operand);
-                if (node is Reference { ReferencedName: var name } && OnPath(name))
-                    throw SimulatedSqlException.ForPathColumnOutsideAggregate(name.ToString());
+                    return false;
+                }
+                if (node is Reference { ReferencedName: var name } && PathOf(name) is not null)
+                {
+                    var error = SimulatedSqlException.ForPathColumnOutsideAggregate(name.ToString());
+                    outside = outside is null ? error : SimulatedSqlException.AndMatchError(outside, error);
+                }
                 return node is not MatchPredicate;
             });
         }
-        foreach (var order in fromClause.OrderBy)
-        {
-            if (order.Expr is { } orderExpression)
-                RejectPathColumns(orderExpression);
-        }
-        foreach (var aggregate in aggregates)
-        {
-            var readsPath = false;
-            aggregate.Operand.VisitColumnReferences(name =>
-            {
-                if (!OnPath(name))
-                    throw SimulatedSqlException.GraphPathAggregateReadsOffPath(name.ToString(), aggregate.LowerName);
-                readsPath = true;
-            });
-            if (!readsPath)
-                throw SimulatedSqlException.GraphPathAggregateWithoutPath(aggregate.LowerName);
-        }
-
-        // The path source: the reached node's own columns, then one column per
-        // aggregate, every one hidden from SELECT *.
-        var originalTypes = ColumnTypeResolverFor([.. sources]);
-        var nodeColumnCount = nodeTable.Columns.Length;
-        var columns = new HeapColumn[nodeColumnCount + aggregates.Count];
-        var schema = new SqlType[columns.Length];
-        var names = new string[columns.Length];
-        for (var i = 0; i < nodeColumnCount; i++)
-        {
-            var column = nodeTable.Columns[i];
-            columns[i] = new HeapColumn(column.Name, column.Type, column.MaxLength, column.Nullable, isHidden: true);
-        }
-        var operandTypes = new SqlType[aggregates.Count];
+        foreach (var expression in expressions)
+            RejectPathColumns(expression);
+        if (outside is not null)
+            throw outside;
+        var aggregatePaths = new ShortestPathSpec[aggregates.Count];
         for (var a = 0; a < aggregates.Count; a++)
         {
             var aggregate = aggregates[a];
-            operandTypes[a] = aggregate.Operand.GetSqlType(context.Batch, originalTypes);
-            var resultType = aggregate.GetSqlType(context.Batch, originalTypes);
-            columns[nodeColumnCount + a] = new HeapColumn($"graph_path_{a}", resultType, VariableLength(resultType), nullable: true, isHidden: true);
+            ShortestPathSpec? read = null;
+            aggregate.Operand.VisitColumnReferences(name =>
+            {
+                if (PathOf(name) is not { } spec)
+                    throw SimulatedSqlException.GraphPathAggregateReadsOffPath(name.ToString(), aggregate.LowerName);
+                if (read is not null && !ReferenceEquals(read, spec))
+                    throw SimulatedSqlException.GraphPathAggregateReadsTwoPaths(aggregate.LowerName);
+                read = spec;
+            });
+            aggregatePaths[a] = read ?? throw SimulatedSqlException.GraphPathAggregateWithoutPath(aggregate.LowerName);
         }
-        for (var i = 0; i < columns.Length; i++)
+
+        // A path starting from another's last node runs after it, whichever
+        // the MATCH wrote first.
+        var ordered = new List<ShortestPathSpec>(specs.Count);
+        while (ordered.Count < specs.Count)
         {
-            schema[i] = columns[i].Type;
-            names[i] = columns[i].Name;
+            var progressed = false;
+            foreach (var spec in specs)
+            {
+                if (ordered.Contains(spec) || (spec.StartIsLastNode && specs.Find(other => ReferenceEquals(other.End, spec.Start)) is { } before && !ordered.Contains(before)))
+                    continue;
+                ordered.Add(spec);
+                progressed = true;
+            }
+            if (!progressed)
+                throw SimulatedSqlException.LastNodeNotAPathEnd(specs.Find(spec => !ordered.Contains(spec))!.StartWritten, 1);
         }
 
-        var path = new ShortestPathPlan(
-            startTable, spec.Start.Qualifier!, edgeTable, spec.Edge.Qualifier!, nodeTable, spec.Node.Qualifier!,
-            spec.Forward, spec.MaxHops, [.. aggregates], operandTypes, schema);
-        var plan = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false, path.Rows);
-        var pathSource = new FromSource(
-            qualifier: spec.Node.Qualifier,
-            columnNames: names,
-            columns: columns,
-            storedSchema: columns,
-            storageOrdinals: null,
-            lobStore: null,
-            rows: [],
-            lateralPlan: plan);
-
-        for (var a = 0; a < aggregates.Count; a++)
-            aggregates[a].Bound = new Reference(spec.Node.Qualifier!, names[nodeColumnCount + a]);
-
-        // Drop the two recursive sources — comma-joined, as MATCH requires —
-        // and apply the path source after everything else.
-        foreach (var recursive in new[] { spec.Edge, spec.Node })
+        var originalTypes = ColumnTypeResolverFor([.. sources]);
+        foreach (var spec in ordered)
         {
-            var index = sources.IndexOf(recursive);
-            sources.RemoveAt(index);
-            if (joins.Count > 0)
-                joins.RemoveAt(index > 0 ? index - 1 : 0);
+            var pathAggregates = new List<GraphPathAggregate>();
+            for (var a = 0; a < aggregates.Count; a++)
+            {
+                if (ReferenceEquals(aggregatePaths[a], spec))
+                    pathAggregates.Add(aggregates[a]);
+            }
+
+            // The path source: the reached node's own columns, its identity,
+            // then one column per aggregate, every one hidden from SELECT *.
+            var end = spec.End;
+            var nodeColumnCount = end.Columns.Length;
+            var columns = new HeapColumn[nodeColumnCount + 2 + pathAggregates.Count];
+            for (var i = 0; i < nodeColumnCount; i++)
+            {
+                var column = end.Columns[i];
+                columns[i] = new HeapColumn(end.ColumnNames[i], column.Type, column.MaxLength, nullable: true, isHidden: true);
+            }
+            columns[nodeColumnCount] = new HeapColumn(ShortestPathSpec.ObjectColumn, SqlType.Int32, maxLength: null, nullable: false, isHidden: true);
+            columns[nodeColumnCount + 1] = new HeapColumn(ShortestPathSpec.IdColumn, SqlType.BigInt, maxLength: null, nullable: false, isHidden: true);
+            var operandTypes = new SqlType[pathAggregates.Count];
+            for (var a = 0; a < pathAggregates.Count; a++)
+            {
+                var aggregate = pathAggregates[a];
+                operandTypes[a] = aggregate.Operand.GetSqlType(context.Batch, originalTypes);
+                var resultType = aggregate.GetSqlType(context.Batch, originalTypes);
+                columns[nodeColumnCount + 2 + a] = new HeapColumn($"graph_path_{a}", resultType, VariableLength(resultType), nullable: true, isHidden: true);
+            }
+            var schema = new SqlType[columns.Length];
+            var names = new string[columns.Length];
+            for (var i = 0; i < columns.Length; i++)
+            {
+                schema[i] = columns[i].Type;
+                names[i] = columns[i].Name;
+            }
+
+            var path = new ShortestPathPlan(spec, context.Batch.CurrentDatabase, [.. pathAggregates], operandTypes, schema);
+            var plan = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false, path.Rows);
+            var pathSource = new FromSource(
+                qualifier: end.Qualifier,
+                columnNames: names,
+                columns: columns,
+                storedSchema: columns,
+                storageOrdinals: null,
+                lobStore: null,
+                rows: [],
+                lateralPlan: plan);
+            for (var a = 0; a < pathAggregates.Count; a++)
+                pathAggregates[a].Bound = new Reference(end.Qualifier!, names[nodeColumnCount + 2 + a]);
+
+            // Drop the recursive sources — comma-joined, as MATCH requires —
+            // and apply the path source after everything else.
+            foreach (var hop in spec.Hops)
+            {
+                foreach (var recursive in (ReadOnlySpan<FromSource>)[hop.Edge, hop.Node])
+                {
+                    var index = sources.IndexOf(recursive);
+                    sources.RemoveAt(index);
+                    if (joins.Count > 0)
+                        joins.RemoveAt(index > 0 ? index - 1 : 0);
+                }
+            }
+            sources.Add(pathSource);
+            joins.Add(new JoinSpec(JoinKind.CrossApply, null));
         }
-        sources.Add(pathSource);
-        joins.Add(new JoinSpec(JoinKind.CrossApply, null));
     }
 
     /// <summary>
-    /// Consumes <c>FOR PATH</c> after a table name, the cursor on the name's
-    /// last part and left on <c>PATH</c>; leaves the cursor alone otherwise.
+    /// What a <c>LAST_NODE</c> equality compares two path ends' sources by: the
+    /// node table, or the view, CTE or derived table standing for one.
+    /// </summary>
+    private static object UnderlyingObject(FromSource source) =>
+        (object?)source.BackingTable ?? (object?)source.BackingView ?? (object?)source.Cte ?? (object?)source.LateralPlan ?? source;
+
+    /// <summary>
+    /// Consumes <c>FOR PATH</c> after a source, the cursor on the source's last
+    /// token and left on <c>PATH</c>; leaves the cursor alone otherwise.
     /// </summary>
     private static bool ParseOptionalForPath(ParserContext context)
     {
@@ -181,99 +293,214 @@ internal sealed partial class Selection
 
     /// <summary>
     /// What a <c>SHORTEST_PATH</c>'s rows are computed from, and the
-    /// computation: a breadth-first walk out of each start row over the edge
-    /// table, one row per node reached — the start itself included when a cycle
-    /// leads back to it — carrying the path that reached it first.
+    /// computation: a breadth-first walk out of each start row, each step one
+    /// repetition of the recursive section, one row per node the walk reaches —
+    /// the start itself included when a cycle leads back to it — carrying the
+    /// path that reached it first.
     /// </summary>
-    private sealed class ShortestPathPlan(
-        HeapTable startTable,
-        string startQualifier,
-        HeapTable edgeTable,
-        string edgeQualifier,
-        HeapTable nodeTable,
-        string nodeQualifier,
-        bool forward,
-        int? maxHops,
-        GraphPathAggregate[] aggregates,
-        SqlType[] operandTypes,
-        SqlType[] schema)
+    /// <remarks>
+    /// <para>
+    /// The walk follows edges whatever their endpoints hold: an edge into a
+    /// node its table no longer holds — or a node a derived source's filter
+    /// leaves out — still leads on, the node reading NULL to the aggregates.
+    /// Such a node reached as the path's last is a row over a node table, its
+    /// columns NULL but for its graph id, and no row over a derived source
+    /// (probed 2026-10-11 against SQL Server 2025). A step repeats only from a
+    /// node of the start's own table, as real's recursion filters it.
+    /// </para>
+    /// <para>
+    /// Each depth's newly reached nodes come out in graph id order, which is
+    /// the order real's plan inserts them in, and of several shortest paths to
+    /// one node the first found wins, the frontier walked in that same order.
+    /// Real settles that tie in a distinct sort whose surviving duplicate is
+    /// not the first found, so a node two equally short paths reach can name
+    /// the other path there.
+    /// </para>
+    /// </remarks>
+    private sealed class ShortestPathPlan(ShortestPathSpec spec, Database database, GraphPathAggregate[] aggregates, SqlType[] operandTypes, SqlType[] schema)
     {
-        private readonly MultiPartName startGraphId =
-            new MultiPartName(startQualifier).WithAddedPart(startTable.Columns[GraphColumns.OrdinalOf(startTable, GraphColumnKind.GraphId)].Name);
+        private readonly ShortestPathHop[] hops = spec.Hops;
 
-        /// <summary>
-        /// The edges out of (walking backwards, into) each node and the path
-        /// node table's rows by graph id, as of the two heaps' mutation
-        /// generations — rebuilt when either table changes, so repeated
-        /// executions and every start row of one share the read.
-        /// </summary>
-        private sealed class GraphSnapshot(long edgeGeneration, long nodeGeneration)
+        /// <summary>The edges out of (walking backwards, into) each node, per hop, and each hop's node rows by identity.</summary>
+        private sealed class GraphSnapshot(long[] generations, int hopCount)
         {
-            public readonly long EdgeGeneration = edgeGeneration;
-            public readonly long NodeGeneration = nodeGeneration;
-            public readonly Dictionary<(int, long), List<((int, long) Target, byte[] Edge)>> Adjacency = [];
-            public readonly Dictionary<long, byte[]> Nodes = [];
+            public readonly long[] Generations = generations;
+            public readonly Dictionary<(int, long), List<((int, long) Target, byte[] Edge)>>[] Adjacency = [.. Enumerable.Range(0, hopCount).Select(static _ => new Dictionary<(int, long), List<((int, long) Target, byte[] Edge)>>())];
+            public readonly Dictionary<(int, long), byte[]>[] Nodes = [.. Enumerable.Range(0, hopCount).Select(static _ => new Dictionary<(int, long), byte[]>())];
+            public readonly HashSet<int>[] NodeObjects = [.. Enumerable.Range(0, hopCount).Select(static _ => new HashSet<int>())];
         }
 
         private volatile GraphSnapshot? snapshot;
 
-        private GraphSnapshot Snapshot()
+        /// <summary>
+        /// The heaps' mutation generations a snapshot over base tables alone
+        /// is good for, or null when a hop reads a derived source, whose rows
+        /// are read afresh for every start row.
+        /// </summary>
+        private long[]? Generations()
         {
-            if (this.snapshot is { } cached
-                && cached.EdgeGeneration == edgeTable.Heap.MutationGeneration
-                && cached.NodeGeneration == nodeTable.Heap.MutationGeneration)
+            var generations = new long[this.hops.Length * 2];
+            for (var h = 0; h < this.hops.Length; h++)
             {
+                if (this.hops[h].Edge is not { BackingTable: { } edge, LateralPlan: null } || this.hops[h].Node is not { BackingTable: { } node, LateralPlan: null })
+                    return null;
+                generations[h * 2] = edge.Heap.MutationGeneration;
+                generations[(h * 2) + 1] = node.Heap.MutationGeneration;
+            }
+            return generations;
+        }
+
+        private GraphSnapshot Snapshot(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        {
+            var generations = this.Generations();
+            if (generations is not null && this.snapshot is { } cached && cached.Generations.AsSpan().SequenceEqual(generations))
                 return cached;
-            }
-            var built = new GraphSnapshot(edgeTable.Heap.MutationGeneration, nodeTable.Heap.MutationGeneration);
-            var (fromObj, fromId, toObj, toId) = (
-                edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromObjId : GraphColumnKind.ToObjId)],
-                edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromId : GraphColumnKind.ToId)],
-                edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.ToObjId : GraphColumnKind.FromObjId)],
-                edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.ToId : GraphColumnKind.FromId)]);
-            foreach (var edge in ClusteredScan.Rows(edgeTable))
+            var built = new GraphSnapshot(generations ?? [], this.hops.Length);
+            for (var h = 0; h < this.hops.Length; h++)
             {
-                var key = (Decode(edgeTable, edge, fromObj).AsInt32, Decode(edgeTable, edge, fromId).AsInt64);
-                if (!built.Adjacency.TryGetValue(key, out var outgoing))
-                    built.Adjacency[key] = outgoing = [];
-                outgoing.Add(((Decode(edgeTable, edge, toObj).AsInt32, Decode(edgeTable, edge, toId).AsInt64), edge));
+                var hop = this.hops[h];
+                var adjacency = built.Adjacency[h];
+                foreach (var (from, to, edge) in Edges(hop, batch, outerResolver))
+                {
+                    var (key, target) = hop.Forward ? (from, to) : (to, from);
+                    if (!adjacency.TryGetValue(key, out var outgoing))
+                        adjacency[key] = outgoing = [];
+                    outgoing.Add((target, edge));
+                }
+                foreach (var (identity, node) in Nodes(hop.Node, batch, outerResolver))
+                {
+                    built.Nodes[h][identity] = node;
+                    _ = built.NodeObjects[h].Add(identity.Item1);
+                }
+                if (hop.Node.BackingTable is { } nodeTable)
+                    _ = built.NodeObjects[h].Add(nodeTable.ObjectId);
             }
-            var graphId = nodeTable.StorageOrdinals[GraphColumns.OrdinalOf(nodeTable, GraphColumnKind.GraphId)];
-            foreach (var node in ClusteredScan.Rows(nodeTable))
-                built.Nodes[Decode(nodeTable, node, graphId).AsInt64] = node;
-            this.snapshot = built;
+            if (generations is not null)
+                this.snapshot = built;
             return built;
+        }
+
+        /// <summary>An edge source's rows with the node identities at either end, rows naming no node left out.</summary>
+        private IEnumerable<((int, long) From, (int, long) To, byte[] Row)> Edges(ShortestPathHop hop, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        {
+            var source = hop.Edge;
+            if (source is { BackingTable: { } table, LateralPlan: null })
+            {
+                var (fromObj, fromId, toObj, toId) = (
+                    table.StorageOrdinals[GraphColumns.OrdinalOf(table, GraphColumnKind.FromObjId)],
+                    table.StorageOrdinals[GraphColumns.OrdinalOf(table, GraphColumnKind.FromId)],
+                    table.StorageOrdinals[GraphColumns.OrdinalOf(table, GraphColumnKind.ToObjId)],
+                    table.StorageOrdinals[GraphColumns.OrdinalOf(table, GraphColumnKind.ToId)]);
+                foreach (var row in ClusteredScan.Rows(table))
+                {
+                    var (a, b, c, d) = (Decode(table, row, fromObj), Decode(table, row, fromId), Decode(table, row, toObj), Decode(table, row, toId));
+                    if (!a.IsNull && !b.IsNull && !c.IsNull && !d.IsNull)
+                        yield return ((a.AsInt32, b.AsInt64), (c.AsInt32, d.AsInt64), row);
+                }
+                yield break;
+            }
+            var fromColumn = GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.FromId);
+            var toColumn = GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.ToId);
+            foreach (var row in source.LateralPlan!.Execute(batch, outerResolver).RowBytes)
+            {
+                if (this.Identity(source, fromColumn, row) is { } from && this.Identity(source, toColumn, row) is { } to)
+                    yield return (from, to, row);
+            }
+        }
+
+        /// <summary>A node source's rows by identity.</summary>
+        private IEnumerable<((int, long) Identity, byte[] Row)> Nodes(FromSource source, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        {
+            if (source is { BackingTable: { } table, LateralPlan: null })
+            {
+                var graphId = table.StorageOrdinals[GraphColumns.OrdinalOf(table, GraphColumnKind.GraphId)];
+                foreach (var row in ClusteredScan.Rows(table))
+                    yield return ((table.ObjectId, Decode(table, row, graphId).AsInt64), row);
+                yield break;
+            }
+            var nodeColumn = GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.NodeId);
+            foreach (var row in source.LateralPlan!.Execute(batch, outerResolver).RowBytes)
+            {
+                if (this.Identity(source, nodeColumn, row) is { } identity)
+                    yield return (identity, row);
+            }
+        }
+
+        /// <summary>The node a derived source's rendered identifier column names, or null.</summary>
+        private (int, long)? Identity(FromSource source, int column, byte[] row)
+        {
+            var text = RowDecoder.DecodeColumn(source.StoredSchema, row, column, source.LobStore);
+            return !text.IsNull && GraphColumns.TryParseStrict(text.AsString, database, edge: false, out var table, out var id)
+                ? (table.ObjectId, id)
+                : null;
         }
 
         private static SqlValue Decode(HeapTable table, byte[] row, int storageOrdinal) =>
             RowDecoder.DecodeColumn(table.StoredColumns, row, storageOrdinal, table.Heap);
 
+        /// <summary>The node the start row names: a node table's row, another path's last node, or a derived source's rendered identifier.</summary>
+        private (int, long)? Start(Func<MultiPartName, SqlValue> outerResolver)
+        {
+            var start = spec.Start;
+            if (spec.StartIsLastNode)
+            {
+                var objectId = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(ShortestPathSpec.ObjectColumn));
+                var nodeId = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(ShortestPathSpec.IdColumn));
+                return objectId.IsNull || nodeId.IsNull ? null : (objectId.AsInt32, nodeId.AsInt64);
+            }
+            if (start.BackingTable is { } table)
+            {
+                var graphId = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(table.Columns[GraphColumns.OrdinalOf(table, GraphColumnKind.GraphId)].Name));
+                return graphId.IsNull ? null : (table.ObjectId, graphId.CoerceTo(SqlType.BigInt).AsInt64);
+            }
+            var text = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(start.ColumnNames[GraphColumns.FindPseudoColumn(start.ColumnNames, GraphColumns.NodeId)]));
+            return !text.IsNull && GraphColumns.TryParseStrict(text.AsString, database, edge: false, out var startTable, out var id)
+                ? (startTable.ObjectId, id)
+                : null;
+        }
+
         public IEnumerable<byte[]> Rows(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
         {
-            var startId = outerResolver?.Invoke(this.startGraphId) ?? throw new InvalidOperationException("A SHORTEST_PATH ran without its start row.");
-            if (startId.IsNull)
+            if (this.Start(outerResolver ?? throw new InvalidOperationException("A SHORTEST_PATH ran without its start row.")) is not { } start)
                 yield break;
-            var start = (startTable.ObjectId, startId.CoerceTo(SqlType.BigInt).AsInt64);
-            var graph = this.Snapshot();
+            var graph = this.Snapshot(batch, outerResolver);
+            var last = this.hops.Length - 1;
+            var emitsMissing = this.hops[last].Node is { BackingTable: not null, LateralPlan: null };
 
-            var reachedBy = new Dictionary<(int, long), ((int, long) Previous, byte[] Edge)>();
+            var reachedBy = new Dictionary<(int, long), ((int, long) Previous, (byte[] Edge, byte[]? Node)[] Steps)>();
+            var chain = new (byte[] Edge, byte[]? Node)[this.hops.Length];
             List<(int, long)> frontier = [start];
-            for (var depth = 1; frontier.Count > 0 && (maxHops is null || depth <= maxHops); depth++)
+            for (var depth = 1; frontier.Count > 0 && (spec.MaxHops is null || depth <= spec.MaxHops); depth++)
             {
                 List<(int, long)> next = [];
                 foreach (var from in frontier)
                 {
-                    if (!graph.Adjacency.TryGetValue(from, out var outgoing))
-                        continue;
-                    foreach (var (target, edge) in outgoing)
-                    {
-                        if (target.Item1 != nodeTable.ObjectId || !graph.Nodes.ContainsKey(target.Item2) || !reachedBy.TryAdd(target, (from, edge)))
-                            continue;
-                        next.Add(target);
-                        yield return this.Row(batch, start, target, reachedBy, graph.Nodes);
-                    }
+                    if (depth == 1 || from.Item1 == start.Item1)
+                        Expand(from, from, 0);
+                }
+                next.Sort();
+                foreach (var reached in next)
+                {
+                    if (emitsMissing || graph.Nodes[last].ContainsKey(reached))
+                        yield return this.Row(batch, start, reached, reachedBy);
                 }
                 frontier = next;
+
+                void Expand((int, long) origin, (int, long) at, int hop)
+                {
+                    if (!graph.Adjacency[hop].TryGetValue(at, out var outgoing))
+                        return;
+                    foreach (var (target, edge) in outgoing)
+                    {
+                        if (!graph.NodeObjects[hop].Contains(target.Item1))
+                            continue;
+                        chain[hop] = (edge, graph.Nodes[hop].GetValueOrDefault(target));
+                        if (hop < last)
+                            Expand(origin, target, hop + 1);
+                        else if (reachedBy.TryAdd(target, (origin, [.. chain])))
+                            next.Add(target);
+                    }
+                }
             }
         }
 
@@ -281,45 +508,45 @@ internal sealed partial class Selection
             BatchContext batch,
             (int, long) start,
             (int, long) reached,
-            Dictionary<(int, long), ((int, long) Previous, byte[] Edge)> reachedBy,
-            Dictionary<long, byte[]> nodes)
+            Dictionary<(int, long), ((int, long) Previous, (byte[] Edge, byte[]? Node)[] Steps)> reachedBy)
         {
-            // The reached node's stored columns; its computed ones read NULL,
-            // since nothing outside the graph path aggregates may read them and
-            // LAST_NODE matches on the stored graph id.
             var values = new SqlValue[schema.Length];
-            var nodeRow = nodes[reached.Item2];
-            var nodeColumns = nodeTable.Columns.Length;
+            var end = spec.End;
+            var nodeColumns = end.Columns.Length;
+            var nodeRow = reachedBy[reached].Steps[^1].Node;
             for (var c = 0; c < nodeColumns; c++)
-            {
-                var storage = nodeTable.StorageOrdinals[c];
-                values[c] = storage >= 0 ? Decode(nodeTable, nodeRow, storage) : SqlValue.Null(nodeTable.Columns[c].Type);
-            }
+                values[c] = nodeRow is null ? SqlValue.Null(end.Columns[c].Type) : EndColumn(end, nodeRow, c, batch);
+            // A node table's row its table no longer holds keeps its graph id,
+            // which a LAST_NODE hop reads on.
+            if (nodeRow is null && end.BackingTable is { } endTable)
+                values[GraphColumns.OrdinalOf(endTable, GraphColumnKind.GraphId)] = SqlValue.FromInt64(reached.Item2);
+            values[nodeColumns] = SqlValue.FromInt32(reached.Item1);
+            values[nodeColumns + 1] = SqlValue.FromInt64(reached.Item2);
             if (aggregates.Length == 0)
                 return RowEncoder.EncodeRow(schema, values);
 
             // The path's steps, first to last.
-            var steps = new List<(byte[] Edge, byte[] Node)>();
+            var steps = new List<(byte[] Edge, byte[]? Node)[]>();
             var at = reached;
             do
             {
-                var (previous, edge) = reachedBy[at];
-                steps.Add((edge, nodes[at.Item2]));
+                var (previous, chain) = reachedBy[at];
+                steps.Add(chain);
                 at = previous;
             }
-            while (at != start);
+            while (at != start || steps.Count == 0);
             steps.Reverse();
 
-            var step = default((byte[] Edge, byte[] Node));
-            var runtime = new RuntimeContext(name => this.ResolveStep(name, step, batch), batch);
+            var step = default((byte[] Edge, byte[]? Node)[]);
+            var runtime = new RuntimeContext(name => this.ResolveStep(name, step!, batch), batch);
             for (var a = 0; a < aggregates.Length; a++)
             {
                 var aggregate = aggregates[a];
-                var resultType = schema[nodeColumns + a];
+                var resultType = schema[nodeColumns + 2 + a];
                 if (aggregate.Aggregate is not { } ordinary)
                 {
                     step = steps[^1];
-                    values[nodeColumns + a] = aggregate.Operand.Run(runtime).CoerceTo(resultType);
+                    values[nodeColumns + 2 + a] = aggregate.Operand.Run(runtime).CoerceTo(resultType);
                     continue;
                 }
                 var aggregator = Aggregator.Create(ordinary, operandTypes[a], resultType, batch: batch);
@@ -333,23 +560,62 @@ internal sealed partial class Selection
                     }
                     aggregator.Add(aggregate.Operand.Run(runtime));
                 }
-                values[nodeColumns + a] = aggregator.Result();
+                values[nodeColumns + 2 + a] = aggregator.Result();
             }
             return RowEncoder.EncodeRow(schema, values);
         }
 
         /// <summary>
-        /// A column of one path step, read off the step's row — decoding just
-        /// that column, or evaluating a computed one over the row's own columns.
+        /// One column of the reached node: a node table's stored column or its
+        /// rendered <c>$node_id</c> — its other computed columns read NULL, since
+        /// nothing outside the graph path aggregates may read them — or a
+        /// derived source's column.
         /// </summary>
-        private SqlValue ResolveStep(MultiPartName name, (byte[] Edge, byte[] Node) step, BatchContext batch)
+        private static SqlValue EndColumn(FromSource end, byte[] row, int column, BatchContext batch)
         {
-            var qualifier = name.ImmediateQualifier;
-            var (table, row) = qualifier is not null && BuiltInToken.Equals(qualifier, edgeQualifier) ? (edgeTable, step.Edge)
-                : qualifier is not null && BuiltInToken.Equals(qualifier, nodeQualifier) ? (nodeTable, step.Node)
-                : throw SimulatedSqlException.InvalidColumnName(name);
-            var ordinal = ColumnOrdinal(table, name.Leaf);
-            return ordinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : Column(table, row, ordinal, batch);
+            if (end is not { BackingTable: { } table, LateralPlan: null })
+                return RowDecoder.DecodeColumn(end.StoredSchema, row, column, end.LobStore);
+            return table.StorageOrdinals[column] >= 0 || table.Columns[column].GraphKind == GraphColumnKind.GraphIdComputed
+                ? Column(table, row, column, batch)
+                : SqlValue.Null(table.Columns[column].Type);
+        }
+
+        /// <summary>
+        /// A column of one path step, read off the row of the hop's edge or
+        /// node it names — decoding just that column, or evaluating a computed
+        /// one over the row's own columns; a node the walk passed through
+        /// without its row reads NULL.
+        /// </summary>
+        private SqlValue ResolveStep(MultiPartName name, (byte[] Edge, byte[]? Node)[] step, BatchContext batch)
+        {
+            if (name.ImmediateQualifier is { } qualifier)
+            {
+                for (var h = 0; h < this.hops.Length; h++)
+                {
+                    var (source, row) = BuiltInToken.Equals(qualifier, this.hops[h].Edge.Qualifier) ? (this.hops[h].Edge, step[h].Edge)
+                        : BuiltInToken.Equals(qualifier, this.hops[h].Node.Qualifier) ? (this.hops[h].Node, step[h].Node)
+                        : (null, null);
+                    if (source is null)
+                        continue;
+                    var ordinal = SourceOrdinal(source, name.Leaf);
+                    if (ordinal < 0)
+                        break;
+                    return row is null ? SqlValue.Null(source.Columns[ordinal].Type)
+                        : source is { BackingTable: { } table, LateralPlan: null } ? Column(table, row, ordinal, batch)
+                        : RowDecoder.DecodeColumn(source.StoredSchema, row, ordinal, source.LobStore);
+                }
+            }
+            throw SimulatedSqlException.InvalidColumnName(name);
+        }
+
+        private static int SourceOrdinal(FromSource source, string leaf)
+        {
+            for (var i = 0; i < source.ColumnNames.Length; i++)
+            {
+                if (BuiltInToken.Equals(source.ColumnNames[i], leaf) || GraphColumns.IsPseudoColumnFor(source.ColumnNames[i], leaf))
+                    return i;
+            }
+            return -1;
         }
 
         private static int ColumnOrdinal(HeapTable table, string leaf)

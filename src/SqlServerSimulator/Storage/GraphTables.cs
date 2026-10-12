@@ -32,6 +32,13 @@ internal enum GraphColumnKind : byte
     ToId = 6,
     ToObjId = 7,
     ToIdComputed = 8,
+
+    /// <summary>
+    /// The object id a view over a node table lists after its own columns,
+    /// beside the table's <see cref="GraphId"/> (probed 2026-10-11 against SQL
+    /// Server 2025).
+    /// </summary>
+    ViewNodeObjectId = 9,
 }
 
 /// <summary>
@@ -62,6 +69,7 @@ internal static class GraphColumns
         GraphColumnKind.ToId => "GRAPH_TO_ID",
         GraphColumnKind.ToObjId => "GRAPH_TO_OBJ_ID",
         GraphColumnKind.ToIdComputed => "GRAPH_TO_ID_COMPUTED",
+        GraphColumnKind.ViewNodeObjectId => "GRAPH_IV_NODE_OBJ_ID",
         _ => null,
     };
 
@@ -154,6 +162,30 @@ internal static class GraphColumns
         return identifier >= 0 ? graphId : -1;
     }
 
+    /// <summary>
+    /// The names of the object id and graph id columns an edge's written
+    /// <c>$from_id</c> / <c>$to_id</c> renders from — what an index, key or
+    /// statistic on it keys — or null when <paramref name="columnName"/> is
+    /// neither or the columns carry no such pair.
+    /// </summary>
+    public static string[]? EndpointKeyNames(IReadOnlyList<HeapColumn?> columns, string columnName)
+    {
+        var (objectKind, idKind) = columnName.Equals(FromId, StringComparison.OrdinalIgnoreCase) ? (GraphColumnKind.FromObjId, GraphColumnKind.FromId)
+            : columnName.Equals(ToId, StringComparison.OrdinalIgnoreCase) ? (GraphColumnKind.ToObjId, GraphColumnKind.ToId)
+            : (GraphColumnKind.None, GraphColumnKind.None);
+        if (objectKind == GraphColumnKind.None)
+            return null;
+        string? objectColumn = null, idColumn = null;
+        foreach (var column in columns)
+        {
+            if (column?.GraphKind == objectKind)
+                objectColumn = column.Name;
+            else if (column?.GraphKind == idKind)
+                idColumn = column.Name;
+        }
+        return objectColumn is null || idColumn is null ? null : [objectColumn, idColumn];
+    }
+
     /// <summary>Whether <paramref name="leaf"/> spells one of the four pseudo-columns.</summary>
     public static bool IsPseudoName(string leaf) =>
         leaf.Equals(NodeId, StringComparison.OrdinalIgnoreCase)
@@ -191,6 +223,35 @@ internal static class GraphColumns
         var toId = Internal("to_id", GraphColumnKind.ToId, SqlType.BigInt, tableName);
         var to = Pseudo(ToId, GraphColumnKind.ToIdComputed, identifierType, tableName, new GraphIdentifier(GraphIdentifierKind.To, toId.Name, toObj.Name, identifierType), nullable: true);
         return [graphId, self, fromObj, fromId, from, toObj, toId, to];
+    }
+
+    /// <summary>
+    /// The hidden graph columns a view whose body reads one node or edge table
+    /// lists after its own: the table's graph id and, for a node table, an
+    /// object id of the view's own; for an edge table its graph id and both
+    /// endpoint pairs (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    public static HeapColumn[] ForView(HeapTable table, string viewName)
+    {
+        HeapColumn Copy(GraphColumnKind kind)
+        {
+            var column = table.Columns[OrdinalOf(table, kind)];
+            return new(column.Name, column.Type, maxLength: null, nullable: false, isHidden: true) { GraphKind = kind };
+        }
+        return table.GraphKind == GraphTableKind.Node
+            ? [Copy(GraphColumnKind.GraphId), Internal("obj_id", GraphColumnKind.ViewNodeObjectId, SqlType.Int32, viewName)]
+            : [Copy(GraphColumnKind.GraphId), Copy(GraphColumnKind.FromObjId), Copy(GraphColumnKind.FromId), Copy(GraphColumnKind.ToObjId), Copy(GraphColumnKind.ToId)];
+    }
+
+    /// <summary>The kind of pseudo-column <paramref name="leaf"/> spells — a written <c>$node_id</c> or a projected full name — or <see cref="GraphColumnKind.None"/>.</summary>
+    public static GraphColumnKind PseudoKindOf(string leaf)
+    {
+        foreach (var (name, kind) in (ReadOnlySpan<(string, GraphColumnKind)>)[(NodeId, GraphColumnKind.GraphIdComputed), (EdgeId, GraphColumnKind.GraphIdComputed), (FromId, GraphColumnKind.FromIdComputed), (ToId, GraphColumnKind.ToIdComputed)])
+        {
+            if (leaf.Equals(name, StringComparison.OrdinalIgnoreCase) || (leaf.Length == name.Length + 1 + SuffixLength && leaf.StartsWith(name + "_", StringComparison.OrdinalIgnoreCase)))
+                return kind;
+        }
+        return GraphColumnKind.None;
     }
 
     private static HeapColumn Internal(string prefix, GraphColumnKind kind, SqlType type, string tableName) =>

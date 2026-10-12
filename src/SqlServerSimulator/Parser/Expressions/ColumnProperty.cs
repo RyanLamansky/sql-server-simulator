@@ -166,7 +166,7 @@ internal sealed class ColumnProperty : Expression
         var columns = ObjectProperty.FindObject(database, id) switch
         {
             HeapTable table => table.Columns,
-            View view => view.OutputColumns,
+            View view => view.CatalogColumns(),
             InlineTableValuedFunction inline => inline.OutputColumns,
             MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
             ClrTableValuedFunction clr => clr.OutputColumns,

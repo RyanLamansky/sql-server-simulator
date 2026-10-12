@@ -246,7 +246,8 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        _ = Selection.ParseAndBindPredicate(context, static _ => SqlType.Int32);
+        // A MATCH parses here too, over sources still to be created.
+        _ = Selection.ParseAndBindPredicate(context, static _ => SqlType.Int32, matchSources: [], matchJoins: []);
 
         var clauses = 0;
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
@@ -359,6 +360,12 @@ partial class Simulation
     /// </summary>
     private static bool SkipUnresolvedMergeSource(ParserContext context)
     {
+        if (IsJoinedMergeSourceAhead(context))
+        {
+            using (ParserScope.Enter(ref context.OnEndsTableSource, true))
+                _ = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, [], []);
+            return true;
+        }
         var atUsing = context.SaveCheckpoint();
         context.MoveNextRequired();
         if (context.Token is not Operator { Character: '(' })

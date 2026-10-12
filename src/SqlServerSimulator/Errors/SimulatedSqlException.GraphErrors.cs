@@ -64,9 +64,20 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException GraphTableCannotBeTemporal() =>
         new("A node or edge table cannot be created as or altered to a temporal table.", 13912, 16, 1);
 
-    /// <summary>Msg 13930: a <c>CONNECTION</c> constraint on a table that isn't an edge table.</summary>
-    internal static SimulatedSqlException EdgeConstraintOnNonEdgeTable(string tableName) =>
-        new($"Edge constraint cannot be created on table '{tableName}'.  The table is not an edge table.", 13930, 16, 1);
+    /// <summary>
+    /// Msg 13930: a <c>CONNECTION</c> constraint on a table that isn't an edge
+    /// table — state 1 in <c>CREATE TABLE</c>, 0 in <c>ALTER TABLE</c>.
+    /// </summary>
+    internal static SimulatedSqlException EdgeConstraintOnNonEdgeTable(string tableName, byte state) =>
+        new($"Edge constraint cannot be created on table '{tableName}'.  The table is not an edge table.", 13930, 16, state);
+
+    /// <summary>
+    /// Msg 13930 then Msg 1750, raised while the batch compiles: the batch
+    /// stops as at any compile error, while a batch running it through
+    /// <c>EXEC</c> goes on (probed 2026-10-11 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException EdgeConstraintOnNonEdgeTableWhileCompiling(string tableName, byte state) =>
+        FollowedBy(EdgeConstraintOnNonEdgeTable(tableName, state), new("Could not create constraint or index. See previous errors.", 1750, 16, 0));
 
     /// <summary>Msg 13931: a <c>CONNECTION</c> clause names a table that doesn't exist.</summary>
     internal static SimulatedSqlException EdgeConstraintTableNotFound(string constraintName, string tableName) =>
@@ -111,6 +122,43 @@ partial class SimulatedSqlException
     /// <summary>Msg 13954: a <c>WITHIN GROUP (GRAPH PATH)</c> aggregate reading a column off the path.</summary>
     internal static SimulatedSqlException GraphPathAggregateReadsOffPath(string identifier, string aggregate) =>
         new($"Identifier '{identifier}' in aggregate '{aggregate}' WITHIN GROUP(GRAPH PATH) is not referencing a recursive path and cannot be used.", 13954, 16, 1);
+
+    /// <summary>Msg 13906: a <c>FOR PATH</c> node a recursive section repeats, named by an ordinary pattern without <c>LAST_NODE</c>.</summary>
+    internal static SimulatedSqlException ForPathNodeOutsideRecursiveSection(string alias) =>
+        new($"Node table name or alias '{alias}' marked as FOR PATH cannot be used outside the recursive section of a SHORTEST_PATH clause except in a LAST_NODE function.", 13906, 16, 1);
+
+    /// <summary>
+    /// Msg 13940: a derived table, view or CTE in a MATCH whose body real
+    /// can't read through to a node or edge table.
+    /// </summary>
+    internal static SimulatedSqlException MatchDerivedTable(string alias) =>
+        new($"Cannot use a derived table '{alias}' in a MATCH clause.", 13940, 16, 1);
+
+    /// <summary>Msg 13950: one node alias in two recursive sections, or twice in one.</summary>
+    internal static SimulatedSqlException ShortestPathNodeUsedTwice(string alias) =>
+        new($"Node table name or alias '{alias}' was used more than once in a SHORTEST_PATH recursive section.", 13950, 16, 1);
+
+    /// <summary>Msg 13953: a <c>WITHIN GROUP (GRAPH PATH)</c> aggregate reading two paths.</summary>
+    internal static SimulatedSqlException GraphPathAggregateReadsTwoPaths(string aggregate) =>
+        new($"Columns in the aggregate '{aggregate}' WITHIN GROUP(GRAPH PATH) reference more than one recursive path.", 13953, 16, 1);
+
+    /// <summary>
+    /// Msg 13962: <c>LAST_NODE</c> naming something no path ends at, at a state
+    /// telling where it was written.
+    /// </summary>
+    internal static SimulatedSqlException LastNodeNotAPathEnd(string alias, byte state) =>
+        new($"The alias or identifier '{alias}' is not the last node in a shortest path pattern. Only the last node in the path can be used with LAST_NODE().", 13962, 16, state);
+
+    /// <summary>Msg 13964: <c>LAST_NODE(x) = LAST_NODE(y)</c> over two different node tables.</summary>
+    internal static SimulatedSqlException LastNodeEqualityOverDifferentObjects(string left, string right) =>
+        new($"The two aliases '{left}' and '{right}' refer to different underlying objects in a LAST_NODE equality expression.", 13964, 16, 2);
+
+    /// <summary>
+    /// Msg 13965: a path's last node named without <c>LAST_NODE</c> where only
+    /// it can read the node.
+    /// </summary>
+    internal static SimulatedSqlException LastNodeRequired(string alias, byte state) =>
+        new($"The table name or alias '{alias}' must use the LAST_NODE function to reference the last node in a shortest_path expression.", 13965, 16, state);
 
     /// <summary>Msg 13957: a <c>SHORTEST_PATH</c> inside a subquery.</summary>
     internal static SimulatedSqlException RecursiveMatchInSubquery() =>

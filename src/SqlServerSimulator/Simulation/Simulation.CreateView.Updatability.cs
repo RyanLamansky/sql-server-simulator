@@ -121,7 +121,8 @@ partial class Simulation
                 var sourceOrd = -1;
                 for (var j = 0; j < source.ColumnNames.Length; j++)
                 {
-                    if (collation.Equals(source.ColumnNames[j], refName.Leaf))
+                    // A pseudo-column reads the column whose name it prefixes.
+                    if (collation.Equals(source.ColumnNames[j], refName.Leaf) || GraphColumns.IsPseudoColumnFor(source.ColumnNames[j], refName.Leaf))
                     {
                         sourceOrd = j;
                         break;

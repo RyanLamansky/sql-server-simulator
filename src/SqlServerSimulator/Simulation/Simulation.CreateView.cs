@@ -265,6 +265,7 @@ partial class Simulation
             UnionOwnerName = UnionOwnerNameOf(bodySelection, rejectionReason),
             UnionLeadsWithJoin = UnionLeadsWithJoinOf(bodySelection, rejectionReason),
             IsRowLimited = IsRowLimitedBody(bodySelection),
+            HiddenGraphColumns = ViewGraphColumns(bodySelection, viewName.Leaf),
             IsWindowed = IsWindowedBody(bodySelection),
             VolatileColumns = bodySelection.VolatileColumns,
             UpstreamView = upstreamView,
@@ -419,8 +420,33 @@ partial class Simulation
             {
                 AliasType = bodySelection.ColumnAliasTypes?[i],
                 IdentitySource = bodySelection.ColumnIdentitySources?[i],
+                // A projected pseudo-column keeps its graph type, under any
+                // name (probed 2026-10-11 against SQL Server 2025).
+                GraphKind = bodySelection is { BranchFromSources: [{ BackingTable.GraphKind: not GraphTableKind.None }] } && bodySelection.ProjectionExpressions is { } projections
+                    && i < projections.Length && UnwrapDirectRef(projections[i]) is { ReferencedName: var projected } && !projected.LeafDelimited
+                    ? GraphColumns.PseudoKindOf(projected.Leaf)
+                    : GraphColumnKind.None,
             };
         }
         return output;
     }
+
+    /// <summary>
+    /// The hidden graph columns a view's body gives it: a body reading one node
+    /// or edge table — directly, through a derived table or CTE, or through a
+    /// view that isn't row-limited, whose own it inherits — without a
+    /// <c>GROUP BY</c>, a set operation reading through its first branch. Real
+    /// lists them after the view's own columns (probed 2026-10-11 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static HeapColumn[] ViewGraphColumns(Selection body, string viewName) =>
+        body is { IsGrouped: false, BranchFromSources: [var source] }
+            ? source switch
+            {
+                { BackingTable: { GraphKind: not GraphTableKind.None } table, LateralPlan: null } => GraphColumns.ForView(table, viewName),
+                { BackingView: { } inner } => inner.IsRowLimited ? [] : inner.HiddenGraphColumns,
+                { LateralPlan: { } derived, LateralIsQueryBody: true } => ViewGraphColumns(derived, viewName),
+                _ => [],
+            }
+            : [];
 }

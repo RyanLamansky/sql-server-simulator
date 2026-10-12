@@ -209,6 +209,11 @@ partial class Simulation
             RejectFilterConstantTypes(context.Batch, table, indexName, targetTableName.ToString(), filter);
         }
 
+        // An edge's $from_id / $to_id keys the hidden object id and graph id
+        // pair it renders from, in that order and the written direction
+        // (probed 2026-10-11 against SQL Server 2025).
+        keyColumns = [.. ExpandGraphEndpointKeys(table, [.. keyColumns])];
+        includeColumnNames = ExpandGraphEndpointKeys(table, includeColumnNames);
         RejectIndexColumnTypes(context.Batch.CurrentDatabase.Collation, table, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, indexName, targetTableName.ToString());
         if (keyColumns.Count > MaxIndexKeyColumns)
             throw SimulatedSqlException.TooManyIndexKeyColumns(indexName, targetTableName.ToString(), keyColumns.Count);
@@ -553,29 +558,31 @@ partial class Simulation
             }
 
             RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, inline: true);
+            var pendingColumns = ExpandGraphEndpointKeys(table, pending.Columns);
+            var pendingIncludes = ExpandGraphEndpointKeys(table, pending.IncludeColumnNames);
             // CREATE TABLE's own index follows the refusal with Msg 1750, at
             // state 0 after a key's 1919 and state 1 after an included column's
             // 1999 (probed 2026-09-30 against SQL Server 2025).
             try
             {
-                RejectIndexColumnTypes(collation, table, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, pending.Name, writtenTableName, inline: true);
+                RejectIndexColumnTypes(collation, table, [.. pendingColumns.Select(static c => c.ColumnName)], pendingIncludes, pending.Name, writtenTableName, inline: true);
             }
             catch (SimulatedSqlException refused) when (refused.Number is 1919 or 1999)
             {
                 throw SimulatedSqlException.FollowedByConstraintNotCreated(refused, state: refused.Number == 1919 ? (byte)0 : (byte)1);
             }
 
-            var keyColumns = new IndexKeyColumn[pending.Columns.Length];
-            for (var i = 0; i < pending.Columns.Length; i++)
+            var keyColumns = new IndexKeyColumn[pendingColumns.Length];
+            for (var i = 0; i < pendingColumns.Length; i++)
             {
-                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pending.Columns[i].ColumnName);
-                keyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, pending.Columns[i].IsDescending);
+                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pendingColumns[i].ColumnName);
+                keyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, pendingColumns[i].IsDescending);
             }
-            var includeColumns = new int[pending.IncludeColumnNames.Count];
-            var includeOrdinals = new int[pending.IncludeColumnNames.Count];
+            var includeColumns = new int[pendingIncludes.Count];
+            var includeOrdinals = new int[pendingIncludes.Count];
             for (var i = 0; i < includeColumns.Length; i++)
             {
-                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pending.IncludeColumnNames[i]);
+                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pendingIncludes[i]);
                 includeColumns[i] = table.StorageOrdinals[fullOrdinal];
                 includeOrdinals[i] = fullOrdinal;
             }
@@ -690,6 +697,33 @@ partial class Simulation
                 throw SimulatedSqlException.IncludedColumnInvalidType(legacy.Name, writtenTableName);
         }
     }
+
+    /// <summary>
+    /// An index's or statistic's written columns with each <c>$from_id</c> /
+    /// <c>$to_id</c> of an edge table replaced by the object id and graph id
+    /// columns it renders from, which are what real keys (probed 2026-10-11
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static (string ColumnName, bool IsDescending)[] ExpandGraphEndpointKeys(HeapTable table, (string ColumnName, bool IsDescending)[] columns)
+    {
+        if (table.GraphKind != GraphTableKind.Edge)
+            return columns;
+        var expanded = new List<(string ColumnName, bool IsDescending)>(columns.Length);
+        foreach (var (name, descending) in columns)
+        {
+            if (GraphColumns.EndpointKeyNames(table.Columns, name) is { } pair)
+                expanded.AddRange(pair.Select(column => (column, descending)));
+            else
+                expanded.Add((name, descending));
+        }
+        return [.. expanded];
+    }
+
+    /// <summary>An index's included or a statistic's columns, expanded as its key columns are.</summary>
+    internal static List<string> ExpandGraphEndpointKeys(HeapTable table, List<string> columns) =>
+        table.GraphKind != GraphTableKind.Edge
+            ? columns
+            : [.. columns.SelectMany(name => GraphColumns.EndpointKeyNames(table.Columns, name) ?? [name])];
 
     private static int ResolveColumnOrdinal(Collation collation, HeapTable table, string columnName)
     {

@@ -154,7 +154,9 @@ partial class Simulation
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        if (!context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName))
+        // An alias spelled like the target's own name is an alias still
+        // (probed 2026-10-11 against SQL Server 2025: `MERGE K k USING …`).
+        if (context.Token is Name and not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
             context.MoveNextRequired();
         if ((sourceView ?? viewRowsTarget) is { } checkedView && !HasInsteadOfTrigger(context.Batch, checkedView, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete))
         {
@@ -176,7 +178,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability, matchSources, matchJoins) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -197,6 +199,14 @@ partial class Simulation
         // takes it like a join's (probe-confirmed).
         using (context.EnterNextValueForScope(NextValueForScope.Clause))
         using (ParserScope.Enter(ref context.AggregateCollector, onAggregates))
+        // A MATCH binds the target and the USING side's sources, a joined
+        // one's included (probed 2026-10-11 against SQL Server 2025).
+        using (ParserScope.Enter(ref context.MatchScope, new MatchScope
+        {
+            Sources = [MergeMatchSource(targetAlias, [.. targetColumns.Select(static column => column.Name)], [.. targetColumns.Select(static column => column.Type)], table: sourceView is null && viewRowsTarget is null ? destinationTable : null), .. matchSources],
+            Joins = [new JoinSpec(JoinKind.Cross, onPredicate: null) { IsComma = true }, .. matchJoins],
+            InMergeOn = true,
+        }))
         {
             onPredicate = BooleanExpression.Parse(context);
         }
@@ -438,15 +448,15 @@ partial class Simulation
             var ordinal = sourceView is null ? index : sourceView.BaseColumnOrdinals[index];
             return ordinal < 0 ? null : DataMask.ForTableColumn(destinationTable, ordinal);
         }
-        DataMask? SourceMask(string leaf)
+        DataMask? SourceMask(MultiPartName name)
         {
-            var index = Array.FindIndex(sourceColumnNames, column => collation.Equals(column, leaf));
+            var index = MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true);
             return index < 0 ? null : sourceMasks?[index];
         }
         DataMask? ColumnMask(MultiPartName name) =>
-            collation.Equals(name.ImmediateQualifier, sourceAlias) ? SourceMask(name.Leaf)
+            NamesMergeSource(collation, name, sourceAlias, sourceColumnNames) ? SourceMask(name)
             : collation.Equals(name.ImmediateQualifier, targetAlias) || collation.Equals(name.ImmediateQualifier, defaultTargetName) ? TargetMask(name.Leaf)
-            : name.Count == 1 ? (Array.Exists(targetColumns, column => collation.Equals(column.Name, name.Leaf)) ? TargetMask(name.Leaf) : SourceMask(name.Leaf))
+            : name.Count == 1 ? (Array.Exists(targetColumns, column => collation.Equals(column.Name, name.Leaf)) ? TargetMask(name.Leaf) : SourceMask(name))
             : null;
 
         var columns = new DataMask?[destinationTable.Columns.Length];
@@ -489,12 +499,136 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseMergeSource(ParserContext context)
     {
+        if (IsJoinedMergeSourceAhead(context))
+            return ParseJoinedMergeSource(context);
         context.MoveNextRequired();
         return context.Token is Operator { Character: '(' }
             ? ParseParenthesizedMergeSource(context)
             : ParseBareTableMergeSource(context);
+    }
+
+    /// <summary>
+    /// Whether the <c>USING</c> under the cursor opens a table source with
+    /// joins — <c>USING a JOIN b ON …</c>, <c>USING (a CROSS JOIN b)</c> —
+    /// rather than one table, view or parenthesized query.
+    /// </summary>
+    private static bool IsJoinedMergeSourceAhead(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            if (context.GetNextOptional() is Operator { Character: '(' })
+            {
+                switch (context.GetNextOptional())
+                {
+                    case Name:
+                        return true;
+                    case Operator { Character: '(' }:
+                        // A derived table leading a parenthesized join takes
+                        // an alias after its body; a query's own parentheses
+                        // don't.
+                        SkipParenthesized();
+                        return context.GetNextOptional() is Name or ReservedKeyword { Keyword: Keyword.As };
+                    default:
+                        // A derived table, which a join may follow.
+                        SkipParenthesized();
+                        _ = context.MoveNext();
+                        break;
+                }
+            }
+            else
+            {
+                while (context.Token is Name && context.GetNextOptional() is Operator { Character: '.' })
+                    _ = context.MoveNext();
+            }
+            if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+                _ = context.MoveNext();
+            if (context.Token is Name)
+                _ = context.MoveNext();
+            // A derived table's column list, or a table's hints.
+            if (context.Token is Operator { Character: '(' } || (context.Token is ReservedKeyword { Keyword: Keyword.With } && context.GetNextOptional() is Operator { Character: '(' }))
+            {
+                SkipParenthesized();
+                _ = context.MoveNext();
+            }
+            return context.Token is ReservedKeyword { Keyword: Keyword.Join or Keyword.Inner or Keyword.Left or Keyword.Right or Keyword.Full or Keyword.Cross or Keyword.Outer };
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+
+        // From an opening parenthesis to its closing one.
+        void SkipParenthesized()
+        {
+            for (var depth = 1; depth > 0 && context.MoveNext();)
+                depth += context.Token is Operator { Character: '(' } ? 1 : context.Token is Operator { Character: ')' } ? -1 : 0;
+        }
+    }
+
+    /// <summary>
+    /// <c>USING</c> a table source with joins: its rows are the join's, and
+    /// each of its sources' columns reads under that source's own qualifier
+    /// (see <see cref="MergeSourceOrdinal"/>). A <c>MATCH</c> in the
+    /// <c>ON</c> binds against them (probed 2026-10-11 against SQL Server
+    /// 2025). Cursor on entry: <c>USING</c>; on exit, the token past the
+    /// source.
+    /// </summary>
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseJoinedMergeSource(ParserContext context)
+    {
+        var sourceList = new List<FromSource>();
+        var joinList = new List<JoinSpec>();
+        using (ParserScope.Enter(ref context.OnEndsTableSource, true))
+            _ = Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourceList, joinList);
+        var sources = sourceList.ToArray();
+        var joins = joinList.ToArray();
+        BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
+        var columnNames = new List<string>();
+        var schema = new List<SqlType>();
+        foreach (var source in sources)
+        {
+            // A pseudo-column reads through a table, not a derived table,
+            // view or CTE (probed 2026-10-11 against SQL Server 2025: Msg 207).
+            var mark = source is { BackingTable: not null, LateralPlan: null } ? JoinedSourceMark : JoinedDerivedSourceMark;
+            for (var c = 0; c < source.ColumnNames.Length; c++)
+            {
+                columnNames.Add($"{source.Qualifier}{mark}{source.ColumnNames[c]}");
+                schema.Add(source.Columns[c].Type);
+            }
+        }
+        var types = schema.ToArray();
+        List<SqlValue[]> Materialize(BatchContext batch)
+        {
+            var rows = new List<SqlValue[]>();
+            foreach (var tuple in Selection.EnumerateJoinedRows((FromSource[])sources.Clone(), joins, batch, outerResolver: null))
+            {
+                batch.PollCancellation();
+                var values = new SqlValue[types.Length];
+                var k = 0;
+                for (var s = 0; s < sources.Length; s++)
+                {
+                    for (var c = 0; c < sources[s].ColumnNames.Length; c++, k++)
+                        values[k] = tuple[s] is { } row ? Selection.DecodeOrCompute(sources[s], c, row, batch) : SqlValue.Null(types[k]);
+                }
+                rows.Add(values);
+            }
+            return rows;
+        }
+        var alias = JoinedSourceMark + string.Join(JoinedSourceMark, sources.Select(static source => source.Qualifier));
+        return (Materialize, alias, [.. columnNames], types, Masks: null, Replayable: false, Nullability: null, sources, joins);
+    }
+
+    /// <summary>
+    /// The source a <c>MATCH</c> in a <c>MERGE</c>'s <c>ON</c> binds a
+    /// one-source <c>USING</c> as: its table, or the query, view or CTE whose
+    /// columns it reads.
+    /// </summary>
+    private static FromSource MergeMatchSource(string alias, string[] columnNames, SqlType[] schema, Selection? body = null, HeapTable? table = null, View? view = null)
+    {
+        var columns = table?.Columns ?? [.. columnNames.Select((name, i) => new HeapColumn(name, schema[i], maxLength: null, nullable: true))];
+        return new FromSource(alias, columnNames, columns, table?.StoredColumns ?? columns, table?.StorageOrdinals, table?.Heap, [], lateralPlan: body, backingTable: table, backingView: view);
     }
 
     /// <summary>
@@ -509,7 +643,7 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
@@ -518,6 +652,7 @@ partial class Simulation
         string[] selectionColumnNames;
         DataMask?[]? masks = null;
         bool[]? nullability;
+        Selection? body = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             var tuples = ParseValuesTuples(context);
@@ -558,6 +693,7 @@ partial class Simulation
             {
                 selection = Selection.Parse(context, QueryScope.Nested(QueryPosition.Derived, null));
             }
+            body = selection;
 
             sourceSchema = selection.Schema;
             selectionColumnNames = selection.ColumnNames;
@@ -621,7 +757,7 @@ partial class Simulation
 
         // A query source is a nested query, which no cached plan holds (see
         // NoteDmlPlan); a VALUES list is replayable.
-        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true, nullability);
+        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true, nullability, [MergeMatchSource(alias, columnNames, sourceSchema, body)], []);
     }
 
     /// <summary>
@@ -637,7 +773,7 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
@@ -646,6 +782,8 @@ partial class Simulation
         string[] columnNames;
         DataMask?[]? masks = null;
         bool[]? nullability = null;
+        Selection? matchBody = null;
+        View? matchView = null;
 
         // CTE binding shadows table / view resolution: `WITH c AS (…) MERGE …
         // USING c ON …` references the CTE, not any same-named base object.
@@ -668,7 +806,7 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
             };
-            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false, ctePlan.ColumnNullability);
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false, ctePlan.ColumnNullability, [MergeMatchSource(cteAlias, columnNames, sourceSchema, ctePlan)], []);
         }
 
         // A linked server's table reads through the same remote query a FROM
@@ -712,6 +850,7 @@ partial class Simulation
             }
             nullability = Array.ConvertAll(viewColumns, static column => column.Nullable);
             var viewSelection = Selection.ForView(resolvedView, viewColumns);
+            (matchBody, matchView) = (viewSelection, resolvedView);
             materialize = batch =>
             {
                 var rs = viewSelection.Execute(batch);
@@ -752,7 +891,7 @@ partial class Simulation
             };
             // Another database's table answers permission checks the session's
             // standing here says nothing about.
-            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable));
+            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable), [MergeMatchSource(alias, columnNames, sourceSchema, table: sourceTable)], []);
         }
         else
         {
@@ -763,7 +902,7 @@ partial class Simulation
 
         var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
         _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability);
+        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability, [MergeMatchSource(defaultAlias, columnNames, sourceSchema, matchBody, view: matchView)], []);
     }
 
     /// <summary>Which sides of a <c>MERGE</c> a clause's column names bind against.</summary>
@@ -772,6 +911,76 @@ partial class Simulation
         Both,
         Target,
         Source,
+    }
+
+    /// <summary>
+    /// The mark a joined <c>USING</c> table source's side is named by — no
+    /// identifier can spell it — and that splits each of its columns' names
+    /// into the joined source's qualifier and the column's own name.
+    /// </summary>
+    private const char JoinedSourceMark = '\u001D';
+
+    /// <summary>
+    /// <see cref="JoinedSourceMark"/> for a column of a derived table, view or
+    /// CTE the join reads, which no pseudo-column reaches.
+    /// </summary>
+    private const char JoinedDerivedSourceMark = '\u001E';
+
+    /// <summary>
+    /// The column of a <c>MERGE</c>'s source side <paramref name="name"/>
+    /// reads, or -1: a name qualified by the source's alias — or, for a joined
+    /// table source, by one of its sources' qualifiers — and, when
+    /// <paramref name="unqualified"/>, a bare one. A graph pseudo-column
+    /// reads the column whose name it prefixes.
+    /// </summary>
+    private static int MergeSourceOrdinal(Collation collation, MultiPartName name, string sourceAlias, string[] sourceColumnNames, bool unqualified = false)
+    {
+        var joined = sourceAlias is [JoinedSourceMark, ..];
+        if (name.ImmediateQualifier is { } qualifier ? !joined && !collation.Equals(qualifier, sourceAlias) : !unqualified)
+            return -1;
+        var found = -1;
+        for (var i = 0; i < sourceColumnNames.Length; i++)
+        {
+            var column = sourceColumnNames[i];
+            var pseudo = !name.LeafDelimited;
+            if (joined)
+            {
+                var mark = column.AsSpan().IndexOfAny(JoinedSourceMark, JoinedDerivedSourceMark);
+                if (name.ImmediateQualifier is { } joinedQualifier && !collation.Equals(column[..mark], joinedQualifier))
+                    continue;
+                pseudo &= column[mark] == JoinedSourceMark;
+                column = column[(mark + 1)..];
+            }
+            if (!collation.Equals(column, name.Leaf) && !(pseudo && GraphColumns.IsPseudoColumnFor(column, name.Leaf)))
+                continue;
+            // A bare name two of a joined side's sources answer to is Msg 209.
+            if (!joined || name.ImmediateQualifier is not null)
+                return i;
+            if (found >= 0)
+                throw SimulatedSqlException.AmbiguousColumnName(name.Leaf);
+            found = i;
+        }
+        return found;
+    }
+
+    /// <summary>Whether <paramref name="name"/>'s qualifier names the <c>MERGE</c>'s source side, or one source of a joined one.</summary>
+    private static bool NamesMergeSource(Collation collation, MultiPartName name, string sourceAlias, string[] sourceColumnNames) =>
+        name.ImmediateQualifier is { } qualifier
+        && (collation.Equals(qualifier, sourceAlias) || JoinedSourceColumns(collation, qualifier, sourceAlias, sourceColumnNames).Length > 0);
+
+    /// <summary>The own names of the columns a joined <c>USING</c> source's <paramref name="qualifier"/> holds; empty for any other.</summary>
+    private static string[] JoinedSourceColumns(Collation collation, string qualifier, string sourceAlias, string[] sourceColumnNames)
+    {
+        if (sourceAlias is not [JoinedSourceMark, ..])
+            return [];
+        var columns = new List<string>();
+        foreach (var column in sourceColumnNames)
+        {
+            var mark = column.AsSpan().IndexOfAny(JoinedSourceMark, JoinedDerivedSourceMark);
+            if (collation.Equals(column[..mark], qualifier))
+                columns.Add(column[(mark + 1)..]);
+        }
+        return [.. columns];
     }
 
     /// <summary>Whether <paramref name="name"/>'s qualifier is one of the two spellings of a MERGE side.</summary>
@@ -802,7 +1011,7 @@ partial class Simulation
         // A clause reading one side sees nothing of the other: the other side's
         // qualifier is as unbound as any unknown one (Msg 4104).
         var namesTarget = scope != MergeNameScope.Source && NamesMergeSide(collation, name, targetAlias, defaultTargetName);
-        var namesSource = scope != MergeNameScope.Target && collation.Equals(name.ImmediateQualifier, sourceAlias);
+        var namesSource = scope != MergeNameScope.Target && NamesMergeSource(collation, name, sourceAlias, sourceColumnNames);
         var unqualified = name.Count == 1;
         if (scope != MergeNameScope.Source && (namesTarget || unqualified))
         {
@@ -811,19 +1020,16 @@ partial class Simulation
                 if (collation.Equals(column.Name, name.Leaf))
                 {
                     // An unqualified name both sides carry is Msg 209.
-                    if (unqualified && scope == MergeNameScope.Both && Array.Exists(sourceColumnNames, source => collation.Equals(source, name.Leaf)))
+                    if (unqualified && scope == MergeNameScope.Both && MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true) >= 0)
                         throw SimulatedSqlException.AmbiguousColumnName(name.Leaf);
                     return column.Type;
                 }
             }
         }
-        if (scope != MergeNameScope.Target && (namesSource || unqualified))
+        if (scope != MergeNameScope.Target && (namesSource || unqualified)
+            && MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true) is var sourceOrdinal and >= 0)
         {
-            for (var i = 0; i < sourceColumnNames.Length; i++)
-            {
-                if (collation.Equals(sourceColumnNames[i], name.Leaf))
-                    return sourceSchema[i];
-            }
+            return sourceSchema[sourceOrdinal];
         }
 
         // Which side failed decides the message, matching real: a name whose
@@ -881,7 +1087,7 @@ partial class Simulation
             {
                 return this.SourceOnly(name);
             }
-            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(this.collation, name, this.sourceAlias, this.sourceAlias))
+            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSource(this.collation, name, this.sourceAlias, this.sourceColumnNames))
             {
                 throw SimulatedSqlException.MergeNotMatchedConditionOutOfScope(name);
             }
@@ -1415,13 +1621,9 @@ partial class Simulation
                         return view?.Admit(i, BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED")) ?? targetColumns[i].Type;
                 }
             }
-            else if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
+            else if (MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames) is var sourceOrdinal and >= 0)
             {
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceSchema[i];
-                }
+                return sourceSchema[sourceOrdinal];
             }
             throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
@@ -1472,6 +1674,10 @@ partial class Simulation
                 else if (context.Batch.CurrentDatabase.Collation.Equals(starQualifier, sourceAlias))
                 {
                     cols = sourceColumnNames;
+                }
+                else if (JoinedSourceColumns(context.Batch.CurrentDatabase.Collation, starQualifier, sourceAlias, sourceColumnNames) is { Length: > 0 } joinedColumns)
+                {
+                    cols = joinedColumns;
                 }
                 if (cols is null)
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");

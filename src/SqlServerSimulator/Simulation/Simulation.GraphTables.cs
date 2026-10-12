@@ -168,7 +168,7 @@ partial class Simulation
             var declaration = pending[i];
             var name = declaration.Name ?? AutoEdgeConstraintName(table.Name, table.EdgeConstraints.Count + i);
             if (table.GraphKind != GraphTableKind.Edge)
-                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.EdgeConstraintOnNonEdgeTable(table.Name), state: 0);
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.EdgeConstraintOnNonEdgeTable(table.Name, state: 1), state: 0);
             var clauses = new (HeapTable From, HeapTable To)[declaration.Clauses.Count];
             for (var c = 0; c < clauses.Length; c++)
             {

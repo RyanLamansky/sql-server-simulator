@@ -248,25 +248,16 @@ partial class Simulation
                 if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
                     return derived;
             }
-            if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
-            {
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
-                }
-            }
+            if (MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames) is var sourceOrdinal and >= 0)
+                return sourceValues is null ? SqlValue.Null(sourceSchema[sourceOrdinal]) : sourceValues[sourceOrdinal];
             if (name.Count == 1)
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
                     return targetValues is null ? SqlValue.Null(targetType) : ReadTargetColumn(targetValues, targetOrdinal);
                 if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
                     return derived;
-                for (var i = 0; i < sourceColumnNames.Length; i++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
-                        return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
-                }
+                if (MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames, unqualified: true) is var unqualifiedOrdinal and >= 0)
+                    return sourceValues is null ? SqlValue.Null(sourceSchema[unqualifiedOrdinal]) : sourceValues[unqualifiedOrdinal];
             }
             throw RowLocator.IsLocatorName(name)
                 ? new NotSupportedException("TEXTPTR in a MERGE isn't modeled: its target and source rows don't carry the address a text pointer names.")
@@ -1589,7 +1580,7 @@ partial class Simulation
                     return true;
                 }
             }
-            if (collation.Equals(name.ImmediateQualifier, sourceAlias) && this.TrySourceOrdinal(name.Leaf, out ordinal, out type))
+            if (name.Count > 1 && this.TrySourceOrdinal(name, out ordinal, out type))
             {
                 isTarget = false;
                 return true;
@@ -1601,7 +1592,7 @@ partial class Simulation
                     isTarget = true;
                     return true;
                 }
-                if (this.TrySourceOrdinal(name.Leaf, out ordinal, out type))
+                if (this.TrySourceOrdinal(name, out ordinal, out type))
                 {
                     isTarget = false;
                     return true;
@@ -1614,16 +1605,13 @@ partial class Simulation
             return false;
         }
 
-        private bool TrySourceOrdinal(string columnName, out int ordinal, out SqlType type)
+        private bool TrySourceOrdinal(MultiPartName name, out int ordinal, out SqlType type)
         {
-            for (var i = 0; i < sourceColumnNames.Length; i++)
+            ordinal = MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true);
+            if (ordinal >= 0)
             {
-                if (collation.Equals(sourceColumnNames[i], columnName))
-                {
-                    ordinal = i;
-                    type = sourceSchema[i];
-                    return true;
-                }
+                type = sourceSchema[ordinal];
+                return true;
             }
             ordinal = 0;
             type = SqlType.Int32;

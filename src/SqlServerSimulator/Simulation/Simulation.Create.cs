@@ -167,6 +167,12 @@ partial class Simulation
             graphKind = ConsumeGraphTableClause(context, hasColumnList: false);
             heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
         }
+        // A CONNECTION constraint on a table that isn't an edge table stops
+        // the batch while it compiles, so nothing ahead of it runs and an
+        // untaken branch holding it refuses too (probed 2026-10-11 against
+        // SQL Server 2025).
+        if (graphKind != GraphTableKind.Edge && pendingEdgeConstraints.Count > 0)
+            throw SimulatedSqlException.EdgeConstraintOnNonEdgeTableWhileCompiling(tableName.Leaf, state: 1);
         var graphIndexPosition = -1;
         if (graphKind != GraphTableKind.None)
         {
@@ -3837,17 +3843,21 @@ partial class Simulation
             // validated in ResolveKeyConstraints after computed-column
             // materialization fills the null placeholder slot. Record the
             // ordinal; the persistence gate fires later.
-            var found = FindDeclaredColumnOrdinal(context, heapColumns, pendingComputed, keyColumn.Value, out _);
-            if (found < 0)
+            // An edge's $from_id / $to_id keys the object id and graph id pair
+            // it renders from (probed 2026-10-11 against SQL Server 2025).
+            var keyedOrdinals = GraphColumns.EndpointKeyNames(heapColumns, keyColumn.Value) is { } pair
+                ? pair.Select(name => heapColumns.FindIndex(column => column?.Name == name)).ToArray()
+                : [FindDeclaredColumnOrdinal(context, heapColumns, pendingComputed, keyColumn.Value, out _)];
+            if (keyedOrdinals[0] < 0)
                 throw SimulatedSqlException.InvalidColumnName(keyColumn.Value);
-            ordinals.Add(found);
+            ordinals.AddRange(keyedOrdinals);
 
             // Optional ASC/DESC after each column. No runtime effect (rows are
             // stored unordered), but the flag surfaces as
             // sys.index_columns.is_descending_key the way a CREATE INDEX key's
             // does — probe-confirmed for both PRIMARY KEY and UNIQUE.
             context.MoveNextRequired();
-            descending.Add(context.Token is ReservedKeyword { Keyword: Keyword.Desc });
+            descending.AddRange(Enumerable.Repeat(context.Token is ReservedKeyword { Keyword: Keyword.Desc }, keyedOrdinals.Length));
             if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
                 context.MoveNextRequired();
         } while (context.Token is Operator { Character: ',' });

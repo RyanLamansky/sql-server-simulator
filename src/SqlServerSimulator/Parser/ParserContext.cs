@@ -881,6 +881,20 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public readonly List<FromSource[]> EnclosingScopes = [];
 
     /// <summary>
+    /// The entries of <see cref="EnclosingScopes"/> that are an <c>APPLY</c>'s
+    /// left side rather than an enclosing query, which a <c>MATCH</c> on the
+    /// right side may not bind against (Msg 13920).
+    /// </summary>
+    public readonly HashSet<FromSource[]> ApplyLeftScopes = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
+    /// Set while a <c>MERGE</c>'s <c>USING</c> table source parses, where an
+    /// <c>ON</c> after a <c>CROSS JOIN</c> or <c>APPLY</c> is the statement's
+    /// own rather than a misplaced join condition.
+    /// </summary>
+    public bool OnEndsTableSource;
+
+    /// <summary>
     /// The columns a <c>CREATE TABLE</c> list has declared so far, or an
     /// <c>ALTER TABLE … ADD</c> target's, by name, while the list parses — how a computed column
     /// or a CHECK tells a CLR type column's member (<c>p.X</c>) or a spatial column's

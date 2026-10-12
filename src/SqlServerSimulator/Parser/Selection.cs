@@ -2913,7 +2913,7 @@ internal sealed partial class Selection
                     context.MatchScope = new Expressions.MatchScope();
                     fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
                         BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()), context));
-                    if (context.MatchScope.Edges.Count > 0 || context.MatchScope.ShortestPath is not null)
+                    if (context.MatchScope.Bound)
                         fromClause.Match = context.MatchScope;
                 }
             }

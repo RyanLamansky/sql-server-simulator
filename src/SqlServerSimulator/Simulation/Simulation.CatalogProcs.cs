@@ -360,7 +360,7 @@ partial class Simulation
                 foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, view.Name) && visible?.Invoke(view) != false)
-                        AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern, classic);
+                        AppendColumnRows(rows, qualifier, owner, view.Name, view.CatalogColumns(), byName, columnPattern, classic);
                 }
 
                 // The schema's catalog views list their columns too (probed
