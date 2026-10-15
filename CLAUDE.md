@@ -274,7 +274,7 @@ Each entry below is a **trigger, not a summary**: it names the area well enough 
 So an entry's silence means nothing — **grep the linked file before concluding something isn't modeled**, and read it before working in that area.
 Where an entry carries a second clause it is because that fact changes what you'd *write*, not merely what you'd find.
 
-- **Built-in scalars** — the math / date / string / bit families, HASHBYTES / CHECKSUM, FORMAT, COMPRESS, the built-in TVFs, `@@`-constants, SESSION_CONTEXT / CONTEXT_INFO, `sys.fn_*`, ODBC escapes, and `SET DATEFIRST` / `SET LANGUAGE`.
+- **Built-in scalars** — the math / date / string / bit families, HASHBYTES / CHECKSUM, the cryptographic family, FORMAT, COMPRESS, the built-in TVFs, `@@`-constants, SESSION_CONTEXT / CONTEXT_INFO, `sys.fn_*`, ODBC escapes, and `SET DATEFIRST` / `SET LANGUAGE`.
   One shared seam narrows every integer argument, so a new id / position / count parameter gets its range error for free by routing through it → [`scalars.md`](docs/claude/scalars.md).
 - **The native `REGEXP_*` family** (SQL Server 2025) — the four scalars, the `REGEXP_LIKE` predicate, the two rowset members, and the RE2 pattern dialect the simulator translates into .NET `Regex`.
   RE2 is not a `Regex` subset in either direction: some constructs are refused and others silently mean something else → [`scalars.md`](docs/claude/scalars.md#the-native-regexp_-family-sql-server-2025).

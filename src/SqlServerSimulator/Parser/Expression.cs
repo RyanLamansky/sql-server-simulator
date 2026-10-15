@@ -2092,6 +2092,7 @@ internal abstract class Expression : ExpressionNode
                 "ISDATE" => new IsDate(context),
                 "ISJSON" => new IsJson(context),
                 "ISNULL" => ParseConditional(context, static c => new IsNullExpression(c)),
+                "KEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyId),
                 "NULLIF" => ParseConditional(context, static c => new NullIf(c)),
                 "SQUARE" => new TrigFunction(context, TrigKind.Square),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
@@ -2101,6 +2102,7 @@ internal abstract class Expression : ExpressionNode
             7 => uppercaseName switch
             {
                 "CEILING" => new Ceiling(context),
+                "CERT_ID" => new CryptographicFunction(context, CryptographicFunctionKind.CertId),
                 "CONVERT" => new ConvertExpression(context, tryMode: false),
                 "DATEADD" => new DateAdd(context),
                 "DB_NAME" => new DbName(context),
@@ -2134,6 +2136,8 @@ internal abstract class Expression : ExpressionNode
                 "DATEPART" => new DatePart(context),
                 "GREATEST" => new GreatestLeast(context, isLeast: false),
                 "GROUPING" => new Grouping(context),
+                "KEY_GUID" => new CryptographicFunction(context, CryptographicFunctionKind.KeyGuid),
+                "KEY_NAME" => new CryptographicFunction(context, CryptographicFunctionKind.KeyName),
                 "PATINDEX" => new PatIndex(context),
                 "SUSER_ID" => new PrincipalIdLookup(context, PrincipalIdKind.SUserId),
                 "TRY_CAST" => new Cast(context, tryMode: true),
@@ -2171,6 +2175,7 @@ internal abstract class Expression : ExpressionNode
             },
             10 => uppercaseName switch
             {
+                "ASYMKEY_ID" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyId),
                 "COL_LENGTH" => new ColLength(context),
                 "DATALENGTH" => new DataLength(context),
                 "DECOMPRESS" => new Decompress(context),
@@ -2189,6 +2194,7 @@ internal abstract class Expression : ExpressionNode
                 "PWDENCRYPT" => new PwdEncrypt(context),
                 "ROW_NUMBER" => WindowExpression.ParseRowNumber(context),
                 "SID_BINARY" => new SidBinary(context),
+                "SIGNBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.SignByCert),
                 "STATS_DATE" => new StatsDate(context),
                 "STRING_AGG" => AggregateExpression.Parse(context, AggregateKind.StringAgg),
                 "SUSER_NAME" => new SUserName(context, isSidVariant: false),
@@ -2225,9 +2231,12 @@ internal abstract class Expression : ExpressionNode
             {
                 "APPLOCK_MODE" => new AppLockMode(context),
                 "APPLOCK_TEST" => new AppLockTest(context),
+                "CERTPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.CertProperty),
                 "CHECKSUM_AGG" => AggregateExpression.Parse(context, AggregateKind.ChecksumAgg),
                 "CONTEXT_INFO" => new ContextInfoFunction(context),
                 "DATEDIFF_BIG" => new DateDiff.Big(context),
+                "DECRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKey),
+                "ENCRYPTBYKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByKey),
                 "ERROR_NUMBER" => new ErrorNumberFunction(context),
                 "FILEGROUP_ID" => new FilegroupId(context),
                 "FILEPROPERTY" => new FileProperty(context),
@@ -2247,6 +2256,8 @@ internal abstract class Expression : ExpressionNode
                 "COLLATIONNAME" => new CollationName(context),
                 "CURSOR_STATUS" => new CursorStatusFunction(context),
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
+                "DECRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByCert),
+                "ENCRYPTBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByCert),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),
                 "FORMATMESSAGE" => new FormatMessage(context),
                 "IDENT_CURRENT" => new IdentCurrent(context),
@@ -2256,6 +2267,7 @@ internal abstract class Expression : ExpressionNode
                 "JSON_CONTAINS" => new JsonContains(context),
                 "LOGINPROPERTY" => new LoginProperty(context),
                 "REGEXP_SUBSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Substr),
+                "SIGNBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.SignByAsymKey),
                 "STRING_ESCAPE" => new StringEscape(context),
                 "TIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.TimeFromParts),
                 _ => null
@@ -2273,15 +2285,18 @@ internal abstract class Expression : ExpressionNode
                 "REGEXP_REPLACE" => RegexpScalar.ParseCall(context, RegexpScalarKind.Replace),
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 "SERVERPROPERTY" => new ServerProperty(context),
+                "SYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.SymKeyProperty),
                 "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
                 "VECTORPROPERTY" => new VectorProperty(context),
                 _ => null
             },
             15 => uppercaseName switch
             {
+                "ASYMKEYPROPERTY" => new CryptographicFunction(context, CryptographicFunctionKind.AsymKeyProperty),
                 "BINARY_CHECKSUM" => new Checksum(context, isBinary: true),
                 "COLUMNS_UPDATED" => new ColumnsUpdatedFunction(context),
                 "ERROR_PROCEDURE" => new ErrorProcedureFunction(context),
+                "IS_OBJECTSIGNED" => new CryptographicFunction(context, CryptographicFunctionKind.IsObjectSigned),
                 "NEWSEQUENTIALID" => new NewSequentialId(context),
                 "PERCENTILE_CONT" => WindowExpression.ParsePercentile(context, WindowKind.PercentileCont),
                 "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
@@ -2295,6 +2310,8 @@ internal abstract class Expression : ExpressionNode
                 "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
                 "CRYPT_GEN_RANDOM" => new CryptGenRandom(context),
                 "CURRENT_TIMEZONE" => new CurrentTimeZone(context, id: false),
+                "DECRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByAsymKey),
+                "ENCRYPTBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByAsymKey),
                 "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
@@ -2325,15 +2342,19 @@ internal abstract class Expression : ExpressionNode
                 "EDGE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: true),
                 "NODE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: false),
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
+                "VERIFYSIGNEDBYCERT" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByCert),
                 _ => null
             },
             19 => uppercaseName switch
             {
                 "CURRENT_TIMEZONE_ID" => new CurrentTimeZone(context, id: true),
+                "DECRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByPassPhrase),
+                "ENCRYPTBYPASSPHRASE" => new CryptographicFunction(context, CryptographicFunctionKind.EncryptByPassPhrase),
                 _ => null
             },
             20 => uppercaseName switch
             {
+                "DECRYPTBYKEYAUTOCERT" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoCert),
                 "PUBLISHINGSERVERNAME" => new PublishingServerName(context),
                 "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
                 "XML_SCHEMA_NAMESPACE" => new XmlSchemaNamespaceFunction(context),
@@ -2346,6 +2367,7 @@ internal abstract class Expression : ExpressionNode
                 "GRAPH_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromEdge),
                 "GRAPH_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromNode),
                 "MIN_ACTIVE_ROWVERSION" => new MinActiveRowVersion(context),
+                "VERIFYSIGNEDBYASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.VerifySignedByAsymKey),
                 _ => null
             },
             22 => uppercaseName switch
@@ -2361,6 +2383,7 @@ internal abstract class Expression : ExpressionNode
             23 => uppercaseName switch
             {
                 "DATETIMEOFFSETFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTimeOffsetFromParts),
+                "DECRYPTBYKEYAUTOASYMKEY" => new CryptographicFunction(context, CryptographicFunctionKind.DecryptByKeyAutoAsymKey),
                 "FULLTEXTCATALOGPROPERTY" => new FullTextCatalogProperty(context),
                 "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
                 _ => null

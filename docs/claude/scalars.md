@@ -957,6 +957,27 @@ Probe-confirmed against SQL Server 2025.
 
 A bare `NULL` argument is Msg 8116 naming `NULL` (`Argument data type NULL is invalid for argument 1 of CertEncoded function.`), as it is for `FORMAT`'s value, `PARSE`'s string, `HASHBYTES`' input, `DATE_BUCKET`'s date, `SUBSTRING`'s string and each `CHECKSUM` argument (probed 2026-09-24).
 
+## Cryptographic functions
+
+`Parser/Expressions/CryptographicFunctions.cs`: one descriptor-driven class for the key and certificate lookups (`KEY_ID`, `KEY_GUID`, `KEY_NAME`, `CERT_ID`, `ASYMKEY_ID`, `CERTPROPERTY`, `ASYMKEYPROPERTY`, `SYMKEYPROPERTY`), the `ENCRYPTBY…` / `DECRYPTBY…` / `SIGNBY…` / `VERIFYSIGNEDBY…` families, `IS_OBJECTSIGNED` and the passphrase pair.
+The simulator builds no key store (the key and certificate DDL raise `NotSupportedException`, see [`grammar.md`](grammar.md#statements-the-simulator-hasnt-built)), so every key-store function answers as real does for a key that doesn't exist: NULL, and 0 from `VERIFYSIGNEDBY…` unless the key id itself is NULL.
+Results are `int`, `uniqueidentifier` (`KEY_GUID`), `nvarchar(4000)` (`KEY_NAME`), `sql_variant` (the `…PROPERTY` trio) or `varbinary(8000)`.
+
+Each argument position takes one family of types, refused with **Msg 8116** while the batch compiles — an untaken branch too — and a string or binary argument past 8000 bytes is **Msg 8152** state 10 as it runs (probed 2026-10-15 against SQL Server 2025, a 22-function × 14-type matrix that the simulator matches cell for cell):
+names take a character string; key and certificate ids and the authenticator flag take `int` and nothing wider or narrower; data, cipher text, passphrases and authenticators take a character or binary string but no legacy LOB; a certificate or key password takes only a Unicode string; `ENCRYPTBYKEY`'s key takes `uniqueidentifier`; `KEY_NAME` takes `varbinary` or `uniqueidentifier`, a signature `binary` or `varbinary`, and `IS_OBJECTSIGNED`'s thumbprint `varbinary` alone.
+A bare `NULL` is Msg 8116 too, except in the flag, authenticator and password slots.
+Real's argument-count errors spell each name its own way (`Key_Id`, `AsymKey_Id`, `DecryptByKeyAutoCert`, `is_objectsigned`).
+
+**`ENCRYPTBYPASSPHRASE` / `DECRYPTBYPASSPHRASE`** are byte-compatible with real, both ways (`PassPhraseCipher`, its format recovered from real's output): each decrypts the other's cipher text.
+The passphrase is read converted to `nvarchar` — a character one as UTF-16LE whatever its type, so `'pw'` and `N'pw'` are one key and a `char(5)` keeps its trailing spaces, a binary one as UTF-16 code units with an odd length zero-padded — and a non-Unicode passphrase past 4000 characters is Msg 8152 state 4.
+Only an `add_authenticator` of exactly 1 adds one, and a NULL authenticator then marks the cipher text so that only a decryption asking for one with NULL reads it.
+Data past 7,959 bytes (7,939 with an authenticator) makes a cipher text past `varbinary(8000)`, which is NULL.
+
+### Divergences
+
+- **System certificates and keys**: real's `master` holds the `##MS_…##` certificates and the service master key, which `CERT_ID` / `KEY_ID` find there; here they are NULL in every database.
+- **A version-1 cipher text** — the triple-DES format SQL Server 2016 and earlier wrote, which real still decrypts — raises `NotSupportedException` from `DECRYPTBYPASSPHRASE`, since no reference instance can write one to check against; any blob opening `0x01000000` takes that path, where real answers NULL for one it can't read.
+
 ## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}`
 
 The tokenizer emits `{` and `}` as single-char operators (no other T-SQL meaning); `Expression.ParseOdbcEscape` consumes the escape in expression position.
