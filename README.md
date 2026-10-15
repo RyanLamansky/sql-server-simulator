@@ -123,7 +123,7 @@ SQL Server's quirks, inconsistencies, and surprises are mostly preserved.
 Error messages usually match, down to the `Msg` number, severity, and wording of common diagnostics.
 
 Entity Framework Core trusts the simulator end-to-end: LINQ queries, migrations, change tracking, and the SaveChanges pipeline all flow through unchanged.
-The test suite — more than 8,000 cases — also drives real SqlClient, real SMO (the library behind SSMS), and EF Core against the simulator as independent oracles.
+The test suite — more than 30,000 cases — also drives real SqlClient, real SMO (the library behind SSMS), and EF Core against the simulator as independent oracles.
 
 ## Capabilities
 
@@ -136,15 +136,15 @@ Coverage is broad; the compact map below is the shape of it, not the full invent
 - **DML and DDL.**
   `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`SELECT INTO` with `OUTPUT`, statement-level atomicity, and `CREATE`/`ALTER`/`DROP` across tables, views, procedures, functions, triggers, sequences, indexes (including filtered and indexed views), types, and schemas.
 - **Programmability.**
-  Stored procedures, scalar UDFs and TVFs, DML + DDL triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`.
+  Stored procedures, scalar UDFs and TVFs, DML, DDL and logon triggers, dynamic SQL, table-valued parameters, control flow with `TRY`/`CATCH`/`THROW`, and CLR assemblies (set `EnableClr` on the `Simulation`).
 - **Concurrency.**
   The full lock-mode matrix with escalation and timeouts, `SNAPSHOT` and `READ_COMMITTED_SNAPSHOT` isolation with a versioned store, deadlock detection, application locks, and nested transactions with savepoints.
 - **Constraints.**
   `PRIMARY KEY`/`UNIQUE`/`CHECK`/`NOT NULL` and `FOREIGN KEY` with all four referential actions on both `ON DELETE` and `ON UPDATE`.
 - **System surfaces.**
   A `sys.*` / `INFORMATION_SCHEMA.*` catalog broad enough to satisfy SSMS, SMO, and DacFx; temporal tables; `SERVERPROPERTY` and friends as true `sql_variant`.
-- **JSON, XML, spatial, full-text DDL.**
-  The `JSON_*`/`OPENJSON` family, XML methods and schema collections, the spatial method surface, and full-text catalog/index DDL.
+- **JSON, XML, spatial, full-text, vectors.**
+  The `JSON_*`/`OPENJSON` family and the native `json` type, XML methods and schema collections, the spatial method surface, full-text search with `CONTAINS`/`FREETEXT`, and SQL Server 2025's `vector` type and `REGEXP_*` functions.
 - **Security.**
   Logins, users, and database + server roles (fixed and custom), with authenticated logins mapped to their database user the way SQL Server does.
   `GRANT`/`DENY`/`REVOKE` are enforced for restricted principals at column, object, schema, and database scope — alongside `EXECUTE AS` impersonation, module `WITH EXECUTE AS`, ownership chaining, catalog metadata filtered to a principal's visibility, and `VIEW SERVER STATE`-gated DMVs.
@@ -156,16 +156,17 @@ Deeper per-feature notes live under [`docs/claude/`](docs/claude/).
 ## Not modeled
 
 SQL Server's surface is enormous, and while coverage is broad it is not complete: you may encounter a feature that hasn't been modeled.
-In general, when that happens the simulator raises `NotSupportedException` naming the missing feature, so gaps fail loudly rather than returning wrong results.
+When that happens the simulator raises `NotSupportedException` naming the missing feature, so gaps fail loudly rather than returning wrong results.
 Write a bug report if you're blocked.
-A few examples:
+The larger areas not built yet:
 
-- Cross-*server* DML - writes through a 4-part linked-server name.
-  Four-part reads work, as does cross-database DML inside one `Simulation`; open a connection on the target `Simulation` to write to it.
-- CLR stored procedures, table-valued functions, aggregates and UDTs; logon triggers; natively-compiled procedures beyond parser fidelity.
-  CLR *scalar* functions work: set `EnableClr` on the `Simulation`, then `CREATE ASSEMBLY` and `CREATE FUNCTION ... AS EXTERNAL NAME`.
-  Enabling it runs the assembly's code inside your process — .NET has no Code Access Security, so `PERMISSION_SET = SAFE` cannot be enforced.
-- A few `ALTER TABLE` shapes: `SWITCH PARTITION`, and `ALTER COLUMN ... ADD | DROP PERSISTED | MASKED`.
+- Encryption: database master keys, certificates, symmetric and asymmetric keys, Always Encrypted and transparent data encryption.
+- Server infrastructure: Service Broker, Extended Events, event notifications, endpoints, SQL Server Audit, Resource Governor and availability groups.
+- External data and storage: PolyBase external tables and data sources, ledger tables, database snapshots and FILESTREAM.
+- Execution plans: `SET SHOWPLAN_*` and `SET STATISTICS XML` are accepted but return no plans.
+
+Running a `CREATE ASSEMBLY` routine executes the assembly's code inside your process.
+The simulator verifies a `SAFE` assembly statically, but .NET has no Code Access Security, so that check is not a sandbox: only register assemblies you trust.
 
 ## Limitations
 
