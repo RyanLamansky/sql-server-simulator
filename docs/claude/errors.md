@@ -144,6 +144,10 @@ A schema-bound body's Msg 1054 (a select-list star, `GROUP BY ALL`) is a grammar
 
 A `SET` to an undeclared variable is Msg 137 at **state 1**, raised once the statement has parsed, so a syntax error or an undeclared variable (state 2, as every read is) on its right-hand side comes first.
 
+**A string or block comment the batch ends inside** (Msg 105 / 113) ends the parse where it opens, as if the text ended there (probed 2026-10-15 against SQL Server 2025): a statement complete before it reports the lexer's error alone (`select 1 'x`, `select 1 /*x`), while one that needs more — an `AS` awaiting its alias, an operator its operand, a derived table its `)`, a `BEGIN` its `END` — adds the Msg 102 its parser raises there, near the string's body or, for a comment, near the last token before it (`select 1 + /*x` is near `'+'`).
+A recovering parser reports the lexer's error after its own (`select 1 in ('x` is Msg 156 then Msg 105).
+The parser reads it as `Parser.Tokens.UnterminatedToken`, which is a statement boundary and nothing else, so a parse site that can end there does and one that can't raises on it.
+
 ## Bind errors in a deferred statement are catchable here and aren't on real
 
 Real compiles a whole batch before running any of it, so an error the binder raises kills the batch outright — a `TRY` / `CATCH` wrapping the failing statement never reaches the CATCH.
@@ -186,6 +190,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 
 - **Syntax-error recovery where the simulator's parser restarts differently from real's grammar** (probed 2026-09-28 against SQL Server 2025): `begin try end try begin catch select 1 end catch` on one line adds a Msg 102 near the last `catch` on real and nothing here, and the Msg 178 a misplaced `CREATE PROCEDURE`'s valued `RETURN` raises names the procedure on real and nothing here.
   Past a `CREATE FUNCTION`'s Msg 181 (an `OUTPUT` parameter), a `WITH SCHEMABINDING` after the return type is real's Msg 319 and Msg 156 near the body's `BEGIN` here (probed 2026-10-06).
+- **An undeclared variable read just before an unterminated string** (`select @a 'x`) reports Msg 137 then Msg 105 here, Msg 105 then Msg 137 on real (probed 2026-10-15 against SQL Server 2025), whose binder names the variable only once its select item ends.
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
 
 Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).

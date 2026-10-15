@@ -408,6 +408,12 @@ partial class Simulation
                 var resume = reported && !readAsCte && next.Number != 137 ? at.StartIndex : at.EndIndex;
                 restart = resume > restart ? resume : at.EndIndex;
             }
+            // A string or comment the text ends inside ends the parse.
+            catch (SimulatedSqlException next) when (next.Number is 105 or 113)
+            {
+                errors.Add(next);
+                break;
+            }
             catch (SimulatedSqlException next) when (next.Number == 1028)
             {
                 // GROUP BY ALL's grouping-set refusal is reported after the
@@ -434,15 +440,20 @@ partial class Simulation
     /// <summary>
     /// The offset of the first token from <paramref name="from"/> on that can
     /// begin a statement — a keyword, <c>(</c>, <c>;</c> or <c>THROW</c> —
-    /// the recovering parser discarding names and operators on the way.
+    /// the recovering parser discarding names and operators on the way — or of
+    /// a string or comment the text ends inside, whose lexer error real's
+    /// recovering parser still reports (probed 2026-10-15 against SQL Server
+    /// 2025: <c>select 1 in ('x</c> is Msg 156, then Msg 105).
     /// </summary>
     private static int NextStatementStart(string text, int from)
     {
         var index = from;
+        var tokenStart = index;
         try
         {
             while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
             {
+                tokenStart = index;
                 switch (token)
                 {
                     case Parser.Tokens.Whitespace or Parser.Tokens.Comment:
@@ -453,6 +464,12 @@ partial class Simulation
                         return token.StartIndex;
                 }
             }
+        }
+        catch (SimulatedSqlException refused) when (refused.Number is 105 or 113)
+        {
+            while (text[tokenStart] is ' ' or '\r' or '\n' or '\t')
+                tokenStart++;
+            return tokenStart;
         }
         catch (SimulatedSqlException)
         {

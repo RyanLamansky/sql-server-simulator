@@ -1311,12 +1311,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
             return false;
         }
 
+        var scanFrom = index;
         try
         {
             while (Tokenizer.NextTokenPastBlanks(commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
             {
                 if (token is Whitespace or Comment)
+                {
+                    scanFrom = index;
                     continue;
+                }
 
 #if DEBUG
                 tokens.Add(token);
@@ -1329,7 +1333,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
                 return true;
             }
         }
-        catch (SimulatedSqlException)
+        catch (SimulatedSqlException refused)
         {
             // The tokenizer refused a character (Msg 102 / 103 / 105 / 113).
             // It leaves `index` past the text it was mid-way through, so a
@@ -1341,7 +1345,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
             // Msg 102 forever after. A text the tokenizer won't read is a text
             // with no sequence to share.
             this.memoCollector = null;
-            throw;
+            // A string or comment the text ends inside is read as a token the
+            // parse ends at, which settles whether the statement it cut off
+            // adds a syntax error to the lexer's.
+            if (refused.Number is not (105 or 113))
+                throw;
+            while (commandText[scanFrom] is ' ' or '\r' or '\n' or '\t')
+                scanFrom++;
+            if (this.Token is { } previous)
+                this.PreviousTokenEnd = previous.EndIndex;
+            this.Token = new UnterminatedToken(commandText, scanFrom, this.Token);
+            index = commandText.Length;
+            return true;
         }
 
         // End of text reached with no tokenization error: the collected

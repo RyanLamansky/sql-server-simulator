@@ -2143,7 +2143,7 @@ internal sealed partial class Selection
             // aliased element (probe-confirmed) — or a `(` outside
             // parentheses, which opens the next statement, a parenthesized
             // query, as it does after an unaliased element below.
-            if (!elementExpected && context.Token is Operator { Character: '(' } && !scope.Parenthesized)
+            if (!elementExpected && context.Token is Operator { Character: '(' } or UnterminatedToken && !scope.Parenthesized)
                 goto ExitWhileTokenLoop;
             if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context) && context.Token is not UnquotedString { IsLabelDeclaration: true })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2360,6 +2360,11 @@ internal sealed partial class Selection
             switch (context.Token)
             {
                 case null:
+                    goto ExitWhileTokenLoop;
+
+                // A string or comment the batch ends inside ends the statement
+                // as the end of the text would; it's no alias.
+                case UnterminatedToken when !scope.Parenthesized:
                     goto ExitWhileTokenLoop;
 
                 // End of statement in a multi-statement batch. Leave the ';'

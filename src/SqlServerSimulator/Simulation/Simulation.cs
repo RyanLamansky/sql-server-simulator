@@ -3760,6 +3760,13 @@ public sealed partial class Simulation
                 RefuseUnbuiltStatement(context, verb: null);
                 throw SimulatedSqlException.SyntaxErrorNear(strayEnd);
 
+            // The statements before a string or comment the batch ends inside
+            // parsed whole, so the lexer's error is the report — unless a
+            // BEGIN still waits for its END (probed 2026-10-15 against SQL
+            // Server 2025: `begin select 1 'x` adds the Msg 102).
+            case UnterminatedToken unterminated:
+                throw batch.BlockDepth > 0 ? unterminated.WithSyntaxError : unterminated.Alone;
+
             default:
                 RefuseUnbuiltStatement(context, verb: null);
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -4380,7 +4387,7 @@ public sealed partial class Simulation
     /// mirrors that by treating the full keyword set uniformly as a boundary.
     /// </summary>
     internal static bool IsStatementBoundary(Token? token) =>
-        token is null
+        token is null or UnterminatedToken
         or Operator { Character: ';' }
         or ReservedKeyword
         {

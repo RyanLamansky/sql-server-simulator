@@ -16,6 +16,16 @@ partial class SimulatedSqlException
         WithLine(new("Missing end comment mark '*/'.", 113, 15, 1), lineNumber);
 
     /// <summary>
+    /// <see cref="MissingEndCommentMark(int)"/> where the statement the
+    /// comment cut off needed more, followed on the same line by the Msg 102
+    /// real's parser raises at the end of its input, naming
+    /// <paramref name="previous"/>, the last token it read (probed 2026-10-15
+    /// against SQL Server 2025: <c>select 1 + /*x</c> is near <c>'+'</c>).
+    /// </summary>
+    internal static SimulatedSqlException MissingEndCommentMark(int lineNumber, Token? previous) =>
+        Aggregate([MissingEndCommentMark(lineNumber), WithLine(SyntaxErrorNear(previous), lineNumber)]);
+
+    /// <summary>
     /// Stamps <paramref name="lineNumber"/> onto <paramref name="exception"/>'s
     /// first error so a tokenizer-thrown mid-token failure (Msg 105 / 113)
     /// carries the tokenizer's own position rather than the last-consumed
@@ -86,13 +96,22 @@ partial class SimulatedSqlException
     /// same body, for <c>'</c>, <c>N'</c>, <c>"</c> and <c>[</c> alike
     /// (probe-confirmed 2026-09-24). A long body is cut, the Msg 105 to the
     /// 2,047 characters any raised message keeps and the Msg 102's to 129, as
-    /// every literal named there is (probed 2026-10-02).
+    /// every literal named there is (probed 2026-10-02). The Msg 102 is the
+    /// parser's, which a statement complete before the literal doesn't raise
+    /// (<see cref="UnclosedQuotationMark"/>; see <see cref="UnterminatedToken"/>).
     /// </summary>
     internal static SimulatedSqlException UnclosedStringLiteral(string body, int lineNumber) =>
         Aggregate([
-            WithLine(new(Simulation.CapRaisedMessage($"Unclosed quotation mark after the character string '{body}'."), 105, 15, 1), lineNumber),
+            UnclosedQuotationMark(body, lineNumber),
             WithLine(new($"Incorrect syntax near '{(body.Length > 129 ? body[..129] : body)}'.", 102, 15, 1), lineNumber),
         ]);
+
+    /// <summary>
+    /// <see cref="UnclosedStringLiteral"/>'s Msg 105 alone, the report of a
+    /// batch whose statements parsed whole before the literal opened.
+    /// </summary>
+    internal static SimulatedSqlException UnclosedQuotationMark(string body, int lineNumber) =>
+        WithLine(new(Simulation.CapRaisedMessage($"Unclosed quotation mark after the character string '{body}'."), 105, 15, 1), lineNumber);
 
     /// <summary>
     /// Mimics SQL Server error 339: an <c>INSERT</c> supplied the <c>DEFAULT</c>
@@ -190,7 +209,9 @@ partial class SimulatedSqlException
     /// <c>near 'q'</c>, not <c>near ''q''</c>. A null token — end of input —
     /// leaves the slot empty, matching real's <c>near ''.</c>
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNear(Token? token, byte state = 1) => new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, state);
+    internal static SimulatedSqlException SyntaxErrorNear(Token? token, byte state = 1) => token is UnterminatedToken unterminated
+        ? unterminated.WithSyntaxError
+        : new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 1067: a <c>SET SHOWPLAN_*</c> switch beside

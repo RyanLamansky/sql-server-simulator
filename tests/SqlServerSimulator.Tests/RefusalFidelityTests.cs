@@ -360,6 +360,60 @@ public sealed class RefusalFidelityTests
         AreEqual($"Incorrect syntax near '{body}'.", ex.Errors[1].Message);
     }
 
+    /// <summary>
+    /// A string or comment the batch ends inside ends the parse: a statement
+    /// complete before it reports the lexer's error alone, one that needed
+    /// more adds the Msg 102 its parser raises there — near the string, or
+    /// near the last token before a comment — and a recovering parser still
+    /// reports the lexer's error after its own (probed 2026-10-15 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1\n'x", "105")]
+    [DataRow("select 1 'x", "105")]
+    [DataRow("select 1 x 'y", "105")]
+    [DataRow("select 1 'x' 'y", "105")]
+    [DataRow("select 1 x, 2\n'y", "105")]
+    [DataRow("select 1 [x", "105")]
+    [DataRow("select 1 N'x", "105")]
+    [DataRow("select 1 from sys.objects o 'x", "105")]
+    [DataRow("select 1 where 1 = 1 'x", "105")]
+    [DataRow("select 1 union all select 2 'x", "105")]
+    [DataRow("select nosuch 'x", "105")]
+    [DataRow("select 1;'x", "105")]
+    [DataRow("'x", "105")]
+    [DataRow("declare @a int 'x", "105")]
+    [DataRow("exec sp_who 'x", "105")]
+    [DataRow("if 1 = 1 select 1 'x", "105")]
+    [DataRow("create procedure p as select 1 'x", "105")]
+    [DataRow("select 1 /*x", "113")]
+    [DataRow("/*x", "113")]
+    [DataRow("select 1 as 'x", "105:x,102:x")]
+    [DataRow("select a = 'x", "105:x,102:x")]
+    [DataRow("select 1, 'x", "105:x,102:x")]
+    [DataRow("select 1 + 'x", "105:x,102:x")]
+    [DataRow("select * from (select 1\n'x", "105:x,102:x")]
+    [DataRow("select 1 x, [y", "105:y,102:y")]
+    [DataRow("begin select 1 'x", "105:x,102:x")]
+    [DataRow("create procedure p as begin select 1 'x", "105:x,102:x")]
+    [DataRow("if 1 = 1 select 1 else 'x", "105:x,102:x")]
+    [DataRow("select /*x", "113,102:select")]
+    [DataRow("select 1 + /*x", "113,102:+")]
+    [DataRow("select 1 in ('x", "156,105")]
+    [DataRow("select 1 + @a + 'x", "137,105")]
+    public void UnterminatedTail_AddsMsg102OnlyWhereTheStatementNeedsMore(string sql, string expected)
+    {
+        // Each error's number, with the text it quotes once any expected entry names one.
+        var quoted = expected.Contains(':', StringComparison.Ordinal);
+        var ex = new Simulation().AssertSqlError(sql, int.Parse(expected[..3], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(expected, string.Join(",", ex.Errors.Select(e => e.Number switch
+        {
+            102 when quoted => $"102:{e.Message["Incorrect syntax near '".Length..^2]}",
+            105 when quoted => $"105:{e.Message["Unclosed quotation mark after the character string '".Length..^2]}",
+            _ => e.Number.ToInvariantString(),
+        })));
+    }
+
     // ---- CHECK constraints bind while compiling ----
 
     [TestMethod]
