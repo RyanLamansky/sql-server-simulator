@@ -865,6 +865,7 @@ A replayed SELECT batch remembers its plan on its parse-cache entry (`BatchConte
 - **What makes a statement recompile is coarser for batches**: a batch's statements keep counting across schema changes where real's recompile and start over under a new `plan_generation_num`; a module's start over when its body's plan doesn't stand, all its statements together, where real's recompile one by one, each taking the next generation (probed 2026-10-15: two statements reached generations 2 and 3).
 - **A deferred compile doesn't decline a batch**: real kept no plan for `create table x …; select * from x` or `…; insert x select …` but kept `…; insert x values (…)` and `select … into x …; select * from x` (probed 2026-10-15); the simulator keeps all four.
 - **A plan whose batch never reaches a statement with a plan isn't cached**: real compiles the whole batch first, so `if 1 = 0 select * from t` has a plan whose statement never ran.
+  For the same reason a batch reading the plan-cache DMVs finds its own plan listed on real, its statements' rows counted so far, and doesn't here (probed 2026-10-15).
 - **Views and inlined functions get no `Parse Tree` entry** (`objtype` `View`, or `Proc` for an inlined scalar function), nor does an extended or CLR procedure get a plan.
 - **`dm_exec_query_optimizer_info`** counts the statements the plans hold — `optimizations`, `trivial plan` and a full search's first stage by the statement's shape, the write kinds — with 0 for the elapsed time and final cost; the other counters read 0 occurrences.
 
