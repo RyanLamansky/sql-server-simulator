@@ -52,10 +52,13 @@ The rule was inferred from real's output, not from documentation: each attribute
 `SIGNBYCERT` writes the eight bytes `0x0100070204000000` and a deterministic 384-byte signature.
 The certificate functions answer NULL rather than raise where `OPEN SYMMETRIC KEY` raises: a password-protected private key without its password, a master-key-protected one with a password, or a master key the session can't use.
 
-## Permissions
+## Permissions and ownership
 
-A principal sees a key or certificate — its catalog row, its name through `KEY_ID` / `CERT_ID`, opening it — as its owner, with full metadata visibility, or holding any permission on it through the permission graph (`PermissionChecker.CanViewKeyMetadata`).
+A principal sees a key or certificate — its catalog row, its name through `KEY_ID` / `CERT_ID`, opening it — as its owner, with full metadata visibility, or holding any permission on it (`PermissionChecker.CanViewKeyMetadata`), granted on the `SYMMETRIC KEY::` / `CERTIFICATE::` classes or reaching them through the permission graph ([`permissions.md`](permissions.md) has the class rules).
 Creating a certificate takes `CREATE CERTIFICATE` and a symmetric key `ALTER ANY SYMMETRIC KEY` (Msg 15247 without), the master key's DDL `CONTROL` on the database, and a principal that can't see a key gets the same Msg 15151 as for a key that doesn't exist.
+
+`ALTER AUTHORIZATION` moves a key to a user or a role but a certificate to a user only (Msg 15345), and drops the permissions granted on it, as a drop does.
+Each key statement raises its DDL event — `CREATE_MASTER_KEY` through `DROP_SYMMETRIC_KEY`, the master key's with no object or owner — whose `CommandText` runs through the statement's `;` and shows every password as `'******'`, while a `KEY_SOURCE` or `IDENTITY_VALUE` shows as written.
 
 ## Divergences
 
@@ -69,7 +72,6 @@ Creating a certificate takes `CREATE CERTIFICATE` and a symmetric key `ALTER ANY
 - Asymmetric keys (`CREATE ASYMMETRIC KEY` raises `NotSupportedException`; an `ENCRYPTION BY` / `DECRYPTION BY ASYMMETRIC KEY` is Msg 15151, since none can exist), and so the `…ASYMKEY…` functions answer as for a missing key.
 - `ALTER CERTIFICATE`, `CREATE CERTIFICATE … FROM` a file, binary or assembly, `BACKUP CERTIFICATE`, `BACKUP` / `RESTORE MASTER KEY`, and the service master key's statements.
 - Temporary symmetric keys (`#name`) and keys from an extensible key management provider.
-- `GRANT` / `DENY` / `REVOKE` on the `SYMMETRIC KEY::` and `CERTIFICATE::` classes and `ALTER AUTHORIZATION` of a key or certificate — owner and database-level permissions are all that reach one.
 - Module signing (`ADD SIGNATURE`, `IS_OBJECTSIGNED`, `sys.crypt_properties`), and users and logins mapped to a certificate.
 - `BACKUP DATABASE` of a database holding keys raises `NotSupportedException` ([`backup-restore.md`](backup-restore.md)).
 - Real's `master` holds the `##MS_…##` system certificates, which `CERT_ID` finds there; here `master` starts with none.

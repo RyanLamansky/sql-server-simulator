@@ -59,11 +59,11 @@ namespace SqlServerSimulator.Parser;
 /// <c>Grantor</c> … <c>CascadeOption</c>, an extended-property or binding
 /// event's property and <c>Parameters</c> list.
 /// </param>
-/// <param name="maskStart">
-/// Where a password literal starts in the batch text, which the event's
-/// <c>CommandText</c> reports as <c>'******'</c>; -1 when there is none.
+/// <param name="masks">
+/// Where each password literal starts and ends in the batch text, in text
+/// order, which the event's <c>CommandText</c> reports as <c>'******'</c>;
+/// null when there is none.
 /// </param>
-/// <param name="maskEnd">The end of that literal.</param>
 internal sealed class DdlEventInfo(
     string eventType,
     string? schemaName,
@@ -75,8 +75,7 @@ internal sealed class DdlEventInfo(
     string? ownerName = null,
     string? serverLevelDatabase = null,
     string? trailingElements = null,
-    int maskStart = -1,
-    int maskEnd = -1)
+    (int Start, int End)[]? masks = null)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
@@ -88,6 +87,5 @@ internal sealed class DdlEventInfo(
     public readonly string? OwnerName = ownerName;
     public readonly string? ServerLevelDatabase = serverLevelDatabase;
     public readonly string? TrailingElements = trailingElements;
-    public readonly int MaskStart = maskStart;
-    public readonly int MaskEnd = maskEnd;
+    public readonly (int Start, int End)[]? Masks = masks;
 }

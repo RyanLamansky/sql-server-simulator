@@ -64,6 +64,9 @@ partial class Simulation
             case "ASSEMBLY":
                 ChangeAssemblyOwner(context, entityName.Leaf, ownerName);
                 break;
+            case "CERTIFICATE":
+                ChangeKeyOwner(context, entityName.Leaf, ownerName, certificate: true);
+                break;
             case "DATABASE":
                 ChangeDatabaseOwner(context, entityName.Leaf, ownerName);
                 break;
@@ -78,6 +81,9 @@ partial class Simulation
                 break;
             case "SCHEMA":
                 ChangeSchemaOwner(context, entityName.Leaf, ownerName);
+                break;
+            case "SYMMETRIC KEY":
+                ChangeKeyOwner(context, entityName.Leaf, ownerName, certificate: false);
                 break;
             case "TYPE":
                 ChangeTypeOwner(context, entityName, ownerName);
@@ -374,6 +380,52 @@ partial class Simulation
         if (previous != newOwner)
             DropSecurablePermissions(context, database, PermissionChecker.ClassFulltextCatalog, catalog.Id);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
+    }
+
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON SYMMETRIC KEY::</c> / <c>CERTIFICATE::</c>:
+    /// one the caller can't take is Msg 15151 as a missing one is, and a
+    /// certificate can't go to a role (Msg 15345) where a key can (probed
+    /// 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    private static void ChangeKeyOwner(ParserContext context, string name, string? ownerName, bool certificate)
+    {
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        var kind = certificate ? "certificate" : "symmetric key";
+        var securableClass = certificate ? PermissionChecker.ClassCertificate : PermissionChecker.ClassSymmetricKey;
+        lock (store.Gate)
+        {
+            int id;
+            int previous;
+            if (certificate)
+            {
+                if (!store.Certificates.TryGetValue(name, out var existing))
+                    throw SimulatedSqlException.CannotFindKey("find", kind, name);
+                (id, previous) = (existing.Id, existing.PrincipalId);
+            }
+            else
+            {
+                if (!store.SymmetricKeys.TryGetValue(name, out var existing))
+                    throw SimulatedSqlException.CannotFindKey("find", kind, name);
+                (id, previous) = (existing.Id, existing.PrincipalId);
+            }
+            RejectUnknownNewOwner(database, ownerName);
+            if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, securableClass, id, 0))
+                throw SimulatedSqlException.CannotFindKey("find", kind, name);
+            database.RejectWriteWhenReadOnly();
+            var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
+            if (certificate && database.Principals.TryGetValue(ownerName!, out var owner) && owner.TypeCode == "R")
+                throw SimulatedSqlException.CertificateOwnedByRole();
+            RecordKeyStoreUndo(context, store);
+            if (certificate)
+                store.Certificates[name] = store.Certificates[name].WithOwner(newOwner);
+            else
+                store.SymmetricKeys[name] = store.SymmetricKeys[name].WithOwner(newOwner);
+            if (previous != newOwner)
+                DropSecurablePermissions(context, database, securableClass, id);
+        }
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, name, certificate ? "CERTIFICATE" : "SYMMETRIC KEY", ownerName: ownerName);
     }
 
     private static void ChangeAssemblyOwner(ParserContext context, string assemblyName, string? ownerName)

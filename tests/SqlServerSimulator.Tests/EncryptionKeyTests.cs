@@ -362,6 +362,114 @@ public sealed class EncryptionKeyTests
     }
 
     [TestMethod]
+    public void Grants_OnTheKeyClasses()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create symmetric key k1 with algorithm = aes_256 encryption by certificate c1;
+            create user u1 without login;
+            create user u2 without login;
+            grant view definition on symmetric key::k1 to u1;
+            grant control on certificate::c1 to u1;
+            grant alter on symmetric key :: k1 to u2 with grant option;
+            deny references on symmetric key::k1 to u2;
+            grant take ownership on certificate::c1 to u2;
+            """);
+        AreEqual("24:SYMMETRIC_KEYS:u1:VIEW DEFINITION:G|24:SYMMETRIC_KEYS:u2:ALTER:W|24:SYMMETRIC_KEYS:u2:REFERENCES:D|25:CERTIFICATE:u1:CONTROL:G|25:CERTIFICATE:u2:TAKE OWNERSHIP:G", simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', class, class_desc, user_name(grantee_principal_id), permission_name, state) collate database_default, '|')
+                within group (order by class, user_name(grantee_principal_id), permission_name)
+            from sys.database_permissions where class in (24, 25)
+            """));
+        AreEqual("256|256|1|1|1|VIEW DEFINITION|5", simulation.ExecuteScalar("""
+            execute as user = 'u1';
+            open symmetric key k1 decryption by certificate c1;
+            select concat_ws('|', key_id('k1'), cert_id('c1'), (select count(*) from sys.openkeys), has_perms_by_name('k1', 'SYMMETRIC KEY', 'VIEW DEFINITION'),
+                has_perms_by_name('c1', 'CERTIFICATE', 'CONTROL'), (select string_agg(permission_name, ',') from fn_my_permissions('k1', 'SYMMETRIC KEY')),
+                (select count(*) from fn_my_permissions('c1', 'CERTIFICATE')))
+            """));
+        _ = simulation.ExecuteNonQuery("drop symmetric key k1");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from sys.database_permissions where class in (24, 25)"));
+    }
+
+    [TestMethod]
+    [DataRow("grant select on symmetric key::k1 to u1", 102, "Incorrect syntax near 'SELECT'.")]
+    [DataRow("grant execute on certificate::c1 to u1", 102, "Incorrect syntax near 'EXECUTE'.")]
+    [DataRow("grant view definition on symmetric key::nope to u1", 15151, "Cannot find the symmetric key 'nope', because it does not exist or you do not have permission.")]
+    [DataRow("grant view definition on certificate::nope to u1", 15151, "Cannot find the certificate 'nope', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on certificate::c1 to r1", 15345, "An entity of type certificate cannot be owned by a role, a group, or by principals mapped to certificates or asymmetric keys.")]
+    [DataRow("alter authorization on symmetric key::nope to u1", 15151, "Cannot find the symmetric key 'nope', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on symmetric key::k1 to schema owner", 15151, "Cannot find the user 'SCHEMA OWNER', because it does not exist or you do not have permission.")]
+    public void KeyClassRefusals(string statement, int number, string message)
+        => new Simulation().AssertSqlError(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create symmetric key k1 with algorithm = aes_256 encryption by certificate c1;
+            create user u1 without login;
+            create role r1;
+            """ + statement, number, message);
+
+    [TestMethod]
+    public void HasPermsByName_OnKeys()
+        => AreEqual("0|1|NULL|NULL|0|0|0|NULL", new Simulation().ExecuteScalar(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create symmetric key k1 with algorithm = aes_256 encryption by certificate c1;
+            create user u1 without login;
+            declare @dbo varchar(50) = concat_ws('|', has_perms_by_name('nope', 'SYMMETRIC KEY', 'CONTROL'), has_perms_by_name('k1', 'SYMMETRIC KEY', 'CONTROL'),
+                isnull(cast(has_perms_by_name('k1', 'SYMMETRIC KEY', 'SELECT') as varchar), 'NULL'), isnull(cast(has_perms_by_name(null, 'CERTIFICATE', 'CONTROL') as varchar), 'NULL'));
+            execute as user = 'u1';
+            select concat_ws('|', @dbo, has_perms_by_name('nope', 'SYMMETRIC KEY', 'CONTROL'), has_perms_by_name('k1', 'SYMMETRIC KEY', 'CONTROL'),
+                has_perms_by_name('k1', 'SYMMETRIC KEY', 'ANY'), isnull(cast(has_perms_by_name(null, 'CERTIFICATE', 'CONTROL') as varchar), 'NULL'))
+            """));
+
+    [TestMethod]
+    public void AlterAuthorization_MovesTheKeyAndDropsItsPermissions()
+        => AreEqual("r1|u1|0", new Simulation().ExecuteScalar(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create symmetric key k1 with algorithm = aes_256 encryption by certificate c1;
+            create user u1 without login;
+            create role r1;
+            grant view definition on symmetric key::k1 to u1;
+            grant view definition on certificate::c1 to r1;
+            alter authorization on symmetric key::k1 to r1;
+            alter authorization on certificate::c1 to u1;
+            select concat_ws('|', (select user_name(principal_id) from sys.symmetric_keys where name = 'k1'), (select user_name(principal_id) from sys.certificates),
+                (select count(*) from sys.database_permissions where class in (24, 25)))
+            """));
+
+    [TestMethod]
+    public void DdlTriggers_SeeKeyStatementsWithTheirPasswordsMasked()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table ev (x xml)",
+            "create trigger tr on database for ddl_database_level_events as insert ev values (eventdata())",
+            MasterKey + """
+            create certificate c1 encryption by password = 'Cp!12345678' with subject = 'x';
+            create symmetric key k1 with algorithm = aes_256, key_source = 'secret source' encryption by certificate c1, password = 'Pw!12345678', password = 'Pw2!12345678';
+            open symmetric key k1 decryption by password = 'Pw!12345678';
+            alter symmetric key k1 add encryption by password = 'Zz!12345678';
+            close symmetric key k1;
+            drop symmetric key k1;
+            drop certificate c1;
+            drop master key;
+            """);
+        AreEqual("""
+            CREATE_MASTER_KEY::MASTER KEY::create master key encryption by password = '******';
+            CREATE_CERTIFICATE:c1:CERTIFICATE:dbo:create certificate c1 encryption by password = '******' with subject = 'x';
+            CREATE_SYMMETRIC_KEY:k1:SYMMETRIC KEY:dbo:create symmetric key k1 with algorithm = aes_256, key_source = 'secret source' encryption by certificate c1, password = '******', password = '******';
+            ALTER_SYMMETRIC_KEY:k1:SYMMETRIC KEY:dbo:alter symmetric key k1 add encryption by password = '******';
+            DROP_SYMMETRIC_KEY:k1:SYMMETRIC KEY:dbo:drop symmetric key k1;
+            DROP_CERTIFICATE:c1:CERTIFICATE:dbo:drop certificate c1;
+            DROP_MASTER_KEY::MASTER KEY::drop master key;
+            """, simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', x.value('(/EVENT_INSTANCE/EventType)[1]', 'sysname'), isnull(x.value('(/EVENT_INSTANCE/ObjectName)[1]', 'sysname'), ''),
+                x.value('(/EVENT_INSTANCE/ObjectType)[1]', 'sysname'), isnull(x.value('(/EVENT_INSTANCE/OwnerName)[1]', 'sysname'), ''),
+                trim(char(13) + char(10) + ' ' from x.value('(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]', 'nvarchar(300)'))), char(10))
+            from ev
+            """));
+    }
+
+    [TestMethod]
     public void OpenAndCloseStillReachCursors()
         => AreEqual(1, new Simulation().ExecuteScalar("""
             declare symmetric cursor for select 1;

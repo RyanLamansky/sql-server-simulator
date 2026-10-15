@@ -439,6 +439,14 @@ internal sealed class HasPermsByName : Expression
                 classDescription = "SCHEMA";
                 majorId = schemaId;
                 break;
+            case "CERTIFICATE" or "SYMMETRIC KEY":
+                if (securableVal.IsNull)
+                    return SqlValue.Null(SqlType.Int32);
+                securableClass = KeyClass(className)!.Value;
+                classDescription = securableClass == PermissionChecker.ClassCertificate ? "CERTIFICATE" : "SYMMETRIC KEY";
+                if (!TryResolveKeyByName(database, securableClass, securableVal.CoerceTo(SqlType.NVarchar).AsString, out majorId))
+                    return SqlValue.FromInt32(0);
+                break;
             default:
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -571,6 +579,13 @@ internal sealed class HasPermsByName : Expression
         if (permission != "ANY" && !PermissionGraph.IsPermissionOf(className.ToUpperInvariant(), permission))
             return SqlValue.Null(SqlType.Int32);
         var isObject = string.Equals(className, "OBJECT", StringComparison.OrdinalIgnoreCase);
+        // A key or certificate answers 0 when it isn't there (probed
+        // 2026-10-15 against SQL Server 2025).
+        if (KeyClass(className) is { } keyClass)
+        {
+            return securableVal.IsNull ? SqlValue.Null(SqlType.Int32)
+                : SqlValue.FromInt32(TryResolveKeyByName(batch.CurrentDatabase, keyClass, securableVal.CoerceTo(SqlType.NVarchar).AsString, out _) ? 1 : 0);
+        }
         if (!isObject && !string.Equals(className, "SCHEMA", StringComparison.OrdinalIgnoreCase))
             return SqlValue.FromInt32(1);
         if (securableVal.IsNull)
@@ -618,6 +633,21 @@ internal sealed class HasPermsByName : Expression
                 or "USER" or "XML SCHEMA COLLECTION" => true,
             _ => false,
         };
+    }
+
+    /// <summary>The permission class of a <c>SYMMETRIC KEY</c> or <c>CERTIFICATE</c> class name, null for any other.</summary>
+    private static byte? KeyClass(string className) =>
+        BuiltInToken.Equals(className.Trim(), "SYMMETRIC KEY") ? PermissionChecker.ClassSymmetricKey
+        : BuiltInToken.Equals(className.Trim(), "CERTIFICATE") ? PermissionChecker.ClassCertificate
+        : null;
+
+    private static bool TryResolveKeyByName(Database database, byte keyClass, string name, out int id)
+    {
+        var store = database.EncryptionKeys;
+        id = keyClass == PermissionChecker.ClassCertificate
+            ? store.Certificates.TryGetValue(name, out var certificate) ? certificate.Id : 0
+            : store.SymmetricKeys.TryGetValue(name, out var key) ? key.Id : 0;
+        return id != 0;
     }
 
     private static bool TryResolveSchemaByName(Database database, string name, out int schemaId)

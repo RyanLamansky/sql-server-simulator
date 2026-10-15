@@ -32,7 +32,8 @@ partial class Simulation
             throw SimulatedSqlException.MasterKeyPasswordRequired();
         ExpectWord(context, "BY");
         ExpectWord(context, "PASSWORD");
-        var password = ParseKeyLiteral(context);
+        var masks = new List<(int Start, int End)>(1);
+        var password = ParseKeyLiteral(context, masks);
         EndKeyStatement(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -54,6 +55,7 @@ partial class Simulation
                 PasswordEncryption(password, 32),
             ]);
         }
+        RecordKeyDdlEvent(context, "CREATE_MASTER_KEY", "MASTER KEY", null, null, masks);
         return true;
     }
 
@@ -71,6 +73,7 @@ partial class Simulation
     private static bool TryParseAlterMasterKey(ParserContext context)
     {
         ExpectWord(context, "KEY");
+        var masks = new List<(int Start, int End)>(1);
         string? password = null;
         var regenerate = false;
         var add = false;
@@ -85,7 +88,7 @@ partial class Simulation
             ExpectWord(context, "ENCRYPTION");
             ExpectWord(context, "BY");
             ExpectWord(context, "PASSWORD");
-            password = ParseKeyLiteral(context);
+            password = ParseKeyLiteral(context, masks);
         }
         else if (IsKeyWord(token, "ADD") || IsKeyWord(token, "DROP"))
         {
@@ -101,7 +104,7 @@ partial class Simulation
             }
             else if (IsKeyWord(protector, "PASSWORD"))
             {
-                password = ParseKeyLiteral(context);
+                password = ParseKeyLiteral(context, masks);
             }
             else
             {
@@ -116,54 +119,58 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var database = context.CurrentDatabase;
-        var store = database.EncryptionKeys;
+        var store = context.CurrentDatabase.EncryptionKeys;
         lock (store.Gate)
+            AlterMasterKey(context, store, password, regenerate, add, serviceMasterKey);
+        RecordKeyDdlEvent(context, "ALTER_MASTER_KEY", "MASTER KEY", null, null, masks);
+        return true;
+    }
+
+    private static void AlterMasterKey(ParserContext context, EncryptionKeyStore store, string? password, bool regenerate, bool add, bool serviceMasterKey)
+    {
+        var database = context.CurrentDatabase;
+        var masterKey = VisibleMasterKey(context.Batch, database);
+        if (password is not null && (regenerate || add))
+            ValidateKeyPassword(password);
+        RequireMasterKey(context.Batch.Connection, database);
+        var now = context.Batch.CurrentStatement.UtcNow;
+        var encryptions = new List<KeyEncryption>(masterKey.Encryptions);
+        if (regenerate)
         {
-            var masterKey = VisibleMasterKey(context.Batch, database);
-            if (password is not null && (regenerate || add))
-                ValidateKeyPassword(password);
-            RequireMasterKey(context.Batch.Connection, database);
-            var now = context.Batch.CurrentStatement.UtcNow;
-            var encryptions = new List<KeyEncryption>(masterKey.Encryptions);
-            if (regenerate)
+            _ = encryptions.RemoveAll(static encryption => encryption.Kind == KeyEncryptionKind.Password);
+            encryptions.Add(PasswordEncryption(password!, 32));
+            RecordKeyStoreUndo(context, store);
+            store.MasterKey = new(NewKeyGuid(), masterKey.CreateDate, now, [.. encryptions]);
+            return;
+        }
+        if (serviceMasterKey)
+        {
+            var existing = encryptions.FindIndex(static encryption => encryption.Kind == KeyEncryptionKind.ServiceMasterKey);
+            if (add == (existing >= 0))
+                return;
+            if (add)
+                encryptions.Insert(0, new(KeyEncryptionKind.ServiceMasterKey, null, null, null, KeyEncryption.BlockEncryptedLength(32)));
+            else
+                encryptions.RemoveAt(existing);
+        }
+        else
+        {
+            var index = encryptions.FindIndex(encryption => encryption.Kind == KeyEncryptionKind.Password && string.Equals(encryption.Password, password, StringComparison.Ordinal));
+            if (add)
             {
-                _ = encryptions.RemoveAll(static encryption => encryption.Kind == KeyEncryptionKind.Password);
+                if (index >= 0)
+                    throw SimulatedSqlException.EncryptionAlreadyExists("password '********'");
                 encryptions.Add(PasswordEncryption(password!, 32));
-                RecordKeyStoreUndo(context, store);
-                store.MasterKey = new(NewKeyGuid(), masterKey.CreateDate, now, [.. encryptions]);
-                return true;
-            }
-            if (serviceMasterKey)
-            {
-                var existing = encryptions.FindIndex(static encryption => encryption.Kind == KeyEncryptionKind.ServiceMasterKey);
-                if (add == (existing >= 0))
-                    return true;
-                if (add)
-                    encryptions.Insert(0, new(KeyEncryptionKind.ServiceMasterKey, null, null, null, KeyEncryption.BlockEncryptedLength(32)));
-                else
-                    encryptions.RemoveAt(existing);
             }
             else
             {
-                var index = encryptions.FindIndex(encryption => encryption.Kind == KeyEncryptionKind.Password && string.Equals(encryption.Password, password, StringComparison.Ordinal));
-                if (add)
-                {
-                    if (index >= 0)
-                        throw SimulatedSqlException.EncryptionAlreadyExists("password '********'");
-                    encryptions.Add(PasswordEncryption(password!, 32));
-                }
-                else
-                {
-                    if (index < 0 || encryptions.Count(static encryption => encryption.Kind == KeyEncryptionKind.Password) == 1)
-                        throw SimulatedSqlException.CannotDropEncryption("password '********'");
-                    encryptions.RemoveAt(index);
-                }
+                if (index < 0 || encryptions.Count(static encryption => encryption.Kind == KeyEncryptionKind.Password) == 1)
+                    throw SimulatedSqlException.CannotDropEncryption("password '********'");
+                encryptions.RemoveAt(index);
             }
-            RecordKeyStoreUndo(context, store);
-            store.MasterKey = masterKey.With([.. encryptions], now);
         }
-        return true;
+        RecordKeyStoreUndo(context, store);
+        store.MasterKey = masterKey.With([.. encryptions], now);
     }
 
     /// <summary>
@@ -192,6 +199,7 @@ partial class Simulation
             RecordKeyStoreUndo(context, store);
             store.MasterKey = null;
         }
+        RecordKeyDdlEvent(context, "DROP_MASTER_KEY", "MASTER KEY", null, null, null);
         return true;
     }
 
@@ -269,11 +277,12 @@ partial class Simulation
         if (IsKeyWord(context.Token, "FROM"))
             throw new NotSupportedException("CREATE CERTIFICATE … FROM a file, binary or assembly isn't modeled by the simulator; certificates are created self-signed.");
         string? password = null;
+        var masks = new List<(int Start, int End)>(1);
         if (IsKeyWord(context.Token, "ENCRYPTION"))
         {
             ExpectWord(context, "BY");
             ExpectWord(context, "PASSWORD");
-            password = ParseKeyLiteral(context);
+            password = ParseKeyLiteral(context, masks);
             context.MoveNextRequired();
         }
         if (!IsKeyWord(context.Token, "WITH"))
@@ -342,6 +351,7 @@ partial class Simulation
                 string.Join(' ', Array.ConvertAll(serial, static b => b.ToString("x2", CultureInfo.InvariantCulture))),
                 RandomNumberGenerator.GetBytes(20), startDate, expiryDate, password, activeForBeginDialog);
         }
+        RecordKeyDdlEvent(context, "CREATE_CERTIFICATE", "CERTIFICATE", name, principalId, masks);
         if (expiryDate < now)
             context.Connection.PendingMessages.Enqueue(SimulatedSqlException.CertificateExpiredMessage(batch));
         else if (startDate > now)
@@ -377,6 +387,8 @@ partial class Simulation
             }
             RecordKeyStoreUndo(context, store);
             _ = store.Certificates.TryRemove(name, out _);
+            DropSecurablePermissions(context, database, ClassCertificate, certificate.Id);
+            RecordKeyDdlEvent(context, "DROP_CERTIFICATE", "CERTIFICATE", name, certificate.PrincipalId, null);
         }
         return true;
     }
@@ -450,7 +462,8 @@ partial class Simulation
         if (!IsKeyWord(context.Token, "ENCRYPTION"))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         ExpectWord(context, "BY");
-        var protectors = ParseKeyProtectors(context);
+        var masks = new List<(int Start, int End)>();
+        var protectors = ParseKeyProtectors(context, masks);
         EndKeyStatement(context, alreadyPast: true);
         if (context.Batch.IsSkipping)
             return true;
@@ -486,6 +499,7 @@ partial class Simulation
             var now = batch.CurrentStatement.UtcNow;
             store.SymmetricKeys[name] = new(++store.LastSymmetricKeyId, name, principalId, bits, keyGuid, material, now, now, encryptions);
         }
+        RecordKeyDdlEvent(context, "CREATE_SYMMETRIC_KEY", "SYMMETRIC KEY", name, principalId, masks);
         return true;
     }
 
@@ -505,7 +519,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         ExpectWord(context, "ENCRYPTION");
         ExpectWord(context, "BY");
-        var protectors = ParseKeyProtectors(context);
+        var masks = new List<(int Start, int End)>();
+        var protectors = ParseKeyProtectors(context, masks);
         EndKeyStatement(context, alreadyPast: true);
         if (context.Batch.IsSkipping)
             return true;
@@ -552,6 +567,7 @@ partial class Simulation
             }
             RecordKeyStoreUndo(context, store);
             store.SymmetricKeys[name] = key.With([.. encryptions], batch.CurrentStatement.UtcNow);
+            RecordKeyDdlEvent(context, "ALTER_SYMMETRIC_KEY", "SYMMETRIC KEY", name, key.PrincipalId, masks);
         }
         return true;
     }
@@ -592,6 +608,8 @@ partial class Simulation
             }
             RecordKeyStoreUndo(context, store);
             _ = store.SymmetricKeys.TryRemove(name, out _);
+            DropSecurablePermissions(context, database, ClassSymmetricKey, key.Id);
+            RecordKeyDdlEvent(context, "DROP_SYMMETRIC_KEY", "SYMMETRIC KEY", name, key.PrincipalId, null);
         }
         return true;
     }
@@ -616,7 +634,7 @@ partial class Simulation
         if (!IsKeyWord(context.Token, "DECRYPTION"))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         ExpectWord(context, "BY");
-        var decryptor = ParseKeyProtector(context, decrypting: true);
+        var decryptor = ParseKeyProtector(context, decrypting: true, masks: null);
         context.MoveNextOptional();
         EndKeyStatement(context, alreadyPast: true);
         if (context.Batch.IsSkipping)
@@ -721,21 +739,21 @@ partial class Simulation
     }
 
     /// <summary>The comma list after <c>ENCRYPTION BY</c>, cursor past it on return.</summary>
-    private static List<KeyProtector> ParseKeyProtectors(ParserContext context)
+    private static List<KeyProtector> ParseKeyProtectors(ParserContext context, List<(int Start, int End)> masks)
     {
         var protectors = new List<KeyProtector>();
         do
-            protectors.Add(ParseKeyProtector(context, decrypting: false));
+            protectors.Add(ParseKeyProtector(context, decrypting: false, masks));
         while (context.GetNextOptional() is Operator { Character: ',' });
         return protectors;
     }
 
     /// <summary>One protector, cursor on the word before it on entry and on its last token on return.</summary>
-    private static KeyProtector ParseKeyProtector(ParserContext context, bool decrypting)
+    private static KeyProtector ParseKeyProtector(ParserContext context, bool decrypting, List<(int Start, int End)>? masks)
     {
         var word = context.GetNextRequired();
         if (IsKeyWord(word, "PASSWORD"))
-            return new(KeyEncryptionKind.Password, null, ParseKeyLiteral(context), null);
+            return new(KeyEncryptionKind.Password, null, ParseKeyLiteral(context, masks), null);
         if (IsKeyWord(word, "CERTIFICATE") || IsKeyWord(word, "ASYMMETRIC"))
         {
             var certificate = IsKeyWord(word, "CERTIFICATE");
@@ -949,15 +967,26 @@ partial class Simulation
         return owner;
     }
 
-    /// <summary>The <c>= '…'</c> after a password or source word, cursor left on the literal.</summary>
-    private static string ParseKeyLiteral(ParserContext context)
+    /// <summary>
+    /// The <c>= '…'</c> after a password or source word, cursor left on the
+    /// literal; a password's place in the text joins <paramref name="masks"/>,
+    /// which a DDL event's command text reads as <c>'******'</c>.
+    /// </summary>
+    private static string ParseKeyLiteral(ParserContext context, List<(int Start, int End)>? masks = null)
     {
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        return context.GetNextRequired() is Literal { Value: var value } && SqlType.IsStringCategory(value.Type)
-            ? value.AsString
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Literal { Value: var value } literal || !SqlType.IsStringCategory(value.Type))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        masks?.Add((literal.StartIndex, literal.EndIndex));
+        return value.AsString;
     }
+
+    /// <summary>The key DDL event a statement raises, its passwords masked; the master key's names no object or owner.</summary>
+    private static void RecordKeyDdlEvent(ParserContext context, string eventType, string objectType, string? name, int? ownerId, List<(int Start, int End)>? masks) =>
+        RecordDdlEvent(context, eventType, schemaName: null, name, objectType,
+            ownerName: ownerId is { } owner ? Ownership.PrincipalName(context.CurrentDatabase, owner) : null,
+            masks: masks is { Count: > 0 } ? [.. masks] : null);
 
     /// <summary>A certificate date: a string that converts to <c>datetime</c>, to the second, or Msg 190 while the batch compiles.</summary>
     private static DateTime ParseCertificateDate(ParserContext context)

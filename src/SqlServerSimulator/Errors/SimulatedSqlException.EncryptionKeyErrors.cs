@@ -23,6 +23,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException KeyAlreadyExists(string name) =>
         new($"A key with name '{name}' or user defined unique identifier already exists or you do not have permissions to create it.", 15282, 16, 1);
 
+    /// <summary>Msg 15345: <c>ALTER AUTHORIZATION</c> of a certificate to a role.</summary>
+    internal static SimulatedSqlException CertificateOwnedByRole() =>
+        new("An entity of type certificate cannot be owned by a role, a group, or by principals mapped to certificates or asymmetric keys.", 15345, 16, 1);
+
     /// <summary>Msg 15232: <c>CREATE CERTIFICATE</c> under a name the database already has.</summary>
     internal static SimulatedSqlException CertificateAlreadyExists(string name) =>
         new($"A certificate with name '{name}' already exists or this certificate already has been added to the database.", 15232, 16, 1);

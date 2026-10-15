@@ -55,7 +55,7 @@ partial class Simulation
             DefaultSchemaName = defaultSchema ?? Database.DefaultSchemaName,
             PasswordHash = PasswordHash.EncryptLegacy(password),
         };
-        RecordDdlEvent(context, "CREATE_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", maskStart: passwordStart, maskEnd: passwordEnd);
+        RecordDdlEvent(context, "CREATE_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd));
         return true;
     }
 
@@ -105,7 +105,7 @@ partial class Simulation
         }
         // The event names the role as the statement leaves it (probed
         // 2026-09-28 against SQL Server 2025).
-        RecordDdlEvent(context, "ALTER_APPLICATION_ROLE", schemaName: null, newName ?? name, "APPLICATION ROLE", maskStart: passwordStart, maskEnd: passwordEnd);
+        RecordDdlEvent(context, "ALTER_APPLICATION_ROLE", schemaName: null, newName ?? name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd));
         return true;
     }
 

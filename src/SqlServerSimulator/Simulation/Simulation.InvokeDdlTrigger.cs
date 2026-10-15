@@ -30,15 +30,32 @@ partial class Simulation
         string? roleName = null,
         string? ownerName = null,
         string? trailingElements = null,
-        int maskStart = -1,
-        int maskEnd = -1)
+        (int Start, int End)[]? masks = null)
     {
         if (!RaisesDdlEvents(context))
             return;
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
             eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName,
-            trailingElements: trailingElements, maskStart: maskStart, maskEnd: maskEnd));
+            trailingElements: trailingElements, masks: masks));
+    }
+
+    /// <summary>The mask list for one password literal, or null for none (a start of -1).</summary>
+    internal static (int Start, int End)[]? PasswordMask(int start, int end) => start >= 0 && start < end ? [(start, end)] : null;
+
+    /// <summary>The statement's text from <paramref name="start"/> to <paramref name="end"/> with each password literal inside it read as <c>'******'</c>.</summary>
+    private static string Masked(string commandText, int start, int end, (int Start, int End)[] masks)
+    {
+        var text = new System.Text.StringBuilder(end - start);
+        var position = start;
+        foreach (var (maskStart, maskEnd) in masks)
+        {
+            if (maskStart < position || maskEnd > end || maskStart >= maskEnd)
+                continue;
+            _ = text.Append(commandText, position, maskStart - position).Append("'******'");
+            position = maskEnd;
+        }
+        return text.Append(commandText, position, end - position).ToString();
     }
 
     /// <summary>
@@ -99,8 +116,7 @@ partial class Simulation
             objectType: loginName is null ? null : "LOGIN",
             serverLevelDatabase: databaseName ?? "",
             trailingElements: loginElements,
-            maskStart: passwordStart,
-            maskEnd: passwordEnd));
+            masks: PasswordMask(passwordStart, passwordEnd)));
     }
 
     /// <summary>
@@ -186,9 +202,7 @@ partial class Simulation
         {
             var eventType = TriggerEventTypes.TryResolve(info.EventType, out var resolved) ? resolved.Type : 0;
             string? eventData = null;
-            var text = info.MaskStart >= start && info.MaskEnd <= end && info.MaskStart < info.MaskEnd
-                ? Shaped(string.Concat(commandText.AsSpan(start, info.MaskStart - start), "'******'", commandText.AsSpan(info.MaskEnd, end - info.MaskEnd)))
-                : statementText;
+            var text = info.Masks is { } masks ? Shaped(Masked(commandText, start, end, masks)) : statementText;
             if (serverTriggers.Length != 0)
             {
                 List<DdlTrigger>? serverMatched = null;
@@ -410,8 +424,8 @@ partial class Simulation
     /// module a batch holds alone — <c>CREATE</c> / <c>ALTER</c> of a view,
     /// procedure, function or trigger, and <c>CREATE DEFAULT</c> /
     /// <c>RULE</c> / <c>SCHEMA</c> — reports the batch; the principal and
-    /// permission statements and a handful of later kinds report through their
-    /// separator; tables, indexes, statistics, databases and the remaining
+    /// permission statements, the key store's and a handful of later kinds
+    /// report through their separator; tables, indexes, statistics, databases and the remaining
     /// <c>DROP</c>s report the statement alone.
     /// </summary>
     private static CommandTextExtent CommandTextExtentOf(string statement)
@@ -437,6 +451,7 @@ partial class Simulation
             || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
             || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))
             || Is(1, "FULLTEXT")
+            || Is(1, "MASTER") || Is(1, "CERTIFICATE") || Is(1, "SYMMETRIC")
             ? CommandTextExtent.ThroughSeparator
             : CommandTextExtent.Statement;
     }

@@ -110,6 +110,10 @@ partial class Simulation
                 objectColumns = ParsePermissionColumnList(context);
             switch (explicitClass)
             {
+                case "CERTIFICATE":
+                    permClass = PermissionChecker.ClassCertificate;
+                    objectSecurableName = securableName;
+                    break;
                 case "DATABASE":
                     permClass = PermissionChecker.ClassDatabase;
                     // Another database is Msg 4610, one that isn't there Msg
@@ -142,6 +146,10 @@ partial class Simulation
                     break;
                 case "SERVER":
                     serverScopeSecurable = true;
+                    break;
+                case "SYMMETRIC KEY":
+                    permClass = PermissionChecker.ClassSymmetricKey;
+                    objectSecurableName = securableName;
                     break;
                 case "TYPE":
                     permClass = PermissionChecker.ClassType;
@@ -275,10 +283,11 @@ partial class Simulation
             throw SimulatedSqlException.GrantSubEntityListNotAllowed().PinLine(0);
         }
 
-        // The permissions a type, an XML schema collection and a full-text
-        // catalog carry; any other is a syntax error at compile, at line 0
-        // (probed 2026-09-29 against SQL Server 2025).
-        if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        // The permissions a type, an XML schema collection, a full-text
+        // catalog, a symmetric key and a certificate carry; any other is a
+        // syntax error at compile, at line 0 (probed 2026-09-29 and
+        // 2026-10-15 against SQL Server 2025).
+        if (IsDerivedSecurableClass(permClass))
         {
             foreach (var (permName, _) in permissions)
             {
@@ -317,7 +326,7 @@ partial class Simulation
             permMajorId = targetPrincipal.PrincipalId;
             securablePrincipal = targetPrincipal;
         }
-        else if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        else if (IsDerivedSecurableClass(permClass))
         {
             permMajorId = ResolveDerivedSecurable(context, database, permClass, objectSecurableName!.Value);
         }
@@ -587,7 +596,7 @@ partial class Simulation
             objectName = objectSecurableName!.Value.Leaf;
             objectType = "SCHEMA";
         }
-        else if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        else if (IsDerivedSecurableClass(permClass))
         {
             // Unprobed: the object types are the ones ALTER AUTHORIZATION reports for the same classes.
             objectName = objectSecurableName!.Value.Leaf;
@@ -595,9 +604,11 @@ partial class Simulation
             {
                 PermissionChecker.ClassType => "TYPE",
                 PermissionChecker.ClassXmlSchemaCollection => "XML SCHEMA COLLECTION",
+                PermissionChecker.ClassSymmetricKey => "SYMMETRIC KEY",
+                PermissionChecker.ClassCertificate => "CERTIFICATE",
                 _ => "FULLTEXT CATALOG",
             };
-            if (permClass != PermissionChecker.ClassFulltextCatalog)
+            if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection)
                 schemaName = EventSchemaName(objectSecurableName.Value);
         }
         else if (permClass == PermissionChecker.ClassDatabasePrincipal)
@@ -721,6 +732,8 @@ partial class Simulation
         PermissionChecker.ClassSchema => Ownership.SchemaOwnerId(database, permMajorId),
         PermissionChecker.ClassDatabasePrincipal when securablePrincipal is not null =>
             securablePrincipal.TypeCode == "R" ? securablePrincipal.OwningPrincipalId : securablePrincipal.PrincipalId,
+        PermissionChecker.ClassSymmetricKey => database.EncryptionKeys.SymmetricKeyById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
+        PermissionChecker.ClassCertificate => database.EncryptionKeys.CertificateById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         _ => Database.DboPrincipalId,
     };
 
@@ -1049,8 +1062,16 @@ partial class Simulation
     /// </summary>
     private static bool PermissionAcceptedOnDerivedClass(byte permClass, string permName) =>
         BuiltInToken.EqualsAny(permName.Trim(), "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION")
-        || (permClass != PermissionChecker.ClassFulltextCatalog && BuiltInToken.Equals(permName.Trim(), "EXECUTE"))
+        || ((permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection) && BuiltInToken.Equals(permName.Trim(), "EXECUTE"))
         || (permClass != PermissionChecker.ClassType && BuiltInToken.Equals(permName.Trim(), "ALTER"));
+
+    /// <summary>
+    /// The classes whose securable is neither an object, a schema nor a
+    /// principal, each resolved by <see cref="ResolveDerivedSecurable"/>.
+    /// </summary>
+    private static bool IsDerivedSecurableClass(byte permClass) =>
+        permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog
+            or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate;
 
     /// <summary>
     /// Resolves a <c>TYPE::</c>, <c>XML SCHEMA COLLECTION::</c> or
@@ -1084,6 +1105,16 @@ partial class Simulation
                 return batch.TryResolveXmlSchemaCollectionSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
                     ? collection.Id
                     : throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
+            case PermissionChecker.ClassSymmetricKey:
+                return database.EncryptionKeys.SymmetricKeys.TryGetValue(name.Leaf, out var key)
+                    && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassSymmetricKey, key.Id, key.PrincipalId)
+                    ? key.Id
+                    : throw SimulatedSqlException.CannotFindKey("find", "symmetric key", name.Leaf);
+            case PermissionChecker.ClassCertificate:
+                return database.EncryptionKeys.Certificates.TryGetValue(name.Leaf, out var certificate)
+                    && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
+                    ? certificate.Id
+                    : throw SimulatedSqlException.CannotFindKey("find", "certificate", name.Leaf);
             default:
                 return name.Count == 1 && database.FullTextCatalogs.TryGetValue(name.Leaf, out var catalog)
                     ? catalog.Id

@@ -685,6 +685,8 @@ internal static partial class BuiltInResources
                 6 => "TYPE",
                 10 => "XML_SCHEMA_COLLECTION",
                 23 => "FULLTEXT_CATALOG",
+                24 => "SYMMETRIC_KEYS",
+                25 => "CERTIFICATE",
                 _ => "DATABASE",
             };
             yield return [

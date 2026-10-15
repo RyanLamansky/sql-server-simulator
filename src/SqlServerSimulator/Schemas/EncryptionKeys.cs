@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
 namespace SqlServerSimulator.Schemas;
@@ -86,7 +87,7 @@ internal sealed class DatabaseMasterKey(Guid keyGuid, DateTime createDate, DateT
 /// rollback restores one by putting the old instance back.
 /// </summary>
 internal sealed class Certificate(int id, string name, int principalId, string subject, string serialNumber, byte[] thumbprint,
-    DateTime startDate, DateTime expiryDate, string? password, bool activeForBeginDialog)
+    DateTime startDate, DateTime expiryDate, string? password, bool activeForBeginDialog, StrongBox<RSA?>? keyPair = null)
 {
     public readonly int Id = id;
 
@@ -114,20 +115,27 @@ internal sealed class Certificate(int id, string name, int principalId, string s
 
     public const int KeyLength = 3072;
 
+    /// <summary>Where the key pair lives once made, shared with the instances an <c>ALTER</c> replaces this one by.</summary>
+    private readonly StrongBox<RSA?> keyPair = keyPair ?? new();
+
     /// <summary>The certificate's RSA key pair, generated when an operation first needs it.</summary>
     public RSA Key
     {
         get
         {
-            if (Volatile.Read(ref field) is { } existing)
+            if (Volatile.Read(ref this.keyPair.Value) is { } existing)
                 return existing;
             var made = RSA.Create(KeyLength);
-            if (Interlocked.CompareExchange(ref field, made, null) is not { } winner)
+            if (Interlocked.CompareExchange(ref this.keyPair.Value, made, null) is not { } winner)
                 return made;
             made.Dispose();
             return winner;
         }
     }
+
+    /// <summary>The certificate under another owner, its key pair shared.</summary>
+    public Certificate WithOwner(int principalId) =>
+        new(this.Id, this.Name, principalId, this.Subject, this.SerialNumber, this.Thumbprint, this.StartDate, this.ExpiryDate, this.Password, this.ActiveForBeginDialog, this.keyPair);
 
     /// <summary><c>sys.certificates.sid</c>: <c>S-1-9-1</c> over the thumbprint.</summary>
     public byte[] Sid => [1, 6, 0, 0, 0, 0, 0, 9, 1, 0, 0, 0, .. this.Thumbprint];
@@ -179,6 +187,9 @@ internal sealed class SymmetricKey(int id, string name, int principalId, int key
 
     public SymmetricKey With(KeyEncryption[] encryptions, DateTime modifyDate) =>
         new(this.Id, this.Name, this.PrincipalId, this.KeyLength, this.KeyGuid, this.Material, this.CreateDate, modifyDate, encryptions);
+
+    public SymmetricKey WithOwner(int principalId) =>
+        new(this.Id, this.Name, principalId, this.KeyLength, this.KeyGuid, this.Material, this.CreateDate, this.ModifyDate, this.Encryptions);
 }
 
 /// <summary>
