@@ -135,7 +135,6 @@ While either option is on the session skips the plan cache and the compiled-batc
 ## Not modeled yet
 
 - `FIPS_FLAGGER`'s warnings: real sends Msg 1021 (`FIPS Warning: Line 1 has the non-ANSI statement 'SET'.`) for each statement outside the level, where the simulator sends none.
-- `sys.dm_exec_cached_plans` and `sys.dm_exec_plan_attributes`, through which real reports a plan's `set_options`, `language_id`, `date_format` and `date_first` cache keys; the rows themselves (use counts, sizes, which statements cache at all) follow real's caching policy.
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
   Not chased: the plan rows are the optimizer's (`|--Table Scan(OBJECT:(…), WHERE:(… = CONVERT_IMPLICIT(int,[@1],0)))`, costs and estimates in `SHOWPLAN_ALL` / `_XML`); only the statement-text rows — one per statement holding a query, the statements without one gathered in one result set — and `SHOWPLAN_ALL`'s `SELECT WITHOUT QUERY` rows are deterministic, which leaves the plan result sets real interleaves with them out (probed 2026-10-06 against SQL Server 2025).
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).

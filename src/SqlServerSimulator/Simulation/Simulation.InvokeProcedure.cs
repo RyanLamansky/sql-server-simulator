@@ -321,6 +321,7 @@ partial class Simulation
         BatchContext? innerBatch = null;
         // What the body's run changed on the session, given back as it ends.
         var bodyEntered = false;
+        CachedModuleCall? planCall = null;
         var savedImpersonationDepth = 0;
         var savedQuotedIdentifiers = false;
         var savedAnsiNulls = false;
@@ -446,6 +447,11 @@ partial class Simulation
                     // alters the procedure meanwhile (probed 2026-10-09
                     // against SQL Server 2025).
                     outerBatch.ReleaseStatementLock(procedure.SchemaLock, LockMode.SchemaStability);
+                    // A procedure compiled afresh for every call keeps no plan
+                    // (probed 2026-10-15 against SQL Server 2025: neither one
+                    // created WITH RECOMPILE nor EXEC … WITH RECOMPILE leaves one).
+                    if (!recompiles)
+                        planCall = BeginCachedModuleCall(outerBatch, innerBatch, procedure, CachedPlanKind.Proc, procedure.CompiledPlan);
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
                     if (innerBatch.CallerStreams)
@@ -480,6 +486,7 @@ partial class Simulation
             streamed?.Dispose();
             if (bodyEntered)
             {
+                EndCachedModuleCall(innerBatch!, planCall);
                 if (compiles)
                     outcomes.Insert(0, new SimulatedInfoOutcome(CompileTime(innerBatch!, clock: null, innerBatch!.LastTopLevelStatementLine + innerBatch.LineOffset, attributionName)));
                 connection.NestingLevel--;

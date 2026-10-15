@@ -145,6 +145,13 @@ public sealed partial class Simulation
         /// <summary>The locks each of <see cref="Plans"/> took as it parsed, which its replay retakes.</summary>
         public readonly ReplayedLock[][] Locks = locks;
         public readonly long SchemaVersionAtParse = schemaVersionAtParse;
+
+        /// <summary>
+        /// The <c>sys.dm_exec_cached_plans</c> plan a replay of this text last
+        /// recorded under, which spares the next replay looking it up
+        /// (<see cref="BatchContext.CachedPlanMemo"/>).
+        /// </summary>
+        public readonly System.Runtime.CompilerServices.StrongBox<CachedPlan?> DmvPlan = new();
     }
 
     /// <summary>
@@ -251,6 +258,7 @@ public sealed partial class Simulation
             if (Matches(key) && this.statementPlanSets.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.statementPlanSetCount);
         }
+        this.RemoveCachedPlans(sqlHandle, database);
         if (sqlHandle is null)
         {
             this.ForgetSentInliningFailures(database);
@@ -448,7 +456,12 @@ public sealed partial class Simulation
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, PlanCacheEntry entry, System.Runtime.CompilerServices.StrongBox<bool> stale)
     {
-        var batch = new BatchContext(command);
+        var batch = new BatchContext(command)
+        {
+            CachedPlanOrigin = CachedPlanOrigin.ClientBatch,
+            CachedPlanDatabase = command.Connection?.CurrentDatabase,
+            CachedPlanMemo = entry.DmvPlan,
+        };
         try
         {
             var connection = batch.Connection;
@@ -465,6 +478,7 @@ public sealed partial class Simulation
                 // RAND() draw and cached subquery results. StartLine mirrors
                 // the single-statement dispatch value for ERROR_LINE parity.
                 batch.CurrentStatement.UtcNow = DateTime.UtcNow;
+                batch.CurrentStatement.DispatchSerial++;
                 batch.CurrentStatement.StartLine = entry.Spans[statement].Line;
                 batch.CurrentStatement.AutocommitTransactionId = 0;
                 batch.CurrentStatement.StatementScopedValues = null;

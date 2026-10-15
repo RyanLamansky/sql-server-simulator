@@ -103,6 +103,8 @@ partial class Simulation
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
         var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, ModuleDefinitionText = function.DefinitionText, CapturesQueryStore = BodyStatementsCaptured(function), ModuleSchema = function.Schema };
+        // A body the optimizer doesn't inline runs under a cached plan of its own.
+        var planCall = BodyRunsUninlined(function) ? BeginCachedModuleCall(outerBatch, innerBatch, function, CachedPlanKind.Proc, compiledBody: null) : null;
         innerBatch.InheritCallerTriggerFrame(outerBatch);
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         connection.NestingLevel++;
@@ -130,6 +132,7 @@ partial class Simulation
         }
         finally
         {
+            EndCachedModuleCall(innerBatch, planCall);
             connection.LastStatementRowCount = savedRowCount;
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
@@ -151,6 +154,13 @@ partial class Simulation
     /// above it <see cref="ModuleInlining"/> says which are), probed 2026-09-30 against SQL Server 2025.
     /// </summary>
     private static bool BodyStatementsCaptured(ScalarFunction function) =>
-        function.Schema.Database is { QueryStore.DesiredState: QueryStoreState.ReadWrite } database
-        && (database.CompatibilityLevel < CompatibilityLevel.Sql150 || !(function.BodyInlines ??= ModuleInlining.Evaluate(function).InlineType));
+        function.Schema.Database is { QueryStore.DesiredState: QueryStoreState.ReadWrite } && BodyRunsUninlined(function);
+
+    /// <summary>
+    /// Whether the optimizer runs the function's body as a call of its own rather than
+    /// inlining it into the calling statement: below compatibility level 150 always, and above
+    /// it when <see cref="ModuleInlining"/> says the body doesn't inline.
+    /// </summary>
+    private static bool BodyRunsUninlined(ScalarFunction function) =>
+        function.Schema.Database.CompatibilityLevel < CompatibilityLevel.Sql150 || !(function.BodyInlines ??= ModuleInlining.Evaluate(function).InlineType);
 }

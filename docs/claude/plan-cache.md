@@ -12,6 +12,8 @@ Two per-`Simulation` reuse layers over a repeated `CommandText`, one stacked on 
 The two are independent: a plan-cache hit never consults the memo (it doesn't parse at all), and a memo hit says nothing about whether a plan will be stored.
 [Which statement kinds reach which layer](#statement-kind-eligibility-what-can-be-replayed) is the substance of the split.
 
+Neither layer is what `sys.dm_exec_cached_plans` lists: the DMVs read a third structure that keeps what *real* keeps, whatever the simulator found cheap to replay — see [The plan-cache DMVs](#the-plan-cache-dmvs).
+
 ## Cache key
 
 `Simulation.PlanCacheKey` holds the command text, the connection's current database, a parameter-type signature folded from each `SimulatedDbCommand.Parameters` entry's name + `DbType` + `Size` + `Precision` + `Scale` (declaration order), the session's effective `QUOTED_IDENTIFIER` setting, its `SET DATEFORMAT` order (which decides how a date string read while parsing reads), and its `ANSI_NULLS` and `CONCAT_NULL_YIELDS_NULL` settings.
@@ -46,7 +48,7 @@ Every bump also invalidates the catalog row cache, which the non-DDL metadata ch
 `Simulation.ClearPlanCache` removes entries rather than staling them: `DBCC FREEPROCCACHE` (bare, or naming the `default` pool, which holds every plan here) and `DBCC FREESYSTEMCACHE('ALL' | 'SQL Plans')` empty the plan cache (both kinds of plan), the compiled-batch memo and the token memo, so the next execution of any text tokenizes, compiles and parses afresh.
 Given a `sql_handle` (the value `sys.dm_exec_requests.sql_handle` reports), `FREEPROCCACHE` removes the plan cache and compiled-batch entries whose command text hashes to it, and leaves the token memo alone.
 `ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE` removes the plan cache and compiled-batch entries compiled in the session's database, and leaves the token memo alone.
-The `internal` pool and a plan handle name nothing, the simulator exposing no plans; `DbccPlanCacheTests` (Tests.Internal) pins each scope.
+Each of the three also empties what the [plan-cache DMVs](#the-plan-cache-dmvs) list in the same scope, and a plan handle `sys.dm_exec_cached_plans` reports removes that one plan; the `internal` pool names nothing. `DbccPlanCacheTests` (Tests.Internal) pins each scope of the parse caches.
 A session with `STATISTICS IO` or `TIME` on neither reads nor fills either cache, so its every batch compiles and reports ([`session-options.md`](session-options.md#statistics-time)).
 
 What a compile sends rather than refuses rides on whether it happens: the Msg 208 a scalar function call that couldn't inline earns goes out only when its batch's text compiles, so a cache hit sends nothing, as real's plan reuse does; the texts that sent theirs are remembered under the schema version they compiled under (`Simulation.SendsInliningFailures`) for the compiles no cache skips, and the three clearings above forget them too.
@@ -815,6 +817,56 @@ The sqllogictest replays, three runs per build alternating, medians: `refs/rando
   The compile walk went from 37% of the point `SELECT` to 35%, and `BuildSqlProjection` from 25% to 19%.
 
 What stays: the first resolution of each name (`ResolveSourceColumnOfAnyKind`, 1.5% of the point `SELECT`, 5% of the SMO column query, much of it the join planner's at run time), the read recorder's own scan of a table query's columns (1.5%), `BuildSqlProjection`'s closure, which captures most of its locals, and the native allocation path, still about a fifth of the samples.
+
+## The plan-cache DMVs
+
+`sys.dm_exec_cached_plans`, `sys.dm_exec_query_stats`, `sys.dm_exec_procedure_stats`, `sys.dm_exec_trigger_stats`, `sys.dm_exec_function_stats`, `sys.dm_exec_query_optimizer_info` and the `sys.dm_exec_plan_attributes` / `sys.dm_exec_query_plan` / `sys.dm_exec_text_query_plan` functions read `Simulation.CachedPlans` (`CachedPlans.cs`, hooks in `Simulation.CachedPlans.cs`), a registry of the plans real would hold.
+It is deliberately not the parse caches above: those keep what the simulator can replay (SELECT sequences, statement plans), which is neither what real compiles nor what it keeps, and coupling the two would make a DMV row appear or vanish with an internal optimization.
+Probed 2026-10-15 against SQL Server 2025.
+
+**Which batches get a plan.**
+A client's batch is an `Adhoc` plan of its text, or a `Prepared` one when it carries parameters — real receives those as `sp_executesql`, so the plan's text is the declaration in parentheses followed by the batch (`(@a int)select …`), the declaration being the one a TDS RPC sent or the one SqlClient would build from the parameters.
+`EXEC('…')` is an `Adhoc` plan of its own and `sp_executesql` a `Prepared` one when it declares parameters, `Adhoc` when it declares none.
+Real keeps a plan only for a batch holding a statement with a query plan — the statements Query Store captures ([`database-options.md`](database-options.md#capture)) — so `select 1`, `DECLARE` / `SET @v`, `PRINT`, an `EXEC` of a procedure, DDL alone and the like leave none, except that a batch of nothing but `SET` options and transaction statements (`BEGIN TRAN`, `COMMIT`, `SAVE TRAN`) is kept; one declaring a table variable is never kept.
+The plan is added at the batch's first statement that has one (`Simulation.CachedPlanOfBatch`), which also counts the batch's use, and a settings-only batch as it ends.
+A statement simple parameterization rewrites runs under a `Prepared` plan of the rewritten text, its batch an `Adhoc` shell holding no statement of its own; each compile of a shell — the first execution of each distinct ad hoc text — counts a use of the prepared plan, which counts every execution of the statement.
+
+**Modules.**
+A procedure's call, a DML trigger's firing and a call of a scalar or multi-statement function the optimizer doesn't inline each run under a `Proc` or `Trigger` plan of the module, keyed by its object id (`BeginCachedModuleCall` / `EndCachedModuleCall`), whose call statistics feed the three module DMVs — procedures, DML triggers and scalar functions, a multi-statement function getting a plan but no row, as on real.
+A function's plan counts one use per calling statement however many rows call it (`StatementContext.DispatchSerial` tells the statements apart), while `sys.dm_exec_function_stats` counts every call.
+A procedure compiled every call (`WITH RECOMPILE` on it or on the `EXEC`) keeps no plan; a natively compiled module isn't measured.
+`sp_recompile` of a procedure or trigger removes its plan at once, and an altered or dropped module's plan, like a dropped database's, is gone the next time the DMVs are read (`Simulation.LiveCachedPlans`).
+A body compiled afresh because an object it reads changed (`ModulePlan`, see [Module bodies](#module-bodies)) keeps its plan and its uses, its statements starting their counts over under the next `plan_generation_num`.
+
+**Statements.**
+`sys.dm_exec_query_stats` has a row per statement a plan ran, recorded from the same capture that times a statement for Query Store (`EndQueryStoreCapture`), which now times every statement of a batch with a plan whether or not its database's store records: a database with its store off still pays the clock and the reads count.
+Offsets are bytes into the plan's text, the end offset the last character's, as real reports them — so a prepared batch's statements sit past its declaration and a module's where its `CREATE` text has them.
+`statement_sql_handle` is the type byte 9 and the MD5 of the text Query Store stores for the statement, which matches real's bytes; `query_hash` / `query_plan_hash` and `statement_context_id` are Query Store's (the latter NULL while the database's store is off).
+
+**Handles.**
+A batch's `sql_handle` is the one `sys.dm_exec_requests` reports for its text (real's MD5 bytes); a module's is the type byte 3, the database and object ids and the procedure number, eight bytes between standing in for real's unrecovered ones.
+A plan handle is the type byte (6 for a batch, 5 for a module), the database id, the object id and four bytes derived from the cache key, so a plan compiled again under the same key gets the handle it had, as real's did.
+`sys.dm_exec_sql_text` resolves a plan handle to the plan's text and database, a batch's SQL handle to its text with no database, and a module's SQL handle to its definition, number 1 for a procedure.
+
+**Plan functions.**
+`sys.dm_exec_plan_attributes` lists real's 29 attributes in real's order and base types: the cache key the plan compiled under (`dbid_execute` 0 for a batch), then one execution context reused at every later use, then the SQL handle.
+`sys.dm_exec_query_plan` gives a ShowPlan XML document with a statement element per statement the plan ran — real's attributes, `RetrievedFromCache="true"` and an empty `QueryPlan`, as Query Store's plans have (the simulator has no optimizer whose operators it could describe); `sys.dm_exec_text_query_plan` gives it as text, the whole batch for offsets 0 and -1 (each one's `DEFAULT`), one statement for its own start offset with its end offset or -1, and a NULL plan for offsets placing no statement.
+A handle shorter than a plan handle is Msg 569 (state 5, or 10 from `dm_exec_plan_attributes`), a string Msg 257, and a NULL or unknown handle answers no rows.
+Every one of these needs `VIEW SERVER PERFORMANCE STATE` (Msg 300 then 297), as the other server-scope DMVs do ([`catalog-views.md`](catalog-views.md)).
+
+**Cost.**
+A tight loop of a plan-cached point `SELECT` measured 2.65 µs against 2.55 µs without the registry, and 2.55 µs against 2.30 µs in a database with its store off, which paid nothing for a statement's capture until the registry needed one (measured 2026-10-15, best of five rounds, Release build).
+A replayed SELECT batch remembers its plan on its parse-cache entry (`BatchContext.CachedPlanMemo`), so a repeat skips the lookup — and with it the declaration a parameterized command's key needs.
+
+### Divergences
+
+- **Timing and I/O columns are the simulator's own measures**: worker and elapsed time in microseconds of its own clock, logical reads as `STATISTICS IO` counts them; physical reads, writes, CLR time, grants, threads, spills, columnstore and page-server figures read 0 and every statement's DOP is 1.
+- **`bucketid`, `size_in_bytes`, `memory_object_address`** are stand-ins derived from the plan, constant for it but not real's values; `refcounts` is 2 and `pool_id` 2 (the default pool) for every plan.
+- **What makes a statement recompile is coarser for batches**: a batch's statements keep counting across schema changes where real's recompile and start over under a new `plan_generation_num`; a module's start over when its body's plan doesn't stand, all its statements together, where real's recompile one by one, each taking the next generation (probed 2026-10-15: two statements reached generations 2 and 3).
+- **A deferred compile doesn't decline a batch**: real kept no plan for `create table x …; select * from x` or `…; insert x select …` but kept `…; insert x values (…)` and `select … into x …; select * from x` (probed 2026-10-15); the simulator keeps all four.
+- **A plan whose batch never reaches a statement with a plan isn't cached**: real compiles the whole batch first, so `if 1 = 0 select * from t` has a plan whose statement never ran.
+- **Views and inlined functions get no `Parse Tree` entry** (`objtype` `View`, or `Proc` for an inlined scalar function), nor does an extended or CLR procedure get a plan.
+- **`dm_exec_query_optimizer_info`** counts the statements the plans hold — `optimizations`, `trivial plan` and a full search's first stage by the statement's shape, the write kinds — with 0 for the elapsed time and final cost; the other counters read 0 occurrences.
 
 ## Not modeled / future
 

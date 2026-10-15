@@ -1634,6 +1634,8 @@ public sealed partial class Simulation
             ForceTempTableScope = command.ScopeTempTablesToBatch,
             ApiServerCursor = command.ApiServerCursor,
             YieldsBetweenStatements = command.YieldsBetweenStatements,
+            CachedPlanOrigin = CachedPlanOrigin.ClientBatch,
+            CachedPlanDatabase = command.Connection?.CurrentDatabase,
         };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
@@ -1774,6 +1776,7 @@ public sealed partial class Simulation
         }
         finally
         {
+            EndCachedPlanBatch(batch);
             if (adHocScope)
             {
                 batch.Connection.NoCount = enteredNoCount;

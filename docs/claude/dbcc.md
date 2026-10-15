@@ -31,7 +31,7 @@ The duration is a positive `int` literal; 0, a negative, a decimal, a variable o
 
 ## The cache commands
 
-`FREEPROCCACHE` clears what [`plan-cache.md`](plan-cache.md#clearing-dbcc-freeproccache) describes; its argument is a pool name (`default`, `internal`), a binary handle of at least 44 bytes (a shorter one is Msg 2560 state 110), or nothing.
+`FREEPROCCACHE` clears what [`plan-cache.md`](plan-cache.md#clearing-dbcc-freeproccache) describes; its argument is a pool name (`default`, `internal`), a binary handle of at least 44 bytes — a plan handle or a SQL handle, as the [plan-cache DMVs](plan-cache.md#the-plan-cache-dmvs) report them (a shorter one is Msg 2560 state 110) — or nothing.
 `FREESYSTEMCACHE` takes `ALL`, a cache store name real lists in `sys.dm_os_memory_cache_counters`, a database's name or its `ObjPerm - ` store, and an optional pool; an unknown store or pool is Msg 2560 naming its position.
 `DROPCLEANBUFFERS` and `FREESESSIONCACHE` only report.
 `FLUSHAUTHCACHE` (no argument) and `PINTABLE` / `UNPINTABLE` (two integers, never looked up: an unknown database or object completes quietly, a string is Msg 2560) only report too, and every `WITH` option is Msg 2532 for them (probed 2026-09-30 against SQL Server 2025).

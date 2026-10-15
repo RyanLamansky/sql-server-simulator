@@ -67,7 +67,7 @@ partial class Simulation
     /// a trailing space — and an output-capable one suffixed <c>output</c>
     /// (probed 2026-10-09 against SQL Server 2025 through SqlClient 7).
     /// </summary>
-    private static string SqlClientParameterDeclaration(SimulatedDbParameterCollection parameters)
+    internal static string SqlClientParameterDeclaration(SimulatedDbParameterCollection parameters)
     {
         var declaration = new StringBuilder();
         for (var i = 0; i < parameters.Count; i++)

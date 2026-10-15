@@ -140,6 +140,7 @@ partial class Simulation
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         innerBatch.InheritCallerTriggerFrame(outerBatch);
         innerBatch.SetTableVariable(function.ReturnVariableName, returnTable);
+        var planCall = BeginCachedModuleCall(outerBatch, innerBatch, function, CachedPlanKind.Proc, compiledBody: null);
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);
         // WITH EXECUTE AS runs the body as the principal it names, as a
@@ -167,6 +168,7 @@ partial class Simulation
         }
         finally
         {
+            EndCachedModuleCall(innerBatch, planCall);
             connection.Security.RevertTo(savedImpersonationDepth);
             connection.StatementIo = callerIo;
             connection.NestingLevel--;

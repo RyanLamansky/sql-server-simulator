@@ -969,6 +969,15 @@ partial class Simulation
         if (runsIn is not null)
             connection.CurrentDatabase = runsIn;
         connection.EnterNestedDatabase(enteredDatabase);
+        // An EXEC string is an ad hoc batch of its own to the plan cache, and
+        // an sp_executesql statement a prepared one when it declares
+        // parameters (probed 2026-10-15 against SQL Server 2025).
+        if (declarations is not null && !outerBatch.IsSkipping)
+        {
+            innerBatch.CachedPlanOrigin = declarations.StartsWith("sp_executesql ", StringComparison.Ordinal) ? CachedPlanOrigin.ExecuteSql : CachedPlanOrigin.DynamicBatch;
+            innerBatch.CachedPlanDeclaration = innerBatch.CachedPlanOrigin == CachedPlanOrigin.ExecuteSql ? declarations["sp_executesql ".Length..] : null;
+            innerBatch.CachedPlanDatabase = connection.CurrentDatabase;
+        }
         // SET NOCOUNT inside the dynamic batch binds for that batch only, the
         // same module scope USE and temp tables get (probe-confirmed for both
         // EXEC('…') and sp_executesql).
@@ -1050,6 +1059,7 @@ partial class Simulation
         finally
         {
             streamed?.Dispose();
+            EndCachedPlanBatch(innerBatch);
             connection.NestingLevel -= nestingLevels;
             // A USE inside the dynamic batch binds for that batch only — the
             // caller resumes on the database it was on (probe-confirmed for

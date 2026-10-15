@@ -365,9 +365,9 @@ partial class Simulation
     /// <c>DBCC FREEPROCCACHE [( plan_handle | sql_handle | pool_name )] [WITH
     /// NO_INFOMSGS]</c>. Empties the plan cache — with it the compiled-batch
     /// memo and the token memo — or, given a <c>sql_handle</c>, the plans of
-    /// the one command text it names; a plan handle names no plan here, the
-    /// simulator exposing none. Of the two resource pools, <c>default</c> holds
-    /// every plan and <c>internal</c> none.
+    /// the one command text or module it names, and given a plan handle, the
+    /// one plan <c>sys.dm_exec_cached_plans</c> lists under it. Of the two
+    /// resource pools, <c>default</c> holds every plan and <c>internal</c> none.
     /// </summary>
     private static List<SimulatedStatementOutcome> RunDbccFreeProcCache(BatchContext batch, DbccInvocation dbcc)
     {
@@ -392,6 +392,8 @@ partial class Simulation
                     throw SimulatedSqlException.DbccParameterIsIncorrect(1, 110);
                 if (handle[0] == 0x02)
                     simulation.ClearPlanCache(sqlHandle: handle);
+                else
+                    simulation.RemoveCachedPlans(handle, database: null);
                 break;
             case { Category: SqlTypeCategory.String }:
                 if (BuiltInToken.Equals(value.AsString, "default"))

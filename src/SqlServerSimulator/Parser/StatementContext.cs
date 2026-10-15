@@ -524,6 +524,13 @@ internal sealed class StatementContext
     public bool ChangesTableStructure;
 
     /// <summary>
+    /// Counts the statements dispatched on this frame, so a function's cached
+    /// plan can tell one calling statement from the next
+    /// (<see cref="Simulation.BeginCachedModuleCall"/>).
+    /// </summary>
+    public int DispatchSerial;
+
+    /// <summary>
     /// Clears what a statement latches as it runs for its dispatch to read
     /// once it ends — once per dispatch of a statement, before its first token
     /// is read. A statement nested in this one (an <c>IF</c>'s branch, a
@@ -531,6 +538,7 @@ internal sealed class StatementContext
     /// </summary>
     public void BeginDispatch()
     {
+        this.DispatchSerial++;
         this.SuppressErrorReset = false;
         this.ReportedIgnoredDuplicate = false;
         this.ReportedNoiseWords = false;

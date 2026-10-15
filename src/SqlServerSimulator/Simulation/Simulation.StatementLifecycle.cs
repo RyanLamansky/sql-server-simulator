@@ -228,6 +228,11 @@ partial class Simulation
                     batch.CountedStatementLine = batch.CurrentStatement.StartLine;
             }
             this.StatementStart = batch.Parser.SaveCheckpoint();
+            if (batch.CachedPlanOrigin is CachedPlanOrigin.ClientBatch or CachedPlanOrigin.DynamicBatch or CachedPlanOrigin.ExecuteSql
+                && batch.BlockDepth == 0 && !batch.IsSkipping)
+            {
+                NoteCachedPlanStatement(batch);
+            }
             this.rowSecurityMarks = batch.Connection.RowSecurityMarks;
             this.gatheredBefore = batch.CreateTimeBindErrors?.Count ?? 0;
             // The string → date-time conversion reads the session's order from

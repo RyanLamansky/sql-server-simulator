@@ -480,6 +480,7 @@ partial class Simulation
         connection.XactAbort = true;
         BatchContext? innerBatch = null;
         SimulatedDbCommand? bodyCommand = null;
+        CachedModuleCall? planCall = null;
         try
         {
             moduleScope = ModuleDatabaseScope.Enter(connection, bodyDatabase);
@@ -555,6 +556,7 @@ partial class Simulation
                         compileError.EndedCalledBatchIn = innerBatch;
                         throw compileError;
                     }
+                    planCall = BeginCachedModuleCall(outerBatch, innerBatch, compiled, CachedPlanKind.Trigger, compiled.CompiledPlan);
                 }
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
@@ -620,6 +622,8 @@ partial class Simulation
         }
         finally
         {
+            if (innerBatch is not null)
+                EndCachedModuleCall(innerBatch, planCall);
             moduleScope.Exit();
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;

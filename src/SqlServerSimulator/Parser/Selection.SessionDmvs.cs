@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -27,18 +28,35 @@ partial class Selection
     /// <c>sys.dm_exec_*</c> functions (probed 2026-09-30 against SQL Server
     /// 2025).
     /// </summary>
-    private static Expression[] ParseSystemFunctionArguments(ParserContext context, string functionName, int count)
+    private static Expression[] ParseSystemFunctionArguments(ParserContext context, string functionName, int count) =>
+        ParseSystemFunctionArguments(context, functionName, count, acceptsDefault: false)!;
+
+    /// <summary>
+    /// <see cref="ParseSystemFunctionArguments(ParserContext, string, int)"/>,
+    /// where <paramref name="acceptsDefault"/> lets an argument after the
+    /// first be <c>DEFAULT</c>, which leaves its slot null.
+    /// </summary>
+    private static Expression?[] ParseSystemFunctionArguments(ParserContext context, string functionName, int count, bool acceptsDefault)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var arguments = new Expression[count];
+        var arguments = new Expression?[count];
         for (var i = 0; ; i++)
         {
             context.MoveNextRequired();
             if (i == 0 && context.Token is Operator { Character: ')' })
                 throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, 3).PinLine(12);
-            var argument = Expression.Parse(context);
+            Expression? argument;
+            if (acceptsDefault && i > 0 && context.Token is ReservedKeyword { Keyword: Keyword.Default })
+            {
+                argument = null;
+                context.MoveNextRequired();
+            }
+            else
+            {
+                argument = Expression.Parse(context);
+            }
             if (i < count)
                 arguments[i] = argument;
             if (context.Token is Operator { Character: ',' })
@@ -60,9 +78,13 @@ partial class Selection
     /// the command a SQL handle names, found among the live sessions'
     /// current or most recent commands — the handles
     /// <c>sys.dm_exec_requests</c> and <c>sys.dm_exec_connections</c> hand
-    /// out. An unknown handle, and a NULL one, answer no rows; one too short,
-    /// or of a type real doesn't resolve, is Msg 569, and a statement handle
-    /// Msg 12413. Probed 2026-09-25 against SQL Server 2025.
+    /// out — and the cached plans' batches; the definition of the module a
+    /// module's SQL handle names; and the text of the cached plan a plan
+    /// handle names, with its database (probed 2026-10-15 against SQL Server
+    /// 2025: a batch's SQL handle reports no database, its plan handle the
+    /// one it compiled in). An unknown handle, and a NULL one, answer no rows;
+    /// one too short, or of a type real doesn't resolve, is Msg 569, and a
+    /// statement handle Msg 12413. Probed 2026-09-25 against SQL Server 2025.
     /// </summary>
     public static Selection ParseSqlText(ParserContext context, string functionName)
     {
@@ -84,8 +106,28 @@ partial class Selection
             throw SimulatedSqlException.InvalidSqlTextHandle();
         switch (handle[0])
         {
-            case 0 or 1 or 2 or 5 or 6 or 7:
+            case 0 or 1 or 2 or 7:
                 break;
+            // A module's handle naming no database is malformed (probed
+            // 2026-10-15 against SQL Server 2025); one naming a database
+            // or object no longer there answers nothing.
+            case 3 when handle[2] != 0 || handle[3] != 0:
+                return ModuleSqlTextRow(batch.Connection.Simulation, handle);
+            case 5 or 6:
+                foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
+                {
+                    if (handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(plan.PlanHandle))
+                    {
+                        return [RowEncoder.EncodeRow(SqlTextSchema, [
+                            SqlValue.FromInt16(plan.Key.DatabaseId),
+                            plan.Module is null ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(plan.ObjectId),
+                            plan.Module is null ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16(plan.Number),
+                            SqlValue.FromBoolean(plan.Module is not null && plan.Text is null),
+                            plan.Text is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(plan.Text),
+                        ])];
+                    }
+                }
+                return [];
             case 9:
                 throw SimulatedSqlException.StatementSqlHandleNotProcessed();
             default:
@@ -103,6 +145,11 @@ partial class Selection
                     return SqlTextRow(parked.BatchText!);
             }
         }
+        foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
+        {
+            if (plan.IsBatch && handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(plan.SqlHandle))
+                return SqlTextRow(plan.Text!);
+        }
         return [];
 
         static bool Matches(string? text, byte[] handle) =>
@@ -113,6 +160,38 @@ partial class Selection
                 SqlValue.Null(SqlType.SmallInt), SqlValue.Null(SqlType.Int32), SqlValue.Null(SqlType.SmallInt),
                 SqlValue.FromBoolean(false), SqlValue.FromNVarchar(text),
             ])];
+    }
+
+    /// <summary>
+    /// The <c>sys.dm_exec_sql_text</c> row of the module a module's SQL handle
+    /// names by its database and object id: its definition, NULL for an
+    /// encrypted one, and the procedure number 1 for a procedure, 0 for
+    /// another module; no row for a module no database holds.
+    /// </summary>
+    private static List<byte[]> ModuleSqlTextRow(Simulation simulation, byte[] handle)
+    {
+        var databaseId = System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(handle.AsSpan(2));
+        var objectId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(handle.AsSpan(4));
+        if (Expressions.DbId.DatabaseWithId(simulation, databaseId) is not { } database)
+            return [];
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var module in schema.SchemaObjects())
+            {
+                if (module.ObjectId != objectId || !SchemaObject.IsSqlModule(module) || module is View)
+                    continue;
+                if (!handle.AsSpan(0, BuiltInResources.SqlHandleLength).SequenceEqual(CachedPlan.ModuleSqlHandle(databaseId, module)))
+                    return [];
+                return [RowEncoder.EncodeRow(SqlTextSchema, [
+                    SqlValue.FromInt16(databaseId),
+                    SqlValue.FromInt32(objectId),
+                    SqlValue.FromInt16(module is Procedure ? (short)1 : (short)0),
+                    SqlValue.FromBoolean(module.DefinitionText is null),
+                    module.DefinitionText is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(module.DefinitionText),
+                ])];
+            }
+        }
+        return [];
     }
 
     /// <summary>

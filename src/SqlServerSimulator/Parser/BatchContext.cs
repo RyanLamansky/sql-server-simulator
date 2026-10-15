@@ -1317,6 +1317,51 @@ internal sealed partial class BatchContext
     public bool CapturesQueryStore;
 
     /// <summary>
+    /// What kind of batch this is to the plan cache <c>sys.dm_exec_cached_plans</c>
+    /// lists — a client's, a dynamic one, or a module body — and so which
+    /// cached plan its statements' executions are recorded under; none for a
+    /// batch real compiles into no plan of its own.
+    /// </summary>
+    public CachedPlanOrigin CachedPlanOrigin;
+
+    /// <summary>The declaration an <c>sp_executesql</c> batch was called with, which prefixes its cached plan's text.</summary>
+    public string? CachedPlanDeclaration;
+
+    /// <summary>The database the batch began in, which its cached plan is compiled in.</summary>
+    public Database? CachedPlanDatabase;
+
+    /// <summary>
+    /// The cached plan the batch's statements are recorded under: set as a
+    /// module call begins, and for any other batch looked up or added at its
+    /// first statement real keeps a plan for (<see cref="Simulation.CachedPlanOfBatch"/>).
+    /// </summary>
+    public CachedPlan? CachedPlan;
+
+    /// <summary>
+    /// Where a replayed plan-cache entry remembers the cached plan its text
+    /// was last recorded under, so a replay finding it still held and its
+    /// settings unchanged skips the lookup; null outside a replay.
+    /// </summary>
+    public System.Runtime.CompilerServices.StrongBox<CachedPlan?>? CachedPlanMemo;
+
+    /// <summary>Whether this execution added <see cref="CachedPlan"/>, which is the compile a simple-parameterized statement's prepared plan counts a use for.</summary>
+    public bool CachedPlanCompiled;
+
+    /// <summary>Set once the batch is found to be one real doesn't cache, so it isn't looked at again.</summary>
+    public bool CachedPlanDeclined;
+
+    /// <summary>
+    /// What the batch's top-level statements have been so far, for the plan
+    /// cache's rule that a batch of nothing but <c>SET</c> options and
+    /// transaction statements is cached though none of them is a query
+    /// (<see cref="Simulation.NoteCachedPlanStatement"/>).
+    /// </summary>
+    public CachedPlanStatements CachedPlanStatements;
+
+    /// <summary>The logical reads the statements of a module call recorded, which its procedure, trigger or function statistics sum.</summary>
+    public long CachedPlanReads;
+
+    /// <summary>
     /// Leaf names (<c>#foo</c>) of local temp tables created while this batch's
     /// body executed. Non-null only for a module body — a procedure, trigger,
     /// or dynamic-SQL (<c>EXEC</c> / <c>sp_executesql</c>) scope — where SQL

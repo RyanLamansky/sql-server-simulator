@@ -1308,8 +1308,17 @@ partial class SimulatedSqlException
     /// handle shorter than a SQL handle or of a type it doesn't take. State 4,
     /// probed 2026-09-25 against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException InvalidSqlTextHandle() =>
-        new("The handle that was passed to dm_exec_sql_text was invalid.", 569, 16, 4);
+    internal static SimulatedSqlException InvalidSqlTextHandle() => InvalidDmvHandle("dm_exec_sql_text", 4);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 569 — a handle DMV function given a handle
+    /// shorter than a plan handle: state 5 from <c>sys.dm_exec_query_plan</c>
+    /// and <c>sys.dm_exec_text_query_plan</c>, 10 from
+    /// <c>sys.dm_exec_plan_attributes</c>, 4 from <c>sys.dm_exec_sql_text</c>
+    /// (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidDmvHandle(string function, byte state) =>
+        new($"The handle that was passed to {function} was invalid.", 569, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 12413 — <c>sys.dm_exec_sql_text</c> given a

@@ -45,9 +45,11 @@ partial class Simulation
         {
             case Procedure procedure:
                 procedure.CompiledPlan = null;
+                batch.Connection.Simulation.RemoveCachedPlansOf(procedure);
                 break;
             case Trigger trigger:
                 trigger.CompiledPlan = null;
+                batch.Connection.Simulation.RemoveCachedPlansOf(trigger);
                 break;
             case Storage.HeapTable table:
                 table.ModifyDate = batch.CurrentStatement.UtcNow;

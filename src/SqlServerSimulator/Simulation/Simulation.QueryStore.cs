@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using SqlServerSimulator.Parser;
@@ -30,11 +29,15 @@ partial class Simulation
     /// <summary>
     /// Where a statement's capture started: its clock, the session's
     /// <c>WAITFOR</c> time by then (which is no CPU), and the logical reads
-    /// its statistics had already counted.
+    /// its statistics had already counted — and whether the execution goes to
+    /// the database's Query Store, the plan cache's statement statistics, or
+    /// both.
     /// </summary>
-    private readonly struct QueryStoreCapture(Database database, long startedAt, long waitedBefore, long lockWaitedBefore, long readsBefore)
+    private readonly struct QueryStoreCapture(Database database, bool recordsStore, bool recordsPlan, long startedAt, long waitedBefore, long lockWaitedBefore, long readsBefore)
     {
         public readonly Database Database = database;
+        public readonly bool RecordsStore = recordsStore;
+        public readonly bool RecordsPlan = recordsPlan;
         public readonly long StartedAt = startedAt;
         public readonly long WaitedBefore = waitedBefore;
         public readonly long LockWaitedBefore = lockWaitedBefore;
@@ -56,26 +59,29 @@ partial class Simulation
     };
 
     /// <summary>
-    /// Starts timing a statement for Query Store, or null when the store
-    /// won't record it: a batch walking in skip mode, a view body or an inlined
-    /// function body (part of its caller's statement), a module's CREATE-time bind, and a
-    /// database whose store isn't READ_WRITE — or is capturing nothing new
-    /// and holds nothing to update. The check reads two fields, so a
-    /// database with its store off pays nothing more.
+    /// Starts timing a statement for Query Store and the plan cache's
+    /// statement statistics, or null when neither will record it: a batch
+    /// walking in skip mode, a view body or an inlined function body (part of
+    /// its caller's statement), a module's CREATE-time bind, and a batch with
+    /// no cached plan of its own in a database whose store isn't READ_WRITE —
+    /// or is capturing nothing new and holds nothing to update.
     /// </summary>
     private static QueryStoreCapture? BeginQueryStoreCapture(BatchContext batch, IoStatistics? io)
     {
-        if (batch.IsSkipping || (batch.SuppressDiagnosticsResolution && !batch.CapturesQueryStore) || batch.CreateTimeBinding)
+        if (batch.IsSkipping || batch.CreateTimeBinding)
+            return null;
+        var recordsPlan = batch.CachedPlanOrigin != CachedPlanOrigin.None && !batch.CachedPlanDeclined;
+        if (batch.SuppressDiagnosticsResolution && !batch.CapturesQueryStore && !recordsPlan)
             return null;
         var database = batch.CurrentDatabase;
         var options = database.QueryStore;
-        if (options.DesiredState != QueryStoreState.ReadWrite
-            || (options.CaptureMode == QueryStoreCaptureMode.None && database.QueryStoreData.IsEmpty))
-        {
+        var recordsStore = (!batch.SuppressDiagnosticsResolution || batch.CapturesQueryStore)
+            && options.DesiredState == QueryStoreState.ReadWrite
+            && (options.CaptureMode != QueryStoreCaptureMode.None || !database.QueryStoreData.IsEmpty);
+        if (!recordsStore && !recordsPlan)
             return null;
-        }
         var connection = batch.Connection;
-        return new QueryStoreCapture(database, Stopwatch.GetTimestamp(), connection.WaitedTicks, connection.Session.LockWaitedMilliseconds, io?.TotalLogicalReads() ?? 0);
+        return new QueryStoreCapture(database, recordsStore, recordsPlan, Stopwatch.GetTimestamp(), connection.WaitedTicks, connection.Session.LockWaitedMilliseconds, io?.TotalLogicalReads() ?? 0);
     }
 
     /// <summary>
@@ -100,15 +106,25 @@ partial class Simulation
         var cpu = Math.Max(0, elapsed - (connection.WaitedTicks - capture.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
         var reads = Math.Max(0, (io?.TotalLogicalReads() ?? 0) - capture.ReadsBefore);
 
-        if (QueryStoreKeyOf(batch, capture.Database, start, end, tokensFrom, out var shape, out var offsetStart, out var offsetEnd) is not { } key)
+        var now = DateTime.UtcNow;
+        if (!capture.RecordsStore)
+        {
+            // The plan cache alone records the statement, and reads the text
+            // Query Store would store for it only as the statement first runs.
+            var shape = connection.Simulation.QueryStoreShapeOf(commandText.AsSpan(start, end - start), capture.Database, batch.Parser, tokensFrom);
+            if (IsCapturedShape(batch, shape))
+                RecordCachedPlanStatement(batch, capture.Database, shape, storeKey: null, start, end, tokensFrom, now, elapsed / 10, cpu / 10, reads, rowCount);
+            return;
+        }
+        if (QueryStoreKeyOf(batch, capture.Database, start, end, tokensFrom, out var storeShape, out var offsetStart, out var offsetEnd) is not { } key)
             return;
         var execution = new QueryStoreExecution(
             key,
-            shape,
+            storeShape,
             commandText,
             offsetStart,
             offsetEnd,
-            DateTime.UtcNow,
+            now,
             elapsed / 10,
             cpu / 10,
             reads,
@@ -116,6 +132,38 @@ partial class Simulation
             executionType,
             lockWaitMilliseconds);
         RecordQueryStoreExecution(capture.Database, execution);
+        if (capture.RecordsPlan)
+            RecordCachedPlanStatement(batch, capture.Database, storeShape, key, start, end, tokensFrom, now, elapsed / 10, cpu / 10, reads, rowCount);
+    }
+
+    /// <summary>Whether real records a statement of <paramref name="shape"/>: a query, a write, or a FROM-less query calling a user function.</summary>
+    private static bool IsCapturedShape(BatchContext batch, QueryStoreShape shape) =>
+        shape.Captured || (shape.CapturedWhenCallingFunction && batch.CurrentStatement.CallsUserFunction);
+
+    /// <summary>Whether <paramref name="batch"/> runs a module's body, whose statements are never simple parameterized and sit in its CREATE text.</summary>
+    private static bool IsModuleBody(BatchContext batch) =>
+        batch.ModuleObjectId != 0 || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false };
+
+    /// <summary>
+    /// The id of the <c>sys.query_context_settings</c> row for
+    /// <paramref name="context"/> in <paramref name="database"/>'s store, added
+    /// when the store has none yet; null while the store isn't READ_WRITE.
+    /// </summary>
+    private static long? QueryStoreContextSettingsId(Database database, QueryStoreContextKey context)
+    {
+        if (database.QueryStore.DesiredState != QueryStoreState.ReadWrite)
+            return null;
+        var data = database.QueryStoreData;
+        lock (data.Gate)
+        {
+            var settings = data.ContextSettings.Find(existing => existing.Key.Equals(context));
+            if (settings is null)
+            {
+                settings = new QueryStoreContextSettings(data.NextContextSettingsId++, context);
+                data.ContextSettings.Add(settings);
+            }
+            return settings.Id;
+        }
     }
 
     /// <summary>
@@ -131,10 +179,10 @@ partial class Simulation
         var connection = batch.Connection;
         shape = connection.Simulation.QueryStoreShapeOf(commandText.AsSpan(start, end - start), database, batch.Parser, tokensFrom);
         offsetStart = offsetEnd = 0;
-        if (!shape.Captured && !(shape.CapturedWhenCallingFunction && batch.CurrentStatement.CallsUserFunction))
+        if (!IsCapturedShape(batch, shape))
             return null;
 
-        var isModule = batch.ModuleObjectId != 0 || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false };
+        var isModule = IsModuleBody(batch);
         string text;
         byte parameterizationType;
         string? tableVariableScope = null;
@@ -480,18 +528,7 @@ partial class Simulation
             DateFormatCode(connection.DateFormat),
             connection.DateFirst,
             batch.ModuleObjectId != 0 ? -2 : Database.DboSchemaId);
-        var data = database.QueryStoreData;
-        QueryStoreContextSettings? context;
-        lock (data.Gate)
-        {
-            context = data.ContextSettings.Find(existing => existing.Key.Equals(key));
-            if (context is null)
-            {
-                context = new QueryStoreContextSettings(data.NextContextSettingsId++, key);
-                data.ContextSettings.Add(context);
-            }
-        }
-        return (StatementSqlHandleOf(statementText), context.Id);
+        return (StatementSqlHandleOf(statementText), QueryStoreContextSettingsId(database, key)!.Value);
     }
 
     /// <summary>Adds the text, context settings and query rows for a newly captured query. Caller holds the gate.</summary>
@@ -581,22 +618,75 @@ partial class Simulation
         var statementText = query.Key.ParameterizationType == 2 && shape.Parameterized is { } parameterized
             ? parameterized[shape.ParameterizedPrefixLength..]
             : shape.Text;
-        var options = query.Context.Key.SetOptions;
+        return AppendShowPlanStatement(OpenShowPlan(), statementText, 1, shape, query.Text.StatementSqlHandle, query.Context.Id, query.Key.ObjectId,
+                query.Key.ParameterizationType, retrievedFromCache: false, compatibilityLevel, query.Context.Key.SetOptions)
+            .Append(ShowPlanClose)
+            .ToString();
+    }
+
+    /// <summary>A ShowPlan XML document's opening, up to its first statement.</summary>
+    internal static StringBuilder OpenShowPlan() =>
+        new StringBuilder()
+            .Append(CultureInfo.InvariantCulture, $"<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.599\" Build=\"{ReferenceBuild.ProductVersion}\">")
+            .Append("<BatchSequence><Batch><Statements>");
+
+    /// <summary>
+    /// <paramref name="value"/> escaped as real writes an attribute of its
+    /// ShowPlan XML: the markup characters and the double quote as entities,
+    /// tab, line feed and carriage return as character references, and the
+    /// apostrophe as itself (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    private static string EscapeShowPlanAttribute(string value)
+    {
+        if (value.AsSpan().IndexOfAny(ShowPlanEscaped) < 0)
+            return value;
+        var escaped = new StringBuilder(value.Length + 16);
+        foreach (var character in value)
+        {
+            _ = character switch
+            {
+                '\t' => escaped.Append("&#x09;"),
+                '\n' => escaped.Append("&#x0A;"),
+                '\r' => escaped.Append("&#x0D;"),
+                '"' => escaped.Append("&quot;"),
+                '&' => escaped.Append("&amp;"),
+                '<' => escaped.Append("&lt;"),
+                '>' => escaped.Append("&gt;"),
+                _ => escaped.Append(character),
+            };
+        }
+        return escaped.ToString();
+    }
+
+    private static readonly System.Buffers.SearchValues<char> ShowPlanEscaped = System.Buffers.SearchValues.Create("&<>\"\t\n\r");
+
+    /// <summary>A ShowPlan XML document's close, after its last statement.</summary>
+    internal const string ShowPlanClose = "</Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    /// <summary>
+    /// One statement of a ShowPlan XML document, in real's shape — the
+    /// statement element and its attributes, the SET options, a
+    /// <c>QueryPlan</c> element — with no operator tree, the simulator having
+    /// no optimizer whose plan it could describe.
+    /// </summary>
+    internal static StringBuilder AppendShowPlanStatement(StringBuilder xml, string statementText, int statementId, QueryStoreShape shape, byte[] statementSqlHandle,
+        long? contextSettingsId, long parentObjectId, byte parameterizationType, bool retrievedFromCache, short compatibilityLevel, int setOptions)
+    {
         static string Flag(int options, int bit) => (options & bit) != 0 ? "true" : "false";
         var invariant = CultureInfo.InvariantCulture;
-        return new StringBuilder()
-            .Append(invariant, $"<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.599\" Build=\"{ReferenceBuild.ProductVersion}\">")
-            .Append("<BatchSequence><Batch><Statements>")
-            .Append(invariant, $"<StmtSimple StatementText=\"{SecurityElement.Escape(statementText)}\" StatementId=\"1\" StatementCompId=\"1\" StatementType=\"{shape.StatementType}\"")
-            .Append(invariant, $" StatementSqlHandle=\"0x{Convert.ToHexString(query.Text.StatementSqlHandle)}\" DatabaseContextSettingsId=\"{query.Context.Id}\"")
-            .Append(invariant, $" ParentObjectId=\"{query.Key.ObjectId}\" StatementParameterizationType=\"{query.Key.ParameterizationType}\" RetrievedFromCache=\"false\"")
+        _ = xml
+            .Append(invariant, $"<StmtSimple StatementText=\"{EscapeShowPlanAttribute(statementText)}\" StatementId=\"{statementId}\" StatementCompId=\"{statementId}\" StatementType=\"{shape.StatementType}\"")
+            .Append(invariant, $" StatementSqlHandle=\"0x{Convert.ToHexString(statementSqlHandle)}\"");
+        if (contextSettingsId is { } contextId)
+            _ = xml.Append(invariant, $" DatabaseContextSettingsId=\"{contextId}\"");
+        return xml
+            .Append(invariant, $" ParentObjectId=\"{parentObjectId}\" StatementParameterizationType=\"{parameterizationType}\" RetrievedFromCache=\"{(retrievedFromCache ? "true" : "false")}\"")
             .Append(invariant, $" StatementOptmLevel=\"{(shape.IsTrivial ? "TRIVIAL" : "FULL")}\" QueryHash=\"0x{Convert.ToHexString(shape.QueryHash)}\"")
             .Append(invariant, $" QueryPlanHash=\"0x{Convert.ToHexString(shape.QueryPlanHash)}\" CardinalityEstimationModelVersion=\"{compatibilityLevel}\">")
-            .Append(invariant, $"<StatementSetOptions QUOTED_IDENTIFIER=\"{Flag(options, 64)}\" ARITHABORT=\"{Flag(options, 4096)}\" CONCAT_NULL_YIELDS_NULL=\"{Flag(options, 8)}\"")
-            .Append(invariant, $" ANSI_NULLS=\"{Flag(options, 32)}\" ANSI_PADDING=\"{Flag(options, 1)}\" ANSI_WARNINGS=\"{Flag(options, 16)}\" NUMERIC_ROUNDABORT=\"{Flag(options, 8192)}\"></StatementSetOptions>")
+            .Append(invariant, $"<StatementSetOptions QUOTED_IDENTIFIER=\"{Flag(setOptions, 64)}\" ARITHABORT=\"{Flag(setOptions, 4096)}\" CONCAT_NULL_YIELDS_NULL=\"{Flag(setOptions, 8)}\"")
+            .Append(invariant, $" ANSI_NULLS=\"{Flag(setOptions, 32)}\" ANSI_PADDING=\"{Flag(setOptions, 1)}\" ANSI_WARNINGS=\"{Flag(setOptions, 16)}\" NUMERIC_ROUNDABORT=\"{Flag(setOptions, 8192)}\"></StatementSetOptions>")
             .Append("<QueryPlan CachedPlanSize=\"16\" CompileTime=\"0\" CompileCPU=\"0\" CompileMemory=\"0\"></QueryPlan>")
-            .Append("</StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>")
-            .ToString();
+            .Append("</StmtSimple>");
     }
 
     /// <summary>
