@@ -85,7 +85,8 @@ dotnet test tests/SqlServerSimulator.Tests/bin/Debug/net10.0/SqlServerSimulator.
 
 That's somewhat faster than `dotnet test <csproj> --no-build --filter`, which pays MSBuild's fixed cost on top; either serves a tight loop.
 Rebuild the one project (`dotnet build src/SqlServerSimulator/SqlServerSimulator.csproj`) when the DLL goes stale; full `dotnet build` + `dotnet test` is the pre-commit checkpoint.
-While iterating, add `-p:RunAnalyzers=false` to those rebuilds: the analyzers the build runs (trim analysis, the IDE / CA rules, the SSS rules) roughly double or triple a compile of the library, and almost all of that cost is Microsoft's, not the SSS rules'.
+While iterating, add `-p:RunAnalyzers=false` to those rebuilds: the analyzers the build runs (the IDE / CA rules, the SSS rules) roughly double a compile of the library, and almost all of that cost is Microsoft's, not the SSS rules'.
+Trim analysis (IL2xxx / IL3xxx) runs only in Release, which CI's Release leg enforces; `dotnet build -c Release` (or `-p:EnableTrimAnalyzer=true`) runs it locally when touching reflection → [`build-analyzers.md`](docs/claude/build-analyzers.md).
 The plain `dotnet build` stays the gate, since a style or analyzer violation only surfaces there.
 All tests use method-level parallelism.
 
@@ -204,6 +205,8 @@ Write to them up front to save a build round trip:
 - **SSS014**: a `$"…"` that becomes a `string` formats its holes with the current culture, which CA1305 doesn't check; build one holding a date, time or floating-point hole with `string.Create(CultureInfo.InvariantCulture, $"…")`.
 - **SSS015**: never read the host's local clock or zone (`DateTime.Now`, `TimeZoneInfo.Local`, `ToLocalTime()`); the simulated server's clock is UTC — the statement's `UtcNow`, the transaction's `SystemTimeUtc`.
 - **SSS016**: one `///` comment, one `<summary>`; a second is a member inserted between another member's documentation and its declaration, so move the displaced block back to its member.
+- **SSS017**: no `!` on a value already declared not-null (a non-nullable parameter, local, field, property or method result, a value type, `this`, `new`, a string); it stands in for the SDK's IDE0370, disabled for build speed → [`build-analyzers.md`](docs/claude/build-analyzers.md).
+- **SSS018**: a disposable `new` that is only used through its members, or thrown away at once, is declared `using`; it stands in for CA2000, disabled for build speed, so an ownership transfer it can't see takes the pragma.
 - A deliberate exception takes `#pragma warning disable SSSnnn` plus a one-line rationale.
 - **MSTEST0049**: async tests thread `TestContext.CancellationToken` (`public TestContext TestContext { get; set; } = null!;`).
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` and typed asserts over generic ones.

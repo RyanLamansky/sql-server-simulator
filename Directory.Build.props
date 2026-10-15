@@ -21,6 +21,14 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);TestResults/**</DefaultItemExcludes>
   </PropertyGroup>
 
+  <!-- Trim analysis (IL2xxx / IL3xxx, from IsTrimmable) is the costliest
+       analyzer in a build and has never been seen to fail, so it runs only in
+       Release, which CI's Release leg builds; `dotnet build -c Release` runs it
+       locally. See docs/claude/build-analyzers.md for the measurements. -->
+  <PropertyGroup Condition="'$(Configuration)' != 'Release'">
+    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory).editorconfig" Link=".editorconfig" />
   </ItemGroup>

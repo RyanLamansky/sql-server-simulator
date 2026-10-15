@@ -83,9 +83,8 @@ partial class Simulation
         // The body's command: the connection is the caller's, so database and
         // transaction state is shared, and the text is the function's own
         // stored body.
-#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+        // Handed back to the session with ReturnBodyCommand, never disposed.
         var bodyCommand = connection.RentBodyCommand(function.BodyText);
-#pragma warning restore CA2000
         var udfFrame = new UdfFrame(function.ReturnType);
         // The body binds and runs in the function's own database.
         var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);

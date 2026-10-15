@@ -217,13 +217,11 @@ internal sealed partial class Selection
                         // be stranded by a thread on its way out. The re-read
                         // is load-bearing: a submitter can enqueue between this
                         // wait timing out and the lock coming back.
-#pragma warning disable CA1508 // Deliberate: Monitor.Wait released the lock, so the enclosing loop's condition says nothing about the count here.
                         if (!signalled && Pending.Count == 0)
                         {
                             threads--;
                             return;
                         }
-#pragma warning restore CA1508
                     }
                     run = Pending.Dequeue();
                 }

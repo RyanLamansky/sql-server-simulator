@@ -32,9 +32,8 @@ public sealed class AbandonedSessionReclamationTests
     /// </summary>
     private static SessionToken Abandon(Simulation simulation, string sql)
     {
-#pragma warning disable CA2000 // Abandoning the connection undisposed is the scenario under test.
+        // Abandoning the connection undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
-#pragma warning restore CA2000
         connection.Open();
         using (var command = connection.CreateCommand())
         {
@@ -338,13 +337,12 @@ public sealed class AbandonedSessionReclamationTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakTriggerReader(Simulation simulation)
     {
-#pragma warning disable CA2000 // Abandoning the connection and its reader undisposed is the scenario under test.
+        // Abandoning the connection and its reader undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
         connection.Open();
         var command = connection.CreateCommand();
         command.CommandText = "UPDATE dbo.t SET v = 2 WHERE id = 1";
         var reader = command.ExecuteReader();
-#pragma warning restore CA2000
         IsTrue(reader.Read());
         return connection.Session;
     }
@@ -352,7 +350,7 @@ public sealed class AbandonedSessionReclamationTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakSuspendedReader(Simulation simulation)
     {
-#pragma warning disable CA2000 // Abandoning the connection and its reader undisposed is the scenario under test.
+        // Abandoning the connection and its reader undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
         connection.Open();
         var transaction = connection.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
@@ -360,7 +358,6 @@ public sealed class AbandonedSessionReclamationTests
         command.Transaction = transaction;
         command.CommandText = "SELECT * FROM dbo.big";
         var reader = command.ExecuteReader();
-#pragma warning restore CA2000
         IsTrue(reader.Read());
         return connection.Session;
     }
@@ -374,9 +371,8 @@ public sealed class AbandonedSessionReclamationTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakConnection(Simulation simulation)
     {
-#pragma warning disable CA2000 // Abandoning the connection undisposed is the scenario under test.
+        // Abandoning the connection undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
-#pragma warning restore CA2000
         connection.Open();
         Exec(connection, "CREATE TABLE ##gcleaked (id int); BEGIN TRANSACTION; UPDATE dbo.t SET v = 99 WHERE id = 1");
         return connection.Session;

@@ -123,9 +123,8 @@ partial class Simulation
         // confirmed: even a multi-statement TVF's mid-body error surfaces the
         // referencing SELECT's line, no procedure), so this frame leaves the
         // exception unresolved for the enclosing statement to stamp.
-#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+        // Handed back to the session with ReturnBodyCommand, never disposed.
         var bodyCommand = connection.RentBodyCommand(function.BodyText);
-#pragma warning restore CA2000
         var innerBatch = new BatchContext(bodyCommand, variables)
         {
             SuppressDiagnosticsResolution = true,

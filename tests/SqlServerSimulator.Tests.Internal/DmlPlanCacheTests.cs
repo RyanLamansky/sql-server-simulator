@@ -298,9 +298,8 @@ public sealed class DmlPlanCacheTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakRecordingConnection(Simulation simulation)
     {
-#pragma warning disable CA2000 // Abandoning the connection undisposed is the scenario under test.
+        // Abandoning the connection undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
-#pragma warning restore CA2000
         connection.Open();
         Execute(connection, "begin transaction");
         Execute(connection, "update t set v = 99 where id = @id", ("@id", 1));

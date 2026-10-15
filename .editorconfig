@@ -23,6 +23,13 @@ dotnet_diagnostic.IDE0072.severity = none # Add missing cases
 
 dotnet_diagnostic.JSON002.severity = none # Probable JSON string detected
 
+# Slow SDK analyzers, disabled for build speed (docs/claude/build-analyzers.md).
+dotnet_diagnostic.IDE0370.severity = none # Unnecessary null suppression: SSS017 stands in.
+dotnet_diagnostic.CA2000.severity = none # Dispose objects before losing scope: SSS018 stands in.
+dotnet_diagnostic.CA5390.severity = none # Hard-coded encryption key: the simulator holds no secrets of its own.
+dotnet_diagnostic.CA5403.severity = none # Hard-coded certificate: likewise.
+dotnet_diagnostic.CA1508.severity = none # Dead conditional code: its dataflow was nearly half a Debug build's CPU, and no cheap rule approximates it.
+
 dotnet_diagnostic.MSTEST0017.severity = error # Assertion arguments should be passed in the correct order (expected then actual)
 dotnet_diagnostic.MSTEST0024.severity = error # Do not store TestContext in a static or readonly field
 dotnet_diagnostic.MSTEST0025.severity = error # Use 'Assert.Fail' instead of always-failing constructs

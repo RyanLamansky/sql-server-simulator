@@ -350,10 +350,6 @@ internal static class ClrAssemblyMetadata
     /// out points into memory the <see cref="PEReader"/> owns, so the reader
     /// must outlive the metadata borrow.
     /// </summary>
-    [System.Diagnostics.CodeAnalysis.SuppressMessage(
-        "Reliability",
-        "CA2000:Dispose objects before losing scope",
-        Justification = "Ownership transfers to the caller, which disposes via using; the returned MetadataReader borrows memory this object owns.")]
     private static PEReader OpenPortableExecutable(byte[] content, string verb, string assemblyName)
     {
         PEReader? peReader = null;

@@ -189,9 +189,8 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
                 _ = worker.woken.Release();
                 return;
             }
-#pragma warning disable CA2000 // The worker's own thread disposes it as it retires.
+            // The worker's own thread disposes it as it retires.
             worker = new Worker { job = statement };
-#pragma warning restore CA2000
             new Thread(worker.Loop) { IsBackground = true, Name = "Simulated statement" }.Start();
         }
 

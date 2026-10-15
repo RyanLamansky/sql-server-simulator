@@ -23,9 +23,8 @@ public sealed class PlanCacheRetentionTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static SessionToken LeakCompilingConnection(Simulation simulation)
     {
-#pragma warning disable CA2000 // Abandoning the connection undisposed is the scenario under test.
+        // Abandoning the connection undisposed is the scenario under test.
         var connection = simulation.CreateDbConnection();
-#pragma warning restore CA2000
         connection.Open();
         _ = Scalar(connection, "BEGIN TRANSACTION; UPDATE dbo.t SET v = 99 WHERE id = 1");
         AreEqual(99, Scalar(connection, "SELECT v FROM dbo.t WHERE id = 1"));

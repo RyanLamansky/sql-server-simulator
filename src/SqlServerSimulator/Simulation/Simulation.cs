@@ -1022,14 +1022,12 @@ public sealed partial class Simulation
         // re-queues a mid-statement session can't spin here.
         for (var remaining = this.abandonedSessions.Count; remaining > 0; remaining--)
         {
-            // CA2000 wants every dequeued connection disposed on every path,
-            // but two paths deliberately hand it back instead: one whose
-            // session is already torn down, and one that is mid-statement and
-            // gets re-queued. Disposing on either would be the bug.
-#pragma warning disable CA2000
+            // Two paths deliberately leave a dequeued connection undisposed:
+            // one whose session is already torn down, and one that is
+            // mid-statement and gets re-queued. Disposing on either would be
+            // the bug.
             if (!this.abandonedSessions.TryDequeue(out var connection))
                 break;
-#pragma warning restore CA2000
             if (connection.Session.Reclaimed)
                 continue;
             if (connection.Session.CurrentExecutingThreadId is not null)

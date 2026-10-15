@@ -752,9 +752,9 @@ partial class Simulation
         }
 
         var connection = batch.Connection;
-#pragma warning disable CA2100, CA2000 // function.BodyText is the function's pre-validated stored body, not external input; the runner's batch holds the command, whose Dispose releases nothing
+#pragma warning disable CA2100 // function.BodyText is the function's pre-validated stored body, not external input
         var bodyCommand = new SimulatedDbCommand(this, connection) { CommandText = function.BodyText };
-#pragma warning restore CA2100, CA2000
+#pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var slots = new VariableSlot[function.Parameters.Length];
         for (var i = 0; i < slots.Length; i++)

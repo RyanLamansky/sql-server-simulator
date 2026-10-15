@@ -501,9 +501,8 @@ partial class Simulation
                 PushServerTriggerExecuteAsFrame(connection, executeAsLogin, bodyDatabase);
             if (!string.IsNullOrEmpty(bodyText))
             {
-#pragma warning disable CA2000 // Handed back to the session with ReturnBodyCommand, never disposed.
+                // Handed back to the session with ReturnBodyCommand, never disposed.
                 bodyCommand = connection.RentBodyCommand(bodyText);
-#pragma warning restore CA2000
                 innerBatch = new BatchContext(bodyCommand, frame)
                 {
                     // Trigger-body errors report a CREATE-relative line and
