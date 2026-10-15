@@ -912,6 +912,8 @@ partial class Simulation
                     spelledNumeric: selection.ColumnReportsNumeric is { } numeric && numeric[i])
                 {
                     AliasType = selection.ColumnAliasTypes?[i],
+                    XmlSchemaCollection = selection.ColumnXmlTypings?[i].Collection,
+                    XmlDocument = selection.ColumnXmlTypings?[i].Document ?? false,
                     // Settled as the body binds at CREATE: a mask the base
                     // table gains or loses later reaches the function's
                     // columns only when it is re-created or altered.

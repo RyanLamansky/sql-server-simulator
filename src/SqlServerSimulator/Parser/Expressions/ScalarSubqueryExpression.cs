@@ -69,6 +69,8 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
 
     internal override Schemas.AliasType? ResultAliasType => this.Inner.ColumnAliasTypes?[0];
 
+    internal override XmlTyping ResultXmlTyping => this.Inner.ColumnXmlTypings?[0] ?? default;
+
     internal override string DebugDisplay() => "(SELECT ...)";
 
     internal override void Describe(NodeShape shape) => shape.Local(this.Inner);

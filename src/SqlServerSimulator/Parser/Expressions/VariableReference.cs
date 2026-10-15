@@ -43,6 +43,7 @@ internal sealed class VariableReference : Expression
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;
         this.aliasType = slot.AliasType;
+        this.xmlTyping = new XmlTyping(slot.XmlSchemaCollection, slot.XmlDocument);
         this.Mask = slot.Mask;
         // A CLR-typed value opens the statement's transaction (probed
         // 2026-09-28 against SQL Server 2025).
@@ -70,6 +71,10 @@ internal sealed class VariableReference : Expression
     private readonly Schemas.AliasType? aliasType;
 
     internal override Schemas.AliasType? ResultAliasType => this.aliasType;
+
+    private readonly XmlTyping xmlTyping;
+
+    internal override XmlTyping ResultXmlTyping => this.xmlTyping;
 
     internal override bool ParallelSafe => true;
 

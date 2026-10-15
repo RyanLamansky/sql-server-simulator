@@ -30,6 +30,11 @@ internal sealed class Reference : Expression
 
     internal override Schemas.AliasType? ResultAliasType => this.aliasType;
 
+    /// <summary>The typed xml of the column this reference binds to; set by <see cref="MarkBoundColumns"/>.</summary>
+    private XmlTyping xmlTyping;
+
+    internal override XmlTyping ResultXmlTyping => this.xmlTyping;
+
     /// <summary>
     /// Records on every reference in <paramref name="root"/> what the column of
     /// <paramref name="sources"/> it binds to says about how it reads: the
@@ -48,6 +53,7 @@ internal sealed class Reference : Expression
                 if (column is { SpelledNumeric: true })
                     reference.readsNumericColumn = true;
                 reference.aliasType = column?.AliasType;
+                reference.xmlTyping = column is null ? default : new XmlTyping(column.XmlSchemaCollection, column.XmlDocument);
             }
             return true;
         });

@@ -1481,4 +1481,23 @@ partial class SimulatedSqlException
         {
             AbortsAsUnderXactAbort = true,
         };
+
+    /// <summary>
+    /// Mimics SQL Server error 526: a <c>CASE</c> (or the <c>COALESCE</c>,
+    /// <c>IIF</c> or <c>CHOOSE</c> desugaring to one) or a <c>UNION ALL</c>
+    /// whose <c>xml</c> arms differ in schema collection or <c>DOCUMENT</c> /
+    /// <c>CONTENT</c> facet, an untyped arm included (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlTypingMismatch(string construct) =>
+        new($"{construct} of XML types constrained by different XML schema collections and/or DOCUMENT/CONTENT option is not allowed. Use the CONVERT function to run this query.", 526, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 458: <c>SELECT … INTO #temp</c> of a typed
+    /// <c>xml</c> column, whose collection lives in another database than
+    /// <c>tempdb</c>, raised while the batch compiles (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SelectIntoXmlAcrossDatabases(string table, string column, string collection, string database) =>
+        new($"Cannot create the SELECT INTO target table \"{table}\" because the xml column \"{column}\" is typed with a schema collection \"{collection}\" from database \"{database}\". Xml columns cannot refer to schemata across databases.", 458, 16, 1);
 }

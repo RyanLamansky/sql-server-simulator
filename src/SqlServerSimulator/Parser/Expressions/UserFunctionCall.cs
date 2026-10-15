@@ -41,6 +41,8 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
 
     internal override Schemas.AliasType? ResultAliasType => this.function.ReturnAliasType;
 
+    internal override XmlTyping ResultXmlTyping => new(this.function.ReturnXmlSchemaCollection, this.function.ReturnXmlDocument);
+
     /// <summary>
     /// One per declared parameter. Each entry is either an explicit
     /// <see cref="Expression"/> argument supplied by the caller, or

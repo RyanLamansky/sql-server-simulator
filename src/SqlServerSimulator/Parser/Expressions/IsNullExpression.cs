@@ -92,4 +92,8 @@ internal sealed class IsNullExpression : Expression
 
     // The result is the checked operand's type, alias and all.
     internal override Schemas.AliasType? ResultAliasType => this.check.ResultAliasType;
+
+    // ISNULL takes its first argument's typing, an untyped one included
+    // (probed 2026-10-15 against SQL Server 2025).
+    internal override XmlTyping ResultXmlTyping => this.check.ResultXmlTyping;
 }

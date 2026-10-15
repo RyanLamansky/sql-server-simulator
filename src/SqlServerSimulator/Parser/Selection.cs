@@ -303,6 +303,14 @@ internal sealed partial class Selection
     internal Schemas.AliasType?[]? ColumnAliasTypes;
 
     /// <summary>
+    /// Per-column typed xml a projection column carries (see
+    /// <c>Expression.ResultXmlTyping</c>); null when no column is typed. A
+    /// view, derived table, CTE, inline function or <c>SELECT … INTO</c>
+    /// column built from this query keeps it.
+    /// </summary>
+    internal XmlTyping[]? ColumnXmlTypings;
+
+    /// <summary>
     /// Per output column, the identity it passes straight through: a direct
     /// reference (aliases aside) to a column that is one, over
     /// a single source apart from APPLY — through a derived table, <c>TOP</c>,
@@ -4047,6 +4055,7 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = UntypedNullsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             ColumnAliasTypes = ColumnAliasTypesOf(expressions),
+            ColumnXmlTypings = ColumnXmlTypingsOf(expressions),
             ColumnMasks = columnMasks,
             // A FROM-less projection has no sources, so column nullability is
             // the per-expression rule alone (literals NOT NULL, other

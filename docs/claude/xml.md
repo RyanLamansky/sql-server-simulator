@@ -74,6 +74,9 @@ CREATE XML INDEX name ON table(col)
   `DOCUMENT` is honored on every write: anything but one top-level element is **Msg 6901**, state 2 when it holds no element at all and 1 otherwise (probed 2026-10-06), and `sys.columns` / `sys.parameters` report it as `is_xml_document`.
   A typed procedure parameter validates its argument as the body begins, so a refusal names the procedure at line 0.
   A function's parameter and return value take the form too: a scalar or multi-statement call validates a typed argument as it binds, so a refusal is the calling statement's, while an inline function ignoring its argument never checks it (probed 2026-10-15 against SQL Server 2025).
+- **The typing travels with the expression** (`XmlTyping`, `Expression.ResultXmlTyping`), as real keeps it part of the type: a column reference, a variable, a typed `CAST`, parentheses, `ISNULL` (its first argument's, an untyped one included), the `CASE` family and `UNION ALL` carry it into a view's, derived table's, CTE's, inline function's and `SELECT INTO`'s columns, which `sys.columns` reports.
+  A `CASE` (or `COALESCE` / `IIF` / `CHOOSE`) or `UNION ALL` whose xml arms differ in collection or facet, an untyped arm included, is **Msg 526** naming the construct, and `SELECT … INTO #temp` of a typed column **Msg 458**, both while the batch compiles (probed 2026-10-15 against SQL Server 2025).
+  The values themselves stay plain `xml`: a typed write validates against its target, never against the expression's typing.
   The collection resolves while the batch compiles: an unknown one, or one the batch itself creates first, is **Msg 6314** quoting the name as written (`dbo.nosuch`), which stops the whole batch (probed 2026-10-06).
 - Statement dispatch: `Xml` added to `ContextualKeyword` enum; CREATE / DROP routes match `UnquotedString { ContextualKeyword: ContextualKeyword.Xml }` and `ReservedKeyword { Keyword: Keyword.Primary }` (the PRIMARY XML INDEX form).
   `SCHEMA` is reserved, so the sub-keyword check uses `Keyword.Schema`.
@@ -404,7 +407,6 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 ### Not modeled yet
 
-- **A typed `xml` column read through a view, an inline function or a derived table** keeps its collection on real — `sys.columns` and `sys.column_xml_schema_collection_usages` list it for the view's or function's column (probed 2026-10-15 against SQL Server 2025) — where the simulator's output column is untyped, as alias types already propagate (`Expression.ResultAliasType`).
 - **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences

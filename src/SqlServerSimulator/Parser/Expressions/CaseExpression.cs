@@ -305,6 +305,8 @@ internal sealed class CaseExpression : Expression
 
     internal override Schemas.AliasType? ResultAliasType => SharedAliasType([.. this.thens, this.elseBranch]);
 
+    internal override XmlTyping ResultXmlTyping => SharedXmlTyping([.. this.thens, this.elseBranch]);
+
     /// <summary>
     /// Parses a CASE expression. Entered with
     /// <see cref="ParserContext.Token"/> on the <c>CASE</c> keyword;

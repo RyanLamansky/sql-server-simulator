@@ -607,8 +607,8 @@ internal static partial class BuiltInResources
         // column binds (0 for untyped xml and every non-xml column — real SQL
         // Server's non-nullable-int convention for this column). The binding
         // lives on HeapColumn.XmlSchemaCollection, set by the xml(collection)
-        // column DDL. View / inline-TVF output columns never carry a binding,
-        // so their rows keep the 0 default below.
+        // column DDL, and a view's or inline TVF's output column carries the
+        // typing its expression does (Expression.ResultXmlTyping).
         SqlValue XmlCollectionIdFor(HeapColumn c) =>
             c.XmlSchemaCollection is { } coll ? SqlValue.FromInt32(coll.Id) : zeroInt;
         // The database's own collation, which a column's declared one overrides.
@@ -625,7 +625,7 @@ internal static partial class BuiltInResources
         // and xml-collection binding, as does a table type's or a
         // multi-statement TVF's return-table column; a view's or inline TVF's
         // column is a SELECT projection numbered by position, never identity
-        // or computed.
+        // or computed, typed xml as its expression is.
         SqlValue[] Row(SqlValue objectId, HeapColumn col, int columnId, bool declared)
         {
             var (maxLength, precision, scale) = GetSysColumnMetadata(col);
@@ -646,8 +646,8 @@ internal static partial class BuiltInResources
                 declared ? SqlValue.FromBoolean(col.Computed is not null && col.GraphKind == GraphColumnKind.None && !col.IsColumnSet) : falseBit,
                 CollationFor(col),
                 SqlValue.FromBoolean(col.IsSparse),
-                SqlValue.FromBoolean(declared && col.XmlDocument),
-                declared ? XmlCollectionIdFor(col) : zeroInt,
+                SqlValue.FromBoolean(col.XmlDocument),
+                XmlCollectionIdFor(col),
                 SqlValue.FromBoolean(declared && col.IsColumnSet),
                 falseBit,
                 col.Type is VectorSqlType dimensioned ? SqlValue.FromInt32(dimensioned.dimensions) : nullInt,

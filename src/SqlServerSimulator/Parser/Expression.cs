@@ -1097,6 +1097,29 @@ internal abstract class Expression : ExpressionNode
     internal virtual Schemas.AliasType? ResultAliasType => null;
 
     /// <summary>
+    /// The schema collection a typed <c>xml</c> result carries (see
+    /// <see cref="XmlTyping"/>); the default for an untyped one or any other
+    /// type.
+    /// </summary>
+    internal virtual XmlTyping ResultXmlTyping => default;
+
+    /// <summary>
+    /// The typing the <c>xml</c> arms of a value-selecting form share — a bare
+    /// NULL and an arm of another type don't count — which their
+    /// unification (<see cref="PromoteValueArms"/>) has already required them
+    /// to agree on.
+    /// </summary>
+    internal static XmlTyping SharedXmlTyping(params ReadOnlySpan<Expression?> arms)
+    {
+        foreach (var arm in arms)
+        {
+            if (arm is not null && !IsUntypedNullLiteral(arm) && arm.ResultXmlTyping is { IsTyped: true } typing)
+                return typing;
+        }
+        return default;
+    }
+
+    /// <summary>
     /// The alias every typed arm of <paramref name="arms"/> carries, if they
     /// agree; a bare NULL arm doesn't count.
     /// </summary>
@@ -1368,6 +1391,21 @@ internal abstract class Expression : ExpressionNode
             branches[count++] = (armType, IntegerLiteralDigits(arm), arm);
         }
         var promoted = SqlType.PromoteBranches(branches.AsSpan(0, count));
+        // xml arms must agree on their schema collection and DOCUMENT facet,
+        // an untyped arm included (probed 2026-10-15 against SQL Server 2025).
+        if (promoted is XmlSqlType)
+        {
+            XmlTyping? first = null;
+            foreach (var (armType, _, arm) in branches.AsSpan(0, count))
+            {
+                if (armType is not XmlSqlType)
+                    continue;
+                var typing = arm.ResultXmlTyping;
+                if (first is { } settled && settled != typing)
+                    throw SimulatedSqlException.XmlTypingMismatch("CASE");
+                first = typing;
+            }
+        }
         // The width / family promotion above resolves collation pairwise on its
         // own and settles on one when it can't; re-stamp the unresolved marker
         // the arm fold produced so the conflict survives into the result type.

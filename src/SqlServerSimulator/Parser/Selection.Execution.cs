@@ -2311,6 +2311,7 @@ internal sealed partial class Selection
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
+        selection.ColumnXmlTypings = ColumnXmlTypingsOf(expressions);
         var outerMask = parseBatch.Parser.OuterMaskResolver;
         selection.ColumnMasks = ProjectionMasks(parseBatch, expressions, sources, outerMask, resolveColumnType);
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
@@ -2830,6 +2831,17 @@ internal sealed partial class Selection
     /// </summary>
     internal static DataMask? ScopedColumnMask(FromSource[] sources, MultiPartName name, Func<MultiPartName, DataMask?>? outer) =>
         FindSourceColumn(sources, name).SourceIndex >= 0 ? SourceColumnMask(sources, name) : outer?.Invoke(name);
+
+    private static XmlTyping[]? ColumnXmlTypingsOf(List<Expression> expressions)
+    {
+        XmlTyping[]? typings = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (expressions[i].ResultXmlTyping is { IsTyped: true } typing)
+                (typings ??= new XmlTyping[expressions.Count])[i] = typing;
+        }
+        return typings;
+    }
 
     private static Schemas.AliasType?[]? ColumnAliasTypesOf(List<Expression> expressions)
     {

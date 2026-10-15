@@ -162,6 +162,8 @@ internal sealed class Coalesce : Expression
 
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
+    internal override XmlTyping ResultXmlTyping => SharedXmlTyping(this.arguments);
+
     /// <summary>
     /// COALESCE takes its nullability from the CASE it desugars to —
     /// <c>CASE WHEN a IS NOT NULL THEN a … ELSE last END</c> — so it is NOT

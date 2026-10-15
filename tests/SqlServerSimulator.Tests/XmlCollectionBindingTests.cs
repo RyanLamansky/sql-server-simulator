@@ -262,4 +262,66 @@ public sealed class XmlCollectionBindingTests
                 from sys.parameters where xml_collection_id > 0
                 """));
     }
+
+    // ---- Typing carried through expressions ---------------------------------
+
+    /// <summary>
+    /// A typed xml keeps its collection and DOCUMENT facet through a view, a
+    /// derived table, a CTE, parentheses, a value-selecting form, a UNION ALL,
+    /// an inline function and SELECT INTO, a typed CAST gives one, and ISNULL
+    /// takes its first argument's (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Typing_FlowsThroughViewsAndExpressions()
+    {
+        var simulation = Typed();
+        simulation.ExecuteBatches(
+            "create table t (d xml(document c), e xml)",
+            "create view v1 as select x.d from (select d from t) x",
+            "create view v2 as with w as (select (d) as d from t) select d from w",
+            "create view v3 as select case when 1 = 1 then d end as d, coalesce(d, d) as d2, iif(1 = 1, d, null) as d3 from t",
+            "create view v4 as select d from t union all select d from t union all select null",
+            "create view v5 as select cast(e as xml(c)) as d, isnull(d, null) as d2, isnull(e, d) as e from t",
+            "create function f (@x xml(c)) returns table as return select @x as x, d from t",
+            "select d into t2 from t");
+        AreEqual(
+            "f|d|1|1 f|x|1|0 t2|d|1|1 v1|d|1|1 v2|d|1|1 v3|d|1|1 v3|d2|1|1 v3|d3|1|1 v4|d|1|1 v5|d|1|0 v5|d2|1|1 v5|e|0|0",
+            simulation.ExecuteScalar("""
+                select string_agg(concat_ws('|', object_name(object_id), name, sign(xml_collection_id), cast(is_xml_document as int)), ' ')
+                    within group (order by object_name(object_id), name)
+                from sys.columns where object_id in (object_id('v1'), object_id('v2'), object_id('v3'), object_id('v4'), object_id('v5'), object_id('f'), object_id('t2'))
+                """));
+    }
+
+    /// <summary>
+    /// A CASE or UNION ALL whose xml arms differ in collection or facet, an
+    /// untyped arm included, is Msg 526 as the batch compiles; a typed column
+    /// copied INTO a #temp table is Msg 458 (probed 2026-10-15 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select case when 1 = 1 then d else e end from t", "CASE")]
+    [DataRow("select coalesce(e, d) from t", "CASE")]
+    [DataRow("select iif(1 = 1, d, h) from t", "CASE")]
+    [DataRow("select d from t union all select e from t", "UNION ALL")]
+    [DataRow("select d from t union all select h from t", "UNION ALL")]
+    public void MixedTypings_RaiseMsg526(string query, string construct)
+    {
+        var simulation = Typed();
+        _ = simulation.ExecuteNonQuery("create table t (d xml(document c), e xml, h xml(content c))");
+        simulation.AssertSqlError(
+            "create table other (a int); " + query, 526,
+            $"{construct} of XML types constrained by different XML schema collections and/or DOCUMENT/CONTENT option is not allowed. Use the CONVERT function to run this query.");
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('other')"));
+    }
+
+    [TestMethod]
+    public void SelectIntoTemp_OfATypedColumn_RaisesMsg458()
+    {
+        var simulation = Typed();
+        _ = simulation.ExecuteNonQuery("create table t (d xml(c))");
+        simulation.AssertSqlError(
+            "select d into #t from t", 458,
+            "Cannot create the SELECT INTO target table \"#t\" because the xml column \"d\" is typed with a schema collection \"c\" from database \"simulated\". Xml columns cannot refer to schemata across databases.");
+    }
 }

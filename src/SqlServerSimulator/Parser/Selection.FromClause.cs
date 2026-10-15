@@ -903,7 +903,7 @@ internal sealed partial class Selection
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];
         for (var ci = 0; ci < lateralColumns.Length; ci++)
-            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: lateralPlan.ColumnNullability?[ci] ?? true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci], DerivedMask = lateralPlan.ColumnMasks?[ci] };
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: lateralPlan.ColumnNullability?[ci] ?? true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci], DerivedMask = lateralPlan.ColumnMasks?[ci], XmlSchemaCollection = lateralPlan.ColumnXmlTypings?[ci].Collection, XmlDocument = lateralPlan.ColumnXmlTypings?[ci].Document ?? false };
 
         var alias = ConsumeOptionalAlias(context);
         columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
@@ -1344,6 +1344,8 @@ internal sealed partial class Selection
                         {
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
                             AliasType = cteBinding.Plan.ColumnAliasTypes?[ci],
+                            XmlSchemaCollection = cteBinding.Plan.ColumnXmlTypings?[ci].Collection,
+                            XmlDocument = cteBinding.Plan.ColumnXmlTypings?[ci].Document ?? false,
                             IdentitySource = cteBinding.Plan.ColumnIdentitySources?[ci],
                             DerivedMask = cteBinding.Plan.ColumnMasks?[ci],
                         };
@@ -1884,6 +1886,8 @@ internal sealed partial class Selection
                     {
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
                         AliasType = derivedSelection.ColumnAliasTypes?[ci],
+                        XmlSchemaCollection = derivedSelection.ColumnXmlTypings?[ci].Collection,
+                        XmlDocument = derivedSelection.ColumnXmlTypings?[ci].Document ?? false,
                         IdentitySource = derivedSelection.ColumnIdentitySources?[ci],
                         DerivedMask = derivedSelection.ColumnMasks?[ci],
                     };

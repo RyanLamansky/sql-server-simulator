@@ -109,6 +109,11 @@ partial class Selection
                 }
             }
 
+            // A #temp table lives in tempdb, which can't name another
+            // database's schema collection.
+            if (projections[i].ResultXmlTyping.Collection is { } collection && targetName.Leaf.StartsWith('#'))
+                throw SimulatedSqlException.SelectIntoXmlAcrossDatabases(targetName.Leaf, colName, collection.Name, parseBatch.CurrentDatabase.Name);
+
             // A stored column is plain text, whatever JSON producer filled it
             // (probed 2026-10-02 against SQL Server 2025).
             var columnType = outputSchema[i] is NVarcharSqlType { jsonText: true } jsonText
@@ -131,6 +136,8 @@ partial class Selection
                 // A #temp table's types resolve in tempdb, which has no
                 // user alias types (probed 2026-09-26).
                 AliasType = targetName.Leaf.StartsWith('#') ? null : projections[i].ResultAliasType,
+                XmlSchemaCollection = projections[i].ResultXmlTyping.Collection,
+                XmlDocument = projections[i].ResultXmlTyping.Document,
             };
         }
 

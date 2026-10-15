@@ -236,6 +236,8 @@ internal sealed class Cast : Expression
     internal static SqlValue AbsorbedOverflow(SqlType targetType) =>
         targetType == SqlType.Real ? SqlValue.FromSingle(0) : SqlValue.Null(targetType);
 
+    internal override XmlTyping ResultXmlTyping => new(this.TargetCollection, this.targetDocument);
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         batch.BindErrors is { } report
             ? TypeWhileReporting(report, this.source, this.openToken, this.targetType, this.targetReportsNumeric, batch, resolveColumnType)

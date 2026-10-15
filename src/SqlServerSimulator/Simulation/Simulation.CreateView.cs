@@ -419,6 +419,8 @@ partial class Simulation
             output[i] = new HeapColumn(name, type, maxLength: null, nullable: nullable, collation: type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType ? type.Collation?.Name : null, spelledNumeric: bodySelection.ColumnReportsNumeric is { } numeric && numeric[i])
             {
                 AliasType = bodySelection.ColumnAliasTypes?[i],
+                XmlSchemaCollection = bodySelection.ColumnXmlTypings?[i].Collection,
+                XmlDocument = bodySelection.ColumnXmlTypings?[i].Document ?? false,
                 IdentitySource = bodySelection.ColumnIdentitySources?[i],
                 // A projected pseudo-column keeps its graph type, under any
                 // name (probed 2026-10-11 against SQL Server 2025).

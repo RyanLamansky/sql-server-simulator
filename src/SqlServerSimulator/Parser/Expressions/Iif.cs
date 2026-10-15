@@ -139,6 +139,8 @@ internal sealed class Iif : Expression
 
     internal override Schemas.AliasType? ResultAliasType => SharedAliasType(this.trueValue, this.falseValue);
 
+    internal override XmlTyping ResultXmlTyping => SharedXmlTyping(this.trueValue, this.falseValue);
+
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
 
     /// <summary>The two value arms, which a masked column reaches the result through.</summary>

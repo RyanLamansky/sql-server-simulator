@@ -226,6 +226,7 @@ internal sealed partial class Selection
         bool[]? combinedUntypedNulls = null;
         bool[]? combinedReportsNumeric = null;
         Schemas.AliasType?[]? combinedAliasTypes = null;
+        XmlTyping[]? combinedXmlTypings = null;
         for (var i = 0; i < combinedSchema.Length; i++)
         {
             // Branches that agree on an alias keep it; a bare NULL branch
@@ -240,6 +241,18 @@ internal sealed partial class Selection
                 : null;
             if (sharedAlias is not null)
                 (combinedAliasTypes ??= new Schemas.AliasType?[combinedSchema.Length])[i] = sharedAlias;
+
+            // xml branches must agree on their typing; a bare NULL branch
+            // takes the other's (probed 2026-10-15 against SQL Server 2025).
+            if (kind == SetOpKind.UnionAll && left.Schema[i] is XmlSqlType && right.Schema[i] is XmlSqlType && !leftIsNull && !rightIsNull)
+            {
+                var leftTyping = left.ColumnXmlTypings?[i] ?? default;
+                if (leftTyping != (right.ColumnXmlTypings?[i] ?? default))
+                    throw SimulatedSqlException.XmlTypingMismatch(SetOpName(kind));
+            }
+            var sharedTyping = leftIsNull ? right.ColumnXmlTypings?[i] ?? default : left.ColumnXmlTypings?[i] ?? default;
+            if (sharedTyping.IsTyped)
+                (combinedXmlTypings ??= new XmlTyping[combinedSchema.Length])[i] = sharedTyping;
 
             var leftDigit = leftDigits is null ? 0 : leftDigits[i];
             var rightDigit = rightDigits is null ? 0 : rightDigits[i];
@@ -426,6 +439,7 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
             ColumnAliasTypes = combinedAliasTypes,
+            ColumnXmlTypings = combinedXmlTypings,
             ColumnMasks = CombinedMasks(left.ColumnMasks, right.ColumnMasks, combinedSchema.Length),
             ColumnNullability = combinedNullability,
             // A set operation's columns read as neither updatable nor computed
@@ -1209,6 +1223,7 @@ internal sealed partial class Selection
             ColumnNullability = inner.ColumnNullability,
             ColumnReportsNumeric = inner.ColumnReportsNumeric,
             ColumnAliasTypes = inner.ColumnAliasTypes,
+            ColumnXmlTypings = inner.ColumnXmlTypings,
             ColumnWireFlags = inner.ColumnWireFlags,
         };
     }
