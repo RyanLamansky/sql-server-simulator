@@ -920,6 +920,7 @@ ORDER BY items resolve a select-list **alias** first (`ORDER BY Total`, bare ter
 Parse-time type-checking is alias-aware to match.
 
 `GROUPING(col)` / `GROUPING_ID(c1, ..., cN)` read the executor-published context off `BatchContext.GroupingSetExpressions` (current set's column list) and `BatchContext.AllGroupingExpressions` (union across query).
+An argument-less `GROUPING_ID()` is real's literal `0` anywhere — in a `WHERE`, without a `GROUP BY`, and as an `ORDER BY` term, where it is Msg 108's position 0 (probed 2026-10-15 against SQL Server 2025).
 Returns `tinyint` 0/1 and `int` bitmap respectively, both NOT NULL, and either in the query's own `WHERE` is the aggregate's Msg 147 (probed 2026-10-01); **leftmost arg of `GROUPING_ID` occupies the most-significant bit** (probe-confirmed against SQL Server 2025 — `GROUPING_ID(region, product)` with region grouped + product not grouped returns `2`, the inverse case returns `1`).
 Argument must match a GROUP BY expression.
 Arg not in any grouping set → Msg 8161; same Msg for GROUPING outside any GROUP BY context.

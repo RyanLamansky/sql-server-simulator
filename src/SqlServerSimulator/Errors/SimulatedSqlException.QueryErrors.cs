@@ -415,6 +415,15 @@ partial class SimulatedSqlException
         new($"The {functionName} function requires {argumentCount} argument(s).", 174, 15, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 5592 state 2: <c>GET_FILESTREAM_TRANSACTION_CONTEXT()</c>
+    /// evaluated on a server whose FILESTREAM access level is 0, raised per
+    /// evaluation, so a call over no rows answers nothing (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FilestreamAccessNotEnabled() =>
+        new("FILESTREAM feature doesn't have file system access enabled.", 5592, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1076 — a built-in with an open-ended argument
     /// list (<c>CHOOSE</c>, <c>CHECKSUM</c>) called with fewer than its minimum.
     /// </summary>

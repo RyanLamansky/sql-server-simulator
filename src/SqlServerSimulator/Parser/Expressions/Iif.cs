@@ -48,6 +48,9 @@ internal sealed class Iif : Expression
         // SQL Server 2025) — save a stray `(` ending the value, which is the
         // syntax error at it, as inside any parentheses (`IIF([abs](1) = 1, …)`,
         // probed 2026-10-01).
+        // An empty argument list is a missing condition (probed 2026-10-15).
+        if (context.Token is Tokens.Operator { Character: ')' })
+            throw SimulatedSqlException.NonBooleanInConditionContext("(");
         try
         {
             this.condition = BooleanExpression.Parse(context);

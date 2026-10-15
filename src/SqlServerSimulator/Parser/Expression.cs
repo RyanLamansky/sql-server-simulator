@@ -2109,6 +2109,7 @@ internal abstract class Expression : ExpressionNode
                 "FILE_ID" => new FileId(context, extended: false),
                 "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
                 "GET_BIT" => new GetBit(context),
+                "HOST_ID" => new HostId(context),
                 "PRODUCT" => AggregateExpression.Parse(context, AggregateKind.Product),
                 "RADIANS" => new Radians(context),
                 "REPLACE" => new Replace(context),
@@ -2201,7 +2202,13 @@ internal abstract class Expression : ExpressionNode
                 "ERROR_STATE" => new ErrorStateFunction(context),
                 "FIRST_VALUE" => WindowExpression.ParseFirstValue(context),
                 "GETANSINULL" => new GetAnsiNull(context),
-                "GROUPING_ID" => new GroupingId(context),
+                // Real folds an argument-less GROUPING_ID() to the literal 0,
+                // anywhere — WHERE and a query with no GROUP BY included — so
+                // ORDER BY GROUPING_ID() is Msg 108's position 0 (probed
+                // 2026-10-15 against SQL Server 2025).
+                "GROUPING_ID" => context.Token is Operator { Character: ')' }
+                    ? new Value(SqlValue.FromInt32(0), integerLiteralDigitCount: 1)
+                    : new GroupingId(context),
                 "JSON_MODIFY" => new JsonModify(context),
                 "JSON_OBJECT" => new JsonObject(context),
                 "OBJECT_NAME" => new ObjectName(context),
@@ -2259,6 +2266,7 @@ internal abstract class Expression : ExpressionNode
                 "COLUMNPROPERTY" => new ColumnProperty(context),
                 "ERROR_SEVERITY" => new ErrorSeverityFunction(context),
                 "FILEGROUP_NAME" => new FilegroupName(context),
+                "FILEPROPERTYEX" => new FilePropertyEx(context),
                 "JSON_OBJECTAGG" => AggregateExpression.Parse(context, AggregateKind.JsonObjectAgg),
                 "OBJECTPROPERTY" => new ObjectProperty(context),
                 "ORIGINAL_LOGIN" => new OriginalLogin(context),
@@ -2286,6 +2294,7 @@ internal abstract class Expression : ExpressionNode
             {
                 "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
                 "CRYPT_GEN_RANDOM" => new CryptGenRandom(context),
+                "CURRENT_TIMEZONE" => new CurrentTimeZone(context, id: false),
                 "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
@@ -2318,8 +2327,14 @@ internal abstract class Expression : ExpressionNode
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
                 _ => null
             },
+            19 => uppercaseName switch
+            {
+                "CURRENT_TIMEZONE_ID" => new CurrentTimeZone(context, id: true),
+                _ => null
+            },
             20 => uppercaseName switch
             {
+                "PUBLISHINGSERVERNAME" => new PublishingServerName(context),
                 "SQL_VARIANT_PROPERTY" => new SqlVariantProperty(context),
                 "XML_SCHEMA_NAMESPACE" => new XmlSchemaNamespaceFunction(context),
                 _ => null

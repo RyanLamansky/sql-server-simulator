@@ -6,10 +6,11 @@ namespace SqlServerSimulator;
 /// Behavioral tests for the placeholder security / FILESTREAM scalars —
 /// <c>CERTENCODED</c>, <c>CERTPRIVATEKEY</c>, and
 /// <c>GET_FILESTREAM_TRANSACTION_CONTEXT</c>. The simulator models no
-/// certificate store or FILESTREAM storage, so each returns NULL (the answer
-/// real SQL Server gives for a nonexistent certificate id / a session with no
-/// active FILESTREAM transaction) while still enforcing the argument-count
-/// diagnostics. Probe-confirmed against SQL Server 2025.
+/// certificate store or FILESTREAM storage, so the certificate pair returns
+/// NULL (the answer real SQL Server gives for a nonexistent certificate id) and
+/// the FILESTREAM one raises Msg 5592 as a server without FILESTREAM access
+/// does, each still enforcing the argument-count diagnostics. Probe-confirmed
+/// against SQL Server 2025.
 /// </summary>
 [TestClass]
 public sealed class CertificateAndFilestreamScalarTests
@@ -49,8 +50,14 @@ public sealed class CertificateAndFilestreamScalarTests
             "select certprivatekey(1, 'a', 'b', 'c')", 189, "The CertPrivateKey function requires 2 to 3 arguments.");
 
     [TestMethod]
-    public void GetFilestreamTransactionContext_ReturnsNull()
-        => AreEqual(1, Scalar("select case when get_filestream_transaction_context() is null then 1 else 0 end"));
+    public void GetFilestreamTransactionContext_RaisesMsg5592()
+        => new Simulation().AssertSqlError(
+            "select get_filestream_transaction_context()", 5592,
+            "FILESTREAM feature doesn't have file system access enabled.");
+
+    [TestMethod]
+    public void GetFilestreamTransactionContext_OverNoRows_AnswersNothing()
+        => AreEqual(0, Scalar("select count(*) from (select get_filestream_transaction_context() c from (select 1 a where 1 = 0) x) y"));
 
     [TestMethod]
     public void GetFilestreamTransactionContext_WithArgument_RaisesMsg174()

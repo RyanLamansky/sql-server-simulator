@@ -134,6 +134,7 @@ A view or inline-TVF body is inlined into the referencing statement and adopts *
 
 **UTC == Local** (Azure SQL Database default): no local-time conversion; all six functions return the same UTC instant (rounded per type — datetime variants quantize to 1/300s tick).
 `SYSDATETIMEOFFSET` reports `+00:00`.
+`CURRENT_TIMEZONE()` and `CURRENT_TIMEZONE_ID()` agree: `(UTC) Coordinated Universal Time` and `UTC`, each `nvarchar(256)` in the database's collation, as a Linux server on UTC answers (probed 2026-10-15 against SQL Server 2025).
 Apps depending on `GETDATE` ≠ `GETUTCDATE` differing by zone won't behave like on-prem; matches cloud default.
 
 **`CURRENT_TIMESTAMP` is parens-less** — only zero-arg function in the grammar without `()`.
@@ -709,6 +710,8 @@ Constants whose values don't carry real session/server identity in the simulator
   The same value `sys.dm_exec_sessions.host_name` and `sp_who` / `sp_who2`'s `HostName` project.
 - **`APP_NAME()`** — the client application name, from the connection string's `Application Name` / `App` keyword or LOGIN7's `AppName`, `''` when neither supplied one.
   The same value `sys.dm_exec_sessions.program_name` and `sp_who2`'s `ProgramName` project.
+- **`HOST_ID()`** — the client process id as a padded `char(10)`, never NULL: the host process here for every session, the value `sys.dm_exec_sessions.host_process_id` and `sysprocesses.hostprocess` report (type probed 2026-10-15 against SQL Server 2025).
+- **`PUBLISHINGSERVERNAME()`** — `@@SERVERNAME` as `nvarchar(256)`, a database that isn't replicated publishing from its own server (probed 2026-10-15).
 - **`ORIGINAL_DB_NAME()`** — the database the login asked for (the connection string's `Initial Catalog`, LOGIN7's database), or the empty string when it named none, whatever `USE` has done since (probed 2026-09-28 against SQL Server 2025).
 - **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
 - **`@@DATEFIRST`** — session state (`SimulatedDbConnection.DateFirst`), default 7 (Sunday), `tinyint`.
@@ -837,6 +840,8 @@ File names are matched with SQL Server's trailing-space-insensitive `=` semantic
 An **unknown property**, an **unknown file name**, a **NULL file name**, or a **NULL property** all return NULL (all probe-confirmed).
 Data-file `SpaceUsed` is self-consistent with `sys.allocation_units` and `sys.database_files` — see the consistency contract in [`catalog-views.md`](catalog-views.md).
 
+`FILEPROPERTYEX(file_name, property)` reads the Azure storage properties (`AccountType`, `BlobTier`, `IsInferredTier`, `IsPageBlob`) a box server's files don't have, so it is a `sql_variant` NULL for every pair of arguments, a known file and property included (probed 2026-10-15 against SQL Server 2025).
+
 ## `SQL_VARIANT_PROPERTY(expression, property)`
 
 `Parser/Expressions/SqlVariantProperty.cs`: reports one facet of the `sql_variant` that would capture `expression` — `BaseType` / `Precision` / `Scale` / `MaxLength` / `TotalBytes` / `Collation`.
@@ -940,15 +945,14 @@ Both scalars, the 16-byte pointer they exchange, and the `READTEXT` / `WRITETEXT
 ## Placeholder security / FILESTREAM scalars: `CERTENCODED` / `CERTPRIVATEKEY` / `GET_FILESTREAM_TRANSACTION_CONTEXT`
 
 `Parser/Expressions/CertificateFunctions.cs` (`CertificateFunction`, `isPrivateKey` flag), `Parser/Expressions/GetFilestreamTransactionContext.cs`.
-The simulator models no certificate store or FILESTREAM storage, so each returns a NULL `varbinary(max)` — the faithful answer for the state the simulator is always in.
+The simulator models no certificate store or FILESTREAM storage, so the certificate pair returns a NULL `varbinary(max)` — the faithful answer for the state the simulator is always in — and the FILESTREAM one raises.
 Probe-confirmed against SQL Server 2025.
 
 - **`CERTENCODED(cert_id)`** → NULL (the answer real gives for a nonexistent certificate id).
   Exactly one argument; any other count raises **Msg 174** (`The CertEncoded function requires 1 argument(s).` — PascalCase function name, unlike the lowercase-rendered `PI` / `ISNULL` form).
 - **`CERTPRIVATEKEY(cert_id, N'encryption_password' [, N'decryption_password'])`** → NULL.
   Two or three arguments; any other count raises **Msg 189** (`The CertPrivateKey function requires 2 to 3 arguments.`, via `SimulatedSqlException.FunctionArgumentCountRange`).
-- **`GET_FILESTREAM_TRANSACTION_CONTEXT()`** → NULL, the faithful "no active FILESTREAM transaction" answer a FILESTREAM-enabled server gives outside such a transaction.
-  (A reference instance with FILESTREAM file-system access disabled at the instance level instead raises Msg 5592; the simulator returns the enabled-but-idle answer.)
+- **`GET_FILESTREAM_TRANSACTION_CONTEXT()`** raises **Msg 5592** state 2 each time it is evaluated, so a call over no rows answers nothing: the simulated server reports a FILESTREAM access level of 0, as a Linux server always does, and that is real's answer there (probed 2026-10-15 against SQL Server 2025).
   Zero arguments; any argument raises **Msg 174** (`The get_filestream_transaction_context function requires 0 argument(s).` — lowercase function name).
 
 A bare `NULL` argument is Msg 8116 naming `NULL` (`Argument data type NULL is invalid for argument 1 of CertEncoded function.`), as it is for `FORMAT`'s value, `PARSE`'s string, `HASHBYTES`' input, `DATE_BUCKET`'s date, `SUBSTRING`'s string and each `CHECKSUM` argument (probed 2026-09-24).
