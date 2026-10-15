@@ -247,6 +247,12 @@ internal static partial class BuiltInResources
         // The legacy ownership move and the startup-procedure flag.
         "sp_changeobjectowner",
         "sp_procoption",
+        // The prepared-statement procedures written as EXEC text, over the
+        // handles their TDS RPC form shares.
+        "sp_prepare",
+        "sp_execute",
+        "sp_prepexec",
+        "sp_unprepare",
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",
@@ -1008,7 +1014,7 @@ internal static partial class BuiltInResources
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
         || proc.StartsWith("sp_OA", StringComparison.Ordinal)
-        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_execute" or "sp_executesql" or "sp_getbindtoken" or "sp_prepare" or "sp_prepexec" or "sp_unprepare" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
     internal static bool TryResolveSystemObject(int objectId, out SystemObject system)

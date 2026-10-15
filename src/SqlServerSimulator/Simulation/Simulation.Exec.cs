@@ -37,7 +37,7 @@ partial class Simulation
     /// (Msg 201) never starts, so it takes the transaction back.
     /// </summary>
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
-        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_dropdevice" or "sp_procoption" or "sp_describe_first_result_set"
+        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
@@ -56,7 +56,7 @@ partial class Simulation
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
         "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
-        or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
+        or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
         or "sp_getbindtoken" or "sp_helpdbfixedrole" or "sp_helpdevice" or "sp_helpfilegroup" or "sp_helpntgroup" or "sp_helprole"
         or "sp_helpextendedproc" or "sp_helplogins"
@@ -64,11 +64,11 @@ partial class Simulation
         or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_query_store_clear_hints"
         or "sp_query_store_clear_message_queues" or "sp_query_store_consistency_check" or "sp_query_store_flush_db" or "sp_query_store_force_plan"
         or "sp_query_store_remove_plan" or "sp_query_store_remove_plan_feedback" or "sp_query_store_remove_query" or "sp_query_store_reset_exec_stats"
-        or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
+        or "sp_prepare" or "sp_prepexec" or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
-        or "sp_tables" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_tables" or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
         || systemProcName.StartsWith("sp_OA", StringComparison.Ordinal)
         || IsOleDbRowsetProcedure(systemProcName);
@@ -283,6 +283,10 @@ partial class Simulation
             "sp_dropdevice" => this.InvokeSpDropDevice(batch, calledAs),
             "sp_changeobjectowner" => this.InvokeSpChangeObjectOwner(batch, calledAs),
             "sp_procoption" => this.InvokeSpProcOption(batch, calledAs),
+            "sp_prepare" => this.InvokeSpPrepare(batch),
+            "sp_execute" => this.InvokeSpExecute(batch, returnCodeVar, insertExecSource),
+            "sp_prepexec" => this.InvokeSpPrepExec(batch, returnCodeVar, insertExecSource),
+            "sp_unprepare" => InvokeSpUnprepare(batch),
             "sp_dropapprole" => this.InvokeSpDropAppRole(batch, calledAs),
             "sp_renamedb" => InvokeSpRenameDb(batch, calledAs),
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
@@ -439,7 +443,7 @@ partial class Simulation
                 batch.BeginImplicitTransaction();
             // A system procedure is a procedure scope like any other;
             // sp_executesql frames its own.
-            var framesScope = batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource && systemProcName != "sp_executesql";
+            var framesScope = batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource && systemProcName is not ("sp_executesql" or "sp_execute" or "sp_prepexec");
             if (framesScope)
                 yield return new SimulatedProcScopeBoundary(isEnter: true);
             var procedureResult = new SystemProcedureResult();

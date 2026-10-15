@@ -50,6 +50,23 @@ public sealed class PreparedStatementTests
     }
 
     [TestMethod]
+    public async Task AnRpcPreparedHandle_RunsFromExecText()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using var prepared = new SqlCommand("select @v * 2", connection);
+        prepared.Parameters.Add("@v", SqlDbType.Int).Value = 3;
+        await prepared.PrepareAsync(TestContext.CancellationToken);
+        AreEqual(6, await prepared.ExecuteScalarAsync(TestContext.CancellationToken));
+
+        // The session's first handle, which a text EXEC on the same session reaches.
+        await using var text = new SqlCommand("exec sp_execute 1, 21", connection);
+        AreEqual(42, await text.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
     public async Task TwoPreparedCommands_InterleavedOnOneConnection()
     {
         var simulation = new Simulation();

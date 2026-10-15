@@ -7,24 +7,6 @@ namespace SqlServerSimulator.Network;
 
 internal sealed partial class TdsSession
 {
-    /// <summary>Prepared statements created by sp_prepare / sp_prepexec, keyed by handle.</summary>
-    private readonly Dictionary<int, PreparedStatement> preparedStatements = [];
-
-    private int nextPreparedHandle;
-
-    private sealed class PreparedStatement(string statement, string declaration, List<string> parameterNames)
-    {
-        public readonly string Statement = statement;
-
-        public readonly string Declaration = declaration;
-
-        /// <summary>
-        /// Names from the preparation-time declaration string, used to name
-        /// sp_execute parameters that arrive without one.
-        /// </summary>
-        public readonly List<string> ParameterNames = parameterNames;
-    }
-
     /// <summary>
     /// Handles an RPC request message: sp_executesql, the prepared-statement
     /// family, and direct stored-procedure invocation. A message may carry
@@ -150,14 +132,14 @@ internal sealed partial class TdsSession
 
             case Tds.ProcIdPrepare:
                 {
-                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
+                    var handle = this.connection!.Prepare(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
                     // The RETURN_METADATA option (1) describes the statement's
                     // result as an empty result set ahead of the handle — what
                     // SQL Server's OLE DB provider reads an OPENQUERY's
                     // columns from.
                     if (request.Parameters.Count > 3 && request.Parameters[3].Value is not (null or DBNull)
                         && (Convert.ToInt32(request.Parameters[3].Value, CultureInfo.InvariantCulture) & 1) != 0
-                        && await this.DescribePreparedStatementAsync(this.preparedStatements[handle], writer, cancellationToken).ConfigureAwait(false))
+                        && await this.DescribePreparedStatementAsync(this.connection.PreparedStatements[handle], writer, cancellationToken).ConfigureAwait(false))
                     {
                         return;
                     }
@@ -170,7 +152,7 @@ internal sealed partial class TdsSession
             case Tds.ProcIdExecute:
                 {
                     var handle = Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture);
-                    if (!this.preparedStatements.TryGetValue(handle, out var prepared))
+                    if (!this.connection!.PreparedStatements.TryGetValue(handle, out var prepared))
                     {
                         writer.WriteErrorOrInfo(Tds.TokenError, 8179, 1, 16, $"Could not find prepared statement with handle {handle}.", "SIMULATED", "", 1);
                         writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
@@ -185,8 +167,8 @@ internal sealed partial class TdsSession
             case Tds.ProcIdPrepExec:
                 {
                     var handleName = request.Parameters[0].Name;
-                    var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
-                    var prepared = this.preparedStatements[handle];
+                    var handle = this.connection!.Prepare(ParameterText(request.Parameters, 2), DeclarationText(request.Parameters, 1));
+                    var prepared = this.connection.PreparedStatements[handle];
                     // The value params (index 3+) arrive positional/unnamed from
                     // native ODBC / OLE DB (name=''); name them from the prepared
                     // declaration so `@P1` binds, the same mapping sp_execute uses.
@@ -196,7 +178,7 @@ internal sealed partial class TdsSession
                 }
 
             case Tds.ProcIdUnprepare:
-                _ = this.preparedStatements.Remove(Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture));
+                _ = this.connection!.PreparedStatements.Remove(Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture));
                 writer.WriteReturnStatus(0);
                 writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
                 break;
@@ -434,13 +416,6 @@ internal sealed partial class TdsSession
 
         _ = command.Parameters.Add(parameter);
         return parameter;
-    }
-
-    private int StorePreparedStatement(string statement, string declaration)
-    {
-        var handle = ++this.nextPreparedHandle;
-        this.preparedStatements[handle] = new PreparedStatement(statement, declaration, ParseDeclarationNames(declaration));
-        return handle;
     }
 
     /// <summary>

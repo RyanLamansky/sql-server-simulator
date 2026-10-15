@@ -188,14 +188,21 @@ partial class Simulation
     /// named); OUTPUT parameters write back to the caller's variable slot
     /// at exit. Probe-confirmed against SQL Server 2025.
     /// </para>
+    /// <para>
+    /// With <paramref name="prepared"/> the statement and its declarations
+    /// come from a prepared statement instead — <c>sp_execute</c> and
+    /// <c>sp_prepexec</c>, whose own leading arguments the caller has parsed —
+    /// which the function looks up once the call runs, and the cursor enters
+    /// on what follows those arguments.
+    /// </para>
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false, string? calledInDatabase = null)
+    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false, string? calledInDatabase = null, Func<PreparedStatement>? prepared = null)
     {
         var context = batch.Parser;
 
         // A call with no statement is the procedure's own Msg 201, naming it
         // (probed 2026-10-02 against SQL Server 2025).
-        if (IsStatementBoundary(context.Token))
+        if (prepared is null && IsStatementBoundary(context.Token))
         {
             if (batch.IsSkipping)
                 yield break;
@@ -215,8 +222,13 @@ partial class Simulation
         // Whether an argument was named matters even though its name is
         // discarded: real's Msg 119 counts the whole list, so naming the
         // first argument obliges every later one to be named too.
-        var sawNamedArgument = TryConsumeSpExecuteSqlArgumentName(context) is not null;
-        var (sqlRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
+        var sawNamedArgument = false;
+        var sqlRaw = SqlValue.Null(SqlType.NVarchar);
+        if (prepared is null)
+        {
+            sawNamedArgument = TryConsumeSpExecuteSqlArgumentName(context) is not null;
+            (sqlRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
+        }
         var sqlValue = sqlRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
         var hasMoreArgs = context.Token is Operator { Character: ',' };
 
@@ -227,7 +239,7 @@ partial class Simulation
         var paramDefsText = "";
         var declaresParameters = false;
         SqlType? paramDefsType = null;
-        if (hasMoreArgs)
+        if (hasMoreArgs && prepared is null)
         {
             context.MoveNextRequired();
             if (TryConsumeSpExecuteSqlArgumentName(context) is not null)
@@ -271,6 +283,16 @@ partial class Simulation
 
         if (batch.IsSkipping)
             yield break;
+
+        // A prepared statement declares its parameters, none for an empty or
+        // NULL declaration, so arguments to one without any are refused.
+        if (prepared?.Invoke() is { } statement)
+        {
+            sqlRaw = SqlValue.FromNVarchar(statement.Statement);
+            sqlValue = sqlRaw;
+            paramDefsText = statement.Declaration;
+            declaresParameters = true;
+        }
 
         if (!SqlType.IsNationalStringCategory(sqlRaw.Type))
             throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@statement", 2).PinLine(1);

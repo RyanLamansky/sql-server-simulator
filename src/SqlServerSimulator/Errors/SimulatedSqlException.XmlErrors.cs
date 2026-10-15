@@ -987,8 +987,20 @@ partial class SimulatedSqlException
     /// wording against SQL Server 2025 (the message says "prepared statement",
     /// which is real's own shared text with the cursor-handle family).
     /// </summary>
-    internal static SimulatedSqlException CouldNotFindPreparedStatement(int handle) =>
-        new($"Could not find prepared statement with handle {handle}.", 8179, 16, 5);
+    internal static SimulatedSqlException CouldNotFindPreparedStatement(int handle, byte state = 5) =>
+        new($"Could not find prepared statement with handle {handle}.", 8179, 16, state);
+
+    /// <summary>Msg 8180: an <c>sp_prepare</c> statement that doesn't compile, after the errors compiling it raised.</summary>
+    internal static SimulatedSqlException StatementsCouldNotBePrepared() =>
+        new("Statement(s) could not be prepared.", 8180, 16, 1);
+
+    /// <summary>Msg 214 state 2: an extended procedure's argument of another type than the one it takes.</summary>
+    internal static SimulatedSqlException ProcedureExpectsParameterOfType(string parameterName, string typeName) =>
+        new($"Procedure expects parameter '{parameterName}' of type '{typeName}'.", 214, 16, 2);
+
+    /// <summary>Msg 591: a procedure's OUTPUT parameter given an argument not marked OUTPUT, which ends the batch.</summary>
+    internal static SimulatedSqlException FormalParameterNotOutput(string procedure, string parameterName, byte state) =>
+        new($"{procedure}: The formal parameter \"{parameterName}\" was defined as OUTPUT, but the actual parameter was not declared as OUTPUT.", 591, 16, state) { TerminatesBatch = true };
 
     /// <summary>
     /// Msg 6926: an element or attribute's text isn't a valid value of the

@@ -613,6 +613,7 @@ partial class Simulation
         // 2026-10-02 against SQL Server 2025).
         ("sp_executesql", 201) => (1, null),
         ("sp_describe_first_result_set" or "sp_describe_undeclared_parameters", 201 or 214 or 11552) => (1, null),
+        ("sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_unprepare", 201) => (1, null),
         // The extended procedures report every error at line 1 (probed
         // 2026-10-04 against SQL Server 2025).
         ("sp_bindsession" or "sp_getbindtoken" or "sp_testlinkedserver", _) => (1, null),

@@ -839,6 +839,9 @@ A procedure whose real body runs an ordinary statement runs the same statement h
   The second sets a `master` `dbo` procedure's startup flag, which `OBJECTPROPERTY(…, 'ExecIsStartup')` and `sys.procedures.is_auto_executed` read and `ALTER PROCEDURE` keeps, and stages `scan for startup procs` (its `value`, never `value_in_use`, as the option needs a restart); each refusal returns its own number, and `'failover'` is real's Msg 40510.
   A simulation never restarts, so a startup procedure never runs.
 
+- **The prepared-statement family as `EXEC` text** (`Simulation.PreparedStatementProcs.cs`, probed 2026-10-15 against SQL Server 2025): `sp_prepare` compiles its statement against its declarations — a failure is its errors then Msg 8180, the handle left unset — stores it under the session's next handle (the one the TDS RPC form uses, see [`tds-endpoint.md`](tds-endpoint.md#rpc-requests)) and sends the statement's columns as an empty result set, run under `SET FMTONLY ON`; `sp_execute` and `sp_prepexec` run a prepared statement through `sp_executesql`'s binding, so its argument refusals (Msg 8178, 8144, 8146) are that procedure's; `sp_unprepare` releases one.
+  A handle the session doesn't hold is Msg 8179 (state 4 from `sp_execute`, 8 from `sp_unprepare`), a handle argument not marked `OUTPUT` Msg 591, which ends the batch, and one of another type than `int` Msg 214.
+
 - **Messages** — `sp_addmessage`, `sp_altermessage` and `sp_dropmessage` maintain `Simulation.UserMessages`, which `sys.messages`, `RAISERROR` and `FORMATMESSAGE` read.
   A localized text uses positional `%N!` or `%N` placeholders against the us_english specifiers, each position at most once.
   `is_event_logged` and severity are per message id, so replacing the us_english row rewrites every language's.

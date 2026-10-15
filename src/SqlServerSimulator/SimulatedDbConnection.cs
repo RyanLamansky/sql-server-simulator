@@ -2477,6 +2477,20 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal readonly Dictionary<string, Cursor> Cursors = new(BuiltInToken.Comparer);
 
+    /// <summary>The statements prepared on this session, by handle.</summary>
+    internal readonly Dictionary<int, PreparedStatement> PreparedStatements = [];
+
+    /// <summary>The last prepared-statement handle handed out; a session numbers its handles from 1.</summary>
+    private int lastPreparedHandle;
+
+    /// <summary>Prepares <paramref name="statement"/> under the next handle, which it answers.</summary>
+    internal int Prepare(string statement, string declaration)
+    {
+        var handle = ++this.lastPreparedHandle;
+        this.PreparedStatements[handle] = new PreparedStatement(statement, declaration);
+        return handle;
+    }
+
     /// <summary>
     /// Backs <c>@@FETCH_STATUS</c>: the status of the most recent <c>FETCH</c>
     /// on this connection (0 success, -1 past end / no row, -2 keyset member
