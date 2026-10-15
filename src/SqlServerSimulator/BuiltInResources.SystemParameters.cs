@@ -91,6 +91,8 @@ partial class BuiltInResources
             ["sp_helpdb"] = [new("@dbname", 256, 256, 0, 0)],
             ["sp_helpdbfixedrole"] = [new("@rolename", 256, 256, 0, 0)],
             ["sp_helpdevice"] = [new("@devname", 256, 256, 0, 0)],
+            ["sp_addumpdevice"] = [new("@devtype", 167, 20, 0, 0), new("@logicalname", 256, 256, 0, 0), new("@physicalname", 231, 520, 0, 0), new("@cntrltype", 52, 2, 5, 0), new("@devstatus", 167, 40, 0, 0)],
+            ["sp_dropdevice"] = [new("@logicalname", 256, 256, 0, 0), new("@delfile", 167, 7, 0, 0)],
             ["sp_helpextendedproc"] = [new("@funcname", 256, 256, 0, 0)],
             ["sp_helpfile"] = [new("@filename", 256, 256, 0, 0)],
             ["sp_helpfilegroup"] = [new("@filegroupname", 256, 256, 0, 0)],

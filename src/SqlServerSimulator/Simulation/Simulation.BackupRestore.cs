@@ -167,7 +167,8 @@ partial class Simulation
         }
         if (!PermissionEnforcement.IsOwnerOrBackupOperator(batch, database) && !PermissionEnforcement.HasDatabasePermission(batch, database, "BACKUP DATABASE"))
             throw SimulatedSqlException.BackupPermissionDenied("BACKUP DATABASE", database.Name, verb);
-        var path = SingleDevice(devices, verb);
+        var device = SingleDevice(devices, verb);
+        var path = device.Path;
 
         BackupMedia media;
         if (options.Init || options.Format)
@@ -187,14 +188,14 @@ partial class Simulation
                     BackupMedia.ReadOutcome.Read => read!,
                     BackupMedia.ReadOutcome.Empty => new BackupMedia(),
                     BackupMedia.ReadOutcome.OtherVersion => throw SimulatedSqlException.BackupFromIncompatibleVersion(writtenBy!, BackupMedia.SimulatorVersion, verb),
-                    _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(path, verb),
+                    _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb),
                 }
                 : new BackupMedia();
         }
         if (options.MediaName is { } mediaName)
         {
             if (!options.Format && media.Sets.Count != 0 && media.MediaName is { } actual && actual != mediaName)
-                throw SimulatedSqlException.BackupMediaNameMismatch(mediaName, actual, path, verb);
+                throw SimulatedSqlException.BackupMediaNameMismatch(mediaName, actual, device.Display, verb);
             media.MediaName = mediaName;
         }
         if (options.MediaDescription is { } mediaDescription)
@@ -231,7 +232,7 @@ partial class Simulation
         if (options.Init || options.Format)
             media.Sets.RemoveRange(0, media.Sets.Count - 1);
         if (this.WriteBackupDevice(path, media.ToBytes()) is var osError and not 0)
-            throw SimulatedSqlException.CannotOpenBackupDevice(path, osError, verb);
+            throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
 
         ReportBackupMessages(batch, options.Stats, database.Name, set, media.Sets.Count, verb, stopwatch.Elapsed.TotalSeconds);
         connection.LastStatementRowCount = 0;
@@ -336,7 +337,7 @@ partial class Simulation
         const string verb = "RESTORE DATABASE";
         context.MoveNextRequired();
         var databaseName = ParseBackupOperand(context, batch);
-        List<string>? devices = null;
+        List<BackupDeviceTarget>? devices = null;
         if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.From })
         {
             devices = ParseBackupDevices(context, batch, verb);
@@ -379,18 +380,19 @@ partial class Simulation
             throw SimulatedSqlException.BackupPermissionDenied("CREATE DATABASE", MasterDatabaseName, verb);
         }
 
-        var path = SingleDevice(devices, verb);
+        var device = SingleDevice(devices, verb);
+        var path = device.Path;
         var bytes = this.ReadBackupDevice(path, out var osError)
-            ?? throw SimulatedSqlException.CannotOpenBackupDevice(path, osError, verb);
+            ?? throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
         var media = BackupMedia.TryRead(bytes, out var read, out var writtenBy) switch
         {
             BackupMedia.ReadOutcome.Read => read!,
-            BackupMedia.ReadOutcome.Empty => throw SimulatedSqlException.BackupVolumeEmpty(path, verb),
+            BackupMedia.ReadOutcome.Empty => throw SimulatedSqlException.BackupVolumeEmpty(device.Display, verb),
             BackupMedia.ReadOutcome.OtherVersion => throw SimulatedSqlException.BackupFromIncompatibleVersion(writtenBy!, BackupMedia.SimulatorVersion, verb),
-            _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(path, verb),
+            _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb),
         };
         if (options.File > media.Sets.Count)
-            throw SimulatedSqlException.BackupFileIdIncorrectlyFormed(options.File, path, verb);
+            throw SimulatedSqlException.BackupFileIdIncorrectlyFormed(options.File, device.Display, verb);
         var set = media.Sets[options.File - 1];
         if (options.Checksum && !set.HasChecksums)
             throw SimulatedSqlException.RestoreChecksumUnavailable(verb);
@@ -401,7 +403,7 @@ partial class Simulation
         }
         catch (InvalidDataException)
         {
-            throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(path, verb);
+            throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb);
         }
 
         if (existing is not null)
@@ -548,11 +550,11 @@ partial class Simulation
     }
 
     /// <summary>The one disk device a statement names; more is striped media, which isn't modeled.</summary>
-    private static string SingleDevice(List<string> devices, string verb)
+    private static BackupDeviceTarget SingleDevice(List<BackupDeviceTarget> devices, string verb)
     {
         if (devices.Count != 1)
             throw new NotSupportedException($"{verb} to or from striped media (more than one device) isn't modeled by the simulator.");
-        return devices[0].Length == 0 ? throw SimulatedSqlException.ZeroLengthBackupDevice(verb) : devices[0];
+        return devices[0].Path.Length == 0 ? throw SimulatedSqlException.ZeroLengthBackupDevice(verb) : devices[0];
     }
 
     /// <summary>The database a statement names: an identifier or a variable, the cursor left on it.</summary>
@@ -565,12 +567,13 @@ partial class Simulation
 
     /// <summary>
     /// The device list after <c>TO</c> / <c>FROM</c>, entered on that keyword
-    /// and leaving the cursor past it: <c>DISK = path</c> entries; a logical
-    /// device name is Msg 3206, a tape or URL device isn't modeled.
+    /// and leaving the cursor past it: <c>DISK = path</c> entries and logical
+    /// device names, written or held by a variable, which resolve as the
+    /// statement runs; a tape or URL device isn't modeled.
     /// </summary>
-    private static List<string> ParseBackupDevices(ParserContext context, BatchContext batch, string verb)
+    private static List<BackupDeviceTarget> ParseBackupDevices(ParserContext context, BatchContext batch, string verb)
     {
-        var devices = new List<string>();
+        var devices = new List<BackupDeviceTarget>();
         while (true)
         {
             var token = context.GetNextRequired();
@@ -579,16 +582,18 @@ partial class Simulation
                 if (context.GetNextRequired() is not Operator { Character: '=' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
-                devices.Add(ParseBackupStringValue(context, batch));
+                var path = ParseBackupStringValue(context, batch);
+                devices.Add(new(path, path));
             }
             else if (token is Name { Value: var deviceKind } && BuiltInToken.EqualsAny(deviceKind, "TAPE", "URL"))
             {
                 throw new NotSupportedException($"{verb} {deviceKind.ToUpperInvariant()} devices aren't modeled by the simulator; only DISK is.");
             }
-            else if (token is Name logicalDevice)
+            else if (token is Name or AtPrefixedString)
             {
+                var logicalName = token is Name logical ? logical.Value : ParseBackupStringValue(context, batch);
                 if (!batch.IsSkipping)
-                    throw SimulatedSqlException.BackupDeviceDoesNotExist(logicalDevice.Value, verb);
+                    devices.Add(ResolveLogicalBackupDevice(batch, logicalName, verb));
             }
             else
             {

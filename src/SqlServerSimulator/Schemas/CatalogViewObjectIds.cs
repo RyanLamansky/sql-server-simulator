@@ -455,6 +455,8 @@ internal static class CatalogViewObjectIds
         ["xp_getnetname"] = -815501649,
         ["sp_dbcmptlevel"] = -796040647,
         ["sp_renamedb"] = -62818140,
+        ["sp_addumpdevice"] = -794916572,
+        ["sp_dropdevice"] = -659208155,
         ["sp_addapprole"] = -775594226,
         ["sp_dropapprole"] = -347698839,
         ["sp_approlepassword"] = -673068117,

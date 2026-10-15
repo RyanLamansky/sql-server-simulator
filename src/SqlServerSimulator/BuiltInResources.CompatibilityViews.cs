@@ -744,8 +744,9 @@ partial class BuiltInResources
             new("changedate", SqlType.DateTime, null, false),
         ], (batch, database) => RemoteLoginRows(batch, database, "sys.linked_logins", oledb: true));
 
-        // Backup devices and open tapes aren't modeled, so both are empty, as
-        // a server with none is.
+        // The logical backup devices, each a dump device (status 16) of no
+        // size; open tapes aren't modeled, so that view is empty, as a server
+        // with none is.
         Compatibility(views, "sysdevices",
         [
             new("name", sysname, 128, false),
@@ -755,7 +756,16 @@ partial class BuiltInResources
             new("status", SqlType.SmallInt, null, true),
             new("cntrltype", SqlType.SmallInt, null, true),
             new("phyname", path, 260, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (batch, _) => batch.Connection.Simulation.LogicalBackupDevicesInOrder().Select(static device => new[]
+        {
+            SqlValue.FromSystemName(device.Name),
+            SqlValue.FromInt32(0),
+            SqlValue.FromInt32(0),
+            SqlValue.FromInt32(0),
+            SqlValue.FromInt16(16),
+            SqlValue.FromInt16(device.Type),
+            SqlValue.FromNVarchar(device.PhysicalName),
+        }));
         Compatibility(views, "sysopentapes",
         [
             new("openTape", NVarcharSqlType.Get(64, Collation.Baseline, Coercibility.Implicit), 64, false),

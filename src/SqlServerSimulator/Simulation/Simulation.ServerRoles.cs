@@ -41,6 +41,9 @@ partial class Simulation
     /// <summary><c>principal_id</c> of the <c>sysadmin</c> fixed server role.</summary>
     internal const int SysadminRoleId = 3;
 
+    /// <summary><c>principal_id</c> of the <c>diskadmin</c> fixed server role — with <c>sysadmin</c>, the membership the backup-device procedures require.</summary>
+    internal const int DiskAdminRoleId = 8;
+
     /// <summary><c>principal_id</c> of the <c>dbcreator</c> fixed server role — the membership that carries <c>CREATE DATABASE</c> / <c>DROP DATABASE</c> (probe-confirmed).</summary>
     internal const int DbCreatorRoleId = 9;
 

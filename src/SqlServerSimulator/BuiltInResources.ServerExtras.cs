@@ -96,14 +96,21 @@ internal static partial class BuiltInResources
             new("family_guid", SqlType.UniqueIdentifier, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // Filled by sp_addumpdevice, which isn't built.
+        // The logical backup devices sp_addumpdevice registers, visible to
+        // every login (probed 2026-10-15 against SQL Server 2025).
         Sys("backup_devices",
         [
             new("name", SqlType.SystemName, 128, false),
             new("type", SqlType.TinyInt, null, true),
             new("type_desc", NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), 60, true),
             new("physical_name", SqlType.NVarchar, 260, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (batch, _) => batch.Connection.Simulation.LogicalBackupDevicesInOrder().Select(static device => new[]
+        {
+            SqlValue.FromSystemName(device.Name),
+            SqlValue.FromByte(device.Type),
+            SqlValue.FromNVarchar(device.TypeDescription),
+            SqlValue.FromNVarchar(device.PhysicalName),
+        }));
 
         // Extended procedures implemented in a DLL, of which a Linux server has
         // none: its xp_ procedures list in sys.all_objects but not here.

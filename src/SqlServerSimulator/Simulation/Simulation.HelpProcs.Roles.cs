@@ -206,9 +206,10 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>EXEC sp_helpdevice [@devname]</c>: the backup devices, of which a
-    /// simulation has none — an empty set, and Msg 15012 for a named one
-    /// (probed 2026-10-04 against SQL Server 2025).
+    /// <c>EXEC sp_helpdevice [@devname]</c>: the logical backup devices in the
+    /// order they were added, or the one named, each described by its type and
+    /// "backup device", and Msg 15012 for a name no device has (probed
+    /// 2026-10-15 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpDevice(BatchContext batch)
     {
@@ -216,9 +217,24 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         var (name, _) = ParseHelpArgs(arguments, "sp_helpdevice", firstName: "devname");
-        if (name is not null)
+        var rows = new List<SqlValue[]>();
+        foreach (var device in batch.Connection.Simulation.LogicalBackupDevicesInOrder())
+        {
+            if (name is not null && !DeviceNamesEqual(device.Name, name))
+                continue;
+            rows.Add(
+            [
+                SqlValue.FromSystemName(device.Name),
+                SqlValue.FromNVarchar(device.PhysicalName),
+                SqlValue.FromNVarchar(device.TypeWord + ", backup device"),
+                SqlValue.FromInt32(16),
+                SqlValue.FromInt16(device.Type),
+                SqlValue.FromInt32(0),
+            ]);
+        }
+        if (name is not null && rows.Count == 0)
             throw SimulatedSqlException.BackupDeviceDoesNotExist(name);
-        yield return new SimulatedSqlResultSet(SpHelpDeviceSchema, SpHelpDeviceColumnNames, []);
+        yield return new SimulatedSqlResultSet(SpHelpDeviceSchema, SpHelpDeviceColumnNames, rows);
     }
 
     /// <summary>

@@ -29,6 +29,45 @@ partial class SimulatedSqlException
             _ => "Access is denied.",
         }})."), 3201, 16, verb.StartsWith("BACKUP", StringComparison.Ordinal) ? (byte)1 : (byte)2), verb);
 
+    /// <summary>
+    /// Mimics SQL Server error 3201 for a tape device (state 5) or a virtual
+    /// device (state 7), neither of which a Linux server opens: a tape is
+    /// named as a logical device is, a virtual device by its physical name
+    /// alone, with the operating-system error each reports.
+    /// </summary>
+    internal static SimulatedSqlException CannotOpenNonDiskBackupDevice(string logicalName, string physicalName, bool tape, string verb) =>
+        FollowedByBackupTerminating(tape
+            ? new($"Cannot open backup device '{logicalName}({physicalName})'. Operating system error 2(The system cannot find the file specified.).", 3201, 16, 5)
+            : new($"Cannot open backup device '{physicalName}'. Operating system error 0x80070002(The system cannot find the file specified.).", 3201, 16, 7), verb);
+
+    /// <summary>Mimics SQL Server error 15026: <c>sp_addumpdevice</c> naming a logical device that exists.</summary>
+    internal static SimulatedSqlException LogicalDeviceAlreadyExists(string name) =>
+        new($"Logical device '{name}' already exists.", 15026, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15061: <c>sp_addumpdevice</c> naming a physical device another device names.</summary>
+    internal static SimulatedSqlException PhysicalDeviceAlreadyExists(string physicalName) =>
+        new($"The add device request was denied. A physical device named \"{physicalName}\" already exists. Only one backup device may refer to any physical device name.", 15061, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15044: <c>sp_addumpdevice</c> with a device type other than disk, tape or virtual_device.</summary>
+    internal static SimulatedSqlException UnknownBackupDeviceType(string type) =>
+        new($"The type \"{type}\" is an unknown backup device type. Use the type \"disk\" or \"tape\".", 15044, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15045: <c>sp_addumpdevice</c> with a NULL logical name.</summary>
+    internal static SimulatedSqlException LogicalDeviceNameNull() =>
+        new("The logical name cannot be NULL.", 15045, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15046: <c>sp_addumpdevice</c> with a NULL physical name.</summary>
+    internal static SimulatedSqlException PhysicalDeviceNameNull() =>
+        new("The physical name cannot be NULL.", 15046, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15285: a device type's own word as a logical device name.</summary>
+    internal static SimulatedSqlException SpecialWordAsDeviceName(string name) =>
+        new($"The special word '{name}' cannot be used for a logical device name.", 15285, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15216: <c>sp_dropdevice</c>'s <c>@delfile</c> other than <c>delfile</c>.</summary>
+    internal static SimulatedSqlException InvalidDelfileOption(string value) =>
+        new($"'{value}' is not a valid option for the @delfile parameter.", 15216, 16, 1);
+
     /// <summary>Mimics SQL Server error 3241: a device of 4 KB or more holding no backup media.</summary>
     internal static SimulatedSqlException MediaFamilyIncorrectlyFormed(string path, string verb) =>
         FollowedByBackupTerminating(new($"The media family on device '{path}' is incorrectly formed. SQL Server cannot process this media family.", 3241, 16, 0), verb);

@@ -241,6 +241,9 @@ internal static partial class BuiltInResources
         // old install scripts call.
         "sp_dbcmptlevel",
         "sp_renamedb",
+        // The logical backup devices BACKUP and RESTORE name in place of a path.
+        "sp_addumpdevice",
+        "sp_dropdevice",
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",

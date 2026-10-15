@@ -13,6 +13,11 @@ A backup device is a file the statement names with `DISK = 'path'` (a variable w
 Following [`bulk-and-adhoc.md`](bulk-and-adhoc.md#file-access)'s settled rule, the simulator never reaches the host's files on its own: with no `Simulation.OpenBackupFile` delegate, devices live in memory for the life of the `Simulation`, keyed by the path as spelled, which is the simulated server's own disk.
 A host that needs real files — a test harness checking `File.Exists` on the backup it asked for — supplies the delegate, which opens the path for reading (null for a missing file) or for writing the device's whole new content (null for a path that can't be written).
 
+A statement may instead name a **logical device** `sp_addumpdevice` registered ([`Simulation.BackupDevices.cs`](../../src/SqlServerSimulator/Simulation/Simulation.BackupDevices.cs)), written bare or held by a variable; devices are server scope and list in `sys.backup_devices`, `sysdevices` and `sp_helpdevice` in the order they were added.
+A disk device opens its physical name as spelled, through the same delegate, and every message naming the device names it `logical(physical)`, as real does; a tape device is real's Linux Msg 3201 state 5 and a virtual device state 7 naming only its physical name (probed 2026-10-15 against SQL Server 2025).
+Real resolves a relative path, for a device or `DISK =` alike, against its default backup directory; the simulator keeps it as spelled.
+`sp_dropdevice … 'delfile'` deletes an in-memory device's content with real's Msg 2503; a file the host's delegate holds stays, since the delegate has no delete.
+
 The file holds the simulator's own format ([`BackupMedia`](../../src/SqlServerSimulator/Storage/Backup/BackupMedia.cs)), not Microsoft's Tape Format: a real `.bak` is refused as an incorrectly formed media family, which is what real says of a file that isn't one.
 Row values are stored in the engine's own storage encodings, so the header records the writing build (the assembly's informational version, commit included) and any other build refuses the backup.
 
@@ -60,6 +65,6 @@ A restore brings back the backed-up recovery model and user access mode, as real
 
 - `BACKUP LOG` (Msg 4208 under `SIMPLE` recovery is modeled), differential and file backups, `COPY_ONLY`'s effect on a log chain (accepted, nothing else to affect).
 - `RESTORE` with `NORECOVERY` / `STANDBY`, `RESTORE LOG`, `HEADERONLY`, `FILELISTONLY`, `LABELONLY`, `VERIFYONLY`, `REWINDONLY`, point-in-time options.
-- Striped media (more than one device), `TAPE` and `URL` devices, `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`, `MEDIANAME` on `RESTORE`.
+- Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`, `MEDIANAME` on `RESTORE`.
 - Backing up a database holding CLR assemblies or modules, partitioning, full-text catalogs, change tracking, security policies, `CREATE DEFAULT` / `CREATE RULE` objects or bindings, memory-optimized tables or table types, temporal or graph tables, XML / spatial / JSON / vector / columnstore / hash / hypothetical indexes, masked or `GENERATED ALWAYS` columns, edge constraints, encrypted or numbered modules, or a DDL trigger with a firing order.
 - `msdb`'s backup history (`backupset`, `restorehistory`), and restoring `model` or `msdb`.
