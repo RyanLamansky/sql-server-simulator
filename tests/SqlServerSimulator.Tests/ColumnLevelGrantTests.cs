@@ -362,4 +362,48 @@ public sealed class ColumnLevelGrantTests
         AreEqual((byte)20, ex.Errors[1].State);
         Contains("\"dbo.t\"", ex.Errors[1].Message);
     }
+
+    /// <summary>
+    /// A column row is an exception to the grantee's state on the object as a
+    /// whole, kept per grantor: what the object row covers isn't stored, an
+    /// object-wide statement replaces the column rows it reaches, and a
+    /// GRANT or DENY replaces only its own grantor's rows (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("grant select (a) on p to u1; grant select on p to u1", "0|SL|G|dbo")]
+    [DataRow("grant select on p to u1; grant select (a) on p to u1", "0|SL|G|dbo")]
+    [DataRow("grant select on p to u1 with grant option; grant select (a) on p to u1", "0|SL|W|dbo")]
+    [DataRow("grant select on p to u1; grant select (a) on p to u1 with grant option", "0|SL|G|dbo 1|SL|W|dbo")]
+    [DataRow("grant select (a) on p to u1 with grant option; grant select on p to u1", "0|SL|G|dbo 1|SL|W|dbo")]
+    [DataRow("grant select (a) on p to u1 with grant option; grant select on p to u1 with grant option", "0|SL|W|dbo")]
+    [DataRow("deny select on p to u1; grant select (a) on p to u1", "0|SL|D|dbo 1|SL|G|dbo")]
+    [DataRow("deny select on p to u1; deny select (a) on p to u1", "0|SL|D|dbo")]
+    [DataRow("grant select (a) on p to u1; deny select on p to u1", "0|SL|D|dbo")]
+    [DataRow("deny select (a) on p to u1; grant select on p to u1", "0|SL|G|dbo")]
+    [DataRow("grant select on p to u1; revoke select (a) on p to u1; grant select (a) on p to u1", "0|SL|G|dbo")]
+    [DataRow("grant select on p to u1; revoke select (a) on p to u1; deny select (a) on p to u1", "0|SL|G|dbo 1|SL|D|dbo")]
+    [DataRow("grant select on p to u1 with grant option; execute as user = 'u1'; grant select on p to u2; revert; grant select on p to u2", "0|SL|G|dbo 0|SL|G|u1 0|SL|W|dbo")]
+    [DataRow("grant select on p to u1 with grant option; execute as user = 'u1'; grant select on p to u2; revert; deny select on p to u2", "0|SL|D|dbo 0|SL|G|u1 0|SL|W|dbo")]
+    [DataRow("grant select on p to u1 with grant option; execute as user = 'u1'; grant select (a) on p to u2; revert; grant select (a) on p to u2", "0|SL|W|dbo 1|SL|G|dbo 1|SL|G|u1")]
+    public void PermissionRows_KeepOnlyExceptionsPerGrantor(string statements, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table p (a int, b int, c int);
+            create user u1 without login;
+            create user u2 without login;
+            {statements};
+            select string_agg(concat_ws('|', minor_id, rtrim(type), state, user_name(grantor_principal_id)), ' ')
+                within group (order by minor_id, type, state, user_name(grantor_principal_id))
+            from sys.database_permissions where major_id = object_id('p')
+            """));
+
+    [TestMethod]
+    public void ObjectDeny_OverAColumnGrantOption_NeedsCascade()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (a int); create user u1 without login; grant select (a) on p to u1 with grant option");
+        _ = sim.AssertSqlError("deny select on p to u1", 4611);
+        _ = sim.ExecuteNonQuery("deny select on p to u1 cascade");
+        AreEqual("0|D", sim.ExecuteScalar("select string_agg(concat_ws('|', minor_id, state), ' ') from sys.database_permissions where major_id = object_id('p')"));
+    }
 }

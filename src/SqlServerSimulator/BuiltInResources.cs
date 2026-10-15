@@ -94,6 +94,7 @@ internal static partial class BuiltInResources
         RegisterRuntimeDmvs(views);
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
+        RegisterCompatibilityProjections(views);
         ApplyRealConstantColumns(views);
         ApplyRealColumnOrder(views);
         ApplyMetadataVisibility(views);

@@ -805,8 +805,8 @@ partial class Simulation
 
     /// <summary>
     /// Applies one (grantee, permission, securable) triple. GRANT stores a
-    /// single G (or W with grant option) row, replacing any prior G/W;
-    /// DENY stores a D row (coexisting with any G row); REVOKE removes the
+    /// single G (or W with grant option) row, replacing its grantor's prior
+    /// row; DENY stores a D row the same way; REVOKE removes the
     /// matching rows, honoring GRANT OPTION FOR (W→G downgrade) and CASCADE
     /// (subtree removal), and raising Msg 4611 when a grantable row is revoked
     /// without CASCADE (probed 2026-09-29 against SQL Server 2025, delegations or
@@ -829,19 +829,33 @@ partial class Simulation
             && p.GranteePrincipalId == granteeId
             && MinorMatches(p.MinorId)
             && p.IsFor(permClass, permMajorId, permEnum, permName, database);
-        // A REVOKE takes back only what its grantor granted: dbo's REVOKE
-        // leaves a row a grantee granted under its grant option (probed
-        // 2026-10-04 against SQL Server 2025).
-        bool Revokes(DatabasePermission p, PermissionState state) => Matches(p, state) && p.GrantorPrincipalId == grantorId;
+        // A grantee holds one row per grantor, so each statement replaces or
+        // takes back only what its own grantor granted: dbo's REVOKE, GRANT or
+        // DENY leaves a row a grantee granted under its grant option (probed
+        // 2026-10-04 and, for GRANT and DENY, 2026-10-15 against SQL Server 2025).
+        bool FromGrantor(DatabasePermission p, PermissionState state) => Matches(p, state) && p.GrantorPrincipalId == grantorId;
+        // A column row records an exception to the grantee's state on the
+        // object as a whole, so a column statement the object row already
+        // covers stores nothing — a GRANT under the object's GRANT, a WITH
+        // GRANT OPTION under its WITH GRANT OPTION, a DENY under its DENY —
+        // and an object-wide GRANT keeps the column grant options it doesn't
+        // reach (probed 2026-10-15 against SQL Server 2025).
+        bool ObjectStateIs(params PermissionState[] states) => minorId != 0 && database.Permissions.Exists(p =>
+            p.MinorId == 0 && p.GranteePrincipalId == granteeId && Array.IndexOf(states, p.State) >= 0
+            && p.IsFor(permClass, permMajorId, permEnum, permName, database));
 
         switch (kind)
         {
             case PermissionStatementKind.Grant:
-                // A securable holds one row per grantee and permission, so
-                // GRANT replaces whatever state the triple had — a DENY
-                // included, and a plain GRANT after a WITH GRANT OPTION
-                // downgrades W→G (probed 2026-09-28 against SQL Server 2025).
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
+                // A securable holds one row per grantee, grantor and
+                // permission, so GRANT replaces whatever state its grantor's
+                // row had — a DENY included, and a plain GRANT after a WITH
+                // GRANT OPTION downgrades W→G (probed 2026-09-28 against SQL
+                // Server 2025).
+                _ = database.Permissions.RemoveAll(p => FromGrantor(p, PermissionState.Grant) || FromGrantor(p, PermissionState.Deny) || FromGrantor(p, PermissionState.Revoke)
+                    || (FromGrantor(p, PermissionState.GrantWithGrantOption) && (withGrantOption || p.MinorId == minorId)));
+                if (withGrantOption ? ObjectStateIs(PermissionState.GrantWithGrantOption) : ObjectStateIs(PermissionState.Grant, PermissionState.GrantWithGrantOption))
+                    break;
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum,
@@ -851,8 +865,14 @@ partial class Simulation
             case PermissionStatementKind.Deny:
                 // DENY likewise replaces the triple's GRANT as well as a prior
                 // DENY (probed 2026-09-28 against SQL Server 2025); with
-                // CASCADE it also takes back what the grantee granted on.
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
+                // CASCADE it also takes back what the grantee granted on. An
+                // object-wide DENY over a column's grant option needs CASCADE
+                // as a REVOKE of it would (probed 2026-10-15).
+                if (minorId == 0 && !cascade && database.Permissions.Exists(p => p.MinorId != 0 && FromGrantor(p, PermissionState.GrantWithGrantOption)))
+                    throw SimulatedSqlException.RevokeRequiresCascade();
+                _ = database.Permissions.RemoveAll(p => FromGrantor(p, PermissionState.Grant) || FromGrantor(p, PermissionState.GrantWithGrantOption) || FromGrantor(p, PermissionState.Deny) || FromGrantor(p, PermissionState.Revoke));
+                if (ObjectStateIs(PermissionState.Deny))
+                    break;
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Deny, permissionName: storedName));
@@ -864,7 +884,7 @@ partial class Simulation
                 // REVOKE GRANT OPTION FOR: downgrade W→G. With CASCADE, also
                 // remove the rows this grantee delegated. Without CASCADE, a
                 // W row with delegations raises Msg 4611.
-                var wRow = database.Permissions.Find(p => Revokes(p, PermissionState.GrantWithGrantOption));
+                var wRow = database.Permissions.Find(p => FromGrantor(p, PermissionState.GrantWithGrantOption));
                 if (wRow is null)
                     return;
                 if (!cascade)
@@ -879,10 +899,10 @@ partial class Simulation
 
             default:
                 // Plain REVOKE removes both G/W and D rows for the triple.
-                var grantable = database.Permissions.Find(p => Revokes(p, PermissionState.GrantWithGrantOption));
+                var grantable = database.Permissions.Find(p => FromGrantor(p, PermissionState.GrantWithGrantOption));
                 if (grantable is not null && !cascade)
                     throw SimulatedSqlException.RevokeRequiresCascade();
-                _ = database.Permissions.RemoveAll(p => Revokes(p, PermissionState.Grant) || Revokes(p, PermissionState.GrantWithGrantOption) || Revokes(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
+                _ = database.Permissions.RemoveAll(p => FromGrantor(p, PermissionState.Grant) || FromGrantor(p, PermissionState.GrantWithGrantOption) || FromGrantor(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
                 // A column revoked out of the same grantee's table-level grant
                 // is remembered as an R row, which keeps that grant (and the
                 // grantee's schema and database ones) off the column (probed
