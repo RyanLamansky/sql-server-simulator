@@ -12,6 +12,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal static class PrincipalPlaceholders
 {
     public const string CurrentLogin = "dbo";
+
+    /// <summary>A SID's type, <c>varbinary(85)</c>, which <c>SUSER_SID</c> and <c>SID_BINARY</c> return.</summary>
+    public static readonly VarbinarySqlType SidType = VarbinarySqlType.Get(85);
 }
 
 /// <summary>
@@ -167,19 +170,19 @@ internal sealed class SUserSid : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.loginArg is null)
-            return SqlValue.FromVarbinary([0x01]);
+            return SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, [0x01]);
         var nameValue = this.loginArg.Run(runtime);
         if (nameValue.IsNull)
-            return SqlValue.Null(SqlType.Varbinary);
+            return SqlValue.Null(PrincipalPlaceholders.SidType);
         var name = nameValue.CoerceTo(SqlType.SystemName).AsString;
         return Collation.Baseline.Equals(name, "sa")
-            ? SqlValue.FromVarbinary([0x01])
+            ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, [0x01])
             : runtime.Batch.Connection.Simulation.Logins.ContainsKey(name)
-                ? SqlValue.FromVarbinary(BuiltInResources.DeriveLoginSid(name))
-                : SqlValue.Null(SqlType.Varbinary);
+                ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, BuiltInResources.DeriveLoginSid(name))
+                : SqlValue.Null(PrincipalPlaceholders.SidType);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => PrincipalPlaceholders.SidType;
 
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 
@@ -213,8 +216,8 @@ internal sealed class SidBinary : Expression
     {
         var value = this.arg.Run(runtime);
         return value.IsNull || value.Type.Category != SqlTypeCategory.String || Parse(value.AsString) is not { } sid
-            ? SqlValue.Null(SqlType.Varbinary)
-            : SqlValue.FromVarbinary(sid);
+            ? SqlValue.Null(PrincipalPlaceholders.SidType)
+            : SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, sid);
     }
 
     /// <summary>The binary form of a string SID, or null when the text isn't one.</summary>
@@ -257,7 +260,7 @@ internal sealed class SidBinary : Expression
         if (IsUntypedNullLiteral(this.arg))
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "sid_binary");
         _ = StringScalars.RequireStringArgument(this.arg, this.arg.GetSqlType(batch, resolveColumnType), "sid_binary", 1, acceptsBinary: true, acceptsLegacyLob: false);
-        return SqlType.Varbinary;
+        return PrincipalPlaceholders.SidType;
     }
 
     internal override bool ResultIsNullable(NullabilityContext context) => true;

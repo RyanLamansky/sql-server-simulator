@@ -114,16 +114,16 @@ internal readonly partial struct SqlValue
         }
 
         // Binary ↔ binary crossings: binary(N) pads or truncates; varbinary
-        // wraps the source bytes unchanged. image (the deprecated always-LOB
-        // type) shares the byte-bag shape, so any binary source can land in
-        // an image target and image rebinds back to varbinary/binary. The
-        // varbinary(N)-target branch covers the same-family-different-length
-        // case that the top-level reference-equality short-circuit no longer
-        // catches now that varbinary singletons are per-length.
+        // wraps the source bytes unchanged under the target's declared
+        // length, which a sql_variant reports (every varbinary target below
+        // keeps it the same way, its cut left to Cast.EnforceTargetMaxLength).
+        // image (the deprecated always-LOB type) shares the byte-bag shape,
+        // so any binary source can land in an image target and image rebinds
+        // back to varbinary/binary.
         if (this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType && target is BinarySqlType targetBinary)
             return FromBinary(targetBinary, this.AsBytes);
         if (this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType && target is VarbinarySqlType)
-            return FromVarbinary(this.AsBytes);
+            return FromVarbinary((VarbinarySqlType)target, this.AsBytes);
         if (this.Type is VarbinarySqlType or BinarySqlType && target == SqlType.Image)
             return FromImage(this.AsBytes);
 
@@ -192,12 +192,12 @@ internal readonly partial struct SqlValue
         // category. The inbound direction raises real's own version failure
         // (Msg 6522 / 24210) on bytes it can't read.
         if (this.Type is SpatialSqlType spatialToVarbinary && target is VarbinarySqlType)
-            return FromVarbinary(this.AsSpatial.Encoded(spatialToVarbinary.IsGeography));
+            return FromVarbinary((VarbinarySqlType)target, this.AsSpatial.Encoded(spatialToVarbinary.IsGeography));
         if (this.Type is SpatialSqlType spatialToBinary && target is BinarySqlType spatialBinaryTarget)
             return FromBinary(spatialBinaryTarget, this.AsSpatial.Encoded(spatialToBinary.IsGeography));
 
         if (SqlType.IsStringCategory(this.Type) && target is VarbinarySqlType)
-            return FromVarbinary(EncodeStringForBinary(this.AsString, this.Type));
+            return FromVarbinary((VarbinarySqlType)target, EncodeStringForBinary(this.AsString, this.Type));
         if (SqlType.IsStringCategory(this.Type) && target is BinarySqlType targetStringToBinary)
         {
             var encoded = EncodeStringForBinary(this.AsString, this.Type);
@@ -218,7 +218,7 @@ internal readonly partial struct SqlValue
         if (SqlType.IsIntegerCategory(this.Type) && target is BinarySqlType intToBinary)
             return FromBinary(intToBinary, EncodeIntegerToBinary(this, intToBinary.length, fixedWidth: true));
         if (SqlType.IsIntegerCategory(this.Type) && target is VarbinarySqlType intToVarbinary)
-            return FromVarbinary(EncodeIntegerToBinary(this, intToVarbinary.length, fixedWidth: false));
+            return FromVarbinary((VarbinarySqlType)target, EncodeIntegerToBinary(this, intToVarbinary.length, fixedWidth: false));
 
         // A float / real lays out its IEEE bits and a money / smallmoney its
         // scaled units, big-endian at their own width, and fits the target as
@@ -233,7 +233,7 @@ internal readonly partial struct SqlValue
             var nativeWidth = this.Type == SqlType.Float || this.Type == SqlType.Money ? 8 : 4;
             return target is BinarySqlType fixedTarget
                 ? FromBinary(fixedTarget, FitToBinaryWidth(native, nativeWidth, fixedTarget.length, fixedWidth: true))
-                : FromVarbinary(FitToBinaryWidth(native, nativeWidth, ((VarbinarySqlType)target).length, fixedWidth: false));
+                : FromVarbinary((VarbinarySqlType)target, FitToBinaryWidth(native, nativeWidth, ((VarbinarySqlType)target).length, fixedWidth: false));
         }
 
         // rowversion converts out as the binary(8) it is: bigint reads the 8
@@ -247,7 +247,7 @@ internal readonly partial struct SqlValue
         // 0x0000000000000001).
         if (this.Type is RowVersionSqlType)
         {
-            return target is VarbinarySqlType ? FromVarbinary(this.AsBytes)
+            return target is VarbinarySqlType ? FromVarbinary((VarbinarySqlType)target, this.AsBytes)
                 : target is BinarySqlType targetRvBinary ? FromBinary(targetRvBinary, this.AsBytes)
                 : target is DecimalSqlType rowVersionToDecimal ? this.CoerceToDecimal(rowVersionToDecimal)
                 : target == SqlType.SmallDateTime ? FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes, fromRowVersion: true))
@@ -273,7 +273,7 @@ internal readonly partial struct SqlValue
             var numeric = EncodeNumericToBytes(this.AsDecimal38, decimalSource);
             return target is BinarySqlType decimalToBinary
                 ? FromBinary(decimalToBinary, numeric.Length < decimalToBinary.length ? RightAligned(numeric, decimalToBinary.length) : numeric)
-                : FromVarbinary(numeric);
+                : FromVarbinary((VarbinarySqlType)target, numeric);
         }
 
         // datetime / smalldatetime → binary: the stored day / tick form, big
@@ -286,7 +286,7 @@ internal readonly partial struct SqlValue
             var legacy = this.EncodeLegacyDateTime();
             return target is BinarySqlType dateTimeToBinary
                 ? FromBinary(dateTimeToBinary, RightAligned(legacy, dateTimeToBinary.length))
-                : FromVarbinary(((VarbinarySqlType)target).length is > 0 and var width && width < legacy.Length ? RightAligned(legacy, width) : legacy);
+                : FromVarbinary((VarbinarySqlType)target, ((VarbinarySqlType)target).length is > 0 and var width && width < legacy.Length ? RightAligned(legacy, width) : legacy);
         }
 
         // date / time / datetime2 / datetimeoffset → binary: the layouts the
@@ -298,7 +298,7 @@ internal readonly partial struct SqlValue
         if (EncodeModernTemporal() is { } temporal && target is BinarySqlType or VarbinarySqlType)
         {
             if (target is not BinarySqlType fixedTarget)
-                return FromVarbinary(temporal);
+                return FromVarbinary((VarbinarySqlType)target, temporal);
             if (fixedTarget.length < temporal.Length && this.Type != SqlType.Date)
                 throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state: 17);
             return FromBinary(fixedTarget, temporal);
@@ -351,7 +351,7 @@ internal readonly partial struct SqlValue
         {
             return hierarchyToVarbinary.length > 0 && this.AsHierarchyIdBytes.Length > hierarchyToVarbinary.length
                 ? throw SimulatedSqlException.HierarchyIdBinaryMismatch(truncated: true)
-                : FromVarbinary(this.AsHierarchyIdBytes);
+                : FromVarbinary((VarbinarySqlType)target, this.AsHierarchyIdBytes);
         }
         if (this.Type is HierarchyIdSqlType && target is BinarySqlType hierarchyToBinary)
         {
@@ -1889,7 +1889,7 @@ internal readonly partial struct SqlValue
     private SqlValue CoerceFromUniqueIdentifier(SqlType target) => target switch
     {
         _ when SqlType.IsStringCategory(target) => FromString(target, this.AsGuid.ToString("D").ToUpperInvariant()),
-        _ when target is VarbinarySqlType => FromVarbinary(this.AsGuid.ToByteArray()),
+        _ when target is VarbinarySqlType => FromVarbinary((VarbinarySqlType)target, this.AsGuid.ToByteArray()),
         BinarySqlType binTarget => FromBinary(binTarget, this.AsGuid.ToByteArray()),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
@@ -2459,7 +2459,7 @@ internal readonly partial struct SqlValue
             if (SqlType.IsCollatedString(target))
                 return FromString(target, udtSource.Udt.ToText(this));
             if (target is VarbinarySqlType)
-                return FromVarbinary(this.AsClrUdtBytes);
+                return FromVarbinary((VarbinarySqlType)target, this.AsClrUdtBytes);
             if (target is BinarySqlType fixedTarget)
             {
                 var bytes = this.AsClrUdtBytes;

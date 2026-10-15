@@ -239,7 +239,7 @@ internal sealed class VarbinarySqlType : SqlType
         return bytes.Length;
     }
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVarbinary(source.ToArray());
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVarbinary(this, source.ToArray());
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromVarbinary((byte[])raw);
 

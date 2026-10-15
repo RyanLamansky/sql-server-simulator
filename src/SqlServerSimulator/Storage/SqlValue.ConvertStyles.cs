@@ -536,7 +536,7 @@ internal readonly partial struct SqlValue
         // 2026-10-06 against SQL Server 2025).
         return target is BinarySqlType bin && !(style == 2 && s.Length == 0)
             ? FromBinaryPadded(bin, bytes)
-            : FromVarbinary(bytes);
+            : target is VarbinarySqlType varbinaryTarget ? FromVarbinary(varbinaryTarget, bytes) : FromVarbinary(bytes);
     }
 
     /// <summary>

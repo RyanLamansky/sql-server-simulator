@@ -765,7 +765,7 @@ internal sealed class Cast : Expression
             _ = System.Text.Encoding.Unicode.GetBytes(text, 0, text.Length, bytes, 2);
             return length > 0 && bytes.Length > length ? throw SimulatedSqlException.XmlTooLongForTarget()
                 : targetType is BinarySqlType fixedBinary ? SqlValue.FromBinary(fixedBinary, bytes)
-                : SqlValue.FromVarbinary(bytes);
+                : SqlValue.FromVarbinary((VarbinarySqlType)targetType, bytes);
         }
         if (targetType is not (VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType))
             return null;
@@ -921,7 +921,7 @@ internal sealed class Cast : Expression
         // (a date is; see SqlValue.EncodeModernTemporal).
         return sourceType is TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType
             ? throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state: 17)
-            : SqlValue.FromVarbinary(coerced.AsBytes[..max]);
+            : SqlValue.FromVarbinary((VarbinarySqlType)targetType, coerced.AsBytes[..max]);
     }
 
     /// <summary>

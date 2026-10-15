@@ -180,6 +180,59 @@ public sealed class SqlVariantPropertyTests
     public void MaxLength_CharPadsToDeclared()
         => AreEqual(5, Scalar("select sql_variant_property(cast('ab' as char(5)), 'MaxLength')"));
 
+    /// <summary>
+    /// A <c>varbinary(n)</c> value reports its declared length wherever it
+    /// came from — a CAST from any source, a variable, a column, a variant
+    /// stored in a table or a table constructor, a union branch, a
+    /// concatenation and the SID functions — while a cut CAST keeps its cut
+    /// length and a hex literal its byte count (probed 2026-10-15 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(0x01 as varbinary(85))", 85)]
+    [DataRow("cast(1 as varbinary(85))", 85)]
+    [DataRow("cast('ab' as varbinary(85))", 85)]
+    [DataRow("cast(newid() as varbinary(20))", 20)]
+    [DataRow("cast(1.5e0 as varbinary(20))", 20)]
+    [DataRow("cast(1.5 as varbinary(20))", 20)]
+    [DataRow("cast(sysdatetime() as varbinary(20))", 20)]
+    [DataRow("convert(varbinary(30), '0xab', 1)", 30)]
+    [DataRow("cast(cast(N'<a/>' as xml) as varbinary(30))", 30)]
+    [DataRow("cast(0x010203 as varbinary(2))", 2)]
+    [DataRow("isnull(cast(0x01 as varbinary(85)), 0x02)", 85)]
+    [DataRow("cast(0x01 as varbinary(85)) + 0x02", 86)]
+    [DataRow("cast(0x01 as varbinary(10)) + cast(0x02 as binary(3))", 13)]
+    [DataRow("cast(cast(0x01 as varbinary(85)) as sql_variant)", 85)]
+    [DataRow("suser_sid()", 85)]
+    [DataRow("sid_binary('S-1-5-32-544')", 85)]
+    [DataRow("0x0102", 2)]
+    public void MaxLength_Varbinary_ReportsDeclaredLength(string expression, int expected)
+        => AreEqual(expected, Scalar($"select sql_variant_property({expression}, 'MaxLength')"));
+
+    [TestMethod]
+    public void MaxLength_Varbinary_SurvivesVariablesColumnsAndRowsets()
+        => AreEqual("85|85|20|9|85|85,10|10,10|85|85,7", Scalar("""
+            declare @v varbinary(85) = 0x01, @s sql_variant, @b binary(7) = 0x01;
+            set @s = @v;
+            create table #t (c varbinary(20), b binary(9), v sql_variant, w sql_variant);
+            insert #t (c, b) values (0x0102, 0x01);
+            update #t set v = c, w = b;
+            declare @tv table (v sql_variant);
+            insert @tv values (cast(cast(0x01 as varbinary(85)) as sql_variant));
+            create table #u (id int, v sql_variant);
+            insert #u values (1, cast(cast(0x01 as varbinary(85)) as sql_variant)), (2, @b);
+            select concat_ws('|',
+                cast(sql_variant_property(@s, 'MaxLength') as int),
+                cast(sql_variant_property(cast(@v as sql_variant), 'MaxLength') as int),
+                (select cast(sql_variant_property(v, 'MaxLength') as int) from #t),
+                (select cast(sql_variant_property(w, 'MaxLength') as int) from #t),
+                (select cast(sql_variant_property(x, 'MaxLength') as int) from (values (cast(cast(0x01 as varbinary(85)) as sql_variant))) d(x)),
+                (select string_agg(cast(sql_variant_property(x, 'MaxLength') as int), ',') from (select cast(cast(0x01 as varbinary(85)) as sql_variant) x union all select cast(cast(0x0102 as varbinary(10)) as sql_variant)) d),
+                (select string_agg(cast(sql_variant_property(cast(x as sql_variant), 'MaxLength') as int), ',') from (select cast(0x01 as varbinary(5)) x union all select cast(0x0102 as binary(10))) d),
+                (select cast(sql_variant_property(v, 'MaxLength') as int) from @tv),
+                (select string_agg(cast(sql_variant_property(v, 'MaxLength') as int), ',') within group (order by id) from #u))
+            """));
+
     // --- TotalBytes (actual value bytes + per-family overhead) ---
 
     [TestMethod]

@@ -172,6 +172,7 @@ Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):
   Hex-string CAST forms (`CONVERT(varbinary, '0x010203', 1)` / `style 2`) still route through `CoerceStringToBinaryWithStyle`.
 
 `VarcharSqlType`/`NVarcharSqlType`/`VarbinarySqlType` are per-length singletons via `Get(N)` (parallel to `CharSqlType`); `Unspecified` (length 0) is the runtime sentinel; `MaxForm` (length -1) is the LOB form.
+A value converted to `varbinary(N)` — from any source, by CAST, assignment or a column read — carries `Get(N)` rather than `Unspecified`, because a `sql_variant` it reaches reports `N` as its `MaxLength` (a hex literal its byte count, a concatenation the summed lengths; probed 2026-10-15 against SQL Server 2025).
 **Equality**: `value.Type == SqlType.Varchar` is true only for the unspecified form; "is any varchar" needs `is VarcharSqlType`.
 The encoder accepts any same-family pair regardless of length (write-time truncation enforced upstream).
 

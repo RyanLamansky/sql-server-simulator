@@ -43,7 +43,7 @@ internal sealed class Add : TwoSidedExpression
         rightBytes.CopyTo(joined, leftBytes.Length);
         return resultType is BinarySqlType binaryResult
             ? SqlValue.FromBinary(binaryResult, joined)
-            : SqlValue.FromVarbinary(joined);
+            : SqlValue.FromVarbinary((VarbinarySqlType)resultType, joined);
     }
 
     /// <summary>
