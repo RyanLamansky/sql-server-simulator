@@ -112,6 +112,7 @@ internal sealed partial class Database
         ];
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
+        this.EncryptionKeys = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         // guest's schema hosts objects like any other: a user defaulting to it
         // reads SCHEMA_NAME() 'guest' and creates there, and dbo can create in
@@ -793,6 +794,12 @@ internal sealed partial class Database
     // counter sits one below it.
     private int nextAssemblyId = 65535;
 
+    /// <summary>
+    /// The database's master key, certificates and symmetric keys, surfaced by
+    /// <c>sys.symmetric_keys</c>, <c>sys.certificates</c> and <c>sys.key_encryptions</c>.
+    /// </summary>
+    public readonly Schemas.EncryptionKeyStore EncryptionKeys;
+
     /// <summary>Allocates the next <c>sys.assemblies.assembly_id</c>.</summary>
     public int AllocateAssemblyId() => Interlocked.Increment(ref this.nextAssemblyId);
 
@@ -960,6 +967,7 @@ internal sealed partial class Database
         Volatile.Read(ref this.nextPrincipalId), Volatile.Read(ref this.nextFullTextCatalogId), Volatile.Read(ref this.nextAssemblyId),
         Volatile.Read(ref this.nextXmlCollectionId), Volatile.Read(ref this.nextPartitionFunctionId), Volatile.Read(ref this.nextPartitionSchemeId),
         Interlocked.Read(ref this.rowVersionCounter), Interlocked.Read(ref this.changeTrackingVersion),
+        Volatile.Read(ref this.EncryptionKeys.LastCertificateId), Volatile.Read(ref this.EncryptionKeys.LastSymmetricKeyId),
     ];
 
     /// <summary>
@@ -982,6 +990,8 @@ internal sealed partial class Database
         Set(ref this.nextPartitionSchemeId, counters[8], raiseOnly);
         _ = Interlocked.Exchange(ref this.rowVersionCounter, counters[9]);
         _ = Interlocked.Exchange(ref this.changeTrackingVersion, counters[10]);
+        Set(ref this.EncryptionKeys.LastCertificateId, counters[11], raiseOnly);
+        Set(ref this.EncryptionKeys.LastSymmetricKeyId, counters[12], raiseOnly);
     }
 }
 

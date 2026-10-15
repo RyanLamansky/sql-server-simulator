@@ -69,6 +69,12 @@ partial class Simulation
                 return TryParseCreateApplicationRole(context);
             case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateCredential(context);
+            case UnquotedString masterWord when masterWord.Value.Equals("MASTER", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateMasterKey(context);
+            case UnquotedString certificateWord when certificateWord.Value.Equals("CERTIFICATE", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateCertificate(context);
+            case UnquotedString symmetricWord when symmetricWord.Value.Equals("SYMMETRIC", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateSymmetricKey(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:

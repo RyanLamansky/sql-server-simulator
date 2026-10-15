@@ -883,4 +883,16 @@ public sealed class ConvertTests
         AreEqual("0x00000001", ExecuteScalar("select convert(varchar(10), convert(binary(3), '0x', 1) + 0x01, 1)"));
         AreEqual("0x00000001", ExecuteScalar("select convert(varchar(10), convert(binary(3), '  ', 2) + 0x01, 1)"));
     }
+
+    /// <summary>
+    /// A <c>sql_variant</c> converts as the value it holds, so the style
+    /// applies to that value (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(cast('2020-01-02 03:04:05' as datetime) as sql_variant)", 121, "2020-01-02 03:04:05.000")]
+    [DataRow("cast(cast('2020-01-02 03:04:05' as datetime) as sql_variant)", 101, "01/02/2020")]
+    [DataRow("cast(1.5e0 as sql_variant)", 2, "1.500000000000000e+000")]
+    [DataRow("cast(0x41 as sql_variant)", 1, "0x41")]
+    public void VariantSource_TakesTheStyleOfItsValue(string source, int style, string expected)
+        => AreEqual(expected, ExecuteScalar($"select convert(varchar(30), {source}, {style})"));
 }

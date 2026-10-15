@@ -270,6 +270,15 @@ internal sealed class StringConcat : Expression
         public Collation? Value;
         public Coercibility Rank;
 
+        /// <summary>
+        /// Whether <see cref="Value"/> is a conflict between this call's own
+        /// arguments, which an explicit <c>COLLATE</c> on any later argument
+        /// still settles: real resolves the argument list as a whole, so
+        /// <c>CONCAT(a, b, c COLLATE x)</c> is <c>x</c> however <c>a</c> and
+        /// <c>b</c> differ (probed 2026-10-15 against SQL Server 2025).
+        /// </summary>
+        private bool ownConflict;
+
         public void Fold(SqlType type, StringConcatKind kind)
         {
             if (type.Category != SqlTypeCategory.String)
@@ -278,6 +287,11 @@ internal sealed class StringConcat : Expression
             {
                 this.Value = type.Collation ?? Collation.Baseline;
                 this.Rank = type.Coercibility;
+                return;
+            }
+            if (this.ownConflict && type.Coercibility == Coercibility.Explicit)
+            {
+                (this.Value, this.Rank, this.ownConflict) = (type.Collation!, Coercibility.Explicit, false);
                 return;
             }
             if (Collation.Resolve(this.Value, this.Rank, type) is { } resolved)
@@ -290,6 +304,7 @@ internal sealed class StringConcat : Expression
                 throw SimulatedSqlException.CollationConflict(type.Collation!.Name, this.Value.Name, operatorName);
             this.Value = UnresolvedCollation.For(type.Collation!, this.Value, operatorName);
             this.Rank = Coercibility.NoCollation;
+            this.ownConflict = true;
         }
     }
 

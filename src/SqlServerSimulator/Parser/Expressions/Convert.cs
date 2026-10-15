@@ -128,6 +128,11 @@ internal sealed class ConvertExpression : Expression
         if (sourceValue.IsNull)
             return Cast.RecollateStringResult(SqlValue.Null(this.targetType), this.targetType, sourceValue.Type, dbCollation);
 
+        // A sql_variant converts as the value it holds, so the style applies
+        // to that: CONVERT(varchar, variant-of-datetime, 121) renders the
+        // ODBC form (probed 2026-10-15 against SQL Server 2025).
+        if (styleCode is not null && sourceValue.Type is SqlVariantSqlType && this.targetType is not SqlVariantSqlType)
+            sourceValue = sourceValue.AsVariantInner;
         var budgetCollation = Cast.ResultCollation(this.targetType, sourceValue.Type, dbCollation);
         // A styled string rendering goes into a char / nchar through its var
         // form, so it meets the length the way CAST's does rather than being

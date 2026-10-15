@@ -12,9 +12,9 @@ namespace SqlServerSimulator;
 public sealed class UnbuiltStatementTests
 {
     [TestMethod]
-    [DataRow("create master key encryption by password = 'Abc!12345678'", "CREATE MASTER KEY")]
-    [DataRow("create certificate c with subject = 'x'", "CREATE CERTIFICATE")]
-    [DataRow("drop symmetric key k", "DROP SYMMETRIC KEY")]
+    [DataRow("create asymmetric key a with algorithm = rsa_2048", "CREATE ASYMMETRIC KEY")]
+    [DataRow("alter certificate c remove private key", "ALTER CERTIFICATE")]
+    [DataRow("backup certificate c to file = 'c.cer'", "BACKUP CERTIFICATE")]
     [DataRow("create column master key cmk with (key_store_provider_name = 'MSSQL_CERTIFICATE_STORE', key_path = 'x')", "CREATE COLUMN MASTER KEY")]
     [DataRow("create database encryption key with algorithm = aes_256 encryption by server certificate c", "CREATE DATABASE ENCRYPTION KEY")]
     [DataRow("alter database scoped credential dc with identity = 'y'", "ALTER DATABASE SCOPED CREDENTIAL")]
@@ -25,8 +25,6 @@ public sealed class UnbuiltStatementTests
     [DataRow("create external data source e with (location = 'sqlserver://x')", "CREATE EXTERNAL DATA SOURCE")]
     [DataRow("alter resource governor reconfigure", "ALTER RESOURCE GOVERNOR")]
     [DataRow("create selective xml index sx on t (x) for (p = '/a')", "CREATE SELECTIVE XML INDEX")]
-    [DataRow("open symmetric key k decryption by password = 'x'", "OPEN SYMMETRIC KEY")]
-    [DataRow("close all symmetric keys", "CLOSE ALL SYMMETRIC KEYS")]
     [DataRow("backup service master key to file = 'x' encryption by password = 'x'", "BACKUP SERVICE MASTER KEY")]
     [DataRow("restore master key from file = 'x' decryption by password = 'x' encryption by password = 'x'", "RESTORE MASTER KEY")]
     [DataRow("add signature to p by certificate c", "ADD SIGNATURE")]

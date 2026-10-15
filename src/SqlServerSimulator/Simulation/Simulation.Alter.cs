@@ -55,6 +55,10 @@ partial class Simulation
                 return TryParseAlterApplicationRole(context);
             case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterCredential(context);
+            case UnquotedString masterWord when masterWord.Value.Equals("MASTER", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterMasterKey(context);
+            case UnquotedString symmetricWord when symmetricWord.Value.Equals("SYMMETRIC", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterSymmetricKey(context);
             case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterSecurityPolicy(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:

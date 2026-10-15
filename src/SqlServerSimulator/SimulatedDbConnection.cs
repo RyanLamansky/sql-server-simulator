@@ -2054,6 +2054,18 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly ConcurrentDictionary<int, PreparedXmlDocument> PreparedXmlDocuments = new();
 
     /// <summary>
+    /// The symmetric keys the session has opened (<c>sys.openkeys</c>), in
+    /// opening order, under a lock on the list. A key stays open until
+    /// <c>CLOSE</c>, its drop or the session's end: a rollback leaves an
+    /// opened key open and a closed one closed (probed 2026-10-15 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal readonly List<Schemas.OpenSymmetricKey> OpenSymmetricKeys = [];
+
+    /// <summary>The databases whose master key the session has opened with <c>OPEN MASTER KEY</c>, under a lock on the list.</summary>
+    internal readonly List<Database> OpenMasterKeys = [];
+
+    /// <summary>
     /// Backs the next <c>sp_xml_preparedocument</c> handle. Real hands out
     /// <c>1, 3, 5, …</c> per session and never reuses a released value
     /// (probe-confirmed); the counter is read pre-increment by two, so it
@@ -2866,6 +2878,10 @@ public sealed class SimulatedDbConnection : DbConnection
             // here is what makes a session that forgot sp_xml_removedocument
             // stop holding its DOMs.
             this.PreparedXmlDocuments.Clear();
+            lock (this.OpenSymmetricKeys)
+                this.OpenSymmetricKeys.Clear();
+            lock (this.OpenMasterKeys)
+                this.OpenMasterKeys.Clear();
             // Cursors are session-scoped and auto-deallocate at close. Release
             // any SCROLL_LOCKS locks the open GLOBAL cursors still hold before
             // dropping them.

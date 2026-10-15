@@ -182,7 +182,7 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
 - **Settled — don't re-pitch:** `msdb.dbo.syspolicy_configuration.current_value` stays `nvarchar` — it's a *view-body* projection (not a resource column) mixing `int` rows with a `binary` GUID row, every consumer reads a single named row and CASTs it, so a variant migration there would only touch the view SQL text for no observable gain.
 - **Graph residue** — `MATCH` reading through a derived table, view or CTE that doesn't project the pseudo-column, `MATCH` over an edge whose node is gone (real NULL-extends it), and `NOT MATCH(SHORTEST_PATH(…))` — see [`graph.md`](graph.md#not-modeled-yet).
 - **Dynamic Data Masking residue** — a masked `geography` / `geometry` / `vector` value raises `NotSupportedException` (real sends a single `0x00` byte its own client can't read back) — see [`data-masking.md`](data-masking.md#not-modeled-yet).
-- **Ownership residue** — `ALTER AUTHORIZATION` on the classes the simulator doesn't carry (certificates, keys, Service Broker, endpoints …), and the assembly gate's divergence (it asks at database scope because `GRANT` carries no assembly class) → [`permissions.md`](permissions.md#ownership).
+- **Ownership residue** — `ALTER AUTHORIZATION` on the classes the simulator doesn't carry (certificates and symmetric keys, which carry an owner but take no `ALTER AUTHORIZATION` or class-level `GRANT` yet — [`encryption-keys.md`](encryption-keys.md#not-modeled-yet) —, Service Broker, endpoints …), and the assembly gate's divergence (it asks at database scope because `GRANT` carries no assembly class) → [`permissions.md`](permissions.md#ownership).
 
 ## Over-permissive register
 

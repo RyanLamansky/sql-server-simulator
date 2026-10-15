@@ -6,9 +6,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>CERTENCODED(cert_id)</c> and
 /// <c>CERTPRIVATEKEY(cert_id, N'encryption_password' [, N'decryption_password'])</c>:
 /// return the public certificate / private key bytes as <c>varbinary(max)</c>.
-/// The simulator models no certificate store, so both return NULL — the exact
-/// answer real SQL Server gives for a certificate id that doesn't exist
-/// (probe-confirmed against SQL Server 2025). Argument-count violations raise
+/// For an id that names no certificate both return NULL, real's answer
+/// (probe-confirmed against SQL Server 2025); the simulator's certificates
+/// carry no X.509 encoding to export, so one that exists raises
+/// <see cref="NotSupportedException"/>. Argument-count violations raise
 /// the same Msg 174 (<c>CERTENCODED</c>) / Msg 189 (<c>CERTPRIVATEKEY</c>) real
 /// does. References:
 /// https://learn.microsoft.com/en-us/sql/t-sql/functions/certencoded-transact-sql,
@@ -48,7 +49,13 @@ internal sealed class CertificateFunction : Expression
         }
     }
 
-    public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(SqlType.VarbinaryMax);
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var id = this.certId.Run(runtime);
+        if (!id.IsNull && id.Type is Int32SqlType && runtime.Batch.CurrentDatabase.EncryptionKeys.CertificateById(id.AsInt32) is not null)
+            throw new NotSupportedException($"{(this.password is null ? "CERTENCODED" : "CERTPRIVATEKEY")} of a certificate isn't modeled by the simulator, whose certificates carry no X.509 encoding.");
+        return SqlValue.Null(SqlType.VarbinaryMax);
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
 

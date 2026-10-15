@@ -116,6 +116,8 @@ partial class DatabaseImage
             throw Unsupported("partition functions or schemes");
         if (!database.FullTextCatalogs.IsEmptyLockFree())
             throw Unsupported("full-text catalogs");
+        if (!database.EncryptionKeys.IsEmpty)
+            throw Unsupported("a master key, certificates or symmetric keys");
         if (database.ChangeTracking is not null)
             throw Unsupported("change tracking");
         foreach (var (_, trigger) in database.DdlTriggers)

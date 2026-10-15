@@ -32,9 +32,7 @@ partial class Simulation
     /// </summary>
     private static readonly UnbuiltStatementForm[] UnbuiltStatementForms =
     [
-        new(null, "MASTER KEY", "Database master keys"),
-        new(null, "CERTIFICATE", "Certificates"),
-        new(null, "SYMMETRIC KEY", "Symmetric keys"),
+        new("ALTER", "CERTIFICATE", "Certificates"),
         new(null, "ASYMMETRIC KEY", "Asymmetric keys"),
         new(null, "CRYPTOGRAPHIC PROVIDER", "Extensible key management (cryptographic providers)"),
         new(null, "COLUMN MASTER KEY", "Always Encrypted (column master keys)"),
@@ -78,11 +76,6 @@ partial class Simulation
         new("", "BACKUP SERVICE MASTER KEY", "The service master key"),
         new("", "RESTORE MASTER KEY", "Database master keys"),
         new("", "RESTORE SERVICE MASTER KEY", "The service master key"),
-        new("", "OPEN SYMMETRIC KEY", "Symmetric keys"),
-        new("", "OPEN MASTER KEY", "Database master keys"),
-        new("", "CLOSE SYMMETRIC KEY", "Symmetric keys"),
-        new("", "CLOSE ALL SYMMETRIC KEYS", "Symmetric keys"),
-        new("", "CLOSE MASTER KEY", "Database master keys"),
         new("", "BEGIN DIALOG", "Service Broker (dialogs)"),
         new("", "BEGIN CONVERSATION TIMER", "Service Broker (conversation timers)"),
         new("", "END CONVERSATION", "Service Broker (conversations)"),

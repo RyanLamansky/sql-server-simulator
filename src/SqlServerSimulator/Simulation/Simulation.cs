@@ -3706,7 +3706,12 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Open }:
                 RefuseUnbuiltStatement(context, verb: null);
-                ParseOpenCursor(batch);
+                if (FollowedByWords(context, "MASTER", "KEY"))
+                    ParseOpenMasterKey(context);
+                else if (FollowedByWords(context, "SYMMETRIC", "KEY"))
+                    ParseOpenSymmetricKey(context);
+                else
+                    ParseOpenCursor(batch);
                 rowCount = 0;
                 break;
 
@@ -3717,7 +3722,12 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Close }:
                 RefuseUnbuiltStatement(context, verb: null);
-                ParseCloseCursor(batch);
+                if (FollowedByWords(context, "MASTER", "KEY"))
+                    ParseCloseMasterKey(context);
+                else if (FollowedByWords(context, "SYMMETRIC", "KEY") || FollowedByWords(context, "ALL", "SYMMETRIC"))
+                    ParseCloseSymmetricKey(context);
+                else
+                    ParseCloseCursor(batch);
                 rowCount = 0;
                 break;
 

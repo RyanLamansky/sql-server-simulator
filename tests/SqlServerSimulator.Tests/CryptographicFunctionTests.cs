@@ -5,9 +5,10 @@ namespace SqlServerSimulator;
 /// <summary>
 /// The cryptographic built-ins. <c>ENCRYPTBYPASSPHRASE</c> /
 /// <c>DECRYPTBYPASSPHRASE</c> are byte-compatible with SQL Server 2025's
-/// version-2 format, pinned by decrypting cipher texts real wrote; the key
-/// and certificate functions answer as real does for a key that doesn't
-/// exist. All probed 2026-10-15 against SQL Server 2025.
+/// version-2 format, pinned by decrypting cipher texts real wrote; every key
+/// and certificate function answers as real does for a key that doesn't
+/// exist (the key store itself is in <see cref="EncryptionKeyTests"/>). All
+/// probed 2026-10-15 against SQL Server 2025.
 /// </summary>
 [TestClass]
 public sealed class CryptographicFunctionTests

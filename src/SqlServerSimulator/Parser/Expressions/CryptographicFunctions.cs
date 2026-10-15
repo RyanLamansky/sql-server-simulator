@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -34,11 +35,14 @@ internal enum CryptographicFunctionKind : byte
 /// <summary>
 /// The SQL Server 2025 cryptographic built-ins: the key and certificate
 /// lookups, the <c>ENCRYPTBY…</c> / <c>DECRYPTBY…</c> / <c>SIGNBY…</c> /
-/// <c>VERIFYSIGNEDBY…</c> families and <c>IS_OBJECTSIGNED</c>, which answer
-/// as real does when the key or certificate they name doesn't exist — the
-/// simulator builds no key store, so none ever does — and
-/// <c>ENCRYPTBYPASSPHRASE</c> / <c>DECRYPTBYPASSPHRASE</c>, which need none
-/// and are byte-compatible with real's (see <see cref="PassPhraseCipher"/>).
+/// <c>VERIFYSIGNEDBY…</c> families and <c>IS_OBJECTSIGNED</c>. The symmetric
+/// key and certificate members work over the database's key store
+/// (<see cref="Database.EncryptionKeys"/>); the asymmetric key members and
+/// <c>IS_OBJECTSIGNED</c> answer as real does for a key or signature that
+/// doesn't exist, since neither can be created yet. <c>ENCRYPTBYKEY</c> and
+/// <c>ENCRYPTBYPASSPHRASE</c> write real's version-2 format byte for byte (see
+/// <see cref="PassPhraseCipher"/>), so a key created from the same
+/// <c>KEY_SOURCE</c>, or the same passphrase, reads real's cipher text.
 /// </summary>
 /// <remarks>
 /// Each argument position takes one family of types (<see cref="Slot"/>),
@@ -208,19 +212,90 @@ internal sealed class CryptographicFunction : Expression
                 throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(10);
         }
 
+        var batch = runtime.Batch;
         switch (this.kind)
         {
-            case CryptographicFunctionKind.KeyId or CryptographicFunctionKind.CertId or CryptographicFunctionKind.AsymKeyId
-                or CryptographicFunctionKind.IsObjectSigned:
-                return SqlValue.Null(SqlType.Int32);
+            case CryptographicFunctionKind.KeyId:
+                return VisibleKeyByName(batch, values[0]) is { } keyById ? SqlValue.FromInt32(keyById.Id) : SqlValue.Null(SqlType.Int32);
             case CryptographicFunctionKind.KeyGuid:
-                return SqlValue.Null(SqlType.UniqueIdentifier);
+                return VisibleKeyByName(batch, values[0]) is { } keyByGuid ? SqlValue.FromGuid(keyByGuid.KeyGuid) : SqlValue.Null(SqlType.UniqueIdentifier);
             case CryptographicFunctionKind.KeyName:
-                return SqlValue.Null(KeyNameType(runtime.Batch));
-            case CryptographicFunctionKind.CertProperty or CryptographicFunctionKind.AsymKeyProperty
-                or CryptographicFunctionKind.SymKeyProperty:
+                {
+                    Guid? guid = values[0].IsNull ? null
+                        : values[0].Type is UniqueIdentifierSqlType ? values[0].AsGuid
+                        : bytes[0] is { Length: >= 16 } cipher ? new Guid(cipher.AsSpan(0, 16)) : null;
+                    var store = batch.CurrentDatabase.EncryptionKeys;
+                    return guid is { } keyGuid && store.SymmetricKeyByGuid(keyGuid) is { } named && SeesSymmetricKey(batch, named)
+                        ? SqlValue.FromNVarchar(KeyNameType(batch), named.Name)
+                        : SqlValue.Null(KeyNameType(batch));
+                }
+            case CryptographicFunctionKind.CertId:
+                return VisibleCertificateByName(batch, values[0]) is { } certificateById ? SqlValue.FromInt32(certificateById.Id) : SqlValue.Null(SqlType.Int32);
+            case CryptographicFunctionKind.CertProperty:
+                return VisibleCertificateById(batch, values[0]) is { } described && !values[1].IsNull
+                    ? CertificateProperty(described, values[1].AsString)
+                    : SqlValue.Null(SqlType.SqlVariant);
+            case CryptographicFunctionKind.AsymKeyId or CryptographicFunctionKind.IsObjectSigned:
+                return SqlValue.Null(SqlType.Int32);
+            case CryptographicFunctionKind.AsymKeyProperty or CryptographicFunctionKind.SymKeyProperty:
+                // SYMKEYPROPERTY answers only for a key from an extensible key
+                // management provider, which none is (probed 2026-10-15).
                 return SqlValue.Null(SqlType.SqlVariant);
-            case CryptographicFunctionKind.VerifySignedByCert or CryptographicFunctionKind.VerifySignedByAsymKey:
+            case CryptographicFunctionKind.EncryptByKey:
+                {
+                    if (values[0].IsNull || bytes[1] is not { } data || OpenKeyByGuid(batch.Connection, values[0].AsGuid) is not { } key)
+                        return SqlValue.Null(BinaryResult);
+                    var body = PassPhraseCipher.Encrypt(key.Material, data, Authenticate(values, 2), AuthenticatorBytes(bytes, 3), prefix: 16);
+                    if (body is null)
+                        return SqlValue.Null(BinaryResult);
+                    _ = key.KeyGuid.TryWriteBytes(body);
+                    return SqlValue.FromVarbinary(BinaryResult, body);
+                }
+            case CryptographicFunctionKind.DecryptByKey:
+                {
+                    if (bytes[0] is not { Length: >= 16 } cipher || OpenKeyByGuid(batch.Connection, new Guid(cipher.AsSpan(0, 16))) is not { } key)
+                        return SqlValue.Null(BinaryResult);
+                    return Decrypted(PassPhraseCipher.Decrypt(key.Material, cipher.AsSpan(16), Authenticate(values, 1), AuthenticatorBytes(bytes, 2)));
+                }
+            case CryptographicFunctionKind.DecryptByKeyAutoCert:
+                {
+                    if (bytes[2] is not { Length: >= 16 } cipher || VisibleCertificateById(batch, values[0]) is not { } certificate)
+                        return SqlValue.Null(BinaryResult);
+                    var store = batch.CurrentDatabase.EncryptionKeys;
+                    if (store.SymmetricKeyByGuid(new Guid(cipher.AsSpan(0, 16))) is not { } key)
+                        return SqlValue.Null(BinaryResult);
+                    var opened = batch.CurrentStatement.AutoOpenedKeys;
+                    if (opened?.Contains(key) != true)
+                    {
+                        if (!Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, certificate, values[1].IsNull ? null : values[1].AsString)
+                            || !Array.Exists(key.Encryptions, encryption => encryption.Certificate?.Id == certificate.Id))
+                        {
+                            return SqlValue.Null(BinaryResult);
+                        }
+                        (batch.CurrentStatement.AutoOpenedKeys ??= []).Add(key);
+                    }
+                    return Decrypted(PassPhraseCipher.Decrypt(key.Material, cipher.AsSpan(16), Authenticate(values, 3), AuthenticatorBytes(bytes, 4)));
+                }
+            case CryptographicFunctionKind.EncryptByCert:
+                return VisibleCertificateById(batch, values[0]) is { } encrypting && bytes[1] is { } plain
+                    ? Decrypted(CertificateCipher.Encrypt(encrypting, plain))
+                    : SqlValue.Null(BinaryResult);
+            case CryptographicFunctionKind.DecryptByCert:
+                return VisibleCertificateById(batch, values[0]) is { } decrypting && bytes[1] is { } encrypted
+                    && Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, decrypting, PasswordArgument(values, 2))
+                    ? Decrypted(CertificateCipher.Decrypt(decrypting, encrypted))
+                    : SqlValue.Null(BinaryResult);
+            case CryptographicFunctionKind.SignByCert:
+                return VisibleCertificateById(batch, values[0]) is { } signing && bytes[1] is { } signed
+                    && Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, signing, PasswordArgument(values, 2))
+                    ? SqlValue.FromVarbinary(BinaryResult, CertificateCipher.Sign(signing, signed))
+                    : SqlValue.Null(BinaryResult);
+            case CryptographicFunctionKind.VerifySignedByCert:
+                if (values[0].IsNull)
+                    return SqlValue.Null(SqlType.Int32);
+                return SqlValue.FromInt32(VisibleCertificateById(batch, values[0]) is { } verifying && bytes[1] is { } verified && bytes[2] is { } signature
+                    && CertificateCipher.Verify(verifying, verified, signature) ? 1 : 0);
+            case CryptographicFunctionKind.VerifySignedByAsymKey:
                 // A signature checked against a key that doesn't exist fails,
                 // unless there is no key id to look up at all.
                 return values[0].IsNull ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(0);
@@ -233,16 +308,97 @@ internal sealed class CryptographicFunction : Expression
                         throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(4);
                     if (passphrase is null || bytes[1] is not { } input)
                         return SqlValue.Null(BinaryResult);
-                    var authenticate = values.Length > 2 && !values[2].IsNull && values[2].AsInt32 == 1;
-                    var authenticator = values.Length > 3 ? bytes[3] : null;
-                    var result = this.kind == CryptographicFunctionKind.EncryptByPassPhrase
-                        ? PassPhraseCipher.Encrypt(passphrase, input, authenticate, authenticator)
-                        : PassPhraseCipher.Decrypt(passphrase, input, authenticate, authenticator);
-                    return result is null ? SqlValue.Null(BinaryResult) : SqlValue.FromVarbinary(BinaryResult, result);
+                    var key = SHA256.HashData(passphrase);
+                    var authenticate = Authenticate(values, 2);
+                    var authenticator = AuthenticatorBytes(bytes, 3);
+                    return Decrypted(this.kind == CryptographicFunctionKind.EncryptByPassPhrase
+                        ? PassPhraseCipher.Encrypt(key, input, authenticate, authenticator, prefix: 0)
+                        : PassPhraseCipher.DecryptPassPhrase(key, input, authenticate, authenticator));
                 }
             default:
                 return SqlValue.Null(BinaryResult);
         }
+    }
+
+    private static SqlValue Decrypted(byte[]? result) => result is null ? SqlValue.Null(BinaryResult) : SqlValue.FromVarbinary(BinaryResult, result);
+
+    private static bool Authenticate(SqlValue[] values, int index) => values.Length > index && !values[index].IsNull && values[index].AsInt32 == 1;
+
+    private static byte[]? AuthenticatorBytes(byte[]?[] bytes, int index) => bytes.Length > index ? bytes[index] : null;
+
+    private static string? PasswordArgument(SqlValue[] values, int index) => values.Length > index && !values[index].IsNull ? values[index].AsString : null;
+
+    /// <summary>
+    /// A key or certificate name as the lookup functions read it: one name,
+    /// brackets around it stripped, matched under the database's collation
+    /// (probed 2026-10-15 against SQL Server 2025: <c>KEY_ID('[k]')</c> finds
+    /// <c>k</c>, <c>KEY_ID('dbo.k')</c> nothing).
+    /// </summary>
+    private static string? LookupName(SqlValue value)
+    {
+        if (value.IsNull)
+            return null;
+        var name = value.AsString;
+        return name.Length >= 2 && name[0] == '[' && name[^1] == ']' ? name[1..^1].Replace("]]", "]", StringComparison.Ordinal) : name;
+    }
+
+    private static SymmetricKey? VisibleKeyByName(BatchContext batch, SqlValue value) =>
+        LookupName(value) is { } name && batch.CurrentDatabase.EncryptionKeys.SymmetricKeys.TryGetValue(name, out var key) && SeesSymmetricKey(batch, key) ? key : null;
+
+    private static bool SeesSymmetricKey(BatchContext batch, SymmetricKey key) =>
+        PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassSymmetricKey, key.Id, key.PrincipalId);
+
+    private static Certificate? VisibleCertificateByName(BatchContext batch, SqlValue value) =>
+        LookupName(value) is { } name && batch.CurrentDatabase.EncryptionKeys.Certificates.TryGetValue(name, out var certificate)
+            && PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
+            ? certificate
+            : null;
+
+    private static Certificate? VisibleCertificateById(BatchContext batch, SqlValue value) =>
+        !value.IsNull && batch.CurrentDatabase.EncryptionKeys.CertificateById(value.AsInt32) is { } certificate
+            && PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
+            ? certificate
+            : null;
+
+    /// <summary>The open symmetric key with <paramref name="keyGuid"/> among the session's, in whichever database it was opened.</summary>
+    private static SymmetricKey? OpenKeyByGuid(SimulatedDbConnection connection, Guid keyGuid)
+    {
+        OpenSymmetricKey[] opened;
+        lock (connection.OpenSymmetricKeys)
+            opened = [.. connection.OpenSymmetricKeys];
+        foreach (var open in opened)
+        {
+            if (Simulation.OpenedKey(connection, open) is { } key && key.KeyGuid == keyGuid)
+                return key;
+        }
+        return null;
+    }
+
+    private static readonly NVarcharSqlType CertificateTextType = NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit);
+
+    private static readonly NVarcharSqlType CertificateNameType = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+
+    /// <summary>
+    /// <c>CERTPROPERTY</c>'s properties, named case-insensitively, each a
+    /// <c>sql_variant</c> of the type real gives it (probed 2026-10-15 against
+    /// SQL Server 2025); any other name, <c>Thumbprint</c> included, is NULL.
+    /// </summary>
+    private static SqlValue CertificateProperty(Certificate certificate, string property)
+    {
+        Span<char> folded = stackalloc char[Math.Min(property.Length, 32)];
+        _ = property.AsSpan(0, folded.Length).ToUpperInvariant(folded);
+        var inner = property.Length > 32 ? SqlValue.Null(SqlType.SqlVariant) : folded switch
+        {
+            "CERT_SERIAL_NUMBER" => SqlValue.FromNVarchar(CertificateNameType, certificate.SerialNumber),
+            "EXPIRY_DATE" => SqlValue.FromDateTime(certificate.ExpiryDate),
+            "ISSUER_NAME" or "SUBJECT" => SqlValue.FromNVarchar(CertificateTextType, certificate.Subject),
+            "KEY_LENGTH" => SqlValue.FromInt32(Certificate.KeyLength),
+            "SID" => SqlValue.FromVarbinary(VarbinarySqlType.Get(85), certificate.Sid),
+            "START_DATE" => SqlValue.FromDateTime(certificate.StartDate),
+            "STRING_SID" => SqlValue.FromNVarchar(CertificateNameType, certificate.StringSid),
+            _ => SqlValue.Null(SqlType.SqlVariant),
+        };
+        return inner.IsNull ? inner : SqlValue.FromVariant(inner);
     }
 
     /// <summary>
@@ -297,8 +453,15 @@ internal static class PassPhraseCipher
 {
     private const int Magic = unchecked((int)0xBAADF00D);
 
-    /// <summary>The cipher text, or null when it wouldn't fit <c>varbinary(8000)</c>, as real answers past 7,959 bytes of data without an authenticator.</summary>
-    public static byte[]? Encrypt(byte[] passphrase, byte[] data, bool authenticate, byte[]? authenticator)
+    /// <summary>
+    /// The cipher text under the AES key <paramref name="key"/> — the
+    /// passphrase's SHA-256, or a symmetric key's material — after
+    /// <paramref name="prefix"/> bytes left for the caller (<c>ENCRYPTBYKEY</c>'s
+    /// key GUID), or null when the whole wouldn't fit <c>varbinary(8000)</c>,
+    /// as real answers past 7,959 bytes of data under a passphrase without an
+    /// authenticator.
+    /// </summary>
+    public static byte[]? Encrypt(byte[] key, byte[] data, bool authenticate, byte[]? authenticator, int prefix)
     {
         var field = AuthenticatorField(authenticate, authenticator);
         var plain = new byte[8 + (field == 20 ? 20 : 0) + data.Length];
@@ -310,37 +473,45 @@ internal static class PassPhraseCipher
         data.CopyTo(plain, plain.Length - data.Length);
 
         using var aes = Aes.Create();
-        aes.Key = SHA256.HashData(passphrase);
+        aes.Key = key;
         var iv = RandomNumberGenerator.GetBytes(16);
         var cipher = aes.EncryptCbc(plain, iv, PaddingMode.PKCS7);
-        if (4 + 16 + cipher.Length > 8000)
+        if (prefix + 4 + 16 + cipher.Length > 8000)
             return null;
-        var result = new byte[4 + 16 + cipher.Length];
-        result[0] = 2;
-        iv.CopyTo(result, 4);
-        cipher.CopyTo(result, 20);
+        var result = new byte[prefix + 4 + 16 + cipher.Length];
+        result[prefix] = 2;
+        iv.CopyTo(result, prefix + 4);
+        cipher.CopyTo(result, prefix + 20);
         return result;
     }
 
     /// <summary>
-    /// The data, or null when the passphrase, the authenticator or the cipher
-    /// text doesn't match. A version-1 cipher text, the triple-DES format
-    /// SQL Server 2016 and earlier wrote, raises <see cref="NotSupportedException"/>.
+    /// <see cref="Decrypt"/> under a passphrase's key, where a version-1
+    /// cipher text, the triple-DES format SQL Server 2016 and earlier wrote,
+    /// raises <see cref="NotSupportedException"/>.
     /// </summary>
-    public static byte[]? Decrypt(byte[] passphrase, byte[] cipher, bool authenticate, byte[]? authenticator)
+    public static byte[]? DecryptPassPhrase(byte[] key, byte[] cipher, bool authenticate, byte[]? authenticator) =>
+        cipher.Length >= 4 && cipher[0] == 1 && cipher[1] == 0 && cipher[2] == 0 && cipher[3] == 0
+            ? throw new NotSupportedException("DECRYPTBYPASSPHRASE of a version-1 cipher text, the triple-DES format SQL Server 2016 and earlier wrote, isn't modeled by the simulator.")
+            : Decrypt(key, cipher, authenticate, authenticator);
+
+    /// <summary>
+    /// The data <paramref name="cipher"/> (from its version field on) holds
+    /// under the AES key <paramref name="key"/>, or null when the key, the
+    /// authenticator or the cipher text doesn't match.
+    /// </summary>
+    public static byte[]? Decrypt(byte[] key, ReadOnlySpan<byte> cipher, bool authenticate, byte[]? authenticator)
     {
-        if (cipher.Length >= 4 && cipher[0] == 1 && cipher[1] == 0 && cipher[2] == 0 && cipher[3] == 0)
-            throw new NotSupportedException("DECRYPTBYPASSPHRASE of a version-1 cipher text, the triple-DES format SQL Server 2016 and earlier wrote, isn't modeled by the simulator.");
         if (cipher.Length < 36 || (cipher.Length - 20) % 16 != 0 || cipher[0] != 2 || cipher[1] != 0 || cipher[2] != 0 || cipher[3] != 0)
             return null;
 
         byte[] plain;
         using (var aes = Aes.Create())
         {
-            aes.Key = SHA256.HashData(passphrase);
+            aes.Key = key;
             try
             {
-                plain = aes.DecryptCbc(cipher.AsSpan(20), cipher.AsSpan(4, 16), PaddingMode.PKCS7);
+                plain = aes.DecryptCbc(cipher[20..], cipher.Slice(4, 16), PaddingMode.PKCS7);
             }
             catch (CryptographicException)
             {
@@ -365,4 +536,64 @@ internal static class PassPhraseCipher
 #pragma warning disable CA5350
     private static byte[] Hash(byte[] data, byte[] authenticator) => SHA1.HashData([.. data, .. authenticator]);
 #pragma warning restore CA5350
+}
+
+/// <summary>
+/// <c>ENCRYPTBYCERT</c> / <c>DECRYPTBYCERT</c> and <c>SIGNBYCERT</c> /
+/// <c>VERIFYSIGNEDBYCERT</c> over a certificate's 3072-bit RSA key, in real's
+/// shapes (probed 2026-10-15 against SQL Server 2025): OAEP with SHA-256, so
+/// at most 318 bytes of data, the 384-byte cipher text in the little-endian
+/// order of Windows' CryptoAPI followed by <c>0x00010001</c>; a signature is
+/// the eight bytes <c>0x0100070204000000</c> and the 384-byte PKCS #1
+/// signature, as deterministic as real's. Each certificate's key is the
+/// simulator's own, so these round-trip within it but not against real's.
+/// </summary>
+internal static class CertificateCipher
+{
+    private static readonly byte[] Trailer = [0, 1, 0, 1];
+
+    private static readonly byte[] SignatureHeader = [1, 0, 7, 2, 4, 0, 0, 0];
+
+    private const int CipherLength = Certificate.KeyLength / 8;
+
+    public static byte[]? Encrypt(Certificate certificate, byte[] data)
+    {
+        if (data.Length > CipherLength - 66)
+            return null;
+        var cipher = certificate.Key.Encrypt(data, RSAEncryptionPadding.OaepSHA256);
+        Array.Reverse(cipher);
+        return [.. cipher, .. Trailer];
+    }
+
+    public static byte[]? Decrypt(Certificate certificate, byte[] cipher)
+    {
+        if (cipher.Length != CipherLength + Trailer.Length || !cipher.AsSpan(CipherLength).SequenceEqual(Trailer))
+            return null;
+        var reversed = cipher[..CipherLength];
+        Array.Reverse(reversed);
+        try
+        {
+            return certificate.Key.Decrypt(reversed, RSAEncryptionPadding.OaepSHA256);
+        }
+        catch (CryptographicException)
+        {
+            return null;
+        }
+    }
+
+    public static byte[] Sign(Certificate certificate, byte[] data)
+    {
+        var signature = certificate.Key.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        Array.Reverse(signature);
+        return [.. SignatureHeader, .. signature];
+    }
+
+    public static bool Verify(Certificate certificate, byte[] data, byte[] signature)
+    {
+        if (signature.Length != SignatureHeader.Length + CipherLength || !signature.AsSpan(0, SignatureHeader.Length).SequenceEqual(SignatureHeader))
+            return false;
+        var reversed = signature[SignatureHeader.Length..];
+        Array.Reverse(reversed);
+        return certificate.Key.VerifyData(data, reversed, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+    }
 }

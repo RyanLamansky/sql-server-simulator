@@ -160,7 +160,7 @@ When that happens the simulator raises `NotSupportedException` naming the missin
 Write a bug report if you're blocked.
 The larger areas not built yet:
 
-- Encryption: database master keys, certificates, symmetric and asymmetric keys, Always Encrypted and transparent data encryption.
+- Encryption: asymmetric keys, certificates loaded from files, module signing, Always Encrypted and transparent data encryption.
 - Server infrastructure: Service Broker, Extended Events, event notifications, endpoints, SQL Server Audit, Resource Governor and availability groups.
 - External data and storage: PolyBase external tables and data sources, ledger tables, database snapshots and FILESTREAM.
 - Execution plans: `SET SHOWPLAN_*` and `SET STATISTICS XML` are accepted but return no plans.

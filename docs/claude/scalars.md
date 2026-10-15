@@ -945,10 +945,11 @@ Both scalars, the 16-byte pointer they exchange, and the `READTEXT` / `WRITETEXT
 ## Placeholder security / FILESTREAM scalars: `CERTENCODED` / `CERTPRIVATEKEY` / `GET_FILESTREAM_TRANSACTION_CONTEXT`
 
 `Parser/Expressions/CertificateFunctions.cs` (`CertificateFunction`, `isPrivateKey` flag), `Parser/Expressions/GetFilestreamTransactionContext.cs`.
-The simulator models no certificate store or FILESTREAM storage, so the certificate pair returns a NULL `varbinary(max)` — the faithful answer for the state the simulator is always in — and the FILESTREAM one raises.
+The certificate pair returns a NULL `varbinary(max)` for an id that names no certificate, real's answer; the simulator's certificates carry no X.509 encoding, so one that exists raises `NotSupportedException` (see [`encryption-keys.md`](encryption-keys.md#divergences)).
+The simulator models no FILESTREAM storage, so the FILESTREAM function raises.
 Probe-confirmed against SQL Server 2025.
 
-- **`CERTENCODED(cert_id)`** → NULL (the answer real gives for a nonexistent certificate id).
+- **`CERTENCODED(cert_id)`** → NULL for a nonexistent certificate id.
   Exactly one argument; any other count raises **Msg 174** (`The CertEncoded function requires 1 argument(s).` — PascalCase function name, unlike the lowercase-rendered `PI` / `ISNULL` form).
 - **`CERTPRIVATEKEY(cert_id, N'encryption_password' [, N'decryption_password'])`** → NULL.
   Two or three arguments; any other count raises **Msg 189** (`The CertPrivateKey function requires 2 to 3 arguments.`, via `SimulatedSqlException.FunctionArgumentCountRange`).
@@ -960,7 +961,8 @@ A bare `NULL` argument is Msg 8116 naming `NULL` (`Argument data type NULL is in
 ## Cryptographic functions
 
 `Parser/Expressions/CryptographicFunctions.cs`: one descriptor-driven class for the key and certificate lookups (`KEY_ID`, `KEY_GUID`, `KEY_NAME`, `CERT_ID`, `ASYMKEY_ID`, `CERTPROPERTY`, `ASYMKEYPROPERTY`, `SYMKEYPROPERTY`), the `ENCRYPTBY…` / `DECRYPTBY…` / `SIGNBY…` / `VERIFYSIGNEDBY…` families, `IS_OBJECTSIGNED` and the passphrase pair.
-The simulator builds no key store (the key and certificate DDL raise `NotSupportedException`, see [`grammar.md`](grammar.md#statements-the-simulator-hasnt-built)), so every key-store function answers as real does for a key that doesn't exist: NULL, and 0 from `VERIFYSIGNEDBY…` unless the key id itself is NULL.
+The symmetric key and certificate members work over the database's key store, described with it in [`encryption-keys.md`](encryption-keys.md); asymmetric keys can't be created yet, so the `…ASYMKEY…` members and `IS_OBJECTSIGNED` answer as real does for a key that doesn't exist: NULL, and 0 from `VERIFYSIGNEDBYASYMKEY` unless the key id itself is NULL.
+`SYMKEYPROPERTY` is NULL for every key, as real's is for any key not from an extensible key management provider.
 Results are `int`, `uniqueidentifier` (`KEY_GUID`), `nvarchar(4000)` (`KEY_NAME`), `sql_variant` (the `…PROPERTY` trio) or `varbinary(8000)`.
 
 Each argument position takes one family of types, refused with **Msg 8116** while the batch compiles — an untaken branch too — and a string or binary argument past 8000 bytes is **Msg 8152** state 10 as it runs (probed 2026-10-15 against SQL Server 2025, a 22-function × 14-type matrix that the simulator matches cell for cell):
@@ -975,7 +977,6 @@ Data past 7,959 bytes (7,939 with an authenticator) makes a cipher text past `va
 
 ### Divergences
 
-- **System certificates and keys**: real's `master` holds the `##MS_…##` certificates and the service master key, which `CERT_ID` / `KEY_ID` find there; here they are NULL in every database.
 - **A version-1 cipher text** — the triple-DES format SQL Server 2016 and earlier wrote, which real still decrypts — raises `NotSupportedException` from `DECRYPTBYPASSPHRASE`, since no reference instance can write one to check against; any blob opening `0x01000000` takes that path, where real answers NULL for one it can't read.
 
 ## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}`

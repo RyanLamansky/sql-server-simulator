@@ -260,17 +260,12 @@ internal static partial class BuiltInResources
             new("member_principal_id", SqlType.Int32, null, false),
         ], EnumerateSysServerRoleMembers);
 
-        // sys.asymmetric_keys / sys.certificates: encryption key objects aren't
-        // modeled, so both are always empty. The full probe-confirmed shapes
-        // (SQL Server 2025) ship so a direct SELECT sees an authentic (empty)
-        // result, and — more load-bearing — SMO's Login and User property-bag
-        // queries LEFT JOIN sys.certificates / sys.asymmetric_keys ON sid, and
-        // its Login bag LEFT JOINs sys.credentials ON credential_id (also
-        // reached as master.sys.certificates / master.sys.asymmetric_keys).
-        // Without the views those bag queries fail Msg 208 and every Login /
-        // User property errors. cryptographic_provider_algid is a first-class sql_variant
-        // matching real SQL Server (the view is always empty, so only the
-        // column type carries).
+        // sys.asymmetric_keys / sys.certificates: the database's asymmetric
+        // keys (none can be created yet) and certificates. SMO's Login and
+        // User property-bag queries LEFT JOIN both ON sid, and its Login bag
+        // LEFT JOINs sys.credentials ON credential_id (also reached as
+        // master.sys.certificates / master.sys.asymmetric_keys), so without
+        // the views every Login / User property errors.
         Sys("asymmetric_keys",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -310,7 +305,7 @@ internal static partial class BuiltInResources
             new("attested_by", SqlType.NVarchar, 260, true),
             new("pvt_key_last_backup_date", SqlType.DateTime, null, true),
             new("key_length", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateCertificates);
 
         Sys("credentials",
         [
@@ -323,19 +318,14 @@ internal static partial class BuiltInResources
             new("target_id", SqlType.Int32, null, true),
         ], EnumerateSysCredentials);
 
-        // Encryption / key-management / audit / row-level-security catalog
-        // views for features the simulator doesn't model (symmetric &
-        // asymmetric key management, Always Encrypted column keys, database-
-        // scoped credentials, cryptographic providers, server audits, Row-
-        // Level Security policies & predicates). Each ships the full probe-
-        // confirmed shape (SQL Server 2025, 2026-07-16) with zero rows via the
-        // shared EmptyCatalogRows — DacFx's bacpac-export reverse-engineering
-        // references them (e.g. sys.symmetric_keys LEFT JOIN
-        // sys.cryptographic_providers) and must resolve to an empty result,
-        // not Msg 208. The sql_variant columns (key_thumbprint /
-        // cryptographic_provider_algid) are first-class sql_variant matching
-        // real SQL Server; the views are always empty, so only the column type
-        // carries. server_audits /
+        // The key store's views (sys.symmetric_keys, sys.key_encryptions,
+        // sys.openkeys; rows in BuiltInResources.EncryptionKeys.cs), then
+        // views for features the simulator hasn't built (Always Encrypted
+        // column keys, database-scoped credentials, cryptographic providers,
+        // server audits), each with the full shape probed against SQL Server
+        // 2025 (2026-07-16) and no rows — DacFx's bacpac-export
+        // reverse-engineering references them (e.g. sys.symmetric_keys LEFT
+        // JOIN sys.cryptographic_providers). server_audits /
         // server_file_audits / cryptographic_providers are server-scoped (the
         // row generator ignores the database). See docs/claude/catalog-views.md.
         Sys("symmetric_keys",
@@ -353,7 +343,7 @@ internal static partial class BuiltInResources
             new("provider_type", nvarchar60Catalog, 60, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
             new("cryptographic_provider_algid", SqlType.SqlVariant, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateSymmetricKeys);
         Sys("cryptographic_providers",
         [
             new("provider_id", SqlType.Int32, null, false),
@@ -373,6 +363,16 @@ internal static partial class BuiltInResources
             new("crypt_type_desc", nvarchar60Catalog, 60, true),
             new("crypt_property", VarbinarySqlType.MaxForm, null, false),
         ], static (_, _) => EmptyCatalogRows);
+        Sys("openkeys",
+        [
+            new("database_id", SqlType.Int32, null, true),
+            new("database_name", SqlType.NVarchar, 128, true),
+            new("key_id", SqlType.Int32, null, true),
+            new("key_name", SqlType.NVarchar, 128, true),
+            new("key_guid", SqlType.UniqueIdentifier, null, true),
+            new("opened_date", SqlType.DateTime, null, true),
+            new("status", SqlType.SmallInt, null, true),
+        ], EnumerateOpenKeys);
         Sys("key_encryptions",
         [
             new("key_id", SqlType.Int32, null, false),
@@ -380,7 +380,7 @@ internal static partial class BuiltInResources
             new("crypt_type", charFour, 4, false),
             new("crypt_type_desc", nvarchar60Catalog, 60, true),
             new("crypt_property", VarbinarySqlType.MaxForm, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateKeyEncryptions);
         Sys("column_master_keys",
         [
             new("name", SqlType.SystemName, 128, false),

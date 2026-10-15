@@ -60,6 +60,15 @@ internal sealed class StatementContext
     public Dictionary<Schemas.Sequence, List<Storage.SqlValue>>? OrderedSequenceDraws;
 
     /// <summary>
+    /// The symmetric keys this run's <c>DECRYPTBYKEYAUTOCERT</c> calls have
+    /// opened. Real keeps such a key open for the rest of the statement, so a
+    /// later call decrypts with it whatever certificate and password it names,
+    /// while the next statement starts without it (probed 2026-10-15 against
+    /// SQL Server 2025). Cleared with the statement's other per-run caches.
+    /// </summary>
+    public List<Schemas.SymmetricKey>? AutoOpenedKeys;
+
+    /// <summary>
     /// The heap addresses of the rows this statement's scans and seeks have
     /// handed out, while something in it reads a <see cref="RowLocator"/>;
     /// null otherwise, which is what keeps every producer's per-row cost at
@@ -642,6 +651,7 @@ internal sealed class StatementContext
         this.StatementScopedValues = null;
         this.SubqueryResults = null;
         this.OrderedSequenceDraws = null;
+        this.AutoOpenedKeys = null;
         this.RowAddresses = null;
         this.CatalogViewRows = null;
 #if DEBUG

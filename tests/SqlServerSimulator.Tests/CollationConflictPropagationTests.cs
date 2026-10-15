@@ -548,6 +548,17 @@ public sealed class CollationConflictPropagationTests
     public void UnresolvingProducers_ReportAsReal(string sql, int number, string message) =>
         SeededCrossCollationTables().AssertSqlError(sql, number, message);
 
+    /// <summary>
+    /// CONCAT and CONCAT_WS resolve their argument list as a whole, so an
+    /// explicit <c>COLLATE</c> on any argument settles a conflict between the
+    /// arguments before it (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(a.n, b.n, a.n collate French_CI_AS) from a, b", "xyx")]
+    [DataRow("select concat_ws(':', a.s, b.s, a.s collate French_CI_AS) from a, b", "x:y:x")]
+    public void ConcatConflict_SettledByALaterCollate(string sql, string expected)
+        => AreEqual(expected, SeededCrossCollationTables().ExecuteScalar(sql));
+
     private static string OutputColumnMessage(string operatorName, string clause, int ordinal) =>
         $"Cannot resolve collation conflict between {ConflictPair} in {operatorName} operator occurring in {clause} statement column {ordinal}.";
 

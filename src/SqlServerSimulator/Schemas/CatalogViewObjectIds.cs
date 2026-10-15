@@ -152,6 +152,7 @@ internal static class CatalogViewObjectIds
         ["sys.numbered_procedure_parameters"] = -419,
         ["sys.numbered_procedures"] = -418,
         ["sys.objects"] = -385,
+        ["sys.openkeys"] = -1047118026,
         ["sys.parameters"] = -393,
         ["sys.partition_functions"] = -433,
         ["sys.partition_parameters"] = -434,

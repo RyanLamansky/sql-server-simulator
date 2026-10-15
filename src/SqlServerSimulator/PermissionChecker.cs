@@ -1185,6 +1185,15 @@ internal static class PermissionEnforcement
         || PermissionChecker.IsGranted(database, principalId, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId, Rights(batch));
 
     /// <summary>
+    /// Whether the effective principal sees a symmetric key or certificate
+    /// (<see cref="PermissionChecker.CanViewKeyMetadata"/>). True for dbo and
+    /// for a session that bypasses checks in <paramref name="database"/>.
+    /// </summary>
+    internal static bool SeesKey(BatchContext batch, Database database, byte securableClass, int id, int ownerId) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.CanViewKeyMetadata(database, principalId, securableClass, id, ownerId, Rights(batch));
+
+    /// <summary>
     /// Whether the effective principal holds <paramref name="permission"/> on the
     /// described securable in <paramref name="database"/> — the generic form of
     /// the typed gates above. True for dbo / module bodies.
@@ -1305,6 +1314,8 @@ internal static class PermissionChecker
     internal const byte ClassType = 6;
     internal const byte ClassXmlSchemaCollection = 10;
     internal const byte ClassFulltextCatalog = 23;
+    internal const byte ClassSymmetricKey = 24;
+    internal const byte ClassCertificate = 25;
 
     // Server-scope permissions (sys.server_permissions.class = 100) live on
     // Simulation.ServerPermissions, not a Database; Simulation.HoldsServerPermission
@@ -1486,6 +1497,10 @@ internal static class PermissionChecker
                         return closure.Contains(catalog.PrincipalId);
                 }
                 return false;
+            case ClassSymmetricKey:
+                return database.EncryptionKeys.SymmetricKeyById(majorId) is { } key && closure.Contains(key.PrincipalId);
+            case ClassCertificate:
+                return database.EncryptionKeys.CertificateById(majorId) is { } certificate && closure.Contains(certificate.PrincipalId);
             default:
                 return false;
         }
@@ -1885,6 +1900,25 @@ internal static class PermissionChecker
     }
 
     /// <summary>
+    /// Whether a restricted principal sees a symmetric key or certificate
+    /// (<paramref name="securableClass"/> 24 or 25): as its owner, with full
+    /// metadata visibility, or holding any permission on it — what real asks
+    /// before a key's catalog row shows, its name resolves or it opens.
+    /// </summary>
+    internal static bool CanViewKeyMetadata(Database database, int principalId, byte securableClass, int id, int ownerId, ServerLoginRights server)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (closure.Contains(ownerId) || HasFullMetadataVisibility(database, closure, server))
+            return true;
+        foreach (var name in (string[])["ALTER", "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"])
+        {
+            if (IsGrantedInClosure(database, closure, name, securableClass, id, 0, server, Permission.Resolve(name)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Whether <c>sys.sql_modules.definition</c>, <c>OBJECT_DEFINITION</c> and
     /// <c>sp_helptext</c> show the definition of an object the principal can
     /// see: its owner, or a holder of <c>VIEW DEFINITION</c>, <c>ALTER</c>,
@@ -2188,6 +2222,10 @@ internal static class PermissionChecker
                 return "XML SCHEMA COLLECTION";
             case ClassFulltextCatalog:
                 return "FULLTEXT CATALOG";
+            case ClassSymmetricKey:
+                return "SYMMETRIC KEY";
+            case ClassCertificate:
+                return "CERTIFICATE";
             default:
                 return "DATABASE";
         }
