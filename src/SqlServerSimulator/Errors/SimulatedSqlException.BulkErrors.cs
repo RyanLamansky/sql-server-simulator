@@ -205,4 +205,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException AdHocServerUnreachable() =>
         new SimulatedSqlException("Named Pipes Provider: Could not open a connection to SQL Server [2]. ", 2, 16, 1) { TerminatesBatch = true }.PinLine(0);
+
+    /// <summary>
+    /// Msg 15281: a procedure of a component whose configuration option is
+    /// off — <c>xp_cmdshell</c>, or an OLE Automation procedure — named
+    /// <c>sys.</c> as real's message names it (probed 2026-10-15 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ComponentBlocked(string procedure, string component) =>
+        new($"SQL Server blocked access to procedure 'sys.{procedure}' of component '{component}' because this component is turned off as part of the security configuration for this server. A system administrator can enable the use of '{component}' by using sp_configure. For more information about enabling '{component}', search for '{component}' in SQL Server Books Online.", 15281, 16, 1);
 }

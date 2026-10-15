@@ -20,6 +20,12 @@ partial class Simulation
     /// <summary><c>configuration_id</c> of <c>contained database authentication</c>.</summary>
     private const int ContainedDatabaseAuthenticationConfigurationId = 16393;
 
+    /// <summary><c>configuration_id</c> of <c>Ole Automation Procedures</c>.</summary>
+    private const int OleAutomationConfigurationId = 16388;
+
+    /// <summary><c>configuration_id</c> of <c>xp_cmdshell</c>.</summary>
+    private const int XpCmdShellConfigurationId = 16390;
+
     private static readonly SqlType[] SpConfigureSchema =
     [
         SqlType.NVarchar, SqlType.Int32, SqlType.Int32, SqlType.Int32, SqlType.Int32,

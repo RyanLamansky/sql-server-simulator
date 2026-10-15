@@ -237,6 +237,16 @@ internal static partial class BuiltInResources
         "xp_regread",
         // xp_getnetname: SMO's fully-qualified server name read.
         "xp_getnetname",
+        // xp_cmdshell and the OLE Automation procedures, refused as blocked
+        // components while their configuration options are off.
+        "sp_OACreate",
+        "sp_OADestroy",
+        "sp_OAGetErrorInfo",
+        "sp_OAGetProperty",
+        "sp_OAMethod",
+        "sp_OASetProperty",
+        "sp_OAStop",
+        "xp_cmdshell",
         // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
@@ -984,6 +994,7 @@ internal static partial class BuiltInResources
     internal static bool IsExtendedProcedure(string proc) =>
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
+        || proc.StartsWith("sp_OA", StringComparison.Ordinal)
         || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_executesql" or "sp_getbindtoken" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>

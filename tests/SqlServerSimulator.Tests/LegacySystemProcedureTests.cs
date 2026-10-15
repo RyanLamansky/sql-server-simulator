@@ -407,4 +407,44 @@ public sealed class LegacySystemProcedureTests
     [TestMethod]
     public void AddUser_UnknownGroup_Raises15014()
         => AssertProcedureError(WithLogins("zl1"), "exec sp_adduser 'zl1', 'zu', 'nogroup'", 15014, "sp_adduser", 23, "The role 'nogroup' does not exist in the current database.");
+
+    /// <summary>
+    /// <c>xp_cmdshell</c> and the OLE Automation procedures are blocked
+    /// components on a stock server: Msg 15281 attributed to the procedure as
+    /// called, the batch running on (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec master..xp_cmdshell 'dir'", "master..xp_cmdshell", "xp_cmdshell", "xp_cmdshell")]
+    [DataRow("declare @o int, @hr int; exec @hr = sp_OACreate 'MSXML2.XMLHTTP', @o out", "sp_OACreate", "sp_OACreate", "Ole Automation Procedures")]
+    [DataRow("exec sp_OAStop", "sp_OAStop", "sp_OAStop", "Ole Automation Procedures")]
+    public void BlockedComponent_RaisesMsg15281(string sql, string calledAs, string procedure, string component)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 15281);
+        AreEqual(
+            ($"SQL Server blocked access to procedure 'sys.{procedure}' of component '{component}' because this component is turned off as part of the security configuration for this server. A system administrator can enable the use of '{component}' by using sp_configure. For more information about enabling '{component}', search for '{component}' in SQL Server Books Online.", calledAs),
+            (ex.Errors[0].Message, ex.Errors[0].Procedure));
+    }
+
+    [TestMethod]
+    public void BlockedComponent_LeavesTheBatchRunning()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("exec xp_cmdshell 'dir'; create table after_it (a int)", 15281);
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.tables where name = 'after_it'"));
+    }
+
+    [TestMethod]
+    public void BlockedComponent_IsAnExtendedProcedure()
+        => AreEqual("X|X", new Simulation().ExecuteScalar("""
+            select concat_ws('|', (select rtrim(type) from master.sys.all_objects where object_id = object_id('sys.xp_cmdshell')),
+                (select rtrim(type) from master.sys.all_objects where name = 'sp_OACreate'))
+            """));
+
+    [TestMethod]
+    public void EnabledComponent_RaisesNotSupported()
+        => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("""
+            exec sp_configure 'show advanced options', 1; reconfigure;
+            exec sp_configure 'xp_cmdshell', 1; reconfigure;
+            exec xp_cmdshell 'dir'
+            """));
 }
