@@ -452,8 +452,14 @@ public sealed class BackupRestoreTests
         var victim = simulation.CreateOpenConnection();
         _ = victim.CreateCommand("use d").ExecuteNonQuery();
         using var setter = simulation.CreateOpenConnection();
-        var elapsed = Stopwatch.StartNew();
-        var alter = Task.Run(() => setter.CreateCommand("alter database d set single_user with rollback after 2 seconds").ExecuteNonQuery(), TestContext.CancellationToken);
+        // A thread of its own, timed from when the statement starts, so a
+        // thread pool starved by the parallel run doesn't eat the bound.
+        var elapsed = new Stopwatch();
+        var alter = Task.Factory.StartNew(() =>
+        {
+            elapsed.Start();
+            return setter.CreateCommand("alter database d set single_user with rollback after 2 seconds").ExecuteNonQuery();
+        }, TestContext.CancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         while (!InTransition(simulation))
             Thread.Sleep(5);
         IsLessThan(2000, elapsed.ElapsedMilliseconds);
