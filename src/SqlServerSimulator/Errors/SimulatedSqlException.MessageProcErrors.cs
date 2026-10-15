@@ -93,6 +93,26 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidSystemProcedureOption(string procedure) =>
         new($"An invalid parameter or option was specified for procedure 'sys.{procedure}'.", 15600, 15, 1);
 
+    /// <summary>Msg 15398: <c>sp_procoption 'startup'</c> on a procedure outside <c>master</c> or outside its <c>dbo</c> schema.</summary>
+    internal static SimulatedSqlException StartupOptionOutsideMasterDbo() =>
+        new("Only objects in the master database owned by dbo can have the startup setting changed.", 15398, 11, 1);
+
+    /// <summary>Msg 15399: <c>sp_procoption 'startup'</c> on a procedure that declares parameters.</summary>
+    internal static SimulatedSqlException StartupOptionOnProcedureWithParameters() =>
+        new("Could not change startup option because this option is restricted to objects that have no parameters.", 15399, 11, 1);
+
+    /// <summary>Msg 40510 state 6: <c>sp_procoption 'failover'</c>, which SQL Server 2025 no longer supports.</summary>
+    internal static SimulatedSqlException ProcedureOptionNotSupported(string procedure) =>
+        new($"Statement '{procedure}' is not supported in this version of SQL Server.", 40510, 16, 6);
+
+    /// <summary>Msg 15001: an <c>sp_changeobjectowner</c> object that is missing, a child object, a system object, schema-bound to, or not in a schema named for its owner.</summary>
+    internal static SimulatedSqlException ObjectNotValidForOperation(string name) =>
+        new($"Object '{name}' does not exist or is not a valid object for this operation.", 15001, 16, 1);
+
+    /// <summary>Msg 15411: an <c>sp_changeobjectowner</c> new owner with no schema of its name that it owns.</summary>
+    internal static SimulatedSqlException PrincipalOrSchemaDoesNotExist(string name) =>
+        new($"Database principal or schema '{name}' does not exist in this database.", 15411, 11, 1);
+
     /// <summary>Msg 15388: a table name <c>sp_tableoption</c> or <c>sp_indexoption</c> can't resolve.</summary>
     internal static SimulatedSqlException NoUserTableMatching(string name) =>
         new($"There is no user table matching the input name '{name}' in the current database or you do not have permission to access the table.", 15388, 11, 1);

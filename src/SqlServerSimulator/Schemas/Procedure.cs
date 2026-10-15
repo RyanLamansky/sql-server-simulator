@@ -113,6 +113,14 @@ internal sealed class Procedure(
     /// replacement and <c>DROP PROCEDURE p</c> drops them with it.
     /// </summary>
     public SortedDictionary<short, Procedure>? Numbered;
+
+    /// <summary>
+    /// Whether <c>sp_procoption</c> marked the procedure to run at startup,
+    /// which <c>OBJECTPROPERTY(…, 'ExecIsStartup')</c> and
+    /// <c>sys.procedures.is_auto_executed</c> report and an <c>ALTER
+    /// PROCEDURE</c> keeps.
+    /// </summary>
+    public bool IsStartup;
 }
 
 /// <summary>

@@ -743,7 +743,8 @@ internal sealed class TableImage
 /// <summary>
 /// A module, synonym, table type or other schema object's state its DDL
 /// doesn't set: owner, modification instant, the principal its
-/// <c>EXECUTE AS</c> resolved to, and a trigger's switches.
+/// <c>EXECUTE AS</c> resolved to, a trigger's switches and a procedure's
+/// startup flag.
 /// </summary>
 internal sealed class ObjectImage
 {
@@ -758,6 +759,7 @@ internal sealed class ObjectImage
     public bool NotForReplication;
     public int FirstForActions;
     public int LastForActions;
+    public bool IsStartup;
 
     public void Write(BinaryWriter w)
     {
@@ -771,6 +773,7 @@ internal sealed class ObjectImage
         w.Write(this.NotForReplication);
         w.Write(this.FirstForActions);
         w.Write(this.LastForActions);
+        w.Write(this.IsStartup);
     }
 
     public static ObjectImage Read(BinaryReader r) => new()
@@ -785,6 +788,7 @@ internal sealed class ObjectImage
         NotForReplication = r.ReadBoolean(),
         FirstForActions = r.ReadInt32(),
         LastForActions = r.ReadInt32(),
+        IsStartup = r.ReadBoolean(),
     };
 }
 

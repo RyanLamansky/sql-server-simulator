@@ -244,6 +244,9 @@ internal static partial class BuiltInResources
         // The logical backup devices BACKUP and RESTORE name in place of a path.
         "sp_addumpdevice",
         "sp_dropdevice",
+        // The legacy ownership move and the startup-procedure flag.
+        "sp_changeobjectowner",
+        "sp_procoption",
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",

@@ -216,9 +216,8 @@ internal static partial class BuiltInResources
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
         // the load-bearing surface — object_id / name / schema_id /
-        // create_date / modify_date / is_ms_shipped / is_auto_executed. Startup
-        // procedures (sp_procoption) aren't modeled, so is_auto_executed is a
-        // constant 0 (non-nullable bit); SMO's StoredProcedure property-bag
+        // create_date / modify_date / is_ms_shipped / is_auto_executed, the
+        // startup flag sp_procoption sets; SMO's StoredProcedure property-bag
         // query projects it as [Startup], and without the column the whole bag
         // query fails Msg 207 and every StoredProcedure property errors.
         // principal_id is the explicit owner ALTER AUTHORIZATION set.
@@ -1018,6 +1017,7 @@ internal static partial class BuiltInResources
         var procType = SqlValue.FromChar(charTwo, "P ");
         var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
         var notAutoExecuted = SqlValue.FromBoolean(false);
+        var autoExecuted = SqlValue.FromBoolean(true);
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
@@ -1032,7 +1032,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromDateTime(proc.CreateDate),
                     SqlValue.FromDateTime(proc.ModifyDate),
                     notMsShipped,
-                    notAutoExecuted,
+                    proc.IsStartup ? autoExecuted : notAutoExecuted,
                 ];
             }
         }

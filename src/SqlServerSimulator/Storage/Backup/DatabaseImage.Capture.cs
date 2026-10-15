@@ -345,6 +345,7 @@ partial class DatabaseImage
             ModifyDate = obj.ModifyDate,
             OwnerPrincipalId = obj.OwnerPrincipalId,
             ExecuteAsPrincipalId = obj.ExecuteAsPrincipalId,
+            IsStartup = obj is Procedure { IsStartup: true },
         };
         if (obj is Trigger trigger)
         {

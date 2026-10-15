@@ -1120,6 +1120,16 @@ internal static class PermissionEnforcement
         || PermissionChecker.IsOwner(database, principalId)
         || Rights(batch).Implies(Permission.Control, PermissionChecker.ClassDatabase);
 
+    /// <summary>
+    /// Whether the effective principal is a <c>db_owner</c> member of
+    /// <paramref name="database"/>, or a member of both <c>db_securityadmin</c>
+    /// and <c>db_ddladmin</c> — <c>sp_changeobjectowner</c>'s gate, which
+    /// reads role membership alone. True for dbo / module bodies.
+    /// </summary>
+    internal static bool IsOwnerOrSecurityAndDdlAdmin(BatchContext batch, Database database) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsOwnerOrSecurityAndDdlAdmin(database, principalId);
+
     /// <summary>Whether the effective principal is a <c>db_owner</c> or <c>db_backupoperator</c> member of <paramref name="database"/> (the <c>CHECKPOINT</c> gate). True for dbo / module bodies.</summary>
     internal static bool IsOwnerOrBackupOperator(BatchContext batch, Database database) =>
         !TryResolveScope(batch, database, out var principalId)
@@ -1651,6 +1661,13 @@ internal static class PermissionChecker
     {
         var closure = BuildClosure(database, principalId);
         return closure.Contains(DbOwner) || closure.Contains(DbBackupOperator);
+    }
+
+    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c>, or of both <c>db_securityadmin</c> and <c>db_ddladmin</c>.</summary>
+    internal static bool IsOwnerOrSecurityAndDdlAdmin(Database database, int principalId)
+    {
+        var closure = BuildClosure(database, principalId);
+        return closure.Contains(DbOwner) || (closure.Contains(DbSecurityAdmin) && closure.Contains(DbDdlAdmin));
     }
 
     /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c>.</summary>

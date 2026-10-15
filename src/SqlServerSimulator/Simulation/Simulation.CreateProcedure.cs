@@ -251,8 +251,10 @@ partial class Simulation
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
-            // The group's numbered procedures stay with it across an ALTER.
+            // The group's numbered procedures and the startup flag stay with it
+            // across an ALTER (probed 2026-10-15 against SQL Server 2025).
             Numbered = replaced?.Numbered,
+            IsStartup = replaced?.IsStartup ?? false,
             RecompilesEveryCall = options.Recompile,
             IsNativelyCompiled = nativelyCompiled,
         };

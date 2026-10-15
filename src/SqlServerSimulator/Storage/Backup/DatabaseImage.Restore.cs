@@ -482,6 +482,9 @@ partial class DatabaseImage
             obj.ExecuteAsPrincipalId = image.ExecuteAsPrincipalId;
             switch (obj)
             {
+                case Procedure procedure:
+                    procedure.IsStartup = image.IsStartup;
+                    break;
                 case Trigger trigger:
                     trigger.IsDisabled = image.IsDisabled;
                     trigger.NotForReplication = image.NotForReplication;

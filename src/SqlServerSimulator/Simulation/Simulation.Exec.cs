@@ -37,7 +37,7 @@ partial class Simulation
     /// (Msg 201) never starts, so it takes the transaction back.
     /// </summary>
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
-        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_dropdevice" or "sp_describe_first_result_set"
+        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_dropdevice" or "sp_procoption" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
@@ -281,6 +281,8 @@ partial class Simulation
             "sp_dbcmptlevel" => this.InvokeSpDbCmptLevel(batch, calledAs, returnCodeVar),
             "sp_addumpdevice" => this.InvokeSpAddUmpDevice(batch, calledAs),
             "sp_dropdevice" => this.InvokeSpDropDevice(batch, calledAs),
+            "sp_changeobjectowner" => this.InvokeSpChangeObjectOwner(batch, calledAs),
+            "sp_procoption" => this.InvokeSpProcOption(batch, calledAs),
             "sp_dropapprole" => this.InvokeSpDropAppRole(batch, calledAs),
             "sp_renamedb" => InvokeSpRenameDb(batch, calledAs),
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
