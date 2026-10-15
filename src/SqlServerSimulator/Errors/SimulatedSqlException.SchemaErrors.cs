@@ -26,6 +26,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidCompatibilityLevel() =>
         new($"Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", 15048, 16, 1);
 
+    /// <summary>Mimics SQL Server error 15416: <c>sp_dbcmptlevel</c> given a level outside the valid ones (probed 2026-10-15 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException DbCmptLevelUsage() =>
+        new("Usage: sp_dbcmptlevel [dbname [, compatibilitylevel]]", 15416, 16, 1);
+
     /// <summary>
     /// Msg 2714, an object name already taken. The state names the kind of
     /// object being created — 6 for a table or schema, 3 for a view, procedure

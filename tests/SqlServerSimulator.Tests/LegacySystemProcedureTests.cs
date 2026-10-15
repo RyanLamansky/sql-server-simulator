@@ -447,4 +447,89 @@ public sealed class LegacySystemProcedureTests
             exec sp_configure 'xp_cmdshell', 1; reconfigure;
             exec xp_cmdshell 'dir'
             """));
+
+    /// <summary>
+    /// <c>sp_dbcmptlevel</c> sets, reports and lists compatibility levels with
+    /// real's messages from real's lines in the procedure (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DbCmptLevel_SetsTheLevel()
+        => AreEqual("0|150", new Simulation().ExecuteScalar("""
+            create database d;
+            declare @r int;
+            exec @r = sp_dbcmptlevel 'd', 150;
+            select concat_ws('|', @r, (select compatibility_level from sys.databases where name = 'd'))
+            """));
+
+    [TestMethod]
+    [DataRow("exec sp_dbcmptlevel 'd', 55", 15416, "Usage: sp_dbcmptlevel [dbname [, compatibilitylevel]]", 77)]
+    [DataRow("exec sp_dbcmptlevel 'nosuch', 150", 15010, "The database 'nosuch' does not exist. Supply a valid database name. To see available databases, use sys.databases.", 54)]
+    [DataRow("begin tran; exec sp_dbcmptlevel 'd', 140", 15002, "The procedure 'sys.sp_dbcmptlevel' cannot be executed within a transaction.", 97)]
+    public void DbCmptLevel_Refusals(string sql, int number, string message, int line)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database d");
+        var ex = simulation.AssertSqlError(sql, number);
+        AreEqual((message, "sp_dbcmptlevel", line), (ex.Errors[0].Message, ex.Errors[0].Procedure, ex.Errors[0].LineNumber));
+    }
+
+    [TestMethod]
+    public void DbCmptLevel_MissingDatabase_IsCaught()
+        => AreEqual(15010, new Simulation().ExecuteScalar("""
+            declare @caught int;
+            begin try exec sp_dbcmptlevel 'nosuch', 150 end try begin catch set @caught = error_number() end catch;
+            select @caught
+            """));
+
+    [TestMethod]
+    public void DbCmptLevel_ReportsAndLists()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static m => $"{m.Number}|{m.LineNumber}|{m.Message}"));
+        _ = connection.CreateCommand("exec sp_dbcmptlevel 'simulated'; exec sp_dbcmptlevel").ExecuteNonQuery();
+        AreEqual(
+            "15054|69|The current compatibility level is 170. 15048|42|Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.",
+            string.Join(" ", messages));
+    }
+
+    [TestMethod]
+    public void RenameDb_RenamesWithModifyNamesNotice()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static m => $"{m.Number}|{m.Message}"));
+        _ = connection.CreateCommand("create database d; exec sp_renamedb 'd', 'e'").ExecuteNonQuery();
+        AreEqual("5021|The database name 'e' has been set.", string.Join(" ", messages));
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.databases where name = 'e'"));
+        var ex = simulation.AssertSqlError("exec sp_renamedb 'e', 'master'", 15032);
+        AreEqual(("sp_renamedb", 36), (ex.Errors[0].Procedure, ex.Errors[0].LineNumber));
+    }
+
+    /// <summary>
+    /// The application-role procedures: <c>sp_addapprole</c> gives the role a
+    /// schema of its own name, which <c>sp_dropapprole</c> removes with it
+    /// (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AppRoleProcedures()
+    {
+        var simulation = new Simulation();
+        AreEqual("ar|APPLICATION_ROLE|ar", simulation.ExecuteScalar("""
+            exec sp_addapprole 'ar', 'Pw!12345678';
+            exec sp_approlepassword 'ar', 'Pw!87654321';
+            select concat_ws('|', default_schema_name, type_desc collate database_default, (select user_name(principal_id) from sys.schemas where name = 'ar'))
+            from sys.database_principals where name = 'ar'
+            """));
+        AreEqual(15023, simulation.AssertSqlError("exec sp_addapprole 'ar', 'Pw!12345678'", 15023).Number);
+        AreEqual(0, simulation.ExecuteScalar("exec sp_dropapprole 'ar'; select count(*) from sys.schemas where name = 'ar'"));
+        var missing = simulation.AssertSqlError("exec sp_dropapprole 'nosuch'", 15151);
+        AreEqual(("sp_dropapprole", 28), (missing.Errors[0].Procedure, missing.Errors[0].LineNumber));
+        simulation.AssertSqlError("exec sp_approlepassword 'nosuch', 'x'", 15151, "Cannot alter the application role 'nosuch', because it does not exist or you do not have permission.");
+    }
 }

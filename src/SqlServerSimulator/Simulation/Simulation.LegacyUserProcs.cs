@@ -40,6 +40,18 @@ partial class Simulation
         new("rolename", SqlType.NVarchar, 128),
     ];
 
+    private static readonly SystemProcedureParameter[] AddAppRoleParameters =
+    [
+        new("rolename", SqlType.NVarchar, 128),
+        new("password", SqlType.NVarchar, 128),
+    ];
+
+    private static readonly SystemProcedureParameter[] AppRolePasswordParameters =
+    [
+        new("rolename", SqlType.NVarchar, 128),
+        new("newpwd", SqlType.NVarchar, 128),
+    ];
+
     private static readonly SystemProcedureParameter[] ServerRoleMemberParameters =
     [
         new("loginame", SqlType.NVarchar, 128),
@@ -237,6 +249,55 @@ partial class Simulation
         List<string> statements = ["create role " + QuoteIdentifier(name) + " authorization " + QuoteIdentifier(owner)];
         statements.AddRange(OwnSchemaStatements(batch, name, isUser: false));
         foreach (var outcome in this.RunStatements(batch, statements))
+            yield return outcome;
+    }
+
+    /// <summary>
+    /// <c>sp_addapprole @rolename, @password</c> is <c>CREATE APPLICATION
+    /// ROLE</c> defaulting to a schema of its own name, which it owns — a taken
+    /// name the statement's own Msg 15023 (probed 2026-10-15 against SQL Server
+    /// 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAddAppRole(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+        var values = BindSystemProcedureArguments("sp_addapprole", calledAs, arguments, AddAppRoleParameters);
+        var name = RequireValidName(values[0]);
+        var quoted = QuoteIdentifier(name);
+        List<string> statements = [$"create application role {quoted} with password = {QuoteText(values[1].IsNull ? "" : values[1].AsString)}, default_schema = {quoted}"];
+        statements.AddRange(OwnSchemaStatements(batch, name, isUser: false));
+        foreach (var outcome in this.RunStatements(batch, statements))
+            yield return outcome;
+    }
+
+    /// <summary><c>sp_approlepassword @rolename, @newpwd</c> is <c>ALTER APPLICATION ROLE … WITH PASSWORD</c>.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAppRolePassword(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+        var values = BindSystemProcedureArguments("sp_approlepassword", calledAs, arguments, AppRolePasswordParameters);
+        var statement = $"alter application role {QuoteIdentifier(RequireValidName(values[0]))} with password = {QuoteText(values[1].IsNull ? "" : values[1].AsString)}";
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+            yield return outcome;
+    }
+
+    /// <summary>
+    /// <c>sp_dropapprole @rolename</c> is <c>DROP APPLICATION ROLE</c>, and the
+    /// role's own empty schema; a name no principal answers to is Msg 15151
+    /// from line 28, and a principal of another kind the statement's own.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpDropAppRole(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+        var values = BindSystemProcedureArguments("sp_dropapprole", calledAs, arguments, DropRoleParameters);
+        var name = RequireValidName(values[0]);
+        var principal = FindDatabasePrincipal(batch, name) ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropApplicationRole(name), 28);
+        foreach (var outcome in this.RunStatements(batch, [principal.TypeCode == "A" ? DropOwnSchemaStatement(batch, principal) : string.Empty, "drop application role " + QuoteIdentifier(name)]))
             yield return outcome;
     }
 

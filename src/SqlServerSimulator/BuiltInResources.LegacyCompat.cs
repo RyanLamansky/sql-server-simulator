@@ -237,6 +237,13 @@ internal static partial class BuiltInResources
         "xp_regread",
         // xp_getnetname: SMO's fully-qualified server name read.
         "xp_getnetname",
+        // The legacy wrappers over ALTER DATABASE and the application-role DDL
+        // old install scripts call.
+        "sp_dbcmptlevel",
+        "sp_renamedb",
+        "sp_addapprole",
+        "sp_dropapprole",
+        "sp_approlepassword",
         // xp_cmdshell and the OLE Automation procedures, refused as blocked
         // components while their configuration options are off.
         "sp_OACreate",

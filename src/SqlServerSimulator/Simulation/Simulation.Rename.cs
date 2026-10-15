@@ -683,15 +683,16 @@ partial class Simulation
     /// the rename <c>ALTER DATABASE … MODIFY NAME</c> makes, with its Msg 5021
     /// notice and no caution, a missing database Msg 15010 from line 29 and a
     /// name another database holds Msg 15032 from line 36, both naming
-    /// <c>sys.sp_renamedb</c> (probed 2026-10-04 against SQL Server 2025).
+    /// <c>sys.sp_renamedb</c>, or the procedure as called when it is called
+    /// itself (probed 2026-10-04 and 2026-10-15 against SQL Server 2025).
     /// </summary>
-    private static void RenameDatabase(BatchContext batch, string databaseName, string newName)
+    private static void RenameDatabase(BatchContext batch, string databaseName, string newName, string procedure = "sys.sp_renamedb")
     {
         var databases = batch.Connection.Simulation.Databases;
         if (!databases.TryGetValue(databaseName, out var target))
-            throw AtProcedureLine(SimulatedSqlException.HelpDatabaseDoesNotExist(databaseName), "sys.sp_renamedb", 29);
+            throw AtProcedureLine(SimulatedSqlException.HelpDatabaseDoesNotExist(databaseName), procedure, 29);
         if (databases.TryGetValue(newName, out var holder) && holder != target)
-            throw AtProcedureLine(SimulatedSqlException.DatabaseNameAlreadyExistsForRename(newName), "sys.sp_renamedb", 36);
+            throw AtProcedureLine(SimulatedSqlException.DatabaseNameAlreadyExistsForRename(newName), procedure, 36);
         if (!PermissionEnforcement.HasDatabasePermission(batch, target, Permission.Alter))
             throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
         RenameDatabaseTo(batch, target, newName);
