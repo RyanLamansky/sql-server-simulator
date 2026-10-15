@@ -274,6 +274,22 @@ public sealed class ErrorDiagnosticsTests
         AreEqual((3, "dbo.p_calls_udf"), CatchDiagnostics(sim, "exec dbo.p_calls_udf"));
     }
 
+    /// <summary>
+    /// A syntax error at the end of the text names the last token and reports
+    /// that token's line, not the statement's (probed 2026-10-15 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1\nfrom", 102, 2)]
+    [DataRow("select 1\n\n\n+", 102, 4)]
+    [DataRow("select 1\nwhere 1 =", 102, 2)]
+    [DataRow("select 1 from t\nwhere", 102, 2)]
+    [DataRow("select 1\nunion", 102, 2)]
+    [DataRow("begin\nselect 1", 102, 2)]
+    [DataRow("declare @a int\nset @a =", 102, 2)]
+    public void SyntaxErrorAtEndOfText_ReportsTheLastTokensLine(string sql, int number, int line)
+        => AreEqual(line, new Simulation().AssertSqlError(sql, number).LineNumber);
+
     // --- Tokenizer-thrown multi-line-token lines (probe-confirmed 2026-07-20) ---
     // Msg 105 (unclosed string) reports the line the literal OPENED on; Msg 113
     // (unclosed block comment) reports the END-OF-INPUT line it ran to.

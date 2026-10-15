@@ -687,8 +687,11 @@ partial class Simulation
                 ex.EndedTextWrite = true;
             if (!batch.SuppressDiagnosticsResolution)
             {
+                // A syntax error at the end of the text names the last token,
+                // and reports its line (probed 2026-10-15 against SQL Server
+                // 2025: `select 1` then `+` on line 4 is Msg 102 at line 4).
                 var diagnosticLine = ex.Class == 15 && !ex.RaisedByRaiserror
-                    ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
+                    ? (batch.Parser.Token ?? batch.Parser.LastToken)?.LineNumber ?? batch.CurrentStatement.StartLine
                     : batch.CurrentStatement.StartLine;
                 ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
                 if (!ex.RaisingScopeRecorded)

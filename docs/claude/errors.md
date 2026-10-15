@@ -11,7 +11,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | Bind error (Msg 208 invalid object) | statement start line | |
 | Binder error on a reference (Msg 207 / 4104 / 209, a GROUP BY violation) | the **reference's** line | the statement's first line when real parameterizes it; see [the whole report](#a-statements-whole-binder-report) |
 | Constraint violation (INSERT/UPDATE) | the DML statement's line | |
-| Syntax error (severity 15: Msg 102/156/…) | the **offending token's** line | differs from statement start for multi-line statements |
+| Syntax error (severity 15: Msg 102/156/…) | the **offending token's** line | differs from statement start for multi-line statements; at the end of the text, the last token's line (probed 2026-10-15) |
 | Unclosed string (Msg 105) | the line the literal **opened** on | even when the body runs across several lines to end of input |
 | Unclosed block comment (Msg 113) | the **end-of-input** line the comment ran to | *not* the line it opened on — the one asymmetry from Msg 105 |
 | Two statements on one line | that shared line | |
