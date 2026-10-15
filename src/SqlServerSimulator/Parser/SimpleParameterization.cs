@@ -30,8 +30,8 @@ namespace SqlServerSimulator.Parser;
 /// <c>numeric(n,0)</c> — while one in arithmetic, a <c>SET</c> or a
 /// <c>VALUES</c> list is <c>int</c>; a decimal is <c>numeric(p,s)</c>, a
 /// string <c>varchar(8000)</c> / <c>nvarchar(4000)</c>. Parameters number in
-/// text order, and an <c>UPDATE</c> declares its <c>WHERE</c> clause's ahead
-/// of its <c>SET</c> clause's.
+/// text order, and Query Store's text declares an <c>UPDATE</c>'s
+/// <c>WHERE</c> clause's ahead of its <c>SET</c> clause's.
 /// </para>
 /// <para>
 /// Which statements qualify is <see cref="BindErrorReport.IsSimplyParameterizable"/>'s
@@ -45,9 +45,15 @@ internal static class SimpleParameterization
     /// <summary>
     /// The parameterized text of the statement <paramref name="tokens"/>
     /// spell (no trailing separator), or null when real wouldn't
-    /// parameterize it or its shape is past what the renderer covers.
+    /// parameterize it or its shape is past what the renderer covers: the
+    /// form Query Store stores, and the form the prepared plan caches, which
+    /// declares every parameter in number order (probed 2026-10-15 against
+    /// SQL Server 2025: <c>update t set b = 'z' where a = 1</c> is
+    /// <c>(@2 tinyint,@1 varchar(8000))</c> in <c>query_store_query_text</c>
+    /// and <c>(@1 varchar(8000),@2 tinyint)</c> under
+    /// <c>sys.dm_exec_query_stats</c>).
     /// </summary>
-    public static string? Parameterize(List<Token> tokens)
+    public static (string QueryStore, string Prepared)? Parameterize(List<Token> tokens)
     {
         if (!BindErrorReport.IsSimplyParameterizable(tokens))
             return null;
@@ -71,7 +77,7 @@ internal static class SimpleParameterization
             }
         }
         var renderer = new Renderer(tokens);
-        return renderer.Statement() ? renderer.Result() : null;
+        return renderer.Statement() ? (renderer.Result(whereFirst: true), renderer.Result(whereFirst: false)) : null;
     }
 
     /// <summary>Where a literal sits, which decides the type its parameter declares.</summary>
@@ -99,18 +105,22 @@ internal static class SimpleParameterization
 
         private Token? Peek(int ahead) => this.position + ahead < tokens.Count ? tokens[this.position + ahead] : null;
 
-        public string Result()
+        /// <summary>
+        /// The rendered statement under its declaration: in number order, or
+        /// — <paramref name="whereFirst"/>, Query Store's form — an
+        /// <c>UPDATE</c>'s <c>WHERE</c> clause's parameters ahead of its
+        /// <c>SET</c> clause's, each group in number order.
+        /// </summary>
+        public string Result(bool whereFirst)
         {
-            // An UPDATE declares its WHERE clause's parameters ahead of its
-            // SET clause's; each group, like every other statement's list, in
-            // number order.
+            var whereGroupFirst = whereFirst && this.declareWhereFirst;
             var prefix = new StringBuilder("(");
             var first = true;
-            for (var pass = this.declareWhereFirst ? 0 : 1; pass < 2; pass++)
+            for (var pass = whereGroupFirst ? 0 : 1; pass < 2; pass++)
             {
                 foreach (var (number, type, inWhere) in this.parameters)
                 {
-                    if (this.declareWhereFirst && inWhere != (pass == 0))
+                    if (whereGroupFirst && inWhere != (pass == 0))
                         continue;
                     if (!first)
                         _ = prefix.Append(',');

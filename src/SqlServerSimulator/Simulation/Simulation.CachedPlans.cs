@@ -171,7 +171,7 @@ partial class Simulation
             return;
         CachedPlan target;
         int startOffset, endOffset;
-        if (shape.Parameterized is { } parameterized && !IsModuleBody(batch))
+        if (shape.PreparedText is { } parameterized && !IsModuleBody(batch))
         {
             target = GetOrAddBatchPlan(batch, CachedPlanKind.Prepared, parameterized, declaration: null, batch.CachedPlanDatabase!, userId, out var created);
             if (created || batch.CachedPlanCompiled)

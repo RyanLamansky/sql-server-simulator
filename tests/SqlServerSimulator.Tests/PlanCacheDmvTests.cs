@@ -80,6 +80,20 @@ public sealed class PlanCacheDmvTests
         IsEmpty(Statements(sim, "select b from t where a = 1"));
     }
 
+    // The prepared plan declares its parameters in number order, where Query
+    // Store's text puts an UPDATE's WHERE clause's first, and its statement
+    // starts past the whole declaration, a numeric(p,s)'s parentheses
+    // included (probed 2026-10-15 against SQL Server 2025).
+    [TestMethod]
+    public void SimpleParameterizedWrite_PreparedPlanDeclaresInNumberOrder()
+    {
+        var sim = WithTable();
+        _ = sim.ExecuteNonQuery("update t set b = 'z' where a = 1");
+        _ = sim.ExecuteNonQuery("delete from t where a = 1.5");
+        CollectionAssert.AreEqual(new[] { (58, 130, 1L, 1L) }, Statements(sim, "(@1 varchar(8000),@2 tinyint)UPDATE [t] set [b] = @1  WHERE [a]=@2"));
+        CollectionAssert.AreEqual(new[] { (34, 80, 1L, 0L) }, Statements(sim, "(@1 numeric(2,1))DELETE [t]  WHERE [a]=@1"));
+    }
+
     // A parameterized command reaches real as sp_executesql, a prepared plan
     // whose text is its declaration in parentheses followed by the batch.
     [TestMethod]

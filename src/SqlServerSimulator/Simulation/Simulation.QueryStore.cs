@@ -730,10 +730,17 @@ internal sealed class QueryStoreShape
     /// <summary>A FROM-less query, which real captures only when it calls a user function.</summary>
     public readonly bool CapturedWhenCallingFunction;
 
-    /// <summary>The simple-parameterized text, or null; see <see cref="SimpleParameterization"/>.</summary>
+    /// <summary>The simple-parameterized text Query Store stores, or null; see <see cref="SimpleParameterization"/>.</summary>
     public readonly string? Parameterized;
 
-    /// <summary>The length of <see cref="Parameterized"/>'s declaration, which the batch offsets skip.</summary>
+    /// <summary>The simple-parameterized text the prepared plan caches, declaring in number order; null when <see cref="Parameterized"/> is.</summary>
+    public readonly string? PreparedText;
+
+    /// <summary>
+    /// The length of <see cref="Parameterized"/>'s declaration, which the
+    /// batch offsets skip: through the parenthesis closing the one it opens
+    /// with, past any a type's precision and scale hold.
+    /// </summary>
     public readonly int ParameterizedPrefixLength;
 
     /// <summary>Every <c>@name</c> the statement reads, without its <c>@</c> (the <see cref="BatchContext.Variables"/> key form), in first-appearance order.</summary>
@@ -755,14 +762,15 @@ internal sealed class QueryStoreShape
     public readonly byte[] QueryHash;
     public readonly byte[] QueryPlanHash;
 
-    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, string? parameterized, string[] variables,
+    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, (string QueryStore, string Prepared)? parameterized, string[] variables,
         bool isConditionOrReturn, bool usesDefaultSchema, bool isTrivial, string statementType, byte[] hash)
     {
         this.Text = text;
         this.Captured = captured;
         this.CapturedWhenCallingFunction = capturedWhenCallingFunction;
-        this.Parameterized = parameterized;
-        this.ParameterizedPrefixLength = parameterized is null ? 0 : parameterized.IndexOf(')', StringComparison.Ordinal) + 1;
+        this.Parameterized = parameterized?.QueryStore;
+        this.PreparedText = parameterized?.Prepared;
+        this.ParameterizedPrefixLength = parameterized is { QueryStore: var declared } ? DeclarationLength(declared) : 0;
         this.Variables = variables;
         this.IsConditionOrReturn = isConditionOrReturn;
         this.UsesDefaultSchema = usesDefaultSchema;
@@ -770,6 +778,19 @@ internal sealed class QueryStoreShape
         this.StatementType = statementType;
         this.QueryHash = hash[..8];
         this.QueryPlanHash = hash[8..16];
+    }
+
+    private static int DeclarationLength(string parameterized)
+    {
+        var depth = 0;
+        for (var i = 0; i < parameterized.Length; i++)
+        {
+            if (parameterized[i] == '(')
+                depth++;
+            else if (parameterized[i] == ')' && --depth == 0)
+                return i + 1;
+        }
+        return 0;
     }
 
     /// <summary>

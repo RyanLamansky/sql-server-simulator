@@ -88,6 +88,21 @@ public sealed class QueryStoreCaptureTests
         Contains(expected, [.. Captured(sim).Select(c => c.Text)]);
     }
 
+    // A parameterized query's offsets skip its whole declaration, a
+    // numeric(p,s)'s parentheses included (probed 2026-10-15 against SQL
+    // Server 2025).
+    [TestMethod]
+    public void SimpleParameterization_OffsetsSkipTheWholeDeclaration()
+    {
+        var sim = CapturingAll();
+        _ = sim.ExecuteNonQuery("delete from t where a = 1.5");
+        AreEqual("34|80", sim.ExecuteScalar("""
+            select concat(q.last_compile_batch_offset_start, '|', q.last_compile_batch_offset_end)
+            from sys.query_store_query q join sys.query_store_query_text t on t.query_text_id = q.query_text_id
+            where t.query_sql_text = '(@1 numeric(2,1))DELETE [t]  WHERE [a]=@1'
+            """));
+    }
+
     [TestMethod]
     public void SimpleParameterization_LiteralVariants_ShareOneQuery()
     {
