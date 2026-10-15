@@ -15,6 +15,7 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlter(ParserContext context)
     {
+        RefuseUnbuiltStatement(context, "ALTER");
         switch (context.GetNextRequired())
         {
             case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:

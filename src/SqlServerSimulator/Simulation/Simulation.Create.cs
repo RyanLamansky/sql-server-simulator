@@ -32,6 +32,7 @@ partial class Simulation
     /// </summary>
     private bool TryParseCreate(ParserContext context)
     {
+        RefuseUnbuiltStatement(context, "CREATE");
         switch (context.GetNextRequired())
         {
             case ReservedKeyword { Keyword: Keyword.Database }:

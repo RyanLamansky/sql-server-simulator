@@ -365,11 +365,36 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 12824: <c>ALTER DATABASE … SET CONTAINMENT =
-    /// PARTIAL</c> while the server option is off (probed 2026-10-09 against
+    /// PARTIAL</c> or <c>CREATE DATABASE … CONTAINMENT = PARTIAL</c> while the
+    /// server option is off, naming the verb (probed 2026-10-09 against
     /// SQL Server 2025; the double space is real's).
     /// </summary>
-    internal static SimulatedSqlException ContainedDatabaseAuthenticationRequired() =>
-        new("The sp_configure value 'contained database authentication' must be set to 1 in order to alter a contained database.  You may need to use RECONFIGURE to set the value_in_use.", 12824, 16, 1);
+    internal static SimulatedSqlException ContainedDatabaseAuthenticationRequired(string verb = "alter") =>
+        new($"The sp_configure value 'contained database authentication' must be set to 1 in order to {verb} a contained database.  You may need to use RECONFIGURE to set the value_in_use.", 12824, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 12808: <c>CREATE DATABASE … WITH</c> an option
+    /// only a contained database takes, on one created with containment NONE,
+    /// named in lower case (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OptionNeedsContainment(string option) =>
+        new($"The option '{option}' cannot be set on a database while containment is being set to NONE.", 12808, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1829: <c>CREATE DATABASE … FOR ATTACH</c> or
+    /// <c>FOR ATTACH_REBUILD_LOG</c> with no file list (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AttachNeedsPrimaryFile() =>
+        new("The FOR ATTACH option requires that at least the primary file be specified.", 1829, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 22487: a Synapse statement — <c>CREATE</c>,
+    /// <c>ALTER</c> or <c>DROP WORKLOAD CLASSIFIER</c> — raised while the
+    /// batch compiles (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SynapseOnlyStatement(string statement) =>
+        new($"{statement} is allowed only when connected to Synapse frontend.", 22487, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 33106: <c>ALTER DATABASE … SET ENCRYPTION</c>

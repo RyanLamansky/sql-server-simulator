@@ -308,7 +308,9 @@ The single sources of truth are `Simulation.SystemDatabaseIds` (the system name�
 
 ## `CREATE DATABASE` / `DROP DATABASE` / `MODIFY NAME`
 
-`CREATE DATABASE <name> [COLLATE <collation>] [<file / option clauses>]` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); the `ON … [LOG ON …]` file list becomes the database's files and filegroups ([`database-options.md`](database-options.md#files-and-filegroups)); every remaining clause (`WITH …`, `CONTAINMENT = …`, `FOR ATTACH`, …) is parse-and-discarded.
+`CREATE DATABASE <name> [CONTAINMENT = …] [ON … [LOG ON …]] { FOR ATTACH … | AS SNAPSHOT OF … | [COLLATE <collation>] [WITH <option>, …] }` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); the `ON … [LOG ON …]` file list becomes the database's files and filegroups ([`database-options.md`](database-options.md#files-and-filegroups)); `WITH TRUSTWORTHY` and `DB_CHAINING` set the two flags, and `CATALOG_COLLATION = DATABASE_DEFAULT`, `LEDGER = OFF`, `FILESTREAM (…)` and `PERSISTENT_LOG_BUFFER = OFF` change nothing here.
+The clauses take real's order and grammar, so a word out of place is Msg 102 or 156 near it with real's state, and an option only a contained database takes is **Msg 12808**, `CONTAINMENT = PARTIAL` with the server option off **Msg 12824** and `FOR ATTACH` without a file list **Msg 1829** (probed 2026-10-15 against SQL Server 2025).
+A contained database, a snapshot, attaching files, a ledger database, a persistent log buffer and the `SQL_Latin1_General_CP1_CI_AS` catalog collation raise `NotSupportedException`.
 A duplicate name raises **Msg 1801**.
 The database registers with the smallest-free id (above) and is immediately usable via `USE`.
 

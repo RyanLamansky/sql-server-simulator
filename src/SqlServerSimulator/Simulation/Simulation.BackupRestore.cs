@@ -133,6 +133,7 @@ partial class Simulation
     /// </summary>
     private bool ParseBackup(ParserContext context, BatchContext batch)
     {
+        RefuseUnbuiltStatement(context, verb: null);
         var kind = context.GetNextRequired();
         var isLog = kind is Name { Value: var word } && BuiltInToken.Equals(word, "LOG");
         if (!isLog && kind is not ReservedKeyword { Keyword: Keyword.Database })
@@ -324,6 +325,7 @@ partial class Simulation
     /// </summary>
     private bool ParseRestore(ParserContext context, BatchContext batch)
     {
+        RefuseUnbuiltStatement(context, verb: null);
         var kind = context.GetNextRequired();
         if (kind is not ReservedKeyword { Keyword: Keyword.Database })
         {

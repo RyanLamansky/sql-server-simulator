@@ -29,25 +29,24 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>CREATE DATABASE &lt;name&gt; [ON [PRIMARY] &lt;filespec&gt; [, …]
-    /// [, FILEGROUP name [CONTAINS …] [DEFAULT] &lt;filespec&gt; [, …]] [LOG ON
-    /// &lt;filespec&gt; [, …]]] [COLLATE &lt;collation&gt;] [&lt;option clauses&gt;]</c>.
-    /// The database name is a single identifier (bare or bracketed / quoted);
-    /// an optional <c>COLLATE</c> clause sets the new database's collation
-    /// (defaulting to the server collation, mirroring <c>model.collation</c>),
-    /// and every other clause (<c>WITH …</c>, <c>CONTAINMENT = …</c>,
-    /// <c>FOR ATTACH</c>, …) is parse-and-discarded. The file list becomes
-    /// the database's <see cref="Database.Files"/> and filegroups; without
-    /// one the database gets the <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>
+    /// Parses <c>CREATE DATABASE &lt;name&gt; [CONTAINMENT = NONE | PARTIAL]
+    /// [ON [PRIMARY] &lt;filespec&gt; [, …] [, FILEGROUP name [CONTAINS …]
+    /// [DEFAULT] &lt;filespec&gt; [, …]] [LOG ON &lt;filespec&gt; [, …]]]</c>
+    /// followed by either <c>FOR ATTACH</c> / <c>AS SNAPSHOT OF</c> or
+    /// <c>[COLLATE &lt;collation&gt;] [WITH &lt;option&gt; [, …]]</c>, in that
+    /// order. The database name is a single identifier (bare or bracketed /
+    /// quoted); <c>COLLATE</c> sets the new database's collation (defaulting
+    /// to the server collation, mirroring <c>model.collation</c>), and
+    /// <c>TRUSTWORTHY</c> / <c>DB_CHAINING</c> its two flags. The file list
+    /// becomes the database's <see cref="Database.Files"/> and filegroups;
+    /// without one the database gets the <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>
     /// pair. The new database is registered with the smallest free
     /// <c>database_id</c> ≥ 5 (see <see cref="RegisterUserDatabase"/>). Cursor
-    /// on entry is the
-    /// <c>DATABASE</c> keyword.
+    /// on entry is the <c>DATABASE</c> keyword.
     /// </summary>
     /// <remarks>
     /// Probe-confirmed against SQL Server 2025: a duplicate name raises
-    /// <strong>Msg 1801</strong> (Class 16, State 3). <c>COLLATE</c> is
-    /// detected anywhere in the trailing-clause scan. The file list (probed
+    /// <strong>Msg 1801</strong> (Class 16, State 3). The file list (probed
     /// 2026-09-27): the first data file is file 1 on <c>PRIMARY</c> and never
     /// smaller than the 8 MB <c>model</c>'s is, the first log file is file 2,
     /// then the other data files and the other log files in order; a declared
@@ -64,52 +63,80 @@ partial class Simulation
             return false;
         var databaseName = nameToken.Value;
 
-        // Walk the trailing clauses: parse the file list, capture a COLLATE
-        // clause anywhere at the top level, discard everything else (tracking
-        // nested parens) until a statement boundary. WITH is a boundary keyword
-        // but legitimately continues CREATE DATABASE, so it's consumed rather
-        // than stopping the scan.
-        string? collationName = null;
-        List<DeclaredFilegroup>? groups = null;
-        List<FileSpecification>? logFiles = null;
-        var depth = 0;
-        var seenWith = false;
+        // The clauses in real's order: CONTAINMENT, the file list, then either
+        // FOR ATTACH / AS SNAPSHOT OF or COLLATE and WITH. Anything out of
+        // place is a syntax error near it (probed 2026-10-15 against SQL
+        // Server 2025).
         context.MoveNextOptional();
-        while (context.Token is { } token)
+        var partial = false;
+        if (IsBareWord(context.Token, "CONTAINMENT"))
         {
-            if (depth == 0 && !seenWith && groups is null && token is ReservedKeyword { Keyword: Keyword.On })
-            {
-                groups = ParseCreateDatabaseDataFiles(context);
-                if (IsLogOn(context))
-                    logFiles = ParseCreateDatabaseLogFiles(context);
-                continue;
-            }
-            if (depth == 0 && !seenWith && groups is null && IsLogOn(context))
-                throw SimulatedSqlException.LogFileWithoutDataFile();
-            if (depth == 0 && token is ReservedKeyword { Keyword: Keyword.Collate })
-            {
-                if (context.GetNextRequired() is not UnquotedString collationToken)
-                    return false;
-                collationName = collationToken.Value;
-                context.MoveNextOptional();
-                continue;
-            }
-            if (depth == 0 && IsStatementBoundary(token) && token is not ReservedKeyword { Keyword: Keyword.With })
-                break;
-            switch (token)
-            {
-                case ReservedKeyword { Keyword: Keyword.With } when depth == 0:
-                    seenWith = true;
-                    break;
-                case Operator { Character: '(' }:
-                    depth++;
-                    break;
-                case Operator { Character: ')' } when depth > 0:
-                    depth--;
-                    break;
-            }
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            partial = IsBareWord(context.GetNextRequired(), "PARTIAL");
+            if (!partial && !IsBareWord(context.Token, "NONE"))
+                throw SimulatedSqlException.SyntaxErrorNear(context.Token, state: 6);
             context.MoveNextOptional();
         }
+        List<DeclaredFilegroup>? groups = null;
+        List<FileSpecification>? logFiles = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+        {
+            groups = ParseCreateDatabaseDataFiles(context);
+            if (IsLogOn(context))
+                logFiles = ParseCreateDatabaseLogFiles(context);
+        }
+        else if (IsLogOn(context))
+        {
+            throw SimulatedSqlException.LogFileWithoutDataFile();
+        }
+
+        string? collationName = null;
+        var options = new CreateDatabaseOptions();
+        string? unbuiltForm = null;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.For }:
+                if (!IsBareWord(context.GetNextRequired(), "ATTACH") && !IsBareWord(context.Token, "ATTACH_REBUILD_LOG"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context.Token, state: 23);
+                // Attach options are taken as written: the statement attaches
+                // nothing either way.
+                while (context.GetNextOptional() is { } attachToken && !(IsStatementBoundary(attachToken) && attachToken is not ReservedKeyword { Keyword: Keyword.With }))
+                {
+                }
+                if (groups is null)
+                    options.MissingPrimaryFile = true;
+                else
+                    unbuiltForm = "CREATE DATABASE … FOR ATTACH, which reads the files of a detached database,";
+                break;
+            case ReservedKeyword { Keyword: Keyword.As }:
+                if (!IsBareWord(context.GetNextRequired(), "SNAPSHOT"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Of })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Name)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+                unbuiltForm = "A database snapshot (CREATE DATABASE … AS SNAPSHOT OF)";
+                break;
+            default:
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
+                {
+                    if (context.GetNextRequired() is not UnquotedString collationToken)
+                        return false;
+                    collationName = collationToken.Value;
+                    context.MoveNextOptional();
+                }
+                if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                {
+                    do
+                        ParseCreateDatabaseOption(context, options);
+                    while (context.Token is Operator { Character: ',' });
+                }
+                break;
+        }
+        if (!IsStatementBoundary(context.Token) || context.Token is ReservedKeyword { Keyword: Keyword.With })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // A skipped (un-taken IF branch) statement validates nothing and has no
         // schema effect — mirror ALTER DATABASE COLLATE, which defers collation
@@ -126,6 +153,29 @@ partial class Simulation
         if (!PermissionEnforcement.HasDatabaseDdlAuthority(context.Batch, Permission.CreateAnyDatabase))
             throw SimulatedSqlException.DatabasePermissionDenied("CREATE DATABASE", "master", aborts: false);
 
+        if (options.MissingPrimaryFile)
+            throw SimulatedSqlException.AttachNeedsPrimaryFile();
+        if (unbuiltForm is not null)
+            throw new NotSupportedException($"{unbuiltForm} isn't modeled by the simulator.");
+        if (partial)
+        {
+            if (ConfigurationInUse(ContainedDatabaseAuthenticationConfigurationId) == 0)
+                throw SimulatedSqlException.ContainedDatabaseAuthenticationRequired("create");
+            throw new NotSupportedException("The simulator does not model contained databases.");
+        }
+        if (options.ContainedOnlyOption is { } containedOnly)
+            throw SimulatedSqlException.OptionNeedsContainment(containedOnly);
+        if (options.CatalogCollation is { } catalogCollation)
+        {
+            throw Collation.Baseline.Equals(catalogCollation, "SQL_Latin1_General_CP1_CI_AS")
+                ? new NotSupportedException("CREATE DATABASE … WITH CATALOG_COLLATION = SQL_Latin1_General_CP1_CI_AS isn't modeled; the simulator's catalog follows the database collation.")
+                : SimulatedSqlException.InvalidCollation(catalogCollation, state: 5);
+        }
+        if (options.Ledger)
+            throw new NotSupportedException("A ledger database (CREATE DATABASE … WITH LEDGER = ON) isn't modeled by the simulator.");
+        if (options.PersistentLogBuffer)
+            throw new NotSupportedException("A persistent log buffer (CREATE DATABASE … WITH PERSISTENT_LOG_BUFFER = ON) isn't modeled by the simulator, which has no log.");
+
         var collation = collationName is null
             ? this.ServerCollation
             : Collation.TryGet(collationName)
@@ -135,7 +185,11 @@ partial class Simulation
         {
             if (this.Databases.ContainsKey(databaseName))
                 throw SimulatedSqlException.DatabaseAlreadyExists(databaseName);
-            var database = new Database(databaseName, collation);
+            var database = new Database(databaseName, collation)
+            {
+                Trustworthy = options.Trustworthy,
+                CrossDatabaseChaining = options.DbChaining,
+            };
             // The creating login owns the new database (probed 2026-09-27
             // against SQL Server 2025 with a dbcreator login); a session with no
             // registered login — the in-process default — creates as sa.
@@ -149,6 +203,145 @@ partial class Simulation
         }
         RecordServerDdlEvent(context, "CREATE_DATABASE", databaseName, loginName: null);
         return true;
+    }
+
+    /// <summary>What a <c>CREATE DATABASE</c>'s <c>WITH</c> list and attach clause leave for the statement to apply or refuse once it runs.</summary>
+    private sealed class CreateDatabaseOptions
+    {
+        public bool Trustworthy;
+        public bool DbChaining;
+        public bool Ledger;
+
+        /// <summary><c>PERSISTENT_LOG_BUFFER = ON</c>, which places the log tail on a DAX volume.</summary>
+        public bool PersistentLogBuffer;
+
+        /// <summary><c>FOR ATTACH</c> with no file list, which is Msg 1829.</summary>
+        public bool MissingPrimaryFile;
+
+        /// <summary>The first option only a contained database takes, in lower case, which is Msg 12808 on any other.</summary>
+        public string? ContainedOnlyOption;
+
+        /// <summary>A <c>CATALOG_COLLATION</c> other than <c>DATABASE_DEFAULT</c>.</summary>
+        public string? CatalogCollation;
+    }
+
+    /// <summary>
+    /// One option of <c>CREATE DATABASE</c>'s <c>WITH</c> list, entered on
+    /// <c>WITH</c> or the comma ahead of it and leaving the cursor past the
+    /// option. A word that names no option, or an option written in another
+    /// option's form, is Msg 102 near the word — state 6 when an <c>=</c>
+    /// follows it, else 44 — where a malformed value of the two bare-valued
+    /// options is the syntax error at that value (probed 2026-10-15 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static void ParseCreateDatabaseOption(ParserContext context, CreateDatabaseOptions options)
+    {
+        var optionToken = context.GetNextRequired();
+        if (optionToken is not Name { Value: var option })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var hasEquals = context.GetNextOptional() is Operator { Character: '=' };
+        var refused = SimulatedSqlException.SyntaxErrorNear(optionToken, state: hasEquals ? (byte)6 : (byte)44);
+        Span<char> upper = stackalloc char[option.Length];
+        _ = option.AsSpan().ToUpperInvariant(upper);
+        switch (upper)
+        {
+            case "CATALOG_COLLATION":
+                if (!hasEquals || context.GetNextOptional() is not Name { Value: var catalogCollation })
+                    throw refused;
+                if (!BuiltInToken.Equals(catalogCollation, "DATABASE_DEFAULT"))
+                    options.CatalogCollation = catalogCollation;
+                break;
+            case "DB_CHAINING":
+                options.DbChaining = ReadBareOnOff(context, hasEquals, refused);
+                break;
+            case "DEFAULT_FULLTEXT_LANGUAGE":
+                ReadContainedOnlyLanguage(context, hasEquals, refused, options, "default_fulltext_language");
+                break;
+            case "DEFAULT_LANGUAGE":
+                ReadContainedOnlyLanguage(context, hasEquals, refused, options, "default_language");
+                break;
+            case "FILESTREAM":
+                if (context.Token is not Operator { Character: '(' })
+                    throw refused;
+                for (var depth = 1; depth > 0;)
+                {
+                    switch (context.GetNextRequired())
+                    {
+                        case Operator { Character: '(' }:
+                            depth++;
+                            break;
+                        case Operator { Character: ')' }:
+                            depth--;
+                            break;
+                    }
+                }
+                break;
+            case "LEDGER":
+                options.Ledger = ReadEqualsOnOff(context, hasEquals, refused);
+                break;
+            case "NESTED_TRIGGERS":
+                _ = ReadEqualsOnOff(context, hasEquals, refused);
+                options.ContainedOnlyOption ??= "nested_triggers";
+                break;
+            case "PERSISTENT_LOG_BUFFER":
+                if (!hasEquals)
+                    throw refused;
+                switch (context.GetNextOptional())
+                {
+                    case ReservedKeyword { Keyword: Keyword.Off }:
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.On }
+                        when context.GetNextOptional() is Operator { Character: '(' }
+                            && IsBareWord(context.GetNextOptional(), "DIRECTORY_NAME")
+                            && context.GetNextOptional() is Operator { Character: '=' }
+                            && context.GetNextOptional() is Literal
+                            && context.GetNextOptional() is Operator { Character: ')' }:
+                        options.PersistentLogBuffer = true;
+                        break;
+                    default:
+                        throw refused;
+                }
+                break;
+            case "TRANSFORM_NOISE_WORDS":
+                _ = ReadEqualsOnOff(context, hasEquals, refused);
+                options.ContainedOnlyOption ??= "transform_noise_words";
+                break;
+            case "TRUSTWORTHY":
+                options.Trustworthy = ReadBareOnOff(context, hasEquals, refused);
+                break;
+            case "TWO_DIGIT_YEAR_CUTOFF":
+                if (!hasEquals || context.GetNextOptional() is not Numeric)
+                    throw refused;
+                options.ContainedOnlyOption ??= "two_digit_year_cutoff";
+                break;
+            default:
+                throw refused;
+        }
+        context.MoveNextOptional();
+    }
+
+    /// <summary><c>TRUSTWORTHY</c> / <c>DB_CHAINING</c>'s bare <c>ON | OFF</c>, whose malformed value is the syntax error at it.</summary>
+    private static bool ReadBareOnOff(ParserContext context, bool hasEquals, SimulatedSqlException refused)
+    {
+        if (hasEquals || context.Token is null)
+            throw refused;
+        return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } onOff
+            ? onOff.Keyword == Keyword.On
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>An option's <c>= ON | OFF</c>, whose malformed value is the option's own refusal.</summary>
+    private static bool ReadEqualsOnOff(ParserContext context, bool hasEquals, SimulatedSqlException refused) =>
+        hasEquals && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } onOff
+            ? onOff.Keyword == Keyword.On
+            : throw refused;
+
+    /// <summary>A default language option's <c>= name | lcid</c>, which only a contained database takes.</summary>
+    private static void ReadContainedOnlyLanguage(ParserContext context, bool hasEquals, SimulatedSqlException refused, CreateDatabaseOptions options, string option)
+    {
+        if (!hasEquals || context.GetNextOptional() is not (Name or Numeric))
+            throw refused;
+        options.ContainedOnlyOption ??= option;
     }
 
     /// <summary>Whether the cursor sits on <c>LOG ON</c>, which it then leaves on <c>ON</c>'s successor.</summary>

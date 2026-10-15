@@ -49,6 +49,10 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume WAITFOR
+        // WAITFOR (RECEIVE …) / (GET CONVERSATION GROUP …) waits on a Service
+        // Broker queue.
+        if (context.Token is Operator { Character: '(' })
+            RefuseUnbuiltStatement(context, verb: "WAITFOR");
 
         // DELAY and TIME are contextual keywords (not in the reserved list),
         // tokenized as UnquotedString.

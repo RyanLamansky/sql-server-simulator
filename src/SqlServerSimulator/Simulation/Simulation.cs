@@ -3549,6 +3549,7 @@ public sealed partial class Simulation
                 // and re-parses via TryParseBeginTransaction so its existing
                 // BEGIN-consuming flow stays untouched.
                 {
+                    RefuseUnbuiltStatement(context, verb: null);
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextRequired();
                     var afterBegin = context.Token;
@@ -3714,6 +3715,7 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Open }:
+                RefuseUnbuiltStatement(context, verb: null);
                 ParseOpenCursor(batch);
                 rowCount = 0;
                 break;
@@ -3724,6 +3726,7 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Close }:
+                RefuseUnbuiltStatement(context, verb: null);
                 ParseCloseCursor(batch);
                 rowCount = 0;
                 break;
@@ -3742,6 +3745,7 @@ public sealed partial class Simulation
             // a batch opening `@p 1` runs `EXEC @p 1` and an undeclared one is
             // Msg 137 (probed 2026-09-25 against SQL Server 2025).
             case Name or AtPrefixedString when atBatchStart:
+                RefuseUnbuiltStatement(context, verb: null);
                 foreach (var o in ParseExec(batch, implicitExec: true))
                     yield return o;
                 break;
@@ -3750,9 +3754,11 @@ public sealed partial class Simulation
             // opening a statement is Msg 156 (probed 2026-09-24 against SQL
             // Server 2025).
             case ReservedKeyword { Keyword: Keyword.End } strayEnd:
+                RefuseUnbuiltStatement(context, verb: null);
                 throw SimulatedSqlException.SyntaxErrorNear(strayEnd);
 
             default:
+                RefuseUnbuiltStatement(context, verb: null);
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 

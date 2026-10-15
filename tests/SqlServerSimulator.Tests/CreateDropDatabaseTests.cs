@@ -150,4 +150,75 @@ public sealed class CreateDropDatabaseTests
         simulation.AssertSqlError(statement, number, message);
         AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.databases where name = 'foo'"));
     }
+
+    /// <summary>
+    /// <c>CREATE DATABASE</c>'s clauses run in real's order and each takes its
+    /// own grammar, so a word out of place is the syntax error near it and no
+    /// database is created (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("garbage", 102, 1)]
+    [DataRow("collate Latin1_General_CI_AS garbage", 102, 1)]
+    [DataRow("collate Latin1_General_CI_AS containment = none", 102, 1)]
+    [DataRow("containment = garbage", 102, 6)]
+    [DataRow("containment garbage", 102, 1)]
+    [DataRow("with garbage", 102, 44)]
+    [DataRow("with trustworthy", 102, 44)]
+    [DataRow("with trustworthy = on", 102, 6)]
+    [DataRow("with trustworthy maybe", 102, 1)]
+    [DataRow("with bogus = 1", 102, 6)]
+    [DataRow("with ledger = maybe", 102, 6)]
+    [DataRow("with default_language = 'us_english'", 102, 6)]
+    [DataRow("with ,", 102, 1)]
+    [DataRow("with (x = 1)", 102, 1)]
+    [DataRow("with trustworthy on, db_chaining off garbage", 102, 1)]
+    [DataRow("with trustworthy on catalog_collation = database_default", 102, 1)]
+    [DataRow("with ledger = on collate Latin1_General_CI_AS", 156, 1)]
+    [DataRow("with trustworthy on for attach", 156, 1)]
+    [DataRow("for garbage", 102, 23)]
+    [DataRow("as copy of simulated", 102, 1)]
+    [DataRow("for attach", 1829, 2)]
+    [DataRow("for attach_rebuild_log", 1829, 2)]
+    [DataRow("with default_language = us_english, ledger = on", 12808, 1)]
+    [DataRow("with nested_triggers = off", 12808, 1)]
+    [DataRow("with two_digit_year_cutoff = 2049", 12808, 1)]
+    [DataRow("containment = partial", 12824, 1)]
+    [DataRow("with catalog_collation = Latin1_General_CI_AS", 448, 5)]
+    public void CreateDatabase_ClauseGrammar_Refusals(string clauses, int number, int state)
+    {
+        var simulation = new Simulation();
+        AreEqual((byte)state, simulation.AssertSqlError($"create database foo {clauses}", number).State);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select db_id('foo')"));
+    }
+
+    [TestMethod]
+    public void CreateDatabase_ContainedOnlyOption_NamesItInLowerCase()
+        => new Simulation().AssertSqlError(
+            "create database foo with Default_Language = us_english", 12808,
+            "The option 'default_language' cannot be set on a database while containment is being set to NONE.");
+
+    [TestMethod]
+    public void CreateDatabase_SsmsScriptedOptions_Run()
+        => AreEqual("foo|1|1", new Simulation().ExecuteScalar("""
+            create database foo containment = none
+                on primary (name = N'foo', filename = N'/var/opt/mssql/data/foo.mdf', size = 8192KB, filegrowth = 65536KB)
+                log on (name = N'foo_log', filename = N'/var/opt/mssql/data/foo_log.ldf', size = 8192KB, filegrowth = 65536KB)
+                collate Latin1_General_CI_AS
+                with catalog_collation = database_default, ledger = off, trustworthy on, db_chaining on,
+                    filestream (non_transacted_access = off), persistent_log_buffer = off;
+            select concat(name, '|', is_trustworthy_on, '|', is_db_chaining_on) from sys.databases where name = 'foo'
+            """));
+
+    [TestMethod]
+    [DataRow("as snapshot of simulated")]
+    [DataRow("on (name = foo, filename = '/var/opt/mssql/data/foo.mdf') for attach")]
+    [DataRow("with ledger = on")]
+    [DataRow("with persistent_log_buffer = on (directory_name = '/pmem')")]
+    [DataRow("with catalog_collation = SQL_Latin1_General_CP1_CI_AS")]
+    public void CreateDatabase_UnbuiltForms_RaiseNotSupported(string clauses)
+    {
+        var simulation = new Simulation();
+        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery($"create database foo {clauses}"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select db_id('foo')"));
+    }
 }

@@ -33,6 +33,7 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseDrop(ParserContext context)
     {
+        RefuseUnbuiltStatement(context, "DROP");
         // DROP INDEX has a distinct grammar — `name ON table [, name ON table, …]`
         // (not just `name`). Route it through its own parser before the
         // shared comma-list path below.

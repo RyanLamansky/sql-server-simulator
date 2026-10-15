@@ -360,8 +360,15 @@ A statement may begin with a parenthesized query (`(SELECT 1) UNION (SELECT 2)`)
 Only a query fills the parens: `(VALUES (1))` and `(WITH …)` are Msg 156 at the keyword, and a `)` a SELECT statement leaves behind (`(SELECT 1))`, a CTE-led `… FROM c)`) Msg 102.
 A `(` after a FROM source that names an object is that source's own argument or legacy hint list instead, where a query is Msg 156 at its `SELECT` (`FROM t (SELECT 3)`, `FROM t x (SELECT 3)`, `DELETE t (SELECT 2)`), and a common table expression's list is Msg 215 without an alias and a hint list with one.
 
+## Statements the simulator hasn't built
+
+A statement real runs that the simulator hasn't built — keys and certificates, Service Broker, Extended Events, endpoints, Resource Governor, the external-data family, audits, availability groups, module signing — raises `NotSupportedException` naming it, where it would otherwise fall through to a syntax error real never raises.
+`Simulation.RefuseUnbuiltStatement` checks the words opening the statement against `UnbuiltStatementForms` at each place one can start (`CREATE` / `ALTER` / `DROP`, `BACKUP` / `RESTORE`, `OPEN` / `CLOSE`, `BEGIN`, `END`, `WAITFOR (`, and an unrecognized head), so building one of them means removing its entry.
+`CREATE`, `ALTER` and `DROP WORKLOAD CLASSIFIER` are real's own Msg 22487 instead, a Synapse surface the box product refuses while the batch compiles (probed 2026-10-15 against SQL Server 2025).
+
 ## Divergences
 
+- **An unknown object-type word after `CREATE`, `ALTER` or `DROP`** is Msg 102 here, where real raises Msg 343 (`Unknown object type 'X' used in a CREATE, DROP, or ALTER statement.`) for a word that isn't one of its own grammar tokens — `CREATE BOGUS x`, `CREATE STOPLIST x`, `DROP NODE x` — and Msg 102 for one that is but doesn't fit there — `ALTER TYPE x`, `CREATE SIGNATURE x`, `DROP SELECTIVE x` — whose list no probe has enumerated (probed 2026-10-15 against SQL Server 2025).
 - **A `(` after an `ORDER BY` or `GROUP BY` name** reads as a call to it, which real parses through its arguments first — `ORDER BY a (SELECT 3)` is Msg 156 at the `SELECT` on real and Msg 195 here.
 - **A `(` after a `DELETE` target** that holds no query is Msg 102 at the `(`, state 31, on real; here it is Msg 102 at the token inside it.
 - **A delimited one-part call as an `sp_executesql` argument** (`EXEC sp_executesql N'SELECT 1', N'@p int', [abs](1)`) is Msg 102 at the name here, where real takes the name as the argument and fails at the `1` of the next statement's `(1)`.
