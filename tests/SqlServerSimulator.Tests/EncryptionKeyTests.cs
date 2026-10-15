@@ -554,11 +554,28 @@ public sealed class EncryptionKeyTests
             """));
 
     [TestMethod]
-    public void BackupOfADatabaseWithKeys_RaisesNotSupported()
+    public void Backup_CarriesTheKeyStore()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create symmetric key k with algorithm = aes_256 encryption by password = 'Abcdefgh12'");
-        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("backup database simulated to disk = 'k.bak'"));
+        _ = simulation.ExecuteNonQuery(MasterKey + """
+            create certificate c1 with subject = 'x';
+            create asymmetric key a1 with algorithm = rsa_2048;
+            create symmetric key k1 with algorithm = aes_256 encryption by certificate c1, asymmetric key a1, password = 'Abcdefgh12';
+            create table t (c varbinary(500), e varbinary(500), p varbinary(500));
+            open symmetric key k1 decryption by password = 'Abcdefgh12';
+            insert t values (encryptbykey(key_guid('k1'), 'by key'), encryptbycert(cert_id('c1'), 'by cert'), (select public_key from sys.asymmetric_keys));
+            backup database simulated to disk = 'k.bak';
+            """);
+        AreEqual("by key|by cert|1|k1:3", simulation.ExecuteBatchesScalar(
+            "restore database copy from disk = 'k.bak' with move 'simulated' to 'copy.mdf', move 'simulated_log' to 'copy.ldf'",
+            """
+            use copy;
+            open symmetric key k1 decryption by asymmetric key a1;
+            select concat_ws('|', cast(decryptbykey(c) as varchar(10)), cast(decryptbycert(cert_id('c1'), e) as varchar(10)),
+                case when p = (select public_key from sys.asymmetric_keys) then 1 else 0 end,
+                (select concat(name, ':', count(*)) from sys.symmetric_keys k join sys.key_encryptions e on e.key_id = k.symmetric_key_id where name = 'k1' group by name))
+            from t
+            """));
     }
 
     [TestMethod]

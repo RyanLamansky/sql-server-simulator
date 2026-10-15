@@ -29,7 +29,7 @@ internal enum KeyEncryptionKind : byte
 /// simulator reads the encrypted form; <see cref="CryptProperty"/> is random
 /// bytes of the length real's encrypted form has.
 /// </summary>
-internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, KeyPair? keyPair, SymmetricKey? symmetricKey, byte[] cryptProperty)
+internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, KeyPair? keyPair, SymmetricKeyReference? symmetricKey, byte[] cryptProperty)
 {
     public readonly KeyEncryptionKind Kind = kind;
 
@@ -43,8 +43,8 @@ internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, Ke
     /// </summary>
     public readonly KeyPair? KeyPair = keyPair;
 
-    /// <summary>The encrypting key as it stood, read for its id, name and GUID alone.</summary>
-    public readonly SymmetricKey? SymmetricKey = symmetricKey;
+    /// <summary>The encrypting symmetric key, by the id, name and GUID it never changes.</summary>
+    public readonly SymmetricKeyReference? SymmetricKey = symmetricKey;
 
     public readonly byte[] CryptProperty = cryptProperty;
 
@@ -67,6 +67,16 @@ internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, Ke
         KeyEncryptionKind.SymmetricKey => this.SymmetricKey!.Id == other.SymmetricKey!.Id,
         _ => true,
     };
+}
+
+/// <summary>The symmetric key an encryption by one names: the id, name and GUID a key keeps for life.</summary>
+internal sealed class SymmetricKeyReference(int id, string name, Guid keyGuid)
+{
+    public readonly int Id = id;
+
+    public readonly string Name = name;
+
+    public readonly Guid KeyGuid = keyGuid;
 }
 
 /// <summary>
@@ -124,6 +134,9 @@ internal abstract class KeyPair(int id, string name, int principalId, int keyLen
     protected readonly StrongBox<RSA?> Rsa = rsa ?? new();
 
     public bool IsCertificate => this is Certificate;
+
+    /// <summary>The key pair if an operation has made it, for a backup to carry; null while none has.</summary>
+    public RSA? MadeKey => Volatile.Read(ref this.Rsa.Value);
 
     /// <summary>The class name real's messages use: <c>certificate</c> or <c>asymmetric key</c>.</summary>
     public string ClassName => this.IsCertificate ? "certificate" : "asymmetric key";

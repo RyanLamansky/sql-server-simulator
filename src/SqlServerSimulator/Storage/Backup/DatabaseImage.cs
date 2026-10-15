@@ -223,6 +223,7 @@ internal sealed partial class DatabaseImage
         w.Write(this.Types.Count);
         foreach (var type in this.Types)
             type.Write(w);
+        this.WriteKeys(w);
     }
 
     private static DatabaseImage Read(BinaryReader r)
@@ -333,6 +334,7 @@ internal sealed partial class DatabaseImage
             image.Sequences.Add(SequenceImage.Read(r));
         for (var i = r.ReadInt32(); i > 0; i--)
             image.Types.Add(TypeImage.Read(r));
+        ReadKeys(r, image);
         return image;
     }
 

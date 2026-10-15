@@ -1072,7 +1072,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindKey("find", "symmetric key", protector.Name!);
         if (!IsKeyOpen(context.Connection, database, key.Id))
             throw SimulatedSqlException.KeyNotOpen(key.Name, 1);
-        return new(KeyEncryptionKind.SymmetricKey, null, null, key, KeyEncryption.BlockEncryptedLength(keyBytes));
+        return new(KeyEncryptionKind.SymmetricKey, null, null, new(key.Id, key.Name, key.KeyGuid), KeyEncryption.BlockEncryptedLength(keyBytes));
     }
 
     private static string ProtectorText(KeyEncryption encryption) => encryption.Kind switch

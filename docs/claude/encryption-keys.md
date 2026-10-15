@@ -13,6 +13,7 @@ Nothing outside the simulator reads the encrypted form, and that is what lets th
 The store's entries are immutable, and `ALTER` replaces one under the same id, GUID and material.
 A statement's undo is a copy of the master key and the three dictionaries (`EncryptionKeyStore.Snapshot`), so key DDL rolls back with its transaction as real's does.
 A session's open keys live on the connection by id (`SimulatedDbConnection.OpenSymmetricKeys`), and those survive a rollback: `OPEN` and `CLOSE` aren't transactional on real.
+A backup carries the whole store (`DatabaseImage.Keys.cs`), each key pair with the RSA key it has made, so data encrypted before a backup decrypts in the restored database.
 
 ## Symmetric keys and real's cipher text
 
@@ -80,5 +81,4 @@ Each key statement raises its DDL event — `CREATE_MASTER_KEY` through `DROP_SY
 - `CREATE CERTIFICATE` / `CREATE ASYMMETRIC KEY … FROM` a file, binary, assembly or provider, loading a private key from one, `BACKUP CERTIFICATE`, `BACKUP` / `RESTORE MASTER KEY`, and the service master key's statements.
 - Temporary symmetric keys (`#name`) and keys from an extensible key management provider.
 - Module signing (`ADD SIGNATURE`, `IS_OBJECTSIGNED`, `sys.crypt_properties`), and users and logins mapped to a certificate.
-- `BACKUP DATABASE` of a database holding keys raises `NotSupportedException` ([`backup-restore.md`](backup-restore.md)).
 - Real's `master` holds the `##MS_…##` system certificates, which `CERT_ID` finds there; here `master` starts with none.

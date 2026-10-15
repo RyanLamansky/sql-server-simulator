@@ -10,7 +10,7 @@ partial class DatabaseImage
     /// <summary>
     /// A new database named <paramref name="name"/> holding the image's files
     /// (<paramref name="physicalNames"/> giving each file's path, by logical
-    /// name), filegroups, schemas, principals, permissions and id counters —
+    /// name), filegroups, schemas, principals, permissions, keys and id counters —
     /// everything registration doesn't overwrite and replay depends on.
     /// </summary>
     public Database CreateShell(string name, Dictionary<string, string> physicalNames)
@@ -27,7 +27,7 @@ partial class DatabaseImage
 
     /// <summary>
     /// Replaces <paramref name="database"/>'s files and filegroups, schema
-    /// owners, principals, permissions and role memberships with the image's,
+    /// owners, principals, permissions, role memberships and keys with the image's,
     /// adding the schemas it lacks.
     /// </summary>
     private void ApplyStorageAndSecurity(Database database, Dictionary<string, string> physicalNames)
@@ -83,6 +83,7 @@ partial class DatabaseImage
             database.RoleMembers.Clear();
             database.RoleMembers.AddRange(this.RoleMembers);
         }
+        this.ApplyKeys(database);
     }
 
     /// <summary>
