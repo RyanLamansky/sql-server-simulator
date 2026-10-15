@@ -126,7 +126,11 @@ public sealed class BackupRestoreWireTests
         await stop.CancelAsync();
         await poller;
 
-        await using var after = new SqlConnection(appConnectionString);
+        // The poller's last refused login can leave its pool in SqlClient's
+        // blocking period, which rethrows that error for a few seconds
+        // whatever the server would answer now, so the check reads through a
+        // connection of its own.
+        await using var after = new SqlConnection(appConnectionString + ";Pooling=false");
         await after.OpenAsync(TestContext.CancellationToken);
         await using var check = new SqlCommand("select v from t where id = 1", after);
         AreEqual("clean", await check.ExecuteScalarAsync(TestContext.CancellationToken));
