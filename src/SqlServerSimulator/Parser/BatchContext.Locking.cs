@@ -465,7 +465,7 @@ internal sealed partial class BatchContext
         // would outlive it.
         if (this.IsSkipping)
             return DataLockPlan.Bypass;
-        if (table.IsTableVariable || Simulation.SystemHeapTables.Values.Contains(table))
+        if (table.IsTableVariable)
             return DataLockPlan.Bypass;
         if (IsLocalTempName(table.Name))
             return this.AcquireLocalTempLock(table, hints, isWrite);
@@ -2477,8 +2477,6 @@ internal sealed partial class BatchContext
     private long? ResolveTableSnapshotXid(HeapTable table)
     {
         if (table.IsTableVariable || IsLocalTempName(table.Name))
-            return null;
-        if (Simulation.SystemHeapTables.Values.Contains(table))
             return null;
 
         var connection = this.Connection;

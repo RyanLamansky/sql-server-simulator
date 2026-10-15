@@ -198,4 +198,29 @@ public sealed class CompatibilityViewTests
                 from sysoledbusers where rmtsrvid = (select server_id from sys.servers where name = 'zzls')
                 """));
     }
+
+    [TestMethod]
+    public void Systypes_ListsTheDatabasesOwnTypes()
+        => AreEqual(
+            "t1|167|1|257|10|0|0|872468488|257|1|0|39|10|N tt|243|1|261|-1|0|0|N|261|0|0|0|0|N t2|56|0|258|4|10|0|N|258|0|1|56|10|0 t3|106|0|259|5|9|2|N|259|0|1|55|9|2 t4|231|0|260|-1|0|0|872468488|260|1|1|39|-1|N",
+            new Simulation().ExecuteScalar("""
+                create type t1 from varchar(10) not null;
+                create type t2 from int;
+                create type t3 from decimal(9,2);
+                create type t4 from nvarchar(max);
+                create type tt as table (a int);
+                select string_agg(concat_ws('|', name, xtype, status, xusertype, length, xprec, xscale, isnull(cast(collationid as varchar), 'N'), usertype,
+                    cast(variable as int), cast(allownulls as int), type, isnull(cast(prec as varchar), 'N'), isnull(cast(scale as varchar), 'N')), ' ')
+                    within group (order by status desc, xusertype)
+                from systypes where xusertype > 256
+                """));
+
+    [TestMethod]
+    public void Systypes_ResolvesAsRealSpellsIt()
+        => AreEqual(
+            "36|36|36|36|36",
+            new Simulation().ExecuteScalar("""
+                select concat_ws('|', (select count(*) from systypes), (select count(*) from sys.systypes), (select count(*) from dbo.systypes),
+                    (select count(*) from master..systypes), (select count(*) from master.sys.systypes))
+                """));
 }

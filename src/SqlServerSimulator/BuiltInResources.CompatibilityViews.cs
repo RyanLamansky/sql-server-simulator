@@ -12,8 +12,9 @@ partial class BuiltInResources
     /// Registers the compatibility views real defines over a modern catalog
     /// view — <c>sysforeignkeys</c>, <c>sysconstraints</c>,
     /// <c>sysreferences</c>, <c>sysmembers</c>, <c>sysfiles</c>,
-    /// <c>sysfilegroups</c>, <c>sysfulltextcatalogs</c>, <c>sysprotects</c>
-    /// and <c>syspermissions</c> — under their bare and <c>sys.</c> keys, so
+    /// <c>sysfilegroups</c>, <c>sysfulltextcatalogs</c>, <c>systypes</c>,
+    /// <c>sysprotects</c> and <c>syspermissions</c> — under their bare and
+    /// <c>sys.</c> keys, so
     /// they also resolve through <c>dbo</c> as every compatibility view does.
     /// Each reads its source's rows filtered for the principal as the source's
     /// are, since real's definition selects from that view; the column shapes
@@ -24,7 +25,7 @@ partial class BuiltInResources
     private static void RegisterCompatibilityProjections(Dictionary<string, CatalogView> views)
     {
         var sysname = SqlType.SystemName;
-        var path = NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit);
+        var path = NVarcharSqlType.Get(260, Collation.Baseline, Coercibility.Implicit);
 
         Compatibility(views, "sysforeignkeys",
         [
@@ -139,6 +140,30 @@ partial class BuiltInResources
             new("grantor", SqlType.SmallInt, null, true),
         ], EnumerateSysprotects);
 
+        Compatibility(views, "systypes",
+        [
+            new("name", sysname, 128, false),
+            new("xtype", SqlType.TinyInt, null, false),
+            new("status", SqlType.TinyInt, null, true),
+            new("xusertype", SqlType.SmallInt, null, true),
+            new("length", SqlType.SmallInt, null, false),
+            new("xprec", SqlType.TinyInt, null, false),
+            new("xscale", SqlType.TinyInt, null, false),
+            new("tdefault", SqlType.Int32, null, false),
+            new("domain", SqlType.Int32, null, false),
+            new("uid", SqlType.SmallInt, null, true),
+            new("reserved", SqlType.SmallInt, null, true),
+            new("collationid", SqlType.Int32, null, true),
+            new("usertype", SqlType.SmallInt, null, true),
+            new("variable", SqlType.Bit, null, false),
+            new("allownulls", SqlType.Bit, null, true),
+            new("type", SqlType.TinyInt, null, false),
+            new("printfmt", VarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit), 255, true),
+            new("prec", SqlType.SmallInt, null, true),
+            new("scale", SqlType.TinyInt, null, true),
+            new("collation", sysname, 128, true),
+        ], EnumerateSystypes);
+
         var bitmap = VarbinarySqlType.Get(4000);
         Compatibility(views, "syspermissions",
         [
@@ -185,6 +210,77 @@ partial class BuiltInResources
     private static SqlValue SmallInt(SqlValue value) => value.IsNull ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16((short)value.AsInt32);
 
     private static int Flag(SqlValue value) => !value.IsNull && value.AsBoolean ? 1 : 0;
+
+    /// <summary>
+    /// <c>sys.types</c> in the 2000 shape, the database's own types included:
+    /// a built-in type keeps its legacy <c>usertype</c>, TDS <c>type</c> code
+    /// and character precision (<see cref="SystypesRowData"/>), and a
+    /// user-defined one takes its base type's code, its own id as
+    /// <c>usertype</c>, its length in characters (or its precision) as
+    /// <c>prec</c> and its scale where the base type has one; a table type
+    /// is code 0 with <c>prec</c> 0. Each row's collation is the one
+    /// <c>sys.types</c> reports (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSystypes(BatchContext batch, Database database)
+    {
+        var rows = SourceRows(batch, database, "sys.types", out var source);
+        int Ordinal(string name) => OrdinalOf(source, name);
+        object?[]? Legacy(int userTypeId) => Array.Find(SystypesRowData, row => Convert.ToInt32(row[3], System.Globalization.CultureInfo.InvariantCulture) == userTypeId);
+        var printfmt = SqlValue.Null(VarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit));
+        foreach (var row in rows)
+        {
+            var systemTypeId = row[Ordinal("system_type_id")].AsByte;
+            var userTypeId = row[Ordinal("user_type_id")].AsInt32;
+            var maxLength = row[Ordinal("max_length")].AsInt16;
+            var nullable = Flag(row[Ordinal("is_nullable")]) == 1;
+            var collationName = row[Ordinal("collation_name")];
+            var own = Legacy(userTypeId);
+            var baseRow = own ?? Legacy(systemTypeId);
+            short? prec;
+            byte? scale;
+            if (own is not null)
+            {
+                prec = own[17] is { } legacyPrecision ? Convert.ToInt16(legacyPrecision, System.Globalization.CultureInfo.InvariantCulture) : null;
+                scale = own[18] is { } legacyScale ? Convert.ToByte(legacyScale, System.Globalization.CultureInfo.InvariantCulture) : null;
+            }
+            else if (baseRow is null)
+            {
+                prec = 0;
+                scale = null;
+            }
+            else
+            {
+                prec = baseRow[17] is null ? null
+                    : systemTypeId is 165 or 167 or 173 or 175 or 231 or 239
+                        ? (short)(maxLength == -1 ? -1 : systemTypeId is 231 or 239 ? maxLength / 2 : maxLength)
+                        : row[Ordinal("precision")].AsByte;
+                scale = baseRow[18] is null ? null : row[Ordinal("scale")].AsByte;
+            }
+            yield return
+            [
+                SqlValue.FromSystemName(row[Ordinal("name")].AsString),
+                SqlValue.FromByte(systemTypeId),
+                SqlValue.FromByte((byte)(nullable ? 0 : 1)),
+                SqlValue.FromInt16((short)userTypeId),
+                SqlValue.FromInt16(maxLength),
+                row[Ordinal("precision")],
+                row[Ordinal("scale")],
+                row[Ordinal("default_object_id")],
+                row[Ordinal("rule_object_id")],
+                SmallInt(row[Ordinal("schema_id")]),
+                SqlValue.FromInt16(0),
+                !collationName.IsNull && Collation.TryGetMetrics(collationName.AsString, out var metrics) ? SqlValue.FromInt32(metrics.CollationId) : SqlValue.Null(SqlType.Int32),
+                SqlValue.FromInt16(own is null ? (short)userTypeId : Convert.ToInt16(own[12], System.Globalization.CultureInfo.InvariantCulture)),
+                SqlValue.FromBoolean(systemTypeId is 165 or 167 or 231),
+                SqlValue.FromBoolean(nullable),
+                SqlValue.FromByte(baseRow is null ? (byte)0 : Convert.ToByte(baseRow[15], System.Globalization.CultureInfo.InvariantCulture)),
+                printfmt,
+                prec is { } p ? SqlValue.FromInt16(p) : SqlValue.Null(SqlType.SmallInt),
+                scale is { } sc ? SqlValue.FromByte(sc) : SqlValue.Null(SqlType.TinyInt),
+                collationName.IsNull ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(collationName.AsString),
+            ];
+        }
+    }
 
     private static IEnumerable<SqlValue[]> EnumerateSysforeignkeys(BatchContext batch, Database database) =>
         Project(batch, database, "sys.foreign_key_columns", static source =>
@@ -498,7 +594,7 @@ partial class BuiltInResources
     private static void RegisterServerCompatibilityProjections(Dictionary<string, CatalogView> views)
     {
         var sysname = SqlType.SystemName;
-        var path = NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit);
+        var path = NVarcharSqlType.Get(260, Collation.Baseline, Coercibility.Implicit);
         var sid = VarbinarySqlType.Get(85);
 
         Compatibility(views, "sysdatabases",
@@ -553,7 +649,7 @@ partial class BuiltInResources
             new("status", SqlType.Int32, null, true),
             new("perf", SqlType.Int32, null, true),
             new("dbid", SqlType.SmallInt, null, true),
-            new("name", NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), 128, true),
+            new("name", NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit), 128, true),
             new("filename", path, 260, true),
         ], EnumerateSysaltfiles);
 
@@ -561,7 +657,7 @@ partial class BuiltInResources
         [
             new("value", SqlType.Int32, null, false),
             new("config", SqlType.SmallInt, null, true),
-            new("comment", NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit), 255, false),
+            new("comment", NVarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit), 255, false),
             new("status", SqlType.SmallInt, null, true),
         ], (batch, database) => Project(batch, database, "sys.configurations", static source =>
         {
@@ -574,13 +670,13 @@ partial class BuiltInResources
             [
                 SqlValue.FromInt32(row[inUse].CoerceTo(SqlType.Int32).AsInt32),
                 SmallInt(row[id]),
-                SqlValue.FromString(NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit), row[description].AsString),
+                SqlValue.FromString(NVarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit), row[description].AsString),
                 SqlValue.FromInt16((short)(Flag(row[dynamic]) + (Flag(row[advanced]) * 2))),
             ];
         }));
 
-        var charsetName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
-        var charsetDescription = NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit);
+        var charsetName = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
+        var charsetDescription = NVarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit);
         var charsetRows = Array.ConvertAll(Charsets, charset => new SqlValue[]
         {
             SqlValue.FromInt16(charset.Type),
@@ -604,7 +700,7 @@ partial class BuiltInResources
             new("definition", SqlType.Image, null, true),
         ], (_, _) => charsetRows);
 
-        var messageText = NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit);
+        var messageText = NVarcharSqlType.Get(255, Collation.Baseline, Coercibility.Implicit);
         Compatibility(views, "sysmessages",
         [
             new("error", SqlType.Int32, null, false),
@@ -662,7 +758,7 @@ partial class BuiltInResources
         ], static (_, _) => EmptyCatalogRows);
         Compatibility(views, "sysopentapes",
         [
-            new("openTape", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, false),
+            new("openTape", NVarcharSqlType.Get(64, Collation.Baseline, Coercibility.Implicit), 64, false),
         ], static (_, _) => EmptyCatalogRows);
     }
 
@@ -695,7 +791,7 @@ partial class BuiltInResources
         int Ordinal(string name) => OrdinalOf(source, name);
         bool On(SqlValue[] row, string name) => Flag(row[Ordinal(name)]) == 1;
         var reserved = SqlValue.FromDateTime(new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        var path = NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit);
+        var path = NVarcharSqlType.Get(260, Collation.Baseline, Coercibility.Implicit);
         foreach (var row in rows)
         {
             var name = row[Ordinal("name")].AsString;
@@ -816,7 +912,7 @@ partial class BuiltInResources
     {
         var rows = SourceRows(batch, database, "sys.master_files", out var source);
         int Ordinal(string name) => OrdinalOf(source, name);
-        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var name = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
         foreach (var row in rows)
         {
             if (row[Ordinal("type")].AsByte > 1)

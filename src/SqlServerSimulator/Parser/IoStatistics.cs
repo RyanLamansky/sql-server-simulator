@@ -50,7 +50,7 @@ internal sealed class IoStatistics
             this.UseWorktable();
             return null;
         }
-        if ((table.IsTableVariable && table.InternalName is null) || Simulation.SystemHeapTables.Values.Contains(table))
+        if (table.IsTableVariable && table.InternalName is null)
             return null;
         var added = new IoTableCounts(table.InternalName ?? table.Name, table);
         this.tables.Insert(0, added);

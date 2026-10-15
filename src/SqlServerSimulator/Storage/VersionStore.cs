@@ -84,8 +84,7 @@ internal static class VersionStore
     internal static bool WillCaptureVersions(Database database, HeapTable table) =>
         (IsVersioningEnabled(database) || table.IsMemoryOptimized)
         && !table.IsTableVariable
-        && !BatchContext.IsLocalTempName(table.Name)
-        && !Simulation.SystemHeapTables.Values.Contains(table);
+        && !BatchContext.IsLocalTempName(table.Name);
 
     /// <summary>
     /// Captures a pre-write snapshot for the row at

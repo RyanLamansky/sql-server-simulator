@@ -1,5 +1,3 @@
-using SqlServerSimulator.Storage;
-using System.Collections.Frozen;
 using System.Globalization;
 
 namespace SqlServerSimulator;
@@ -63,60 +61,4 @@ internal static partial class BuiltInResources
 
         return null;
     }
-
-    public static readonly Lazy<FrozenDictionary<string, HeapTable>> SystemHeapTables = new(BuildSystemHeapTables);
-
-    private static FrozenDictionary<string, HeapTable> BuildSystemHeapTables()
-    {
-        HeapColumn[] systypesColumns =
-        [
-            new("name", SqlType.SystemName, 128, false),
-            new("xtype", SqlType.TinyInt, null, false),
-            new("status", SqlType.TinyInt, null, true),
-            new("xusertype", SqlType.SmallInt, null, true),
-            new("length", SqlType.SmallInt, null, false),
-            new("xprec", SqlType.TinyInt, null, false),
-            new("xscale", SqlType.TinyInt, null, false),
-            new("tdefault", SqlType.Int32, null, false),
-            new("domain", SqlType.Int32, null, false),
-            new("uid", SqlType.SmallInt, null, true),
-            new("reserved", SqlType.SmallInt, null, true),
-            new("collationid", SqlType.Int32, null, true),
-            new("usertype", SqlType.SmallInt, null, true),
-            new("variable", SqlType.Bit, null, false),
-            new("allownulls", SqlType.Bit, null, true),
-            new("type", SqlType.TinyInt, null, false),
-            new("printfmt", SqlType.Varchar, 255, true),
-            new("prec", SqlType.SmallInt, null, true),
-            new("scale", SqlType.TinyInt, null, true),
-            new("collation", SqlType.SystemName, 128, true),
-        ];
-        // System tables live outside any user database's id space — they're
-        // process-shared and the simulator doesn't expose them via OBJECT_ID
-        // (which routes through per-DB schema resolution). A small negative
-        // id keeps them distinguishable in debug output.
-        var systypes = new HeapTable("systypes", systypesColumns, objectId: -1);
-
-        foreach (var row in SystypesRowData)
-        {
-            var values = new SqlValue[systypesColumns.Length];
-            for (var i = 0; i < systypesColumns.Length; i++)
-                values[i] = ObjectToSqlValue(row[i], systypesColumns[i].Type);
-
-            _ = systypes.Heap.Insert(RowEncoder.EncodeRow(systypes.Schema, values));
-        }
-
-        return new Dictionary<string, HeapTable>(BuiltInToken.Comparer) { [systypes.Name] = systypes }
-            .ToFrozenDictionary(BuiltInToken.Comparer);
-    }
-
-    private static SqlValue ObjectToSqlValue(object? value, SqlType type) =>
-        value is null ? SqlValue.Null(type)
-        : type == SqlType.TinyInt ? SqlValue.FromByte(Convert.ToByte(value, CultureInfo.InvariantCulture))
-        : type == SqlType.SmallInt ? SqlValue.FromInt16(Convert.ToInt16(value, CultureInfo.InvariantCulture))
-        : type == SqlType.Int32 ? SqlValue.FromInt32(Convert.ToInt32(value, CultureInfo.InvariantCulture))
-        : type == SqlType.Bit ? SqlValue.FromBoolean((bool)value)
-        : type is VarcharSqlType ? SqlValue.FromVarchar((string)value)
-        : type == SqlType.SystemName ? SqlValue.FromSystemName((string)value)
-        : throw new NotSupportedException($"Built-in resource materializer doesn't know how to convert {value.GetType().Name} to {type}.");
 }

@@ -150,7 +150,7 @@ Six scopes, one home each.
 Field rosters live in the source XML docs; this captures only identity + load-bearing contracts.
 
 - **`Simulation`** = server / instance.
-  Holds `SystemHeapTables`, the `Databases` dict, and the `init`-only `ServerCollationName`, which seeds every new `Database` ([`collations.md`](docs/claude/collations.md#server-level-seed-simulationservercollationname)).
+  Holds the `Databases` dict and the `init`-only `ServerCollationName`, which seeds every new `Database` ([`collations.md`](docs/claude/collations.md#server-level-seed-simulationservercollationname)).
   Its public surface is whatever `QualityTests.PublicApiWhitelist` lists.
 - **`Database`** (internal) = one database.
   Holds `Schemas`, `CompatibilityLevel`, `CollationName`, the rowversion counter (`@@DBTS`), the MVCC version store, and the principal / permission / extended-property / full-text / DDL-trigger surfaces.
@@ -169,7 +169,7 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **`BatchContext`** (internal, `Parser/`) = one command execution.
   Owns the `ParserContext` (parse-time scratch) + batch-lifetime runtime state: `Variables`, `TableVariables` (`@t`), `CurrentUndoLog`, `CurrentTableVarUndoLog` (statement-only, disjoint from the tx-scoped log so `ROLLBACK TRAN` skips `@t`), `UdfFrame` / `ProcFrame` (non-null in a UDF/proc body — gates value-form `RETURN`).
   Exposes the **resolver contract** the parser depends on:
-  - `TryResolveTable` — `#foo` → `Connection.TempTables` (any qualifier); `@t` → `TableVariables` (1-part only); else named schema, an unqualified name searching the principal's default schema (a module body's own schema) before `dbo`; `SystemHeapTables` only as flat 1-part fallback.
+  - `TryResolveTable` — `#foo` → `Connection.TempTables` (any qualifier); `@t` → `TableVariables` (1-part only); else named schema, an unqualified name searching the principal's default schema (a module body's own schema) before `dbo`.
     An unqualified `CREATE` target asks `TryResolveCreateSchema` instead.
   - `TryResolveFunction` — 2-/3-part only.
     `TryResolveProcedure` accepts 1-part.

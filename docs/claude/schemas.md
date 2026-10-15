@@ -265,7 +265,6 @@ A `CREATE VIEW` element may be followed by further elements — a view body norm
 Every `HeapTable` carries a stable per-database `int ObjectId` assigned at CREATE time from `Database.AllocateObjectId()` (a `Database`-scoped `Interlocked.Increment` counter seeded at 100).
 DROP-then-recreate yields a fresh id, matching real SQL Server (probe-confirmed — counter never reuses values).
 The counter bypasses transaction rollback: a rolled-back CREATE TABLE still consumed an id, matching the identity-counter rule.
-System tables (`SystemHeapTables`) carry a sentinel `ObjectId = -1` — they're process-shared, sit outside per-DB id space, and aren't reachable through `OBJECT_ID()` anyway.
 Backs `OBJECT_ID()` plus `sys.tables` / `sys.objects` / `sys.columns.object_id`.
 
 **`OBJECT_ID(name [, type])`** scalar (`Parser/Expressions/ObjectId.cs`): returns the `int` ObjectId of the named object, or NULL when not found / wrong type / malformed name.

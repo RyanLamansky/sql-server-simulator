@@ -3925,7 +3925,7 @@ internal sealed partial class Selection
 
     private static bool WriterFences(HeapTable table, bool serializableHint, BatchContext batch) =>
         !batch.IsSkipping && (serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
-            && !table.IsTableVariable && !BatchContext.IsLocalTempName(table.Name) && !Simulation.SystemHeapTables.Values.Contains(table);
+            && !table.IsTableVariable && !BatchContext.IsLocalTempName(table.Name);
 
     // A clustered table's fallback is RangeS-U on every key and the infinity
     // anchor, real's own for a SERIALIZABLE UPDATE / DELETE that scans; a

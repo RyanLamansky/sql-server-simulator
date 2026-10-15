@@ -678,13 +678,6 @@ public sealed partial class Simulation
     internal readonly long StartTicks = Environment.TickCount64;
 
     /// <summary>
-    /// System tables (e.g. <c>systypes</c>). Materialized once per process and
-    /// shared across all <see cref="Simulation"/> instances; the bytes are
-    /// immutable.
-    /// </summary>
-    internal static FrozenDictionary<string, HeapTable> SystemHeapTables => BuiltInResources.SystemHeapTables.Value;
-
-    /// <summary>
     /// Global temp tables (<c>##foo</c>) — instance-wide, visible to every
     /// connection on this <see cref="Simulation"/>. Created by any session via
     /// <c>CREATE TABLE ##foo</c>; the creating connection is stamped on
@@ -1059,10 +1052,7 @@ public sealed partial class Simulation
     /// <summary>
     /// Per-Simulation lock coordinator — single gate every
     /// <see cref="LockResource"/> acquisition / release serializes through,
-    /// plus the cycle-detection walker. One instance per simulation;
-    /// SystemHeapTables (shared across simulations) bypass via the
-    /// resolver's no-Sch-S branch, so cross-simulation locking isn't a
-    /// concern.
+    /// plus the cycle-detection walker. One instance per simulation.
     /// </summary>
     internal readonly LockManager LockManager = new();
 

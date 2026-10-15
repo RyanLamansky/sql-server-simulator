@@ -165,7 +165,7 @@ The structured path routes through the constraint-enforcing insert rather than a
 
 - **`sys.types`**: ships full surface (35 system types + every user-defined table type).
   Table-type rows carry `system_type_id = 243`, `is_user_defined = 1`, `is_table_type = 1`, `is_nullable = 0` (probe-confirmed G1).
-  The new view ships alongside the legacy bare `systypes` table (kept for old code paths that read it directly).
+  The legacy `systypes` compatibility view projects it, a table type included (see [`catalog-views.md`](catalog-views.md)).
 - **`sys.table_types`**: per-database list of user-defined table types only — `name / type_table_object_id / is_user_defined / schema_id / user_type_id`.
 - **`sys.columns`**: extended to project columns through `type_table_object_id` (probe G3 join shape works end-to-end). is_identity / is_computed inherit from the column definition.
 - **`sys.parameters`**: extended with `is_readonly` (true for TVP parameters, false otherwise).

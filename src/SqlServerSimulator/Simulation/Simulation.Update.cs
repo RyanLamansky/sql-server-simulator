@@ -1822,13 +1822,11 @@ partial class Simulation
     /// <summary>
     /// Lockability predicate for heap-table mutation sites: row-X acquire
     /// only applies to tables that participate in cross-connection
-    /// contention. Table variables, local temp tables, and system tables
-    /// all bypass.
+    /// contention. Table variables and local temp tables bypass.
     /// </summary>
     internal static bool IsLockableTable(HeapTable table) =>
         !table.IsTableVariable
-        && !BatchContext.IsLocalTempName(table.Name)
-        && !Simulation.SystemHeapTables.Values.Contains(table);
+        && !BatchContext.IsLocalTempName(table.Name);
 
     /// <summary>
     /// Inserts a row a statement writes. On a table other sessions can read,

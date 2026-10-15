@@ -195,14 +195,6 @@ internal sealed partial class BatchContext
 
         if (!this.TryResolveSchema(name, out var schema))
         {
-            // 1-part fallback to system tables when the default schema lookup
-            // misses; matches the legacy bare-`systypes` access path. System
-            // tables are immutable and SHARED across Simulations (the dict
-            // lives in BuiltInResources as a static Value), so per-instance
-            // lock acquisition would race across simulations — skip the
-            // schema-stability acquire; nothing can DDL them anyway.
-            if (name.Count == 1)
-                return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
             table = null;
             return false;
         }
@@ -222,12 +214,6 @@ internal sealed partial class BatchContext
         // by the caller's TryResolveView, which applies the same redirect.
         if (this.TryRedirectThroughSynonym(schema, name, out var tableBase))
             return this.TryResolveTable(tableBase, out table);
-
-        // Bare 1-part also falls through to system tables when the default
-        // schema doesn't hold the table — same shared-instance reasoning,
-        // no Sch-S acquire.
-        if (name.Count == 1)
-            return Simulation.SystemHeapTables.TryGetValue(name.Leaf, out table);
 
         table = null;
         return false;

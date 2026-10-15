@@ -16,7 +16,7 @@ Skip-mode suppresses the entire action including name resolution.
 Outside an explicit transaction, TRUNCATE commits immediately (no log entry — same pattern as DROP TABLE on regular tables).
 
 ## Local temp tables (`#foo`)
-Per-connection `Dictionary<string, HeapTable> TempTables` on `SimulatedDbConnection`; routed by `BatchContext.TryResolveTable` (`#`-prefix leaf → connection dict, ignoring any qualifier; else the named schema's heap-table dict + flat `SystemHeapTables`).
+Per-connection `Dictionary<string, HeapTable> TempTables` on `SimulatedDbConnection`; routed by `BatchContext.TryResolveTable` (`#`-prefix leaf → connection dict, ignoring any qualifier; else the named schema's heap-table dict).
 Auto-cleared on `Dispose`, matching real SQL Server's session-close drop.
 Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confirmed against SQL Server 2025.
 
