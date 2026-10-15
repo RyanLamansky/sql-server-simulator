@@ -1304,6 +1304,7 @@ internal static partial class BuiltInResources
                 {
                     var (returnMaxLength, returnPrecision, returnScale) =
                         GetSysColumnMetadata(new HeapColumn(string.Empty, returnType, maxLength: null, nullable: true));
+                    var returnCollection = (fn as ScalarFunction)?.ReturnXmlSchemaCollection;
                     yield return [
                         fnObjectId,
                         emptyName,
@@ -1316,9 +1317,9 @@ internal static partial class BuiltInResources
                         trueBit,
                         falseBit,
                         falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean((fn as ScalarFunction)?.ReturnXmlDocument ?? false),
                         nullDefault,
-                        zeroInt,
+                        returnCollection is null ? zeroInt : SqlValue.FromInt32(returnCollection.Id),
                         falseBit,
                         trueBit,
                         VectorDims(returnType),
@@ -1345,9 +1346,9 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         fn is ClrFunction && p.Default is not null ? trueBit : falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(p.XmlDocument),
                         fn is ClrFunction && p.Default is { } fnDefault ? ClrDefaultValue(batch, fnDefault) : nullDefault,
-                        zeroInt,
+                        p.XmlSchemaCollection is { } parameterCollection ? SqlValue.FromInt32(parameterCollection.Id) : zeroInt,
                         SqlValue.FromBoolean(fnTvp),
                         trueBit,
                         VectorDims(p.Type),

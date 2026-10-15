@@ -128,6 +128,12 @@ internal sealed class ScalarFunction(
     /// <summary>The user alias type the return type was written as; see <see cref="HeapColumn.AliasType"/>.</summary>
     public AliasType? ReturnAliasType;
 
+    /// <summary>The collection an <c>xml(…)</c> return type is typed by; see <see cref="HeapColumn.XmlSchemaCollection"/>.</summary>
+    public XmlSchemaCollection? ReturnXmlSchemaCollection;
+
+    /// <summary>The return type was declared <c>xml(DOCUMENT …)</c>; see <see cref="HeapColumn.XmlDocument"/>.</summary>
+    public bool ReturnXmlDocument;
+
     /// <summary>
     /// True when the function was declared with
     /// <c>WITH RETURNS NULL ON NULL INPUT</c>. At call time, if any argument
@@ -455,6 +461,12 @@ internal sealed class UdfParameter(string name, SqlType type, Expression? defaul
 
     /// <summary>The user alias type the parameter was declared with; see <see cref="HeapColumn.AliasType"/>.</summary>
     public AliasType? AliasType;
+
+    /// <summary>The collection an <c>xml(…)</c> parameter is typed by; see <see cref="HeapColumn.XmlSchemaCollection"/>.</summary>
+    public XmlSchemaCollection? XmlSchemaCollection;
+
+    /// <summary>The parameter was declared <c>xml(DOCUMENT …)</c>; see <see cref="HeapColumn.XmlDocument"/>.</summary>
+    public bool XmlDocument;
 
     /// <summary>The line of the parameter's name in the CREATE text, which a schema-bound alias-type refusal reports.</summary>
     public int LineNumber;

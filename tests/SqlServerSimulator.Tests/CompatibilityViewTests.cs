@@ -223,4 +223,40 @@ public sealed class CompatibilityViewTests
                 select concat_ws('|', (select count(*) from systypes), (select count(*) from sys.systypes), (select count(*) from dbo.systypes),
                     (select count(*) from master..systypes), (select count(*) from master.sys.systypes))
                 """));
+
+    /// <summary>
+    /// The usage views list every column and parameter a user-defined type or
+    /// a typed <c>xml</c> declares — a table's, a table type's, a function's
+    /// result and a function's return value as parameter 0 (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void UsageViews()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create type a1 from varchar(10)",
+            "create type tt as table (x a1, y int)",
+            """create xml schema collection xsc as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="e" type="xs:string"/></xs:schema>'""",
+            "create table t (id int, c a1, d xml(xsc), e xml, f a1 not null)",
+            "create procedure p @p1 a1, @p2 tt readonly, @p3 xml(document xsc) = null, @p4 int as select 1",
+            "create function f (@x a1) returns a1 as begin return @x end",
+            "create function tvf (@x a1) returns @r table (r a1, s xml(xsc)) as begin return end");
+        AreEqual(
+            "c|t|2|a1 c|t|5|a1 c|tt|1|a1 c|tvf|1|a1 p|f|0|a1 p|f|1|a1 p|p|1|a1 p|p|2|tt p|tvf|1|a1 xc|t|3|xsc xc|tvf|2|xsc xp|p|3|xsc",
+            simulation.ExecuteScalar("""
+                select string_agg(x, ' ') within group (order by x) from (
+                    select concat_ws('|', 'c', case when object_name(object_id) like 'TT[_]tt[_]%' then 'tt' else object_name(object_id) end, column_id, type_name(user_type_id)) from sys.column_type_usages
+                    union all select concat_ws('|', 'p', object_name(object_id), parameter_id, type_name(user_type_id)) from sys.parameter_type_usages
+                    union all select concat_ws('|', 'xc', object_name(object_id), column_id, 'xsc') from sys.column_xml_schema_collection_usages
+                    union all select concat_ws('|', 'xp', object_name(object_id), parameter_id, 'xsc') from sys.parameter_xml_schema_collection_usages) u(x)
+                """));
+    }
+
+    [TestMethod]
+    public void SecurableClasses()
+        => AreEqual("29|DATABASE|0|EXTERNAL MODEL|110", new Simulation().ExecuteScalar("""
+            select concat_ws('|', count(*), min(case when class = 0 then class_desc end), min(class), max(case when class = 110 then class_desc end), max(class))
+            from sys.securable_classes
+            """));
 }

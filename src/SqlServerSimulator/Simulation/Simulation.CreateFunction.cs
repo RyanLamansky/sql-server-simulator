@@ -397,7 +397,7 @@ partial class Simulation
     private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         var returnSpelledNumeric = IsNumericTypeWord(context.Token);
-        var returnType = ParseFunctionReturnType(context, ordinal: 0, parameterName: "", out var returnMaxLength, out var returnAliasType);
+        var returnType = ParseFunctionReturnType(context, ordinal: 0, parameterName: "", out var returnMaxLength, out var returnAliasType, out var returnXmlType);
         returnSpelledNumeric = returnAliasType?.SpelledNumeric ?? returnSpelledNumeric;
 
         // Optional WITH clause. RETURNS NULL ON NULL INPUT is the only option
@@ -539,6 +539,8 @@ partial class Simulation
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             ReturnSpelledNumeric = returnSpelledNumeric,
             ReturnAliasType = returnAliasType,
+            ReturnXmlSchemaCollection = returnXmlType?.Collection,
+            ReturnXmlDocument = returnXmlType?.Document ?? false,
             ReturnMaxLength = returnMaxLength,
             BodyLineOffset = CountNewlines(commandText, 0, bodyStart),
             InlineOption = options.Inline,
@@ -970,10 +972,11 @@ partial class Simulation
         SqlType paramType;
         int? paramMaxLength;
         AliasType? aliasType;
+        (XmlSchemaCollection Collection, bool Document)? xmlType = null;
         var typeResolved = true;
         try
         {
-            paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out paramMaxLength, out aliasType);
+            paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out paramMaxLength, out aliasType, out xmlType);
         }
         catch (SimulatedSqlException error) when (error.Number == 2715)
         {
@@ -1000,7 +1003,15 @@ partial class Simulation
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
             throw SimulatedSqlException.OutputOptionNotAllowed();
         _ = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
-        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength, LineNumber = variable.LineNumber };
+        return new UdfParameter(name, paramType, defaultExpression)
+        {
+            SpelledNumeric = spelledNumeric,
+            AliasType = aliasType,
+            DeclaredMaxLength = paramMaxLength,
+            LineNumber = variable.LineNumber,
+            XmlSchemaCollection = xmlType?.Collection,
+            XmlDocument = xmlType?.Document ?? false,
+        };
     }
 
     /// <summary>
@@ -1119,10 +1130,29 @@ partial class Simulation
     /// <paramref name="ordinal"/> is the parameter's position, 0 for the
     /// return type.
     /// </summary>
-    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, string parameterName, out int? maxLength, out AliasType? aliasType)
+    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, string parameterName, out int? maxLength, out AliasType? aliasType) =>
+        ParseFunctionReturnType(context, ordinal, parameterName, out maxLength, out aliasType, out _);
+
+    /// <summary>
+    /// A function parameter's or return value's type, with the collection
+    /// an <c>xml(…)</c> type names in <paramref name="xmlType"/>, as a
+    /// procedure parameter's takes one.
+    /// </summary>
+    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, string parameterName, out int? maxLength, out AliasType? aliasType, out (XmlSchemaCollection Collection, bool Document)? xmlType)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
+        xmlType = null;
+        if (context.Token is Operator { Character: '(' }
+            && qualifiedTypeName.Count == 1
+            && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml")
+            && PeekIsXmlSchemaArgument(context))
+        {
+            xmlType = ParseXmlSchemaCollectionArgument(context);
+            context.MoveNextRequired();
+            (maxLength, aliasType) = (null, null);
+            return SqlType.Xml;
+        }
 
         int? declaredMaxLength = null;
         int? declaredScale = null;

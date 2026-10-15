@@ -218,7 +218,7 @@ partial class Simulation
 #pragma warning restore CA2100
             var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
             foreach (var param in function.Parameters)
-                variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, Storage.SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+                variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, Storage.SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
             var attempt = new InlinedScalarCalls(errors: null, body: true);
             var analysis = new BatchContext(bodyCommand, variables, new UdfFrame(function is ScalarFunction scalar ? scalar.ReturnType : Storage.SqlType.Int32)) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, InlinedCalls = attempt, ModuleSchema = function.Schema };
             var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);

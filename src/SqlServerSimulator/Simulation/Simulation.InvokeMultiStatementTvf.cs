@@ -77,7 +77,11 @@ partial class Simulation
             // variable assignment is (probed 2026-09-27 against SQL Server
             // 2025).
             value = Parser.Expressions.Cast.ApplyCoercion(value, param.Type, param.DeclaredMaxLength);
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            // A typed xml argument is validated as it binds, at the calling
+            // statement (probed 2026-10-15 against SQL Server 2025).
+            if (param.XmlSchemaCollection is not null)
+                value = Parser.Expressions.Cast.ValidateTypedXml(value, param.XmlSchemaCollection, param.XmlDocument);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
         }
 
         // Construct a fresh return-table HeapTable for this call. Constraint

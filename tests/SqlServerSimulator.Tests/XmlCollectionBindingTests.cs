@@ -231,4 +231,35 @@ public sealed class XmlCollectionBindingTests
             2298,
             "Attribute 'bogus' is not valid at location '/*:schema[1]/*:element[1]'.");
     }
+
+    // ---- Function parameters and return values -----------------------------
+
+    /// <summary>
+    /// A function's parameter and return value take a typed <c>xml</c> as a
+    /// procedure's parameter does: a scalar call validates its argument at the
+    /// calling statement, where an inline function ignoring the argument
+    /// doesn't, and <c>sys.parameters</c> names the collection (probed
+    /// 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void FunctionParameters_TakeATypedXml()
+    {
+        var simulation = Typed();
+        simulation.ExecuteBatches(
+            "create function f (@x xml(c)) returns int as begin return 1 end",
+            "create function g (@x xml(document c)) returns xml(c) as begin return @x end",
+            "create function h (@x xml(c)) returns table as return select 1 as one");
+        AreEqual(1, simulation.ExecuteScalar("select dbo.f('<a>1</a>')"));
+        var invalid = simulation.AssertSqlError("select 1;\nselect dbo.f('<b/>')", 6913);
+        AreEqual((2, ""), (invalid.Errors[0].LineNumber, invalid.Errors[0].Procedure));
+        _ = simulation.AssertSqlError("select dbo.g('<a>1</a><a>2</a>')", 6901);
+        AreEqual(1, simulation.ExecuteScalar("select one from dbo.h('<b/>')"));
+        AreEqual(
+            "f|1|65536|0 g|0|65536|0 g|1|65536|1 h|1|65536|0",
+            simulation.ExecuteScalar("""
+                select string_agg(concat_ws('|', object_name(object_id), parameter_id, xml_collection_id, cast(is_xml_document as int)), ' ')
+                    within group (order by object_name(object_id), parameter_id)
+                from sys.parameters where xml_collection_id > 0
+                """));
+    }
 }

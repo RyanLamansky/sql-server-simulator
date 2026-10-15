@@ -445,7 +445,7 @@ partial class Simulation
             foreach (var param in function.Parameters)
             {
                 if (param.TableType is null)
-                    variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+                    variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
             }
             var frame = new UdfFrame(function.ReturnType) { AnalyzesReturnMask = true };
             var analysis = new BatchContext(bodyCommand, variables, frame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleSchema = function.Schema };
@@ -487,7 +487,7 @@ partial class Simulation
         foreach (var param in parameters)
         {
             if (param.TableType is null)
-                variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+                variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
         }
         return variables;
     }

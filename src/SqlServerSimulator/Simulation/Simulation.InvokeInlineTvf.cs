@@ -126,7 +126,7 @@ partial class Simulation
             // variable assignment is (probed 2026-09-27 against SQL Server
             // 2025).
             value = Parser.Expressions.Cast.ApplyCoercion(value, param.Type, param.DeclaredMaxLength);
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
         }
 
         // The UdfFrame here is a placeholder — inline TVF bodies don't use
@@ -234,7 +234,7 @@ partial class Simulation
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), batch)).CoerceTo(param.Type)
                 : argValues[i];
             value = Parser.Expressions.Cast.ApplyCoercion(value, param.Type, param.DeclaredMaxLength);
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric, XmlSchemaCollection = param.XmlSchemaCollection, XmlDocument = param.XmlDocument };
         }
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         var savedAnsiNulls = connection.AnsiNulls;
