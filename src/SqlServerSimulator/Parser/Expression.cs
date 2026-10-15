@@ -712,7 +712,9 @@ internal abstract class Expression : ExpressionNode
                 // reserve any of them); the runtime check rejects date/time
                 // LHS with Msg 8116. Binds tighter than `+` so the zone-name
                 // slot is a primary expression — full expressions need parens.
-                case UnquotedString { ContextualKeyword: ContextualKeyword.At }:
+                // An AT not followed by TIME is an alias, as in `SELECT 1 at`
+                // (probed 2026-10-15 against SQL Server 2025).
+                case UnquotedString { ContextualKeyword: ContextualKeyword.At } when AtTimeZone.IsAhead(context):
                     {
                         expression = AtTimeZone.ParsePostfix(expression, context);
                         continue;

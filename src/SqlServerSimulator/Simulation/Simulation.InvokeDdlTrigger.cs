@@ -451,7 +451,7 @@ partial class Simulation
             || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
             || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))
             || Is(1, "FULLTEXT")
-            || Is(1, "MASTER") || Is(1, "CERTIFICATE") || Is(1, "SYMMETRIC")
+            || Is(1, "MASTER") || Is(1, "CERTIFICATE") || Is(1, "SYMMETRIC") || Is(1, "ASYMMETRIC")
             ? CommandTextExtent.ThroughSeparator
             : CommandTextExtent.Statement;
     }

@@ -59,6 +59,10 @@ partial class Simulation
                 return TryParseAlterMasterKey(context);
             case UnquotedString symmetricWord when symmetricWord.Value.Equals("SYMMETRIC", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterSymmetricKey(context);
+            case UnquotedString asymmetricWord when asymmetricWord.Value.Equals("ASYMMETRIC", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterKeyPair(context, certificate: false);
+            case UnquotedString certificateWord when certificateWord.Value.Equals("CERTIFICATE", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterKeyPair(context, certificate: true);
             case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterSecurityPolicy(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:

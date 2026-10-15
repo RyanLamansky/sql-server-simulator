@@ -470,6 +470,79 @@ public sealed class EncryptionKeyTests
     }
 
     [TestMethod]
+    public void AsymmetricKeys_CatalogAndFunctions()
+        => AreEqual("a1:256:MK:3R:RSA_2048:2048:276:0x060200000024000052534131:8:1:S-1-9-2|a3:257:PW:4R:RSA_3072:3072:404|A256:8:256|260:0x00010001:hello:260:NULL|264:0x0100070204000000:1:0:NULL|hi|varbinary|S-1-9-2", new Simulation().ExecuteScalar(MasterKey + """
+            create asymmetric key a1 with algorithm = rsa_2048;
+            create asymmetric key a3 with algorithm = rsa_3072 encryption by password = 'Ap!12345678';
+            create symmetric key s1 with algorithm = aes_256 encryption by asymmetric key a1;
+            declare @id int = asymkey_id('a1');
+            declare @e varbinary(8000) = encryptbyasymkey(@id, 'hello'), @s varbinary(8000) = signbyasymkey(@id, 'data');
+            open symmetric key s1 decryption by asymmetric key a1;
+            declare @c varbinary(8000) = encryptbykey(key_guid('s1'), 'hi');
+            close symmetric key s1;
+            select concat_ws('|',
+                (select concat_ws(':', name collate database_default, asymmetric_key_id, pvt_key_encryption_type, algorithm, algorithm_desc, key_length, datalength(public_key),
+                    convert(varchar(30), substring(public_key, 1, 12), 1), datalength(thumbprint), case when sid = 0x010300000000000902000000 + thumbprint then 1 end,
+                    left(string_sid, 7)) from sys.asymmetric_keys where name = 'a1'),
+                (select concat_ws(':', name collate database_default, asymmetric_key_id, pvt_key_encryption_type, algorithm, algorithm_desc, key_length, datalength(public_key)) from sys.asymmetric_keys where name = 'a3'),
+                (select concat_ws(':', crypt_type collate database_default, datalength(thumbprint), datalength(crypt_property)) from sys.key_encryptions where key_id = key_id('s1')),
+                concat_ws(':', datalength(@e), convert(varchar(10), substring(@e, 257, 4), 1), cast(decryptbyasymkey(@id, @e) as varchar(10)),
+                    datalength(encryptbyasymkey(@id, replicate('a', 190))), isnull(cast(datalength(encryptbyasymkey(@id, replicate('a', 191))) as varchar), 'NULL')),
+                concat_ws(':', datalength(@s), convert(varchar(20), substring(@s, 1, 8), 1), verifysignedbyasymkey(@id, 'data', @s), verifysignedbyasymkey(@id, 'datx', @s),
+                    isnull(cast(datalength(signbyasymkey(asymkey_id('a3'), 'x')) as varchar), 'NULL')),
+                cast(decryptbykeyautoasymkey(@id, null, @c) as varchar(10)),
+                cast(sql_variant_property(asymkeyproperty(@id, 'sid'), 'BaseType') as sysname), left(cast(asymkeyproperty(@id, 'string_sid') as nvarchar(100)), 7))
+            """));
+
+    [TestMethod]
+    [DataRow("create asymmetric key a1 with algorithm = rsa_2048", 15396, 1)]
+    [DataRow("open symmetric key s3 decryption by asymmetric key a3", 15334, 6)]
+    [DataRow("open symmetric key s3 decryption by asymmetric key a3 with password = 'wrong'", 15466, 9)]
+    [DataRow("open symmetric key s3 decryption by asymmetric key a1 with password = 'x'", 15313, 6)]
+    [DataRow("alter symmetric key s1 add encryption by asymmetric key a1", 15315, 2)]
+    [DataRow("drop asymmetric key a1", 15352, 1)]
+    [DataRow("drop asymmetric key nope", 15151, 1)]
+    [DataRow("alter asymmetric key nope remove private key", 15151, 1)]
+    [DataRow("alter asymmetric key a3 with private key (decryption by password = 'wrong', encryption by password = 'Bp!12345678')", 15466, 9)]
+    [DataRow("alter asymmetric key a1 with private key (decryption by password = 'x', encryption by password = 'Bp!12345678')", 15147, 1)]
+    [DataRow("alter asymmetric key a3 with private key (encryption by password = 'Cp!12345678')", 15334, 2)]
+    [DataRow("alter asymmetric key a1 with private key (encryption by password = 'short')", 33062, 2)]
+    [DataRow("alter asymmetric key a1 remove private key; alter asymmetric key a1 remove private key", 15563, 1)]
+    [DataRow("alter asymmetric key a1 remove private key; open symmetric key s1 decryption by asymmetric key a1", 15556, 1)]
+    [DataRow("alter certificate c1 remove private key", 33011, 1)]
+    [DataRow("alter certificate c2 remove private key; alter certificate c2 with private key (encryption by password = 'Bp!12345678')", 15342, 1)]
+    [DataRow("alter certificate c2 with private key (decryption by password = 'x')", 15397, 1)]
+    [DataRow("alter certificate c2 with private key (file = 'c.pvk', decryption by password = 'x')", 15332, 1)]
+    [DataRow("alter authorization on asymmetric key::a1 to r1", 15345, 1)]
+    [DataRow("drop master key", 15580, 1)]
+    public void AsymmetricKeyAndCertificateRefusals(string statement, int number, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError(MasterKey + """
+            create asymmetric key a1 with algorithm = rsa_2048;
+            create asymmetric key a3 with algorithm = rsa_2048 encryption by password = 'Ap!12345678';
+            create certificate c1 with subject = 'x';
+            create certificate c2 with subject = 'y';
+            create symmetric key s1 with algorithm = aes_256 encryption by asymmetric key a1, certificate c1;
+            create symmetric key s3 with algorithm = aes_256 encryption by asymmetric key a3;
+            create role r1;
+            """ + statement, number).State);
+
+    [TestMethod]
+    public void AlterKeyPair_ReprotectsAndRemovesPrivateKeys()
+        => AreEqual("a1:PW|a3:MK|c1:NA:0|264|NULL|388", new Simulation().ExecuteScalar(MasterKey + """
+            create asymmetric key a1 with algorithm = rsa_2048;
+            create asymmetric key a3 with algorithm = rsa_2048 encryption by password = 'Ap!12345678';
+            create certificate c1 with subject = 'x';
+            alter asymmetric key a1 with private key (encryption by password = 'Bp!12345678');
+            alter asymmetric key a3 with private key (decryption by password = 'Ap!12345678');
+            alter certificate c1 with active for begin_dialog = off;
+            alter certificate c1 remove private key;
+            select concat_ws('|', (select string_agg(concat(name collate database_default, ':', pvt_key_encryption_type), '|') within group (order by name) from sys.asymmetric_keys),
+                (select concat_ws(':', name collate database_default, pvt_key_encryption_type, is_active_for_begin_dialog) from sys.certificates),
+                datalength(signbyasymkey(asymkey_id('a1'), 'x', N'Bp!12345678')), isnull(cast(datalength(signbycert(cert_id('c1'), 'x')) as varchar), 'NULL'),
+                datalength(encryptbycert(cert_id('c1'), 'x')))
+            """));
+
+    [TestMethod]
     public void OpenAndCloseStillReachCursors()
         => AreEqual(1, new Simulation().ExecuteScalar("""
             declare symmetric cursor for select 1;
@@ -490,6 +563,7 @@ public sealed class EncryptionKeyTests
 
     [TestMethod]
     [DataRow("create certificate c from file = 'c.cer'")]
+    [DataRow("create asymmetric key a from file = 'a.snk'")]
     [DataRow("create symmetric key #k with algorithm = aes_256 encryption by password = 'Abcdefgh12'")]
     [DataRow("create certificate c with subject = 'c'; select certencoded(cert_id('c'))")]
     [DataRow("create certificate c with subject = 'c'; select certprivatekey(cert_id('c'), N'Abcdefgh12')")]

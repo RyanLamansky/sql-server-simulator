@@ -195,4 +195,16 @@ public sealed class AtTimeZoneTests
         // datetime2(3) only stores 3 fractional digits, so .1234567 → .123.
         AreEqual(123L * TimeSpan.TicksPerMillisecond, result.Ticks % TimeSpan.TicksPerSecond);
     }
+
+    /// <summary>
+    /// <c>AT</c> without <c>TIME</c> after it is an alias, a column's or a
+    /// table's (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AtWithoutTime_IsAnAlias()
+        => AreEqual("1|2|3", new Simulation().ExecuteScalar("""
+            create table at (at int);
+            insert at values (3);
+            select concat_ws('|', x.at, x.b, (select at.at from at at)) from (select 1 at, 2 b) x
+            """));
 }

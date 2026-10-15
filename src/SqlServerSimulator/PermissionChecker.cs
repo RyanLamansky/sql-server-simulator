@@ -1316,6 +1316,7 @@ internal static class PermissionChecker
     internal const byte ClassFulltextCatalog = 23;
     internal const byte ClassSymmetricKey = 24;
     internal const byte ClassCertificate = 25;
+    internal const byte ClassAsymmetricKey = 26;
 
     // Server-scope permissions (sys.server_permissions.class = 100) live on
     // Simulation.ServerPermissions, not a Database; Simulation.HoldsServerPermission
@@ -1501,6 +1502,8 @@ internal static class PermissionChecker
                 return database.EncryptionKeys.SymmetricKeyById(majorId) is { } key && closure.Contains(key.PrincipalId);
             case ClassCertificate:
                 return database.EncryptionKeys.CertificateById(majorId) is { } certificate && closure.Contains(certificate.PrincipalId);
+            case ClassAsymmetricKey:
+                return database.EncryptionKeys.AsymmetricKeyById(majorId) is { } asymmetricKey && closure.Contains(asymmetricKey.PrincipalId);
             default:
                 return false;
         }
@@ -1900,8 +1903,8 @@ internal static class PermissionChecker
     }
 
     /// <summary>
-    /// Whether a restricted principal sees a symmetric key or certificate
-    /// (<paramref name="securableClass"/> 24 or 25): as its owner, with full
+    /// Whether a restricted principal sees a symmetric key, certificate or
+    /// asymmetric key (<paramref name="securableClass"/> 24, 25 or 26): as its owner, with full
     /// metadata visibility, or holding any permission on it — what real asks
     /// before a key's catalog row shows, its name resolves or it opens.
     /// </summary>
@@ -2226,6 +2229,8 @@ internal static class PermissionChecker
                 return "SYMMETRIC KEY";
             case ClassCertificate:
                 return "CERTIFICATE";
+            case ClassAsymmetricKey:
+                return "ASYMMETRIC KEY";
             default:
                 return "DATABASE";
         }

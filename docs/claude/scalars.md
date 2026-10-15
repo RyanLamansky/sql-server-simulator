@@ -961,7 +961,7 @@ A bare `NULL` argument is Msg 8116 naming `NULL` (`Argument data type NULL is in
 ## Cryptographic functions
 
 `Parser/Expressions/CryptographicFunctions.cs`: one descriptor-driven class for the key and certificate lookups (`KEY_ID`, `KEY_GUID`, `KEY_NAME`, `CERT_ID`, `ASYMKEY_ID`, `CERTPROPERTY`, `ASYMKEYPROPERTY`, `SYMKEYPROPERTY`), the `ENCRYPTBY…` / `DECRYPTBY…` / `SIGNBY…` / `VERIFYSIGNEDBY…` families, `IS_OBJECTSIGNED` and the passphrase pair.
-The symmetric key and certificate members work over the database's key store, described with it in [`encryption-keys.md`](encryption-keys.md); asymmetric keys can't be created yet, so the `…ASYMKEY…` members and `IS_OBJECTSIGNED` answer as real does for a key that doesn't exist: NULL, and 0 from `VERIFYSIGNEDBYASYMKEY` unless the key id itself is NULL.
+The key and certificate members work over the database's key store, described with it in [`encryption-keys.md`](encryption-keys.md); module signing isn't built, so `IS_OBJECTSIGNED` answers as real does for a signature that doesn't exist, NULL, and a `VERIFYSIGNEDBY…` against a missing key is 0 unless the key id itself is NULL.
 `SYMKEYPROPERTY` is NULL for every key, as real's is for any key not from an extensible key management provider.
 Results are `int`, `uniqueidentifier` (`KEY_GUID`), `nvarchar(4000)` (`KEY_NAME`), `sql_variant` (the `…PROPERTY` trio) or `varbinary(8000)`.
 

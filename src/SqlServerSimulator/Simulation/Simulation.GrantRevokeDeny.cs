@@ -110,6 +110,10 @@ partial class Simulation
                 objectColumns = ParsePermissionColumnList(context);
             switch (explicitClass)
             {
+                case "ASYMMETRIC KEY":
+                    permClass = PermissionChecker.ClassAsymmetricKey;
+                    objectSecurableName = securableName;
+                    break;
                 case "CERTIFICATE":
                     permClass = PermissionChecker.ClassCertificate;
                     objectSecurableName = securableName;
@@ -606,6 +610,7 @@ partial class Simulation
                 PermissionChecker.ClassXmlSchemaCollection => "XML SCHEMA COLLECTION",
                 PermissionChecker.ClassSymmetricKey => "SYMMETRIC KEY",
                 PermissionChecker.ClassCertificate => "CERTIFICATE",
+                PermissionChecker.ClassAsymmetricKey => "ASYMMETRIC KEY",
                 _ => "FULLTEXT CATALOG",
             };
             if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection)
@@ -734,6 +739,7 @@ partial class Simulation
             securablePrincipal.TypeCode == "R" ? securablePrincipal.OwningPrincipalId : securablePrincipal.PrincipalId,
         PermissionChecker.ClassSymmetricKey => database.EncryptionKeys.SymmetricKeyById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         PermissionChecker.ClassCertificate => database.EncryptionKeys.CertificateById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
+        PermissionChecker.ClassAsymmetricKey => database.EncryptionKeys.AsymmetricKeyById(permMajorId)?.PrincipalId ?? Database.DboPrincipalId,
         _ => Database.DboPrincipalId,
     };
 
@@ -1071,7 +1077,7 @@ partial class Simulation
     /// </summary>
     private static bool IsDerivedSecurableClass(byte permClass) =>
         permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog
-            or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate;
+            or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate or PermissionChecker.ClassAsymmetricKey;
 
     /// <summary>
     /// Resolves a <c>TYPE::</c>, <c>XML SCHEMA COLLECTION::</c> or
@@ -1115,6 +1121,11 @@ partial class Simulation
                     && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
                     ? certificate.Id
                     : throw SimulatedSqlException.CannotFindKey("find", "certificate", name.Leaf);
+            case PermissionChecker.ClassAsymmetricKey:
+                return database.EncryptionKeys.AsymmetricKeys.TryGetValue(name.Leaf, out var asymmetricKey)
+                    && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassAsymmetricKey, asymmetricKey.Id, asymmetricKey.PrincipalId)
+                    ? asymmetricKey.Id
+                    : throw SimulatedSqlException.CannotFindKey("find", "asymmetric key", name.Leaf);
             default:
                 return name.Count == 1 && database.FullTextCatalogs.TryGetValue(name.Leaf, out var catalog)
                     ? catalog.Id

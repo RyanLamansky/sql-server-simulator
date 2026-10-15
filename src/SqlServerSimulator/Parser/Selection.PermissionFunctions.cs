@@ -237,6 +237,10 @@ partial class Selection
                 return name is not null && database.Schemas.TryGetValue(name, out var schema)
                     ? (name, className, Granted(PermissionChecker.ClassSchema, schema.SchemaId, 0), null)
                     : null;
+            case "ASYMMETRIC KEY":
+                return name is not null && database.EncryptionKeys.AsymmetricKeys.TryGetValue(name, out var asymmetricKey)
+                    ? (name, className, Granted(PermissionChecker.ClassAsymmetricKey, asymmetricKey.Id, 0), null)
+                    : null;
             case "CERTIFICATE":
                 return name is not null && database.EncryptionKeys.Certificates.TryGetValue(name, out var certificate)
                     ? (name, className, Granted(PermissionChecker.ClassCertificate, certificate.Id, 0), null)
@@ -253,7 +257,7 @@ partial class Selection
             default:
                 // A class real doesn't know lists nothing.
                 return Array.Exists(BuiltinPermissionRows.All, row => row.ClassDescription == className)
-                    ? throw new NotSupportedException($"fn_my_permissions is modeled for the server, database, object, schema, principal, symmetric key and certificate classes, not '{className}'.")
+                    ? throw new NotSupportedException($"fn_my_permissions is modeled for the server, database, object, schema, principal and key classes, not '{className}'.")
                     : null;
         }
     }

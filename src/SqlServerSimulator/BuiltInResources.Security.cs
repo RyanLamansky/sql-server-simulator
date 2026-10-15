@@ -261,7 +261,7 @@ internal static partial class BuiltInResources
         ], EnumerateSysServerRoleMembers);
 
         // sys.asymmetric_keys / sys.certificates: the database's asymmetric
-        // keys (none can be created yet) and certificates. SMO's Login and
+        // keys and certificates (rows in BuiltInResources.EncryptionKeys.cs). SMO's Login and
         // User property-bag queries LEFT JOIN both ON sid, and its Login bag
         // LEFT JOINs sys.credentials ON credential_id (also reached as
         // master.sys.certificates / master.sys.asymmetric_keys), so without
@@ -284,7 +284,7 @@ internal static partial class BuiltInResources
             new("provider_type", nvarchar60Catalog, 60, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
             new("cryptographic_provider_algid", SqlType.SqlVariant, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateAsymmetricKeys);
 
         Sys("certificates",
         [
@@ -687,6 +687,7 @@ internal static partial class BuiltInResources
                 23 => "FULLTEXT_CATALOG",
                 24 => "SYMMETRIC_KEYS",
                 25 => "CERTIFICATE",
+                26 => "ASYMMETRIC_KEY",
                 _ => "DATABASE",
             };
             yield return [

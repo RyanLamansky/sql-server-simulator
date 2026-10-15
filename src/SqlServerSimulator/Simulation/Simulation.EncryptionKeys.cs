@@ -18,6 +18,8 @@ partial class Simulation
 
     private const byte ClassCertificate = PermissionChecker.ClassCertificate;
 
+    private const byte ClassAsymmetricKey = PermissionChecker.ClassAsymmetricKey;
+
     /// <summary>
     /// <c>CREATE MASTER KEY ENCRYPTION BY PASSWORD = '…'</c>, cursor on
     /// <c>MASTER</c>. Without the password clause it is Msg 33161 while the
@@ -176,7 +178,8 @@ partial class Simulation
     /// <summary>
     /// <c>DROP MASTER KEY</c>: Msg 15151 when the database has none or the
     /// session lacks <c>CONTROL</c>, Msg 15580 while a certificate's private
-    /// key is encrypted by it.
+    /// key is encrypted by it — the certificates asked before the asymmetric
+    /// keys, each in id order.
     /// </summary>
     private static bool TryParseDropMasterKey(ParserContext context)
     {
@@ -191,10 +194,11 @@ partial class Simulation
         lock (store.Gate)
         {
             _ = VisibleMasterKey(context.Batch, database);
-            foreach (var (_, certificate) in store.Certificates.ToArray().OrderBy(static entry => entry.Value.Id))
+            foreach (var keyPair in store.Certificates.ToArray().Select(static entry => (KeyPair)entry.Value).OrderBy(static keyPair => keyPair.Id)
+                .Concat(store.AsymmetricKeys.ToArray().Select(static entry => (KeyPair)entry.Value).OrderBy(static keyPair => keyPair.Id)))
             {
-                if (certificate.Password is null)
-                    throw SimulatedSqlException.MasterKeyInUse($"certificate '{certificate.Name}'");
+                if (keyPair is { HasPrivateKey: true, Password: null })
+                    throw SimulatedSqlException.MasterKeyInUse($"{keyPair.ClassName} '{keyPair.Name}'");
             }
             RecordKeyStoreUndo(context, store);
             store.MasterKey = null;
@@ -349,7 +353,7 @@ partial class Simulation
             var serial = RandomNumberGenerator.GetBytes(20);
             store.Certificates[name] = new(++store.LastCertificateId, name, principalId, displaySubject,
                 string.Join(' ', Array.ConvertAll(serial, static b => b.ToString("x2", CultureInfo.InvariantCulture))),
-                RandomNumberGenerator.GetBytes(20), startDate, expiryDate, password, activeForBeginDialog);
+                RandomNumberGenerator.GetBytes(20), startDate, expiryDate, password, hasPrivateKey: true, activeForBeginDialog);
         }
         RecordKeyDdlEvent(context, "CREATE_CERTIFICATE", "CERTIFICATE", name, principalId, masks);
         if (expiryDate < now)
@@ -380,11 +384,8 @@ partial class Simulation
             {
                 throw SimulatedSqlException.CannotFindKey("drop", "certificate", name);
             }
-            foreach (var (_, key) in store.SymmetricKeys)
-            {
-                if (Array.Exists(key.Encryptions, encryption => encryption.Certificate?.Id == certificate.Id))
-                    throw SimulatedSqlException.KeyInUse("certificate");
-            }
+            if (EncryptsAKey(store, certificate))
+                throw SimulatedSqlException.KeyInUse("certificate");
             RecordKeyStoreUndo(context, store);
             _ = store.Certificates.TryRemove(name, out _);
             DropSecurablePermissions(context, database, ClassCertificate, certificate.Id);
@@ -652,13 +653,18 @@ partial class Simulation
         }
         else if (decryptor.IsAsymmetricKey)
         {
-            throw SimulatedSqlException.CannotFindKey("find", "asymmetric key", decryptor.Name!);
+            // An asymmetric key is matched against the key's encryptions ahead
+            // of its private key, where a certificate is matched after (probed
+            // 2026-10-15 against SQL Server 2025).
+            var asymmetricKey = FindVisibleKeyPair(batch, database, decryptor.Name!, certificate: false);
+            match = Array.Find(key.Encryptions, encryption => encryption.IsBy(asymmetricKey)) ?? throw SimulatedSqlException.KeyNotEncryptedByDecryptor(6);
+            RequirePrivateKey(context.Connection, database, asymmetricKey, decryptor.CertificatePassword);
         }
         else if (decryptor.Kind == KeyEncryptionKind.Certificate)
         {
-            var certificate = FindVisibleCertificate(batch, database, decryptor.Name!);
+            var certificate = FindVisibleKeyPair(batch, database, decryptor.Name!, certificate: true);
             RequirePrivateKey(context.Connection, database, certificate, decryptor.CertificatePassword);
-            match = Array.Find(key.Encryptions, encryption => encryption.Certificate?.Id == certificate.Id);
+            match = Array.Find(key.Encryptions, encryption => encryption.IsBy(certificate));
         }
         else
         {
@@ -718,6 +724,271 @@ partial class Simulation
             if (opened.RemoveAll(open => open.Database == database && open.KeyId == key.Id) == 0)
                 throw SimulatedSqlException.KeyNotOpen(key.Name, 7);
         }
+    }
+
+    /// <summary>
+    /// <c>CREATE ASYMMETRIC KEY name [AUTHORIZATION owner] WITH ALGORITHM =
+    /// RSA_2048 | RSA_3072 | RSA_4096 [ENCRYPTION BY PASSWORD = '…']</c>, cursor
+    /// on <c>ASYMMETRIC</c>: SQL Server 2025 parses no shorter key. As it runs:
+    /// Msg 15247 without <c>CREATE ASYMMETRIC KEY</c>, the password policy, Msg
+    /// 15396 for a name in use and Msg 15581 when the master key that would
+    /// protect the private key isn't available. Loading one from a file, an
+    /// assembly or a provider isn't built.
+    /// </summary>
+    private static bool TryParseCreateAsymmetricKey(ParserContext context)
+    {
+        ExpectWord(context, "KEY");
+        var name = ParseKeyObjectName(context);
+        var owner = ParseKeyAuthorization(context);
+        if (IsKeyWord(context.Token, "FROM"))
+            throw new NotSupportedException("CREATE ASYMMETRIC KEY … FROM a file, assembly or provider isn't modeled by the simulator; asymmetric keys are created WITH ALGORITHM.");
+        if (!IsKeyWord(context.Token, "WITH"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectWord(context, "ALGORITHM");
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var algorithm = context.GetNextRequired();
+        var keyLength = IsKeyWord(algorithm, "RSA_2048") ? 2048
+            : IsKeyWord(algorithm, "RSA_3072") ? 3072
+            : IsKeyWord(algorithm, "RSA_4096") ? 4096
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+        string? password = null;
+        var masks = new List<(int Start, int End)>(1);
+        if (IsKeyWord(context.GetNextOptional(), "ENCRYPTION"))
+        {
+            ExpectWord(context, "BY");
+            ExpectWord(context, "PASSWORD");
+            password = ParseKeyLiteral(context, masks);
+            context.MoveNextOptional();
+        }
+        EndKeyStatement(context, alreadyPast: true);
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var batch = context.Batch;
+        var database = context.CurrentDatabase;
+        if (!PermissionEnforcement.HoldsDatabasePermission(batch, database, "CREATE ASYMMETRIC KEY"))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
+        var principalId = owner is null ? KeyCreatorId(batch) : ResolveNewOwner(context, database, owner, acceptsSchemaOwner: false)!.Value;
+        if (password is not null)
+            ValidateKeyPassword(password);
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            if (store.AsymmetricKeys.ContainsKey(name))
+                throw SimulatedSqlException.AsymmetricKeyAlreadyExists(name);
+            if (password is null)
+                RequireMasterKey(context.Connection, database);
+            RecordKeyStoreUndo(context, store);
+            store.AsymmetricKeys[name] = new(++store.LastAsymmetricKeyId, name, principalId, keyLength, RandomNumberGenerator.GetBytes(8), password, hasPrivateKey: true);
+        }
+        RecordKeyDdlEvent(context, "CREATE_ASYMMETRIC_KEY", "ASYMMETRIC KEY", name, principalId, masks);
+        return true;
+    }
+
+    /// <summary>
+    /// <c>DROP ASYMMETRIC KEY name [REMOVE PROVIDER KEY]</c>: Msg 15151 for one
+    /// that doesn't exist or the session can't control, Msg 15352 while a
+    /// symmetric key is encrypted by it.
+    /// </summary>
+    private static bool TryParseDropAsymmetricKey(ParserContext context)
+    {
+        ExpectWord(context, "KEY");
+        var name = ParseKeyObjectName(context);
+        if (IsKeyWord(context.Token, "REMOVE"))
+        {
+            ExpectWord(context, "PROVIDER");
+            ExpectWord(context, "KEY");
+            context.MoveNextOptional();
+        }
+        EndKeyStatement(context, alreadyPast: true);
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        lock (store.Gate)
+        {
+            if (!store.AsymmetricKeys.TryGetValue(name, out var key)
+                || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.Control, ClassAsymmetricKey, key.Id, 0))
+            {
+                throw SimulatedSqlException.CannotFindKey("drop", "asymmetric key", name);
+            }
+            if (EncryptsAKey(store, key))
+                throw SimulatedSqlException.KeyInUse("asymmetric key");
+            RecordKeyStoreUndo(context, store);
+            _ = store.AsymmetricKeys.TryRemove(name, out _);
+            DropSecurablePermissions(context, database, ClassAsymmetricKey, key.Id);
+            RecordKeyDdlEvent(context, "DROP_ASYMMETRIC_KEY", "ASYMMETRIC KEY", name, key.PrincipalId, null);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// <c>ALTER CERTIFICATE name { REMOVE PRIVATE KEY | WITH PRIVATE KEY (…) |
+    /// WITH ACTIVE FOR BEGIN_DIALOG = ON | OFF }</c> and <c>ALTER ASYMMETRIC KEY
+    /// name { REMOVE PRIVATE KEY | WITH PRIVATE KEY (…) }</c>, cursor on the
+    /// class's first word. <c>WITH PRIVATE KEY</c> re-protects the private
+    /// key: by its <c>ENCRYPTION BY PASSWORD</c>, or by the master key without
+    /// one, after a <c>DECRYPTION BY PASSWORD</c> that opens the old
+    /// protection. As it runs: Msg 15151 for one that isn't there or the
+    /// session can't alter; the password policy for the new password; a key
+    /// pair without a private key is Msg 15563 (a certificate's re-protection
+    /// Msg 15342); an old password missing is Msg 15334 state 2, a wrong one
+    /// Msg 15466, one given for a master-key protection Msg 15397 (certificate)
+    /// or 15147 (asymmetric key), and the master key must be available (Msg
+    /// 15581). A certificate's private key can't be removed while a key is
+    /// encrypted by it (Msg 33011), an asymmetric key's can. Loading a private
+    /// key from a file or binary isn't built: one the key pair has is Msg
+    /// 15332, as real refuses it.
+    /// </summary>
+    private static bool TryParseAlterKeyPair(ParserContext context, bool certificate)
+    {
+        if (!certificate)
+            ExpectWord(context, "KEY");
+        var name = ParseKeyObjectName(context);
+        var masks = new List<(int Start, int End)>(2);
+        var remove = false;
+        bool? active = null;
+        string? encryptionPassword = null;
+        string? decryptionPassword = null;
+        var loadsPrivateKey = false;
+        if (IsKeyWord(context.Token, "REMOVE"))
+        {
+            ExpectWord(context, "PRIVATE");
+            ExpectWord(context, "KEY");
+            remove = true;
+            context.MoveNextOptional();
+        }
+        else if (IsKeyWord(context.Token, "WITH"))
+        {
+            var word = context.GetNextRequired();
+            if (certificate && IsKeyWord(word, "ACTIVE"))
+            {
+                ExpectWord(context, "FOR");
+                ExpectWord(context, "BEGIN_DIALOG");
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var setting = context.GetNextRequired();
+                if (!IsKeyWord(setting, "ON") && !IsKeyWord(setting, "OFF"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                active = IsKeyWord(setting, "ON");
+                context.MoveNextOptional();
+            }
+            else if (IsKeyWord(word, "PRIVATE"))
+            {
+                ExpectWord(context, "KEY");
+                if (context.GetNextRequired() is not Operator { Character: '(' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                do
+                {
+                    var option = context.GetNextRequired();
+                    if (IsKeyWord(option, "ENCRYPTION") && encryptionPassword is null)
+                    {
+                        ExpectWord(context, "BY");
+                        ExpectWord(context, "PASSWORD");
+                        encryptionPassword = ParseKeyLiteral(context, masks);
+                    }
+                    else if (IsKeyWord(option, "DECRYPTION") && decryptionPassword is null)
+                    {
+                        ExpectWord(context, "BY");
+                        ExpectWord(context, "PASSWORD");
+                        decryptionPassword = ParseKeyLiteral(context, masks);
+                    }
+                    else if (certificate && (IsKeyWord(option, "FILE") || IsKeyWord(option, "BINARY")))
+                    {
+                        if (context.GetNextRequired() is not Operator { Character: '=' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        if (context.GetNextRequired() is not Literal)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        loadsPrivateKey = true;
+                    }
+                    else
+                    {
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                }
+                while (context.GetNextRequired() is Operator { Character: ',' });
+                if (context.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (encryptionPassword is null && decryptionPassword is null && !loadsPrivateKey)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+            }
+            else
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+        else
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        EndKeyStatement(context, alreadyPast: true);
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var batch = context.Batch;
+        var database = context.CurrentDatabase;
+        var store = database.EncryptionKeys;
+        var kind = certificate ? "certificate" : "asymmetric key";
+        lock (store.Gate)
+        {
+            KeyPair? keyPair = certificate
+                ? store.Certificates.TryGetValue(name, out var byCertificate) ? byCertificate : null
+                : store.AsymmetricKeys.TryGetValue(name, out var byKey) ? byKey : null;
+            if (keyPair is null || !PermissionEnforcement.HoldsPermission(batch, database, Permission.Alter, ClassOf(keyPair), keyPair.Id, 0))
+                throw SimulatedSqlException.CannotFindKey("alter", kind, name);
+            KeyPair altered;
+            if (active is { } activeForBeginDialog)
+            {
+                altered = ((Certificate)keyPair).WithActiveForBeginDialog(activeForBeginDialog);
+            }
+            else if (remove)
+            {
+                if (!keyPair.HasPrivateKey)
+                    throw SimulatedSqlException.NoPrivateKeySet(kind);
+                if (certificate && EncryptsAKey(store, keyPair))
+                    throw SimulatedSqlException.CertificatePrivateKeyInUse();
+                altered = keyPair.With(keyPair.PrincipalId, password: null, hasPrivateKey: false);
+            }
+            else if (loadsPrivateKey)
+            {
+                throw keyPair.HasPrivateKey
+                    ? SimulatedSqlException.PrivateKeyAlreadySet()
+                    : new NotSupportedException("ALTER CERTIFICATE … WITH PRIVATE KEY from a file or binary isn't modeled by the simulator.");
+            }
+            else
+            {
+                if (!keyPair.HasPrivateKey)
+                    throw certificate ? SimulatedSqlException.NoPrivateKeyProvisioned(name) : SimulatedSqlException.NoPrivateKeySet(kind);
+                if (encryptionPassword is not null)
+                    ValidateKeyPassword(encryptionPassword);
+                if (keyPair.Password is { } current)
+                {
+                    if (decryptionPassword is null)
+                        throw SimulatedSqlException.PrivateKeyPasswordRequired(kind, 2);
+                    if (!string.Equals(decryptionPassword, current, StringComparison.Ordinal))
+                        throw SimulatedSqlException.DecryptionFailed();
+                }
+                else
+                {
+                    if (decryptionPassword is not null)
+                        throw certificate ? SimulatedSqlException.CertificateNotPasswordProtected() : SimulatedSqlException.AsymmetricKeyNotPasswordProtected();
+                    RequireMasterKey(context.Connection, database);
+                }
+                if (encryptionPassword is null)
+                    RequireMasterKey(context.Connection, database);
+                altered = keyPair.With(keyPair.PrincipalId, encryptionPassword, hasPrivateKey: true);
+            }
+            RecordKeyStoreUndo(context, store);
+            if (altered is Certificate alteredCertificate)
+                store.Certificates[name] = alteredCertificate;
+            else
+                store.AsymmetricKeys[name] = (AsymmetricKey)altered;
+            RecordKeyDdlEvent(context, certificate ? "ALTER_CERTIFICATE" : "ALTER_ASYMMETRIC_KEY", certificate ? "CERTIFICATE" : "ASYMMETRIC KEY", name, keyPair.PrincipalId, masks);
+        }
+        return true;
     }
 
     /// <summary>A password, certificate, symmetric key or asymmetric key a statement names to encrypt or decrypt a key.</summary>
@@ -792,12 +1063,10 @@ partial class Simulation
             return PasswordEncryption(password, keyBytes);
         var batch = context.Batch;
         var database = context.CurrentDatabase;
-        if (protector.IsAsymmetricKey)
-            throw SimulatedSqlException.CannotFindKey("find", "asymmetric key", protector.Name!);
         if (protector.Kind == KeyEncryptionKind.Certificate)
         {
-            var certificate = FindVisibleCertificate(batch, database, protector.Name!);
-            return new(KeyEncryptionKind.Certificate, null, certificate, null, RandomNumberGenerator.GetBytes(Certificate.KeyLength / 8));
+            var keyPair = FindVisibleKeyPair(batch, database, protector.Name!, certificate: !protector.IsAsymmetricKey);
+            return new(keyPair.IsCertificate ? KeyEncryptionKind.Certificate : KeyEncryptionKind.AsymmetricKey, null, keyPair, null, RandomNumberGenerator.GetBytes(keyPair.KeyLength / 8));
         }
         if (!store.SymmetricKeys.TryGetValue(protector.Name!, out var key) || !PermissionEnforcement.SeesKey(batch, database, ClassSymmetricKey, key.Id, key.PrincipalId))
             throw SimulatedSqlException.CannotFindKey("find", "symmetric key", protector.Name!);
@@ -808,27 +1077,50 @@ partial class Simulation
 
     private static string ProtectorText(KeyEncryption encryption) => encryption.Kind switch
     {
-        KeyEncryptionKind.Certificate => $"certificate '{encryption.Certificate!.Name}'",
+        KeyEncryptionKind.Certificate or KeyEncryptionKind.AsymmetricKey => $"{encryption.KeyPair!.ClassName} '{encryption.KeyPair.Name}'",
         KeyEncryptionKind.SymmetricKey => $"symmetric key '{encryption.SymmetricKey!.Name}'",
         _ => "password '********'",
     };
 
-    private static Certificate FindVisibleCertificate(BatchContext batch, Database database, string name) =>
-        database.EncryptionKeys.Certificates.TryGetValue(name, out var certificate) && PermissionEnforcement.SeesKey(batch, database, ClassCertificate, certificate.Id, certificate.PrincipalId)
-            ? certificate
-            : throw SimulatedSqlException.CannotFindKey("find", "certificate", name);
+    /// <summary>The certificate (or asymmetric key) <paramref name="name"/> names, when the session can see it; Msg 15151 otherwise.</summary>
+    private static KeyPair FindVisibleKeyPair(BatchContext batch, Database database, string name, bool certificate)
+    {
+        var store = database.EncryptionKeys;
+        KeyPair? found = certificate
+            ? store.Certificates.TryGetValue(name, out var byCertificate) ? byCertificate : null
+            : store.AsymmetricKeys.TryGetValue(name, out var byKey) ? byKey : null;
+        return found is not null && PermissionEnforcement.SeesKey(batch, database, ClassOf(found), found.Id, found.PrincipalId)
+            ? found
+            : throw SimulatedSqlException.CannotFindKey("find", certificate ? "certificate" : "asymmetric key", name);
+    }
+
+    private static byte ClassOf(KeyPair keyPair) => keyPair.IsCertificate ? ClassCertificate : ClassAsymmetricKey;
+
+    /// <summary>Whether a symmetric key of <paramref name="store"/> is encrypted by <paramref name="keyPair"/>.</summary>
+    private static bool EncryptsAKey(EncryptionKeyStore store, KeyPair keyPair)
+    {
+        foreach (var (_, key) in store.SymmetricKeys)
+        {
+            if (Array.Exists(key.Encryptions, encryption => encryption.IsBy(keyPair)))
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>
-    /// Refuses the use of <paramref name="certificate"/>'s private key as
-    /// <c>OPEN SYMMETRIC KEY</c> does: a password-protected one needs its
-    /// password, a master-key-protected one none and the master key available.
+    /// Refuses the use of <paramref name="keyPair"/>'s private key as
+    /// <c>OPEN SYMMETRIC KEY</c> does: a removed one is Msg 15556, a
+    /// password-protected one needs its password, a master-key-protected one
+    /// none and the master key available.
     /// </summary>
-    private static void RequirePrivateKey(SimulatedDbConnection connection, Database database, Certificate certificate, string? password)
+    private static void RequirePrivateKey(SimulatedDbConnection connection, Database database, KeyPair keyPair, string? password)
     {
-        if (certificate.Password is { } expected)
+        if (!keyPair.HasPrivateKey)
+            throw SimulatedSqlException.PrivateKeyUnusable(keyPair.ClassName);
+        if (keyPair.Password is { } expected)
         {
             if (password is null)
-                throw SimulatedSqlException.CertificatePasswordRequired();
+                throw SimulatedSqlException.PrivateKeyPasswordRequired(keyPair.ClassName, keyPair.IsCertificate ? (byte)5 : (byte)6);
             if (!string.Equals(password, expected, StringComparison.Ordinal))
                 throw SimulatedSqlException.DecryptionFailed();
             return;
@@ -838,11 +1130,11 @@ partial class Simulation
         RequireMasterKey(connection, database);
     }
 
-    /// <summary>Whether <paramref name="certificate"/>'s private key opens with <paramref name="password"/>, as the cryptographic functions ask it: they answer NULL rather than raise.</summary>
-    internal static bool PrivateKeyAvailable(SimulatedDbConnection connection, Database database, Certificate certificate, string? password) =>
-        certificate.Password is { } expected
+    /// <summary>Whether <paramref name="keyPair"/>'s private key opens with <paramref name="password"/>, as the cryptographic functions ask it: they answer NULL rather than raise.</summary>
+    internal static bool PrivateKeyAvailable(SimulatedDbConnection connection, Database database, KeyPair keyPair, string? password) =>
+        keyPair.HasPrivateKey && (keyPair.Password is { } expected
             ? string.Equals(password, expected, StringComparison.Ordinal)
-            : password is null && MasterKeyAvailable(connection, database);
+            : password is null && MasterKeyAvailable(connection, database));
 
     /// <summary>Msg 15581 — state 1 without a master key, 7 with one the session can't use — unless the master key is available.</summary>
     private static void RequireMasterKey(SimulatedDbConnection connection, Database database)

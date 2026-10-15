@@ -559,6 +559,23 @@ public sealed class CollationConflictPropagationTests
     public void ConcatConflict_SettledByALaterCollate(string sql, string expected)
         => AreEqual(expected, SeededCrossCollationTables().ExecuteScalar(sql));
 
+    /// <summary>
+    /// A <c>COLLATE</c> on a <c>sysname</c> column makes the <c>nvarchar(128)</c>
+    /// it aliases in that collation, explicit, so it settles an operator over
+    /// the catalog's other columns (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CollatedSysname_IsAnExplicitNvarchar()
+    {
+        var simulation = new Simulation();
+        AreEqual(0, simulation.ExecuteScalar("select count(concat(name collate database_default, ':', type)) from sys.objects where 1 = 0"));
+        _ = simulation.ExecuteNonQuery("select name collate Latin1_General_BIN n1, name n2 into t from sys.objects where 1 = 0");
+        AreEqual("n1:nvarchar:256:Latin1_General_BIN|n2:sysname:256:SQL_Latin1_General_CP1_CI_AS", simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', c.name, type_name(c.user_type_id), c.max_length, c.collation_name), '|') within group (order by c.column_id)
+            from sys.columns c where c.object_id = object_id('t')
+            """));
+    }
+
     private static string OutputColumnMessage(string operatorName, string clause, int ordinal) =>
         $"Cannot resolve collation conflict between {ConflictPair} in {operatorName} operator occurring in {clause} statement column {ordinal}.";
 

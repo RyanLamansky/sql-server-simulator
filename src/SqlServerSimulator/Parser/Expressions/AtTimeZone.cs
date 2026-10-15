@@ -128,6 +128,15 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     private static TimeZoneInfo ResolveZone(string name) =>
         ZoneCache.GetOrAdd(name, BuiltInResources.FindWindowsTimeZone) ?? throw SimulatedSqlException.InvalidTimeZoneParameter(name);
 
+    /// <summary>Whether the <c>AT</c> at the cursor opens <c>AT TIME</c> rather than being an alias.</summary>
+    public static bool IsAhead(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var ahead = context.GetNextOptional() is UnquotedString { ContextualKeyword: ContextualKeyword.Time };
+        context.RestoreCheckpoint(checkpoint);
+        return ahead;
+    }
+
     /// <summary>
     /// Parses the <c>AT TIME ZONE &lt;tz-expr&gt;</c> postfix when invoked
     /// from <see cref="Expression.Parse"/>'s binary-operator loop. The current

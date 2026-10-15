@@ -968,6 +968,7 @@ internal sealed partial class Database
         Volatile.Read(ref this.nextXmlCollectionId), Volatile.Read(ref this.nextPartitionFunctionId), Volatile.Read(ref this.nextPartitionSchemeId),
         Interlocked.Read(ref this.rowVersionCounter), Interlocked.Read(ref this.changeTrackingVersion),
         Volatile.Read(ref this.EncryptionKeys.LastCertificateId), Volatile.Read(ref this.EncryptionKeys.LastSymmetricKeyId),
+        Volatile.Read(ref this.EncryptionKeys.LastAsymmetricKeyId),
     ];
 
     /// <summary>
@@ -992,6 +993,7 @@ internal sealed partial class Database
         _ = Interlocked.Exchange(ref this.changeTrackingVersion, counters[10]);
         Set(ref this.EncryptionKeys.LastCertificateId, counters[11], raiseOnly);
         Set(ref this.EncryptionKeys.LastSymmetricKeyId, counters[12], raiseOnly);
+        Set(ref this.EncryptionKeys.LastAsymmetricKeyId, counters[13], raiseOnly);
     }
 }
 

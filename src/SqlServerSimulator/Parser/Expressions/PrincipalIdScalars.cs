@@ -439,11 +439,16 @@ internal sealed class HasPermsByName : Expression
                 classDescription = "SCHEMA";
                 majorId = schemaId;
                 break;
-            case "CERTIFICATE" or "SYMMETRIC KEY":
+            case "ASYMMETRIC KEY" or "CERTIFICATE" or "SYMMETRIC KEY":
                 if (securableVal.IsNull)
                     return SqlValue.Null(SqlType.Int32);
                 securableClass = KeyClass(className)!.Value;
-                classDescription = securableClass == PermissionChecker.ClassCertificate ? "CERTIFICATE" : "SYMMETRIC KEY";
+                classDescription = securableClass switch
+                {
+                    PermissionChecker.ClassCertificate => "CERTIFICATE",
+                    PermissionChecker.ClassAsymmetricKey => "ASYMMETRIC KEY",
+                    _ => "SYMMETRIC KEY",
+                };
                 if (!TryResolveKeyByName(database, securableClass, securableVal.CoerceTo(SqlType.NVarchar).AsString, out majorId))
                     return SqlValue.FromInt32(0);
                 break;
@@ -639,14 +644,18 @@ internal sealed class HasPermsByName : Expression
     private static byte? KeyClass(string className) =>
         BuiltInToken.Equals(className.Trim(), "SYMMETRIC KEY") ? PermissionChecker.ClassSymmetricKey
         : BuiltInToken.Equals(className.Trim(), "CERTIFICATE") ? PermissionChecker.ClassCertificate
+        : BuiltInToken.Equals(className.Trim(), "ASYMMETRIC KEY") ? PermissionChecker.ClassAsymmetricKey
         : null;
 
     private static bool TryResolveKeyByName(Database database, byte keyClass, string name, out int id)
     {
         var store = database.EncryptionKeys;
-        id = keyClass == PermissionChecker.ClassCertificate
-            ? store.Certificates.TryGetValue(name, out var certificate) ? certificate.Id : 0
-            : store.SymmetricKeys.TryGetValue(name, out var key) ? key.Id : 0;
+        id = keyClass switch
+        {
+            PermissionChecker.ClassCertificate => store.Certificates.TryGetValue(name, out var certificate) ? certificate.Id : 0,
+            PermissionChecker.ClassAsymmetricKey => store.AsymmetricKeys.TryGetValue(name, out var asymmetricKey) ? asymmetricKey.Id : 0,
+            _ => store.SymmetricKeys.TryGetValue(name, out var key) ? key.Id : 0,
+        };
         return id != 0;
     }
 

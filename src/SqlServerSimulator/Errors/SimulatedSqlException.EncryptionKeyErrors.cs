@@ -23,9 +23,41 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException KeyAlreadyExists(string name) =>
         new($"A key with name '{name}' or user defined unique identifier already exists or you do not have permissions to create it.", 15282, 16, 1);
 
-    /// <summary>Msg 15345: <c>ALTER AUTHORIZATION</c> of a certificate to a role.</summary>
-    internal static SimulatedSqlException CertificateOwnedByRole() =>
-        new("An entity of type certificate cannot be owned by a role, a group, or by principals mapped to certificates or asymmetric keys.", 15345, 16, 1);
+    /// <summary>Msg 15345: <c>ALTER AUTHORIZATION</c> of a certificate or asymmetric key (<paramref name="kind"/>) to a role.</summary>
+    internal static SimulatedSqlException KeyPairOwnedByRole(string kind) =>
+        new($"An entity of type {kind} cannot be owned by a role, a group, or by principals mapped to certificates or asymmetric keys.", 15345, 16, 1);
+
+    /// <summary>Msg 15396: <c>CREATE ASYMMETRIC KEY</c> under a name the database already has.</summary>
+    internal static SimulatedSqlException AsymmetricKeyAlreadyExists(string name) =>
+        new($"An asymmetric key with name '{name}' already exists or this asymmetric key already has been added to the database.", 15396, 16, 1);
+
+    /// <summary>Msg 15556: a key opened by a certificate or asymmetric key (<paramref name="kind"/>) whose private key has been removed.</summary>
+    internal static SimulatedSqlException PrivateKeyUnusable(string kind) =>
+        new($"Cannot decrypt or encrypt using the specified {kind}, either because it has no private key or because the password provided for the private key is incorrect.", 15556, 16, 1);
+
+    /// <summary>Msg 15563: removing or re-protecting the private key of a certificate or asymmetric key (<paramref name="kind"/>) that has none.</summary>
+    internal static SimulatedSqlException NoPrivateKeySet(string kind) =>
+        new($"The {kind} has no private key set for it.", 15563, 16, 1);
+
+    /// <summary>Msg 15342: <c>ALTER CERTIFICATE … WITH PRIVATE KEY</c> re-protecting a private key the certificate doesn't have.</summary>
+    internal static SimulatedSqlException NoPrivateKeyProvisioned(string name) =>
+        new($"There is no private key provisioned for certificate '{name}'.", 15342, 16, 1);
+
+    /// <summary>Msg 15397: a decryption password for a certificate whose private key the master key protects.</summary>
+    internal static SimulatedSqlException CertificateNotPasswordProtected() =>
+        new("The certificate is not protected by a password. A decryption password cannot be used for this operation.", 15397, 16, 1);
+
+    /// <summary>Msg 15147: a decryption password for an asymmetric key whose private key the master key protects.</summary>
+    internal static SimulatedSqlException AsymmetricKeyNotPasswordProtected() =>
+        new("No decryption password should be provided because the private key of this asymmetric key is encrypted by a master key.", 15147, 16, 1);
+
+    /// <summary>Msg 33011: <c>ALTER CERTIFICATE … REMOVE PRIVATE KEY</c> while a key is encrypted by the certificate.</summary>
+    internal static SimulatedSqlException CertificatePrivateKeyInUse() =>
+        new("The certificate private key cannot be dropped because one or more entities are encrypted by it.", 33011, 16, 1);
+
+    /// <summary>Msg 15332: <c>ALTER CERTIFICATE … WITH PRIVATE KEY (FILE | BINARY …)</c> for a certificate that has a private key.</summary>
+    internal static SimulatedSqlException PrivateKeyAlreadySet() =>
+        new("The private key is already set for this file. To change it you should drop and re-create the certificate.", 15332, 16, 1);
 
     /// <summary>Msg 15232: <c>CREATE CERTIFICATE</c> under a name the database already has.</summary>
     internal static SimulatedSqlException CertificateAlreadyExists(string name) =>
@@ -48,11 +80,13 @@ partial class SimulatedSqlException
         new($"The key '{name}' is not open. Please open the key before using it.", 15315, 16, state);
 
     /// <summary>
-    /// Msg 15334: a certificate whose private key a password protects, used to
-    /// open a key without that password.
+    /// Msg 15334: a certificate's or asymmetric key's (<paramref name="kind"/>)
+    /// private key a password protects, used without that password — state 5
+    /// opening a key by a certificate, 6 by an asymmetric key, 2 altering the
+    /// private key's protection.
     /// </summary>
-    internal static SimulatedSqlException CertificatePasswordRequired() =>
-        new("The certificate has a private key that is protected by a user defined password. That password needs to be provided to enable the use of the private key.", 15334, 16, 5);
+    internal static SimulatedSqlException PrivateKeyPasswordRequired(string kind, byte state) =>
+        new($"The {kind} has a private key that is protected by a user defined password. That password needs to be provided to enable the use of the private key.", 15334, 16, state);
 
     /// <summary>Msg 15465: a password given for a certificate whose private key the master key protects.</summary>
     internal static SimulatedSqlException PrivateKeyPasswordInvalid() =>
@@ -63,8 +97,8 @@ partial class SimulatedSqlException
         new("An error occurred during decryption.", 15466, 16, 9);
 
     /// <summary>
-    /// Msg 15352: <c>DROP SYMMETRIC KEY</c> or <c>DROP CERTIFICATE</c> of one
-    /// another key is encrypted by.
+    /// Msg 15352: <c>DROP SYMMETRIC KEY</c>, <c>CERTIFICATE</c> or
+    /// <c>ASYMMETRIC KEY</c> of one another key is encrypted by.
     /// </summary>
     internal static SimulatedSqlException KeyInUse(string kind) =>
         new($"The {kind} cannot be dropped because one or more entities are either signed or encrypted using it.", 15352, 16, 1);
@@ -87,8 +121,9 @@ partial class SimulatedSqlException
         new("There is already a master key in the database. Please drop it before performing this statement.", 15578, 16, 1);
 
     /// <summary>
-    /// Msg 15580: <c>DROP MASTER KEY</c> while a certificate's private key is
-    /// encrypted by it; <paramref name="what"/> is <c>certificate 'name'</c>.
+    /// Msg 15580: <c>DROP MASTER KEY</c> while a certificate's or asymmetric
+    /// key's private key is encrypted by it; <paramref name="what"/> is
+    /// <c>certificate 'name'</c> or <c>asymmetric key 'name'</c>.
     /// </summary>
     internal static SimulatedSqlException MasterKeyInUse(string what) =>
         new($"Cannot drop master key because {what} is encrypted by it.", 15580, 16, 1);

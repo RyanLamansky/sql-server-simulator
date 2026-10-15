@@ -229,15 +229,21 @@ internal sealed class CryptographicFunction : Expression
                         ? SqlValue.FromNVarchar(KeyNameType(batch), named.Name)
                         : SqlValue.Null(KeyNameType(batch));
                 }
-            case CryptographicFunctionKind.CertId:
-                return VisibleCertificateByName(batch, values[0]) is { } certificateById ? SqlValue.FromInt32(certificateById.Id) : SqlValue.Null(SqlType.Int32);
+            case CryptographicFunctionKind.CertId or CryptographicFunctionKind.AsymKeyId:
+                return VisibleKeyPairByName(batch, values[0], this.kind == CryptographicFunctionKind.CertId) is { } byName
+                    ? SqlValue.FromInt32(byName.Id)
+                    : SqlValue.Null(SqlType.Int32);
             case CryptographicFunctionKind.CertProperty:
-                return VisibleCertificateById(batch, values[0]) is { } described && !values[1].IsNull
+                return VisibleKeyPairById(batch, values[0], certificate: true) is Certificate described && !values[1].IsNull
                     ? CertificateProperty(described, values[1].AsString)
                     : SqlValue.Null(SqlType.SqlVariant);
-            case CryptographicFunctionKind.AsymKeyId or CryptographicFunctionKind.IsObjectSigned:
+            case CryptographicFunctionKind.AsymKeyProperty:
+                return VisibleKeyPairById(batch, values[0], certificate: false) is { } asymmetricKey && !values[1].IsNull
+                    ? AsymmetricKeyProperty(asymmetricKey, values[1].AsString)
+                    : SqlValue.Null(SqlType.SqlVariant);
+            case CryptographicFunctionKind.IsObjectSigned:
                 return SqlValue.Null(SqlType.Int32);
-            case CryptographicFunctionKind.AsymKeyProperty or CryptographicFunctionKind.SymKeyProperty:
+            case CryptographicFunctionKind.SymKeyProperty:
                 // SYMKEYPROPERTY answers only for a key from an extensible key
                 // management provider, which none is (probed 2026-10-15).
                 return SqlValue.Null(SqlType.SqlVariant);
@@ -257,18 +263,21 @@ internal sealed class CryptographicFunction : Expression
                         return SqlValue.Null(BinaryResult);
                     return Decrypted(PassPhraseCipher.Decrypt(key.Material, cipher.AsSpan(16), Authenticate(values, 1), AuthenticatorBytes(bytes, 2)));
                 }
-            case CryptographicFunctionKind.DecryptByKeyAutoCert:
+            case CryptographicFunctionKind.DecryptByKeyAutoCert or CryptographicFunctionKind.DecryptByKeyAutoAsymKey:
                 {
-                    if (bytes[2] is not { Length: >= 16 } cipher || VisibleCertificateById(batch, values[0]) is not { } certificate)
+                    if (bytes[2] is not { Length: >= 16 } cipher
+                        || VisibleKeyPairById(batch, values[0], this.kind == CryptographicFunctionKind.DecryptByKeyAutoCert) is not { } keyPair)
+                    {
                         return SqlValue.Null(BinaryResult);
+                    }
                     var store = batch.CurrentDatabase.EncryptionKeys;
                     if (store.SymmetricKeyByGuid(new Guid(cipher.AsSpan(0, 16))) is not { } key)
                         return SqlValue.Null(BinaryResult);
                     var opened = batch.CurrentStatement.AutoOpenedKeys;
                     if (opened?.Contains(key) != true)
                     {
-                        if (!Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, certificate, values[1].IsNull ? null : values[1].AsString)
-                            || !Array.Exists(key.Encryptions, encryption => encryption.Certificate?.Id == certificate.Id))
+                        if (!Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, keyPair, PasswordArgument(values, 1))
+                            || !Array.Exists(key.Encryptions, encryption => encryption.IsBy(keyPair)))
                         {
                             return SqlValue.Null(BinaryResult);
                         }
@@ -276,29 +285,27 @@ internal sealed class CryptographicFunction : Expression
                     }
                     return Decrypted(PassPhraseCipher.Decrypt(key.Material, cipher.AsSpan(16), Authenticate(values, 3), AuthenticatorBytes(bytes, 4)));
                 }
-            case CryptographicFunctionKind.EncryptByCert:
-                return VisibleCertificateById(batch, values[0]) is { } encrypting && bytes[1] is { } plain
-                    ? Decrypted(CertificateCipher.Encrypt(encrypting, plain))
+            case CryptographicFunctionKind.EncryptByCert or CryptographicFunctionKind.EncryptByAsymKey:
+                return VisibleKeyPairById(batch, values[0], this.kind == CryptographicFunctionKind.EncryptByCert) is { } encrypting && bytes[1] is { } plain
+                    ? Decrypted(KeyPairCipher.Encrypt(encrypting, plain))
                     : SqlValue.Null(BinaryResult);
-            case CryptographicFunctionKind.DecryptByCert:
-                return VisibleCertificateById(batch, values[0]) is { } decrypting && bytes[1] is { } encrypted
+            case CryptographicFunctionKind.DecryptByCert or CryptographicFunctionKind.DecryptByAsymKey:
+                return VisibleKeyPairById(batch, values[0], this.kind == CryptographicFunctionKind.DecryptByCert) is { } decrypting && bytes[1] is { } encrypted
                     && Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, decrypting, PasswordArgument(values, 2))
-                    ? Decrypted(CertificateCipher.Decrypt(decrypting, encrypted))
+                    ? Decrypted(KeyPairCipher.Decrypt(decrypting, encrypted))
                     : SqlValue.Null(BinaryResult);
-            case CryptographicFunctionKind.SignByCert:
-                return VisibleCertificateById(batch, values[0]) is { } signing && bytes[1] is { } signed
+            case CryptographicFunctionKind.SignByCert or CryptographicFunctionKind.SignByAsymKey:
+                return VisibleKeyPairById(batch, values[0], this.kind == CryptographicFunctionKind.SignByCert) is { } signing && bytes[1] is { } signed
                     && Simulation.PrivateKeyAvailable(batch.Connection, batch.CurrentDatabase, signing, PasswordArgument(values, 2))
-                    ? SqlValue.FromVarbinary(BinaryResult, CertificateCipher.Sign(signing, signed))
+                    ? SqlValue.FromVarbinary(BinaryResult, KeyPairCipher.Sign(signing, signed))
                     : SqlValue.Null(BinaryResult);
-            case CryptographicFunctionKind.VerifySignedByCert:
-                if (values[0].IsNull)
-                    return SqlValue.Null(SqlType.Int32);
-                return SqlValue.FromInt32(VisibleCertificateById(batch, values[0]) is { } verifying && bytes[1] is { } verified && bytes[2] is { } signature
-                    && CertificateCipher.Verify(verifying, verified, signature) ? 1 : 0);
-            case CryptographicFunctionKind.VerifySignedByAsymKey:
+            case CryptographicFunctionKind.VerifySignedByCert or CryptographicFunctionKind.VerifySignedByAsymKey:
                 // A signature checked against a key that doesn't exist fails,
                 // unless there is no key id to look up at all.
-                return values[0].IsNull ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(0);
+                if (values[0].IsNull)
+                    return SqlValue.Null(SqlType.Int32);
+                return SqlValue.FromInt32(VisibleKeyPairById(batch, values[0], this.kind == CryptographicFunctionKind.VerifySignedByCert) is { } verifying
+                    && bytes[1] is { } verified && bytes[2] is { } signature && KeyPairCipher.Verify(verifying, verified, signature) ? 1 : 0);
             case CryptographicFunctionKind.EncryptByPassPhrase or CryptographicFunctionKind.DecryptByPassPhrase:
                 {
                     // A non-Unicode passphrase that fits 8000 bytes can still
@@ -348,16 +355,29 @@ internal sealed class CryptographicFunction : Expression
     private static bool SeesSymmetricKey(BatchContext batch, SymmetricKey key) =>
         PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassSymmetricKey, key.Id, key.PrincipalId);
 
-    private static Certificate? VisibleCertificateByName(BatchContext batch, SqlValue value) =>
-        LookupName(value) is { } name && batch.CurrentDatabase.EncryptionKeys.Certificates.TryGetValue(name, out var certificate)
-            && PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
-            ? certificate
-            : null;
+    private static KeyPair? VisibleKeyPairByName(BatchContext batch, SqlValue value, bool certificate)
+    {
+        if (LookupName(value) is not { } name)
+            return null;
+        var store = batch.CurrentDatabase.EncryptionKeys;
+        KeyPair? found = certificate
+            ? store.Certificates.TryGetValue(name, out var byCertificate) ? byCertificate : null
+            : store.AsymmetricKeys.TryGetValue(name, out var byKey) ? byKey : null;
+        return Visible(batch, found);
+    }
 
-    private static Certificate? VisibleCertificateById(BatchContext batch, SqlValue value) =>
-        !value.IsNull && batch.CurrentDatabase.EncryptionKeys.CertificateById(value.AsInt32) is { } certificate
-            && PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId)
-            ? certificate
+    private static KeyPair? VisibleKeyPairById(BatchContext batch, SqlValue value, bool certificate)
+    {
+        if (value.IsNull)
+            return null;
+        var store = batch.CurrentDatabase.EncryptionKeys;
+        return Visible(batch, certificate ? store.CertificateById(value.AsInt32) : store.AsymmetricKeyById(value.AsInt32));
+    }
+
+    private static KeyPair? Visible(BatchContext batch, KeyPair? keyPair) =>
+        keyPair is not null && PermissionEnforcement.SeesKey(batch, batch.CurrentDatabase,
+            keyPair.IsCertificate ? PermissionChecker.ClassCertificate : PermissionChecker.ClassAsymmetricKey, keyPair.Id, keyPair.PrincipalId)
+            ? keyPair
             : null;
 
     /// <summary>The open symmetric key with <paramref name="keyGuid"/> among the session's, in whichever database it was opened.</summary>
@@ -392,7 +412,7 @@ internal sealed class CryptographicFunction : Expression
             "CERT_SERIAL_NUMBER" => SqlValue.FromNVarchar(CertificateNameType, certificate.SerialNumber),
             "EXPIRY_DATE" => SqlValue.FromDateTime(certificate.ExpiryDate),
             "ISSUER_NAME" or "SUBJECT" => SqlValue.FromNVarchar(CertificateTextType, certificate.Subject),
-            "KEY_LENGTH" => SqlValue.FromInt32(Certificate.KeyLength),
+            "KEY_LENGTH" => SqlValue.FromInt32(Certificate.CertificateKeyLength),
             "SID" => SqlValue.FromVarbinary(VarbinarySqlType.Get(85), certificate.Sid),
             "START_DATE" => SqlValue.FromDateTime(certificate.StartDate),
             "STRING_SID" => SqlValue.FromNVarchar(CertificateNameType, certificate.StringSid),
@@ -400,6 +420,17 @@ internal sealed class CryptographicFunction : Expression
         };
         return inner.IsNull ? inner : SqlValue.FromVariant(inner);
     }
+
+    /// <summary>
+    /// <c>ASYMKEYPROPERTY</c>'s properties: the key's <c>sid</c> and
+    /// <c>string_sid</c>; <c>algorithm_desc</c>, which real documents, is NULL
+    /// there for every key a database creates, as is any other name (probed
+    /// 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue AsymmetricKeyProperty(KeyPair key, string property) =>
+        BuiltInToken.Equals(property, "sid") ? SqlValue.FromVariant(SqlValue.FromVarbinary(VarbinarySqlType.Get(85), key.Sid))
+        : BuiltInToken.Equals(property, "string_sid") ? SqlValue.FromVariant(SqlValue.FromNVarchar(CertificateNameType, key.StringSid))
+        : SqlValue.Null(SqlType.SqlVariant);
 
     /// <summary>
     /// A string or binary argument's bytes as the function reads them: a
@@ -539,41 +570,41 @@ internal static class PassPhraseCipher
 }
 
 /// <summary>
-/// <c>ENCRYPTBYCERT</c> / <c>DECRYPTBYCERT</c> and <c>SIGNBYCERT</c> /
-/// <c>VERIFYSIGNEDBYCERT</c> over a certificate's 3072-bit RSA key, in real's
-/// shapes (probed 2026-10-15 against SQL Server 2025): OAEP with SHA-256, so
-/// at most 318 bytes of data, the 384-byte cipher text in the little-endian
-/// order of Windows' CryptoAPI followed by <c>0x00010001</c>; a signature is
-/// the eight bytes <c>0x0100070204000000</c> and the 384-byte PKCS #1
-/// signature, as deterministic as real's. Each certificate's key is the
-/// simulator's own, so these round-trip within it but not against real's.
+/// <c>ENCRYPTBYCERT</c> / <c>DECRYPTBYCERT</c>, <c>SIGNBYCERT</c> /
+/// <c>VERIFYSIGNEDBYCERT</c> and their asymmetric-key twins over a key pair's
+/// RSA key, in real's shapes (probed 2026-10-15 against SQL Server 2025):
+/// OAEP with SHA-256, so at most the key's byte length less 66 bytes of data
+/// (318 for a certificate's 3072-bit key), the cipher text in the
+/// little-endian order of Windows' CryptoAPI followed by <c>0x00010001</c>;
+/// a signature is the eight bytes <c>0x0100070204000000</c> and the PKCS #1
+/// signature, as deterministic as real's. Each key is the simulator's own, so
+/// these round-trip within it but not against real's.
 /// </summary>
-internal static class CertificateCipher
+internal static class KeyPairCipher
 {
     private static readonly byte[] Trailer = [0, 1, 0, 1];
 
     private static readonly byte[] SignatureHeader = [1, 0, 7, 2, 4, 0, 0, 0];
 
-    private const int CipherLength = Certificate.KeyLength / 8;
-
-    public static byte[]? Encrypt(Certificate certificate, byte[] data)
+    public static byte[]? Encrypt(KeyPair keyPair, byte[] data)
     {
-        if (data.Length > CipherLength - 66)
+        if (data.Length > (keyPair.KeyLength / 8) - 66)
             return null;
-        var cipher = certificate.Key.Encrypt(data, RSAEncryptionPadding.OaepSHA256);
+        var cipher = keyPair.Key.Encrypt(data, RSAEncryptionPadding.OaepSHA256);
         Array.Reverse(cipher);
         return [.. cipher, .. Trailer];
     }
 
-    public static byte[]? Decrypt(Certificate certificate, byte[] cipher)
+    public static byte[]? Decrypt(KeyPair keyPair, byte[] cipher)
     {
-        if (cipher.Length != CipherLength + Trailer.Length || !cipher.AsSpan(CipherLength).SequenceEqual(Trailer))
+        var length = keyPair.KeyLength / 8;
+        if (cipher.Length != length + Trailer.Length || !cipher.AsSpan(length).SequenceEqual(Trailer))
             return null;
-        var reversed = cipher[..CipherLength];
+        var reversed = cipher[..length];
         Array.Reverse(reversed);
         try
         {
-            return certificate.Key.Decrypt(reversed, RSAEncryptionPadding.OaepSHA256);
+            return keyPair.Key.Decrypt(reversed, RSAEncryptionPadding.OaepSHA256);
         }
         catch (CryptographicException)
         {
@@ -581,19 +612,19 @@ internal static class CertificateCipher
         }
     }
 
-    public static byte[] Sign(Certificate certificate, byte[] data)
+    public static byte[] Sign(KeyPair keyPair, byte[] data)
     {
-        var signature = certificate.Key.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var signature = keyPair.Key.SignData(data, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         Array.Reverse(signature);
         return [.. SignatureHeader, .. signature];
     }
 
-    public static bool Verify(Certificate certificate, byte[] data, byte[] signature)
+    public static bool Verify(KeyPair keyPair, byte[] data, byte[] signature)
     {
-        if (signature.Length != SignatureHeader.Length + CipherLength || !signature.AsSpan(0, SignatureHeader.Length).SequenceEqual(SignatureHeader))
+        if (signature.Length != SignatureHeader.Length + (keyPair.KeyLength / 8) || !signature.AsSpan(0, SignatureHeader.Length).SequenceEqual(SignatureHeader))
             return false;
         var reversed = signature[SignatureHeader.Length..];
         Array.Reverse(reversed);
-        return certificate.Key.VerifyData(data, reversed, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        return keyPair.Key.VerifyData(data, reversed, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
     }
 }

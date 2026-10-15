@@ -149,9 +149,8 @@ internal sealed class NVarcharSqlType : SqlType
 /// SQL Server's <c>sysname</c>: <c>nvarchar(128) NOT NULL</c> alias used by
 /// the system catalogs. Always carries the server-default collation
 /// (<see cref="Collation.Baseline"/>) at
-/// <see cref="Coercibility.Implicit"/> rank — sysname
-/// columns don't accept a <c>COLLATE</c> clause and never coerce, so a
-/// single shared instance is sufficient.
+/// <see cref="Coercibility.Implicit"/> rank, so a single shared instance is
+/// sufficient; anything that re-collates one makes an <c>nvarchar(128)</c>.
 /// </summary>
 internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.UnicodeString)
 {
@@ -164,6 +163,18 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, Type
     public override Collation Collation => SqlServerSimulator.Collation.Baseline;
 
     public override Coercibility Coercibility => Coercibility.Implicit;
+
+    /// <summary>
+    /// A sysname under any other collation or rank — a <c>COLLATE</c>
+    /// postfix, an operator's settled collation — is the <c>nvarchar(128)</c>
+    /// it aliases (probed 2026-10-15 against SQL Server 2025: <c>name COLLATE
+    /// Latin1_General_BIN</c> selected into a table is <c>nvarchar(128)</c>
+    /// in that collation).
+    /// </summary>
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) =>
+        coercibility == Coercibility.Implicit && ReferenceEquals(collation, SqlServerSimulator.Collation.Baseline)
+            ? this
+            : NVarcharSqlType.Get(128, collation, coercibility);
 
     public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 

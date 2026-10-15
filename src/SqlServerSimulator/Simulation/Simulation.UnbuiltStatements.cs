@@ -32,8 +32,6 @@ partial class Simulation
     /// </summary>
     private static readonly UnbuiltStatementForm[] UnbuiltStatementForms =
     [
-        new("ALTER", "CERTIFICATE", "Certificates"),
-        new(null, "ASYMMETRIC KEY", "Asymmetric keys"),
         new(null, "CRYPTOGRAPHIC PROVIDER", "Extensible key management (cryptographic providers)"),
         new(null, "COLUMN MASTER KEY", "Always Encrypted (column master keys)"),
         new(null, "COLUMN ENCRYPTION KEY", "Always Encrypted (column encryption keys)"),

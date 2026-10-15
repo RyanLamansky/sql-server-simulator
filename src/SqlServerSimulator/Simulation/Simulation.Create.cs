@@ -75,6 +75,8 @@ partial class Simulation
                 return TryParseCreateCertificate(context);
             case UnquotedString symmetricWord when symmetricWord.Value.Equals("SYMMETRIC", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSymmetricKey(context);
+            case UnquotedString asymmetricWord when asymmetricWord.Value.Equals("ASYMMETRIC", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateAsymmetricKey(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:

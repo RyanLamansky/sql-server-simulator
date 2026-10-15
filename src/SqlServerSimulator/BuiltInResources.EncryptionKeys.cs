@@ -41,15 +41,35 @@ internal static partial class BuiltInResources
         {
             if (!PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassCertificate, certificate.Id, certificate.PrincipalId))
                 continue;
-            var byPassword = certificate.Password is not null;
             yield return
             [
                 SqlValue.FromSystemName(certificate.Name), SqlValue.FromInt32(certificate.Id), SqlValue.FromInt32(certificate.PrincipalId),
-                SqlValue.FromChar(KeyCodeType, byPassword ? "PW" : "MK"), SqlValue.FromNVarchar(byPassword ? "ENCRYPTED_BY_PASSWORD" : "ENCRYPTED_BY_MASTER_KEY"),
+                SqlValue.FromChar(KeyCodeType, certificate.ProtectionCode), SqlValue.FromNVarchar(certificate.ProtectionDescription),
                 SqlValue.FromBoolean(certificate.ActiveForBeginDialog), SqlValue.FromNVarchar(certificate.Subject), SqlValue.FromNVarchar(certificate.SerialNumber),
                 SqlValue.FromVarbinary(certificate.Sid), SqlValue.FromNVarchar(certificate.StringSid), SqlValue.FromNVarchar(certificate.Subject),
                 SqlValue.FromDateTime(certificate.ExpiryDate), SqlValue.FromDateTime(certificate.StartDate), SqlValue.FromVarbinary(certificate.Thumbprint),
-                SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.DateTime), SqlValue.FromInt32(Certificate.KeyLength),
+                SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.DateTime), SqlValue.FromInt32(certificate.KeyLength),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// <c>sys.asymmetric_keys</c>. Reading <c>public_key</c> makes each key's
+    /// key pair, which nothing before may have needed.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateAsymmetricKeys(Parser.BatchContext batch, Database database)
+    {
+        foreach (var (_, key) in database.EncryptionKeys.AsymmetricKeys.ToArray().OrderBy(static entry => entry.Value.Id))
+        {
+            if (!PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassAsymmetricKey, key.Id, key.PrincipalId))
+                continue;
+            yield return
+            [
+                SqlValue.FromSystemName(key.Name), SqlValue.FromInt32(key.PrincipalId), SqlValue.FromInt32(key.Id),
+                SqlValue.FromChar(KeyCodeType, key.ProtectionCode), SqlValue.FromNVarchar(key.ProtectionDescription), SqlValue.FromVarbinary(key.Thumbprint),
+                SqlValue.FromChar(KeyCodeType, key.AlgorithmCode), SqlValue.FromNVarchar(key.AlgorithmDescription), SqlValue.FromInt32(key.KeyLength),
+                SqlValue.FromVarbinary(key.Sid), SqlValue.FromNVarchar(key.StringSid), SqlValue.FromVarbinary(VarbinarySqlType.MaxForm, key.PublicKeyBlob),
+                SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.UniqueIdentifier), SqlValue.Null(SqlType.SqlVariant),
             ];
         }
     }
@@ -83,7 +103,8 @@ internal static partial class BuiltInResources
         var (code, description, thumbprint) = encryption.Kind switch
         {
             KeyEncryptionKind.ServiceMasterKey => ("ESKM", "ENCRYPTION BY MASTER KEY", [1]),
-            KeyEncryptionKind.Certificate => ("C256", "ENCRYPTION BY CERTIFICATE OAEP256", encryption.Certificate!.Thumbprint),
+            KeyEncryptionKind.Certificate => ("C256", "ENCRYPTION BY CERTIFICATE OAEP256", encryption.KeyPair!.Thumbprint),
+            KeyEncryptionKind.AsymmetricKey => ("A256", "ENCRYPTION BY ASYMMETRIC KEY OAEP256", encryption.KeyPair!.Thumbprint),
             KeyEncryptionKind.SymmetricKey => ("ESKS", "ENCRYPTION BY SYMMETRIC KEY", encryption.SymmetricKey!.KeyGuid.ToByteArray()),
             _ => ("ESP2", "ENCRYPTION BY PASSWORD V2", null),
         };

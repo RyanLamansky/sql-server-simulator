@@ -12,8 +12,6 @@ namespace SqlServerSimulator;
 public sealed class UnbuiltStatementTests
 {
     [TestMethod]
-    [DataRow("create asymmetric key a with algorithm = rsa_2048", "CREATE ASYMMETRIC KEY")]
-    [DataRow("alter certificate c remove private key", "ALTER CERTIFICATE")]
     [DataRow("backup certificate c to file = 'c.cer'", "BACKUP CERTIFICATE")]
     [DataRow("create column master key cmk with (key_store_provider_name = 'MSSQL_CERTIFICATE_STORE', key_path = 'x')", "CREATE COLUMN MASTER KEY")]
     [DataRow("create database encryption key with algorithm = aes_256 encryption by server certificate c", "CREATE DATABASE ENCRYPTION KEY")]

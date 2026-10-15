@@ -16,6 +16,9 @@ internal enum KeyEncryptionKind : byte
     /// <summary><c>C256</c>: a certificate's public key.</summary>
     Certificate,
 
+    /// <summary><c>A256</c>: an asymmetric key's public key.</summary>
+    AsymmetricKey,
+
     /// <summary><c>ESKS</c>: another symmetric key.</summary>
     SymmetricKey,
 }
@@ -26,15 +29,21 @@ internal enum KeyEncryptionKind : byte
 /// simulator reads the encrypted form; <see cref="CryptProperty"/> is random
 /// bytes of the length real's encrypted form has.
 /// </summary>
-internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, Certificate? certificate, SymmetricKey? symmetricKey, byte[] cryptProperty)
+internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, KeyPair? keyPair, SymmetricKey? symmetricKey, byte[] cryptProperty)
 {
     public readonly KeyEncryptionKind Kind = kind;
 
     /// <summary>The password, compared exactly, for <see cref="KeyEncryptionKind.Password"/>.</summary>
     public readonly string? Password = password;
 
-    public readonly Certificate? Certificate = certificate;
+    /// <summary>
+    /// The certificate or asymmetric key, as it stood when the encryption was
+    /// made: its id, name and thumbprint never change, but its owner and
+    /// private key may have since, so ask the store for those.
+    /// </summary>
+    public readonly KeyPair? KeyPair = keyPair;
 
+    /// <summary>The encrypting key as it stood, read for its id, name and GUID alone.</summary>
     public readonly SymmetricKey? SymmetricKey = symmetricKey;
 
     public readonly byte[] CryptProperty = cryptProperty;
@@ -47,11 +56,14 @@ internal sealed class KeyEncryption(KeyEncryptionKind kind, string? password, Ce
     /// </summary>
     public static byte[] BlockEncryptedLength(int keyBytes) => RandomNumberGenerator.GetBytes(((keyBytes / 16) + 1) * 16);
 
-    /// <summary>Whether this encryption is the one <paramref name="other"/> describes: the same password, certificate or key.</summary>
+    /// <summary>Whether this is an encryption by <paramref name="keyPair"/>.</summary>
+    public bool IsBy(KeyPair keyPair) => this.KeyPair is { } own && own.IsCertificate == keyPair.IsCertificate && own.Id == keyPair.Id;
+
+    /// <summary>Whether this encryption is the one <paramref name="other"/> describes: the same password, key pair or key.</summary>
     public bool SameProtector(KeyEncryption other) => this.Kind == other.Kind && this.Kind switch
     {
         KeyEncryptionKind.Password => string.Equals(this.Password, other.Password, StringComparison.Ordinal),
-        KeyEncryptionKind.Certificate => this.Certificate!.Id == other.Certificate!.Id,
+        KeyEncryptionKind.Certificate or KeyEncryptionKind.AsymmetricKey => this.IsBy(other.KeyPair!),
         KeyEncryptionKind.SymmetricKey => this.SymmetricKey!.Id == other.SymmetricKey!.Id,
         _ => true,
     };
@@ -82,12 +94,13 @@ internal sealed class DatabaseMasterKey(Guid keyGuid, DateTime createDate, DateT
 }
 
 /// <summary>
-/// A certificate (<c>sys.certificates</c>): self-signed, its 3072-bit RSA key
-/// generated on first use. Immutable apart from the lazily made key, so a
-/// rollback restores one by putting the old instance back.
+/// What a certificate and an asymmetric key share: an RSA key pair generated
+/// on first use, whose private half a password or the master key protects —
+/// or that has been removed. Immutable apart from the lazily made key, which
+/// an instance an <c>ALTER</c> makes shares, so a rollback restores one by
+/// putting the old instance back.
 /// </summary>
-internal sealed class Certificate(int id, string name, int principalId, string subject, string serialNumber, byte[] thumbprint,
-    DateTime startDate, DateTime expiryDate, string? password, bool activeForBeginDialog, StrongBox<RSA?>? keyPair = null)
+internal abstract class KeyPair(int id, string name, int principalId, int keyLength, byte[] thumbprint, string? password, bool hasPrivateKey, StrongBox<RSA?>? rsa)
 {
     public readonly int Id = id;
 
@@ -95,62 +108,128 @@ internal sealed class Certificate(int id, string name, int principalId, string s
 
     public readonly int PrincipalId = principalId;
 
-    /// <summary>The subject as <c>sys.certificates</c> shows it, which is its issuer too.</summary>
-    public readonly string Subject = subject;
+    /// <summary>The key length in bits.</summary>
+    public readonly int KeyLength = keyLength;
 
-    /// <summary>The serial number as real shows it: twenty hex bytes, space-separated.</summary>
-    public readonly string SerialNumber = serialNumber;
-
-    /// <summary>The 20-byte SHA-1 thumbprint, which is also the tail of the certificate's SID.</summary>
+    /// <summary>The thumbprint, which is also the tail of the SID: 20 bytes for a certificate, 8 for an asymmetric key.</summary>
     public readonly byte[] Thumbprint = thumbprint;
 
-    public readonly DateTime StartDate = startDate;
-
-    public readonly DateTime ExpiryDate = expiryDate;
-
-    /// <summary>The password protecting the private key, or null when the master key protects it.</summary>
+    /// <summary>The password protecting the private key, or null when the master key protects it or there is none.</summary>
     public readonly string? Password = password;
 
-    public readonly bool ActiveForBeginDialog = activeForBeginDialog;
-
-    public const int KeyLength = 3072;
+    /// <summary>False once <c>REMOVE PRIVATE KEY</c> has dropped the private half.</summary>
+    public readonly bool HasPrivateKey = hasPrivateKey;
 
     /// <summary>Where the key pair lives once made, shared with the instances an <c>ALTER</c> replaces this one by.</summary>
-    private readonly StrongBox<RSA?> keyPair = keyPair ?? new();
+    protected readonly StrongBox<RSA?> Rsa = rsa ?? new();
 
-    /// <summary>The certificate's RSA key pair, generated when an operation first needs it.</summary>
+    public bool IsCertificate => this is Certificate;
+
+    /// <summary>The class name real's messages use: <c>certificate</c> or <c>asymmetric key</c>.</summary>
+    public string ClassName => this.IsCertificate ? "certificate" : "asymmetric key";
+
+    /// <summary>The key pair, generated when an operation first needs it.</summary>
     public RSA Key
     {
         get
         {
-            if (Volatile.Read(ref this.keyPair.Value) is { } existing)
+            if (Volatile.Read(ref this.Rsa.Value) is { } existing)
                 return existing;
-            var made = RSA.Create(KeyLength);
-            if (Interlocked.CompareExchange(ref this.keyPair.Value, made, null) is not { } winner)
+            var made = RSA.Create(this.KeyLength);
+            if (Interlocked.CompareExchange(ref this.Rsa.Value, made, null) is not { } winner)
                 return made;
             made.Dispose();
             return winner;
         }
     }
 
-    /// <summary>The certificate under another owner, its key pair shared.</summary>
-    public Certificate WithOwner(int principalId) =>
-        new(this.Id, this.Name, principalId, this.Subject, this.SerialNumber, this.Thumbprint, this.StartDate, this.ExpiryDate, this.Password, this.ActiveForBeginDialog, this.keyPair);
+    /// <summary><c>pvt_key_encryption_type</c>: <c>MK</c>, <c>PW</c> or <c>NA</c>.</summary>
+    public string ProtectionCode => !this.HasPrivateKey ? "NA" : this.Password is null ? "MK" : "PW";
 
-    /// <summary><c>sys.certificates.sid</c>: <c>S-1-9-1</c> over the thumbprint.</summary>
-    public byte[] Sid => [1, 6, 0, 0, 0, 0, 0, 9, 1, 0, 0, 0, .. this.Thumbprint];
+    /// <summary><c>pvt_key_encryption_type_desc</c>.</summary>
+    public string ProtectionDescription => !this.HasPrivateKey ? "NO_PRIVATE_KEY" : this.Password is null ? "ENCRYPTED_BY_MASTER_KEY" : "ENCRYPTED_BY_PASSWORD";
 
-    /// <summary><c>sys.certificates.string_sid</c>: the thumbprint's five little-endian words after <c>S-1-9-1</c>.</summary>
+    /// <summary>The SID: authority 9, then 1 for a certificate or 2 for an asymmetric key, then the thumbprint's words.</summary>
+    public byte[] Sid => [1, (byte)(1 + (this.Thumbprint.Length / 4)), 0, 0, 0, 0, 0, 9, this.IsCertificate ? (byte)1 : (byte)2, 0, 0, 0, .. this.Thumbprint];
+
+    /// <summary>The SID's string form: <c>S-1-9-1-…</c> or <c>S-1-9-2-…</c> over the thumbprint's little-endian words.</summary>
     public string StringSid
     {
         get
         {
-            var parts = new string[5];
-            for (var i = 0; i < 5; i++)
+            var parts = new string[this.Thumbprint.Length / 4];
+            for (var i = 0; i < parts.Length; i++)
                 parts[i] = BitConverter.ToUInt32(this.Thumbprint, i * 4).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            return "S-1-9-1-" + string.Join('-', parts);
+            return (this.IsCertificate ? "S-1-9-1-" : "S-1-9-2-") + string.Join('-', parts);
         }
     }
+
+    /// <summary>This key pair under another owner or protection, its key shared.</summary>
+    public abstract KeyPair With(int principalId, string? password, bool hasPrivateKey);
+}
+
+/// <summary>A certificate (<c>sys.certificates</c>): self-signed, over a 3072-bit key.</summary>
+internal sealed class Certificate(int id, string name, int principalId, string subject, string serialNumber, byte[] thumbprint,
+    DateTime startDate, DateTime expiryDate, string? password, bool hasPrivateKey, bool activeForBeginDialog, StrongBox<RSA?>? rsa = null)
+    : KeyPair(id, name, principalId, CertificateKeyLength, thumbprint, password, hasPrivateKey, rsa)
+{
+    public const int CertificateKeyLength = 3072;
+
+    /// <summary>The subject as <c>sys.certificates</c> shows it, which is its issuer too.</summary>
+    public readonly string Subject = subject;
+
+    /// <summary>The serial number as real shows it: twenty hex bytes, space-separated.</summary>
+    public readonly string SerialNumber = serialNumber;
+
+    public readonly DateTime StartDate = startDate;
+
+    public readonly DateTime ExpiryDate = expiryDate;
+
+    public readonly bool ActiveForBeginDialog = activeForBeginDialog;
+
+    public override KeyPair With(int principalId, string? password, bool hasPrivateKey) =>
+        new Certificate(this.Id, this.Name, principalId, this.Subject, this.SerialNumber, this.Thumbprint, this.StartDate, this.ExpiryDate, password, hasPrivateKey, this.ActiveForBeginDialog, this.Rsa);
+
+    public Certificate WithActiveForBeginDialog(bool active) =>
+        new(this.Id, this.Name, this.PrincipalId, this.Subject, this.SerialNumber, this.Thumbprint, this.StartDate, this.ExpiryDate, this.Password, this.HasPrivateKey, active, this.Rsa);
+}
+
+/// <summary>An asymmetric key (<c>sys.asymmetric_keys</c>): an RSA key of 2048, 3072 or 4096 bits.</summary>
+internal sealed class AsymmetricKey(int id, string name, int principalId, int keyLength, byte[] thumbprint, string? password, bool hasPrivateKey, StrongBox<RSA?>? rsa = null)
+    : KeyPair(id, name, principalId, keyLength, thumbprint, password, hasPrivateKey, rsa)
+{
+    /// <summary><c>sys.asymmetric_keys.algorithm</c>: <c>3R</c>, <c>4R</c> or <c>5R</c>.</summary>
+    public string AlgorithmCode => this.KeyLength switch { 2048 => "3R", 3072 => "4R", _ => "5R" };
+
+    public string AlgorithmDescription => "RSA_" + this.KeyLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <c>sys.asymmetric_keys.public_key</c>: the public key as a CryptoAPI
+    /// <c>PUBLICKEYBLOB</c> — the header real writes (probed 2026-10-15
+    /// against SQL Server 2025), <c>RSA1</c>, the bit length and exponent, and
+    /// the modulus little-endian.
+    /// </summary>
+    public byte[] PublicKeyBlob
+    {
+        get
+        {
+            var parameters = this.Key.ExportParameters(includePrivateParameters: false);
+            var modulus = parameters.Modulus!;
+            var blob = new byte[20 + modulus.Length];
+            ReadOnlySpan<byte> header = [6, 2, 0, 0, 0, 0x24, 0, 0, (byte)'R', (byte)'S', (byte)'A', (byte)'1'];
+            header.CopyTo(blob);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(blob.AsSpan(12), this.KeyLength);
+            var exponent = parameters.Exponent!;
+            for (var i = 0; i < exponent.Length; i++)
+                blob[16 + i] = exponent[exponent.Length - 1 - i];
+            for (var i = 0; i < modulus.Length; i++)
+                blob[20 + i] = modulus[modulus.Length - 1 - i];
+            return blob;
+        }
+    }
+
+    public override KeyPair With(int principalId, string? password, bool hasPrivateKey) =>
+        new AsymmetricKey(this.Id, this.Name, principalId, this.KeyLength, this.Thumbprint, password, hasPrivateKey, this.Rsa);
 }
 
 /// <summary>
@@ -205,6 +284,8 @@ internal sealed class EncryptionKeyStore(Collation collation)
 
     public readonly ConcurrentDictionary<string, SymmetricKey> SymmetricKeys = new(collation.NameKeys);
 
+    public readonly ConcurrentDictionary<string, AsymmetricKey> AsymmetricKeys = new(collation.NameKeys);
+
     /// <summary>Serializes the key DDL, whose checks span the whole store.</summary>
     public readonly Lock Gate = new();
 
@@ -214,7 +295,9 @@ internal sealed class EncryptionKeyStore(Collation collation)
 
     internal int LastSymmetricKeyId = 255;
 
-    public bool IsEmpty => this.MasterKey is null && this.Certificates.IsEmptyLockFree() && this.SymmetricKeys.IsEmptyLockFree();
+    internal int LastAsymmetricKeyId = 255;
+
+    public bool IsEmpty => this.MasterKey is null && this.Certificates.IsEmptyLockFree() && this.SymmetricKeys.IsEmptyLockFree() && this.AsymmetricKeys.IsEmptyLockFree();
 
     public SymmetricKey? SymmetricKeyById(int id)
     {
@@ -246,12 +329,26 @@ internal sealed class EncryptionKeyStore(Collation collation)
         return null;
     }
 
+    public AsymmetricKey? AsymmetricKeyById(int id)
+    {
+        foreach (var (_, key) in this.AsymmetricKeys)
+        {
+            if (key.Id == id)
+                return key;
+        }
+        return null;
+    }
+
+    /// <summary>The certificate or asymmetric key <paramref name="stale"/> names, as it stands now; null once dropped.</summary>
+    public KeyPair? Current(KeyPair stale) => stale.IsCertificate ? this.CertificateById(stale.Id) : this.AsymmetricKeyById(stale.Id);
+
     /// <summary>A copy of the store's state that, run, puts it back.</summary>
     public Action Snapshot()
     {
         var masterKey = this.MasterKey;
         var certificates = this.Certificates.ToArray();
         var symmetricKeys = this.SymmetricKeys.ToArray();
+        var asymmetricKeys = this.AsymmetricKeys.ToArray();
         return () =>
         {
             this.MasterKey = masterKey;
@@ -261,6 +358,9 @@ internal sealed class EncryptionKeyStore(Collation collation)
             this.SymmetricKeys.Clear();
             foreach (var (name, key) in symmetricKeys)
                 this.SymmetricKeys[name] = key;
+            this.AsymmetricKeys.Clear();
+            foreach (var (name, key) in asymmetricKeys)
+                this.AsymmetricKeys[name] = key;
         };
     }
 }
