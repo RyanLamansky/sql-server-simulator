@@ -4,11 +4,9 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// The SQL Server 2000 compatibility views real defines over the modern
-/// catalog: <c>sysforeignkeys</c>, <c>sysconstraints</c>, <c>sysreferences</c>,
-/// <c>sysmembers</c>, <c>sysfiles</c>, <c>sysfilegroups</c>,
-/// <c>sysfulltextcatalogs</c>, <c>sysprotects</c> and <c>syspermissions</c>,
-/// each checked row for row against SQL Server 2025 over the same fixture
-/// (probed 2026-10-15).
+/// catalog — the database-scope ones checked row for row against SQL Server
+/// 2025 over the same fixture, the server-scope ones over the same option and
+/// login sequences (probed 2026-10-15).
 /// </summary>
 [TestClass]
 public sealed class CompatibilityViewTests
@@ -109,4 +107,95 @@ public sealed class CompatibilityViewTests
                     (select count(*) from sysmembers), (select count(*) from sysprotects where id >= 0), (select count(*) from syspermissions where id >= 0));
                 revert
                 """));
+
+    [TestMethod]
+    [DataRow("", 65536, 1627389952)]
+    [DataRow("auto_close on", 65537, 1627389952)]
+    [DataRow("auto_shrink on", 4259840, 1627389952)]
+    [DataRow("recovery simple", 65544, 1627389952)]
+    [DataRow("recovery bulk_logged", 65540, 1627389952)]
+    [DataRow("page_verify torn_page_detection", 16, 1627389952)]
+    [DataRow("page_verify none", 0, 1627389952)]
+    [DataRow("restricted_user", 67584, 1627389952)]
+    [DataRow("single_user", 69632, 1627389952)]
+    [DataRow("read_only", 1073808384, 1627389952)]
+    [DataRow("ansi_null_default on", 65536, 1627406336)]
+    [DataRow("quoted_identifier on", 65536, 1635778560)]
+    [DataRow("cursor_default local", 65536, 1628438528)]
+    [DataRow("auto_create_statistics off", 65536, 1610612736)]
+    [DataRow("auto_update_statistics off", 65536, 553648128)]
+    [DataRow("db_chaining on", 65536, 1627390976)]
+    public void Sysdatabases_PacksOptionsAsReal(string option, int status, int status2)
+        => AreEqual($"{status}|{status2}|170|0|0|998|0x01", new Simulation().ExecuteScalar($"""
+            create database d;
+            {(option.Length == 0 ? "" : $"alter database d set {option};")}
+            select concat_ws('|', status, status2, cmptlevel, mode, category, version, convert(varchar, sid, 1)) from sysdatabases where name = 'd'
+            """));
+
+    [TestMethod]
+    public void Sysdatabases_SystemDatabases()
+        => AreEqual(
+            "master|1|65544|1090520064 tempdb|2|65544|1090520064 model|3|65536|1090519040 msdb|4|65544|1627390976",
+            new Simulation().ExecuteScalar("select string_agg(concat_ws('|', name, dbid, status, status2), ' ') within group (order by dbid) from master..sysdatabases where dbid <= 4"));
+
+    [TestMethod]
+    public void Syslogins_StatusAccessAndRoles()
+        => AreEqual(
+            "sa|9|master|0|1|1|0|0 zza|9|master|0|1|0|1|0 zzb|10|tempdb|1|0|0|0|1 zzc|10|master|0|0|0|0|0",
+            new Simulation().ExecuteScalar("""
+                use master;
+                create login zza with password = 'Zz!12345678', check_policy = off;
+                create login zzb with password = 'Zz!12345678', check_policy = off, default_database = tempdb;
+                deny connect sql to zzb;
+                alter server role dbcreator add member zza;
+                alter server role ##MS_DefinitionReader## add member zzb;
+                create login zzc with password = 'Zz!12345678', check_policy = off;
+                revoke connect sql from zzc;
+                select string_agg(concat_ws('|', name, status, dbname, denylogin, hasaccess, sysadmin, dbcreator, [##MS_DefinitionReader##]), ' ') within group (order by name)
+                from syslogins where name like 'zz%' or name = 'sa'
+                """));
+
+    [TestMethod]
+    public void Sysaltfiles_ListsEveryDatabasesFilesForControlServer()
+    {
+        var sim = new Simulation();
+        AreEqual(
+            "1|1|1024|-1|8192|2|0|d|/var/opt/mssql/data/d.mdf 2|0|1024|268435456|8192|66|0|d_log|/var/opt/mssql/data/d_log.ldf",
+            sim.ExecuteScalar("create database d; select string_agg(concat_ws('|', fileid, groupid, size, maxsize, growth, status, perf, name, filename), ' ') within group (order by fileid) from sysaltfiles where dbid = db_id('d')"));
+        sim.AssertSqlError(
+            "use master; create login zza with password = 'Zz!12345678', check_policy = off; execute as login = 'zza'; select count(*) from sysaltfiles",
+            229, "The SELECT permission was denied on the object 'sysaltfiles', database 'mssqlsystemresource', schema 'sys'.");
+    }
+
+    [TestMethod]
+    public void Syscurconfigs_StatusPacksDynamicAndAdvanced()
+        => AreEqual(
+            "101|3 102|1 103|2",
+            new Simulation().ExecuteScalar("select string_agg(concat_ws('|', config, status), ' ') within group (order by config) from syscurconfigs where config in (101, 102, 103)"));
+
+    [TestMethod]
+    public void Syscharsets_AndTheEmptyDeviceViews()
+        => AreEqual(
+            "117|iso_1|nocase_iso|0|0",
+            new Simulation().ExecuteScalar("""
+                select concat_ws('|', count(*), max(case when type = 1001 and id = 1 then name end), max(case when id = 52 then name end),
+                    (select count(*) from sysdevices), (select count(*) from sysopentapes))
+                from syscharsets
+                """));
+
+    [TestMethod]
+    public void Sysoledbusers_ListsLinkedLogins()
+    {
+        var sim = new Simulation();
+        sim.AddRemoteSimulation("zzls", new Simulation());
+        AreEqual(
+            "N|N|N|1 rmt|N|0x01|0",
+            sim.ExecuteScalar("""
+                use master;
+                exec sp_addlinkedserver @server = 'zzls', @srvproduct = '', @provider = 'SQLNCLI', @datasrc = 'localhost';
+                exec sp_addlinkedsrvlogin 'zzls', 'false', 'sa', 'rmt', 'pw';
+                select string_agg(concat_ws('|', isnull(rmtloginame, 'N'), isnull(rmtpassword, 'N'), isnull(convert(varchar, loginsid, 1), 'N'), status), ' ') within group (order by rmtloginame)
+                from sysoledbusers where rmtsrvid = (select server_id from sys.servers where name = 'zzls')
+                """));
+    }
 }

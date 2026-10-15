@@ -37,7 +37,9 @@ internal static partial class BuiltInResources
         ("sys.dm_tran_session_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store_space_usage", DmvGateKind.ServerState),
+        ("sys.sysaltfiles", DmvGateKind.ControlServer),
         ("sys.sysprocesses", DmvGateKind.SessionSelfFilter),
+        ("sysaltfiles", DmvGateKind.ControlServer),
         ("sysprocesses", DmvGateKind.SessionSelfFilter),
     ];
 
@@ -88,6 +90,14 @@ internal static partial class BuiltInResources
             case DmvGateKind.DatabaseState:
                 if (!HoldsDatabaseState(batch, simulation, login))
                     throw SimulatedSqlException.DatabasePermissionDenied("VIEW DATABASE PERFORMANCE STATE", databaseName, aborts: false);
+                return rows;
+            // Real reads sysaltfiles through its resource database, where only
+            // CONTROL SERVER holds SELECT (probed 2026-10-15 against SQL
+            // Server 2025: VIEW SERVER STATE, VIEW ANY DEFINITION and ALTER
+            // ANY DATABASE don't).
+            case DmvGateKind.ControlServer:
+                if (!simulation.HoldsServerPermission(login, Permission.ControlServer))
+                    throw SimulatedSqlException.PermissionDenied("SELECT", view.Name, "mssqlsystemresource", "sys");
                 return rows;
             default: // SessionSelfFilter
                 return simulation.HoldsServerPermission(login, Permission.ViewServerState)

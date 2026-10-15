@@ -486,4 +486,518 @@ partial class BuiltInResources
             ];
         }
     }
+
+    /// <summary>
+    /// Registers the server-scope compatibility views: <c>sysdatabases</c>,
+    /// <c>syslogins</c>, <c>sysaltfiles</c>, <c>syscurconfigs</c>,
+    /// <c>syscharsets</c>, <c>sysmessages</c>, <c>sysremotelogins</c>,
+    /// <c>sysoledbusers</c>, <c>sysdevices</c> and <c>sysopentapes</c>, each
+    /// as real defines it and as visible as its source (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void RegisterServerCompatibilityProjections(Dictionary<string, CatalogView> views)
+    {
+        var sysname = SqlType.SystemName;
+        var path = NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit);
+        var sid = VarbinarySqlType.Get(85);
+
+        Compatibility(views, "sysdatabases",
+        [
+            new("name", sysname, 128, false),
+            new("dbid", SqlType.SmallInt, null, true),
+            new("sid", sid, 85, true),
+            new("mode", SqlType.SmallInt, null, true),
+            new("status", SqlType.Int32, null, true),
+            new("status2", SqlType.Int32, null, true),
+            new("crdate", SqlType.DateTime, null, false),
+            new("reserved", SqlType.DateTime, null, true),
+            new("category", SqlType.Int32, null, true),
+            new("cmptlevel", SqlType.TinyInt, null, false),
+            new("filename", path, 260, true),
+            new("version", SqlType.SmallInt, null, true),
+        ], EnumerateSysdatabases);
+
+        HeapColumn[] loginColumns =
+        [
+            new("sid", sid, 85, true),
+            new("status", SqlType.SmallInt, null, true),
+            new("createdate", SqlType.DateTime, null, false),
+            new("updatedate", SqlType.DateTime, null, false),
+            new("accdate", SqlType.DateTime, null, false),
+            new("totcpu", SqlType.Int32, null, true),
+            new("totio", SqlType.Int32, null, true),
+            new("spacelimit", SqlType.Int32, null, true),
+            new("timelimit", SqlType.Int32, null, true),
+            new("resultlimit", SqlType.Int32, null, true),
+            new("name", sysname, 128, false),
+            new("dbname", sysname, 128, true),
+            new("password", sysname, 128, true),
+            new("language", sysname, 128, true),
+            new("denylogin", SqlType.Int32, null, true),
+            new("hasaccess", SqlType.Int32, null, true),
+            new("isntname", SqlType.Int32, null, true),
+            new("isntgroup", SqlType.Int32, null, true),
+            new("isntuser", SqlType.Int32, null, true),
+            .. SysloginsRoleColumns.Select(static role => new HeapColumn(role, SqlType.Int32, null, true)),
+            new("loginname", sysname, 128, false),
+        ];
+        Compatibility(views, "syslogins", loginColumns, EnumerateSyslogins);
+
+        Compatibility(views, "sysaltfiles",
+        [
+            new("fileid", SqlType.SmallInt, null, true),
+            new("groupid", SqlType.SmallInt, null, true),
+            new("size", SqlType.Int32, null, false),
+            new("maxsize", SqlType.Int32, null, false),
+            new("growth", SqlType.Int32, null, false),
+            new("status", SqlType.Int32, null, true),
+            new("perf", SqlType.Int32, null, true),
+            new("dbid", SqlType.SmallInt, null, true),
+            new("name", NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), 128, true),
+            new("filename", path, 260, true),
+        ], EnumerateSysaltfiles);
+
+        Compatibility(views, "syscurconfigs",
+        [
+            new("value", SqlType.Int32, null, false),
+            new("config", SqlType.SmallInt, null, true),
+            new("comment", NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit), 255, false),
+            new("status", SqlType.SmallInt, null, true),
+        ], (batch, database) => Project(batch, database, "sys.configurations", static source =>
+        {
+            var id = OrdinalOf(source, "configuration_id");
+            var inUse = OrdinalOf(source, "value_in_use");
+            var description = OrdinalOf(source, "description");
+            var dynamic = OrdinalOf(source, "is_dynamic");
+            var advanced = OrdinalOf(source, "is_advanced");
+            return row =>
+            [
+                SqlValue.FromInt32(row[inUse].CoerceTo(SqlType.Int32).AsInt32),
+                SmallInt(row[id]),
+                SqlValue.FromString(NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit), row[description].AsString),
+                SqlValue.FromInt16((short)(Flag(row[dynamic]) + (Flag(row[advanced]) * 2))),
+            ];
+        }));
+
+        var charsetName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var charsetDescription = NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit);
+        var charsetRows = Array.ConvertAll(Charsets, charset => new SqlValue[]
+        {
+            SqlValue.FromInt16(charset.Type),
+            SqlValue.FromByte(charset.Id),
+            SqlValue.FromByte(charset.CsId),
+            SqlValue.FromInt16(0),
+            SqlValue.FromString(charsetName, charset.Name),
+            SqlValue.FromString(charsetDescription, charset.Description),
+            SqlValue.Null(VarbinarySqlType.Get(6000)),
+            SqlValue.Null(SqlType.Image),
+        });
+        Compatibility(views, "syscharsets",
+        [
+            new("type", SqlType.SmallInt, null, false),
+            new("id", SqlType.TinyInt, null, false),
+            new("csid", SqlType.TinyInt, null, false),
+            new("status", SqlType.SmallInt, null, true),
+            new("name", charsetName, 128, false),
+            new("description", charsetDescription, 255, false),
+            new("binarydefinition", VarbinarySqlType.Get(6000), 6000, true),
+            new("definition", SqlType.Image, null, true),
+        ], (_, _) => charsetRows);
+
+        var messageText = NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit);
+        Compatibility(views, "sysmessages",
+        [
+            new("error", SqlType.Int32, null, false),
+            new("severity", SqlType.TinyInt, null, true),
+            new("dlevel", SqlType.SmallInt, null, true),
+            new("description", messageText, 255, true),
+            new("msglangid", SqlType.SmallInt, null, false),
+        ], (batch, database) => Project(batch, database, "sys.messages", source =>
+        {
+            var id = OrdinalOf(source, "message_id");
+            var severity = OrdinalOf(source, "severity");
+            var logged = OrdinalOf(source, "is_event_logged");
+            var text = OrdinalOf(source, "text");
+            var language = OrdinalOf(source, "language_id");
+            return row =>
+            [
+                row[id],
+                row[severity],
+                SqlValue.FromInt16((short)(Flag(row[logged]) * 128)),
+                SqlValue.FromString(messageText, row[text].AsString.Length > 255 ? row[text].AsString[..255] : row[text].AsString),
+                row[language],
+            ];
+        }));
+
+        Compatibility(views, "sysremotelogins",
+        [
+            new("remoteserverid", SqlType.SmallInt, null, true),
+            new("remoteusername", sysname, 128, true),
+            new("status", SqlType.SmallInt, null, true),
+            new("sid", sid, 85, true),
+            new("changedate", SqlType.DateTime, null, false),
+        ], (batch, database) => RemoteLoginRows(batch, database, "sys.remote_logins", oledb: false));
+
+        Compatibility(views, "sysoledbusers",
+        [
+            new("rmtsrvid", SqlType.SmallInt, null, true),
+            new("rmtloginame", sysname, 128, true),
+            new("rmtpassword", sysname, 128, true),
+            new("loginsid", sid, 85, true),
+            new("status", SqlType.SmallInt, null, true),
+            new("changedate", SqlType.DateTime, null, false),
+        ], (batch, database) => RemoteLoginRows(batch, database, "sys.linked_logins", oledb: true));
+
+        // Backup devices and open tapes aren't modeled, so both are empty, as
+        // a server with none is.
+        Compatibility(views, "sysdevices",
+        [
+            new("name", sysname, 128, false),
+            new("size", SqlType.Int32, null, true),
+            new("low", SqlType.Int32, null, true),
+            new("high", SqlType.Int32, null, true),
+            new("status", SqlType.SmallInt, null, true),
+            new("cntrltype", SqlType.SmallInt, null, true),
+            new("phyname", path, 260, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Compatibility(views, "sysopentapes",
+        [
+            new("openTape", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, false),
+        ], static (_, _) => EmptyCatalogRows);
+    }
+
+    /// <summary>The fixed server roles <c>syslogins</c> flags, in column order and in <c>role_principal_id</c> order 3 through 20.</summary>
+    private static readonly string[] SysloginsRoleColumns =
+    [
+        "sysadmin", "securityadmin", "serveradmin", "setupadmin", "processadmin", "diskadmin", "dbcreator", "bulkadmin",
+        "##MS_ServerStateReader##", "##MS_ServerStateManager##", "##MS_DefinitionReader##", "##MS_DatabaseConnector##",
+        "##MS_DatabaseManager##", "##MS_LoginManager##", "##MS_SecurityDefinitionReader##", "##MS_PermissionDefinitionReader##",
+        "##MS_ServerSecurityStateReader##", "##MS_ServerPermissionStateReader##",
+    ];
+
+    /// <summary>
+    /// One row per database <c>sys.databases</c> shows, its options packed as
+    /// real's <c>status</c> (auto close 1, bulk-logged 4, simple 8, torn-page
+    /// 16, offline 512, read-only 1024, restricted 2048, single-user 4096,
+    /// emergency 32768 with 256, checksum 65536, auto shrink 4194304, and
+    /// 0x40000000 read-only or offline) and <c>status2</c> (DB_CHAINING 0x400,
+    /// NUMERIC_ROUNDABORT 0x800, ARITHABORT 0x1000, ANSI_PADDING 0x2000,
+    /// ANSI_NULL_DEFAULT 0x4000, CONCAT_NULL_YIELDS_NULL 0x10000,
+    /// RECURSIVE_TRIGGERS 0x20000, local cursors 0x100000, QUOTED_IDENTIFIER
+    /// 0x800000, auto create statistics 0x1000000, CURSOR_CLOSE_ON_COMMIT
+    /// 0x2000000, ANSI_NULLS 0x4000000, ANSI_WARNINGS 0x10000000, full-text
+    /// 0x20000000, auto update statistics 0x40000000) — each bit set by its
+    /// option alone on a probe database.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysdatabases(BatchContext batch, Database database)
+    {
+        var rows = SourceRows(batch, database, "sys.databases", out var source);
+        int Ordinal(string name) => OrdinalOf(source, name);
+        bool On(SqlValue[] row, string name) => Flag(row[Ordinal(name)]) == 1;
+        var reserved = SqlValue.FromDateTime(new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        var path = NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit);
+        foreach (var row in rows)
+        {
+            var name = row[Ordinal("name")].AsString;
+            var state = row[Ordinal("state")].AsByte;
+            var readOnly = On(row, "is_read_only");
+            var status = (On(row, "is_auto_close_on") ? 1 : 0)
+                + row[Ordinal("recovery_model")].AsByte switch { 2 => 4, 3 => 8, _ => 0 }
+                + row[Ordinal("page_verify_option")].AsByte switch { 1 => 16, 2 => 65536, _ => 0 }
+                + (state == 6 ? 512 : 0)
+                + (readOnly ? 1024 : 0)
+                + row[Ordinal("user_access")].AsByte switch { 1 => 4096, 2 => 2048, _ => 0 }
+                + (state == 5 ? 32768 + 256 : 0)
+                + (On(row, "is_auto_shrink_on") ? 4194304 : 0)
+                + (readOnly || state == 6 ? 0x40000000 : 0);
+            var status2 = (On(row, "is_db_chaining_on") ? 0x400 : 0)
+                + (On(row, "is_numeric_roundabort_on") ? 0x800 : 0)
+                + (On(row, "is_arithabort_on") ? 0x1000 : 0)
+                + (On(row, "is_ansi_padding_on") ? 0x2000 : 0)
+                + (On(row, "is_ansi_null_default_on") ? 0x4000 : 0)
+                + (On(row, "is_concat_null_yields_null_on") ? 0x10000 : 0)
+                + (On(row, "is_recursive_triggers_on") ? 0x20000 : 0)
+                + (On(row, "is_local_cursor_default") ? 0x100000 : 0)
+                + (On(row, "is_quoted_identifier_on") ? 0x800000 : 0)
+                + (On(row, "is_auto_create_stats_on") ? 0x1000000 : 0)
+                + (On(row, "is_cursor_close_on_commit_on") ? 0x2000000 : 0)
+                + (On(row, "is_ansi_nulls_on") ? 0x4000000 : 0)
+                + (On(row, "is_ansi_warnings_on") ? 0x10000000 : 0)
+                + (On(row, "is_fulltext_enabled") ? 0x20000000 : 0)
+                + (On(row, "is_auto_update_stats_on") ? 0x40000000 : 0);
+            var primary = batch.Connection.Simulation.Databases.TryGetValue(name, out var target)
+                ? target.Files.Find(static file => file.FileId == 1)
+                : null;
+            yield return
+            [
+                SqlValue.FromSystemName(name),
+                SmallInt(row[Ordinal("database_id")]),
+                row[Ordinal("owner_sid")],
+                SqlValue.FromInt16(0),
+                SqlValue.FromInt32(status),
+                SqlValue.FromInt32(status2),
+                row[Ordinal("create_date")],
+                reserved,
+                SqlValue.FromInt32((On(row, "is_published") ? 1 : 0) + (On(row, "is_subscribed") ? 2 : 0) + (On(row, "is_merge_published") ? 4 : 0) + (On(row, "is_distributor") ? 16 : 0)),
+                row[Ordinal("compatibility_level")],
+                primary is null ? SqlValue.Null(path) : SqlValue.FromString(path, primary.PhysicalName),
+                SqlValue.FromInt16(998),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// One row per login <c>sys.server_principals</c> shows, a role excluded:
+    /// <c>status</c> 9 when its CONNECT SQL from <c>sa</c> is granted and 10
+    /// otherwise, <c>hasaccess</c> / <c>denylogin</c> from that grant, and a
+    /// flag for each fixed server role it is a member of.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSyslogins(BatchContext batch, Database database)
+    {
+        var connect = new Dictionary<int, string>();
+        foreach (var row in SourceRows(batch, database, "sys.server_permissions", out var permissions))
+        {
+            if (row[OrdinalOf(permissions, "class")].AsByte == 100 && row[OrdinalOf(permissions, "type")].AsString.TrimEnd() == "COSQ"
+                && row[OrdinalOf(permissions, "grantor_principal_id")].AsInt32 == 1)
+            {
+                connect[row[OrdinalOf(permissions, "grantee_principal_id")].AsInt32] = row[OrdinalOf(permissions, "state")].AsString.TrimEnd();
+            }
+        }
+        var members = new HashSet<(int Member, int Role)>();
+        foreach (var row in SourceRows(batch, database, "sys.server_role_members", out var memberships))
+            _ = members.Add((row[OrdinalOf(memberships, "member_principal_id")].AsInt32, row[OrdinalOf(memberships, "role_principal_id")].AsInt32));
+
+        var principals = SourceRows(batch, database, "sys.server_principals", out var source);
+        int Ordinal(string name) => OrdinalOf(source, name);
+        foreach (var row in principals)
+        {
+            var type = row[Ordinal("type")].AsString.TrimEnd();
+            if (type == "R")
+                continue;
+            var id = row[Ordinal("principal_id")].AsInt32;
+            var state = connect.GetValueOrDefault(id);
+            var granted = state is "G" or "W";
+            var name = row[Ordinal("name")].AsString;
+            var result = new List<SqlValue>(38)
+            {
+                row[Ordinal("sid")],
+                SqlValue.FromInt16((short)(8 + (granted ? 1 : 2))),
+                row[Ordinal("create_date")],
+                row[Ordinal("modify_date")],
+                row[Ordinal("create_date")],
+                SqlValue.FromInt32(0),
+                SqlValue.FromInt32(0),
+                SqlValue.FromInt32(0),
+                SqlValue.FromInt32(0),
+                SqlValue.FromInt32(0),
+                SqlValue.FromSystemName(name),
+                row[Ordinal("default_database_name")],
+                SqlValue.Null(SqlType.SystemName),
+                row[Ordinal("default_language_name")],
+                SqlValue.FromInt32(state == "D" ? 1 : 0),
+                SqlValue.FromInt32(granted ? 1 : 0),
+                SqlValue.FromInt32(type is "G" or "U" ? 1 : 0),
+                SqlValue.FromInt32(type == "G" ? 1 : 0),
+                SqlValue.FromInt32(type == "U" ? 1 : 0),
+            };
+            for (var role = 3; role < 3 + SysloginsRoleColumns.Length; role++)
+                result.Add(SqlValue.FromInt32(members.Contains((id, role)) ? 1 : 0));
+            result.Add(SqlValue.FromSystemName(name));
+            yield return [.. result];
+        }
+    }
+
+    /// <summary>
+    /// Every database's data and log files, as <c>sysfiles</c> lists one
+    /// database's, with its id — readable with <c>CONTROL SERVER</c> alone
+    /// (the gate is <see cref="DmvGateKind.ControlServer"/>).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysaltfiles(BatchContext batch, Database database)
+    {
+        var rows = SourceRows(batch, database, "sys.master_files", out var source);
+        int Ordinal(string name) => OrdinalOf(source, name);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        foreach (var row in rows)
+        {
+            if (row[Ordinal("type")].AsByte > 1)
+                continue;
+            yield return
+            [
+                SqlValue.FromInt16((short)(row[Ordinal("file_id")].AsInt32 & 0x7fff)),
+                SmallInt(row[Ordinal("data_space_id")]),
+                row[Ordinal("size")],
+                row[Ordinal("max_size")],
+                row[Ordinal("growth")],
+                SqlValue.FromInt32((row[Ordinal("type")].AsByte == 1 ? 66 : 2)
+                    + (Flag(row[Ordinal("is_read_only")]) * 4096)
+                    + (Flag(row[Ordinal("is_percent_growth")]) * 1048576)
+                    + (row[Ordinal("state")].AsByte == 6 ? 268435456 : 0)),
+                SqlValue.FromInt32(0),
+                SmallInt(row[Ordinal("database_id")]),
+                SqlValue.FromString(name, row[Ordinal("name")].AsString),
+                row[Ordinal("physical_name")],
+            ];
+        }
+    }
+
+    /// <summary>
+    /// <c>sysremotelogins</c> over <c>sys.remote_logins</c> and
+    /// <c>sysoledbusers</c> over <c>sys.linked_logins</c>, each naming its
+    /// local login by <c>sid</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> RemoteLoginRows(BatchContext batch, Database database, string sourceKey, bool oledb)
+    {
+        var sids = new Dictionary<int, SqlValue>();
+        foreach (var row in SourceRows(batch, database, "sys.server_principals", out var principals))
+            sids[row[OrdinalOf(principals, "principal_id")].AsInt32] = row[OrdinalOf(principals, "sid")];
+        var nullSid = SqlValue.Null(VarbinarySqlType.Get(85));
+        var rows = SourceRows(batch, database, sourceKey, out var source);
+        int Ordinal(string name) => OrdinalOf(source, name);
+        foreach (var row in rows)
+        {
+            var local = row[Ordinal("local_principal_id")];
+            var sid = !local.IsNull && sids.TryGetValue(local.AsInt32, out var found) ? found : nullSid;
+            var remoteName = row[Ordinal("remote_name")].IsNull ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(row[Ordinal("remote_name")].AsString);
+            yield return oledb
+                ?
+                [
+                    SmallInt(row[Ordinal("server_id")]),
+                    remoteName,
+                    SqlValue.Null(SqlType.SystemName),
+                    sid,
+                    SqlValue.FromInt16((short)Flag(row[Ordinal("uses_self_credential")])),
+                    row[Ordinal("modify_date")],
+                ]
+                :
+                [
+                    SmallInt(row[Ordinal("server_id")]),
+                    remoteName,
+                    SqlValue.FromInt16(0),
+                    sid,
+                    row[Ordinal("modify_date")],
+                ];
+        }
+    }
+
+    /// <summary><c>syscharsets</c>' rows: the character sets and sort orders a SQL Server 2025 instance lists, copied from it (probed 2026-10-15).</summary>
+    private static readonly (short Type, byte Id, byte CsId, string Name, string Description)[] Charsets =
+    [
+        (1001, 1, 0, "iso_1", "ISO 8859-1 (Latin-1) - Western European 8-bit character set."),
+        (1001, 2, 0, "cp850", "Code Page 850 (Multilingual) character set."),
+        (1001, 3, 0, "cp437", "Code Page 437 (United States) character set."),
+        (1001, 4, 0, "cp1250", "Code page 1250"),
+        (1001, 5, 0, "cp1251", "Code Page 1251"),
+        (1001, 6, 0, "cp1253", "Code page 1253"),
+        (1001, 7, 0, "cp1254", "Code page 1254"),
+        (1001, 8, 0, "cp1255", "Code page 1255"),
+        (1001, 9, 0, "cp1256", "Code page 1256"),
+        (1001, 10, 0, "cp1257", "Code page 1257"),
+        (1001, 12, 0, "cp949", "Code page 949"),
+        (1001, 13, 0, "cp950", "Code page 950"),
+        (1001, 14, 0, "cp936", "Code page 936"),
+        (1001, 15, 0, "cp874", "Code page 874"),
+        (1001, 16, 0, "cp1258", "Code page 1258"),
+        (1001, 108, 0, "utf8", "Code page 65001"),
+        (1001, 109, 0, "cp932", "Code page 932"),
+        (2001, 30, 3, "bin_cp437", "Binary Sort Order for the Code Page 437 Character Set"),
+        (2001, 31, 3, "dictionary_437", "General purpose dictionary sort order for use in the US.  Uses the Code Page 437 character set and is case-sensitive."),
+        (2001, 32, 3, "nocase_437", "Case-insensitive dictionary sort order for use in the US.  Uses the Code Page 437 character set."),
+        (2001, 33, 3, "nocasepref_437", "Case-insensitive dictionary sort order, with case preference for collating purposes, for use in the US.  Uses the Code Page 437 character set."),
+        (2001, 34, 3, "noaccents_437", "Case-insensitive dictionary sort order for use in the US.  Uses the Code Page 437 character set.  Diacritical marks are ignored."),
+        (2001, 40, 2, "bin_cp850", "Binary Sort Order for the CodePage 850 Character Set"),
+        (2001, 41, 2, "dictionary_850", "General purpose dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set and is case-sensitive."),
+        (2001, 42, 2, "nocase_850", "Case-insensitive dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set."),
+        (2001, 43, 2, "nocasepref_850", "Case-insensitive dictionary sort order, with case preference for collating purposes, for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set."),
+        (2001, 44, 2, "noaccents_850", "Case-insensitive dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set.  Diacritical marks are ignored."),
+        (2001, 49, 2, "caseless_34", "Case-insensitive sort order for 3.4.1 caseless database."),
+        (2001, 50, 1, "bin_iso_1", "Binary Sort Order for the ISO 8859-1 (Latin 1) Character Set"),
+        (2001, 51, 1, "dictionary_iso", "General purpose dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the ISO 8859-1 character set and is case-sensitive."),
+        (2001, 52, 1, "nocase_iso", "Case-insensitive dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the ISO 8859-1 character set."),
+        (2001, 53, 1, "nocasepref_iso", "Case-insensitive dictionary sort order, with case preference for collating purposes, for use with several Western-European languages including English, French, and German.  Uses the ISO 8859-1 character set."),
+        (2001, 54, 1, "noaccents_iso", "Case-insensitive dictionary sort order for use with several Western-European languages including English, French, and German.  Uses the ISO 8859-1 character set.  Diacritical marks are ignored."),
+        (2001, 55, 2, "alt_dictionary", "General purpose dictionary sort order for use with several Western-European languages. Uses the Code Page 850 character set and is case-sensitive."),
+        (2001, 56, 2, "alt_nocasepref", "Case-insensitive dictionary sort order, with case preference for collating purposes, for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set."),
+        (2001, 57, 2, "alt_noaccents", "Case-insensitive dictionary sort order for most of the European languages.  Uses the Code Page 850 character set.  Diacritical marks are ignored."),
+        (2001, 58, 2, "scand_nocasepref", "Case-insensitive Scandinavian dictionary sort order, with  case preference for collating purposes.  Uses the Code Page 850  character set."),
+        (2001, 59, 2, "scand_dictionary", "General purpose Scandinavian dictionary sort order.  Uses the Code Page 850 character set and is case-sensitive."),
+        (2001, 60, 2, "scand_nocase", "Case-insensitive Scandinavian dictionary sort order, without  case preference for collating purposes.  Uses the Code Page 850  character set."),
+        (2001, 61, 2, "alt_nocase", "Case-insensitive dictionary sort order, without case preference for collating purposes, for use with several Western-European languages including English, French, and German.  Uses the Code Page 850 character set."),
+        (2001, 71, 1, "dictionary_1252", "NT Latin-1 case sensitive sort order for code page 1252"),
+        (2001, 72, 1, "nocase_1252", "NT Latin-1 case insensitive sort order for code page 1252"),
+        (2001, 80, 4, "bin_cp1250", "Binary Sort Order for the Code Page 1250 Character Set"),
+        (2001, 81, 4, "dictionary_1250", "Dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 82, 4, "nocase_1250", "Dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 83, 4, "csydic", "Czech dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 84, 4, "csync", "Czech dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 85, 4, "hundic", "Hungarian dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 86, 4, "hunnc", "Hungarian dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 87, 4, "plkdic", "Polish dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 88, 4, "plknc", "Polish dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 89, 4, "romdic", "Romanian dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 90, 4, "romnc", "Romanian dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 91, 4, "shldic", "Croatian dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 92, 4, "shlnc", "Croatian dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 93, 4, "skydic", "Slovak dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 94, 4, "skync", "Slovak dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 95, 4, "slvdic", "Slovenian dictionary case-sensitive sort order for use with code page 1250"),
+        (2001, 96, 4, "slvnc", "Slovenian dictionary case-insensitive sort order for use with code page 1250"),
+        (2001, 104, 5, "bin_cp1251", "Binary Sort Order for the Code Page 1251 Character Set"),
+        (2001, 105, 5, "dictionary_251", "Dictionary case-sensitive sort order for use with code page 1251"),
+        (2001, 106, 5, "nocase_1251", "Dictionary case-insensitive sort order for use with code page 1251"),
+        (2001, 107, 5, "ukrdic", "Ukrainian dictionary case-sensitive sort order for use with code page 1251"),
+        (2001, 108, 5, "ukrnc", "Ukrainian dictionary case-insensitive sort order for use with code page 1251"),
+        (2001, 112, 6, "bin_cp1253", "Binary Sort Order for the Code Page 1253 Character Set"),
+        (2001, 113, 6, "dictionary_1253", "Greek case sensitive dictionary sort order for use with code page 1253"),
+        (2001, 114, 6, "nocase_1253", "Greek case insensitive dictionary sort order for use with code page 1253"),
+        (2001, 120, 6, "greek_mixeddictionary", "Greek English mixed dictionary sort order. Uses the ISO 8859-7 (ANSI 1253) Greek Windows character set and is case-sensitive."),
+        (2001, 122, 6, "greek_altdictionary2", "Greek dictionary sort order for use with Greek and English. Uses the ISO 8859-7 (ANSI 1253) Greek Windows character set and is case-sensitive."),
+        (2001, 124, 6, "greek_nocasedict", "Greek dictionary sort order for use with Greek and English. Uses the ISO 8859-7 (ANSI 1253) Greek Windows character set and is not case-sensitive."),
+        (2001, 128, 7, "bin_cp1254", "Binary Sort Order for the Code Page 1254 Character Set"),
+        (2001, 129, 7, "dictionary_1254", "Case sensitive dictionary sort order for use with code page 1254"),
+        (2001, 130, 7, "nocase_1254", "Case insensitive dictionary order for use with code page 1254"),
+        (2001, 136, 8, "bin_cp1255", "Binary Sort Order for the Code Page 1255 Character Set"),
+        (2001, 137, 8, "dictionary_1255", "Case-sensitive dictionary sort order for use with code page 1255"),
+        (2001, 138, 8, "nocase_1255", "Case-insensitive dictionary sort order for use with code page 1255"),
+        (2001, 144, 9, "bin_cp1256", "Binary Sort Order for the Code Page 1256 Character Set"),
+        (2001, 145, 9, "dictionary_1256", "Case-sensitive dictionary order for use with code page 1256"),
+        (2001, 146, 9, "nocase_1256", "Case-insensitive dictionary sort order for use with code page 1256"),
+        (2001, 152, 10, "bin_cp1257", "Binary Sort Order for the Code Page 1257 Character Set"),
+        (2001, 153, 10, "dictionary_1257", "Case sensitive sort order for use with code page 1257"),
+        (2001, 154, 10, "nocase_1257", "Case insensitive dictionary order for use with code page 1257"),
+        (2001, 155, 10, "etidic", "Estonian case sensitive dictionary sort order for use with code page 1257"),
+        (2001, 156, 10, "etinc", "Estonian case insensitive dictionary sort order for use with code page 1257"),
+        (2001, 157, 10, "lvidic", "Latvian case sensitive dictionary sort order for use with code page 1257"),
+        (2001, 158, 10, "lvinc", "Latvian case insensitive dictionary sort order for use with code page 1257"),
+        (2001, 159, 10, "lthdic", "Lithuanian case sensitive dictionary sort order for use with code page 1257"),
+        (2001, 160, 10, "lthnc", "Lithuanian case insensitive dictionary sort order for use with code page 1257"),
+        (2001, 183, 1, "danno_nocasepref", "Case-insensitive Danish/Norwegian dictionary sort order, with case preference for collating purposes. Uses the ISO 8859-1 character set with Windows 3.1 additional characters."),
+        (2001, 184, 1, "svfi1_nocasepref", "Case-insensitive Swedish/Finnish dictionary sort order, with case preference for collating purposes. Uses the ISO 8859-1 character set with Windows 3.1 additional characters. The letters V and W are treated as variants of the same letter."),
+        (2001, 185, 1, "svfi2_nocasepref", "Case-insensitive Swedish/Finnish dictionary sort order, with case preference for collating purposes. Uses the ISO 8859-1 character set with Windows 3.1 additional characters. The letters V and W are treated as separate letters."),
+        (2001, 186, 1, "islan_nocasepref", "Case-insensitive Icelandic dictionary sort order, with case preference for collating purposes. Uses the ISO 8859-1 character set with Windows 3.1 additional characters."),
+        (2001, 192, 109, "bin_cp932", "Binary Sort Order for the Code Page 932 Character Set"),
+        (2001, 193, 109, "nls_cp932", "NLS Case-Insensitive Sort Order for the Code Page 932 Character Set"),
+        (2001, 194, 12, "bin_cp949", "Binary Sort Order for the Code Page 949 Character Set"),
+        (2001, 195, 12, "nls_cp949", "NLS Case-Insensitive Sort Order for the Code Page 949 Character Set"),
+        (2001, 196, 13, "bin_cp950", "Binary Sort Order for the Code Page 950 Character Set"),
+        (2001, 197, 13, "nls_cp950", "NLS Case-Insensitive Sort Order for the Code Page 950 Character Set"),
+        (2001, 198, 14, "bin_cp936", "Binary Sort Order for the Code Page 936 Character Set"),
+        (2001, 199, 14, "nls_cp936", "NLS Case-Insensitive Sort Order for the Code Page 936 Character Set"),
+        (2001, 200, 109, "nls_cp932_cs", "NLS Case-Sensitive Sort Order for the Code Page 932 Character Set"),
+        (2001, 201, 12, "nls_cp949_cs", "NLS Case-Sensitive Sort Order for the Code Page 949 Character Set"),
+        (2001, 202, 13, "nls_cp950_cs", "NLS Case-Sensitive Sort Order for the Code Page 950 Character Set"),
+        (2001, 203, 14, "nls_cp936_cs", "NLS Case-Sensitive Sort Order for the Code Page 936 Character Set"),
+        (2001, 204, 15, "bin_cp874", "Binary Sort Order for the Code Page 874 Character Set"),
+        (2001, 205, 15, "nls_cp874", "NLS Case-Insensitive Sort Order for the Code Page 874 Character Set"),
+        (2001, 206, 15, "nls_cp874_cs", "NLS Case-Sensitive Sort Order for the Code Page 874 Character Set"),
+        (2001, 210, 1, "EBCDIC_037", "EBCDIC 037 code page sort - United States/Canada"),
+        (2001, 211, 1, "EBCDIC_273", "EBCDIC 273 code page sort - Austria/Germany F.R."),
+        (2001, 212, 1, "EBCDIC_277", "EBCDIC 277 code page sort - Denmark/Norway"),
+        (2001, 213, 1, "EBCDIC_278", "EBCDIC 278 code page sort - Finland/Sweden"),
+        (2001, 214, 1, "EBCDIC_280", "EBCDIC 280 code page sort - Italy"),
+        (2001, 215, 1, "EBCDIC_284", "EBCDIC 284 code page sort - Latin American/Spain"),
+        (2001, 216, 1, "EBCDIC_285", "EBCDIC 285 code page sort - United Kingdom"),
+        (2001, 217, 1, "EBCDIC_297", "EBCDIC 297 code page sort - France"),
+        (2001, 218, 1, "EBCDIC_277", "EBCDIC 277 code page sort - Denmark/Norway"),
+        (2001, 219, 1, "EBCDIC_1141", "EBCDIC 1141 code page sort - Austria/Germany"),
+    ];
 }

@@ -95,6 +95,7 @@ internal static partial class BuiltInResources
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
         RegisterCompatibilityProjections(views);
+        RegisterServerCompatibilityProjections(views);
         ApplyRealConstantColumns(views);
         ApplyRealColumnOrder(views);
         ApplyMetadataVisibility(views);

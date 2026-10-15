@@ -469,9 +469,10 @@ partial class Simulation
             : throw SimulatedSqlException.LinkedServerDoesNotExist(serverName);
     }
 
-    /// <summary>The principal a login mapping is for: 0 for every login when <paramref name="name"/> is NULL, else the login's (Msg 15007 when there is none).</summary>
+    /// <summary>The principal a login mapping is for: 0 for every login when <paramref name="name"/> is NULL, else the login's — <c>sa</c>'s 1, which the login registry doesn't hold — (Msg 15007 when there is none).</summary>
     private static int LinkedLoginPrincipal(BatchContext batch, SqlValue name) =>
         name.IsNull ? 0
+        : BuiltInToken.Comparer.Equals(name.AsString, "sa") ? 1
         : batch.Connection.Simulation.Logins.TryGetValue(name.AsString, out var login) ? login.PrincipalId
         : throw SimulatedSqlException.NotAValidLogin(name.AsString);
 
