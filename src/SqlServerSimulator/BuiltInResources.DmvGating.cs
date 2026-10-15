@@ -20,7 +20,10 @@ internal static partial class BuiltInResources
     [
         ("sys.dm_db_file_space_usage", DmvGateKind.ServerState),
         ("sys.dm_db_partition_stats", DmvGateKind.DatabaseState),
+        ("sys.dm_db_session_space_usage", DmvGateKind.ServerState),
+        ("sys.dm_db_task_space_usage", DmvGateKind.ServerState),
         ("sys.dm_exec_connections", DmvGateKind.ServerStatePolicy),
+        ("sys.dm_exec_query_memory_grants", DmvGateKind.ServerState),
         ("sys.dm_exec_requests", DmvGateKind.SessionSelfFilter),
         ("sys.dm_exec_sessions", DmvGateKind.SessionSelfFilter),
         ("sys.dm_hadr_cluster", DmvGateKind.ServerState),
@@ -76,12 +79,14 @@ internal static partial class BuiltInResources
         switch (kind)
         {
             case DmvGateKind.ServerState:
+                RejectUntrustedImpersonation(batch);
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
-                    throw SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER PERFORMANCE STATE", databaseName);
+                    throw ServerStateDenied("VIEW SERVER PERFORMANCE STATE");
                 return rows;
             case DmvGateKind.ServerSecurityState:
+                RejectUntrustedImpersonation(batch);
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerSecurityState))
-                    throw SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER SECURITY STATE", databaseName);
+                    throw ServerStateDenied("VIEW SERVER SECURITY STATE");
                 return rows;
             case DmvGateKind.ServerStatePolicy:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
@@ -89,7 +94,10 @@ internal static partial class BuiltInResources
                 return rows;
             case DmvGateKind.DatabaseState:
                 if (!HoldsDatabaseState(batch, simulation, login))
-                    throw SimulatedSqlException.DatabasePermissionDenied("VIEW DATABASE PERFORMANCE STATE", databaseName, aborts: false);
+                {
+                    throw SimulatedSqlException.Aggregate(
+                        [SimulatedSqlException.DatabasePermissionDenied("VIEW DATABASE PERFORMANCE STATE", databaseName, aborts: false), SimulatedSqlException.UserLacksPermissionToPerformAction()]);
+                }
                 return rows;
             // Real reads sysaltfiles through its resource database, where only
             // CONTROL SERVER holds SELECT (probed 2026-10-15 against SQL
@@ -115,11 +123,30 @@ internal static partial class BuiltInResources
     internal static void DemandServerPerformanceState(BatchContext batch, bool policyWording)
     {
         var security = batch.Connection.Security;
-        if (security.EffectiveIsDbo || batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewServerPerformanceState))
+        if (security.EffectiveIsDbo)
             return;
-        throw policyWording
-            ? SimulatedSqlException.ServerStatePolicyDenied()
-            : SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER PERFORMANCE STATE", batch.CurrentDatabase.Name);
+        if (!policyWording)
+            RejectUntrustedImpersonation(batch);
+        if (batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewServerPerformanceState))
+            return;
+        throw policyWording ? SimulatedSqlException.ServerStatePolicyDenied() : ServerStateDenied("VIEW SERVER PERFORMANCE STATE");
+    }
+
+    /// <summary>Msg 300, naming <c>master</c>, and the Msg 297 real sends after it.</summary>
+    private static SimulatedSqlException ServerStateDenied(string permission) =>
+        SimulatedSqlException.Aggregate([SimulatedSqlException.ServerStatePermissionDenied(permission, "master"), SimulatedSqlException.UserLacksPermissionToPerformAction()]);
+
+    /// <summary>
+    /// Msg 15562 for an <c>EXECUTE AS USER</c> context reading server state
+    /// from a database that isn't <c>TRUSTWORTHY</c>, ahead of any permission
+    /// check: real refuses before asking what the user's login holds (probed
+    /// 2026-10-15 against SQL Server 2025). The policy-worded gates (Msg 371)
+    /// ask the permission alone.
+    /// </summary>
+    private static void RejectUntrustedImpersonation(BatchContext batch)
+    {
+        if (batch.Connection.Security.Effective.IsDatabaseScoped && !batch.CurrentDatabase.Trustworthy)
+            throw SimulatedSqlException.ModuleNotTrusted();
     }
 
     // A database VIEW DATABASE PERFORMANCE STATE requirement is met by that

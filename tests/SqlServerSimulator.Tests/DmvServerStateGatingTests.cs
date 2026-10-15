@@ -42,12 +42,15 @@ public sealed class DmvServerStateGatingTests
 
     // ---- Server-scope DMVs → Msg 300 ----
 
+    // Msg 300 names master, where server permissions live, and Msg 297
+    // follows it (probed 2026-10-15 against SQL Server 2025).
     [TestMethod]
-    public void ServerDmv_RestrictedWithoutPermission_Raises300VerbatimInMaster()
+    public void ServerDmv_RestrictedWithoutPermission_Raises300NamingMasterThen297()
     {
         var ex = Seeded().AssertSqlError(
             "use master; execute as login = 'srvl2'; select count(*) from sys.dm_os_waiting_tasks", 300);
         AreEqual("VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database 'master'.", ex.Errors[0].Message);
+        AreEqual(297, ex.Errors[1].Number);
     }
 
     // sys.dm_exec_connections takes the same permission but refuses with Msg
@@ -64,7 +67,11 @@ public sealed class DmvServerStateGatingTests
 
     [TestMethod]
     public void InputBuffer_RestrictedWithoutPermission_Raises300EvenForItsOwnSession()
-        => _ = Seeded().AssertSqlError("execute as user = 'u_none'; select count(*) from sys.dm_exec_input_buffer(@@spid, 0)", 300);
+        => _ = Seeded().AssertSqlError("use master; execute as login = 'srvl2'; select count(*) from sys.dm_exec_input_buffer(@@spid, 0)", 300);
+
+    [TestMethod]
+    public void InputBuffer_UnderExecuteAsUser_IsNotTrusted()
+        => _ = Seeded().AssertSqlError("execute as user = 'u_none'; select count(*) from sys.dm_exec_input_buffer(@@spid, 0)", 15562);
 
     [TestMethod]
     public void DbccInputBuffer_RestrictedReadsItsOwnSessionOnly()
@@ -91,7 +98,22 @@ public sealed class DmvServerStateGatingTests
     [DataRow("sys.dm_hadr_cluster")]
     [TestMethod]
     public void ServerDmv_RestrictedWithoutPermission_Raises300(string view)
-        => _ = Seeded().AssertSqlError($"execute as user = 'u_none'; select count(*) from {view}", 300);
+        => _ = Seeded().AssertSqlError($"use master; execute as login = 'srvl2'; select count(*) from {view}", 300);
+
+    // An EXECUTE AS USER context reaching for server state is refused as
+    // untrusted before any permission is asked, unless the database is
+    // TRUSTWORTHY (probed 2026-10-15 against SQL Server 2025).
+    [DataRow("sys.dm_tran_locks")]
+    [DataRow("sys.dm_db_session_space_usage")]
+    [DataRow("sys.dm_exec_query_memory_grants")]
+    [TestMethod]
+    public void ServerDmv_UnderExecuteAsUser_IsNotTrusted(string view)
+        => Seeded().AssertSqlError($"execute as user = 'u_none'; select count(*) from {view}", 15562,
+            "The module being executed is not trusted. Either the owner of the database of the module needs to be granted authenticate permission, or the module needs to be digitally signed.");
+
+    [TestMethod]
+    public void ServerDmv_UnderExecuteAsUserInATrustworthyDatabase_AsksThePermission()
+        => _ = Seeded().AssertSqlError("alter database simulated set trustworthy on; execute as user = 'u_none'; select count(*) from sys.dm_tran_locks", 300);
 
     [TestMethod]
     public void ServerDmv_WithViewServerState_Opens()
@@ -122,7 +144,8 @@ public sealed class DmvServerStateGatingTests
     {
         var ex = Seeded().AssertSqlError(
             "execute as user = 'u_none'; select count(*) from sys.dm_db_partition_stats", 262);
-        AreEqual("VIEW DATABASE PERFORMANCE STATE permission denied in database 'simulated'.", ex.Message);
+        AreEqual("VIEW DATABASE PERFORMANCE STATE permission denied in database 'simulated'.", ex.Errors[0].Message);
+        AreEqual(297, ex.Errors[1].Number);
     }
 
     [TestMethod]
@@ -204,5 +227,23 @@ public sealed class DmvServerStateGatingTests
             "execute as user = 'u_none'; select count(*) from sys.fn_helpcollations()")));
         AreEqual(0, sim.ExecuteScalar(
             "execute as user = 'u_none'; select count(*) from sys.dm_db_xtp_table_memory_stats"));
+    }
+
+    [TestMethod]
+    public void ServerExtras_ReadAsRealDoes()
+    {
+        var sim = Seeded();
+        AreEqual("35|DISABLE_OPTIMIZED_NESTED_LOOP|ASSUME_FIXED_MAX_SELECTIVITY_FOR_REGEXP", sim.ExecuteScalar("""
+            select concat_ws('|', count(*), min(case when n = 1 then name end), min(case when n = 35 then name end))
+            from (select name, row_number() over (order by (select 1)) n from sys.dm_exec_valid_use_hints) h
+            """));
+        AreEqual("2|0|0|0|0", sim.ExecuteScalar("""
+            select concat_ws('|', database_id, user_objects_alloc_page_count, (select count(*) from sys.dm_exec_query_memory_grants),
+                (select count(*) from sys.master_key_passwords) + (select count(*) from sys.backup_devices) + (select count(*) from sys.extended_procedures),
+                (select request_id from sys.dm_db_task_space_usage where session_id = @@spid))
+            from sys.dm_db_session_space_usage where session_id = @@spid
+            """));
+        _ = sim.ExecuteNonQuery("create credential c with identity = 'i'; alter login srvl with credential = c");
+        AreEqual("srvl", sim.ExecuteScalar("select p.name from sys.server_principal_credentials spc join sys.server_principals p on p.principal_id = spc.principal_id"));
     }
 }

@@ -120,10 +120,27 @@ public sealed partial class SimulatedSqlException
         new("The user does not have the external policy action 'Microsoft.Sql/Sqlservers/SystemViewsAndFunctions/ServerPerformanceState/Rows/Select' or permission 'VIEW SERVER PERFORMANCE STATE' to perform this action.", 371, 14, 3);
 
     /// <summary>
+    /// Msg 297, the second error a DMV read refused with Msg 300 or Msg 262
+    /// sends (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UserLacksPermissionToPerformAction() =>
+        new("The user does not have permission to perform this action.", 297, 16, 1);
+
+    /// <summary>
+    /// Msg 15562: a database-scoped identity — an <c>EXECUTE AS USER</c>
+    /// context — reaching for server state from a database that isn't
+    /// <c>TRUSTWORTHY</c>, as a server-scope DMV read does (probed 2026-10-15
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ModuleNotTrusted() =>
+        new("The module being executed is not trusted. Either the owner of the database of the module needs to be granted authenticate permission, or the module needs to be digitally signed.", 15562, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 300 for a server-scope DMV read denied by a missing
     /// <c>VIEW SERVER PERFORMANCE STATE</c> (or covering <c>VIEW SERVER STATE</c>)
-    /// permission. Severity 14, state 1, probe-confirmed wording. Real also raises
-    /// a trailing Msg 297; the simulator surfaces the single Msg 300.
+    /// permission. Severity 14, state 1, probe-confirmed wording; the database
+    /// named is <c>master</c>, where server permissions live, whichever database
+    /// the session is in (probed 2026-10-15 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ServerStatePermissionDenied(string permission, string databaseName) =>
         new($"{permission} permission was denied on object 'server', database '{databaseName}'.", 300, 14, 1);

@@ -97,6 +97,7 @@ internal static partial class BuiltInResources
         RegisterCompatibilityProjections(views);
         RegisterServerCompatibilityProjections(views);
         RegisterUsageViews(views);
+        RegisterServerExtras(views);
         ApplyRealConstantColumns(views);
         ApplyRealColumnOrder(views);
         ApplyMetadataVisibility(views);

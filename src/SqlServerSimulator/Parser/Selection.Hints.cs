@@ -126,9 +126,9 @@ internal sealed partial class Selection
         TableHintNames.GetAlternateLookup<ReadOnlySpan<char>>();
 
     /// <summary>
-    /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the contents of
-    /// <c>sys.dm_exec_valid_use_hints</c> on SQL Server 2025 (probed
-    /// 2026-07-16). Case-insensitive (real accepts a lowercase argument). An
+    /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the rows of
+    /// <c>sys.dm_exec_valid_use_hints</c> on SQL Server 2025 in its order,
+    /// which the view lists (probed 2026-07-16 and 2026-10-15). Case-insensitive (real accepts a lowercase argument). An
     /// argument outside this set raises Msg 10715 (<see cref="ConsumeUseHint"/>);
     /// every other OPTION hint discards without a name check, but real SQL
     /// Server validates USE HINT against this catalog, so the simulator does
@@ -136,34 +136,25 @@ internal sealed partial class Selection
     /// targeting a hint added after 2025 would need a refresh here, the same
     /// trust-region trade-off the table-hint accept-list carries.
     /// </summary>
-    private static readonly FrozenSet<string> ValidUseHintNames = new HashSet<string>
-    {
-        "ABORT_QUERY_EXECUTION",
-        "ASSUME_FIXED_MAX_SELECTIVITY_FOR_REGEXP",
-        "ASSUME_FIXED_MIN_SELECTIVITY_FOR_REGEXP",
-        "ASSUME_FULL_INDEPENDENCE_FOR_FILTER_ESTIMATES",
-        "ASSUME_JOIN_PREDICATE_DEPENDS_ON_FILTERS",
-        "ASSUME_MIN_SELECTIVITY_FOR_FILTER_ESTIMATES",
-        "ASSUME_PARTIAL_CORRELATION_FOR_FILTER_ESTIMATES",
-        "DISABLE_BATCH_MODE_ADAPTIVE_JOINS",
-        "DISABLE_BATCH_MODE_MEMORY_GRANT_FEEDBACK",
-        "DISABLE_CE_FEEDBACK",
-        "DISABLE_DEFERRED_COMPILATION_TV",
-        "DISABLE_DOP_FEEDBACK",
-        "DISABLE_INTERLEAVED_EXECUTION_TVF",
-        "DISABLE_MEMORY_GRANT_FEEDBACK_PERSISTENCE",
+    internal static readonly string[] ValidUseHintsInCatalogOrder =
+    [
         "DISABLE_OPTIMIZED_NESTED_LOOP",
-        "DISABLE_OPTIMIZED_PLAN_FORCING",
-        "DISABLE_OPTIMIZER_ROWGOAL",
-        "DISABLE_PARAMETER_SNIFFING",
-        "DISABLE_RESULT_SET_CACHE",
-        "DISABLE_ROW_MODE_MEMORY_GRANT_FEEDBACK",
-        "DISABLE_TSQL_SCALAR_UDF_INLINING",
-        "DISALLOW_BATCH_MODE",
-        "ENABLE_HIST_AMENDMENT_FOR_ASC_KEYS",
-        "ENABLE_QUERY_OPTIMIZER_HOTFIXES",
-        "FORCE_DEFAULT_CARDINALITY_ESTIMATION",
         "FORCE_LEGACY_CARDINALITY_ESTIMATION",
+        "ENABLE_QUERY_OPTIMIZER_HOTFIXES",
+        "DISABLE_PARAMETER_SNIFFING",
+        "ASSUME_MIN_SELECTIVITY_FOR_FILTER_ESTIMATES",
+        "ASSUME_JOIN_PREDICATE_DEPENDS_ON_FILTERS",
+        "ENABLE_HIST_AMENDMENT_FOR_ASC_KEYS",
+        "DISABLE_OPTIMIZER_ROWGOAL",
+        "FORCE_DEFAULT_CARDINALITY_ESTIMATION",
+        "DISALLOW_BATCH_MODE",
+        "QUERY_PLAN_PROFILE",
+        "DISABLE_INTERLEAVED_EXECUTION_TVF",
+        "DISABLE_BATCH_MODE_MEMORY_GRANT_FEEDBACK",
+        "DISABLE_BATCH_MODE_ADAPTIVE_JOINS",
+        "DISABLE_ROW_MODE_MEMORY_GRANT_FEEDBACK",
+        "DISABLE_DEFERRED_COMPILATION_TV",
+        "DISABLE_TSQL_SCALAR_UDF_INLINING",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_100",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_110",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_120",
@@ -171,9 +162,20 @@ internal sealed partial class Selection
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_140",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_150",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_160",
+        "ASSUME_FULL_INDEPENDENCE_FOR_FILTER_ESTIMATES",
+        "ASSUME_PARTIAL_CORRELATION_FOR_FILTER_ESTIMATES",
+        "DISABLE_CE_FEEDBACK",
+        "DISABLE_MEMORY_GRANT_FEEDBACK_PERSISTENCE",
+        "DISABLE_DOP_FEEDBACK",
+        "DISABLE_OPTIMIZED_PLAN_FORCING",
         "QUERY_OPTIMIZER_COMPATIBILITY_LEVEL_170",
-        "QUERY_PLAN_PROFILE",
-    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+        "ABORT_QUERY_EXECUTION",
+        "DISABLE_RESULT_SET_CACHE",
+        "ASSUME_FIXED_MIN_SELECTIVITY_FOR_REGEXP",
+        "ASSUME_FIXED_MAX_SELECTIVITY_FOR_REGEXP",
+    ];
+
+    private static readonly FrozenSet<string> ValidUseHintNames = ValidUseHintsInCatalogOrder.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Recognized hint modifiers that affect phase-1b data-lock acquisition.
