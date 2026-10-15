@@ -463,6 +463,7 @@ internal static class CatalogViewObjectIds
         ["sp_execute"] = -170993081,
         ["sp_prepexec"] = -271049915,
         ["sp_unprepare"] = -674036617,
+        ["sp_estimate_data_compression_savings"] = -84473125,
         ["sp_addapprole"] = -775594226,
         ["sp_dropapprole"] = -347698839,
         ["sp_approlepassword"] = -673068117,

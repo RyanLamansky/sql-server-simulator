@@ -93,6 +93,7 @@ partial class BuiltInResources
             ["sp_helpdevice"] = [new("@devname", 256, 256, 0, 0)],
             ["sp_addumpdevice"] = [new("@devtype", 167, 20, 0, 0), new("@logicalname", 256, 256, 0, 0), new("@physicalname", 231, 520, 0, 0), new("@cntrltype", 52, 2, 5, 0), new("@devstatus", 167, 40, 0, 0)],
             ["sp_dropdevice"] = [new("@logicalname", 256, 256, 0, 0), new("@delfile", 167, 7, 0, 0)],
+            ["sp_estimate_data_compression_savings"] = [new("@schema_name", 256, 256, 0, 0), new("@object_name", 256, 256, 0, 0), new("@index_id", 56, 4, 10, 0), new("@partition_number", 56, 4, 10, 0), new("@data_compression", 231, 120, 0, 0), new("@xml_compression", 104, 1, 1, 0)],
             ["sp_changeobjectowner"] = [new("@objname", 231, 1552, 0, 0), new("@newowner", 256, 256, 0, 0)],
             ["sp_procoption"] = [new("@ProcName", 231, 1552, 0, 0), new("@OptionName", 167, 35, 0, 0), new("@OptionValue", 167, 12, 0, 0)],
             ["sp_helpextendedproc"] = [new("@funcname", 256, 256, 0, 0)],

@@ -253,6 +253,8 @@ internal static partial class BuiltInResources
         "sp_execute",
         "sp_prepexec",
         "sp_unprepare",
+        // The compression estimate, over the simulator's own page counts.
+        "sp_estimate_data_compression_savings",
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",

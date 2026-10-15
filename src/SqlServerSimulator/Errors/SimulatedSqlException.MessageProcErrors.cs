@@ -125,6 +125,32 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException QualifiedNameMustBeCurrentDatabase() =>
         new("If the qualified object name specifies a database, that database must be the current database.", 15387, 11, 1);
 
+    // sp_estimate_data_compression_savings — probed 2026-10-15 against SQL Server 2025.
+
+    /// <summary>Msg 15659: a <c>@schema_name</c> no schema has.</summary>
+    internal static SimulatedSqlException SchemaParameterDoesNotExist(string schemaName) =>
+        new($"The schema '{schemaName}' specified for parameter schema_name does not exist.", 15659, 16, 1);
+
+    /// <summary>Msg 15223 at class 11: a required parameter given NULL.</summary>
+    internal static SimulatedSqlException InputParameterNotAllowedNull(string parameterName) =>
+        new($"Error: The input parameter '{parameterName}' is not allowed to be null.", 15223, 11, 1);
+
+    /// <summary>Msg 15661: a temporary table's name.</summary>
+    internal static SimulatedSqlException CompressionEstimateOfTemporaryTable() =>
+        new("Compressing temporary tables is not supported by the stored procedure sp_estimate_data_compression_savings.", 15661, 16, 1);
+
+    /// <summary>Msg 1088 at class 15: an object that doesn't resolve.</summary>
+    internal static SimulatedSqlException CompressionEstimateObjectNotFound(string objectName) =>
+        new($"Cannot find the object \"{objectName}\" because it does not exist or you do not have permissions.", 1088, 15, 1);
+
+    /// <summary>Msg 23118: neither compression parameter given.</summary>
+    internal static SimulatedSqlException CompressionParametersBothNull() =>
+        new("Either datacompression, or xmlcompression, or both must have a value. These parameters cannot be both set to NULL.", 23118, 16, 1);
+
+    /// <summary>Msg 3217: a <c>@data_compression</c> other than NONE, ROW, PAGE, COLUMNSTORE or COLUMNSTORE_ARCHIVE.</summary>
+    internal static SimulatedSqlException InvalidDataCompressionParameter() =>
+        new("Invalid value specified for datacompression parameter.", 3217, 16, 1);
+
     /// <summary>Msg 15323: <c>sp_autostats</c> naming an index the table doesn't have.</summary>
     internal static SimulatedSqlException SelectedIndexDoesNotExist(string tableName) =>
         new($"The selected index does not exist on table '{tableName}'.", 15323, 16, 1);

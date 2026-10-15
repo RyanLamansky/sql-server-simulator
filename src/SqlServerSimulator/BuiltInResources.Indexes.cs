@@ -1029,6 +1029,28 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// The <c>used_page_count</c> <c>sys.dm_db_partition_stats</c> reports for
+    /// each of <paramref name="table"/>'s (index_id, partition) units, in its
+    /// order — what <c>sp_estimate_data_compression_savings</c> sizes from.
+    /// </summary>
+    internal static List<(int IndexId, int PartitionNumber, long UsedPages)> PartitionUsedPages(Database database, HeapTable table)
+    {
+        var partitions = new List<(int IndexId, int PartitionNumber, long UsedPages)>();
+        HeapTable? lastTable = null;
+        var census = new PartitionCensus();
+        foreach (var (candidate, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
+        {
+            var isBase = !ReferenceEquals(candidate, lastTable);
+            lastTable = candidate;
+            if (!ReferenceEquals(candidate, table))
+                continue;
+            foreach (var unit in census.Units(candidate, indexId, placement))
+                partitions.Add((indexId, unit.Number, unit.InRowPages + (isBase && unit.Number == 1 ? candidate.Heap.LobPages.Count : 0)));
+        }
+        return partitions;
+    }
+
+    /// <summary>
     /// The four page/row totals <c>sp_spaceused</c> reports, accumulated over
     /// the same (table, index_id) identities <c>sys.dm_db_partition_stats</c>
     /// projects and with real's own formulas: <c>ReservedPages</c> /

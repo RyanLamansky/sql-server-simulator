@@ -56,7 +56,7 @@ partial class Simulation
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
         "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
-        or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
+        or "sp_estimate_data_compression_savings" or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
         or "sp_getbindtoken" or "sp_helpdbfixedrole" or "sp_helpdevice" or "sp_helpfilegroup" or "sp_helpntgroup" or "sp_helprole"
         or "sp_helpextendedproc" or "sp_helplogins"
@@ -287,6 +287,7 @@ partial class Simulation
             "sp_execute" => this.InvokeSpExecute(batch, returnCodeVar, insertExecSource),
             "sp_prepexec" => this.InvokeSpPrepExec(batch, returnCodeVar, insertExecSource),
             "sp_unprepare" => InvokeSpUnprepare(batch),
+            "sp_estimate_data_compression_savings" => InvokeSpEstimateDataCompressionSavings(batch, calledAs),
             "sp_dropapprole" => this.InvokeSpDropAppRole(batch, calledAs),
             "sp_renamedb" => InvokeSpRenameDb(batch, calledAs),
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
