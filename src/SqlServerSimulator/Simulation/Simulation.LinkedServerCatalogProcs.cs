@@ -5,8 +5,8 @@ namespace SqlServerSimulator;
 
 // The catalog procedures that describe linked servers rather than reach
 // through one: sp_linkedservers, sp_testlinkedserver and sp_catalogs, and the
-// provider's schema rowsets sp_tables_ex and sp_columns_ex (probed 2026-10-06
-// against SQL Server 2025).
+// provider's schema rowsets sp_tables_ex, sp_columns_ex, sp_primarykeys and
+// sp_foreignkeys (probed 2026-10-06 and 2026-10-16 against SQL Server 2025).
 partial class Simulation
 {
     private static readonly SystemProcedureParameter[] CatalogsParameters =
@@ -33,6 +33,124 @@ partial class Simulation
         new("column_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
         new("ODBCVer", SqlType.Int32, 0, SqlValue.FromInt32(2)),
     ];
+
+    private static readonly SystemProcedureParameter[] PrimaryKeysParameters =
+    [
+        new("table_server", SqlType.NVarchar, 128),
+        new("table_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+    ];
+
+    private static readonly SystemProcedureParameter[] ForeignKeysParameters =
+    [
+        new("table_server", SqlType.NVarchar, 128),
+        new("pktab_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("pktab_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("pktab_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("fktab_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("fktab_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("fktab_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+    ];
+
+    /// <summary>
+    /// <c>sp_primarykeys</c> lists the primary-key columns of a linked
+    /// server's tables in one of its databases, by schema, table and key
+    /// position, each name an exact one under the server's collation; the key's
+    /// name isn't reported. The database defaults to the one a session of the
+    /// server starts in.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpPrimaryKeys(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var values = BindSystemProcedureArguments("sp_primarykeys", calledAs, arguments, PrimaryKeysParameters);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        SqlType[] schema = [name, name, name, name, SqlType.Int32, name];
+        string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "KEY_SEQ", "PK_NAME"];
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
+        {
+            yield return new SimulatedSqlResultSet(schema, names, []);
+            throw MissingSchemaRowsetServer(calledAs, values[0], line: 10);
+        }
+        var query = $"""
+            SELECT DB_NAME(), s.name, o.name, c.name, ic.key_ordinal
+            FROM sys.key_constraints AS k JOIN sys.objects AS o ON o.object_id = k.parent_object_id
+                JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+                JOIN sys.index_columns AS ic ON ic.object_id = k.parent_object_id AND ic.index_id = k.unique_index_id
+                JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE k.type = 'PK'{SchemaRowsetFilter("o.name", values[1], usePattern: false)}{SchemaRowsetFilter("s.name", values[2], usePattern: false)}
+            ORDER BY s.name, o.name, ic.key_ordinal
+            """;
+        var rows = new List<SqlValue[]>();
+        if (SchemaRowsetQuery(server, values[3], query) is { } result)
+        {
+            foreach (var row in result.RowValues)
+            {
+                rows.Add([
+                    SqlValue.FromString(name, row[0].AsString), SqlValue.FromString(name, row[1].AsString), SqlValue.FromString(name, row[2].AsString),
+                    SqlValue.FromString(name, row[3].AsString), SqlValue.FromInt32(row[4].CoerceTo(SqlType.Int32).AsInt32), SqlValue.Null(name),
+                ]);
+            }
+        }
+        yield return new SimulatedSqlResultSet(schema, names, rows);
+    }
+
+    /// <summary>
+    /// <c>sp_foreignkeys</c> lists the foreign-key columns between a linked
+    /// server's tables — those referencing the primary-key table named, those
+    /// of the foreign-key table named, or every one — by primary-key table,
+    /// foreign-key table and key position, in the database either catalog
+    /// argument names. A rule reads in ODBC's terms (cascade 0, no action 1,
+    /// set NULL 2, set default 3) and neither key's name is reported.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpForeignKeys(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var values = BindSystemProcedureArguments("sp_foreignkeys", calledAs, arguments, ForeignKeysParameters);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        SqlType[] schema = [name, name, name, name, name, name, name, name, SqlType.Int32, SqlType.Int32, SqlType.Int32, name, name, SqlType.SmallInt];
+        string[] names =
+        [
+            "PKTABLE_CAT", "PKTABLE_SCHEM", "PKTABLE_NAME", "PKCOLUMN_NAME", "FKTABLE_CAT", "FKTABLE_SCHEM", "FKTABLE_NAME", "FKCOLUMN_NAME",
+            "KEY_SEQ", "UPDATE_RULE", "DELETE_RULE", "FK_NAME", "PK_NAME", "DEFERRABILITY",
+        ];
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
+        {
+            yield return new SimulatedSqlResultSet(schema, names, []);
+            throw MissingSchemaRowsetServer(calledAs, values[0], line: 13);
+        }
+        var query = $"""
+            SELECT DB_NAME(), ps.name, po.name, pc.name, fs.name, fo.name, fc.name, k.constraint_column_id,
+                f.update_referential_action, f.delete_referential_action
+            FROM sys.foreign_keys AS f JOIN sys.foreign_key_columns AS k ON k.constraint_object_id = f.object_id
+                JOIN sys.objects AS po ON po.object_id = f.referenced_object_id JOIN sys.schemas AS ps ON ps.schema_id = po.schema_id
+                JOIN sys.columns AS pc ON pc.object_id = k.referenced_object_id AND pc.column_id = k.referenced_column_id
+                JOIN sys.objects AS fo ON fo.object_id = f.parent_object_id JOIN sys.schemas AS fs ON fs.schema_id = fo.schema_id
+                JOIN sys.columns AS fc ON fc.object_id = k.parent_object_id AND fc.column_id = k.parent_column_id
+            WHERE 1 = 1{SchemaRowsetFilter("po.name", values[1], usePattern: false)}{SchemaRowsetFilter("ps.name", values[2], usePattern: false)}{SchemaRowsetFilter("fo.name", values[4], usePattern: false)}{SchemaRowsetFilter("fs.name", values[5], usePattern: false)}
+            ORDER BY ps.name, po.name, fs.name, fo.name, k.constraint_column_id
+            """;
+        static SqlValue Rule(SqlValue action) => SqlValue.FromInt32(action.CoerceTo(SqlType.Int32).AsInt32 switch { 0 => 1, 1 => 0, var other => other });
+        var rows = new List<SqlValue[]>();
+        if (SchemaRowsetQuery(server, values[3].IsNull ? values[6] : values[3], query) is { } result)
+        {
+            foreach (var row in result.RowValues)
+            {
+                SqlValue Text(int at) => SqlValue.FromString(name, row[at].AsString);
+                rows.Add([
+                    Text(0), Text(1), Text(2), Text(3), Text(0), Text(4), Text(5), Text(6), SqlValue.FromInt32(row[7].CoerceTo(SqlType.Int32).AsInt32),
+                    Rule(row[8]), Rule(row[9]), SqlValue.Null(name), SqlValue.Null(name), SqlValue.Null(SqlType.SmallInt),
+                ]);
+            }
+        }
+        yield return new SimulatedSqlResultSet(schema, names, rows);
+    }
 
     /// <summary>
     /// <c>sp_linkedservers</c> lists every server <c>sys.servers</c> holds, the

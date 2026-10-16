@@ -370,6 +370,8 @@ partial class Simulation
             "sp_catalogs" => InvokeSpCatalogs(batch, calledAs),
             "sp_tables_ex" => InvokeSpTablesEx(batch, calledAs),
             "sp_columns_ex" => InvokeSpColumnsEx(batch, calledAs),
+            "sp_foreignkeys" => InvokeSpForeignKeys(batch, calledAs),
+            "sp_primarykeys" => InvokeSpPrimaryKeys(batch, calledAs),
             "sp_helpsort" => Uncounted(InvokeSpHelpSort(batch, calledAs)),
             "sp_lock" => Uncounted(InvokeSpLock(batch, calledAs)),
             "sp_monitor" => Uncounted(InvokeSpMonitor(batch, calledAs)),

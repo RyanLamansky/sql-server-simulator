@@ -137,6 +137,8 @@ What the linked-server procedures check and report, probed 2026-10-05 against SQ
 - **`sp_tables_ex` and `sp_columns_ex`**, the provider's schema rowsets, read the server's own catalog in the named database — the one its sessions start in when none is named, nothing for one it lacks — by type, schema and name (probed 2026-10-06).
   `sp_tables_ex` lists tables, views and synonyms, a shipped object as `SYSTEM TABLE` / `SYSTEM VIEW`; `sp_columns_ex` describes the columns of tables and views in the provider's down-level terms, leaving out a `hierarchyid`, spatial, `json` or CLR type's column (`Simulation.ProviderColumnRow` holds the mapping).
   An unknown server is Msg 7202 leaving the batch running — after `sp_tables_ex`'s empty listing at line 41, and before `sp_columns_ex`'s Msg 3621 and empty listing at line 177.
+- **`sp_primarykeys` and `sp_foreignkeys`** list the server's key columns by exact name — by schema, table and key position, and by primary-key then foreign-key table — with neither key's name reported and a rule in ODBC's terms (cascade 0, no action 1, set NULL 2, set default 3); `sp_foreignkeys` reads the database either catalog argument names, and an unknown server is Msg 7202 after an empty listing, at line 10 and 13 (probed 2026-10-16 against SQL Server 2025 through an MSOLEDBSQL loopback).
+  **Not modeled yet**: `sp_table_privileges_ex` / `sp_column_privileges_ex`, which list the server's own catalog views with their grants beside the user's objects, and `sp_indexes`, which real's MSOLEDBSQL loopback refuses with Msg 7412 / 7346 (`Binding information is invalid.`).
 
 ## Server options
 

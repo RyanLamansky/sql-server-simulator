@@ -203,6 +203,8 @@ partial class BuiltInResources
             ["sp_sproc_columns_90"] = [new("@procedure_name", 231, 780, 0, 0), new("@procedure_owner", 231, 768, 0, 0), new("@procedure_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
             ["sp_tablecollations"] = [new("@object", 231, 8000, 0, 0)],
             ["sp_tablecollations_90"] = [new("@object", 231, 8000, 0, 0)],
+            ["sp_foreignkeys"] = [new("@table_server", 256, 256, 0, 0), new("@pktab_name", 256, 256, 0, 0), new("@pktab_schema", 256, 256, 0, 0), new("@pktab_catalog", 256, 256, 0, 0), new("@fktab_name", 256, 256, 0, 0), new("@fktab_schema", 256, 256, 0, 0), new("@fktab_catalog", 256, 256, 0, 0)],
+            ["sp_primarykeys"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0)],
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>One row of <see cref="SystemProcedureParameters"/>.</summary>

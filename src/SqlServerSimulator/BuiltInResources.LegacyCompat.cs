@@ -49,6 +49,8 @@ internal static partial class BuiltInResources
         "sp_catalogs",
         "sp_tables_ex",
         "sp_columns_ex",
+        "sp_primarykeys",
+        "sp_foreignkeys",
         "sp_set_session_context",
         // Server-level trust of an assembly by its SHA2_512 hash, which
         // CREATE ASSEMBLY asks under clr strict security.

@@ -212,6 +212,51 @@ public sealed class LinkedServerCatalogTests
     public void SpTablesEx_ListsTheServersTables(string sql, string expected) =>
         AreEqual(expected, Rows(SchemaRowsetLoopback(), sql));
 
+    private static Simulation KeysLoopback()
+    {
+        var sim = Loopback("create database zzkeys");
+        sim.ExecuteBatches(
+            "use zzkeys",
+            "create schema s2",
+            """
+            create table dbo.aaa_par (k int primary key);
+            create table dbo.par (a int not null, b int not null, constraint pk_par primary key (a, b));
+            create table dbo.chi (id int primary key, pa int, pb int, foreign key (pa, pb) references dbo.par (a, b) on delete cascade);
+            create table s2.chi2 (id int, pa int, pb int, foreign key (pa, pb) references dbo.par (a, b) on update set null);
+            create table dbo.sd_chi (k int default 0 references dbo.aaa_par (k) on delete set default on update cascade);
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// <c>sp_primarykeys</c> and <c>sp_foreignkeys</c> list a linked server's
+    /// keys by exact name, without the keys' own names, its rules in ODBC's
+    /// terms (probed 2026-10-16 against SQL Server 2025 through an MSOLEDBSQL
+    /// loopback).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_primarykeys 'SELF', 'PAR', 'DBO', 'zzkeys'", "zzkeys|dbo|par|a|1|NULL~zzkeys|dbo|par|b|2|NULL")]
+    [DataRow("exec sp_primarykeys 'SELF', 'p%', null, 'zzkeys'", "")]
+    [DataRow("exec sp_primarykeys 'SELF', null, null, 'zzkeys'", "zzkeys|dbo|aaa_par|k|1|NULL~zzkeys|dbo|chi|id|1|NULL~zzkeys|dbo|par|a|1|NULL~zzkeys|dbo|par|b|2|NULL")]
+    [DataRow("exec sp_primarykeys 'SELF', 'par'", "")]
+    [DataRow("exec sp_foreignkeys 'SELF', 'aaa_par', null, 'zzkeys'", "zzkeys|dbo|aaa_par|k|zzkeys|dbo|sd_chi|k|1|0|3|NULL|NULL|NULL")]
+    [DataRow("exec sp_foreignkeys 'SELF', 'par', 'dbo', 'zzkeys'", "zzkeys|dbo|par|a|zzkeys|dbo|chi|pa|1|1|0|NULL|NULL|NULL~zzkeys|dbo|par|b|zzkeys|dbo|chi|pb|2|1|0|NULL|NULL|NULL~zzkeys|dbo|par|a|zzkeys|s2|chi2|pa|1|2|1|NULL|NULL|NULL~zzkeys|dbo|par|b|zzkeys|s2|chi2|pb|2|2|1|NULL|NULL|NULL")]
+    [DataRow("exec sp_foreignkeys 'SELF', null, null, null, 'chi', 'dbo', 'zzkeys'", "zzkeys|dbo|par|a|zzkeys|dbo|chi|pa|1|1|0|NULL|NULL|NULL~zzkeys|dbo|par|b|zzkeys|dbo|chi|pb|2|1|0|NULL|NULL|NULL")]
+    [DataRow("exec sp_foreignkeys 'SELF', 'par', 'dbo', 'zzkeys', 'chi', 's2'", "")]
+    public void SpPrimaryKeysAndForeignKeys_ListTheServersKeys(string sql, string expected) =>
+        AreEqual(expected, Rows(KeysLoopback(), sql));
+
+    [TestMethod]
+    public void SpPrimaryKeysAndForeignKeys_RefuseAServerTheInstanceDoesntHave()
+    {
+        var sim = Loopback();
+        var pk = sim.AssertSqlError("exec sp_primarykeys 'nope', 'par'", 7202).Errors[0];
+        AreEqual((10, "sp_primarykeys"), (pk.LineNumber, pk.Procedure));
+        var fk = sim.AssertSqlError("exec sp_foreignkeys 'nope', 'par'", 7202).Errors[0];
+        AreEqual((13, "sp_foreignkeys"), (fk.LineNumber, fk.Procedure));
+        _ = sim.AssertSqlError("exec sp_primarykeys", 201);
+    }
+
     /// <summary>
     /// <c>sp_columns_ex</c> describes columns as SQL Server's OLE DB provider
     /// reports them, leaving out the types it has no mapping for (probed
