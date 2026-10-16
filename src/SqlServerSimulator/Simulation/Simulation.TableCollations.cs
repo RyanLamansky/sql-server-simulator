@@ -20,6 +20,8 @@ partial class Simulation
     private static readonly string[] TableCollationsColumnNames =
         ["colid", "name", "tds_collation", "collation"];
 
+    private static readonly bool[] TableCollationsNullability = [false, true, true, true];
+
     /// <summary>
     /// Handles <c>EXEC sp_tablecollations_100 N'[schema].[table]'</c> — the
     /// per-column collation metadata query SqlClient's <c>SqlBulkCopy</c> runs
@@ -29,25 +31,41 @@ partial class Simulation
     /// its 5-byte TDS collation structure, and the collation name — the latter
     /// two NULL for non-string columns, matching real SQL Server. An
     /// unresolvable table name yields an empty result set (real filters on
-    /// <c>object_id = NULL</c>).
+    /// <c>object_id = NULL</c>). <c>sp_tablecollations_90</c> gives the date
+    /// and time types after <c>datetime</c> the database's collation, as the
+    /// strings a down-level client reads them as, and the older
+    /// <c>sp_tablecollations</c> <c>xml</c> too (probed 2026-10-16 against SQL
+    /// Server 2025).
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpTableCollations(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpTableCollations(BatchContext batch, string procedure, SpColumnsVersion version)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        RequireFirstParameter(arguments, "sp_tablecollations_100", "object");
+        RequireFirstParameter(arguments, procedure, "object");
         var rows = new List<SqlValue[]>();
         if (arguments.Count > 0
             && !arguments[0].Value.IsNull
             && ObjectId.TryParseObjectName(arguments[0].Value.CoerceTo(SqlType.NVarchar).AsString, out var parsed)
             && batch.TryResolveTable(parsed, out var table))
         {
+            // A column set stands in for its sparse columns (probed 2026-10-16
+            // against SQL Server 2025).
+            var hasColumnSet = Array.Exists(table.Columns, static column => column.IsColumnSet);
             for (var i = 0; i < table.Columns.Length; i++)
             {
                 var column = table.Columns[i];
-                var collation = column.Type.Category == SqlTypeCategory.String ? column.Type.Collation : null;
+                if (hasColumnSet && column.IsSparse)
+                    continue;
+                var collation = column.Type switch
+                {
+                    _ when column.IsColumnSet => version == SpColumnsVersion.Classic ? batch.CurrentDatabase.Collation : null,
+                    { Category: SqlTypeCategory.String } => column.Type.Collation,
+                    DateSqlType or TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType when version != SpColumnsVersion.V100 => batch.CurrentDatabase.Collation,
+                    XmlSqlType when version == SpColumnsVersion.Classic => batch.CurrentDatabase.Collation,
+                    _ => null,
+                };
                 SqlValue tdsCollation;
                 SqlValue collationName;
                 if (collation is null)
@@ -73,6 +91,6 @@ partial class Simulation
             }
         }
 
-        yield return new SimulatedSqlResultSet(TableCollationsSchema, TableCollationsColumnNames, rows);
+        yield return new SimulatedSqlResultSet(TableCollationsSchema, TableCollationsColumnNames, rows) { ColumnNullability = TableCollationsNullability };
     }
 }

@@ -381,6 +381,12 @@ internal static class CatalogViewObjectIds
     public static readonly FrozenDictionary<string, int> ByProcedureName = new Dictionary<string, int>(BuiltInToken.Comparer)
     {
         ["sp_add_trusted_assembly"] = -207093074,
+        ["sp_datatype_info_170"] = -739330893,
+        ["sp_datatype_info_90"] = -138857529,
+        ["sp_special_columns_90"] = -885305184,
+        ["sp_sproc_columns_90"] = -229693137,
+        ["sp_tablecollations"] = -442043634,
+        ["sp_tablecollations_90"] = -205149438,
         ["sp_columns_170"] = -808029578,
         ["sp_columns_90"] = -539604337,
         ["xp_fixeddrives"] = -324230772,

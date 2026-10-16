@@ -292,11 +292,15 @@ internal static partial class BuiltInResources
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
         "sp_tablecollations_100",
+        "sp_tablecollations",
+        "sp_tablecollations_90",
         // sp_datatype_info_100: the ODBC SQLGetTypeInfo backing proc — ODBC
         // Driver 18 / JDBC call it on connect to learn each type's
         // precision/scale, so temporal parameters bind at the right scale.
         "sp_datatype_info",
         "sp_datatype_info_100",
+        "sp_datatype_info_90",
+        "sp_datatype_info_170",
         // sp_tables / sp_columns_100: the ODBC SQLTables / SQLColumns backing
         // procs — JDBC's DatabaseMetaData.getTables / getColumns (Hibernate
         // schema validation, generic tooling) call them on connect to
@@ -326,12 +330,14 @@ internal static partial class BuiltInResources
         // parameters.
         "sp_sproc_columns",
         "sp_sproc_columns_100",
+        "sp_sproc_columns_90",
         // SQLTablePrivileges / SQLColumnPrivileges.
         "sp_table_privileges",
         "sp_column_privileges",
         // SQLSpecialColumns.
         "sp_special_columns",
         "sp_special_columns_100",
+        "sp_special_columns_90",
         // The sp_help family — the formatted-metadata procs interactive
         // sessions and SSMS's scripting fall back on. sp_help delegates to
         // sp_helpindex / sp_helpconstraint for its per-table detail sets;

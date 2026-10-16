@@ -33,6 +33,12 @@ partial class Simulation
         .. SprocColumnsColumnNames[..19], "SS_TYPE_CATALOG_NAME", "SS_TYPE_SCHEMA_NAME", .. SpColumnsColumnNames[22..29],
     ];
 
+    // sp_sproc_columns_90: _100's columns without the SS_TYPE_* pair (probed
+    // 2026-10-16 against SQL Server 2025).
+    private static readonly SqlType[] SprocColumns90Schema = [.. SprocColumns100Schema[..19], .. SprocColumns100Schema[21..]];
+
+    private static readonly string[] SprocColumns90ColumnNames = [.. SprocColumns100ColumnNames[..19], .. SprocColumns100ColumnNames[21..]];
+
     private const short SqlParamInput = 1;
     private const short SqlParamInputOutput = 2;
     private const short SqlResultColumn = 3;
@@ -50,11 +56,14 @@ partial class Simulation
     /// columns are <c>sp_columns</c>' for the same type, in its classic or
     /// <c>_100</c> spelling; a table-valued parameter reads as type -153 named
     /// after its table type. <c>@fUsePattern = 0</c> matches names exactly
-    /// (probed 2026-09-26 against SQL Server 2025).
+    /// (probed 2026-09-26 against SQL Server 2025). <c>_90</c> types each
+    /// parameter as <c>sp_columns_90</c> types a column, without the
+    /// SS_TYPE_* pair (probed 2026-10-16).
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSprocColumns(BatchContext batch, bool classic)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSprocColumns(BatchContext batch, SpColumnsVersion version)
     {
-        var procedureName = classic ? "sp_sproc_columns" : "sp_sproc_columns_100";
+        var classic = version == SpColumnsVersion.Classic;
+        var procedureName = version switch { SpColumnsVersion.Classic => "sp_sproc_columns", SpColumnsVersion.V90 => "sp_sproc_columns_90", _ => "sp_sproc_columns_100" };
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
@@ -78,16 +87,19 @@ partial class Simulation
                 if (!NameMatches(ownerPattern, owner, schema.Name))
                     continue;
                 var ownerValue = SqlValue.FromSystemName(schema.Name);
-                IEnumerable<(string Name, bool IsProcedure, SchemaObject Routine)> routines =
+                // Every number of a numbered procedure group is listed (probed
+                // 2026-10-16 against SQL Server 2025).
+                IEnumerable<(string Name, short Number, SchemaObject Routine)> routines =
                 [
-                    .. schema.Procedures.EnumerateValues().Select(p => (p.Name, true, (SchemaObject)p)),
-                    .. schema.Functions.EnumerateValues().Select(f => (f.Name, false, (SchemaObject)f)),
+                    .. schema.Procedures.EnumerateValues().SelectMany(p => (IEnumerable<(string, short, SchemaObject)>)
+                        [(p.Name, 1, p), .. (p.Numbered ?? []).Where(static n => n.Key > 1).Select(n => (p.Name, n.Key, (SchemaObject)n.Value))]),
+                    .. schema.Functions.EnumerateValues().Select(f => (f.Name, (short)0, (SchemaObject)f)),
                 ];
-                foreach (var (routineName, isProcedure, routine) in routines.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase))
+                foreach (var (routineName, number, routine) in routines.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Number))
                 {
                     if (!NameMatches(namePattern, name, routineName))
                         continue;
-                    var nameValue = SqlValue.FromString(CatalogNVarchar134, routineName + (isProcedure ? ";1" : ";0"));
+                    var nameValue = SqlValue.FromString(CatalogNVarchar134, routineName + ";" + number.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     void Add(string columnName, short columnType, SqlValue[] row)
                     {
                         if (NameMatches(columnPattern, column, columnName))
@@ -110,7 +122,7 @@ partial class Simulation
                                 var columnType = parameter.IsOutput ? SqlParamInputOutput : SqlParamInput;
                                 Add(parameterName, columnType, parameter.TableType is { } tableType
                                     ? TableTypeRow(parameterName, tableType, i + 1)
-                                    : TypedRow(new HeapColumn(parameterName, parameter.Type, parameter.DeclaredMaxLength, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType }, i + 1, columnType));
+                                    : TypedRow(new HeapColumn(parameterName, parameter.Type, parameter.DeclaredMaxLength, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType, XmlSchemaCollection = parameter.XmlSchemaCollection }, i + 1, columnType));
                             }
                             break;
                         case UserDefinedFunction function:
@@ -124,7 +136,7 @@ partial class Simulation
                                 if (parameter.Type is VectorSqlType or JsonSqlType)
                                     continue;
                                 var parameterName = "@" + parameter.Name;
-                                Add(parameterName, SqlParamInput, TypedRow(new HeapColumn(parameterName, parameter.Type, null, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType }, i + 1, SqlParamInput));
+                                Add(parameterName, SqlParamInput, TypedRow(new HeapColumn(parameterName, parameter.Type, null, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType, XmlSchemaCollection = parameter.XmlSchemaCollection }, i + 1, SqlParamInput));
                             }
                             break;
                     }
@@ -134,8 +146,24 @@ partial class Simulation
                         var full = BuildSpColumnsRow(qualifierValue, ownerValue, nameValue, typed, ordinal, byName);
                         // A parameter has no default a client can read here.
                         full[12] = SqlValue.Null(CatalogNVarchar4000);
+                        // A rowversion parameter keeps the NOT NULL type token,
+                        // and a typed xml one names its schema collection
+                        // (probed 2026-10-16 against SQL Server 2025).
+                        if (typed.Type == SqlType.RowVersion)
+                            full[28] = SqlValue.FromByte(45);
+                        if (typed.XmlSchemaCollection is { } collection)
+                        {
+                            full[25] = qualifierValue;
+                            full[26] = SqlValue.FromSystemName(SchemaNameOf(database, collection.SchemaId) ?? "");
+                            full[27] = SqlValue.FromSystemName(collection.Name);
+                        }
+                        if (version == SpColumnsVersion.V90)
+                        {
+                            var downlevel90 = SpColumns90Row(full, typed);
+                            return [.. downlevel90[..4], SqlValue.FromInt16(columnType), .. downlevel90[4..]];
+                        }
                         if (!classic)
-                            return Shape(full, columnType, classic);
+                            return Shape(full, columnType, classic, typed.Type is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType);
                         var downlevel = ClassicSpColumnsRow(full, typed);
                         // Where sp_columns blanks a downlevel temporal column's
                         // scale, a parameter keeps its fractional scale and
@@ -183,30 +211,36 @@ partial class Simulation
                         if (classic)
                             return [.. head, ssDataType];
                         var nullName = SqlValue.Null(SqlType.SystemName);
-                        return [.. head, typeCatalog, typeSchema, nullName, nullName, SqlValue.Null(CatalogNVarchar4000), nullName, nullName, nullName, ssDataType];
+                        return version == SpColumnsVersion.V90
+                            ? [.. head, nullName, nullName, SqlValue.Null(CatalogNVarchar4000), nullName, nullName, nullName, ssDataType]
+                            : [.. head, typeCatalog, typeSchema, nullName, nullName, SqlValue.Null(CatalogNVarchar4000), nullName, nullName, nullName, ssDataType];
                     }
                 }
             }
         }
 
-        yield return classic
-            ? new SimulatedSqlResultSet(SprocColumnsSchema, SprocColumnsColumnNames, rows)
-            : new SimulatedSqlResultSet(SprocColumns100Schema, SprocColumns100ColumnNames, rows);
+        yield return version switch
+        {
+            SpColumnsVersion.Classic => new SimulatedSqlResultSet(SprocColumnsSchema, SprocColumnsColumnNames, rows),
+            SpColumnsVersion.V90 => new SimulatedSqlResultSet(SprocColumns90Schema, SprocColumns90ColumnNames, rows),
+            _ => new SimulatedSqlResultSet(SprocColumns100Schema, SprocColumns100ColumnNames, rows),
+        };
     }
 
     /// <summary>
     /// Reshapes an <c>sp_columns</c> row (19 classic cells or 29 <c>_100</c>
     /// cells) into <c>sp_sproc_columns</c>' layout: <c>COLUMN_TYPE</c> after
     /// <c>COLUMN_NAME</c>, and for <c>_100</c> the SS_TYPE_* pair in place of
-    /// the SS_IS_* flags.
+    /// the SS_IS_* flags, which name a CLR type's catalog and schema as its
+    /// SS_UDT_* pair does (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    private static SqlValue[] Shape(SqlValue[] row, short columnType, bool classic)
+    private static SqlValue[] Shape(SqlValue[] row, short columnType, bool classic, bool clrType = false)
     {
         SqlValue[] head = [.. row[..4], SqlValue.FromInt16(columnType), .. row[4..18]];
         if (classic)
             return [.. head, row[18]];
         var nullName = SqlValue.Null(SqlType.SystemName);
-        return [.. head, nullName, nullName, .. row[22..29]];
+        return clrType ? [.. head, row[22], row[23], .. row[22..29]] : [.. head, nullName, nullName, .. row[22..29]];
     }
 
     // Real's positional order is @procedure_name, @procedure_owner,

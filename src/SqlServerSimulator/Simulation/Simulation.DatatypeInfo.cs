@@ -246,6 +246,23 @@ partial class Simulation
         internal static readonly SqlValue[][] ClassicDatatypeInfoV2Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV2Raw);
 
         internal static readonly SqlValue[][] ClassicDatatypeInfoV3Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV3Raw);
+
+        // sp_datatype_info_90 is the older set with xml as itself (-152),
+        // listed first; sp_datatype_info_170 adds json and vector under ODBC 3
+        // (probed 2026-10-16 against SQL Server 2025).
+        internal static readonly SqlValue[][] DatatypeInfo90V2Rows = Native90Rows(DatatypeInfoV2Raw, ClassicDatatypeInfoV2Rows);
+
+        internal static readonly SqlValue[][] DatatypeInfo90V3Rows = Native90Rows(DatatypeInfoV3Raw, ClassicDatatypeInfoV3Rows);
+
+        internal static readonly SqlValue[][] DatatypeInfo170V3Rows =
+        [
+            BuildDatatypeInfoRow(["json", -157, 2147483647, "'", "'", null, 1, 1, 0, null, 0, null, "json", null, null, -157, null, null, null, 2]),
+            BuildDatatypeInfoRow(["vector", -156, 8000, "'", "'", "dimensions,base_type", 1, 0, 0, null, 0, null, "vector", null, null, -156, null, null, null, 4]),
+            .. DatatypeInfoV3Rows,
+        ];
+
+        private static SqlValue[][] Native90Rows(object?[][] native, SqlValue[][] classic) =>
+            [BuildDatatypeInfoRow(Array.Find(native, static row => (string)row[0]! == "xml")!), .. classic.Where(static row => row[0].AsString != "xml")];
     }
 
     private static SqlValue[][] BuildDatatypeInfoRows(object?[][] raw)
@@ -278,9 +295,11 @@ partial class Simulation
     /// Handles <c>EXEC sp_datatype_info_100 [@data_type] [, @ODBCVer]</c> — the
     /// proc ODBC's <c>SQLGetTypeInfo</c> calls on connect to learn each type's
     /// precision/scale (also reached via the <c>sys.sp_datatype_info_100</c>
-    /// name-form RPC through a synthesized EXEC) — and, with
-    /// <paramref name="classic"/>, the older <c>sp_datatype_info</c> pre-2008
-    /// drivers call, which reads the downlevel row set. Mirrors the real proc's
+    /// name-form RPC through a synthesized EXEC) — and its other versions: the
+    /// older <c>sp_datatype_info</c> pre-2008 drivers call, which reads the
+    /// downlevel row set, <c>_90</c>, which reads it with <c>xml</c> as itself,
+    /// and <c>_170</c>, which adds <c>json</c> and <c>vector</c> under ODBC 3,
+    /// its default. Mirrors the real proc's
     /// semantics: <c>@data_type</c> (positional or named, absent → 0, an
     /// explicit NULL → no rows) selects a single <c>DATA_TYPE</c> when non-zero
     /// or every type when 0;
@@ -291,19 +310,23 @@ partial class Simulation
     /// in range and sorted by (<c>DATA_TYPE</c>, <c>AUTO_INCREMENT</c>,
     /// <c>MONEY</c>, <c>USERTYPE</c>) with NULL <c>AUTO_INCREMENT</c> first.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDatatypeInfo(BatchContext batch, bool classic)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDatatypeInfo(BatchContext batch, string procedure, SpColumnsVersion version)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        var (dataType, odbcVer) = ParseDatatypeInfoArgs(arguments, classic ? "sp_datatype_info" : "sp_datatype_info_100");
-        var source = (classic, odbcVer >= 3) switch
+        var (dataType, odbcVer) = ParseDatatypeInfoArgs(arguments, procedure, version == SpColumnsVersion.V170 ? 3 : 2);
+        var classic = version is SpColumnsVersion.Classic or SpColumnsVersion.V90;
+        var source = (version, odbcVer >= 3) switch
         {
-            (true, true) => DatatypeInfoTables.ClassicDatatypeInfoV3Rows,
-            (true, false) => DatatypeInfoTables.ClassicDatatypeInfoV2Rows,
-            (false, true) => DatatypeInfoTables.DatatypeInfoV3Rows,
-            (false, false) => DatatypeInfoTables.DatatypeInfoV2Rows,
+            (SpColumnsVersion.Classic, true) => DatatypeInfoTables.ClassicDatatypeInfoV3Rows,
+            (SpColumnsVersion.Classic, false) => DatatypeInfoTables.ClassicDatatypeInfoV2Rows,
+            (SpColumnsVersion.V90, true) => DatatypeInfoTables.DatatypeInfo90V3Rows,
+            (SpColumnsVersion.V90, false) => DatatypeInfoTables.DatatypeInfo90V2Rows,
+            (SpColumnsVersion.V170, true) => DatatypeInfoTables.DatatypeInfo170V3Rows,
+            (_, true) => DatatypeInfoTables.DatatypeInfoV3Rows,
+            (_, false) => DatatypeInfoTables.DatatypeInfoV2Rows,
         };
 
         // An explicit NULL @data_type matches no type — the proc's range test
@@ -313,27 +336,109 @@ partial class Simulation
         if (dataType is { } wanted)
         {
             var (low, high) = wanted == 0 ? (-32768, 32767) : (wanted, wanted);
-            var matching = source.Where(row => row[1].AsInt16 >= low && row[1].AsInt16 <= high);
-            rows = classic
-                ? [.. matching]
-                : [.. matching
+            bool InRange(SqlValue[] row) => row[1].AsInt16 >= low && row[1].AsInt16 <= high;
+            var matching = source.Where(InRange);
+            var aliases = AliasTypeDatatypeInfoRows(batch.CurrentDatabase, source).Where(InRange);
+            if (classic)
+            {
+                rows = [.. matching];
+                foreach (var alias in aliases)
+                    rows.Insert(ClassicAliasPosition(rows, alias), alias);
+            }
+            else
+            {
+                rows = [.. matching.Concat(aliases)
                     .OrderBy(row => (int)row[1].AsInt16)
                     .ThenBy(DatatypeInfoOrderKey12)
                     .ThenBy(row => (int)row[10].AsInt16)
                     .ThenBy(row => (int)row[19].AsInt16)];
+            }
         }
 
-        yield return new SimulatedSqlResultSet(DatatypeInfoSchema, DatatypeInfoColumnNames, rows);
+        yield return new SimulatedSqlResultSet(DatatypeInfoSchema, DatatypeInfoColumnNames, rows)
+        {
+            ColumnNullability = version switch
+            {
+                SpColumnsVersion.V170 => DatatypeInfo170Nullability,
+                SpColumnsVersion.V100 => DatatypeInfo100Nullability,
+                _ => DatatypeInfoClassicNullability,
+            },
+        };
+    }
+
+    // The columns each version sends NOT NULL: SEARCHABLE and MONEY in every
+    // one, SQL_DATA_TYPE from _100 on, DATA_TYPE in _170 (probed 2026-10-16
+    // against SQL Server 2025).
+    private static readonly bool[] DatatypeInfoClassicNullability = [.. Enumerable.Range(0, 20).Select(static i => i is not (8 or 10))];
+
+    private static readonly bool[] DatatypeInfo100Nullability = [.. Enumerable.Range(0, 20).Select(static i => i is not (8 or 10 or 15))];
+
+    private static readonly bool[] DatatypeInfo170Nullability = [.. Enumerable.Range(0, 20).Select(static i => i is not (1 or 8 or 10 or 15))];
+
+    /// <summary>
+    /// The current database's alias types, each as its base type's row reads
+    /// in <paramref name="source"/> under the alias's own name, with its
+    /// declared precision (a string's length, a decimal's precision), its
+    /// scale as both scale bounds where the base has any, its nullability, no
+    /// <c>CREATE_PARAMS</c> and its <c>user_type_id</c> as <c>USERTYPE</c>
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static List<SqlValue[]> AliasTypeDatatypeInfoRows(Database database, SqlValue[][] source)
+    {
+        var rows = new List<SqlValue[]>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, alias) in schema.AliasTypes)
+            {
+                var baseName = alias.SpelledNumeric && alias.UnderlyingType is DecimalSqlType ? "numeric" : SpColumnsTypeName(alias.UnderlyingType);
+                if (Array.Find(source, row => row[0].AsString == baseName) is not { } baseRow)
+                    continue;
+                var (precision, _, scale, _) = SpColumnGeometry(new HeapColumn(alias.Name, alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable));
+                var row = (SqlValue[])baseRow.Clone();
+                var name = SqlValue.FromString(DatatypeInfoSchema[0], alias.Name);
+                row[0] = row[12] = name;
+                if (precision is { } declared)
+                    row[2] = SqlValue.FromInt32(declared);
+                row[5] = SqlValue.Null(DatatypeInfoSchema[5]);
+                row[6] = SqlValue.FromInt16(alias.IsNullable ? (short)1 : (short)0);
+                if (scale is { } declaredScale && !row[13].IsNull)
+                    row[13] = row[14] = SqlValue.FromInt16((short)declaredScale);
+                row[19] = SqlValue.FromInt16((short)alias.UserTypeId);
+                rows.Add(row);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Where the older procedure's order puts an alias type's row: among its
+    /// <c>DATA_TYPE</c>'s rows by the newer procedure's keys, ahead of the
+    /// date and time types it reads down-level as strings.
+    /// </summary>
+    private static int ClassicAliasPosition(List<SqlValue[]> rows, SqlValue[] alias)
+    {
+        static (int, int, int) Key(SqlValue[] row) => (DatatypeInfoOrderKey12(row), row[10].AsInt16, row[19].AsInt16);
+        var last = -1;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (row[1].AsInt16 != alias[1].AsInt16 || row[0].AsString is "date" or "time" or "datetime2" or "datetimeoffset")
+                continue;
+            if (Key(row).CompareTo(Key(alias)) > 0)
+                return i;
+            last = i;
+        }
+        return last < 0 ? rows.Count : last + 1;
     }
 
     // AUTO_INCREMENT (column index 11) sort key: NULL sorts first, matching
     // ORDER BY ascending, so a NULL cell maps to int.MinValue.
     private static int DatatypeInfoOrderKey12(SqlValue[] row) => row[11].IsNull ? int.MinValue : row[11].AsInt16;
 
-    private static (int? DataType, int OdbcVer) ParseDatatypeInfoArgs(List<ProcArgument> arguments, string procedureName)
+    private static (int? DataType, int OdbcVer) ParseDatatypeInfoArgs(List<ProcArgument> arguments, string procedureName, int defaultOdbcVer)
     {
         int? dataType = 0;
-        var odbcVer = 2;
+        var odbcVer = defaultOdbcVer;
         var positional = 0;
         foreach (var arg in arguments)
         {

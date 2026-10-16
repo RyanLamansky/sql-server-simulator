@@ -18,6 +18,11 @@ partial class Simulation
     // against SQL Server 2025).
     private static readonly bool[] SpSpecialColumnsRowVersionNullability = [true, true, true, false, true, true, true, true];
 
+    // sp_special_columns_100's 'R' form sends DATA_TYPE NOT NULL, where _90's
+    // and the older procedure's are nullable (probed 2026-10-16 against SQL
+    // Server 2025).
+    private static readonly bool[] SpSpecialColumns100Nullability = [true, true, false, true, true, true, true, true];
+
     /// <summary>
     /// Handles <c>EXEC sp_special_columns[_100] @table_name [, @table_owner]
     /// [, @table_qualifier] [, @col_type] [, @scope] [, @nullable]
@@ -129,7 +134,9 @@ partial class Simulation
 
         yield return resolved && collation.Equals(colType, "V")
             ? new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows) { ColumnNullability = SpSpecialColumnsRowVersionNullability }
-            : new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows);
+            : procedureName == "sp_special_columns_100" && !collation.Equals(colType, "V")
+                ? new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows) { ColumnNullability = SpSpecialColumns100Nullability }
+                : new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows);
     }
 
     // Real's procedure raises these itself, so they carry its name and the

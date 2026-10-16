@@ -57,7 +57,7 @@ partial class Simulation
     /// invalidates for itself.
     /// </summary>
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
-        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_90" or "sp_columns_100" or "sp_columns_170" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
+        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_90" or "sp_columns_100" or "sp_columns_170" or "sp_databases" or "sp_datatype_info" or "sp_datatype_info_90" or "sp_datatype_info_170" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_estimate_data_compression_savings" or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
@@ -69,8 +69,8 @@ partial class Simulation
         or "sp_query_store_remove_plan" or "sp_query_store_remove_plan_feedback" or "sp_query_store_remove_query" or "sp_query_store_reset_exec_stats"
         or "sp_prepare" or "sp_prepexec" or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
-        or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
-        or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
+        or "sp_special_columns_90" or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_90" or "sp_sproc_columns_100" or "sp_statistics"
+        or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations" or "sp_tablecollations_90" or "sp_tablecollations_100"
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
         or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
         or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
@@ -339,8 +339,10 @@ partial class Simulation
             "sp_procedure_params_100_managed" => InvokeSpProcedureParamsManaged(batch, systemProcName, calledAs, v100: true),
             "sp_procedure_params_managed" => InvokeSpProcedureParamsManaged(batch, systemProcName, calledAs, v100: false),
             "sp_configure" => Uncounted(InvokeSpConfigure(batch, CalledName(procName))),
-            "sp_datatype_info" => InvokeSpDatatypeInfo(batch, classic: true),
-            "sp_datatype_info_100" => InvokeSpDatatypeInfo(batch, classic: false),
+            "sp_datatype_info" => InvokeSpDatatypeInfo(batch, systemProcName, SpColumnsVersion.Classic),
+            "sp_datatype_info_90" => InvokeSpDatatypeInfo(batch, systemProcName, SpColumnsVersion.V90),
+            "sp_datatype_info_100" => InvokeSpDatatypeInfo(batch, systemProcName, SpColumnsVersion.V100),
+            "sp_datatype_info_170" => InvokeSpDatatypeInfo(batch, systemProcName, SpColumnsVersion.V170),
             "sp_databases" => Uncounted(InvokeSpDatabases(batch)),
             "sp_cursor_list" => InvokeSpCursorList(batch, CalledName(procName)),
             "sp_dbfixedrolepermission" => InvokeSpDbFixedRolePermission(batch),
@@ -436,12 +438,15 @@ partial class Simulation
             "sp_serveroption" => InvokeSpServerOption(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch, CalledName(procName))),
-            "sp_special_columns" or "sp_special_columns_100" => InvokeSpSpecialColumns(batch, systemProcName),
-            "sp_sproc_columns" => InvokeSpSprocColumns(batch, classic: true),
-            "sp_sproc_columns_100" => InvokeSpSprocColumns(batch, classic: false),
+            "sp_special_columns" or "sp_special_columns_90" or "sp_special_columns_100" => InvokeSpSpecialColumns(batch, systemProcName),
+            "sp_sproc_columns" => InvokeSpSprocColumns(batch, SpColumnsVersion.Classic),
+            "sp_sproc_columns_90" => InvokeSpSprocColumns(batch, SpColumnsVersion.V90),
+            "sp_sproc_columns_100" => InvokeSpSprocColumns(batch, SpColumnsVersion.V100),
             "sp_statistics" or "sp_statistics_100" => Uncounted(InvokeSpStatistics(batch, systemProcName)),
             "sp_stored_procedures" => InvokeSpStoredProcedures(batch),
-            "sp_tablecollations_100" => InvokeSpTableCollations(batch),
+            "sp_tablecollations" => InvokeSpTableCollations(batch, systemProcName, SpColumnsVersion.Classic),
+            "sp_tablecollations_90" => InvokeSpTableCollations(batch, systemProcName, SpColumnsVersion.V90),
+            "sp_tablecollations_100" => InvokeSpTableCollations(batch, systemProcName, SpColumnsVersion.V100),
             "sp_table_privileges" => InvokeSpTablePrivileges(batch),
             "sp_tables" => InvokeSpTables(batch),
             "sp_unbindefault" => InvokeSpUnbind(batch, CalledName(procName), isRule: false),
