@@ -1237,7 +1237,7 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not Name)
             return false;
-        var tableName = BatchContext.ParseObjectName(context);
+        var tableName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
             return false;

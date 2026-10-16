@@ -31,7 +31,7 @@ partial class Simulation
     internal static bool TryParseUpdateStatistics(ParserContext context)
     {
         context.MoveNextRequired();
-        var tableName = BatchContext.ParseObjectName(context);
+        var tableName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         context.MoveNextOptional();
 
         List<string>? targets = null;

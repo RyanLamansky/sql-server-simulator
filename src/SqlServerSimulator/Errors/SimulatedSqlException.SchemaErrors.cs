@@ -247,6 +247,24 @@ partial class SimulatedSqlException
         new($"The object name '{name}' contains more than the maximum number of prefixes. The maximum is {maximum}.", 117, 15, 1);
 
     /// <summary>
+    /// Msg 117 for an <c>ALTER TABLE</c> target naming a server, at
+    /// <paramref name="nameLine"/>, followed — when the statement goes on to a
+    /// column of its own (<c>ADD c</c>, <c>ALTER COLUMN c</c>, <c>DROP COLUMN
+    /// c</c>), the <paramref name="column"/> name — by Msg 102 near that name
+    /// at its own line (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterTableNameNamesServer(MultiPartName name, int nameLine, Token? column)
+    {
+        var tooMany = TooManyNamePrefixes(name.Written, 2);
+        tooMany.Errors[0].LineNumber = nameLine;
+        if (column is null)
+            return tooMany;
+        var nearColumn = SyntaxErrorNear(column);
+        nearColumn.Errors[0].LineNumber = column.LineNumber;
+        return FollowedBy(tooMany, nearColumn);
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 7202: an <c>OPENQUERY</c> (or four-part name)
     /// references a linked-server name that isn't registered in
     /// <c>sys.servers</c>. Wording probe-confirmed against SQL Server 2025;

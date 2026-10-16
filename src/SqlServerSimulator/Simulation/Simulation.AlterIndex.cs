@@ -116,7 +116,7 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var tableName = BatchContext.ParseObjectName(context);
+        var tableName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         var targetColumnstore = TargetsColumnstoreIndex(context, tableName, indexName);
         var targetsJson = TargetsJsonIndex(context, tableName, indexName);
         context.MoveNextRequired();

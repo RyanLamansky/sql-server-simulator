@@ -50,6 +50,14 @@ partial class Simulation
         {
             writtenName = text.AsString;
             tableName = Parser.Expressions.ObjectId.TryParseObjectName(writtenName, out var parsed) ? parsed : default;
+            // The string names a temporary table in tempdb alone: another
+            // database's prefix finds nothing (probed 2026-10-16 against SQL
+            // Server 2025: 'tempdb..#t' finds it, 'master..#t' is Msg 2501).
+            if (tableName.Count >= 3 && (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf))
+                && tableName[tableName.Count - 3] is { Length: > 0 } prefix && !BuiltInToken.Equals(prefix, TempdbDatabaseName))
+            {
+                tableName = default;
+            }
             context.MoveNextRequired();
         }
         else if (context.Token is AtPrefixedString or Literal or Numeric)

@@ -122,10 +122,13 @@ partial class Simulation
         while (true)
         {
             var name = BatchContext.ParseObjectName(context);
-            // A temporary procedure's database part is ignored with Msg 2701
-            // (probed 2026-10-16 against SQL Server 2025).
+            // A temporary table's or procedure's database part is ignored with
+            // Msg 2701, and a table's server part is Msg 117 (probed 2026-10-16
+            // against SQL Server 2025).
             if (targetKind == DropTargetKind.Procedure)
                 name = BatchContext.TemporaryTableName(context, name);
+            else if (targetKind == DropTargetKind.Table)
+                name = BatchContext.TableDefinitionName(context, name);
             try
             {
                 switch (targetKind)
@@ -1063,6 +1066,10 @@ partial class Simulation
         while (true)
         {
             var firstName = BatchContext.ParseObjectName(context);
+            // The deprecated `db..#t.index` form reads its temporary table's
+            // name as any other (probed 2026-10-16 against SQL Server 2025).
+            if (firstName.Count == 4 && BatchContext.TemporaryTableName(context, WithoutLeaf(firstName)) is { Count: 1 } temporary)
+                firstName = temporary.WithAddedPart(firstName.Leaf);
             context.MoveNextOptional();
             string indexName;
             MultiPartName tableName;
@@ -1073,7 +1080,7 @@ partial class Simulation
                 // Standard `index_name ON table` form.
                 indexName = firstName.Leaf;
                 context.MoveNextRequired();
-                tableName = BatchContext.ParseObjectName(context);
+                tableName = BatchContext.TableDefinitionName(context, BatchContext.ParseObjectName(context));
                 context.MoveNextOptional();
                 options = ParseDropIndexOptions(context);
             }

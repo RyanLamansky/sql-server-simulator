@@ -49,7 +49,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired(); // consume TABLE
 
-        var name = BatchContext.ParseObjectName(context);
+        var name = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         List<(Parser.Expression Low, Parser.Expression? High)>? partitions = null;
         var afterName = context.SaveCheckpoint();
         if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With })

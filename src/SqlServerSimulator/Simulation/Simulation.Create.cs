@@ -132,7 +132,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNearKeyword(tableNameKeyword);
         if (context.Token is not Name)
             return false;
-        var tableName = BatchContext.ParseObjectName(context);
+        var tableName = BatchContext.TableDefinitionName(context, BatchContext.ParseObjectName(context));
         // tempdb pads a local temp table's name to 116 characters plus a
         // 12-digit suffix, so a longer one is Msg 193 (probed 2026-10-01).
         if (BatchContext.IsLocalTempName(tableName.Leaf) && tableName.Leaf.Length > 116)
@@ -4101,7 +4101,7 @@ partial class Simulation
         if (pendingForeignKeys is null)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var referencedTable = BatchContext.ParseObjectName(context);
+        var referencedTable = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         var referencedColumns = new List<string>();
         context.MoveNextOptional();
         if (context.Token is Operator { Character: '(' })
@@ -4225,7 +4225,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var referencedTable = BatchContext.ParseObjectName(context);
+        var referencedTable = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         var referencedColumns = new List<string>();
         context.MoveNextOptional();
         if (context.Token is Operator { Character: '(' })

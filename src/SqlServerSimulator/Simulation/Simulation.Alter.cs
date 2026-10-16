@@ -1941,6 +1941,23 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The Msg 117 an <c>ALTER TABLE</c> naming a server raises, the cursor on
+    /// the name's last token, with the Msg 102 real adds near the column a
+    /// column clause goes on to name.
+    /// </summary>
+    private static SimulatedSqlException AlterTableNameNamesServer(ParserContext context, MultiPartName tableName)
+    {
+        var nameLine = context.Token?.LineNumber ?? 0;
+        var verb = context.GetNextOptional();
+        var next = context.GetNextOptional();
+        if (verb is ReservedKeyword { Keyword: Keyword.Alter or Keyword.Drop } && next is ReservedKeyword { Keyword: Keyword.Column })
+            next = context.GetNextOptional();
+        else if (verb is not ReservedKeyword { Keyword: Keyword.Add })
+            next = null;
+        return SimulatedSqlException.AlterTableNameNamesServer(tableName, nameLine, next as Name);
+    }
+
+    /// <summary>
     /// Parses the modeled <c>ALTER TABLE</c> shapes: <c>SET (SYSTEM_VERSIONING
     /// = OFF)</c>, <c>[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name]
     /// (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) …</c>, and
@@ -1974,6 +1991,9 @@ partial class Simulation
         if (context.Token is not Name)
             return false;
         var tableName = BatchContext.ParseObjectName(context);
+        if (tableName.Count == 4)
+            throw AlterTableNameNamesServer(context, tableName);
+        tableName = BatchContext.TemporaryTableName(context, tableName);
 
         // Sch-M for the ALTER's lifetime — acquired here at the dispatcher
         // entry so every sub-parser (ADD / DROP / ALTER COLUMN / ADD CONSTRAINT

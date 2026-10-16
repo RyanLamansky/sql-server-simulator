@@ -37,7 +37,7 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var targetName = BatchContext.ParseObjectName(context);
+        var targetName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         context.MoveNextOptional();
         Expression? targetPartition = null;
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Partition })

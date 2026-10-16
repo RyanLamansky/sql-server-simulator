@@ -45,7 +45,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var targetTableName = BatchContext.ParseObjectName(context);
+        var targetTableName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

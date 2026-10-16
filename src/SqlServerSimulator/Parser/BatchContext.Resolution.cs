@@ -1073,17 +1073,19 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// <paramref name="name"/>, just parsed with the cursor on its last token,
-    /// as a temporary table's name reads: whatever server it names is dropped,
-    /// the session's own table being the one meant, and a database it names is
-    /// ignored with the class-0 Msg 2701 as the batch compiles, at the line of
-    /// the token after the name (probed 2026-10-06 against SQL Server 2025).
-    /// Any other name passes through.
+    /// as a temporary object's name reads: the leaf alone, the session's own
+    /// object being the one meant whatever server, database or schema it names,
+    /// so a message names it bare (<c>Invalid object name '#t'</c> for
+    /// <c>master.dbo.#t</c> and <c>dbo.#t</c> alike), and a database it names
+    /// is ignored with the class-0 Msg 2701 as the batch compiles, at the line
+    /// of the token after the name (probed 2026-10-06 and 2026-10-16 against
+    /// SQL Server 2025). Any other name passes through.
     /// </summary>
     public static MultiPartName TemporaryTableName(ParserContext context, MultiPartName name)
     {
-        if (name.Count < 3 || !(IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf)))
+        if (name.Count < 2 || !(IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf)))
             return name;
-        if (context.Batch.CompilingForRun && name[name.Count - 3] is { Length: > 0 } ignoredDatabase)
+        if (context.Batch.CompilingForRun && name.Count >= 3 && name[name.Count - 3] is { Length: > 0 } ignoredDatabase)
         {
             var note = SimulatedSqlException.TempdbDatabaseNameIgnoredMessage(context.Batch, ignoredDatabase);
             var nameLine = context.Token?.LineNumber ?? 0;
@@ -1093,8 +1095,18 @@ internal sealed partial class BatchContext
             note.LineNumber = (nextLine ?? nameLine) + context.Batch.LineOffset;
             (context.Batch.CompileMessages ??= []).Add(note);
         }
-        return name.Count == 4 ? new MultiPartName(name[1]).WithAddedPart(name[2]).WithAddedPart(name.Leaf) : name;
+        return new MultiPartName(name.Leaf);
     }
+
+    /// <summary>
+    /// <paramref name="name"/>, just parsed with the cursor on its last token,
+    /// as a statement creating, dropping or indexing a table reads it: a server
+    /// part is Msg 117, temporary table or not, as the batch compiles (probed
+    /// 2026-10-16 against SQL Server 2025), and a temporary table's name then
+    /// reads as <see cref="TemporaryTableName"/> reads it.
+    /// </summary>
+    public static MultiPartName TableDefinitionName(ParserContext context, MultiPartName name) =>
+        name.Count == 4 ? throw SimulatedSqlException.TooManyNamePrefixes(name.Written, 2) : TemporaryTableName(context, name);
 
     /// <summary>
     /// Whether the cursor, on the second dot of <c>a...b</c>, opens a third

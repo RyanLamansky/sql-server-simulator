@@ -666,4 +666,100 @@ public sealed class TempTableTests
                 """).ExecuteScalar()!.ToString()!.Split('|'));
         Exec(writer, "rollback");
     }
+
+    /// <summary>
+    /// Every statement naming a temporary table ignores a database part with
+    /// the class-0 Msg 2701 at the line after the name, as a read does (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DefinitionAndMaintenanceStatements_IgnoreADatabasePart_WithMsg2701()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        var notes = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => notes.AddRange(e.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}:{error.Message}"));
+        foreach (var sql in (ReadOnlySpan<string>)[
+            "create table nosuch.dbo.#t (a int identity, b int)",
+            "select 1 a into master..#s",
+            "alter table master..#t add c int",
+            "create index ix on master..#t (b)",
+            "create statistics st on master..#t (b)",
+            "update statistics master..#t",
+            "alter index all on master..#t rebuild",
+            "set identity_insert master..#t on",
+            "truncate table master..#t",
+            "drop index ix on master..#t",
+            "create index ix on #t (b); drop index master..#t.ix",
+            "drop table master..#t",
+            "drop table if exists master..#s",
+        ])
+        {
+            notes.Clear();
+            Exec(connection, sql);
+            var database = sql.Contains("nosuch", StringComparison.Ordinal) ? "nosuch" : "master";
+            CollectionAssert.AreEqual(new[] { $"2701@1:Database name '{database}' ignored, referencing object in tempdb." }, notes, sql);
+        }
+
+        notes.Clear();
+        Exec(connection, "create table\nmaster..#m\n(a int)");
+        CollectionAssert.AreEqual(new[] { "2701@3:Database name 'master' ignored, referencing object in tempdb." }, notes);
+        AreEqual(0, connection.CreateCommand("select count(*) from tempdb..#m").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A temporary table's name in a message is its leaf, whatever database or
+    /// schema it was written with (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert master..#nope values (1)", "Invalid object name '#nope'.")]
+    [DataRow("select * from dbo.#nope", "Invalid object name '#nope'.")]
+    [DataRow("delete srv.master.dbo.#nope", "Invalid object name '#nope'.")]
+    [DataRow("drop table master..#nope", "Cannot drop the table '#nope', because it does not exist or you do not have permission.")]
+    [DataRow("alter table master..#nope add b int", "Cannot find the object \"#nope\" because it does not exist or you do not have permissions.")]
+    [DataRow("create index ix on master..#nope (a)", "Cannot find the object \"#nope\" because it does not exist or you do not have permissions.")]
+    [DataRow("set identity_insert master..#nope on", "Cannot find the object \"#nope\" because it does not exist or you do not have permissions.")]
+    [DataRow("drop index ix on master..#nope", "Cannot drop the index '#nope.ix', because it does not exist or you do not have permission.")]
+    public void QualifiedTemporaryName_IsNamedByItsLeaf(string sql, string message) =>
+        AreEqual(message, Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery(sql)).Errors.First(static error => error.Class > 0).Message);
+
+    /// <summary>
+    /// A server part where a table is created, dropped, indexed or altered is
+    /// Msg 117 as the batch compiles, temporary or not; an <c>ALTER TABLE</c>
+    /// going on to a column adds Msg 102 near its name (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table srv.master.dbo.#t (a int)", "srv.master.dbo.#t", new[] { 117 })]
+    [DataRow("create table srv.master.dbo.t (a int)", "srv.master.dbo.t", new[] { 117 })]
+    [DataRow("select 1 a into srv.master.dbo.#y", "srv.master.dbo.#y", new[] { 117 })]
+    [DataRow("drop table srv.master.dbo.t", "srv.master.dbo.t", new[] { 117 })]
+    [DataRow("create index i on srv.master.dbo.#t (a)", "srv.master.dbo.#t", new[] { 117 })]
+    [DataRow("alter table srv.master.dbo.t add constraint ck check (1 = 1)", "srv.master.dbo.t", new[] { 117 })]
+    [DataRow("alter table srv.master.dbo.t add c int", "srv.master.dbo.t", new[] { 117, 102 })]
+    [DataRow("alter table srv.master.dbo.#t drop column c", "srv.master.dbo.#t", new[] { 117, 102 })]
+    public void ServerPart_OnATableDefinition_IsMsg117(string sql, string name, int[] numbers)
+    {
+        var simulation = new Simulation();
+        var error = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery($"{sql}\nselect 1/0"));
+        CollectionAssert.AreEqual(numbers, Numbers(error));
+        AreEqual($"The object name '{name}' contains more than the maximum number of prefixes. The maximum is 2.", error.Errors[0].Message);
+        if (numbers.Length > 1)
+            AreEqual("Incorrect syntax near 'c'.", error.Errors[1].Message);
+    }
+
+    /// <summary>
+    /// <c>DBCC CHECKIDENT</c>'s string finds a temporary table through
+    /// <c>tempdb</c> alone (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CheckIdent_FindsATemporaryTableThroughTempdbAlone()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        Exec(connection, "create table #c (a int identity)");
+        Exec(connection, "dbcc checkident ('tempdb..#c')");
+        var error = Throws<SimulatedSqlException>(() => Exec(connection, "dbcc checkident ('master..#c')"));
+        AreEqual((2501, "Cannot find a table or object with the name \"master..#c\". Check the system catalog."), (error.Number, error.Message));
+    }
 }

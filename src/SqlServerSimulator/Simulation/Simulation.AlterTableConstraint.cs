@@ -387,7 +387,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var referencedTable = BatchContext.ParseObjectName(context);
+        var referencedTable = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         var referencedColumns = new List<string>();
         context.MoveNextOptional();
         if (context.Token is Operator { Character: '(' })
