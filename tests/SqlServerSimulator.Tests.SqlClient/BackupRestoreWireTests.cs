@@ -164,8 +164,22 @@ public sealed class BackupRestoreWireTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var victim = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app");
         await using var master = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=master");
+        await using var observer = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=master");
         var alter = Execute(master, "ALTER DATABASE [app] SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
-        await Task.Delay(300, TestContext.CancellationToken);
+
+        // The ALTER holds the database in transition from before it ends the
+        // victim, so the victim's session leaving is the window opening; a
+        // login arriving after the window would wait out the single-user slot
+        // instead, and one arriving before it would be let in.
+        await using (var sessions = new SqlCommand("select count(*) from sys.dm_exec_sessions where database_id = db_id('app')", observer))
+        {
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            while ((int)(await sessions.ExecuteScalarAsync(TestContext.CancellationToken))! != 0)
+            {
+                IsLessThan(10_000, waited.ElapsedMilliseconds, "the ALTER never ended the victim's session");
+                await Task.Delay(5, TestContext.CancellationToken);
+            }
+        }
         var started = System.Diagnostics.Stopwatch.StartNew();
         var error = await ThrowsExactlyAsync<SqlException>(async () => await Wire.OpenAsync(listener, TestContext.CancellationToken, ";Initial Catalog=app;ConnectRetryCount=0"));
         IsLessThan(1000, started.ElapsedMilliseconds);

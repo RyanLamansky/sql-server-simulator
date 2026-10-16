@@ -61,3 +61,10 @@ Under method-level parallelism this assembly cannot finish faster than its slowe
 The 1-second minimum is preferred over `ConnectRetryCount=0` because it keeps the retry exercised — the listener has to serve a second login attempt after rejecting the first — and the surfaced error collection is identical either way.
 
 The standing long poles are the cancellation and command-timeout tests, which wait on real client timers; a new test that stays under them costs nothing measurable.
+
+## Waiting for the other side
+
+**Wait on what the other side reached, never on elapsed time.**
+A fixed `Task.Delay` standing in for "the ALTER is settling" or "the reader is waiting" holds on a quiet machine and not on a loaded runner, where the parallel run's blocked threads delay the delay's own continuation past the window it was aiming at.
+Poll the state off a DMV through a connection of its own — `Wire.AwaitSuspendedAsync` for a reader waiting on its client, `sys.dm_exec_sessions` for a session a termination ended — and start any timing the test asserts from there.
+`AssemblyHooks` raises the thread pool's floor for the same reason; its XML doc says why.
