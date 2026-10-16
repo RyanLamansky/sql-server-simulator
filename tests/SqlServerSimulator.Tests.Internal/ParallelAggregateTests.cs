@@ -49,10 +49,17 @@ public sealed class ParallelAggregateTests
     /// measure. Every test here reads and none writes, so sharing is safe under
     /// the suite's method-level parallelism.
     /// </summary>
+    /// <summary>The host's own worker budget, restored once the class is done.</summary>
+    private static int hostWorkerBudget;
+
     [ClassInitialize]
     public static void CreateFixture(TestContext context)
     {
         _ = context;
+        // A host of two cores or fewer grants no fan-out, which would leave
+        // every engagement assertion here reporting the host, not a gate.
+        hostWorkerBudget = Selection.ParallelWorkerBudget;
+        Selection.ParallelWorkerBudget = Math.Max(hostWorkerBudget, 4);
         simulation = new Simulation();
         using var connection = simulation.CreateDbConnection();
         connection.Open();
@@ -87,6 +94,9 @@ public sealed class ParallelAggregateTests
             """);
         Execute(connection, "create table dim (k int); insert dim select value from generate_series(0, 11)");
     }
+
+    [ClassCleanup]
+    public static void RestoreWorkerBudget() => Selection.ParallelWorkerBudget = hostWorkerBudget;
 
     private static void Execute(DbConnection connection, string sql)
     {

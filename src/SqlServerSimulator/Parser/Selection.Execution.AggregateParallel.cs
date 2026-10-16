@@ -106,8 +106,11 @@ internal sealed partial class Selection
     /// statements wait on threads the first is using. A statement that cannot
     /// reserve at least two slots runs serially, which is always a correct
     /// outcome, so the budget needs no fairness beyond first-come.
+    /// A host of two cores or fewer never forks, since a statement keeps one
+    /// core for its own producer; the contract tests raise the budget so the
+    /// merge is exercised whatever the host (or a <c>taskset</c>) allows.
     /// </summary>
-    private static readonly int ParallelWorkerBudget = Environment.ProcessorCount;
+    internal static int ParallelWorkerBudget = Environment.ProcessorCount;
 
     private static int outstandingParallelWorkers;
 
