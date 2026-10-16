@@ -363,7 +363,7 @@ A `(` after a FROM source that names an object is that source's own argument or 
 
 ## Statements the simulator hasn't built
 
-A statement real runs that the simulator hasn't built — `BACKUP CERTIFICATE`, the master keys' backups, Service Broker, event notifications, endpoints, Resource Governor, the external-data family, audits, availability groups, module signing — raises `NotSupportedException` naming it, where it would otherwise fall through to a syntax error real never raises.
+A statement real runs that the simulator hasn't built — `BACKUP CERTIFICATE`, the master keys' backups, Service Broker's conversation statements, event notifications, endpoints, Resource Governor, the external-data family, audits, availability groups, module signing — raises `NotSupportedException` naming it, where it would otherwise fall through to a syntax error real never raises.
 `Simulation.RefuseUnbuiltStatement` checks the words opening the statement against `UnbuiltStatementForms` at each place one can start (`CREATE` / `ALTER` / `DROP`, `BACKUP` / `RESTORE`, `OPEN` / `CLOSE`, `BEGIN`, `END`, `WAITFOR (`, and an unrecognized head), so building one of them means removing its entry.
 `CREATE`, `ALTER` and `DROP WORKLOAD CLASSIFIER` are real's own Msg 22487 instead, a Synapse surface the box product refuses while the batch compiles (probed 2026-10-15 against SQL Server 2025).
 

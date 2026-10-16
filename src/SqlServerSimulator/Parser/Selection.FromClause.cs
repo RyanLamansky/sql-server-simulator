@@ -1461,7 +1461,9 @@ internal sealed partial class Selection
                 // metadata at execution time — wrapped as a LateralPlan so
                 // each Execute re-runs the generator and picks up CREATE /
                 // DROP changes from earlier in the same batch.
-                if (context.Batch.TryResolveCatalogView(objectName, out var catalogView, out var catalogTargetDb))
+                // A Service Broker queue reads as a rowset of its messages too.
+                if (context.Batch.TryResolveQueueRowset(objectName, out var catalogView, out var catalogTargetDb)
+                    || context.Batch.TryResolveCatalogView(objectName, out catalogView, out catalogTargetDb))
                 {
                     var catalogColumnNames = new string[catalogView.Columns.Length];
                     for (var ci = 0; ci < catalogColumnNames.Length; ci++)

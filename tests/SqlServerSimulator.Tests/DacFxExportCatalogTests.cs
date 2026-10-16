@@ -30,9 +30,8 @@ public sealed class DacFxExportCatalogTests
 
     /// <summary>
     /// Every DacFx-referenced unmodeled-feature view resolves and returns zero
-    /// rows — the accepted-but-empty pattern. Covers the Service Broker family
-    /// (which real SQL Server seeds with system rows, deliberately omitted since
-    /// DacFx exports only user objects), partitioning, encryption / key mgmt,
+    /// rows — the accepted-but-empty pattern. Covers the Service Broker views a
+    /// fresh database holds no row of, partitioning, encryption / key mgmt,
     /// Always Encrypted, RLS, audits, external languages / libraries / models,
     /// graph edge constraints, and the remaining index / search / assembly views.
     /// </summary>
@@ -43,8 +42,7 @@ public sealed class DacFxExportCatalogTests
         foreach (var view in new[]
         {
             // Service Broker
-            "services", "service_queues", "service_contracts", "service_contract_usages",
-            "service_contract_message_usages", "service_message_types", "routes",
+            "message_type_xml_schema_collection_usages",
             "conversation_priorities", "remote_service_bindings", "event_notifications",
             // Partitioning
             "partition_functions", "partition_schemes", "partition_range_values",
@@ -114,7 +112,7 @@ public sealed class DacFxExportCatalogTests
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.external_models where parameters is null and create_time is null"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.assembly_files where content is null and sha2_256 is null"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.crypt_properties where crypt_property is not null"));
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.service_queues where activation_procedure is null"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.service_queues where activation_procedure is not null"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_file_audits where log_file_path is null"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.external_library_files where content is null and platform_desc is null"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.external_language_files where content is null and file_name is null and environment_variables is null"));

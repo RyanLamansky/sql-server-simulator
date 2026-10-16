@@ -69,6 +69,7 @@ internal sealed class Schema
         this.Defaults = new(collation);
         this.Rules = new(collation);
         this.SecurityPolicies = new(collation);
+        this.Queues = new(collation);
         this.DefinitionLocks = new(collation);
         this.TypeDefinitionLocks = new(collation);
     }
@@ -188,6 +189,13 @@ internal sealed class Schema
     public readonly ConcurrentDictionary<string, SecurityPolicy> SecurityPolicies;
 
     /// <summary>
+    /// Service Broker queues hosted by this schema (see <see cref="ServiceQueue"/>),
+    /// sharing the object-name namespace; the queues real ships in every
+    /// database sit on <see cref="DatabaseBroker.SystemQueues"/> instead.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, ServiceQueue> Queues;
+
+    /// <summary>
     /// The names of the shared object namespace a statement's uncommitted
     /// create, alter, drop or rename holds, each while it is held (see
     /// <see cref="DefinitionLock"/>); empty while no change is pending.
@@ -203,7 +211,7 @@ internal sealed class Schema
     /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's
     /// object-name namespace (heap tables, views, UDFs, procedures,
-    /// sequences, triggers, synonyms, defaults, rules, security policies) — the set whose leaf names must be
+    /// sequences, triggers, synonyms, defaults, rules, security policies, queues) — the set whose leaf names must be
     /// unique (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
     /// deliberately omitted: probe-confirmed that table-type names occupy
     /// a separate namespace from this set. Used by sys.objects projection
@@ -221,6 +229,7 @@ internal sealed class Schema
         foreach (var (_, d) in this.Defaults) yield return d;
         foreach (var (_, r) in this.Rules) yield return r;
         foreach (var (_, sp) in this.SecurityPolicies) yield return sp;
+        foreach (var (_, q) in this.Queues) yield return q;
     }
 
     /// <summary>
@@ -241,6 +250,7 @@ internal sealed class Schema
         DefaultObject @default => this.Defaults.TryGetValue(@default.Name, out var held) && ReferenceEquals(held, @default),
         RuleObject rule => this.Rules.TryGetValue(rule.Name, out var held) && ReferenceEquals(held, rule),
         SecurityPolicy policy => this.SecurityPolicies.TryGetValue(policy.Name, out var held) && ReferenceEquals(held, policy),
+        ServiceQueue queue => this.Queues.TryGetValue(queue.Name, out var held) && ReferenceEquals(held, queue),
         _ => false,
     };
 
@@ -269,7 +279,7 @@ internal sealed class Schema
         this.HeapTables.ContainsKey(leaf) || this.Views.ContainsKey(leaf) || this.Functions.ContainsKey(leaf)
         || this.Procedures.ContainsKey(leaf) || this.Sequences.ContainsKey(leaf) || this.Synonyms.ContainsKey(leaf)
         || this.Triggers.ContainsKey(leaf) || this.Defaults.ContainsKey(leaf) || this.Rules.ContainsKey(leaf)
-        || this.SecurityPolicies.ContainsKey(leaf);
+        || this.SecurityPolicies.ContainsKey(leaf) || this.Queues.ContainsKey(leaf);
 
     /// <summary>
     /// True when a table type or alias type is named <paramref name="leaf"/> —

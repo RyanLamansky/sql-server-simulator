@@ -70,10 +70,11 @@ partial class Simulation
 
         // Msg 4701 carries only the leaf name (probe-confirmed against SQL
         // Server 2025), distinct from Msg 208 / 3701 which embed the qualifier.
-        // A view is Msg 4708 naming it as written (probed 2026-10-05).
+        // A view or a queue is Msg 4708 naming it as written (probed 2026-10-05
+        // and 2026-10-16).
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
         {
-            throw batch.TryResolveView(name, out _)
+            throw batch.TryResolveView(name, out _) || batch.TryResolveQueue(name, out _)
                 ? SimulatedSqlException.CannotTruncateNonTable(name.Written)
                 : SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
         }

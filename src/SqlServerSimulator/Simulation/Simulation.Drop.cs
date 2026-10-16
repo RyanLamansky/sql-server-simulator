@@ -45,6 +45,8 @@ partial class Simulation
         // grammars and live in per-database dicts rather than per-schema.
         switch (context.Token)
         {
+            case UnquotedString when TryParseBrokerDdl(context, "DROP"):
+                return true;
             case ReservedKeyword { Keyword: Keyword.Database }:
                 return TryParseDropDatabase(context);
             case ReservedKeyword { Keyword: Keyword.User }:

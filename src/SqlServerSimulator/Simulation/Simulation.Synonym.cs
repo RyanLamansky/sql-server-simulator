@@ -157,6 +157,7 @@ partial class Simulation
         DefaultObject => ("default", "DEFAULT"),
         RuleObject => ("rule", "RULE"),
         SecurityPolicy => ("security policy", "SECURITY POLICY"),
+        ServiceQueue => ("queue", "QUEUE"),
         _ => throw new InvalidOperationException($"No DROP wording is mapped for schema-object kind {obj.GetType().Name}."),
     };
 }

@@ -120,6 +120,8 @@ partial class DatabaseImage
             throw Unsupported("full-text catalogs");
         if (database.ChangeTracking is not null)
             throw Unsupported("change tracking");
+        if (DatabaseBroker.HoldsUserObjects(database))
+            throw Unsupported("Service Broker objects");
         foreach (var (_, trigger) in database.DdlTriggers)
         {
             if (trigger.ClrEntry is not null || trigger.DefinitionText is null || trigger.FirstForEvents is not null || trigger.LastForEvents is not null)

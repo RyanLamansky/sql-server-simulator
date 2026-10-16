@@ -27,8 +27,7 @@ partial class Simulation
     /// <summary>
     /// The statement forms <see cref="RefuseUnbuiltStatement"/> recognizes, a
     /// longer form ahead of a shorter one it extends (<c>SERVER AUDIT
-    /// SPECIFICATION</c> before <c>SERVER AUDIT</c>, <c>SERVICE MASTER KEY</c>
-    /// before <c>SERVICE</c>).
+    /// SPECIFICATION</c> before <c>SERVER AUDIT</c>).
     /// </summary>
     private static readonly UnbuiltStatementForm[] UnbuiltStatementForms =
     [
@@ -40,14 +39,7 @@ partial class Simulation
         new(null, "DATABASE SCOPED CREDENTIAL", "Database scoped credentials"),
         new(null, "SERVER AUDIT SPECIFICATION", "SQL Server Audit (server audit specifications)"),
         new(null, "SERVER AUDIT", "SQL Server Audit"),
-        new(null, "QUEUE", "Service Broker (queues)"),
         new("ALTER", "SERVICE MASTER KEY", "the service master key"),
-        new(null, "SERVICE", "Service Broker (services)"),
-        new(null, "CONTRACT", "Service Broker (contracts)"),
-        new(null, "MESSAGE TYPE", "Service Broker (message types)"),
-        new(null, "ROUTE", "Service Broker (routes)"),
-        new(null, "REMOTE SERVICE BINDING", "Service Broker (remote service bindings)"),
-        new(null, "BROKER PRIORITY", "Service Broker (broker priorities)"),
         new(null, "EVENT NOTIFICATION", "Event notifications"),
         new(null, "ENDPOINT", "Endpoints"),
         new(null, "RESOURCE POOL", "Resource Governor (resource pools)"),

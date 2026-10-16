@@ -35,6 +35,8 @@ partial class Simulation
         RefuseUnbuiltStatement(context, "CREATE");
         switch (context.GetNextRequired())
         {
+            case UnquotedString when TryParseBrokerDdl(context, "CREATE"):
+                return true;
             case ReservedKeyword { Keyword: Keyword.Database }:
                 return TryParseCreateDatabase(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:

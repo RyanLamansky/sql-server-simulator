@@ -27,6 +27,7 @@ internal static partial class BuiltInResources
         ("sys.dm_exec_function_stats", DmvGateKind.ServerState),
         ("sys.dm_exec_procedure_stats", DmvGateKind.ServerState),
         ("sys.dm_broker_activated_tasks", DmvGateKind.ServerState),
+        ("sys.dm_broker_queue_monitors", DmvGateKind.ServerState),
         ("sys.dm_exec_query_memory_grants", DmvGateKind.ServerState),
         ("sys.dm_exec_query_resource_semaphores", DmvGateKind.ServerState),
         ("sys.dm_exec_query_optimizer_info", DmvGateKind.ServerState),

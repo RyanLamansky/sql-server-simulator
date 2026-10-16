@@ -129,6 +129,13 @@ internal sealed class ObjectProperty : Expression
                 if (r.ObjectId == id) return r;
             foreach (var (_, sp) in schema.SecurityPolicies)
                 if (sp.ObjectId == id) return sp;
+            foreach (var (_, q) in schema.Queues)
+                if (q.ObjectId == id) return q;
+        }
+        if (database.ServiceBrokerIfUsed is { } broker)
+        {
+            foreach (var queue in broker.SystemQueues)
+                if (queue.ObjectId == id) return queue;
         }
         return null;
     }
@@ -347,12 +354,13 @@ internal sealed class ObjectProperty : Expression
             "ISENCRYPTED" => IsSqlModule(obj) ? Flag(obj.DefinitionText is null) : obj is BindableObject ? 0 : null,
             "ISEXECUTED" => Flag(executes),
             // Never answered 1 by a modeled kind: an extended procedure, a
-            // shipped object, a Service Broker queue, a replication procedure.
-            // IsSystemTable is 0 even for a catalog view; DacFx's
-            // default-constraint populator filters on `= 0`, so a NULL here
-            // silently drops every DEFAULT constraint from a bacpac export.
+            // replication procedure. IsSystemTable is 0 even for a catalog
+            // view; DacFx's default-constraint populator filters on `= 0`, so
+            // a NULL here silently drops every DEFAULT constraint from a
+            // bacpac export.
             "ISMSSHIPPED" => Flag(obj.IsMsShipped),
-            "ISEXTENDEDPROC" or "ISQUEUE" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
+            "ISQUEUE" => Flag(obj is ServiceQueue),
+            "ISEXTENDEDPROC" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
             // A view's answer runs the indexed-view battery, which needs a
             // batch to parse its body in; Run answers it before reaching here.
             "ISINDEXABLE" => obj switch

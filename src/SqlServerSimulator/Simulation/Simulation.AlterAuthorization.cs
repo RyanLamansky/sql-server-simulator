@@ -226,6 +226,7 @@ partial class Simulation
         Synonym => "SYNONYM",
         RuleObject => "RULE",
         SecurityPolicy => "SECURITY POLICY",
+        ServiceQueue => "QUEUE",
         _ => "DEFAULT",
     };
 

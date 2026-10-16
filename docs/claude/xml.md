@@ -760,7 +760,7 @@ Node ids follow real's numbering, which is not plain document order (probe-confi
 ### The schema component views
 
 `sys.xml_schema_namespaces`, `sys.xml_schema_components` and its per-kind views (`_types`, `_elements`, `_attributes`, `_model_groups`, `_wildcards`), `sys.xml_schema_facets`, `sys.xml_schema_wildcard_namespaces` and `sys.xml_schema_component_placements` project the components the collection's text declares (`XmlSchemaComponentBuilder`), and match SQL Server 2025's rows id for id across the probed shapes and all six AdventureWorks collections, recreated from real's `XML_SCHEMA_NAMESPACE` text (2026-10-16).
-`sys.message_type_xml_schema_collection_usages` ships empty, since Service Broker isn't built.
+`sys.message_type_xml_schema_collection_usages` lists the Service Broker message types validating against a collection — see [`service-broker.md`](service-broker.md).
 The `sys` collection's 100 components — the XSD built-ins, the `sqltypes` namespace and the `xml:` attributes — are real's own rows (`XmlSchemaSystemCollection`), and a reference to a built-in places that component.
 
 What the numbering rests on, all probed 2026-10-16 against SQL Server 2025:

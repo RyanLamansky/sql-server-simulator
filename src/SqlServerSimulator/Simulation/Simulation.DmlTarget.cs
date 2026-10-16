@@ -147,12 +147,14 @@ partial class Simulation
     }
 
     /// <summary>
-    /// A missing DML target's error: Msg 1087 for a table variable, otherwise
-    /// the batch's Msg 208 (or a synonym's Msg 5313) for <paramref name="name"/>.
+    /// A missing DML target's error: Msg 1087 for a table variable, Msg 416
+    /// for a queue, otherwise the batch's Msg 208 (or a synonym's Msg 5313) for <paramref name="name"/>.
     /// </summary>
     private static SimulatedSqlException MissingDmlTargetError(BatchContext batch, MultiPartName name) =>
         BatchContext.IsTableVariableName(name.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(name.Leaf)
+            : batch.TryResolveQueue(name, out var queue)
+            ? SimulatedSqlException.QueueCannotBeUpdated(queue.Name)
             : batch.UnresolvableObjectName(name);
 
     /// <summary>

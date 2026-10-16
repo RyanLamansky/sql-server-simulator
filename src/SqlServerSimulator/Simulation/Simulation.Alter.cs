@@ -19,6 +19,8 @@ partial class Simulation
         RefuseUnbuiltStatement(context, "ALTER");
         switch (context.GetNextRequired())
         {
+            case UnquotedString when TryParseBrokerDdl(context, "ALTER"):
+                return true;
             case ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc }:
                 // ALTER PROCEDURE is identical in shape to CREATE PROCEDURE —
                 // same parameter grammar, same options, same body capture —
@@ -2025,7 +2027,7 @@ partial class Simulation
             context.Batch.AcquireTableRedefinitionLock(alterTarget);
             RecordTableDdlUndo(context, alterTarget);
         }
-        else if (!context.Batch.IsSkipping && context.Batch.TryResolveView(tableName, out _))
+        else if (!context.Batch.IsSkipping && (context.Batch.TryResolveView(tableName, out _) || context.Batch.TryResolveQueue(tableName, out _)))
         {
             throw SimulatedSqlException.AlterTableNonTable(tableName.ToString());
         }

@@ -427,11 +427,33 @@ internal sealed partial class Database
 
     /// <summary>
     /// <c>sys.databases.is_broker_enabled</c>, set by the <c>ALTER DATABASE …
-    /// SET</c> Service Broker switches — recorded; Service Broker itself isn't
-    /// modeled. A new database starts enabled whatever <c>model</c> says
-    /// (probed 2026-09-30 against SQL Server 2025).
+    /// SET</c> Service Broker switches. While it is off a message sent to a
+    /// service in this database waits on the sender's
+    /// <c>sys.transmission_queue</c>. A new database starts enabled whatever
+    /// <c>model</c> says (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
     public bool BrokerEnabled = true;
+
+    private DatabaseBroker? serviceBroker;
+
+    /// <summary>
+    /// This database's Service Broker objects, created with the ones real
+    /// ships on first use; <see cref="ServiceBrokerIfUsed"/> reads it without
+    /// creating it.
+    /// </summary>
+    public DatabaseBroker ServiceBroker
+    {
+        get
+        {
+            if (Volatile.Read(ref this.serviceBroker) is { } broker)
+                return broker;
+            var created = new DatabaseBroker(this);
+            return Interlocked.CompareExchange(ref this.serviceBroker, created, null) ?? created;
+        }
+    }
+
+    /// <summary>The Service Broker objects when a statement has asked for them, else null.</summary>
+    public DatabaseBroker? ServiceBrokerIfUsed => Volatile.Read(ref this.serviceBroker);
 
     /// <summary>
     /// <c>sys.databases.delayed_durability</c>: 0 DISABLED, 1 ALLOWED, 2

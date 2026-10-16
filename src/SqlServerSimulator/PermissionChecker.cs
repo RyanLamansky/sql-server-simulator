@@ -1323,6 +1323,11 @@ internal static class PermissionChecker
     internal const byte ClassDatabasePrincipal = 4;
     internal const byte ClassType = 6;
     internal const byte ClassXmlSchemaCollection = 10;
+    internal const byte ClassMessageType = 15;
+    internal const byte ClassContract = 16;
+    internal const byte ClassService = 17;
+    internal const byte ClassRemoteServiceBinding = 18;
+    internal const byte ClassRoute = 19;
     internal const byte ClassFulltextCatalog = 23;
     internal const byte ClassSymmetricKey = 24;
     internal const byte ClassCertificate = 25;
@@ -2260,6 +2265,16 @@ internal static class PermissionChecker
                 return "TYPE";
             case ClassXmlSchemaCollection:
                 return "XML SCHEMA COLLECTION";
+            case ClassMessageType:
+                return "MESSAGE TYPE";
+            case ClassContract:
+                return "CONTRACT";
+            case ClassService:
+                return "SERVICE";
+            case ClassRemoteServiceBinding:
+                return "REMOTE SERVICE BINDING";
+            case ClassRoute:
+                return "ROUTE";
             case ClassFulltextCatalog:
                 return "FULLTEXT CATALOG";
             case ClassSymmetricKey:

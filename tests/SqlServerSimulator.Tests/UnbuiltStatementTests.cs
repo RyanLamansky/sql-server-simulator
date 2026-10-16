@@ -17,7 +17,6 @@ public sealed class UnbuiltStatementTests
     [DataRow("create database encryption key with algorithm = aes_256 encryption by server certificate c", "CREATE DATABASE ENCRYPTION KEY")]
     [DataRow("alter database scoped credential dc with identity = 'y'", "ALTER DATABASE SCOPED CREDENTIAL")]
     [DataRow("create server audit specification s for server audit a", "CREATE SERVER AUDIT SPECIFICATION")]
-    [DataRow("create queue q", "CREATE QUEUE")]
     [DataRow("alter service master key regenerate", "ALTER SERVICE MASTER KEY")]
     [DataRow("create event notification n on server for create_table to service 's', 'current database'", "CREATE EVENT NOTIFICATION")]
     [DataRow("create external data source e with (location = 'sqlserver://x')", "CREATE EXTERNAL DATA SOURCE")]

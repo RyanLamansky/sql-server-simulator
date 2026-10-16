@@ -118,6 +118,10 @@ partial class Simulation
                     permClass = PermissionChecker.ClassCertificate;
                     objectSecurableName = securableName;
                     break;
+                case "CONTRACT":
+                    permClass = PermissionChecker.ClassContract;
+                    objectSecurableName = securableName;
+                    break;
                 case "DATABASE":
                     permClass = PermissionChecker.ClassDatabase;
                     // Another database is Msg 4610, one that isn't there Msg
@@ -137,6 +141,14 @@ partial class Simulation
                     serverScopeSecurable = true;
                     loginSecurableName = securableName.Leaf;
                     break;
+                case "MESSAGE TYPE":
+                    permClass = PermissionChecker.ClassMessageType;
+                    objectSecurableName = securableName;
+                    break;
+                case "REMOTE SERVICE BINDING":
+                    permClass = PermissionChecker.ClassRemoteServiceBinding;
+                    objectSecurableName = securableName;
+                    break;
                 case "ROLE":
                     // A role is a database principal like a user: class 4
                     // DATABASE_PRINCIPAL.
@@ -144,12 +156,20 @@ partial class Simulation
                     userSecurableName = securableName;
                     principalClassWord = "role";
                     break;
+                case "ROUTE":
+                    permClass = PermissionChecker.ClassRoute;
+                    objectSecurableName = securableName;
+                    break;
                 case "SCHEMA":
                     permClass = PermissionChecker.ClassSchema;
                     objectSecurableName = securableName;
                     break;
                 case "SERVER":
                     serverScopeSecurable = true;
+                    break;
+                case "SERVICE":
+                    permClass = PermissionChecker.ClassService;
+                    objectSecurableName = securableName;
                     break;
                 case "SYMMETRIC KEY":
                     permClass = PermissionChecker.ClassSymmetricKey;
@@ -636,6 +656,7 @@ partial class Simulation
                 PermissionChecker.ClassSymmetricKey => "SYMMETRIC KEY",
                 PermissionChecker.ClassCertificate => "CERTIFICATE",
                 PermissionChecker.ClassAsymmetricKey => "ASYMMETRIC KEY",
+                >= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute => BrokerClassWord(permClass),
                 _ => "FULLTEXT CATALOG",
             };
             if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection)
@@ -1063,14 +1084,22 @@ partial class Simulation
         // kind isn't consulted at grant time.
         var kindIsExecutable = objectTypeCode is "P " or "FN" or "PC" or "FS" or "FT" or "SN";
         var kindIsTabular = objectTypeCode is "U " or "V " or "IF" or "TF" or "SN";
+        var queue = objectTypeCode == "SQ";
         var isDml = permName.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("DELETE", StringComparison.OrdinalIgnoreCase);
         var isExecute = permName.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase);
-        // RECEIVE is a queue's permission, which no modeled object kind is.
-        if (permName.Equals("RECEIVE", StringComparison.OrdinalIgnoreCase))
+        // RECEIVE is a queue's permission, and SELECT the one DML permission a
+        // queue takes (probed 2026-10-16 against SQL Server 2025).
+        if (permName.Equals("RECEIVE", StringComparison.OrdinalIgnoreCase) && !queue)
             throw SimulatedSqlException.PermissionIncompatibleWithObject("RECEIVE");
+        if (queue)
+        {
+            if ((isDml && !permName.Equals("SELECT", StringComparison.OrdinalIgnoreCase)) || isExecute)
+                throw SimulatedSqlException.PermissionIncompatibleWithObject(permName.ToUpperInvariant());
+            return;
+        }
         // A sequence takes UPDATE, the permission NEXT VALUE FOR reads
         // (probed 2026-09-28 against SQL Server 2025).
         if (isDml && !kindIsTabular && !(objectTypeCode == "SO" && permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)))
@@ -1092,9 +1121,21 @@ partial class Simulation
     /// (probed 2026-09-29 against SQL Server 2025).
     /// </summary>
     private static bool PermissionAcceptedOnDerivedClass(byte permClass, string permName) =>
-        BuiltInToken.EqualsAny(permName.Trim(), "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION")
+        permClass is >= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute
+            ? PermissionGraph.IsPermissionOf(BrokerClassWord(permClass), CanonicalPermissionName(permName))
+            : BuiltInToken.EqualsAny(permName.Trim(), "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION")
         || ((permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection) && BuiltInToken.Equals(permName.Trim(), "EXECUTE"))
         || (permClass != PermissionChecker.ClassType && BuiltInToken.Equals(permName.Trim(), "ALTER"));
+
+    /// <summary>The class word a Service Broker securable class is granted under.</summary>
+    private static string BrokerClassWord(byte permClass) => permClass switch
+    {
+        PermissionChecker.ClassMessageType => "MESSAGE TYPE",
+        PermissionChecker.ClassContract => "CONTRACT",
+        PermissionChecker.ClassRemoteServiceBinding => "REMOTE SERVICE BINDING",
+        PermissionChecker.ClassRoute => "ROUTE",
+        _ => "SERVICE",
+    };
 
     /// <summary>
     /// The classes whose securable is neither an object, a schema nor a
@@ -1102,6 +1143,7 @@ partial class Simulation
     /// </summary>
     private static bool IsDerivedSecurableClass(byte permClass) =>
         permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog
+            or (>= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute)
             or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate or PermissionChecker.ClassAsymmetricKey;
 
     /// <summary>
@@ -1136,6 +1178,26 @@ partial class Simulation
                 return batch.TryResolveXmlSchemaCollectionSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
                     ? collection.Id
                     : throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
+            case PermissionChecker.ClassMessageType:
+                return database.ServiceBroker.MessageTypes.TryGetValue(name.Leaf, out var messageType)
+                    ? messageType.Id
+                    : throw SimulatedSqlException.BrokerObjectNotFound("find", "message type", name.Leaf);
+            case PermissionChecker.ClassContract:
+                return database.ServiceBroker.Contracts.TryGetValue(name.Leaf, out var contract)
+                    ? contract.Id
+                    : throw SimulatedSqlException.BrokerObjectNotFound("find", "contract", name.Leaf);
+            case PermissionChecker.ClassService:
+                return database.ServiceBroker.Services.TryGetValue(name.Leaf, out var service)
+                    ? service.Id
+                    : throw SimulatedSqlException.BrokerObjectNotFound("find", "service", name.Leaf);
+            case PermissionChecker.ClassRemoteServiceBinding:
+                return database.ServiceBroker.RemoteServiceBindings.TryGetValue(name.Leaf, out var binding)
+                    ? binding.Id
+                    : throw SimulatedSqlException.BrokerObjectNotFound("find", "remote service binding", name.Leaf);
+            case PermissionChecker.ClassRoute:
+                return database.ServiceBroker.Routes.TryGetValue(name.Leaf, out var route)
+                    ? route.Id
+                    : throw SimulatedSqlException.BrokerObjectNotFound("find", "route", name.Leaf);
             case PermissionChecker.ClassSymmetricKey:
                 return database.EncryptionKeys.SymmetricKeys.TryGetValue(name.Leaf, out var key)
                     && PermissionEnforcement.SeesKey(batch, database, PermissionChecker.ClassSymmetricKey, key.Id, key.PrincipalId)

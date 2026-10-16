@@ -363,6 +363,46 @@ internal sealed partial class BatchContext
         this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, NameSpace.Objects, out schema);
 
     /// <summary>
+    /// Resolves <paramref name="name"/> to a Service Broker queue — one a
+    /// statement created, or one real ships in <c>dbo</c> — without creating
+    /// the database's broker state for a name that can't be one.
+    /// </summary>
+    public bool TryResolveQueue(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ServiceQueue? queue)
+    {
+        queue = null;
+        if (name.Count > 3 || IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf) || name.Leaf.StartsWith('@'))
+            return false;
+        if (!this.TryResolveSchema(name, out var schema))
+            return false;
+        if (schema.Queues.TryGetValue(name.Leaf, out queue))
+            return true;
+        if (schema.SchemaId != Database.DboSchemaId || !DatabaseBroker.IsSystemQueueName(name.Leaf))
+            return false;
+        queue = schema.Database.ServiceBroker.FindQueue(schema, name.Leaf);
+        return queue is not null;
+    }
+
+    /// <summary>
+    /// The rowset of the queue <paramref name="name"/> resolves to (see
+    /// <see cref="TryResolveQueue"/>), read under the <c>SELECT</c>
+    /// permission a table's read takes.
+    /// </summary>
+    public bool TryResolveQueueRowset(
+        MultiPartName name,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? rowset,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Database? database)
+    {
+        rowset = null;
+        database = null;
+        if (!this.TryResolveQueue(name, out var queue))
+            return false;
+        PermissionEnforcement.CheckWhileParsing(this, "SELECT", name, queue);
+        database = queue.Schema.Database;
+        rowset = BuiltInResources.QueueRowset(queue, database);
+        return true;
+    }
+
+    /// <summary>
     /// <see cref="TryResolveSchema"/> as the caller
     /// resolves, ignoring <see cref="ModuleSchema"/>: a procedure an
     /// <c>EXEC</c> names, and the name a catalog function (<c>OBJECT_ID</c>,
