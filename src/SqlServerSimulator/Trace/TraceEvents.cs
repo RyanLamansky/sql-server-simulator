@@ -169,6 +169,7 @@ internal static class TraceEvents
         private readonly int processId = connection.ClientProcessId;
         private readonly string application = connection.ClientApplicationName;
         private readonly string login = connection.Security.Effective.LoginName;
+        private readonly byte[] loginSid = Simulation.LoginSid(connection.Simulation, connection.Security.Effective.LoginName);
         private readonly string originalLogin = connection.Security.OriginalLoginName;
         private readonly int spid = connection.Spid;
         private readonly short databaseId = database.Id;
@@ -197,7 +198,7 @@ internal static class TraceEvents
             if (typeKey != 16964)
                 values[34] = SqlValue.FromNVarchar(name);
             values[35] = SqlValue.FromNVarchar(this.databaseName);
-            values[41] = SqlValue.FromImage(Simulation.LoginSid(this.login));
+            values[41] = SqlValue.FromImage(this.loginSid);
             values[49] = SqlValue.FromInt32(0);
             values[50] = SqlValue.FromInt64(0);
             values[51] = SqlValue.FromInt64(sequence);
@@ -570,7 +571,7 @@ internal static class TraceEvents
         values[11] = SqlValue.FromNVarchar(security.Effective.LoginName);
         values[12] = SqlValue.FromInt32(connection.Spid);
         values[35] = SqlValue.FromNVarchar(connection.CurrentDatabase.Name);
-        values[41] = SqlValue.FromImage(Simulation.LoginSid(security.Effective.LoginName));
+        values[41] = SqlValue.FromImage(Simulation.LoginSid(connection.Simulation, security.Effective.LoginName));
         values[49] = SqlValue.FromInt32(0);
         values[50] = SqlValue.FromInt64(0);
         values[64] = SqlValue.FromNVarchar(security.OriginalLoginName);

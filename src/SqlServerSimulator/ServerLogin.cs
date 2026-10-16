@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// verified by the TDS endpoint at LOGIN7 time. Instances are immutable;
 /// <c>ALTER LOGIN … WITH PASSWORD</c> swaps in a replacement entry.
 /// </summary>
-internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false, string defaultDatabase = "master", string defaultLanguage = "us_english", bool isPolicyChecked = true, bool isExpirationChecked = false)
+internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false, string defaultDatabase = "master", string defaultLanguage = "us_english", bool isPolicyChecked = true, bool isExpirationChecked = false, byte[]? sid = null)
 {
     /// <summary>
     /// Server-level principal id, allocated once at <c>CREATE LOGIN</c> and
@@ -19,6 +19,15 @@ internal sealed class ServerLogin(int principalId, string name, byte[] passwordH
     public readonly int PrincipalId = principalId;
 
     public readonly string Name = name;
+
+    /// <summary>
+    /// The login's 16-byte security identifier: the one <c>CREATE LOGIN … SID</c>
+    /// or <c>sp_addlogin @sid</c> gave it, else the deterministic one derived
+    /// from its name (real draws a random GUID). A database user mapped to the
+    /// login carries it too, which is how a login made again with the same SID
+    /// finds its users.
+    /// </summary>
+    public readonly byte[] Sid = sid ?? BuiltInResources.DeriveLoginSid(name);
 
     /// <summary>
     /// Version-tagged hash (tag + salt + 64-byte key). Written in the legacy
@@ -67,5 +76,5 @@ internal sealed class ServerLogin(int principalId, string name, byte[] passwordH
         string? defaultLanguage = null, bool? isPolicyChecked = null, bool? isExpirationChecked = null) =>
         new(this.PrincipalId, this.Name, passwordHash ?? this.PasswordHash, this.CreateDate, passwordLastSetTime ?? this.PasswordLastSetTime,
             isDisabled ?? this.IsDisabled, defaultDatabase ?? this.DefaultDatabase, defaultLanguage ?? this.DefaultLanguage,
-            isPolicyChecked ?? this.IsPolicyChecked, isExpirationChecked ?? this.IsExpirationChecked);
+            isPolicyChecked ?? this.IsPolicyChecked, isExpirationChecked ?? this.IsExpirationChecked, this.Sid);
 }

@@ -184,6 +184,12 @@ internal sealed partial class DatabaseImage
                 w.Write(hash);
             }
             w.Write(p.OwningPrincipalId);
+            w.Write(p.LoginSid is not null);
+            if (p.LoginSid is { } loginSid)
+            {
+                w.Write(loginSid.Length);
+                w.Write(loginSid);
+            }
         }
         w.Write(this.Permissions.Count);
         foreach (var p in this.Permissions)
@@ -312,6 +318,7 @@ internal sealed partial class DatabaseImage
                 DefaultSchemaName = BackupBinary.ReadNullable(r),
                 PasswordHash = r.ReadBoolean() ? r.ReadBytes(r.ReadInt32()) : null,
                 OwningPrincipalId = r.ReadInt32(),
+                LoginSid = r.ReadBoolean() ? r.ReadBytes(r.ReadInt32()) : null,
             });
         }
         for (var i = r.ReadInt32(); i > 0; i--)

@@ -85,6 +85,7 @@ partial class Simulation
         {
             DefaultSchemaName = defaultSchema,
             LoginPrincipalId = loginLink is not null && context.Simulation.TryResolveServerPrincipalId(loginLink, out var linkedId) ? linkedId : 0,
+            LoginSid = loginLink is null ? null : LoginSid(context.Simulation, loginLink),
         };
         // CREATE USER auto-seeds a CONNECT grant (class 0 DATABASE, grantor dbo,
         // state G) — probe-confirmed against sys.database_permissions.

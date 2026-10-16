@@ -88,7 +88,7 @@ partial class Simulation
             logins.ConvertAll(login => new SqlValue[]
             {
                 SqlValue.FromNVarchar(loginName, login.Name),
-                SqlValue.FromVarbinary(login.Name == "sa" ? [0x01] : BuiltInResources.DeriveLoginSid(login.Name)),
+                SqlValue.FromVarbinary(LoginSid(simulation, login.Name)),
                 SqlValue.FromNVarchar(defaultDatabase, login.DefaultDatabase),
                 SqlValue.FromNVarchar(defaultLanguage, login.DefaultLanguage),
                 SqlValue.FromChar(HelpLoginsAUserType, hasUser.Contains(login.Name) ? "yes  " : "NO   "),

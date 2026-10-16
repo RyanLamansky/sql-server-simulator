@@ -274,7 +274,7 @@ partial class Simulation
         AppendElement(builder, "ServerName", ServerNameValue);
         AppendElement(builder, "LoginName", loginName);
         AppendElement(builder, "LoginType", "SQL Login");
-        AppendElement(builder, "SID", Convert.ToBase64String(LoginSid(loginName)));
+        AppendElement(builder, "SID", Convert.ToBase64String(LoginSid(batch.Connection.Simulation, loginName)));
         AppendElement(builder, "ClientHost", connection.Transport.Client?.Address.ToString() ?? LocalMachineClientHost);
         AppendElement(builder, "IsPooled", isPooled ? "1" : "0");
         _ = builder.Append("</EVENT_INSTANCE>");

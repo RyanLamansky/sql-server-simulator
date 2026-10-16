@@ -143,7 +143,7 @@ partial class Simulation
         else
             principalId = connection.Security.Effective.DatabasePrincipalId;
         var notification = new EventNotification(name, objectId, parent, home, queue, [.. events], [.. groups], batch.CurrentStatement.UtcNow,
-            serviceName, instance, fanIn ? LoginSid(loginName) : null, principalId);
+            serviceName, instance, fanIn ? LoginSid(context.Batch.Connection.Simulation, loginName) : null, principalId);
         simulation.OpenNotificationDialog(batch, notification);
         lock (simulation.eventNotificationGate)
         {
@@ -662,7 +662,7 @@ partial class Simulation
             AppendElement(builder, "LoginName", "sa");
             AppendElement(builder, "StartTime", TraceTime(foundUtc));
             AppendElement(builder, "ServerName", ServerNameValue);
-            AppendElement(builder, "LoginSid", Convert.ToBase64String(LoginSid("sa")));
+            AppendElement(builder, "LoginSid", Convert.ToBase64String(LoginSid(this, "sa")));
             AppendElement(builder, "EventSequence", sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
             AppendElement(builder, "IsSystem", "1");
             AppendElement(builder, "SessionLoginName", "");
@@ -730,7 +730,7 @@ partial class Simulation
     private static string AppendTraceTail(StringBuilder builder, SimulatedDbConnection connection, long sequence)
     {
         var login = connection.Security.OriginalLoginName;
-        AppendElement(builder, "LoginSid", Convert.ToBase64String(LoginSid(login)));
+        AppendElement(builder, "LoginSid", Convert.ToBase64String(LoginSid(connection.Simulation, login)));
         AppendElement(builder, "RequestID", "0");
         AppendElement(builder, "EventSequence", sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
         AppendElement(builder, "Type", "1");

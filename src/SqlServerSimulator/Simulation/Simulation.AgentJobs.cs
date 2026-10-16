@@ -78,7 +78,7 @@ partial class Simulation
             """,
             ("id", SqlValue.FromGuid(jobId)), ("name", SqlValue.FromNVarchar(name)), ("enabled", call.Values[1]),
             ("description", SqlValue.FromNVarchar(description)), ("start", call.Values[3]), ("category", SqlValue.FromInt32(categoryId ?? 0)),
-            ("owner", owner is null ? CallerSid(batch) : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(owner))),
+            ("owner", owner is null ? CallerSid(batch) : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, owner))),
             ("eventlog", SqlValue.FromInt32(levels[0])), ("email", SqlValue.FromInt32(operators[0] == 0 ? 0 : levels[1])),
             ("netsend", SqlValue.FromInt32(operators[1] == 0 ? 0 : levels[2])), ("page", SqlValue.FromInt32(operators[2] == 0 ? 0 : levels[3])),
             ("emailop", SqlValue.FromInt32(operators[0])), ("netsendop", SqlValue.FromInt32(operators[1])), ("pageop", SqlValue.FromInt32(operators[2])),
@@ -249,7 +249,7 @@ partial class Simulation
             ("id", jobId), ("name", newName is null ? job["name"] : SqlValue.FromNVarchar(newName)), ("enabled", call.IsNull(3) ? job["enabled"] : call.Values[3]),
             ("description", description), ("start", SqlValue.FromInt32(call.Int(5) ?? job.Int("start_step_id"))),
             ("category", SqlValue.FromInt32(categoryId ?? job.Int("category_id"))),
-            ("owner", owner is null ? job["owner_sid"] : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(owner))),
+            ("owner", owner is null ? job["owner_sid"] : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, owner))),
             ("eventlog", SqlValue.FromInt32(levels[0])), ("email", SqlValue.FromInt32(levels[1])), ("netsend", SqlValue.FromInt32(levels[2])),
             ("page", SqlValue.FromInt32(levels[3])), ("emailop", SqlValue.FromInt32(operators[0])), ("netsendop", SqlValue.FromInt32(operators[1])),
             ("pageop", SqlValue.FromInt32(operators[2])), ("delete", SqlValue.FromInt32(call.Int(15) ?? job.Int("delete_level"))));

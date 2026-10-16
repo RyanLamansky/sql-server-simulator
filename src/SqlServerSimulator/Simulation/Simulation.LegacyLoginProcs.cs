@@ -66,8 +66,9 @@ partial class Simulation
     /// is <c>CREATE LOGIN … WITH PASSWORD, DEFAULT_DATABASE, DEFAULT_LANGUAGE</c> with
     /// <c>master</c> and us_english the defaults. <c>@encryptopt</c> may only be NULL: the
     /// skip options hand the statement a password that isn't a hash (Msg 15021), and
-    /// anything else is Msg 15600. <c>@sid</c> is read and dropped — a login's SID is
-    /// derived from its name here.
+    /// anything else is Msg 15600. <c>@sid</c>, a <c>varbinary(16)</c> a longer value is
+    /// cut to, becomes the statement's <c>SID</c>, so its refusals are the statement's
+    /// (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpAddLogin(BatchContext batch, string calledAs)
     {
@@ -89,6 +90,11 @@ partial class Simulation
             .Append(QuoteText(values[1].IsNull ? "" : values[1].AsString))
             .Append(", default_database = ").Append(QuoteIdentifier(values[2].IsNull ? "master" : values[2].AsString))
             .Append(", default_language = ").Append(QuoteIdentifier(values[3].IsNull ? "us_english" : values[3].AsString)).ToString();
+        if (ArgumentFor(arguments, 4, "sid") is { IsDefault: false, Value: { IsNull: false } sid })
+        {
+            var bytes = sid.CoerceTo(SqlType.Varbinary).AsBytes;
+            statement += ", sid = 0x" + Convert.ToHexString(bytes.AsSpan(0, Math.Min(bytes.Length, 16)));
+        }
         foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }

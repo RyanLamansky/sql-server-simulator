@@ -50,6 +50,15 @@ internal sealed class DatabasePrincipal(
     public int LoginPrincipalId;
 
     /// <summary>
+    /// The SID of the login the user was linked to, which
+    /// <c>sys.database_principals.sid</c> reports and a login created with the
+    /// same SID re-links the user by; null where no link was made, or one
+    /// made before the login carried a SID of its own, which reads the
+    /// login name's derived one.
+    /// </summary>
+    public byte[]? LoginSid;
+
+    /// <summary>
     /// The synthetic <c>S-1-9-3-…</c> security-identifier string a
     /// <c>CREATE USER name WITHOUT LOGIN</c> user reports through
     /// <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c> and the Msg 916 "server

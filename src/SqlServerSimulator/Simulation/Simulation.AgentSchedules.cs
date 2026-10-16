@@ -216,7 +216,7 @@ partial class Simulation
         var schedule = new AgentSchedule();
         schedule.Merge(call, 1);
         var (id, uid) = this.InsertAgentSchedule(batch, call.Text(0)!.Trim(), schedule,
-            owner is null ? CallerSid(batch) : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(owner)));
+            owner is null ? CallerSid(batch) : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, owner)));
         call.SetOutput(13, SqlValue.FromGuid(uid));
         call.SetOutput(14, SqlValue.FromInt32(id));
         AgentReturn(batch, returnCodeVar, 0);
@@ -439,7 +439,7 @@ partial class Simulation
             where schedule_id = @id
             """,
             [("id", scheduleId), ("name", call.Text(2) is { Length: > 0 } renamed ? SqlValue.FromNVarchar(renamed.Trim()) : row["name"]),
-                ("owner", owner is null ? row["owner_sid"] : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(owner))), .. schedule.Parameters()]);
+                ("owner", owner is null ? row["owner_sid"] : SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, owner))), .. schedule.Parameters()]);
         foreach (var notice in this.AgentScheduleNotices(batch, scheduleId))
             yield return notice;
         AgentReturn(batch, returnCodeVar, 0);

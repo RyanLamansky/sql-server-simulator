@@ -344,9 +344,9 @@ partial class Simulation
         var bytes = sid.AsBytes;
         if (bytes is [0x01])
             return "sa";
-        foreach (var (name, _) in this.Logins)
+        foreach (var (name, login) in this.Logins)
         {
-            if (BuiltInResources.DeriveLoginSid(name).AsSpan().SequenceEqual(bytes))
+            if (SidsMatch(login.Sid, bytes))
                 return name;
         }
         return null;
@@ -354,7 +354,7 @@ partial class Simulation
 
     /// <summary>The calling login's sid, which a job or schedule it creates is owned by.</summary>
     private static SqlValue CallerSid(BatchContext batch) =>
-        SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Security.Effective.LoginName));
+        SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, batch.Connection.Security.Effective.LoginName));
 
     /// <summary>Whether the caller is a <c>sysadmin</c>, the bar most of Agent's ownership rules are set at.</summary>
     private static bool AgentIsSysadmin(BatchContext batch) => IsSysadminSession(batch);

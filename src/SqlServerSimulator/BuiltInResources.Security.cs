@@ -653,7 +653,7 @@ internal static partial class BuiltInResources
     private static byte[] DeriveDatabasePrincipalSid(DatabasePrincipal principal)
     {
         if (principal.LoginName is { } login)
-            return DeriveLoginSid(login);
+            return principal.LoginSid ?? DeriveLoginSid(login);
         var sid = new byte[DatabasePrincipalSidPrefix.Length + 16];
         DatabasePrincipalSidPrefix.CopyTo(sid, 0);
         if (principal.SecurityIdentifierString is not null)
@@ -754,7 +754,7 @@ internal static partial class BuiltInResources
         }
         var login = effective.LoginName;
         var loginId = simulation.TryResolveServerPrincipalId(login, out var id) ? id : 1;
-        yield return TokenRow(loginId, loginId == 1 ? [0x01] : DeriveLoginSid(login), login, "SQL LOGIN", "GRANT OR DENY");
+        yield return TokenRow(loginId, Simulation.LoginSid(simulation, login), login, "SQL LOGIN", "GRANT OR DENY");
         yield return TokenRow(2, [0x02], "public", "SERVER ROLE", "GRANT OR DENY");
         foreach (var (roleId, roleName) in Simulation.FixedServerRoles)
         {
@@ -886,7 +886,7 @@ internal static partial class BuiltInResources
         foreach (var (_, login) in simulation.Logins)
         {
             rows.Add((login.PrincipalId, [
-                SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
+                SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(login.Sid),
                 loginType, sqlLogin, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
                 SqlValue.FromSystemName(login.DefaultDatabase), SqlValue.FromSystemName(login.DefaultLanguage), simulation.CredentialIdOf(login.PrincipalId), nullOwningId, falseBit, zeroTenant,
             ]));
@@ -1066,7 +1066,7 @@ internal static partial class BuiltInResources
             yield return [
                 SqlValue.FromSystemName(login.Name),
                 SqlValue.FromInt32(login.PrincipalId),
-                SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
+                SqlValue.FromVarbinary(login.Sid),
                 loginType,
                 sqlLogin,
                 login.IsDisabled ? trueBit : falseBit,

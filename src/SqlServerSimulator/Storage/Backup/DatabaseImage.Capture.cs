@@ -82,6 +82,7 @@ partial class DatabaseImage
                 DefaultSchemaName = principal.DefaultSchemaName,
                 PasswordHash = principal.PasswordHash,
                 OwningPrincipalId = principal.OwningPrincipalId,
+                LoginSid = principal.LoginSid,
             });
         }
         lock (database.Permissions)

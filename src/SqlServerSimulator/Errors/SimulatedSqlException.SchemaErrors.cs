@@ -3873,6 +3873,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ServerPrincipalAlreadyExists(string name) =>
         new($"The server principal '{name}' already exists.", 15025, 16, 1);
 
+    /// <summary>Msg 15419: a <c>CREATE LOGIN … SID</c> of another length than sixteen bytes.</summary>
+    internal static SimulatedSqlException LoginSidWrongLength() =>
+        new("Supplied parameter sid should be binary(16).", 15419, 16, 1);
+
+    /// <summary>Msg 15433: a <c>CREATE LOGIN … SID</c> a server principal already holds, or one of zeros.</summary>
+    internal static SimulatedSqlException LoginSidInUse() =>
+        new("Supplied parameter sid is in use.", 15433, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server error 15151 for <c>ALTER LOGIN</c> / <c>DROP LOGIN</c>
     /// on a nonexistent login, in its verb-bearing login wording — probe-confirmed against SQL

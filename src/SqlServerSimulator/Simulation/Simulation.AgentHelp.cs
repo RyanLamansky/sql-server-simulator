@@ -140,7 +140,7 @@ partial class Simulation
         if (call.Text(4) is { } owner)
         {
             conditions.Add("owner_sid = @owner");
-            parameters.Add(("owner", SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(owner))));
+            parameters.Add(("owner", SqlValue.FromVarbinary(VarbinarySqlType.Get(85), LoginSid(batch.Connection.Simulation, owner))));
         }
         if (call.Text(5) is { } subsystem)
         {

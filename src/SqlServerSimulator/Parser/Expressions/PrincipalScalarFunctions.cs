@@ -103,7 +103,7 @@ internal sealed class SUserName : Expression
         var id = this.isSidVariant ? 0 : StringScalars.CoerceLengthArgument(argValue);
         foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
         {
-            if (sid is not null ? !row[2].IsNull && row[2].AsBytes.AsSpan().SequenceEqual(sid) : row[1].AsInt32 == id)
+            if (sid is not null ? !row[2].IsNull && Simulation.SidsMatch(row[2].AsBytes, sid) : row[1].AsInt32 == id)
                 return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), row[0].AsString);
         }
         if (sid is not null && WellKnownWindowsAccount(sid) is { } account)
@@ -173,15 +173,15 @@ internal sealed class SUserSid : Expression
         // SQL Server 2025: a SQL login reads its own sid, which is what the
         // Agent views filter a job's owner by).
         if (this.loginArg is null)
-            return SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, Simulation.LoginSid(runtime.Batch.Connection.Security.Effective.LoginName));
+            return SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, Simulation.LoginSid(runtime.Batch.Connection.Simulation, runtime.Batch.Connection.Security.Effective.LoginName));
         var nameValue = this.loginArg.Run(runtime);
         if (nameValue.IsNull)
             return SqlValue.Null(PrincipalPlaceholders.SidType);
         var name = nameValue.CoerceTo(SqlType.SystemName).AsString;
         return Collation.Baseline.Equals(name, "sa")
             ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, [0x01])
-            : runtime.Batch.Connection.Simulation.Logins.ContainsKey(name)
-                ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, BuiltInResources.DeriveLoginSid(name))
+            : runtime.Batch.Connection.Simulation.Logins.TryGetValue(name, out var login)
+                ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, login.Sid)
                 : SqlValue.Null(PrincipalPlaceholders.SidType);
     }
 

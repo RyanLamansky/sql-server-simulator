@@ -29,7 +29,7 @@ partial class Simulation
         context.MoveNextRequired();
         var name = ParseLoginName(context);
         var password = ParseLoginPasswordClause(context, required: true, out var passwordStart, out var passwordEnd);
-        var options = ConsumeLoginOptions(context);
+        var options = ConsumeLoginOptions(context, takesSid: true);
         if (context.Batch.IsSkipping)
             return true;
         RecordServerSecurityUndo(context.Batch);
@@ -41,6 +41,16 @@ partial class Simulation
         if (password!.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         var simulation = context.Batch.Connection.Simulation;
+        // A SID is sixteen bytes no server principal's matches, checked ahead
+        // of the name and the password (probed 2026-10-16 against SQL Server
+        // 2025).
+        if (options.Sid is { } sid)
+        {
+            if (sid.Length != 16)
+                throw SimulatedSqlException.LoginSidWrongLength();
+            if (!sid.AsSpan().ContainsAnyExcept((byte)0) || simulation.ServerPrincipalSidInUse(sid))
+                throw SimulatedSqlException.LoginSidInUse();
+        }
         // The name collides with any *server principal*, not just a previously
         // created login: `sa`, `public` and the fixed server roles are all
         // resolvable names that Logins doesn't hold, so checking that
@@ -61,9 +71,11 @@ partial class Simulation
         var utcNow = context.Batch.CurrentStatement.UtcNow;
         var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow,
             defaultDatabase: options.DefaultDatabase ?? "master", defaultLanguage: options.DefaultLanguage ?? "us_english",
-            isPolicyChecked: checkPolicy, isExpirationChecked: options.CheckExpiration ?? false);
+            isPolicyChecked: checkPolicy, isExpirationChecked: options.CheckExpiration ?? false, sid: options.Sid);
         if (!simulation.Logins.TryAdd(name, login))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        if (options.Sid is not null)
+            simulation.RelinkUsersBySid(login);
         simulation.MapLoginCredential(login.PrincipalId, credentialId);
         // CREATE LOGIN auto-seeds a server-scope CONNECT SQL grant (class 100,
         // grantor sa) — probe6 N4b.
@@ -71,6 +83,65 @@ partial class Simulation
             simulation.ServerPermissions.Add(new ServerPermission(login.PrincipalId, 1, "CONNECT SQL", "COSQ", PermissionState.Grant));
         RecordServerDdlEvent(context, "CREATE_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
+    }
+
+    /// <summary>Whether a server principal — a login, <c>sa</c>, <c>public</c> or a server role — holds a SID matching <paramref name="sid"/>.</summary>
+    private bool ServerPrincipalSidInUse(byte[] sid)
+    {
+        if (SidsMatch(sid, [0x01]) || SidsMatch(sid, [0x02]))
+            return true;
+        foreach (var (roleId, _) in FixedServerRoles)
+        {
+            if (SidsMatch(sid, [(byte)roleId]))
+                return true;
+        }
+        foreach (var (_, login) in this.Logins)
+        {
+            if (SidsMatch(sid, login.Sid))
+                return true;
+        }
+        foreach (var (_, role) in this.ServerRoles)
+        {
+            if (SidsMatch(sid, BuiltInResources.DeriveLoginSid(role.Name)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Maps every orphaned database user whose SID is <paramref name="login"/>'s
+    /// to it: a login made again with a dropped one's SID gets that login's
+    /// users back, whatever its name (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    private void RelinkUsersBySid(ServerLogin login)
+    {
+        foreach (var (_, database) in this.Databases)
+        {
+            foreach (var (_, user) in database.Principals)
+            {
+                if (user.TypeCode != "S" || user.LoginSid is not { } userSid || !SidsMatch(userSid, login.Sid))
+                    continue;
+                if (user.LoginName is { } linked && this.Logins.TryGetValue(linked, out var current) && current.PrincipalId == user.LoginPrincipalId)
+                    continue;
+                user.LoginName = login.Name;
+                user.LoginPrincipalId = login.PrincipalId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether two SIDs are the same as SQL Server compares them, as
+    /// <c>varbinary</c>: the shorter padded with zero bytes, so <c>0x03</c>
+    /// and sixteen bytes leading with it match (probed 2026-10-16 against SQL
+    /// Server 2025: a SID of <c>0x03</c> and fifteen zeros is
+    /// <c>sysadmin</c>'s, in use).
+    /// </summary>
+    internal static bool SidsMatch(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
+    {
+        var common = Math.Min(first.Length, second.Length);
+        return first[..common].SequenceEqual(second[..common])
+            && !first[common..].ContainsAnyExcept((byte)0) && !second[common..].ContainsAnyExcept((byte)0);
     }
 
     /// <summary>
@@ -203,8 +274,11 @@ partial class Simulation
     }
 
     /// <summary>The options of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> the simulator keeps, null for one not written.</summary>
-    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword, string? credential, bool noCredential)
+    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword, string? credential, bool noCredential, byte[]? sid)
     {
+        /// <summary>The binary literal a <c>SID =</c> gives, before its checks.</summary>
+        public readonly byte[]? Sid = sid;
+
         /// <summary>The credential a <c>CREDENTIAL = name</c> maps the login to.</summary>
         public readonly string? Credential = credential;
 
@@ -224,9 +298,10 @@ partial class Simulation
     /// <c>CHECK_POLICY</c> / <c>CHECK_EXPIRATION</c> switches and the <c>CREDENTIAL</c> /
     /// <c>NO CREDENTIAL</c> mapping, and discarding every other option.
     /// </summary>
-    private static LoginOptions ConsumeLoginOptions(ParserContext context)
+    private static LoginOptions ConsumeLoginOptions(ParserContext context, bool takesSid = false)
     {
         string? database = null, language = null, oldPassword = null, credential = null;
+        byte[]? sid = null;
         bool? checkPolicy = null, checkExpiration = null;
         var noCredential = false;
         while (!IsStatementBoundary(context.Token))
@@ -242,6 +317,25 @@ partial class Simulation
                         credential = credentialName.Value;
                         context.MoveNextOptional();
                     }
+                    continue;
+                }
+                // SID takes a binary literal, once, and only from CREATE LOGIN:
+                // anything else is a syntax error at it (probed 2026-10-16
+                // against SQL Server 2025).
+                if (option.Equals("SID", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!takesSid)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextOptional() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextOptional() is not Literal { Value: { IsNull: false } literal } || literal.Type is not VarbinarySqlType)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    // A second SID is named by its bytes read as UTF-16, a
+                    // zero character shown as a period.
+                    if (sid is not null)
+                        throw SimulatedSqlException.SyntaxErrorNear(System.Text.Encoding.Unicode.GetString(literal.AsBytes).Replace('\0', '.'), 1);
+                    sid = literal.AsBytes;
+                    context.MoveNextOptional();
                     continue;
                 }
                 if (option.Equals("NO", StringComparison.OrdinalIgnoreCase)
@@ -280,7 +374,7 @@ partial class Simulation
             }
             context.MoveNextOptional();
         }
-        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential);
+        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential, sid);
     }
 
     /// <summary>

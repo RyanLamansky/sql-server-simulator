@@ -47,7 +47,7 @@ partial class Simulation
         var lsn = $"({ActiveLogSequence}:{transaction.TransactionId}:1)";
         var startTime = SqlValue.FromDateTime(transaction.BeginTimeUtc).CoerceDateTimeToStringWithStyle(SqlType.NVarchar, 109).AsString;
         var login = connection.Security.OriginalLoginName;
-        var sid = "0x" + Convert.ToHexString(BuiltInToken.Equals(login, "sa") || !connection.Simulation.Logins.ContainsKey(login) ? [0x01] : BuiltInResources.DeriveLoginSid(login));
+        var sid = "0x" + Convert.ToHexString(connection.Simulation.Logins.TryGetValue(login, out var registered) && !BuiltInToken.Equals(login, "sa") ? registered.Sid : [0x01]);
         if (dbcc.Has(DbccOptions.TableResults))
         {
             var collation = batch.CurrentDatabase.Collation;

@@ -113,7 +113,7 @@ partial class Simulation
             AppendElement(elements, "DefaultLanguage", "us_english");
             AppendElement(elements, "DefaultDatabase", MasterDatabaseName);
             AppendElement(elements, "LoginType", "SQL Login");
-            AppendElement(elements, "SID", Convert.ToBase64String(LoginSid(loginName)));
+            AppendElement(elements, "SID", Convert.ToBase64String(LoginSid(context.Batch.Connection.Simulation, loginName)));
             loginElements = elements.ToString();
         }
         (context.Batch.CurrentStatement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
@@ -128,10 +128,13 @@ partial class Simulation
 
     /// <summary>
     /// The sid a login reports in <c>EVENTDATA()</c> and <c>SUSER_SID</c>:
-    /// the well-known <c>0x01</c> for <c>sa</c>, else its synthetic one.
+    /// the well-known <c>0x01</c> for <c>sa</c>, a registered login's own
+    /// (<see cref="ServerLogin.Sid"/>), else the one derived from the name.
     /// </summary>
-    internal static byte[] LoginSid(string loginName) =>
-        BuiltInToken.Comparer.Equals(loginName, "sa") ? [0x01] : BuiltInResources.DeriveLoginSid(loginName);
+    internal static byte[] LoginSid(Simulation simulation, string loginName) =>
+        BuiltInToken.Comparer.Equals(loginName, "sa") ? [0x01]
+        : simulation.Logins.TryGetValue(loginName, out var login) ? login.Sid
+        : BuiltInResources.DeriveLoginSid(loginName);
 
     /// <summary>
     /// Fires every enabled database-scope DDL trigger matching the events the

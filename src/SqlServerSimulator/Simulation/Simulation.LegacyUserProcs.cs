@@ -451,6 +451,7 @@ partial class Simulation
                                 $"The row for user '{target.Name}' will be fixed by updating its login link to a login already in existence.");
                             target.LoginName = target.Name;
                             target.LoginPrincipalId = simulation.TryResolveServerPrincipalId(target.Name, out var fixedId) ? fixedId : 0;
+                            target.LoginSid = LoginSid(simulation, target.Name);
                             byUpdating++;
                         }
                         else
@@ -463,6 +464,7 @@ partial class Simulation
                                 yield return outcome;
                             target.LoginName = target.Name;
                             target.LoginPrincipalId = simulation.TryResolveServerPrincipalId(target.Name, out var createdId) ? createdId : 0;
+                            target.LoginSid = LoginSid(simulation, target.Name);
                             byCreating++;
                         }
                     }
@@ -499,6 +501,7 @@ partial class Simulation
                         throw AtSystemProcedureLine(calledAs, SimulatedSqlException.LoginAlreadyHasAccount(existing.Name), 175);
                     user!.LoginName = loginName;
                     user.LoginPrincipalId = simulation.TryResolveServerPrincipalId(loginName, out var relinkedId) ? relinkedId : 0;
+                    user.LoginSid = LoginSid(simulation, loginName);
                     yield break;
                 }
             default:

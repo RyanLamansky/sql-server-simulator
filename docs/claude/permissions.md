@@ -490,7 +490,18 @@ A login carries a default database, default language and the `CHECK_POLICY` / `C
 `CHECK_POLICY = ON` enforces a minimum length of eight (Msg 33062) and three of the four character classes without the login name in it (Msg 33064).
 The legacy procedures (`sp_addlogin`, `sp_password`, `sp_adduser`, `sp_addrole`, `sp_change_users_login` and their siblings) build and run the ordinary statement real does, and raise real's own errors from real's line numbers; see [`catalog-views.md`](catalog-views.md#system-procedures-over-the-registries).
 A user is an orphan when its login link no longer matches the login of its name.
-A `CREATE LOGIN` `SID` is derived from the name, so `sp_addlogin @sid` is ignored.
+`sp_addlogin @sid` becomes the statement's `SID`, cut to sixteen bytes as its `varbinary(16)` parameter cuts it, so its refusals are the statement's (see [Login SIDs](#login-sids)).
+
+### Login SIDs
+
+Probed 2026-10-16 against SQL Server 2025.
+`CREATE LOGIN … WITH PASSWORD = '…', SID = 0x…` gives the login that SID (`ServerLogin.Sid`), which `sys.server_principals`, `sys.sql_logins`, `SUSER_SID`, `sp_helplogins`, the security tokens, `EVENTDATA()` and SQL Trace report, and a user created for the login carries (`DatabasePrincipal.LoginSid`, kept by a backup).
+The SID is checked ahead of the name and the password: one of another length than sixteen bytes — a 28-byte Windows SID among them — is Msg 15419, and one a server principal holds, or one of zeros, Msg 15433.
+SIDs compare as `varbinary`, the shorter padded with zeros, so `0x03` and fifteen zero bytes is `sysadmin`'s, and `SUSER_SNAME` finds a login by its SID with zero bytes appended.
+`SID` takes only a binary literal (a string, a number, `NULL` or a variable is Msg 102 / 156 at it), once — a second is Msg 102 naming its bytes read as UTF-16, a zero character a period — and `ALTER LOGIN` takes none.
+A login made with a dropped login's SID gets that login's users back, whatever its name: each orphaned user carrying the SID maps to it.
+
+**Divergences**: real takes `SID` before `PASSWORD` in its grammar only to refuse the password then (Msg 102 at the password's value), where the simulator refuses at `SID`; and a login created without a `SID` reads the one derived from its name, so a login dropped and made again under the same name shows its old users' SID in the catalog, where real's new random SID differs, though `sp_change_users_login` still reports them orphaned.
 
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)
 
@@ -500,7 +511,7 @@ The hash uses the legacy `0x0200` single-pass-SHA-512 format (`PasswordHash.Encr
 `PasswordHash.Verify` dispatches on the version tag, so both forms verify; the T-SQL `PWDENCRYPT` keeps emitting `0x0300`.
 In-process connections never authenticate — login DDL through one is how the registry is seeded.
 
-- `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; `CREDENTIAL` maps the login to a credential (see [Credentials](#credentials)), and the rest of the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE / SID) is kept as the login's catalog rows show it or read without effect.
+- `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; `CREDENTIAL` maps the login to a credential (see [Credentials](#credentials)), and `SID` gives the login its SID (see [Login SIDs](#login-sids)), and the rest of the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE) is kept as the login's catalog rows show it or read without effect.
   `FROM WINDOWS` / certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
   A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
@@ -805,7 +816,7 @@ A restricted principal's read of one is refused with Msg 229 naming the view in 
 
 **`sys.server_principals`** (14-col full probe-confirmed shape): `name` / `principal_id` / `sid` / `type` / `type_desc` / `is_disabled` / `create_date` / `modify_date` / `default_database_name` / `default_language_name` / `credential_id` / `owning_principal_id` / `is_fixed_role` / `tenant_id`.
 Projects the synthetic fixed rows — `sa` (id 1, sid `0x01`, `SQL_LOGIN`, default db `master`), `public` (id 2, sid `0x02`, `SERVER_ROLE`, `owning_principal_id` 1, `is_fixed_role` **0** — probe-confirmed quirk), and the 18 fixed server roles (ids 3–20, `SERVER_ROLE`, `is_fixed_role 1`) — plus one row per `Simulation.Logins` entry and per `Simulation.ServerRoles` (custom-role) entry (user ids from 258 via `Simulation.AllocatePrincipalId`; `modify_date` = password-last-set; `tenant_id` all-zero GUID matching real's SQL-login rows). Rows emit in principal_id order.
-Created-login `sid`s are deterministic synthetic 16-byte values (FNV-derived from the name) — unique and stable, but won't byte-match real.
+A created login's `sid` is the one its `CREATE LOGIN … SID` gave it, else a deterministic synthetic 16-byte value (FNV-derived from the name) — unique and stable, but won't byte-match real's random one.
 A created login's `is_disabled` follows `ALTER LOGIN … DISABLE` / `ENABLE`, here and in `sys.sql_logins`.
 Rows are **filtered for a restricted session** — see [Server-principal metadata visibility](#server-principal-metadata-visibility); a dbo / sysadmin reader sees everything and pays one bool read.
 

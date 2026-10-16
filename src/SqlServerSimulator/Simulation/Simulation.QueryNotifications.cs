@@ -111,7 +111,7 @@ partial class Simulation
     internal void SubscribeQuery(BatchContext batch, QueryNotificationRequest request, string text)
     {
         var database = batch.CurrentDatabase;
-        var sid = LoginSid(batch.Connection.Security.Effective.LoginName);
+        var sid = LoginSid(batch.Connection.Simulation, batch.Connection.Security.Effective.LoginName);
         if (QueryTablesIfNotifiable(batch, text) is not { Length: > 0 } tables)
         {
             this.SendQueryNotification(database, request, 0, "subscribe", "statement", "invalid", 0, sid);
