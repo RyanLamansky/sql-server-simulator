@@ -680,6 +680,7 @@ All probed 2026-09-29 against SQL Server 2025 with dedicated probe logins; the d
 **The model.**
 `PermissionCatalog` carries all 51 SERVER-class permissions with the covering graph `sys.fn_builtin_permissions('SERVER')` lists — `CONTROL SERVER` at the top, `VIEW SERVER STATE` under `ALTER SERVER STATE`, `CREATE ANY DATABASE` under `ALTER ANY DATABASE`, `EXTERNAL ACCESS ASSEMBLY` under `UNSAFE ASSEMBLY`, the `VIEW ANY …` family under `VIEW ANY DEFINITION`.
 `Simulation.HoldsServerPermission` answers for a login: `sysadmin` passes, then a `DENY` anywhere in the login's server-principal closure binds — `CONTROL SERVER` included — then a grant, then a fixed role's own grants (`Simulation.FixedServerRoleGrants`), whose covering closure is exactly what `fn_my_permissions(NULL, 'SERVER')` lists for a member of each role.
+`fn_my_permissions(NULL, NULL)` lists the same server permissions, a named securable with a NULL class nothing, and the `DATABASE` class lists the current database's whatever name it is given, under `CROSS APPLY` as alone (probed 2026-10-16 against SQL Server 2025).
 Real keeps those role grants out of `sys.server_permissions`, and so does the simulator.
 The quirks that closure preserves: `securityadmin` carries only `ALTER ANY LOGIN` (and `CREATE LOGIN` under it), `serveradmin`'s `ALTER SERVER STATE` brings the three `VIEW SERVER … STATE` permissions, and `##MS_DefinitionReader##` gets no `VIEW ANY CRYPTOGRAPHICALLY SECURED DEFINITION`, whose cover is `CONTROL SERVER` alone.
 

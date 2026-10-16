@@ -275,6 +275,10 @@ internal static partial class BuiltInResources
         // The error log: its readers, its cycle and xp_logevent's writes.
         "sp_cycle_errorlog",
         "sp_enumerrorlogs",
+        // The Agent alert settings and the orphaned Windows logins, which
+        // sp_Blitz reads.
+        "sp_MSgetalertinfo",
+        "sp_validatelogins",
         "sp_readerrorlog",
         "xp_enumerrorlogs",
         "xp_logevent",
@@ -1016,6 +1020,7 @@ internal static partial class BuiltInResources
         ("fn_builtin_permissions", -413116802, "IF"),
         ("fn_listextendedproperty", -572068538, "TF"),
         ("fn_my_permissions", -462384620, "TF"),
+        ("fn_trace_gettable", -718311503, "IF"),
         ("fn_varbintohexstr", -565035985, "FN"),
         ("fn_varbintohexsubstring", -403477184, "FN"),
         ("fn_virtualfilestats", -337551382, "TF"),

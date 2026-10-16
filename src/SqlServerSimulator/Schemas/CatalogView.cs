@@ -336,6 +336,9 @@ internal enum DmvGateKind : byte
 
     /// <summary>The running-session Extended Events views — need <c>VIEW SERVER PERFORMANCE STATE</c>; denial raises Msg 297 state 13 alone.</summary>
     ExtendedEventsState,
+
+    /// <summary><c>sys.traces</c> — needs <c>ALTER TRACE</c>; denial raises Msg 8189.</summary>
+    AlterTrace,
 }
 
 /// <summary>

@@ -98,6 +98,7 @@ partial class Simulation
             "CHECKFILEGROUP" => RunDbccCheckDatabase(batch, dbcc, "CHECKFILEGROUP"),
             "CHECKTABLE" => RunDbccCheckTable(batch, dbcc),
             "CLEANTABLE" => RunDbccCleanTable(batch, dbcc),
+            "DBINFO" => RunDbccDbInfo(batch, dbcc),
             "DBREINDEX" => RunDbccDbReindex(batch, dbcc),
             "DROPCLEANBUFFERS" => RunDbccDropCleanBuffers(batch, dbcc),
             "ERRORLOG" => RunDbccErrorLog(batch, dbcc),
@@ -143,8 +144,6 @@ partial class Simulation
         {
             switch (upper)
             {
-                case "DBINFO":
-                    return DbccPermissionDenied(batch, "dbinfo", 14);
                 case "IND":
                     return DbccPermissionDenied(batch, "ind", 1);
                 case "MEMORYSTATUS":
@@ -168,7 +167,7 @@ partial class Simulation
     /// </summary>
     private static bool IsUnbuiltDbccCommand(ReadOnlySpan<char> upper) => upper switch
     {
-        "BUFFER" or "CLONEDATABASE" or "DBINFO" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
+        "BUFFER" or "CLONEDATABASE" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
             or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
             or "STACKDUMP" or "TUPLEMOVER" or "WRITEPAGE" => true,
         _ => false,

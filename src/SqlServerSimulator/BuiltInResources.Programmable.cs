@@ -1199,7 +1199,7 @@ internal static partial class BuiltInResources
                     viewTypeDesc,
                     SqlValue.FromDateTime(view.CreateDate),
                     SqlValue.FromDateTime(view.ModifyDate),
-                    falseBit,
+                    SqlValue.FromBoolean(view.IsMsShipped),
                     SqlValue.FromBoolean(view.WithCheckOption),
                     falseBit,
                     ledgerViewTypeNone,

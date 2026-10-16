@@ -40,7 +40,10 @@ internal sealed class ErrorLog
     private const int LineOverhead = 37;
 
     /// <summary>The <c>-e</c> path real's startup parameters name, <c>SERVERPROPERTY('ErrorLogFileName')</c>'s.</summary>
-    public const string FileName = "/var/opt/mssql/log/errorlog";
+    public const string FileName = Directory + "errorlog";
+
+    /// <summary>The log directory of real's Linux server, where its traces and event files live beside the error log.</summary>
+    public const string Directory = "/var/opt/mssql/log/";
 
     /// <summary>One entry: when it was written, the process column (<c>Server</c>, <c>spid53</c>, <c>Logon</c>) and its text, which an empty <c>xp_logevent</c> message leaves NULL.</summary>
     internal readonly struct Entry(DateTime logDate, string processInfo, string? text)

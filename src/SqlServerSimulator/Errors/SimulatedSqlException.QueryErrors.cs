@@ -360,9 +360,24 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 195 for a table-valued system function called as a scalar, whose
     /// name real recognizes as an object (probed 2026-10-11 against SQL Server
-    /// 2025).
+    /// 2025), and at state 15 for a name the legacy <c>::</c> prefix doesn't
+    /// take (probed 2026-10-16).
     /// </summary>
-    internal static SimulatedSqlException UnrecognizedSystemFunction(string name) => new($"'{name}' is not a recognized function name.", 195, 15, 10);
+    internal static SimulatedSqlException UnrecognizedSystemFunction(string name, byte state = 10) => new($"'{name}' is not a recognized function name.", 195, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 19049: <c>fn_trace_gettable</c> naming a file
+    /// that isn't there (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TraceFileNotFound(string path) =>
+        new($"File '{path}' either does not exist or there was an error opening the file. Error = '2(The system cannot find the file specified.)'.", 19049, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 19050: <c>fn_trace_gettable</c> given an empty
+    /// or NULL file name (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TraceFileNameInvalid(string path) =>
+        new($"Trace file name '{path}' is invalid.", 19050, 16, 10);
 
     /// <summary>
     /// Mimics SQL Server's Msg 10744 — fired when a <c>FETCH</c> clause

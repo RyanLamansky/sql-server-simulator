@@ -65,7 +65,7 @@ public sealed class ServerConfigurationTests
         // Staged but not installed — still hidden.
         _ = simulation.AssertSqlError("exec sp_configure 'max degree of parallelism'", 15123);
         _ = simulation.ExecuteNonQuery("reconfigure");
-        AreEqual(8, simulation.ExecuteScalar(
+        AreEqual(0, simulation.ExecuteScalar(
             "select convert(int, value_in_use) from sys.configurations where name = 'max degree of parallelism'"));
     }
 

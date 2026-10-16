@@ -638,17 +638,13 @@ partial class Simulation
             }
             return (slot.Value, outputSlot);
         }
-        var value = context.Token switch
-        {
-            Literal lit => lit.Value,
-            Numeric num => num.Value,
-            ReservedKeyword { Keyword: Keyword.Null } => SqlValue.Null(SqlType.Int32),
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-        };
-        context.MoveNextOptional();
-        return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out }
-            ? throw SimulatedSqlException.ConstantPassedAsOutput()
-            : (value, null);
+        // A value is otherwise a constant as an EXEC argument takes one — a
+        // literal, a negated number, a bare identifier read as a string, or
+        // an @@ function — except that a leading `+` is Msg 102 (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (context.Token is Operator { Character: '+' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return (ParseExecArgument(context, batch, name: null).Value, null);
     }
 
     /// <summary>

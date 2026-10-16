@@ -1170,6 +1170,24 @@ public sealed class StoredProcedureTests
     }
 
     [TestMethod]
+    public void CallingAProcedureAVariableNames_NotesNoMsg2007()
+        => IsEmpty(InfoMessages(new Simulation(), "create proc p as\ndeclare @proc nvarchar(300) = N'zz.sys.sp_executesql'\nexec @proc N'select 1'"));
+
+    [TestMethod]
+    public void SpExecuteSqlValue_TakesAConstantAnExecArgumentTakes()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar("exec sp_executesql N'select @a', N'@a int', @@TRANCOUNT"));
+        AreEqual(0, sim.ExecuteScalar("exec sp_executesql N'select @a', N'@a int', @a = @@TRANCOUNT"));
+        AreEqual(-1, sim.ExecuteScalar("exec sp_executesql N'select @a', N'@a int', -1"));
+        AreEqual("abc", sim.ExecuteScalar("exec sp_executesql N'select @a', N'@a nvarchar(20)', abc"));
+        _ = sim.AssertSqlError("exec sp_executesql N'select @a', N'@a int', @@TRANCOUNT output", 179);
+        _ = sim.AssertSqlError("exec sp_executesql N'select @a', N'@a int', +5", 102);
+        sim.ExecuteBatches("create proc p @a int output as select @a");
+        _ = sim.AssertSqlError("exec p @@TRANCOUNT output", 179);
+    }
+
+    [TestMethod]
     public void NestingLimit_EndsTheBatchAndRollsBack()
     {
         var sim = new Simulation();

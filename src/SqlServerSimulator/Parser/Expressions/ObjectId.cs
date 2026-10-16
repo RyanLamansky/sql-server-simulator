@@ -204,6 +204,25 @@ internal sealed class ObjectId : Expression
         if (filter == ObjectTypeFilter.Synonym)
             return SqlValue.Null(SqlType.Int32);
 
+        // A system function the simulator models answers with real's id under
+        // its own type code, a `fn_` one unqualified too (probed 2026-10-16
+        // against SQL Server 2025: OBJECT_ID('sys.dm_exec_sql_text', 'IF') and
+        // OBJECT_ID('fn_my_permissions') are ids, OBJECT_ID('dm_exec_sql_text')
+        // and OBJECT_ID('sys.dm_exec_sql_text', 'FN') NULL).
+        if (SystemFunction(runtime.Batch, parsed) is { } systemFunctionObject)
+        {
+            var typeMatches = filter switch
+            {
+                ObjectTypeFilter.Any => true,
+                ObjectTypeFilter.ScalarFunction => systemFunctionObject.Type == "FN",
+                ObjectTypeFilter.InlineTableValuedFunction => systemFunctionObject.Type == "IF",
+                ObjectTypeFilter.Unrecognized => BuiltInToken.Equals(systemFunctionObject.Type, typeFilter),
+                _ => false,
+            };
+            if (typeMatches)
+                return SqlValue.FromInt32(systemFunctionObject.ObjectId);
+        }
+
         // 'FN' / 'IF' / no filter: try function resolution. With a specific
         // filter the function must match that kind (scalar vs. inline TVF);
         // without a filter, any kind matches. 'TF' isn't in the accept-list,
@@ -327,6 +346,30 @@ internal sealed class ObjectId : Expression
     {
         _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
         return SqlType.Int32;
+    }
+
+    /// <summary>
+    /// The modeled system function <paramref name="name"/> names — a
+    /// <c>sys.</c> name, one a database that exists qualifies, or a bare
+    /// <c>fn_</c> one — or null.
+    /// </summary>
+    private static BuiltInResources.SystemObject? SystemFunction(BatchContext batch, MultiPartName name)
+    {
+        var qualifies = name.Count switch
+        {
+            1 => name.Leaf.StartsWith("fn_", StringComparison.OrdinalIgnoreCase),
+            2 => BuiltInToken.Equals(name.ImmediateQualifier, "sys"),
+            3 => BuiltInToken.Equals(name.ImmediateQualifier, "sys") && batch.Connection.Simulation.Databases.ContainsKey(name[0]),
+            _ => false,
+        };
+        if (!qualifies)
+            return null;
+        foreach (var system in BuiltInResources.SystemObjects.Value)
+        {
+            if (system.Type is "FN" or "IF" or "TF" && system.SchemaId == Database.SysSchemaId && string.Equals(system.Name, name.Leaf, StringComparison.OrdinalIgnoreCase))
+                return system;
+        }
+        return null;
     }
 
     private static int? SystemProcedureId(string name)

@@ -87,6 +87,20 @@ internal static partial class BuiltInResources
         ("sysaltfiles", DmvGateKind.ControlServer),
         ("sysperfinfo", DmvGateKind.ServerState),
         ("sysprocesses", DmvGateKind.SessionSelfFilter),
+        ("sys.dm_db_persisted_sku_features", DmvGateKind.DatabaseState),
+        ("sys.dm_hadr_availability_group_states", DmvGateKind.DatabaseState),
+        ("sys.dm_hadr_availability_replica_states", DmvGateKind.DatabaseState),
+        ("sys.dm_hadr_availability_replica_cluster_states", DmvGateKind.ServerState),
+        ("sys.dm_os_buffer_pool_extension_configuration", DmvGateKind.ServerState),
+        ("sys.dm_os_cluster_nodes", DmvGateKind.ServerState),
+        ("sys.dm_os_job_object", DmvGateKind.ServerState),
+        ("sys.dm_os_loaded_modules", DmvGateKind.ServerState),
+        ("sys.dm_os_memory_cache_counters", DmvGateKind.ServerState),
+        ("sys.dm_os_memory_cache_hash_tables", DmvGateKind.ServerState),
+        ("sys.dm_os_memory_health_history", DmvGateKind.ServerState),
+        ("sys.dm_xtp_transaction_stats", DmvGateKind.ServerState),
+        ("sys.dm_server_audit_status", DmvGateKind.ServerSecurityState),
+        ("sys.traces", DmvGateKind.AlterTrace),
     ];
 
     /// <summary>
@@ -171,6 +185,10 @@ internal static partial class BuiltInResources
             case DmvGateKind.ExtendedEventsState:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
                     throw SimulatedSqlException.UserLacksPermissionToPerformAction(13);
+                return rows;
+            case DmvGateKind.AlterTrace:
+                if (!simulation.HoldsServerPermission(login, Permission.AlterTrace))
+                    throw SimulatedSqlException.TracePermissionDenied("SYS.TRACES", state: 6);
                 return rows;
             // VIEW SERVER PERFORMANCE STATE opens every session's rows
             // (probed 2026-10-16 against SQL Server 2025).

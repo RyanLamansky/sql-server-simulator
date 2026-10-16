@@ -115,6 +115,13 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public DateTime ModifyDate = createDate;
 
     /// <summary>
+    /// <c>sys.objects.is_ms_shipped</c> and <c>OBJECTPROPERTY(…, 'IsMSShipped')</c>:
+    /// true for the objects a fresh server ships in <c>msdb</c>, which
+    /// health checks tell apart from the ones users create.
+    /// </summary>
+    public bool IsMsShipped;
+
+    /// <summary>
     /// Two-character <c>sys.objects.type</c> discriminator: <c>'U '</c>
     /// (USER_TABLE), <c>'V '</c> (VIEW), <c>'P '</c> (SQL_STORED_PROCEDURE),
     /// <c>'FN'</c> (SQL_SCALAR_FUNCTION), <c>'IF'</c>

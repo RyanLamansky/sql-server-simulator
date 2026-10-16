@@ -139,4 +139,17 @@ public sealed class UpdateStatisticsTests
             update statistics t st with sample 50 percent, persist_sample_percent = on;
             select has_persisted_sample from sys.stats where name = 'st'
             """));
+
+    [TestMethod]
+    public void AProcedureBody_TakesUpdateStatistics()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure p as create table #t (a int); update statistics #t with rowcount = 9223372036854775807, pagecount = 9223372036854775807; select 1",
+            "create table t (a int); create statistics s on t (a)",
+            "create procedure q as update statistics t s with norecompute");
+        AreEqual(1, sim.ExecuteScalar("exec p"));
+        _ = sim.ExecuteNonQuery("exec q");
+        IsTrue(sim.ExecuteScalar<bool>("select no_recompute from sys.stats where name = 's'"));
+    }
 }

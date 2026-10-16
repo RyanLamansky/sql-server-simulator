@@ -85,6 +85,274 @@ public sealed partial class Simulation
         SeedMsdbPolicyConfigurationView(msdb);
         SeedMsdbPolicyAutomationFunction(msdb);
         SeedMsdbBackupSet(msdb);
+        SeedMsdbHistoryAndAgentTables(msdb);
+    }
+
+    /// <summary>
+    /// Seeds the rest of the backup and restore history and the SQL Server
+    /// Agent tables health checks read — media sets and families, restore
+    /// history, suspect pages, jobs, steps, schedules, history, alerts,
+    /// operators, maintenance subplans and SSIS packages — empty and in SQL
+    /// Server 2025's column shapes (probed 2026-10-16): the simulator keeps no
+    /// history and runs no Agent. Real ships seven data-collector schedules
+    /// and eight SSIS packages in the last two, which aren't seeded.
+    /// </summary>
+    private static void SeedMsdbHistoryAndAgentTables(Database msdb)
+    {
+        var collation = msdb.Collation;
+        SeedMsdbTable(msdb, "backupmediafamily",
+        [
+            new("media_set_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("family_sequence_number", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("media_family_id", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
+            new("media_count", SqlType.Int32, maxLength: null, nullable: true),
+            new("logical_device_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("physical_device_name", NVarcharSqlType.Get(260, collation, Coercibility.Implicit), maxLength: 260, nullable: true),
+            new("device_type", SqlType.TinyInt, maxLength: null, nullable: true),
+            new("physical_block_size", SqlType.Int32, maxLength: null, nullable: true),
+            new("mirror", SqlType.TinyInt, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "backupmediaset",
+        [
+            new("media_set_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("media_uuid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
+            new("media_family_count", SqlType.TinyInt, maxLength: null, nullable: true),
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("description", NVarcharSqlType.Get(255, collation, Coercibility.Implicit), maxLength: 255, nullable: true),
+            new("software_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("software_vendor_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("MTF_major_version", SqlType.TinyInt, maxLength: null, nullable: true),
+            new("mirror_count", SqlType.TinyInt, maxLength: null, nullable: true),
+            new("is_password_protected", SqlType.Bit, maxLength: null, nullable: true),
+            new("is_compressed", SqlType.Bit, maxLength: null, nullable: true),
+            new("is_encrypted", SqlType.Bit, maxLength: null, nullable: true),
+        ]);
+        SeedMsdbTable(msdb, "restorehistory",
+        [
+            new("restore_history_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("restore_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("destination_database_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("user_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("backup_set_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("restore_type", CharSqlType.Get(1, collation, Coercibility.Implicit), maxLength: 1, nullable: true),
+            new("replace", SqlType.Bit, maxLength: null, nullable: true),
+            new("recovery", SqlType.Bit, maxLength: null, nullable: true),
+            new("restart", SqlType.Bit, maxLength: null, nullable: true),
+            new("stop_at", SqlType.DateTime, maxLength: null, nullable: true),
+            new("device_count", SqlType.TinyInt, maxLength: null, nullable: true),
+            new("stop_at_mark_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("stop_before", SqlType.Bit, maxLength: null, nullable: true),
+        ]);
+        SeedMsdbTable(msdb, "suspect_pages",
+        [
+            new("database_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("file_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("page_id", SqlType.BigInt, maxLength: null, nullable: false),
+            new("event_type", SqlType.Int32, maxLength: null, nullable: false),
+            new("error_count", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_update_date", SqlType.DateTime, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysalerts",
+        [
+            new("id", SqlType.Int32, maxLength: null, nullable: false),
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("event_source", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: false),
+            new("event_category_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("event_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("message_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("severity", SqlType.Int32, maxLength: null, nullable: false),
+            new("enabled", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("delay_between_responses", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_occurrence_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_occurrence_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_response_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_response_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("notification_message", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
+            new("include_event_description", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("database_name", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
+            new("event_description_keyword", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: true),
+            new("occurrence_count", SqlType.Int32, maxLength: null, nullable: false),
+            new("count_reset_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("count_reset_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("has_notification", SqlType.Int32, maxLength: null, nullable: false),
+            new("flags", SqlType.Int32, maxLength: null, nullable: false),
+            new("performance_condition", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
+            new("category_id", SqlType.Int32, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysjobactivity",
+        [
+            new("session_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("run_requested_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("run_requested_source", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("queued_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("start_execution_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("last_executed_step_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("last_executed_step_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("stop_execution_date", SqlType.DateTime, maxLength: null, nullable: true),
+            new("job_history_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("next_scheduled_run_date", SqlType.DateTime, maxLength: null, nullable: true),
+        ]);
+        SeedMsdbTable(msdb, "sysjobhistory",
+        [
+            new("instance_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("step_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("step_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("sql_message_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("sql_severity", SqlType.Int32, maxLength: null, nullable: false),
+            new("message", NVarcharSqlType.Get(4000, collation, Coercibility.Implicit), maxLength: 4000, nullable: true),
+            new("run_status", SqlType.Int32, maxLength: null, nullable: false),
+            new("run_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("run_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("run_duration", SqlType.Int32, maxLength: null, nullable: false),
+            new("operator_id_emailed", SqlType.Int32, maxLength: null, nullable: false),
+            new("operator_id_netsent", SqlType.Int32, maxLength: null, nullable: false),
+            new("operator_id_paged", SqlType.Int32, maxLength: null, nullable: false),
+            new("retries_attempted", SqlType.Int32, maxLength: null, nullable: false),
+            new("server", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysjobs",
+        [
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("originating_server_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("enabled", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("description", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
+            new("start_step_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("category_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("owner_sid", VarbinarySqlType.Get(85), maxLength: 85, nullable: false),
+            new("notify_level_eventlog", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_level_email", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_level_netsend", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_level_page", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_email_operator_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_netsend_operator_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("notify_page_operator_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("delete_level", SqlType.Int32, maxLength: null, nullable: false),
+            new("date_created", SqlType.DateTime, maxLength: null, nullable: false),
+            new("date_modified", SqlType.DateTime, maxLength: null, nullable: false),
+            new("version_number", SqlType.Int32, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysjobschedules",
+        [
+            new("schedule_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
+            new("next_run_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("next_run_time", SqlType.Int32, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysjobsteps",
+        [
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("step_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("step_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("subsystem", NVarcharSqlType.Get(40, collation, Coercibility.Implicit), maxLength: 40, nullable: false),
+            new("command", NVarcharSqlType.Get(SqlType.MaxLengthSentinel, collation, Coercibility.Implicit), maxLength: null, nullable: true),
+            new("flags", SqlType.Int32, maxLength: null, nullable: false),
+            new("additional_parameters", NVarcharSqlType.Get(SqlType.MaxLengthSentinel, collation, Coercibility.Implicit), maxLength: null, nullable: true),
+            new("cmdexec_success_code", SqlType.Int32, maxLength: null, nullable: false),
+            new("on_success_action", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("on_success_step_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("on_fail_action", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("on_fail_step_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("server", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("database_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("database_user_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("retry_attempts", SqlType.Int32, maxLength: null, nullable: false),
+            new("retry_interval", SqlType.Int32, maxLength: null, nullable: false),
+            new("os_run_priority", SqlType.Int32, maxLength: null, nullable: false),
+            new("output_file_name", NVarcharSqlType.Get(200, collation, Coercibility.Implicit), maxLength: 200, nullable: true),
+            new("last_run_outcome", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_run_duration", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_run_retries", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_run_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_run_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("proxy_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("step_uid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
+        ]);
+        SeedMsdbTable(msdb, "sysmaintplan_subplans",
+        [
+            new("subplan_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("subplan_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("subplan_description", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
+            new("plan_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("msx_job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
+            new("schedule_id", SqlType.Int32, maxLength: null, nullable: true),
+            new("msx_plan", SqlType.Bit, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysoperators",
+        [
+            new("id", SqlType.Int32, maxLength: null, nullable: false),
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("enabled", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("email_address", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: true),
+            new("last_email_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_email_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("pager_address", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: true),
+            new("last_pager_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_pager_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("weekday_pager_start_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("weekday_pager_end_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("saturday_pager_start_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("saturday_pager_end_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("sunday_pager_start_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("sunday_pager_end_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("pager_days", SqlType.TinyInt, maxLength: null, nullable: false),
+            new("netsend_address", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: true),
+            new("last_netsend_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("last_netsend_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("category_id", SqlType.Int32, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysschedules",
+        [
+            new("schedule_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("schedule_uid", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("originating_server_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("owner_sid", VarbinarySqlType.Get(85), maxLength: 85, nullable: false),
+            new("enabled", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_type", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_interval", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_subday_type", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_subday_interval", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_relative_interval", SqlType.Int32, maxLength: null, nullable: false),
+            new("freq_recurrence_factor", SqlType.Int32, maxLength: null, nullable: false),
+            new("active_start_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("active_end_date", SqlType.Int32, maxLength: null, nullable: false),
+            new("active_start_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("active_end_time", SqlType.Int32, maxLength: null, nullable: false),
+            new("date_created", SqlType.DateTime, maxLength: null, nullable: false),
+            new("date_modified", SqlType.DateTime, maxLength: null, nullable: false),
+            new("version_number", SqlType.Int32, maxLength: null, nullable: false),
+        ]);
+        SeedMsdbTable(msdb, "sysssispackages",
+        [
+            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("description", NVarcharSqlType.Get(1024, collation, Coercibility.Implicit), maxLength: 1024, nullable: true),
+            new("createdate", SqlType.DateTime, maxLength: null, nullable: false),
+            new("folderid", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("ownersid", VarbinarySqlType.Get(85), maxLength: 85, nullable: false),
+            new("packagedata", SqlType.Image, maxLength: null, nullable: false),
+            new("packageformat", SqlType.Int32, maxLength: null, nullable: false),
+            new("packagetype", SqlType.Int32, maxLength: null, nullable: false),
+            new("vermajor", SqlType.Int32, maxLength: null, nullable: false),
+            new("verminor", SqlType.Int32, maxLength: null, nullable: false),
+            new("verbuild", SqlType.Int32, maxLength: null, nullable: false),
+            new("vercomments", NVarcharSqlType.Get(1024, collation, Coercibility.Implicit), maxLength: 1024, nullable: true),
+            new("verid", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
+            new("isencrypted", SqlType.Bit, maxLength: null, nullable: false),
+            new("readrolesid", VarbinarySqlType.Get(85), maxLength: 85, nullable: true),
+            new("writerolesid", VarbinarySqlType.Get(85), maxLength: 85, nullable: true),
+        ]);
+    }
+
+    private static void SeedMsdbTable(Database msdb, string name, HeapColumn[] columns)
+    {
+        var table = new HeapTable(name, columns, msdb.AllocateObjectId()) { OwningDatabase = msdb, IsMsShipped = true };
+        msdb.Schemas[Database.DefaultSchemaName].HeapTables[table.Name] = table;
     }
 
     /// <summary>
@@ -164,7 +432,7 @@ public sealed partial class Simulation
             new("last_valid_restore_time", SqlType.DateTime, maxLength: null, nullable: true),
             new("compression_algorithm", NVarcharSqlType.Get(32, msdb.Collation, Coercibility.Implicit), maxLength: 32, nullable: true),
         ];
-        var table = new HeapTable("backupset", columns, msdb.AllocateObjectId()) { OwningDatabase = msdb };
+        var table = new HeapTable("backupset", columns, msdb.AllocateObjectId()) { OwningDatabase = msdb, IsMsShipped = true };
         msdb.Schemas[Database.DefaultSchemaName].HeapTables[table.Name] = table;
     }
 
@@ -254,6 +522,7 @@ public sealed partial class Simulation
             isJoinUpdatable: false)
         {
             DefinitionText = $"CREATE VIEW dbo.syspolicy_system_health_state AS {bodyText}",
+            IsMsShipped = true,
         };
         schema.Views[view.Name] = view;
     }
@@ -309,6 +578,7 @@ public sealed partial class Simulation
             isJoinUpdatable: false)
         {
             DefinitionText = $"CREATE VIEW dbo.syspolicy_configuration AS {bodyText}",
+            IsMsShipped = true,
         };
         schema.Views[view.Name] = view;
     }
@@ -343,6 +613,7 @@ public sealed partial class Simulation
             createDate: DateTime.UtcNow)
         {
             DefinitionText = $"CREATE FUNCTION dbo.fn_syspolicy_is_automation_enabled() RETURNS bit AS BEGIN {bodyText} END",
+            IsMsShipped = true,
         };
         schema.Functions[function.Name] = function;
     }
@@ -2252,6 +2523,18 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Whether the <c>UPDATE</c> under the cursor opens <c>UPDATE STATISTICS</c>,
+    /// leaving the cursor where it was either way.
+    /// </summary>
+    private static bool OpensUpdateStatistics(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var opens = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Statistics };
+        context.RestoreCheckpoint(checkpoint);
+        return opens;
+    }
+
+    /// <summary>
     /// Drives the per-statement dispatch loop until either end-of-batch
     /// (when <paramref name="endKeyword"/> is null — top-level call from
     /// <see cref="CreateResultSetsForCommand"/>) or the matching keyword
@@ -3326,7 +3609,7 @@ public sealed partial class Simulation
             {
                 Keyword: Keyword.Create or Keyword.Alter or Keyword.Drop or Keyword.Truncate or Keyword.Exec or Keyword.Execute
                     or Keyword.Grant or Keyword.Deny or Keyword.Revoke or Keyword.Dbcc,
-            } || (context.Token is ReservedKeyword { Keyword: Keyword.Update } && IsUpdateStatistics(context));
+            } || (context.Token is ReservedKeyword { Keyword: Keyword.Update } && OpensUpdateStatistics(context));
         }
 
         // A doomed transaction refuses object DDL with Msg 3930 the way it

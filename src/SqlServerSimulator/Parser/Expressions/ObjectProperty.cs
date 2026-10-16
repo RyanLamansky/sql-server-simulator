@@ -351,7 +351,8 @@ internal sealed class ObjectProperty : Expression
             // IsSystemTable is 0 even for a catalog view; DacFx's
             // default-constraint populator filters on `= 0`, so a NULL here
             // silently drops every DEFAULT constraint from a bacpac export.
-            "ISEXTENDEDPROC" or "ISMSSHIPPED" or "ISQUEUE" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
+            "ISMSSHIPPED" => Flag(obj.IsMsShipped),
+            "ISEXTENDEDPROC" or "ISQUEUE" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
             // A view's answer runs the indexed-view battery, which needs a
             // batch to parse its body in; Run answers it before reaching here.
             "ISINDEXABLE" => obj switch

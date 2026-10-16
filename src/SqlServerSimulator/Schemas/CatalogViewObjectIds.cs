@@ -350,6 +350,27 @@ internal static class CatalogViewObjectIds
         ["sysprocesses"] = -210,
         ["sysservers"] = -212,
         ["sysusers"] = -140,
+        ["sys.database_automatic_tuning_options"] = -598,
+        ["sys.database_mirroring_endpoints"] = -235,
+        ["sys.dm_db_column_store_row_group_physical_stats"] = -586,
+        ["sys.dm_db_mirroring_auto_page_repair"] = -735915642,
+        ["sys.dm_db_persisted_sku_features"] = -354452907,
+        ["sys.dm_hadr_auto_page_repair"] = -629792996,
+        ["sys.dm_hadr_availability_group_states"] = -683019598,
+        ["sys.dm_hadr_availability_replica_cluster_states"] = -655454781,
+        ["sys.dm_hadr_availability_replica_states"] = -744484871,
+        ["sys.dm_os_buffer_pool_extension_configuration"] = -817648642,
+        ["sys.dm_os_cluster_nodes"] = -39192848,
+        ["sys.dm_os_job_object"] = -380468051,
+        ["sys.dm_os_loaded_modules"] = -1035533931,
+        ["sys.dm_os_memory_cache_counters"] = -267822312,
+        ["sys.dm_os_memory_cache_hash_tables"] = -428028999,
+        ["sys.dm_os_memory_health_history"] = -890463207,
+        ["sys.dm_os_windows_info"] = -39745214,
+        ["sys.dm_server_audit_status"] = -119413159,
+        ["sys.dm_xtp_transaction_stats"] = -995830047,
+        ["sys.resource_governor_configuration"] = -253,
+        ["sys.traces"] = -855650752,
     }.ToFrozenDictionary(BuiltInToken.Comparer);
 
     /// <summary>
@@ -360,6 +381,8 @@ internal static class CatalogViewObjectIds
     public static readonly FrozenDictionary<string, int> ByProcedureName = new Dictionary<string, int>(BuiltInToken.Comparer)
     {
         ["sp_add_trusted_assembly"] = -207093074,
+        ["sp_MSgetalertinfo"] = -6695601,
+        ["sp_validatelogins"] = -165200503,
         ["sp_addextendedproperty"] = -806860202,
         ["sp_addlinkedserver"] = -414504921,
         ["sp_addlinkedsrvlogin"] = -946112541,

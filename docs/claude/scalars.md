@@ -760,7 +760,7 @@ Column shape mirrors real exactly: `(DbId smallint, FileId smallint, TimeStamp b
 `NULL` is the wildcard at either argument (all databases / all files); a non-NULL id naming no database or file yields zero rows (including negatives such as `-1`), matching real.
 The simulator has no physical file model, so it reports **one row per (database, `file_id 1`)** with every IO counter, `BytesOnDisk`, and `FileHandle` at 0 — the file cardinality per database differs from real (real seeds tempdb with multiple data files) but the wildcard / filter semantics and column shape match.
 Wrong arg count matches real: one argument → **Msg 313** (insufficient arguments), three → **Msg 8144** (too many arguments).
-The legacy `::fn_virtualfilestats(...)` prefix form isn't tokenized (`::` needs grammar work); the bare and `sys.`-qualified forms cover the documented invocations.
+The legacy `::` prefix reads as the bare name for the SQL Server 2000 system functions — `fn_virtualfilestats`, `fn_helpcollations`, `fn_listextendedproperty`, `fn_trace_gettable` — in a FROM clause and after `APPLY`; another name is Msg 195 at state 15 and a qualified one (`::sys.fn_…`) Msg 102 near its dot (probed 2026-10-16 against SQL Server 2025).
 Dispatch lives in `Parser/Selection.VirtualFileStats.cs`, wired into `ParseSingleFromSourceCore` after `ParseObjectName` (so the `sys.` qualifier parses first, unlike the qualifier-less rowset functions).
 
 ## Session-state store: `SESSION_CONTEXT` / `CONTEXT_INFO` / connection scalars

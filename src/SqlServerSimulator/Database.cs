@@ -454,7 +454,8 @@ internal sealed partial class Database
     /// <summary>
     /// When the last <c>DBCC CHECKDB</c> over this database began, which
     /// <c>DATABASEPROPERTYEX(…, 'LastGoodCheckDbTime')</c> reports and each
-    /// startup line of the error log recalls; null until one has run. Every
+    /// startup line of the error log recalls, as does <c>DBCC DBINFO</c>'s
+    /// <c>dbi_dbccLastKnownGood</c>; null until one has run. Every
     /// form that checks sets it — <c>PHYSICAL_ONLY</c>, <c>NOINDEX</c> and
     /// <c>TABLOCK</c> too — while <c>ESTIMATEONLY</c> and the narrower checks
     /// (<c>CHECKALLOC</c>, <c>CHECKTABLE</c>) leave it (probed 2026-10-16

@@ -10,7 +10,7 @@ Everything below was probed 2026-09-28 against SQL Server 2025 through the `.vs/
 - **What settles at parse, what at run.**
   A `WITH` word that is no DBCC option at all is Msg 195 state 4 while the batch compiles, so none of it runs; `MAXDOP` without `= n` is the same.
   Everything else raises when the statement runs: an unknown subcommand (Msg 2526 state 3), an option the subcommand doesn't take (Msg 2532), the wrong argument count (Msg 2583) and an unusable argument (Msg 2560, state 9 unless noted).
-  A known subcommand the simulator hasn't built (`PAGE`, `IND`, `SHOWCONTIG`, `MEMORYSTATUS`, …) is `NotSupportedException`, not Msg 2526 — after the permission refusal real raises first for a caller outside `sysadmin`: Msg 2571 for `PAGE`, `IND`, `MEMORYSTATUS` and `OUTPUTBUFFER` (state 1) and `DBINFO` (state 14), Msg 7983 for `PROCCACHE` without `db_owner` (probed 2026-10-04 against SQL Server 2025).
+  A known subcommand the simulator hasn't built (`PAGE`, `IND`, `SHOWCONTIG`, `MEMORYSTATUS`, …) is `NotSupportedException`, not Msg 2526 — after the permission refusal real raises first for a caller outside `sysadmin`: Msg 2571 for `PAGE`, `IND`, `MEMORYSTATUS` and `OUTPUTBUFFER` (state 1), Msg 7983 for `PROCCACHE` without `db_owner` (probed 2026-10-04 against SQL Server 2025).
 - **Messages.**
   Msg 2528 closes every successful run, `WITH NO_INFOMSGS` silencing it and every other informational line — and, for `INDEXDEFRAG` and `SHRINKFILE`, the result set too.
   A command's rows close with their own counted DONE before Msg 2528, which a second DONE follows; `CHECKCONSTRAINTS` alone sends Msg 2528 before its rows' DONE and leaves that DONE uncounted (`AfterDbccRows`, and the wire test in `StatementDoneWireTests`).
@@ -102,6 +102,12 @@ The arguments check in order — three or four of them (Msg 2583 state 3), the d
 Only then is a print option past 3 Msg 2560 state 102.
 The dump itself — under trace flag 3604 or `WITH TABLERESULTS` — is real's page image, which the simulator's pages don't carry: `NotSupportedException`.
 An earlier record had `WITH TABLERESULTS` returning an empty `ParentObject` / `Object` / `Field` / `VALUE` set (probed 2026-09-30) in a shape it doesn't capture: re-probed 2026-10-08 on CU7 (17.0.4065.4), over sqlcmd and SqlClient, every form returned the page's rows — pages 0, 1 and 1000 of the data file, print options 0 through 3 and none, the database by id 0 or by name, the log file's header page, under `NO_INFOMSGS` and through `INSERT … EXEC`, as had the 2026-09-30 sweep's own `tempdb` page 1 case — while a page past the file is Msg 8968 with no result set; RTM-GDR (17.0.1135.8) refused the probe login with Msg 2571.
+
+## `DBINFO`
+
+`DBCC DBINFO [( [database] )]` is `sysadmin`'s (Msg 2571 state 14) and takes a database by name only, a number being Msg 2560 state 9.
+Without `TABLERESULTS` real writes the boot page nowhere a client reads and sends Msg 2528 alone; with it, real's 108 `ParentObject` / `Object` / `Field` / `VALUE` rows, all `nvarchar(255)` (probed 2026-10-16 against SQL Server 2025).
+The database's name, id, compatibility level, collation id, creation date, family and Service Broker GUIDs follow the simulator's state, and `dbi_dbccLastKnownGood` is the `LastGoodCheckDbTime` the last `CHECKDB` set; the log sequence numbers, status words and other internals are a fresh database's, and the structure address a stand-in.
 
 ## Table maintenance
 

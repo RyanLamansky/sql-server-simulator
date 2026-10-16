@@ -123,6 +123,10 @@ partial class Selection
         string entity;
         Func<string, bool> holds;
         (Storage.HeapColumn[] Columns, Func<Permission, int, bool> Holds)? columns = null;
+        // Two NULLs name the server (probed 2026-10-16 against SQL Server
+        // 2025), while a named securable with a NULL class lists nothing.
+        if (classValue.IsNull && securable.Run(runtime).IsNull)
+            className = "SERVER";
         if (BuiltInToken.Comparer.Equals(className, "SERVER"))
         {
             entity = "server";

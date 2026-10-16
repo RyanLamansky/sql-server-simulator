@@ -771,6 +771,15 @@ internal sealed partial class Selection
         if (next is AtPrefixedString && IsXmlNodesCallAhead(context))
             return ParseXmlNodesSource(context, []);
 
+        // `CROSS APPLY ::fn_virtualfilestats(…)` takes the legacy prefix as
+        // the FROM clause does.
+        if (next is Operator { Character: ':' })
+        {
+            var chainedResolverForPrefix = binding.ResolverOver(leftSources, scope.OuterTypeResolver);
+            context.RestoreCheckpoint(checkpoint);
+            return AcrossApplyBoundary(context, leftSources, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForPrefix)));
+        }
+
         if (next is Name nextName)
         {
             // The right-side source's column references can correlate to the
@@ -1082,6 +1091,8 @@ internal sealed partial class Selection
         // source of its own.
         if (token is not Operator { Character: '(' })
             context.Batch.CurrentStatement.MarkOpensTransaction();
+        if (token is Operator { Character: ':' })
+            token = ParseLegacyFunctionPrefix(context);
         switch (token)
         {
             // A leading `.` opens a name whose db/schema positions are omitted
@@ -1192,47 +1203,60 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf));
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_validate_plan_guide"))
                         return BuiltInRowsetSource(context, ParseValidatePlanGuide(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_gettable"))
+                        return BuiltInRowsetSource(context, ParseTraceGetTable(context, "sys.fn_trace_gettable"));
                 }
 
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text,
                 // dm_exec_input_buffer, dm_exec_cursors and
                 // dm_io_virtual_file_stats are system TVFs, `sys.`-qualified like
                 // fn_virtualfilestats and dispatched on the same terms.
-                if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
+                // A three-part name runs the function in the named database,
+                // its arguments still evaluating in the session's (probed
+                // 2026-10-16 against SQL Server 2025: from master,
+                // db.sys.dm_db_stats_properties(OBJECT_ID('dbo.t'), 1) finds
+                // nothing and OBJECT_ID('db.dbo.t') finds the statistic).
+                Database? sysRowsetDatabase = null;
+                if (IsSysRowsetFunction(objectName) && objectName.Count == 3
+                    && context.Batch.Connection.Simulation.Databases.TryGetValue(objectName[0], out var namedDatabase))
+                {
+                    sysRowsetDatabase = namedDatabase;
+                }
+                if ((objectName.Count == 2 || sysRowsetDatabase is not null) && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referencing_entities"))
-                        return BuiltInRowsetSource(context, ParseSqlReferencingEntities(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencingEntities(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referenced_entities"))
-                        return BuiltInRowsetSource(context, ParseSqlReferencedEntities(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencedEntities(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_describe_first_result_set"))
-                        return BuiltInRowsetSource(context, ParseDescribeFirstResultSet(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseDescribeFirstResultSet(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_sql_text"))
-                        return BuiltInRowsetSource(context, ParseSqlText(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlText(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_plan_attributes"))
-                        return BuiltInRowsetSource(context, ParsePlanAttributes(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParsePlanAttributes(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_query_plan"))
-                        return BuiltInRowsetSource(context, ParseQueryPlan(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseQueryPlan(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_text_query_plan"))
-                        return BuiltInRowsetSource(context, ParseTextQueryPlan(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseTextQueryPlan(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_query_statistics_xml"))
-                        return BuiltInRowsetSource(context, ParseQueryStatisticsXml(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseQueryStatisticsXml(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
-                        return BuiltInRowsetSource(context, ParseInputBuffer(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseInputBuffer(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_cursors"))
-                        return BuiltInRowsetSource(context, ParseExecCursors(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseExecCursors(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_fts_parser"))
-                        return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseFtsParser(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_io_virtual_file_stats"))
-                        return BuiltInRowsetSource(context, ParseVirtualFileStatsDmv(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseVirtualFileStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_info"))
-                        return BuiltInRowsetSource(context, ParseLogInfoDmv(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseLogInfoDmv(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_stats"))
-                        return BuiltInRowsetSource(context, ParseLogStatsDmv(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseLogStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_os_volume_stats"))
-                        return BuiltInRowsetSource(context, ParseVolumeStatsDmv(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, InDatabase(ParseVolumeStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_xe_file_target_read_file"))
-                        return BuiltInRowsetSource(context, ParseXeFileTargetReadFile(context, objectName.ToString()));
-                    if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString()) is { } indexDmv)
+                        return BuiltInRowsetSource(context, InDatabase(ParseXeFileTargetReadFile(context, objectName.ToString()), sysRowsetDatabase));
+                    if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString(), sysRowsetDatabase) is { } indexDmv)
                         return BuiltInRowsetSource(context, indexDmv);
                 }
 
@@ -2063,9 +2087,11 @@ internal sealed partial class Selection
     /// <c>CROSS APPLY sys.dm_exec_sql_text(r.sql_handle)</c>.
     /// </summary>
     private static bool IsSysRowsetFunction(MultiPartName name) =>
-        name.Count == 2
+        ((name.Count == 1 || (name.Count == 2 && BuiltInToken.Equals(name.ImmediateQualifier, "sys")))
+            && BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_my_permissions", "fn_trace_gettable", "fn_validate_plan_guide", "fn_virtualfilestats"))
+        || (name.Count is 2 or 3
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats", "fn_xe_file_target_read_file");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats", "fn_xe_file_target_read_file"));
 
     /// <summary>
     /// A <c>WITH</c> right after a rowset function's call, no alias between,
@@ -2110,6 +2136,49 @@ internal sealed partial class Selection
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         throw SimulatedSqlException.CteRequiresPrecedingSemicolon(state: 2).PinLine(12);
+    }
+
+    /// <summary>
+    /// The function name after the legacy <c>::</c> prefix, which takes only
+    /// the SQL Server 2000 system functions — <c>::fn_virtualfilestats(…)</c>
+    /// reads as <c>fn_virtualfilestats(…)</c> — and refuses another name with
+    /// Msg 195 at state 15, a qualified one with Msg 102 near its dot (probed
+    /// 2026-10-16 against SQL Server 2025). Entered on the first colon; leaves
+    /// the cursor on the name.
+    /// </summary>
+    private static Name ParseLegacyFunctionPrefix(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: ':' } || context.GetNextRequired() is not Name name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var afterName = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Operator { Character: '.' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(afterName);
+        return BuiltInToken.EqualsAny(name.Value, "fn_helpcollations", "fn_listextendedproperty", "fn_trace_gettable", "fn_virtualfilestats")
+            ? name
+            : throw SimulatedSqlException.UnrecognizedSystemFunction(name.Value, state: 15);
+    }
+
+    /// <summary>
+    /// <paramref name="plan"/> run inside <paramref name="database"/>, a
+    /// three-part name's, its rows stepping back out to the session's
+    /// database as each reaches the referencing query; the plan itself when
+    /// <paramref name="database"/> is null.
+    /// </summary>
+    private static Selection InDatabase(Selection plan, Database? database) =>
+        database is null
+            ? plan
+            : new Selection(plan.Schema, plan.ColumnNames, hasOrderBy: false, hasTopOrOffsetOrFetch: false,
+                valueRowSource: (batch, outerResolver) => ModuleDatabaseScope.Enumerate(batch.Connection, database, DeferredRows(plan, batch, outerResolver)))
+            {
+                ColumnNullability = plan.ColumnNullability,
+            };
+
+    /// <summary>The rows of <paramref name="plan"/>, which starts running at the first step.</summary>
+    private static IEnumerable<SqlValue[]> DeferredRows(Selection plan, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        foreach (var row in plan.Execute(batch, outerResolver).RowValues)
+            yield return row;
     }
 
     /// <summary>

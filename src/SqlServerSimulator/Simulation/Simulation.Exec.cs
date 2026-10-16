@@ -212,6 +212,7 @@ partial class Simulation
         }
 
         MultiPartName procName;
+        var namedByVariable = context.Token is AtPrefixedString;
         if (context.Token is AtPrefixedString nameVariable)
         {
             procName = ProcedureNameFromVariable(batch, nameVariable.Value);
@@ -432,6 +433,8 @@ partial class Simulation
                 => this.InvokeBlockedComponentProcedure(batch, systemProcName, calledAs),
             "sp_cycle_errorlog" => InvokeSpCycleErrorLog(batch, calledAs),
             "sp_enumerrorlogs" => InvokeSpEnumErrorLogs(batch, calledAs, returnCodeVar),
+            "sp_MSgetalertinfo" => InvokeSpGetAlertInfo(batch, calledAs),
+            "sp_validatelogins" => InvokeSpValidateLogins(batch, calledAs),
             "sp_readerrorlog" => InvokeSpReadErrorLog(batch, calledAs, returnCodeVar),
             "xp_enumerrorlogs" => InvokeXpEnumErrorLogs(batch, calledAs),
             "xp_logevent" => InvokeXpLogEvent(batch, calledAs, returnCodeVar),
@@ -505,7 +508,9 @@ partial class Simulation
 
         if (batch.IsSkipping)
         {
-            if (batch.MissingProcedureReferences is { } missing && !BatchContext.IsLocalTempName(procName.Leaf) && !ResolvesProcedure(batch, procName))
+            // A name a variable holds is known only as the body runs, so it
+            // draws no Msg 2007 (probed 2026-10-16 against SQL Server 2025).
+            if (batch.MissingProcedureReferences is { } missing && !namedByVariable && !BatchContext.IsLocalTempName(procName.Leaf) && !ResolvesProcedure(batch, procName))
                 missing.Add(procName.WithoutOmittedLeading().Written);
             yield break;
         }
@@ -774,7 +779,9 @@ partial class Simulation
             var expression = Expression.Parse(context);
             var value = expression.Run(new RuntimeContext(
                 columnName => throw SimulatedSqlException.ColumnReferenceNotAllowed(columnName), batch));
-            return new ProcArgument(name, isDefault: false, value: value, outputSlot: null);
+            return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out }
+                ? throw SimulatedSqlException.ConstantPassedAsOutput()
+                : new ProcArgument(name, isDefault: false, value: value, outputSlot: null);
         }
 
         // @variable reference — capture the slot (live, so OUTPUT writeback

@@ -11,23 +11,25 @@ partial class Selection
     /// <c>dm_db_index_operational_stats</c>, <c>dm_db_stats_properties</c>,
     /// <c>dm_db_stats_histogram</c>, <c>dm_db_incremental_stats_properties</c>
     /// and <c>dm_db_missing_index_columns</c> — by name, or null for another.
-    /// Shapes probed 2026-10-05 against SQL Server 2025.
+    /// Shapes probed 2026-10-05 against SQL Server 2025. A non-null
+    /// <paramref name="database"/> — a three-part name's — is where the rows
+    /// are read, after the arguments evaluate in the session's database.
     /// </summary>
-    private static Selection? ParseIndexDmv(ParserContext context, string leaf, string functionName)
+    private static Selection? ParseIndexDmv(ParserContext context, string leaf, string functionName, Database? database)
     {
         Span<char> upper = stackalloc char[leaf.Length];
         _ = leaf.AsSpan().ToUpperInvariant(upper);
         return upper switch
         {
-            "DM_DB_INCREMENTAL_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, 2, IncrementalStatsColumns, static (_, _) => []),
-            "DM_DB_INDEX_OPERATIONAL_STATS" => ParseSystemTvf(context, functionName, 4, OperationalStatsColumns, static (_, _) => []),
-            "DM_DB_INDEX_PHYSICAL_STATS" => ParseSystemTvf(context, functionName, 5, BuiltInResources.IndexPhysicalStatsColumns,
+            "DM_DB_INCREMENTAL_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, IncrementalStatsColumns, static (_, _) => []),
+            "DM_DB_INDEX_OPERATIONAL_STATS" => ParseSystemTvf(context, functionName, database, 4, OperationalStatsColumns, static (_, _) => []),
+            "DM_DB_INDEX_PHYSICAL_STATS" => ParseSystemTvf(context, functionName, database, 5, BuiltInResources.IndexPhysicalStatsColumns,
                 static (batch, args) => BuiltInResources.IndexPhysicalStats(batch, IntArgument(args[0]), IntArgument(args[1]), IntArgument(args[2]), IntArgument(args[3]),
                     args[4].IsNull ? null : args[4].CoerceTo(SqlType.NVarchar).AsString)),
-            "DM_DB_MISSING_INDEX_COLUMNS" => ParseSystemTvf(context, functionName, 1, MissingIndexColumnsColumns, static (_, _) => []),
-            "DM_DB_STATS_HISTOGRAM" => ParseSystemTvf(context, functionName, 2, StatsHistogramColumns,
+            "DM_DB_MISSING_INDEX_COLUMNS" => ParseSystemTvf(context, functionName, database, 1, MissingIndexColumnsColumns, static (_, _) => []),
+            "DM_DB_STATS_HISTOGRAM" => ParseSystemTvf(context, functionName, database, 2, StatsHistogramColumns,
                 static (batch, args) => BuiltInResources.StatsHistogram(batch, IntArgument(args[0]), IntArgument(args[1]))),
-            "DM_DB_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, 2, StatsPropertiesColumns,
+            "DM_DB_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, StatsPropertiesColumns,
                 static (batch, args) => BuiltInResources.StatsProperties(batch, IntArgument(args[0]), IntArgument(args[1]))),
             _ => null,
         };
@@ -87,7 +89,7 @@ partial class Selection
     /// expression or <c>DEFAULT</c> (read as NULL), whose rows
     /// <paramref name="rows"/> produces when it runs.
     /// </summary>
-    private static Selection ParseSystemTvf(ParserContext context, string functionName, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows)
+    private static Selection ParseSystemTvf(ParserContext context, string functionName, Database? database, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -124,7 +126,16 @@ partial class Selection
                 var values = new SqlValue[arity];
                 for (var i = 0; i < arity; i++)
                     values[i] = arguments[i]?.Run(runtime) ?? SqlValue.Null(SqlType.Int32);
-                var produced = rows(batch, values);
+                List<SqlValue[]> produced;
+                var scope = database is null ? default : ModuleDatabaseScope.Enter(batch.Connection, database);
+                try
+                {
+                    produced = rows(batch, values);
+                }
+                finally
+                {
+                    scope.Exit();
+                }
                 var encoded = new List<byte[]>(produced.Count);
                 foreach (var row in produced)
                     encoded.Add(RowEncoder.EncodeRow(schema, row));

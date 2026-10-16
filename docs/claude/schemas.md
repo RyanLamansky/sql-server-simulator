@@ -135,6 +135,7 @@ Probed 2026-09-28 against SQL Server 2025 for every module kind:
 
 `ModuleDatabaseScope` is the switch: an eagerly run body (a procedure, trigger, scalar or multi-statement function) enters it around the body, and a view or inline function, whose rows the referencing statement pulls lazily, enters it around each step of its enumeration so the statement's own expressions evaluate between steps in the session's database.
 It isn't a `USE` — no message is sent and the caller resumes where it was.
+A system table-valued function named through a database (`otherdb.sys.dm_db_stats_properties(…)`) enters it the same way, reading that database's objects while its arguments evaluate in the session's (probed 2026-10-16 against SQL Server 2025: from `master`, `OBJECT_ID('dbo.t')` as the argument finds nothing and `OBJECT_ID('otherdb.dbo.t')` finds the statistic); a database that doesn't exist is Msg 208 on the whole name.
 A login that is `dbo` in the module's database but not in the session's runs the body under the `dbo` bypass, which also waves through the body's references back into the session's database; how real checks that reach wasn't probed.
 
 ## DROP SCHEMA
@@ -284,6 +285,7 @@ A NULL on any argument propagates NULL.
   A constraint's name is scoped to the schema of the table that owns it, so one on a table in schema `s` answers only through `OBJECT_ID('s.<name>')` and never unqualified from `dbo` (probe-confirmed), and its metadata visibility follows that table the way a trigger's follows its parent.
   Resolution is attempted last, after tables, so a name a table also holds still answers the table's id.
 
+- **The modeled system functions answer with real's ids** under their own type codes (`IF`, `TF`, `FN`): a `sys.` name, one a database that exists qualifies, or a bare `fn_` one — `OBJECT_ID('fn_my_permissions')` is an id where `OBJECT_ID('dm_exec_sql_text')` is NULL (probed 2026-10-16 against SQL Server 2025).
 - **Runtime-evaluated arguments**: `DECLARE @n nvarchar(100) = 'foo'; SELECT OBJECT_ID(@n)` works — both args are full `Expression`s.
 - **Unqualified function names resolve as any unqualified name does.** `BatchContext.TryResolveFunction` takes 2-/3-part names only, because a bare `f()` at a *call* site is Msg 195 on real; `OBJECT_ID` is a name lookup rather than a call, and real returns the id for `OBJECT_ID('f')`, so it asks `TryResolveFunctionName`, which takes the 1-part form through the default-schema search.
   Skipping the function namespace silently broke the common `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which reported NULL rather than the property.

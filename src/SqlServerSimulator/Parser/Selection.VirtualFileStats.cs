@@ -25,8 +25,7 @@ partial class Selection
     /// in-process store that performs no disk IO. The wildcard / filter
     /// semantics still match real so a caller enumerating files gets the right
     /// row cardinality per database. The legacy <c>::fn_virtualfilestats(...)</c>
-    /// prefix form isn't tokenized; the bare and <c>sys.</c>-qualified forms
-    /// cover the documented invocations.
+    /// prefix reaches here as the bare name (see <c>ParseLegacyFunctionPrefix</c>).
     /// </remarks>
     public static Selection ParseVirtualFileStats(ParserContext context, string functionName)
     {

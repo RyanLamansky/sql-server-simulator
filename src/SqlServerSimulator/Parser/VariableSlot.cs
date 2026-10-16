@@ -34,7 +34,10 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
 
-    public SqlValue Value = value.IsNull && declaredType is SystemNameSqlType ? SqlValue.Null(SysnameVariable) : value;
+    public SqlValue Value = declaredType is not SystemNameSqlType ? value
+        : value.IsNull ? SqlValue.Null(SysnameVariable)
+        : value.Type is SystemNameSqlType ? SqlValue.FromNVarchar(SysnameVariable, value.AsString)
+        : value;
 
     private static readonly NVarcharSqlType SysnameVariable = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
 

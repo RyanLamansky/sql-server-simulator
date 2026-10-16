@@ -272,4 +272,14 @@ public sealed class InsertExecTests
         _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("create table t (a int); insert t output inserted.a exec ('select 1'); create table after_error (a int)"));
         AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from sys.tables where name = 'after_error'"));
     }
+
+    [TestMethod]
+    public void ASysnameParameter_ReachesAnNVarcharColumn()
+        => AreEqual("db", new Simulation().ExecuteScalar("""
+            create table t (a int);
+            insert t values (1);
+            create table #u (n nvarchar(128) not null);
+            insert #u exec sp_executesql N'select @i from t', N'@i sysname', N'db';
+            select n from #u
+            """));
 }

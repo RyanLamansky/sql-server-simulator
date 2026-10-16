@@ -50,6 +50,7 @@ internal static partial class BuiltInResources
     private static readonly CharSqlType charTwo = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
     private static readonly CharSqlType charOne = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
     private static readonly SqlValue notMsShipped = SqlValue.FromBoolean(false);
+    private static readonly SqlValue msShippedValue = SqlValue.FromBoolean(true);
 
     /// <summary>
     /// Shared empty row set for the AlwaysOn Availability-Group catalog views
@@ -94,6 +95,7 @@ internal static partial class BuiltInResources
         RegisterServerAndDatabases(views);
         RegisterRuntimeDmvs(views);
         RegisterOsDmvs(views);
+        RegisterHealthCheckViews(views);
         RegisterServerStateDmvs(views);
         RegisterPerformanceCounters(views);
         RegisterExtendedEvents(views);

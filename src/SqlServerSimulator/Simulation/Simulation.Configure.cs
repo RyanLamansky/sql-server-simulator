@@ -14,6 +14,9 @@ partial class Simulation
     /// <summary><c>configuration_id</c> of <c>show advanced options</c>.</summary>
     private const int ShowAdvancedOptionsConfigurationId = 518;
 
+    /// <summary><c>configuration_id</c> of <c>default trace enabled</c>.</summary>
+    private const int DefaultTraceEnabledConfigurationId = 1568;
+
     /// <summary><c>configuration_id</c> of <c>clr strict security</c>.</summary>
     private const int ClrStrictSecurityConfigurationId = 1587;
 
@@ -67,6 +70,13 @@ partial class Simulation
     /// 10343).
     /// </summary>
     internal bool ClrStrictSecurity => this.ConfigurationInUse(ClrStrictSecurityConfigurationId) != 0;
+
+    /// <summary>
+    /// The installed value of <c>default trace enabled</c>, 1 unless
+    /// <c>sp_configure</c> and <c>RECONFIGURE</c> turned it off: while on,
+    /// <c>sys.traces</c> lists the default trace.
+    /// </summary>
+    internal bool DefaultTraceEnabled => this.ConfigurationInUse(DefaultTraceEnabledConfigurationId) != 0;
 
     /// <summary>
     /// The installed value of <paramref name="configurationId"/>, falling back

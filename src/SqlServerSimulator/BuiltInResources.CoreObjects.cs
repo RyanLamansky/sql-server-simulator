@@ -209,7 +209,7 @@ internal static partial class BuiltInResources
                         tableTypeDesc,
                         SqlValue.FromDateTime(t.CreateDate),
                         SqlValue.FromDateTime(t.ModifyDate),
-                        notMsShipped,
+                        t.IsMsShipped ? msShippedValue : notMsShipped,
                         tt,
                         ttd,
                         htid,
@@ -988,7 +988,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromNVarchar(obj.ObjectTypeDescription),
                     SqlValue.FromDateTime(obj.CreateDate),
                     SqlValue.FromDateTime(obj.ModifyDate),
-                    notMsShipped,
+                    obj.IsMsShipped ? msShipped : notMsShipped,
                     notPublished,
                     notPublished,
                 ];

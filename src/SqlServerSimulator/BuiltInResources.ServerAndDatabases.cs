@@ -980,11 +980,11 @@ internal static partial class BuiltInResources
         (1536, "max text repl size (B)", 65536, -1, 2147483647, 65536, "Maximum size of a text field in replication.", true, false),
         (1537, "media retention", 0, 0, 365, 0, "Tape retention period in days", true, true),
         (1538, "cost threshold for parallelism", 5, 0, 32767, 5, "cost threshold for parallelism", true, true),
-        (1539, "max degree of parallelism", 8, 0, 32767, 8, "maximum degree of parallelism", true, true),
+        (1539, "max degree of parallelism", 0, 0, 32767, 0, "maximum degree of parallelism", true, true),
         (1540, "min memory per query (KB)", 1024, 512, 2147483647, 1024, "minimum memory per query (kBytes)", true, true),
         (1541, "query wait (s)", -1, -1, 2147483647, -1, "maximum time to wait for query memory (s)", true, true),
         (1543, "min server memory (MB)", 0, 0, 2147483647, 16, "Minimum size of server memory (MB)", true, true),
-        (1544, "max server memory (MB)", 4096, 128, 2147483647, 4096, "Maximum size of server memory (MB)", true, true),
+        (1544, "max server memory (MB)", 2147483647, 128, 2147483647, 2147483647, "Maximum size of server memory (MB)", true, true),
         (1545, "query governor cost limit", 0, 0, 2147483647, 0, "Maximum estimated cost allowed by query governor", true, true),
         (1546, "lightweight pooling", 0, 0, 1, 0, "User mode scheduler uses lightweight pooling", false, true),
         (1547, "scan for startup procs", 0, 0, 1, 0, "scan for startup stored procedures", false, true),
@@ -1190,7 +1190,7 @@ internal static partial class BuiltInResources
     /// Service Broker isn't modeled; the column is non-null in real SQL
     /// Server, so a stable constant stands in.
     /// </summary>
-    private static readonly Guid SysDatabasesBrokerGuid = new("00000000-0000-0000-0000-000000000001");
+    internal static readonly Guid SysDatabasesBrokerGuid = new("00000000-0000-0000-0000-000000000001");
 
     /// <summary>
     /// <c>is_fulltext_enabled</c> / <c>DATABASEPROPERTYEX(…, 'IsFulltextEnabled')</c>:

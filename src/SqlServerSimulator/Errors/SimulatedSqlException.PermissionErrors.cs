@@ -128,6 +128,14 @@ public sealed partial class SimulatedSqlException
         new("The user does not have permission to perform this action.", 297, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 8189: a trace surface — <c>sys.traces</c> at
+    /// state 6, <c>fn_trace_gettable</c> at state 15 — read without
+    /// <c>ALTER TRACE</c> (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TracePermissionDenied(string surface, byte state) =>
+        new($"You do not have permission to run '{surface}'.", 8189, 14, state);
+
+    /// <summary>
     /// Msg 15562: a database-scoped identity — an <c>EXECUTE AS USER</c>
     /// context — reaching for server state from a database that isn't
     /// <c>TRUSTWORTHY</c>, as a server-scope DMV read does (probed 2026-10-15

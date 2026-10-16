@@ -831,7 +831,7 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 - **Columnstore storage views**: `sys.column_store_segments`, `sys.column_store_dictionaries` and `sys.column_store_row_groups` carry real's shapes and no rows — what real returns over a database holding no compressed row group — and reading `column_store_row_groups` sends the Msg 8625 real's join-hinted definition earns (probed 2026-10-06 against SQL Server 2025).
   Over a columnstore index real's rows describe its own compression (`size_in_bytes`, encodings, dictionary ids, hobt ids — a two-row index already reports one segment per column, `state_description` `COMPRESSED`), which a heap of ordinary rows has no counterpart for: not chased.
-  `sys.dm_db_column_store_row_group_physical_stats` isn't registered (Msg 208).
+  `sys.dm_db_column_store_row_group_physical_stats` lists nothing on the same terms.
   A `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md).
 
 - **`filter_definition` edge cases**: a predicate the simulator accepts but can't render canonically reports `filter_definition` NULL with `has_filter` still set; the shapes real accepts render as real's (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)).
