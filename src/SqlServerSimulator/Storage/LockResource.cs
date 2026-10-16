@@ -437,15 +437,16 @@ internal sealed class LockManager
     /// </summary>
     public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
-        var waitedBefore = owner.LockWaitedMilliseconds;
-        var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned);
+        var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned, out var waitedMilliseconds);
         // A wait that ended reports itself to a session taking wait_info —
-        // system_health does, keeping a lock wait past thirty seconds.
-        if (owner.LockWaitedMilliseconds != waitedBefore && this.OwningSimulation is { } simulation
+        // system_health does, keeping a lock wait past thirty seconds. One
+        // shorter than the tick clock's granularity measures zero and is
+        // reported all the same.
+        if (waitedMilliseconds >= 0 && this.OwningSimulation is { } simulation
             && (ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.WaitInfo) || ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.WaitCompleted))
             && owner.TryResolveActing() is { } waiter)
         {
-            ExtendedEvents.XeSessionEvents.WaitEnded(waiter, mode, owner.LockWaitedMilliseconds - waitedBefore);
+            ExtendedEvents.XeSessionEvents.WaitEnded(waiter, mode, waitedMilliseconds);
         }
         switch (outcome)
         {
@@ -469,9 +470,11 @@ internal sealed class LockManager
         return outcome;
     }
 
+    // waitedMilliseconds is how long the request waited, or -1 when it didn't.
     [MethodImpl(Tiering.OptimizeFirstCall)]
-    private LockAcquireOutcome TryAcquireCore(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned)
+    private LockAcquireOutcome TryAcquireCore(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned, out long waitedMilliseconds)
     {
+        waitedMilliseconds = -1;
         if (sweepAbandoned)
             this.SweepAbandonedSessions();
         lock (this.gate)
@@ -629,7 +632,7 @@ internal sealed class LockManager
                 // majority — doesn't write the session's wait fields at all.
                 if (waited)
                 {
-                    var waitedMilliseconds = Environment.TickCount64 - owner.WaitStartedTicks;
+                    waitedMilliseconds = Environment.TickCount64 - owner.WaitStartedTicks;
                     owner.LockWaitedMilliseconds += waitedMilliseconds;
                     this.Counters.Waits[counted]++;
                     this.Counters.WaitMilliseconds[counted] += waitedMilliseconds;
