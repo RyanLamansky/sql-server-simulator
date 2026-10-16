@@ -379,6 +379,7 @@ partial class Simulation
         if (dbcc.Arguments.Count == 0)
         {
             simulation.ClearPlanCache();
+            NotePlanCacheFlush(batch);
             return DbccCompleted(batch, dbcc, []);
         }
 
@@ -398,9 +399,14 @@ partial class Simulation
                 break;
             case { Category: SqlTypeCategory.String }:
                 if (BuiltInToken.Equals(value.AsString, "default"))
+                {
                     simulation.ClearPlanCache();
+                    NotePlanCacheFlush(batch);
+                }
                 else if (!BuiltInToken.Equals(value.AsString, "internal"))
+                {
                     throw SimulatedSqlException.DbccParameterIsIncorrect(1);
+                }
                 break;
             default:
                 throw SimulatedSqlException.DbccParameterIsIncorrect(1);
@@ -521,6 +527,8 @@ partial class Simulation
             throw SimulatedSqlException.DbccParameterIsIncorrect(1);
         if (BuiltInToken.EqualsAny(store, "ALL", "SQL Plans"))
             simulation.ClearPlanCache();
+        if (BuiltInToken.Equals(store, "ALL"))
+            NotePlanCacheFlush(batch);
         return DbccCompleted(batch, dbcc, []);
     }
 

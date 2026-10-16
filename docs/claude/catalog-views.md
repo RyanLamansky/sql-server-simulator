@@ -954,6 +954,7 @@ Probed 2026-10-16 against SQL Server 2025 on Linux; the XML docs on those member
 - **Consistency checks**: `CHECKDB`, `CHECKFILEGROUP`, `CHECKALLOC`, `CHECKTABLE` and `CHECKCATALOG` each end with `DBCC CHECKDB (d[, noindex]) [WITH …] executed by <login> found 0 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 0 seconds.` and the internal snapshot's LSNs, preceded by the zero-error summary when that went out as a message (not under `NO_INFOMSGS`, `TABLERESULTS` or `ESTIMATEONLY`).
   The target is the database's own name however written, `CHECKTABLE`'s the three-part table name and an index by name, `CHECKFILEGROUP`'s the filegroup; the `WITH` list is real's order (`all_errormsgs`, `no_infomsgs`, `tablock`, `estimateonly`, `physical_only`, `tableresults`, `data_purity`, `maxdop = n`), never naming `extended_logical_checks`; the login is the one the session runs as (`EXECUTE AS LOGIN`'s); `TABLOCK` and `tempdb` take no snapshot, so their line ends on its two spaces; a `CHECKDB` of `master` logs the resource database too.
   The LSNs stand in for real's: the active virtual log file `DBCC LOGINFO` reports (34, `00000022`), the server's last transaction id as the first block and the split point sixteen blocks on, as real's always is.
+- **Plan cache flushes**: a flush of the whole plan cache (`DBCC FREEPROCCACHE`, its `'default'` pool, `FREESYSTEMCACHE ('ALL')`) writes real's `SQL Server has encountered n occurrence(s) of cachestore flush …` for `Object Plans`, `SQL Plans` and `Bound Trees` under the session — the first at once, later ones only once the last report is five minutes old, counting every flush since; the narrower forms (a plan or SQL handle, one named store) write nothing here, not having been probed.
 - **`KILL`** writes `Process ID n was killed by hostname h, host process ID p.` under the killing session, naming its client's host name and process id (`HOST_NAME()`'s and `HOST_ID()`'s).
 - **Logon triggers' messages** go to the log in place of the client, as [`triggers.md`](triggers.md#logon-triggers) describes.
 - **Who reads it**: the four extended procedures and `sp_cycle_errorlog` grant `public` nothing, so only a sysadmin, a `CONTROL SERVER` holder or a `master` user granted `EXECUTE` on one runs it, a database owner elsewhere meeting Msg 229 like anyone; `sp_readerrorlog` and `sp_enumerrorlogs` are signed T-SQL wrappers that check `securityadmin`, `VIEW SERVER STATE` or `VIEW ANY ERROR LOG` themselves (Msg 27219), and `sp_cycle_errorlog` checks `sysadmin` again past its grant (Msg 15247).
@@ -967,7 +968,7 @@ Probed 2026-10-16 against SQL Server 2025 on Linux; the XML docs on those member
 
 ### Divergences
 
-- Real's preamble runs to some two hundred environmental lines — memory, CPU and NUMA, TLS, every database's recovery — which are left out; so are the system sessions' (`spidNNs`) lines and the diagnostic lines real writes around a startup (`[DBMgr::FindFreeDatabaseID] …`, `[n]. Feature Status: …`, `Parallel redo is started …`), and every engine-written line not listed above (deadlocks).
+- Real's preamble runs to some two hundred environmental lines — memory, CPU and NUMA, TLS, every database's recovery — which are left out; so are the system sessions' (`spidNNs`) lines and the diagnostic lines real writes around a startup (`[DBMgr::FindFreeDatabaseID] …`, `[n]. Feature Status: …`, `Parallel redo is started …`).
 - Real's log, differential and file backup lines (`Log was backed up.`, `Database differential changes were backed up.`, `Database file was backed up.` and their restore counterparts) have no counterpart, those backups not being built.
 - Real applies `ALTER DATABASE … SET FILESTREAM` while its batch compiles, so its lines lead the batch's — and a batch that then fails to compile has still written them; here they are written as the statement runs.
 - `ALTER DATABASE … COLLATE` writes real's ` index restored for d.<system table>.` line per system base table, which has no counterpart here.
@@ -975,6 +976,13 @@ Probed 2026-10-16 against SQL Server 2025 on Linux; the XML docs on those member
 - `xp_enumerrorlogs` lists the logs by number; real lists them in its log directory's order.
 - `xp_readerrorlog`'s rarer argument interactions aren't chased: a non-NULL eighth argument makes real ignore every filter, a log type of 3 with a non-string search reports `Error log location not found.`, and an `INSERT … EXEC` over a refusal is real's severe error, where here the insert takes no rows.
 - Log time is UTC, as every simulated clock is; the reference's host clock was UTC too, so a server in another zone wasn't compared.
+
+### Not modeled yet
+
+- **Deadlock reports.**
+  With trace flag 1204 or 1222 on, real writes each deadlock's report under its system sessions: 1204's `Deadlock encountered .... Printing deadlock information` wait-for graph (each node's lock resource, grant list, statement type, input buffer and requesting owner) and 1222's `deadlock-list` — the victim, each process's attributes (wait resource, owner id, isolation level, client, login, current database), its execution stack down to module addresses and its input buffer, then the resource list with each lock's owners and waiters.
+  None of it is written here.
+  Without either flag real logs nothing for a deadlock, the victim's Msg 1205 included, which the simulator matches (probed 2026-10-16 against SQL Server 2025).
 
 ## OLE DB schema rowsets: a real server's linked server
 

@@ -800,6 +800,19 @@ public sealed class ErrorLogTests
     }
 
     [TestMethod]
+    public void PlanCacheFlushes_AreReportedAtMostEveryFiveMinutes()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("dbcc freeproccache with no_infomsgs; dbcc freesystemcache ('ALL') with no_infomsgs; dbcc freeproccache ('default')");
+        CollectionAssert.AreEqual(new[]
+        {
+            "SQL Server has encountered 1 occurrence(s) of cachestore flush for the 'Object Plans' cachestore (part of plan cache) due to 'DBCC FREEPROCCACHE' or 'DBCC FREESYSTEMCACHE' operations.",
+            "SQL Server has encountered 1 occurrence(s) of cachestore flush for the 'SQL Plans' cachestore (part of plan cache) due to 'DBCC FREEPROCCACHE' or 'DBCC FREESYSTEMCACHE' operations.",
+            "SQL Server has encountered 1 occurrence(s) of cachestore flush for the 'Bound Trees' cachestore (part of plan cache) due to 'DBCC FREEPROCCACHE' or 'DBCC FREESYSTEMCACHE' operations.",
+        }, LoggedTexts(simulation, "cachestore flush"));
+    }
+
+    [TestMethod]
     public void DiagnosticsLogConfigurations_ReportsTheStockRow()
     {
         var simulation = new Simulation();

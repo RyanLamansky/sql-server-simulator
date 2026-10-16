@@ -49,6 +49,40 @@ partial class Simulation
             log.Write(batch.CurrentStatement.UtcNow, process, message);
     }
 
+    private readonly Lock planCacheFlushGate = new();
+    private DateTime? lastPlanCacheFlushReportUtc;
+    private int unreportedPlanCacheFlushes;
+
+    /// <summary>
+    /// Counts one flush of the whole plan cache — <c>DBCC FREEPROCCACHE</c>,
+    /// <c>FREESYSTEMCACHE ('ALL')</c> — and reports the flushes counted so far,
+    /// this one included, for each of the three plan cachestores, when none
+    /// has been reported yet or the last report is more than five minutes old:
+    /// real reports its first flush at once and then at most every five
+    /// minutes, a flush inside the window only adding to the next report's
+    /// count (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static void NotePlanCacheFlush(BatchContext batch)
+    {
+        var simulation = batch.Connection.Simulation;
+        var now = batch.CurrentStatement.UtcNow;
+        int count;
+        lock (simulation.planCacheFlushGate)
+        {
+            simulation.unreportedPlanCacheFlushes++;
+            if (simulation.lastPlanCacheFlushReportUtc is { } last && now - last <= TimeSpan.FromMinutes(5))
+                return;
+            simulation.lastPlanCacheFlushReportUtc = now;
+            count = simulation.unreportedPlanCacheFlushes;
+            simulation.unreportedPlanCacheFlushes = 0;
+        }
+        foreach (var store in (ReadOnlySpan<string>)["Object Plans", "SQL Plans", "Bound Trees"])
+        {
+            LogSessionLine(batch, string.Create(CultureInfo.InvariantCulture,
+                $"SQL Server has encountered {count} occurrence(s) of cachestore flush for the '{store}' cachestore (part of plan cache) due to 'DBCC FREEPROCCACHE' or 'DBCC FREESYSTEMCACHE' operations."));
+        }
+    }
+
     /// <summary>Writes one line under the running session's process column.</summary>
     internal static void LogSessionLine(BatchContext batch, string text) =>
         batch.Connection.Simulation.ErrorLog.Write(batch.CurrentStatement.UtcNow, ErrorLog.SessionProcess(batch.Connection.Spid), text);
