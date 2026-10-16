@@ -160,6 +160,8 @@ partial class Simulation
             throw SimulatedSqlException.KillNoRollbackInProgress(spid);
 
         victim.Kill();
+        // Real names the killing session's client: its host name and process id.
+        LogSessionLine(batch, string.Create(CultureInfo.InvariantCulture, $"Process ID {spid} was killed by hostname {connection.ClientHostName}, host process ID {Environment.ProcessId}."));
         connection.LastStatementRowCount = 0;
         return true;
     }

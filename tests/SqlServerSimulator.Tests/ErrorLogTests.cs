@@ -733,6 +733,73 @@ public sealed class ErrorLogTests
     }
 
     [TestMethod]
+    public void Kill_LogsTheKillersClient()
+    {
+        var simulation = new Simulation();
+        using var victim = simulation.CreateOpenConnection();
+        var victimSpid = victim.CreateCommand("select @@spid").ExecuteScalar();
+        using var killer = simulation.CreateDbConnection();
+        killer.ConnectionString = "Workstation ID=probehost";
+        killer.Open();
+        _ = killer.CreateCommand($"kill {victimSpid}").ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[] { $"spid{killer.CreateCommand("select @@spid").ExecuteScalar()}|Process ID {victimSpid} was killed by hostname probehost, host process ID {Environment.ProcessId}." },
+            Logged(simulation, "was killed"));
+    }
+
+    [TestMethod]
+    public void LogonTrigger_Messages_GoToTheErrorLog()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create login lt with password = 'Pa55word!'",
+            """
+            create trigger tr on all server for logon as
+            begin
+                if original_login() = N'lt'
+                begin
+                    print 'printed ' + original_login();
+                    raiserror('raised ten %d', 10, 1, 42);
+                    raiserror('raised sixteen', 16, 3);
+                    raiserror('raised zero', 0, 1);
+                    print '';
+                end
+            end
+            """);
+        using var connection = Login(simulation, "lt");
+        var spid = connection.CreateCommand("select @@spid").ExecuteScalar();
+        CollectionAssert.AreEqual(new[]
+        {
+            $"spid{spid}|printed lt",
+            $"spid{spid}|raised ten 42",
+            $"spid{spid}|Error: 50000, Severity: 16, State: 3.",
+            $"spid{spid}|raised sixteen",
+            $"spid{spid}|raised zero",
+            // An empty PRINT is a single space, as on the wire.
+            $"spid{spid}| ",
+        }, EngineLines(simulation).FindAll(line => line.StartsWith($"spid{spid}|", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    [DataRow("print 'before'; declare @x int = 1 / 0;", new[] { "before", "Error: 8134, Severity: 16, State: 1.", "Divide by zero error encountered." })]
+    [DataRow("select 'a result';", new[] { "Error: 575, Severity: 16, State: 1.", "A LOGON trigger returned a resultset. Modify the LOGON trigger to not return resultsets." })]
+    public void LogonTrigger_Failure_LogsItsErrorAndTheRefusal(string body, string[] sessionLines)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create login lt with password = 'Pa55word!'",
+            $"create trigger tr on all server for logon as begin if original_login() = N'lt' begin {body} end end");
+        AreEqual(17892, Throws<SimulatedSqlException>(() => Login(simulation, "lt")).Number);
+        var lines = EngineLines(simulation);
+        var sessionTexts = lines.FindAll(static line => line.StartsWith("spid", StringComparison.Ordinal));
+        CollectionAssert.AreEqual(sessionLines, sessionTexts.ConvertAll(static line => line[(line.IndexOf('|', StringComparison.Ordinal) + 1)..]));
+        CollectionAssert.AreEqual(new[]
+        {
+            "Logon|Error: 17892, Severity: 20, State: 1.",
+            "Logon|Logon failed for login 'lt' due to trigger execution. [CLIENT: <local machine>]",
+        }, lines[^2..]);
+    }
+
+    [TestMethod]
     public void DiagnosticsLogConfigurations_ReportsTheStockRow()
     {
         var simulation = new Simulation();

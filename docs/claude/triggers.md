@@ -425,10 +425,10 @@ Short of that, any of these fails the trigger, and the login is refused with **M
 
 - a `ROLLBACK` — what the body writes after it commits on its own, as in a DML trigger;
 - an error the body leaves unhandled, or one it swallowed while `XACT_ABORT` was still on;
-- a result set, from the body or from dynamic SQL it runs (real's Msg 575 goes only to its error log);
+- a result set, from the body or from dynamic SQL it runs (Msg 575, which goes only to the error log);
 - a transaction the body opened and left open.
 
-`RAISERROR` at any severity leaves the login standing, and nothing the body prints reaches the client — real writes `PRINT` and `RAISERROR` text to its error log.
+`RAISERROR` at any severity leaves the login standing, and nothing the body prints or raises reaches the client: each message goes to the error log under the session instead — a `PRINT` (an empty one as a single space) or a message through severity 10 as its text, an error above it, the one that failed the trigger included, with its `Error: n, Severity: s, State: t.` line first — and a refusal adds Msg 17892 at severity 20 under `Logon`, naming the client as a refused login does (probed 2026-10-16 against SQL Server 2025).
 The in-process `Open` throws the refusal and leaves the connection closed.
 Over the wire the client sees it after the login's database and language notices, with no `LOGINACK`, so SqlClient reports Msg 17892 with Msg 5701 and 5703 beside it; at a pooled reset it is followed by **Msg 596** (class 21, the session killed) and `DONE_SRVERROR`, which SqlClient reports as its own severe error, and the connection closes.
 

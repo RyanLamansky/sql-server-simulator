@@ -37,8 +37,12 @@ partial class Simulation
     /// (<c>@@TRANCOUNT</c> 1) under <c>XACT_ABORT</c>. A body <c>ROLLBACK</c>,
     /// an error — even one its own <c>CATCH</c> swallowed — and a result set
     /// (Msg 575) all fail the trigger; <c>RAISERROR</c> is exempt, as in a
-    /// DML trigger. Nothing the body prints reaches the client (real writes it
-    /// to the error log), and the refusal is the one message the client sees.
+    /// DML trigger. Nothing the body prints or raises reaches the client: real
+    /// writes each message to the error log under the session — a <c>PRINT</c>
+    /// or a severity-10 one as its text, an error with its
+    /// <c>Error: n, Severity: s, State: t.</c> line first, the error that
+    /// failed the trigger included — and logs the refusal under <c>Logon</c>
+    /// at severity 20 naming the client, which sees that refusal alone.
     /// </para>
     /// <para>
     /// The no-trigger case costs one array-length read past the login count,
@@ -86,6 +90,8 @@ partial class Simulation
         // per-statement clock the bodies share. Like a client batch it runs on
         // past an error XACT_ABORT exempts — a RAISERROR — which leaves the
         // login standing.
+        // Messages the session queued before the bodies ran are the client's.
+        var queuedBefore = connection.PendingMessages.Count;
         using var command = new SimulatedDbCommand(this, connection) { CommandText = " " };
         var batch = new BatchContext(command) { ContinueOnError = true };
         var eventData = BuildLogonEventData(batch, loginName, isPooled);
@@ -115,12 +121,13 @@ partial class Simulation
                             trigger.UsesAnsiNulls);
                         if (batch.PendingTriggerOutcomes is { } outcomes)
                         {
+                            batch.PendingTriggerOutcomes = null;
                             foreach (var outcome in outcomes)
                             {
                                 if (outcome is SimulatedSqlResultSet && !connection.LogonUnitCommitted)
                                     throw SimulatedSqlException.LogonTriggerReturnedResultSet();
+                                this.LogLogonTriggerOutcome(batch, outcome);
                             }
-                            batch.PendingTriggerOutcomes = null;
                         }
                         // A transaction a body opened and left open ends the
                         // trigger as a ROLLBACK does — unless the login's unit
@@ -148,6 +155,8 @@ partial class Simulation
         }
         catch (SimulatedSqlException ended) when (connection.LogonUnitCommitted)
         {
+            this.LogLogonTriggerMessages(batch, queuedBefore);
+            this.LogLogonTriggerError(batch, ended);
             // Once a body committed the login's unit nothing refuses it: not
             // the Msg 3609 that COMMIT earns, a later error, a result set nor a
             // transaction left open, which commits (probed 2026-09-28 against
@@ -165,20 +174,85 @@ partial class Simulation
                 }
             }
         }
-        catch (SimulatedSqlException)
+        catch (SimulatedSqlException failed)
         {
+            this.LogLogonTriggerMessages(batch, queuedBefore);
+            this.LogLogonTriggerError(batch, failed);
+            this.ErrorLog.WriteError(DateTime.UtcNow, "Logon", 17892, 20, 1,
+                $"Logon failed for login '{loginName}' due to trigger execution. [CLIENT: {connection.Transport.Client?.Address.ToString() ?? LocalMachineClient}]");
             var refusal = SimulatedSqlException.LogonFailedDueToTrigger(loginName);
             refusal.PreserveDiagnostics(1, procedure: null);
             throw refusal;
         }
         finally
         {
+            this.LogLogonTriggerMessages(batch, queuedBefore);
             connection.Security = savedSecurity;
             connection.NoCount = savedNoCount;
             connection.Language = savedLanguage;
             connection.RunningLogonTriggers = false;
             connection.LogonUnitCommitted = false;
         }
+    }
+
+    /// <summary>
+    /// Writes what the logon trigger bodies sent and haven't yet been logged:
+    /// the outcomes they buffered, then any message they left queued on the
+    /// session past the <paramref name="queuedBefore"/> it held already.
+    /// </summary>
+    private void LogLogonTriggerMessages(BatchContext batch, int queuedBefore)
+    {
+        if (batch.PendingTriggerOutcomes is { } outcomes)
+        {
+            batch.PendingTriggerOutcomes = null;
+            foreach (var outcome in outcomes)
+                this.LogLogonTriggerOutcome(batch, outcome);
+        }
+        var queue = batch.Connection.PendingMessages;
+        if (queue.Count <= queuedBefore)
+            return;
+        var queued = queue.ToArray();
+        queue.Clear();
+        for (var i = 0; i < queued.Length; i++)
+        {
+            if (i < queuedBefore)
+                queue.Enqueue(queued[i]);
+            else
+                this.LogLogonTriggerMessage(batch, queued[i]);
+        }
+    }
+
+    /// <summary>Writes one outcome of a logon trigger body as real's log has it: a message or a continued-past error.</summary>
+    private void LogLogonTriggerOutcome(BatchContext batch, SimulatedStatementOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case SimulatedInfoOutcome info:
+                this.LogLogonTriggerMessage(batch, info.Message);
+                break;
+            case SimulatedErrorOutcome error:
+                this.LogLogonTriggerError(batch, error.Exception);
+                break;
+            default:
+                break;
+        }
+    }
+
+    /// <summary>A message is its text alone, a severity-10 one's included; one above is an error.</summary>
+    private void LogLogonTriggerMessage(BatchContext batch, SimulatedError message)
+    {
+        var process = ErrorLog.SessionProcess(batch.Connection.Spid);
+        if (message.Class > 10)
+            this.ErrorLog.WriteError(DateTime.UtcNow, process, message.Number, message.Class, message.State, message.Message);
+        else
+            this.ErrorLog.Write(DateTime.UtcNow, process, message.Message);
+    }
+
+    /// <summary>An error with its <c>Error: n, Severity: s, State: t.</c> line, each of the errors it carries.</summary>
+    private void LogLogonTriggerError(BatchContext batch, SimulatedSqlException error)
+    {
+        foreach (var each in error.Errors)
+            this.LogLogonTriggerMessage(batch, each);
     }
 
     /// <summary>
