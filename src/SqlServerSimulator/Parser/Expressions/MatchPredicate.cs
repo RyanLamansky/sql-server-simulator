@@ -22,9 +22,56 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class MatchPredicate : BooleanExpression
 {
-    private readonly BooleanExpression desugared;
+    private BooleanExpression desugared;
 
-    private MatchPredicate(BooleanExpression desugared) => this.desugared = desugared;
+    /// <summary>
+    /// The desugared form a query whose MATCH nodes outer-join reads: each
+    /// such node's identity equalities against its anchor endpoint instead of
+    /// its own graph id (see <see cref="MatchScope.OuterNodes"/>).
+    /// </summary>
+    private readonly BooleanExpression outerDesugared;
+
+    /// <summary>The <c>SHORTEST_PATH</c>s this MATCH added to the scope.</summary>
+    private readonly List<ShortestPathSpec> paths;
+
+    /// <summary>What stands for <see cref="paths"/> under a <c>NOT</c>: each hop's edge keeping to its two node tables.</summary>
+    private readonly BooleanExpression pathFilter;
+
+    /// <summary>Whether the MATCH holds <c>SHORTEST_PATH</c>s alone — no ordinary hop or <c>LAST_NODE</c> equality.</summary>
+    private readonly bool onlyPaths;
+
+    private MatchPredicate(BooleanExpression desugared, BooleanExpression outerDesugared, List<ShortestPathSpec> paths, BooleanExpression pathFilter, bool onlyPaths)
+    {
+        this.desugared = desugared;
+        this.outerDesugared = outerDesugared;
+        this.paths = paths;
+        this.pathFilter = pathFilter;
+        this.onlyPaths = onlyPaths;
+    }
+
+    /// <summary>Switches to the desugared form whose nodes the query outer-joins.</summary>
+    public void UseOuterNodes() => this.desugared = this.outerDesugared;
+
+    /// <summary>
+    /// Under a <c>NOT</c>, real applies none of a MATCH's shortest paths: the
+    /// <c>FOR PATH</c> sources read as ordinary ones, the predicate leaving only
+    /// its edges' endpoint-object filters — un-negated, however many
+    /// <c>NOT</c>s (probed 2026-10-16 against SQL Server 2025). Withdraws this
+    /// MATCH's paths from <paramref name="scope"/> and answers the filter, or
+    /// null when the MATCH isn't one of shortest paths alone.
+    /// </summary>
+    public BooleanExpression? WithdrawPaths(MatchScope scope)
+    {
+        if (!this.onlyPaths || this.paths.Count == 0)
+            return null;
+        foreach (var path in this.paths)
+        {
+            _ = scope.ShortestPaths.Remove(path);
+            foreach (var hop in path.Hops)
+                _ = scope.AllEdges.Remove(hop.Edge);
+        }
+        return this.pathFilter;
+    }
 
     /// <summary>Whether the <c>MATCH</c> under the cursor opens a pattern — a <c>(</c> follows it.</summary>
     public static bool IsAhead(ParserContext context)
@@ -110,7 +157,10 @@ internal sealed class MatchPredicate : BooleanExpression
                 : SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
-        return new MatchPredicate(Bind(context, written));
+        var desugared = Bind(context, written, out var outerDesugared, out var paths, out var pathFilter);
+        var predicate = new MatchPredicate(desugared, outerDesugared, paths, pathFilter, written.Hops.Count == 0 && written.LastNodeEqualities.Count == 0);
+        context.MatchScope!.Predicates.Add(predicate);
+        return predicate;
     }
 
     /// <summary>A node position as written: a bare name, or <c>LAST_NODE(name)</c>.</summary>
@@ -254,7 +304,7 @@ internal sealed class MatchPredicate : BooleanExpression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    private static BooleanExpression Bind(ParserContext context, WrittenPatterns written)
+    private static BooleanExpression Bind(ParserContext context, WrittenPatterns written, out BooleanExpression outerDesugared, out List<ShortestPathSpec> addedPaths, out BooleanExpression pathFilter)
     {
         var scope = context.MatchScope!;
         var ownSources = scope.Sources ?? context.ScopeSources ?? [];
@@ -379,16 +429,35 @@ internal sealed class MatchPredicate : BooleanExpression
             foreach (var (edge, _, _) in section)
                 UseEdge(edge, ordinary: false);
         }
+        addedPaths = new List<ShortestPathSpec>(paths.Count);
+        var pathConjuncts = new List<BooleanExpression>();
         for (var p = 0; p < paths.Count; p++)
         {
             var (start, section) = paths[p];
-            scope.ShortestPaths.Add(new ShortestPathSpec(
+            var spec = new ShortestPathSpec(
                 sources[start],
                 written.Paths[p].Start.LastNode,
                 written.Paths[p].Start.Name.Value,
                 [.. section.Select(hop => new ShortestPathHop(sources[hop.Edge], sources[hop.Node], hop.Forward))],
-                written.Paths[p].MaxHops));
+                written.Paths[p].MaxHops);
+            scope.ShortestPaths.Add(spec);
+            addedPaths.Add(spec);
+            // What stands for the path under a NOT: each hop's edge keeps to
+            // its two node tables.
+            var previous = spec.StartIsLastNode ? null : spec.Start;
+            foreach (var hop in spec.Hops)
+            {
+                if (hop.Edge.BackingTable is { } edgeTable)
+                {
+                    if (previous?.BackingTable is { } previousTable)
+                        pathConjuncts.Add(ObjectFilter(hop.Edge, edgeTable, hop.Forward ? GraphColumnKind.FromObjId : GraphColumnKind.ToObjId, previousTable));
+                    if (hop.Node.BackingTable is { } nodeTable)
+                        pathConjuncts.Add(ObjectFilter(hop.Edge, edgeTable, hop.Forward ? GraphColumnKind.ToObjId : GraphColumnKind.FromObjId, nodeTable));
+                }
+                previous = hop.Node;
+            }
         }
+        pathFilter = AndAll([.. pathConjuncts]);
         for (var i = 0; i < hops.Count; i++)
         {
             var (from, _, to) = bound[i];
@@ -398,24 +467,61 @@ internal sealed class MatchPredicate : BooleanExpression
                 scope.Nodes.Add(sources[to]);
         }
 
+        // A node table's row is read as an outer join from the first edge
+        // endpoint naming it, as real NULL-extends a node its table no longer
+        // holds — or a row-level security filter hides — rather than dropping
+        // the edge's row (probed 2026-10-16 against SQL Server 2025). Every
+        // other endpoint naming the node then compares with that one. A node
+        // a derived edge, a LAST_NODE, an enclosing query, a path's start or
+        // a MERGE reaches keeps the inner equalities.
+        var outerEligible = new HashSet<FromSource>();
+        if (!scope.InMergeOn)
+        {
+            var ineligible = new HashSet<FromSource>();
+            for (var i = 0; i < hops.Count; i++)
+            {
+                var (from, edge, to) = bound[i];
+                Consider(from, hops[i].From.LastNode);
+                Consider(to, hops[i].To.LastNode);
+
+                void Consider(int node, bool lastNode)
+                {
+                    if (lastNode || node >= ownSources.Length || sources[node].BackingTable is null || sources[node].ForPath
+                        || sources[edge].BackingTable is null || scope.ShortestPaths.Exists(path => ReferenceEquals(path.Start, sources[node])))
+                    {
+                        _ = ineligible.Add(sources[node]);
+                    }
+                    else
+                    {
+                        _ = outerEligible.Add(sources[node]);
+                    }
+                }
+            }
+            outerEligible.ExceptWith(ineligible);
+        }
         // A LAST_NODE, and a FOR PATH node named without one, is checked once
         // the whole WHERE has bound its paths.
         var conjuncts = new List<BooleanExpression>((hops.Count * 4) + (equalities.Length * 2));
+        var outerConjuncts = new List<BooleanExpression>(conjuncts.Capacity);
         for (var i = 0; i < hops.Count; i++)
         {
             var (from, edge, to) = bound[i];
             Note(hops[i].From, from, state: 4);
             Note(hops[i].To, to, state: 5);
-            Endpoint(conjuncts, sources[edge], sources[from], hops[i].From.LastNode, GraphColumnKind.FromObjId, GraphColumnKind.FromId, GraphColumns.FromId);
-            Endpoint(conjuncts, sources[edge], sources[to], hops[i].To.LastNode, GraphColumnKind.ToObjId, GraphColumnKind.ToId, GraphColumns.ToId);
+            Endpoint(scope, outerEligible, conjuncts, outerConjuncts, sources[edge], sources[from], hops[i].From.LastNode, GraphColumnKind.FromObjId, GraphColumnKind.FromId, GraphColumns.FromId);
+            Endpoint(scope, outerEligible, conjuncts, outerConjuncts, sources[edge], sources[to], hops[i].To.LastNode, GraphColumnKind.ToObjId, GraphColumnKind.ToId, GraphColumns.ToId);
         }
         for (var i = 0; i < equalities.Length; i++)
         {
             var (left, right) = equalities[i];
             scope.LastNodeEqualities.Add((sources[left], written.LastNodeEqualities[i].Left.Value, sources[right], written.LastNodeEqualities[i].Right.Value));
-            conjuncts.Add(Equality(new Reference(sources[left].Qualifier!, ShortestPathSpec.ObjectColumn), new Reference(sources[right].Qualifier!, ShortestPathSpec.ObjectColumn)));
-            conjuncts.Add(Equality(new Reference(sources[left].Qualifier!, ShortestPathSpec.IdColumn), new Reference(sources[right].Qualifier!, ShortestPathSpec.IdColumn)));
+            foreach (var sink in (ReadOnlySpan<List<BooleanExpression>>)[conjuncts, outerConjuncts])
+            {
+                sink.Add(Equality(new Reference(sources[left].Qualifier!, ShortestPathSpec.ObjectColumn), new Reference(sources[right].Qualifier!, ShortestPathSpec.ObjectColumn)));
+                sink.Add(Equality(new Reference(sources[left].Qualifier!, ShortestPathSpec.IdColumn), new Reference(sources[right].Qualifier!, ShortestPathSpec.IdColumn)));
+            }
         }
+        outerDesugared = AndAll([.. outerConjuncts]);
         return AndAll([.. conjuncts]);
 
         // A LAST_NODE names a path's last node, which anything else is
@@ -426,7 +532,7 @@ internal sealed class MatchPredicate : BooleanExpression
             {
                 if (sources[s].Qualifier is not { } qualifier || !collation.Equals(qualifier, name.Value))
                     continue;
-                if (sources[s].BackingTable is null && sources[s].LateralPlan is { } body && !IsTransparent(body))
+                if (sources[s] is { BackingTable: null, GraphIdentityTable: null, LateralPlan: { } body } && !IsTransparent(body))
                 {
                     (edge ? opaqueEdges : opaqueNodes).Add(name.Value);
                     return -1;
@@ -503,42 +609,85 @@ internal sealed class MatchPredicate : BooleanExpression
             || (body.UpdatabilityProfile is { Sources: [var source] } && (source.BackingTable is not null || (source.LateralPlan is { } inner && IsTransparent(inner)))));
 
     private static bool IsNodeSource(FromSource source) =>
-        source.BackingTable is { } table
+        GraphTableOf(source) is { } table
             ? table.GraphKind == GraphTableKind.Node
             : GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.NodeId) >= 0;
 
     private static bool IsEdgeSource(FromSource source) =>
-        source.BackingTable is { } table
+        GraphTableOf(source) is { } table
             ? table.GraphKind == GraphTableKind.Edge
             : GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.FromId) >= 0
                 && GraphColumns.FindPseudoColumn(source.ColumnNames, GraphColumns.ToId) >= 0;
 
     /// <summary>
-    /// One end of a hop: the edge's endpoint pair against the node table's
-    /// identity when both are base tables — or against a path's last node,
-    /// whose identity its path source carries — and the rendered identifiers
-    /// otherwise.
+    /// The node or edge table whose identity <paramref name="source"/> reads:
+    /// its own, or the one a derived table's, view's or CTE's body carries
+    /// through (<see cref="FromSource.GraphIdentityTable"/>).
     /// </summary>
-    private static void Endpoint(List<BooleanExpression> conjuncts, FromSource edge, FromSource node, bool lastNode, GraphColumnKind objectIdKind, GraphColumnKind idKind, string pseudoColumn)
+    private static HeapTable? GraphTableOf(FromSource source) => source.BackingTable ?? source.GraphIdentityTable;
+
+    /// <summary>The column <paramref name="source"/> carries its identity column <paramref name="kind"/> in.</summary>
+    private static string IdentityColumn(FromSource source, GraphColumnKind kind) => source.BackingTable is { } table
+        ? table.Columns[GraphColumns.OrdinalOf(table, kind)].Name
+        : Selection.GraphIdentityName(Array.IndexOf(Selection.GraphIdentityKinds(source.GraphIdentityTable!), kind));
+
+    /// <summary>
+    /// One end of a hop, into <paramref name="conjuncts"/> and the outer-node
+    /// form's <paramref name="outerConjuncts"/>: the edge's endpoint pair
+    /// against the node table's identity when both carry their table's — a
+    /// base table, or a body carrying it through (<see cref="GraphTableOf"/>) — or
+    /// against a path's last node, whose identity its path source carries —
+    /// and the rendered identifiers otherwise. For a node the query outer-joins
+    /// (<paramref name="outerEligible"/>), the outer form compares the endpoint
+    /// with the node's anchor instead, the first endpoint naming it becoming
+    /// that anchor and the node's join condition.
+    /// </summary>
+    private static void Endpoint(MatchScope scope, HashSet<FromSource> outerEligible, List<BooleanExpression> conjuncts, List<BooleanExpression> outerConjuncts, FromSource edge, FromSource node, bool lastNode, GraphColumnKind objectIdKind, GraphColumnKind idKind, string pseudoColumn)
     {
-        if (edge.BackingTable is { } edgeTable && (lastNode || node.BackingTable is not null))
+        if (GraphTableOf(edge) is not null && (lastNode || GraphTableOf(node) is not null))
         {
-            conjuncts.Add(Equality(
-                new Reference(edge.Qualifier!, edgeTable.Columns[GraphColumns.OrdinalOf(edgeTable, objectIdKind)].Name),
-                lastNode ? new Reference(node.Qualifier!, ShortestPathSpec.ObjectColumn) : new Value(SqlValue.FromInt32(node.BackingTable!.ObjectId))));
-            conjuncts.Add(Equality(
-                new Reference(edge.Qualifier!, edgeTable.Columns[GraphColumns.OrdinalOf(edgeTable, idKind)].Name),
-                lastNode
-                    ? new Reference(node.Qualifier!, ShortestPathSpec.IdColumn)
-                    : new Reference(node.Qualifier!, node.BackingTable!.Columns[GraphColumns.OrdinalOf(node.BackingTable, GraphColumnKind.GraphId)].Name)));
+            var objectFilter = Equality(
+                new Reference(edge.Qualifier!, IdentityColumn(edge, objectIdKind)),
+                lastNode ? new Reference(node.Qualifier!, ShortestPathSpec.ObjectColumn) : new Value(SqlValue.FromInt32(GraphTableOf(node)!.ObjectId)));
+            conjuncts.Add(objectFilter);
+            outerConjuncts.Add(objectFilter);
+            var endpoint = new Reference(edge.Qualifier!, IdentityColumn(edge, idKind));
+            Expression identity = lastNode
+                ? new Reference(node.Qualifier!, ShortestPathSpec.IdColumn)
+                : new Reference(node.Qualifier!, IdentityColumn(node, GraphColumnKind.GraphId));
+            conjuncts.Add(Equality(endpoint, identity));
+            if (!lastNode && outerEligible.Contains(node))
+            {
+                if (scope.NodeAnchors.TryGetValue(node, out var anchor))
+                {
+                    outerConjuncts.Add(Equality(endpoint, anchor));
+                }
+                else
+                {
+                    scope.NodeAnchors.Add(node, endpoint);
+                    scope.OuterNodes.Add((node, Equality(identity, endpoint)));
+                }
+            }
+            else
+            {
+                outerConjuncts.Add(Equality(endpoint, identity));
+            }
             return;
         }
         // A LAST_NODE naming no node is refused once the paths are known.
         var edgeColumn = GraphColumns.FindPseudoColumn(edge.ColumnNames, pseudoColumn);
         var nodeColumn = GraphColumns.FindPseudoColumn(node.ColumnNames, GraphColumns.NodeId);
         if (edgeColumn >= 0 && nodeColumn >= 0)
-            conjuncts.Add(Equality(new Reference(edge.Qualifier!, edge.ColumnNames[edgeColumn]), new Reference(node.Qualifier!, node.ColumnNames[nodeColumn])));
+        {
+            var rendered = Equality(new Reference(edge.Qualifier!, edge.ColumnNames[edgeColumn]), new Reference(node.Qualifier!, node.ColumnNames[nodeColumn]));
+            conjuncts.Add(rendered);
+            outerConjuncts.Add(rendered);
+        }
     }
+
+    /// <summary>The edge's endpoint object id named by <paramref name="kind"/> against <paramref name="nodeTable"/>'s object id.</summary>
+    private static BooleanExpression ObjectFilter(FromSource edge, HeapTable edgeTable, GraphColumnKind kind, HeapTable nodeTable) =>
+        Equality(new Reference(edge.Qualifier!, edgeTable.Columns[GraphColumns.OrdinalOf(edgeTable, kind)].Name), new Value(SqlValue.FromInt32(nodeTable.ObjectId)));
 
     public override bool? Run(RuntimeContext runtime) => this.desugared.Run(runtime);
 
@@ -593,6 +742,21 @@ internal sealed class MatchScope
 
     /// <summary>The <c>SHORTEST_PATH</c>s the WHERE's MATCHes recurse over, in written order.</summary>
     public readonly List<ShortestPathSpec> ShortestPaths = [];
+
+    /// <summary>
+    /// The MATCH node tables the query reads as outer joins — each with its
+    /// join condition, its graph id against its anchor endpoint — and each
+    /// node's anchor, the first edge endpoint any of the WHERE's MATCHes names
+    /// it by. Applied by <c>Selection.ApplyMatchOuterNodes</c>; a statement
+    /// that doesn't apply them reads each MATCH's inner equalities.
+    /// </summary>
+    public readonly List<(FromSource Node, BooleanExpression On)> OuterNodes = [];
+
+    /// <inheritdoc cref="OuterNodes"/>
+    public readonly Dictionary<FromSource, Expression> NodeAnchors = [];
+
+    /// <summary>The WHERE's MATCH predicates, whose outer-node forms the query switches to as it applies <see cref="OuterNodes"/>.</summary>
+    public readonly List<MatchPredicate> Predicates = [];
 
     /// <summary>
     /// Each <c>LAST_NODE(x)</c> an ordinary pattern names, with the Msg 13962

@@ -2517,6 +2517,7 @@ internal sealed partial class Selection
                     if (!context.Batch.IsSkipping && ReadsPredicateColumns(sources, fromClause, joins, distinct))
                         Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
+                    ApplyMatchOuterNodes(sources, joins, fromClause);
                     // An EXISTS body's bare star names no column, so it never
                     // meets the grouping check a qualified star or a named
                     // column does (`EXISTS (SELECT * FROM t GROUP BY a)` runs,

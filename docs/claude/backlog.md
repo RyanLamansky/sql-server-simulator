@@ -184,7 +184,7 @@ Captured from a Microsoft Learn category-by-category audit; re-fetch <https://le
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 
 - **Settled — don't re-pitch:** `msdb.dbo.syspolicy_configuration.current_value` stays `nvarchar` — it's a *view-body* projection (not a resource column) mixing `int` rows with a `binary` GUID row, every consumer reads a single named row and CASTs it, so a variant migration there would only touch the view SQL text for no observable gain.
-- **Graph residue** — `MATCH` reading through a derived table, view or CTE that doesn't project the pseudo-column, `MATCH` over an edge whose node is gone (real NULL-extends it), and `NOT MATCH(SHORTEST_PATH(…))` — see [`graph.md`](graph.md#not-modeled-yet).
+- **Graph residue** — a `SHORTEST_PATH` starting from a node its table no longer holds — see [`graph.md`](graph.md#not-modeled-yet).
 - **Ownership residue** — `ALTER AUTHORIZATION` on an endpoint (to a login other than `sa`) or a server role, whose owners aren't carried → [`permissions.md`](permissions.md#ownership).
 
 ## Over-permissive register

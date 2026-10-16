@@ -1385,7 +1385,7 @@ internal sealed partial class Selection
                     _ = RejectRepeatedColumnName(cteBinding.ColumnNames, cteBinding.Name);
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
-                    var cteHidden = cteBinding.Plan.BrowseFlattened ? cteBinding.Plan.HiddenColumnCount : 0;
+                    var cteHidden = cteBinding.Plan.TrailingHiddenColumnCount;
                     for (var ci = 0; ci < cteColumns.Length; ci++)
                     {
                         cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: cteBinding.Plan.ColumnNullability?[ci] ?? true, isHidden: ci >= cteColumns.Length - cteHidden, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
@@ -1453,6 +1453,7 @@ internal sealed partial class Selection
                     {
                         ForPath = cteForPath,
                         BrowseBody = context.BrowseFlattenFrom ? cteBinding.Plan : null,
+                        GraphIdentityTable = cteBinding.Plan.GraphIdentityColumnCount > 0 ? cteBinding.Plan.GraphIdentityTable : null,
                         ForcedSeekThrough = cteHints is { ForceSeek: true } ? cteHints : null,
                     };
                 }
@@ -1557,15 +1558,21 @@ internal sealed partial class Selection
                     var viewForPath = ParseOptionalForPath(context);
                     var viewSystemTime = ParseOptionalForSystemTimeClause(context);
                     var viewFlattens = context.BrowseFlattenFrom;
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens);
+                    var viewGraphIdentity = !viewFlattens && context.GraphIdentityPassthrough;
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens, viewGraphIdentity);
                     // A body a browse statement flattens trails the view's own
-                    // columns with its base tables' hidden ones.
-                    if (viewFlattens && viewBody is { BrowseFlattened: true, HiddenColumnCount: > 0 and var viewHidden } && viewBody.Schema.Length - viewHidden == viewColumns.Length)
+                    // columns with its base tables' hidden ones, and a body
+                    // carrying a graph table's identity with that.
+                    if (viewBody is { TrailingHiddenColumnCount: > 0 and var viewHidden } && viewBody.Schema.Length - viewHidden == viewColumns.Length)
                     {
                         viewColumns = [
                             .. viewColumns,
-                            .. Enumerable.Range(viewColumns.Length, viewHidden).Select(i => new HeapColumn(BrowseHiddenName(i), viewBody.Schema[i], maxLength: null, nullable: true, isHidden: true)),
+                            .. Enumerable.Range(viewColumns.Length, viewHidden).Select(i => new HeapColumn(viewBody.TrailingHiddenName(i), viewBody.Schema[i], maxLength: null, nullable: true, isHidden: true)),
                         ];
+                    }
+                    else
+                    {
+                        viewGraphIdentity = false;
                     }
                     var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
@@ -1590,7 +1597,7 @@ internal sealed partial class Selection
                     }
                     ValidateViewIndexHints(context, resolvedView, viewHints, objectName.ToString(), objectNameLine);
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
-                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens);
+                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens, graphIdentity: viewGraphIdentity);
                     viewPlan.OutputKeys = viewBody?.OutputKeys;
                     var viewSource = new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
@@ -1609,6 +1616,7 @@ internal sealed partial class Selection
                     {
                         ForPath = viewForPath,
                         BrowseBody = viewFlattens ? viewBody : null,
+                        GraphIdentityTable = viewGraphIdentity ? viewBody!.GraphIdentityTable : null,
                         BodySeekShape = viewBody?.SeekShape,
                         ForcedSeekThrough = viewHints is { ForceSeek: true, NoExpand: false } ? viewHints : null,
                         ForcedViewIndexSeek = viewHints is { ForceSeek: true, NoExpand: true } ? viewHints : null,
@@ -1925,7 +1933,7 @@ internal sealed partial class Selection
                     derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
                         QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
                 }
-                var derivedHidden = derivedSelection.BrowseFlattened ? derivedSelection.HiddenColumnCount : 0;
+                var derivedHidden = derivedSelection.TrailingHiddenColumnCount;
 
                 // Inner SELECT result rows are LOB-inline (projections never
                 // emit LOB pointers because they have no destination Heap),
@@ -1975,7 +1983,7 @@ internal sealed partial class Selection
                 // (Msg 8155, probed 2026-10-02 against SQL Server 2025).
                 var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames[..^derivedHidden], derivedQualifier);
                 if (derivedHidden > 0)
-                    derivedNames = [.. derivedNames, .. Enumerable.Range(derivedNames.Length, derivedHidden).Select(BrowseHiddenName)];
+                    derivedNames = [.. derivedNames, .. Enumerable.Range(derivedNames.Length, derivedHidden).Select(derivedSelection.TrailingHiddenName)];
                 // A derived table takes no TABLESAMPLE; real stops at the
                 // keyword itself (Msg 156, probed 2026-09-24).
                 if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
@@ -1995,6 +2003,7 @@ internal sealed partial class Selection
                 {
                     ForPath = derivedForPath,
                     BrowseBody = derivedFlattens ? derivedSelection : null,
+                    GraphIdentityTable = derivedSelection.GraphIdentityColumnCount > 0 ? derivedSelection.GraphIdentityTable : null,
                 };
 
             case ReservedKeyword { Keyword: Keyword.OpenXml }:

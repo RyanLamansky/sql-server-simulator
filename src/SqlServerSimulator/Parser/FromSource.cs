@@ -64,6 +64,13 @@ internal sealed class FromSource(
     public Selection? BrowseBody;
 
     /// <summary>
+    /// The node or edge table a derived table's, view's or CTE's body reads
+    /// through, when the body carries its identity as hidden trailing columns
+    /// (<see cref="Selection.GraphIdentityTable"/>); null for every other source.
+    /// </summary>
+    public HeapTable? GraphIdentityTable;
+
+    /// <summary>
     /// Written <c>FOR PATH</c>: a node or edge table a <c>SHORTEST_PATH</c>
     /// recurses over, whose columns only graph path aggregates may read.
     /// </summary>

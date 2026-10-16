@@ -753,4 +753,93 @@ public sealed class GraphTableTests
             merge Likes using (select p1.$node_id f, p2.$node_id t from Person p1, Person p2 where p1.id = 2 and p2.id = 4) s
             on match(s-(Likes)->s) when not matched then insert ($from_id, $to_id) values (s.f, s.t);
             """, 13940).Errors.Count);
+
+    private const string Chain = """
+        create table N (id int, name varchar(10)) as node;
+        create table E (w int) as edge;
+        create table M (id int, tag varchar(10)) as node;
+        insert N values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+        insert M values (10, 'm');
+        insert E select (select $node_id from N where id = 1), (select $node_id from N where id = 2), 12;
+        insert E select (select $node_id from N where id = 2), (select $node_id from N where id = 3), 23;
+        insert E select (select $node_id from N where id = 3), (select $node_id from N where id = 4), 34;
+        insert E select (select $node_id from N where id = 1), (select $node_id from M where id = 10), 110;
+        """;
+
+    private static Simulation Chained(params ReadOnlySpan<string> more)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches([Chain, "create view vN as select name from N", "create view vE as select w from E", .. more]);
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("select n1.name, n2.name from (select name from N) n1, E e, N n2 where match(n1-(e)->n2) order by 1, 2", "a|b;b|c;c|d")]
+    [DataRow("select n1.name, e.w, n2.name from vN n1, vE e, vN n2 where match(n1-(e)->n2) order by 1, 2", "a|12|b;b|23|c;c|34|d")]
+    [DataRow("with c as (select name from N where id < 3) select n1.name, n2.name from c n1, E e, c n2 where match(n1-(e)->n2) order by 1, 2", "a|b")]
+    [DataRow("select n1.x, n2.name from (select name as x, $node_id as nid from N) n1, E e, N n2 where match(n1-(e)->n2) order by 1, 2", "a|b;b|c;c|d")]
+    [DataRow("select n1.name, n2.name from (select name from N where id > 1) n1, E e, N n2 where match(n1-(e)->n2) order by 1, 2", "b|c;c|d")]
+    [DataRow("select n1.name, n2.name, e.w from N n1, (select w from E where w > 20) e, N n2 where match(n1-(e)->n2) order by 1, 2", "b|c|23;c|d|34")]
+    [DataRow("select n1.name, n2.name from (select name from (select name, id from N) i) n1, E e, N n2 where match(n1-(e)->n2) order by 1, 2", "a|b;b|c;c|d")]
+    public void Match_ReadsThroughABodyThatProjectsNoPseudoColumn(string query, string expected) => AreEqual(expected, Rows(Chained(), query));
+
+    [TestMethod]
+    public void Match_ThroughABodyThatProjectsNoPseudoColumn_StarSkipsTheIdentity()
+        => AreEqual("$edge_id_*,$from_id_*,$to_id_*,w,name,$node_id_*,id,name", Columns(Chained(), "select * from (select name from N) n1, E e, N n2 where match(n1-(e)->n2)"));
+
+    [TestMethod]
+    [DataRow("select n1.name, e.w, n2.name, n2.id from N n1, E e, N n2 where match(n1-(e)->n2) order by e.w", "a|12|b|2;b|23|NULL|NULL;NULL|34|d|4")]
+    [DataRow("select n1.name, e.w, n2.name from N n1, E e, N n2 where match(n1-(e)->n2) and n2.name is null", "b|23|NULL")]
+    [DataRow("select n1.name, e.w, n2.name, f.w, n3.name from N n1, E e, N n2, E f, N n3 where match(n1-(e)->n2-(f)->n3) order by e.w, f.w", "a|12|b|23|NULL;b|23|NULL|34|d")]
+    [DataRow("select e.w, f.w from N n1, E e, N n2, E f, N n3 where match(n1-(e)->n2 and n2-(f)->n3) order by e.w, f.w", "12|23;23|34")]
+    [DataRow("select e.w, n2.name, n2.$node_id from N n1, E e, N n2 where match(n1-(e)->n2) and n2.id is null", "23|NULL|NULL")]
+    [DataRow("select count(*) from N n1, E e, M n2 where match(n1-(e)->n2)", "1")]
+    public void Match_NullExtendsANodeItsTableNoLongerHolds(string query, string expected) => AreEqual(expected, Rows(Chained("delete N where id = 3"), query));
+
+    [TestMethod]
+    [DataRow("select n1.name, count(*) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(-(e)->n2)+)) group by n1.name order by 1", "a|12;b|12;c|12;d|12")]
+    [DataRow("select e.w, count(*) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(-(e)->n2)+)) group by e.w order by 1", "12|16;23|16;34|16")]
+    [DataRow("select e.w, count(*) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(<-(e)-n2)+)) group by e.w order by 1", "12|16;23|16;34|16")]
+    [DataRow("select count(*) from N n1, E for path e, N for path n2 where not not match(shortest_path(n1(-(e)->n2)+))", "48")]
+    [DataRow("select count(*) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(-(e)->n2)+)) or 1 = 0", "48")]
+    [DataRow("select count(*) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) or 1 = 0", "6")]
+    [DataRow("select count(*) from N n1, E for path e, N for path n2", "64")]
+    [DataRow("select count(*) from N n1, E for path e, N for path n2 where n1.id = 1", "16")]
+    public void NotMatch_AppliesNoShortestPath(string query, string expected) => AreEqual(expected, Rows(Chained(), query));
+
+    [TestMethod]
+    public void NotMatch_ShortestPath_LeavesForPathSourcesUnused()
+    {
+        var sim = Chained();
+        _ = sim.AssertSqlError("select count(*) from N n1, E for path e, N for path n2, E e3, N n3 where not match(shortest_path(n1(-(e)->n2)+)) and match(n1-(e3)->n3)", 13949);
+        sim.AssertSqlError("select n1.name, string_agg(n2.name, '>') within group (graph path) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(-(e)->n2)+))", 13952,
+            "No columns in the aggregate 'string_agg' WITHIN GROUP(GRAPH PATH) reference a recursive path.");
+    }
+
+    [TestMethod]
+    public void RowLevelSecurity_OverAGraphTable()
+    {
+        var sim = Chained(
+            "create function dbo.fn(@id int) returns table with schemabinding as return select 1 ok where @id <> 3",
+            "create function dbo.fe(@w int) returns table with schemabinding as return select 1 ok where @w <> 23",
+            "create security policy p add filter predicate dbo.fn(id) on dbo.N with (state = on)");
+        const string Path = "select n1.name, string_agg(n2.name, '>') within group (graph path) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))";
+
+        // A hidden node NULL-pads the MATCH, and refuses a walk naming the path's node.
+        AreEqual("a|12|b;b|23|NULL;NULL|34|d", Rows(sim, "select n1.name, e.w, n2.name from N n1, E e, N n2 where match(n1-(e)->n2) order by e.w"));
+        sim.AssertSqlError(Path, 4104, "The multi-part identifier \"n2\" could not be bound.");
+        AreEqual(3, sim.AssertSqlError(Path + " and 1 = 0", 4104).State);
+        AreEqual(3, sim.AssertSqlError("select n1.name, count(e.w) within group (graph path) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))", 4104).State);
+        AreEqual("27", Rows(sim, "select count(*) from N n1, E for path e, N for path n2 where not match(shortest_path(n1(-(e)->n2)+))"));
+
+        // Over the edge table too the node is named first, and alone the edge at state 2.
+        _ = sim.ExecuteNonQuery("alter security policy p add filter predicate dbo.fe(w) on dbo.E");
+        AreEqual(3, sim.AssertSqlError(Path, 4104).State);
+        _ = sim.ExecuteNonQuery("alter security policy p drop filter predicate on dbo.N");
+        AreEqual("a|12|b;c|34|d", Rows(sim, "select n1.name, e.w, n2.name from N n1, E e, N n2 where match(n1-(e)->n2) order by e.w"));
+        sim.AssertSqlError(Path, 4104, "The multi-part identifier \"e\" could not be bound.");
+        AreEqual(2, sim.AssertSqlError(Path, 4104).State);
+        _ = sim.ExecuteNonQuery("alter security policy p with (state = off)");
+        AreEqual("6", Rows(sim, "select count(*) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))"));
+    }
 }

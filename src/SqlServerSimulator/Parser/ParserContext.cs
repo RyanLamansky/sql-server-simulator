@@ -205,6 +205,17 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BrowseFlattenFrom;
 
     /// <summary>
+    /// Whether a derived table, view or CTE body reading one node or edge
+    /// table carries that table's identity columns behind its own, hidden, so
+    /// a <c>MATCH</c> reads through a body that doesn't project the
+    /// pseudo-column, as real's does (<c>Selection.AppendGraphIdentityColumns</c>).
+    /// Armed for a batch whose text names <c>MATCH</c> at all, and for a view
+    /// body a reference in such a batch parses, so no other batch's bodies
+    /// carry the columns.
+    /// </summary>
+    public bool GraphIdentityPassthrough = command.CommandText?.Contains("MATCH", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>
     /// Armed by a FROM source of a <see cref="BrowseFlattenFrom"/> clause just
     /// before it parses its body, and consumed by the first query block that
     /// body begins — which then flattens (<see cref="BrowseFlattenBody"/>)

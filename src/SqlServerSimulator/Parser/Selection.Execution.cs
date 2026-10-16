@@ -1657,6 +1657,14 @@ internal sealed partial class Selection
         var browseHidden = (browse || browseFlattened) && browsePassesRows
             ? AppendBrowseHiddenColumns(sources, expressions)
             : 0;
+        HeapTable? graphIdentityTable = null;
+        var graphIdentityHidden = !browse && !browseFlattened && browsePassesRows && parseBatch.Parser.GraphIdentityPassthrough
+            && scope.Position is QueryPosition.Derived or QueryPosition.Inlined
+            && topExpression is null && fromClause.OffsetExpression is null && intoTarget is null && !isAssignmentOnly
+            && !parseBatch.Parser.LaterSetOperationBranch
+            && parseBatch.Parser.Token is not Tokens.ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect }
+            ? AppendGraphIdentityColumns(sources, expressions, out graphIdentityTable)
+            : 0;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
@@ -2336,6 +2344,11 @@ internal sealed partial class Selection
             selection.BrowseFlattened = true;
             selection.BrowsePassesRows = browsePassesRows;
             selection.HiddenColumnCount = browseHidden;
+        }
+        else if (graphIdentityHidden > 0)
+        {
+            selection.GraphIdentityColumnCount = graphIdentityHidden;
+            selection.GraphIdentityTable = graphIdentityTable;
         }
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
         {

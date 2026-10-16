@@ -5,10 +5,70 @@ namespace SqlServerSimulator.Parser;
 
 // MATCH(SHORTEST_PATH(…)): each path's FOR PATH edges and nodes give way to
 // one lateral source, run per start row, whose rows are the nodes the start
-// reaches with each path's graph path aggregates alongside. See
+// reaches with each path's graph path aggregates alongside. Also what MATCH
+// asks of the rest of the plan: its node tables' outer joins, and the graph
+// identity a body carries for a MATCH to read through. See
 // docs/claude/graph.md.
 internal sealed partial class Selection
 {
+    /// <summary>
+    /// How many hidden columns carrying a node or edge table's identity trail
+    /// this body's own (see <see cref="AppendGraphIdentityColumns"/>): one for
+    /// a node table's graph id, four for an edge table's endpoint pairs.
+    /// </summary>
+    internal int GraphIdentityColumnCount;
+
+    /// <summary>The node or edge table whose identity <see cref="GraphIdentityColumnCount"/> columns carry.</summary>
+    internal HeapTable? GraphIdentityTable;
+
+    /// <summary>How many hidden columns trail this body's own: a browse statement's, or a graph identity's.</summary>
+    internal int TrailingHiddenColumnCount => this.BrowseFlattened ? this.HiddenColumnCount : this.GraphIdentityColumnCount;
+
+    /// <summary>The name a FROM source over this body gives the hidden column at <paramref name="ordinal"/>.</summary>
+    internal string TrailingHiddenName(int ordinal) => this.BrowseFlattened
+        ? BrowseHiddenName(ordinal)
+        : GraphIdentityName(ordinal - (this.Schema.Length - this.GraphIdentityColumnCount));
+
+    /// <summary>The name of a body's graph identity column <paramref name="index"/>, one no identifier can spell.</summary>
+    internal static string GraphIdentityName(int index) => "\u0001graph" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static readonly GraphColumnKind[] NodeIdentityKinds = [GraphColumnKind.GraphId];
+
+    private static readonly GraphColumnKind[] EdgeIdentityKinds = [GraphColumnKind.FromObjId, GraphColumnKind.FromId, GraphColumnKind.ToObjId, GraphColumnKind.ToId];
+
+    /// <summary>The identity columns, in order, a body over <paramref name="table"/> carries.</summary>
+    internal static GraphColumnKind[] GraphIdentityKinds(HeapTable table) =>
+        table.GraphKind == GraphTableKind.Node ? NodeIdentityKinds : EdgeIdentityKinds;
+
+    /// <summary>
+    /// Appends, to a body reading one node or edge table — directly, or through
+    /// a body that carries its identity in turn — that table's identity columns
+    /// as hidden trailing columns, so a <c>MATCH</c> reads through a derived
+    /// table, view or CTE that projects no pseudo-column, or projects one under
+    /// another name (probed 2026-10-16 against SQL Server 2025); returns how
+    /// many it appended.
+    /// </summary>
+    private static int AppendGraphIdentityColumns(FromSource[] sources, List<Expression> expressions, out HeapTable? table)
+    {
+        table = null;
+        if (sources is not [{ Qualifier: { } qualifier } source])
+            return 0;
+        if (source.BackingTable is { GraphKind: GraphTableKind.Node or GraphTableKind.Edge } graph)
+        {
+            foreach (var kind in GraphIdentityKinds(graph))
+                expressions.Add(new Reference(qualifier, graph.Columns[GraphColumns.OrdinalOf(graph, kind)].Name));
+            table = graph;
+        }
+        else if (source.GraphIdentityTable is { } inner)
+        {
+            var count = GraphIdentityKinds(inner).Length;
+            for (var i = 0; i < count; i++)
+                expressions.Add(new Reference(qualifier, GraphIdentityName(i)));
+            table = inner;
+        }
+        return table is null ? 0 : GraphIdentityKinds(table).Length;
+    }
+
     /// <summary>
     /// Settles the query's <c>SHORTEST_PATH</c>s, if its WHERE bound any: the
     /// <c>FOR PATH</c> sources' refusals and the <c>LAST_NODE</c> references',
@@ -62,7 +122,9 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.ForPathNodeOutsideRecursiveSection(source.Qualifier!);
             }
         }
-        foreach (var source in sources)
+        // A query with no MATCH reads its FOR PATH sources as ordinary ones
+        // (probed 2026-10-16 against SQL Server 2025).
+        foreach (var source in match is null ? [] : sources)
         {
             if (!source.ForPath || Recursive(source))
                 continue;
@@ -83,6 +145,26 @@ internal sealed partial class Selection
         // 2026-09-27 against SQL Server 2025).
         if (scope.Position is QueryPosition.Subquery or QueryPosition.Exists)
             throw SimulatedSqlException.RecursiveMatchInSubquery();
+
+        // Real can't walk a node or edge table a row-level security filter
+        // covers: the recursive section's node is Msg 4104 at state 3 ahead
+        // of its edge at state 2, as the batch compiles (probed 2026-10-16
+        // against SQL Server 2025).
+        if (context.Batch.Connection.Simulation.DeclaresSecurityPolicies)
+        {
+            foreach (var edges in (ReadOnlySpan<bool>)[false, true])
+            {
+                foreach (var spec in specs)
+                {
+                    foreach (var hop in spec.Hops)
+                    {
+                        var walked = edges ? hop.Edge : hop.Node;
+                        if (walked.BackingTable is { } table && RowSecurity.For(context.Batch, table)?.Filter is not null)
+                            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(walked.Qualifier!, edges ? (byte)2 : (byte)3);
+                    }
+                }
+            }
+        }
 
         var collation = context.Batch.CurrentDatabase.Collation;
         ShortestPathSpec? PathOf(MultiPartName name)
@@ -252,6 +334,41 @@ internal sealed partial class Selection
             }
             sources.Add(pathSource);
             joins.Add(new JoinSpec(JoinKind.CrossApply, null));
+        }
+    }
+
+    /// <summary>
+    /// Reads each MATCH node table the WHERE's patterns outer-join
+    /// (<see cref="MatchScope.OuterNodes"/>) as a <c>LEFT JOIN</c> on its
+    /// anchor endpoint, placed after the query's other sources and ahead of
+    /// its paths, and switches each MATCH to the form comparing the node's
+    /// other endpoints with that anchor. Column resolution is by name, so the
+    /// move changes no reference. A FROM clause holding anything but commas
+    /// and the paths' applies keeps the inner form.
+    /// </summary>
+    private static void ApplyMatchOuterNodes(List<FromSource> sources, List<JoinSpec> joins, FromClause fromClause)
+    {
+        if (fromClause.Match is not { InMergeOn: false, OuterNodes.Count: > 0 } match)
+            return;
+        var pathsStart = joins.FindIndex(join => join.Kind == JoinKind.CrossApply);
+        var ordinary = pathsStart < 0 ? joins.Count : pathsStart;
+        for (var i = 0; i < ordinary; i++)
+        {
+            if (joins[i] is not { Kind: JoinKind.Cross, OnPredicate: null, IsComma: true })
+                return;
+        }
+        foreach (var predicate in match.Predicates)
+            predicate.UseOuterNodes();
+        foreach (var (node, on) in match.OuterNodes)
+        {
+            var index = sources.IndexOf(node);
+            sources.RemoveAt(index);
+            joins.RemoveAt(index > 0 ? index - 1 : 0);
+            var place = joins.FindIndex(join => join.Kind == JoinKind.CrossApply);
+            if (place < 0)
+                place = joins.Count;
+            sources.Insert(place + 1, node);
+            joins.Insert(place, new JoinSpec(JoinKind.Left, on));
         }
     }
 

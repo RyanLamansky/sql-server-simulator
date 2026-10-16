@@ -46,6 +46,9 @@ Where it applies — each place a statement reads the table's rows for itself:
 - an `UPDATE` / `DELETE` target, single-table or joined, and a `MERGE` target, whose hidden rows are neither matched nor `NOT MATCHED BY SOURCE` — so a `MERGE` inserting a hidden row's key is Msg 2627, as an `INSERT` of one is;
 - a `MERGE`'s bare-table source, a partitioned view's members, a `FOR SYSTEM_TIME` read's current rows (the history rows answer only to a policy on the history table), `CONTAINSTABLE`'s matches, and a schema-bound view's rows under a filter on the view itself.
 
+Over a graph table (probed 2026-10-06 and 2026-10-16 against SQL Server 2025): a `MATCH` whose node row the filter hides keeps the edge, the node's columns NULL, since each node table reads as an outer join from its edge (see [`graph.md`](graph.md#match)); a filtered edge's rows leave the pattern.
+A `SHORTEST_PATH` walking a filtered node or edge table is refused as the batch compiles with Msg 4104 naming the recursive section's node alias at state 3, ahead of its edge's at state 2, whatever the path's aggregates read, while a `NOT MATCH(SHORTEST_PATH(…))`, which walks nothing, reads the filtered rows.
+
 What it doesn't reach: `TRUNCATE TABLE`, `CHANGETABLE` (every changed key shows), a foreign key's existence check, `sys.partitions` row counts and `sp_spaceused`.
 
 The predicate runs **ahead of anything the statement evaluates over the row**, as real's plan applies it at the scan: `WHERE id = 4 AND 1 / a = 1` raises nothing for a principal the row is hidden from, where a visible row's divide by zero does.
@@ -96,4 +99,3 @@ A predicate function's own reads lock as any read at the statement's isolation d
 ## Not modeled yet
 
 - Block predicates on a memory-optimized table's natively compiled writes, and the replication behavior `NOT FOR REPLICATION` names.
-- A filter predicate over a graph table (probed 2026-10-06 against SQL Server 2025): real refuses a `SHORTEST_PATH` walk over a filtered node or edge table with Msg 4104 state 3 naming the `FOR PATH` node alias a graph path aggregate reads, and a plain `MATCH` whose node row the filter hides keeps the edge, its node's columns NULL — the walk here reads the tables unfiltered, and a hidden node drops the match.

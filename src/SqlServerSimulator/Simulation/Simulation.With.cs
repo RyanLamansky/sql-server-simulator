@@ -200,7 +200,7 @@ partial class Simulation
             Selection body;
             using (ParserScope.Enter(ref context.BrowseFlatten, flattensBodies))
                 body = ParseCteBodyRecordingReads(context, binding, renameList);
-            var browseHidden = body.BrowseFlattened ? body.HiddenColumnCount : 0;
+            var browseHidden = body.TrailingHiddenColumnCount;
 
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -222,7 +222,7 @@ partial class Simulation
                 columnNames = body.ColumnNames[..^browseHidden];
             }
             if (browseHidden > 0)
-                columnNames = [.. columnNames, .. Enumerable.Range(columnNames.Length, browseHidden).Select(Selection.BrowseHiddenName)];
+                columnNames = [.. columnNames, .. Enumerable.Range(columnNames.Length, browseHidden).Select(body.TrailingHiddenName)];
 
             // The same binding instance stays in the dictionary so
             // self-reference FromSources built during the recursive parse

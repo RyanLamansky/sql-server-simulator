@@ -387,6 +387,8 @@ internal abstract class BooleanExpression : ExpressionNode
             context.MoveNextRequired();
         }
         var atom = ParseAtom(context);
+        if (negations > 0 && atom is Expressions.MatchPredicate match && context.MatchScope is { InMergeOn: false } matchScope && match.WithdrawPaths(matchScope) is { } pathFilter)
+            return pathFilter;
         if (negations > 0 && context.MatchScope is { Edges.Count: > 0, InMergeOn: false })
             Expressions.MatchPredicate.RejectUnder([atom]);
         return negations % 2 == 1 ? new NotExpression(atom) : atom;

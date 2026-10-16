@@ -204,10 +204,12 @@ partial class SimulatedSqlException
     /// nowhere in scope — an OUTPUT clause naming neither the
     /// INSERTED/DELETED virtual tables nor the MERGE source alias, or a
     /// non-<c>APPLY</c> FROM source's argument naming a sibling source
-    /// (see <c>Selection.RejectSiblingReferences</c>).
+    /// (see <c>Selection.RejectSiblingReferences</c>), or a <c>SHORTEST_PATH</c>
+    /// walking a table a row-level security filter predicate covers, named by
+    /// its alias: a node at state 3, an edge at state 2.
     /// </summary>
-    internal static SimulatedSqlException MultiPartIdentifierCouldNotBeBound(string name) =>
-        new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, 1);
+    internal static SimulatedSqlException MultiPartIdentifierCouldNotBeBound(string name, byte state = 1) =>
+        new($"The multi-part identifier \"{name}\" could not be bound.", 4104, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4121 — fired when a schema-qualified function
