@@ -2327,7 +2327,9 @@ public sealed partial class Simulation
     /// part of the name the call used carries over, so the procedure runs in
     /// that database as an <c>EXEC</c> naming it does. Each
     /// non-<see cref="ParameterDirection.ReturnValue"/> parameter is passed
-    /// positionally: an input literalized (see <see cref="LiteralizeRpcArgument"/>),
+    /// by its name when it has one and the procedure isn't an extended one
+    /// (as SqlClient's <c>DeriveParameters</c> names <c>@procedure_name</c>
+    /// and <c>@procedure_schema</c> alone), positionally otherwise: an input literalized (see <see cref="LiteralizeRpcArgument"/>),
     /// an output one as a variable of the batch the call writes back through,
     /// as the return value is. Result sets stream back through the yielded
     /// outcomes.
@@ -2356,12 +2358,15 @@ public sealed partial class Simulation
         }
         _ = sql.Append(canonicalName);
         var first = true;
+        var bindsByName = !BuiltInResources.IsExtendedProcedure(canonicalName);
         foreach (DbParameter parameter in parameters)
         {
             if (parameter.Direction is ParameterDirection.ReturnValue)
                 continue;
             _ = sql.Append(first ? " " : ", ");
             first = false;
+            if (bindsByName && parameter.ParameterName is { Length: > 0 } parameterName)
+                _ = sql.Append(parameterName[0] == '@' ? "" : "@").Append(parameterName).Append(" = ");
             if (parameter.Direction is ParameterDirection.Output or ParameterDirection.InputOutput)
             {
                 var type = SqlType.GetByDbType(parameter.DbType);

@@ -62,6 +62,9 @@ internal static class ScalarArguments
     /// </summary>
     public static short CoerceToSmallInt(SqlValue value) => Narrow(value, SqlType.SmallInt).AsInt16;
 
+    /// <summary>Narrows to <c>tinyint</c>, which <c>ODBCSCALE</c>'s two arguments declare.</summary>
+    public static byte CoerceToTinyInt(SqlValue value) => Narrow(value, SqlType.TinyInt).AsByte;
+
     /// <summary>
     /// Narrows a system procedure's integer parameter, given the type that
     /// parameter is declared as. The procedure-parameter boundary reports

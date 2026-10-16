@@ -449,7 +449,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   **`@optname` filtering** (`FilterXpMsverRows`, probe-confirmed against SQL Server 2025): each argument names one row to return — the result carries only the requested rows, **always in `Index` order regardless of argument order**; with no arguments every row returns.
   Name matching is case-insensitive; an unknown optname is silently skipped (`EXEC xp_msver 'bogus'` → empty set, no error); a duplicated optname yields its row once.
   **RPC-by-name path**: DacFx's `sqlpackage /Action:Export` invokes `xp_msver` as a direct TDS RPC (`CommandType.StoredProcedure`) with five repeated `@optname` parameters.
-  The engine's `Simulation.InvokeFromCommandTypeStoredProcedure` routes a modeled system-proc name (matched via `ResolveSystemProcedureName`) through `InvokeSystemProcedureFromRpc`, which synthesizes an equivalent top-level `EXEC <name> <args>` batch — arguments **literalized positionally** (`LiteralizeRpcArgument`), because named-argument synthesis would collide on the repeated `@optname`.
+  The engine's `Simulation.InvokeFromCommandTypeStoredProcedure` routes a modeled system-proc name (matched via `ResolveSystemProcedureName`) through `InvokeSystemProcedureFromRpc`, which synthesizes an equivalent top-level `EXEC <name> <args>` batch — arguments literalized (`LiteralizeRpcArgument`), bound by name when the RPC names them and the procedure isn't an extended one — an extended procedure takes them positionally, which is what lets the repeated `@optname` through (SqlClient's `DeriveParameters` names `@procedure_name` and `@procedure_schema` and skips `@group_number`, so a positional binding would put the schema in the group number).
   The database part of the name carries over (`[db].[sys].sp_columns_100_rowset` runs in `db`), and an output parameter or the return value passes as a variable of the synthesized batch that is written back to the RPC's parameter — SQL Server's OLE DB provider calls the schema-rowset procedures and `sp_getschemalock` so.
   This makes every modeled system proc reachable via `CommandType.StoredProcedure`, not just `xp_msver`.
 - **`xp_cmdshell` and the OLE Automation procedures** (`sp_OACreate`, `sp_OAMethod`, `sp_OAGetProperty`, `sp_OASetProperty`, `sp_OADestroy`, `sp_OAGetErrorInfo`, `sp_OAStop`; `Simulation.BlockedComponents.cs`) are listed as real lists them, extended procedures under real's object ids, and each call is **Msg 15281** naming the component while its `sp_configure` option is off, as a stock server ships it — attributed to the procedure as called (`master..xp_cmdshell`), whatever the arguments, and leaving the batch running (probed 2026-10-15 against SQL Server 2025).
@@ -1026,6 +1026,26 @@ Both are extended procedures needing a user transaction — outside one Msg 3918
 - Real's "2" forms with no schema list its system tables and their indexes and columns too (`sysrowsets`, the `sys.plan_persist_*` tables …); the simulator has none to list, and its catalog views' dates are `SystemObjectDate` rather than the build's.
 - `sp_table_statistics2_rowset`'s histogram step count is the simulator's own, which keeps a step per distinct value where real merges similar ones (see [`indexes.md`](indexes.md)).
 - A distributed transaction through the link — a four-part write inside the real server's `BEGIN TRAN` — sends a TM request for the DTC address the endpoint doesn't model; real's own loopback answers Msg 3910 there.
+
+## The metadata SqlClient asks for itself
+
+`SqlConnection.GetSchema` answers each collection with a query from SqlClient's own metadata XML — `INFORMATION_SCHEMA` views, `sysusers`, `master..sysdatabases`, `sys.table_types` with the undocumented `ODBCSCALE(system_type_id, scale)` built-in (`Parser/Expressions/OdbcScale.cs`) — and, from SQL Server 2008 on, three procedures: `sp_columns_managed` for `Columns` / `AllColumns` / `ColumnSetColumns` (`@SchemaType` 0 / 1 / 2), `sp_indexes_managed` for `Indexes` and `sp_indexcolumns_managed` for `IndexColumns`.
+`SqlCommandBuilder.DeriveParameters` reads `sp_procedure_params_100_managed`.
+`ClientMetadataWireTests` drives every collection and `DeriveParameters` over the wire (`Simulation.ManagedMetadataProcs.cs`; probed 2026-10-16 against SQL Server 2025).
+
+- **`sp_columns_managed`** lists the columns of the user tables and views — never a table type's, a function's or a catalog view's — with each argument a `LIKE` pattern under the database's collation, the catalog's included.
+  A column reads as `INFORMATION_SCHEMA.COLUMNS` reads it but for a `vector`, which reads as the `varbinary` it travels as, and a collation name, which isn't a column.
+  `@SchemaType` 0 leaves the sparse columns out (a column set stays), 1 lists every column, 2 the sparse ones alone; NULL or another number lists nothing, and a string that is no number is Msg 245 at the procedure's line 10, which ends the batch.
+- **`sp_indexes_managed` / `sp_indexcolumns_managed`** list every index `sys.indexes` lists on a user table but the heap — an indexed view's aren't — each argument an exact name, ordered by table, index and column name.
+  A column's `ordinal_position` is its key ordinal, 0 for an included, columnstore, XML or spatial index's column, and `KeyType` its `system_type_id`.
+- **`sp_procedure_params_100_managed` / `sp_procedure_params_managed`** find the name as `OBJECT_ID` finds it — the caller's default schema, then `dbo`, then `sys`, so `sp_who` answers — and list every group number of a numbered procedure for a NULL `@group_number`; `@parameter_name` is exact.
+  The `_100` version reports the `SqlDbType` each parameter binds as (`MANAGED_DATA_TYPE`): a `vector` as `VarBinary`, a CLR, spatial or `hierarchyid` type as `Udt` named under `sys`, a table-valued parameter as `Structured` with its type's catalog and schema, a table-valued function's result as `Variant`, and a cursor as the `int` output it reads as.
+  The plain version carries the OLE DB `PROCEDURE_PARAMETERS` columns of the `_100` rowset version, a table-valued parameter as type 143; its parameters of a numbered procedure's number 2 on report NULL nullability.
+  Both leave a `json` parameter out, keep a typed `xml` parameter's schema collection in the `XML_*` columns, and report that parameter's `TYPE_SCHEMA_NAME` as the routine's own schema rather than the collection's.
+
+### Divergences
+
+- Real's `sp_columns_managed` has no `ORDER BY`, so its rows follow its plan — a table's NOT NULL columns tend to come first, a rowversion ahead of the key — where the simulator lists each table's columns by position.
 
 ## Expression dependencies
 

@@ -391,6 +391,13 @@ internal static partial class BuiltInResources
         // document store OPENXML reads. See docs/claude/xml.md.
         "sp_xml_preparedocument",
         "sp_xml_removedocument",
+        // The metadata procedures SqlClient calls itself: DeriveParameters'
+        // parameter list and GetSchema's column and index collections.
+        "sp_procedure_params_100_managed",
+        "sp_procedure_params_managed",
+        "sp_columns_managed",
+        "sp_indexes_managed",
+        "sp_indexcolumns_managed",
     ];
 
     /// <summary>

@@ -185,6 +185,11 @@ partial class BuiltInResources
             ["sp_validname"] = [new("@name", 256, 256, 0, 0), new("@raise_error", 104, 1, 1, 0)],
             ["sp_who"] = [new("@loginame", 256, 256, 0, 0)],
             ["sp_who2"] = [new("@loginame", 256, 256, 0, 0)],
+            ["sp_columns_managed"] = [new("@Catalog", 256, 256, 0, 0), new("@Owner", 256, 256, 0, 0), new("@Table", 256, 256, 0, 0), new("@Column", 256, 256, 0, 0), new("@SchemaType", 256, 256, 0, 0)],
+            ["sp_indexcolumns_managed"] = [new("@Catalog", 256, 256, 0, 0), new("@Owner", 256, 256, 0, 0), new("@Table", 256, 256, 0, 0), new("@ConstraintName", 256, 256, 0, 0), new("@Column", 256, 256, 0, 0)],
+            ["sp_indexes_managed"] = [new("@Catalog", 256, 256, 0, 0), new("@Owner", 256, 256, 0, 0), new("@Table", 256, 256, 0, 0), new("@Name", 256, 256, 0, 0)],
+            ["sp_procedure_params_100_managed"] = [new("@procedure_name", 256, 256, 0, 0), new("@group_number", 56, 4, 10, 0), new("@procedure_schema", 256, 256, 0, 0), new("@parameter_name", 256, 256, 0, 0)],
+            ["sp_procedure_params_managed"] = [new("@procedure_name", 256, 256, 0, 0), new("@group_number", 56, 4, 10, 0), new("@procedure_schema", 256, 256, 0, 0), new("@parameter_name", 256, 256, 0, 0)],
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>One row of <see cref="SystemProcedureParameters"/>.</summary>

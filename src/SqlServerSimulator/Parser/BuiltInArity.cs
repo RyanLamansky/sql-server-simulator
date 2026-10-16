@@ -580,6 +580,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
         ["OBJECT_ID_FROM_NODE_ID"] = Exactly("object_id_from_node_id", 1),
         ["OBJECT_NAME"] = Between("object_name", 1, 2),
         ["OBJECT_SCHEMA_NAME"] = Between("object_schema_name", 1, 2),
+        ["ODBCSCALE"] = Exactly("odbcscale", 2),
         ["ORIGINAL_DB_NAME"] = Exactly("original_db_name", 0),
         ["ORIGINAL_LOGIN"] = Exactly("original_login", 0),
         ["PARSENAME"] = Exactly("parsename", 2),

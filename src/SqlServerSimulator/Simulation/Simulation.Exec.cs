@@ -70,7 +70,8 @@ partial class Simulation
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
-        or "sp_tables" or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
+        or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
@@ -319,6 +320,11 @@ partial class Simulation
             "sp_column_privileges" => InvokeSpColumnPrivileges(batch),
             "sp_columns" => InvokeSpColumns(batch, classic: true),
             "sp_columns_100" => InvokeSpColumns(batch, classic: false),
+            "sp_columns_managed" => InvokeSpColumnsManaged(batch, systemProcName, calledAs),
+            "sp_indexcolumns_managed" => InvokeSpIndexesManaged(batch, systemProcName, calledAs, columns: true),
+            "sp_indexes_managed" => InvokeSpIndexesManaged(batch, systemProcName, calledAs, columns: false),
+            "sp_procedure_params_100_managed" => InvokeSpProcedureParamsManaged(batch, systemProcName, calledAs, v100: true),
+            "sp_procedure_params_managed" => InvokeSpProcedureParamsManaged(batch, systemProcName, calledAs, v100: false),
             "sp_configure" => Uncounted(InvokeSpConfigure(batch, CalledName(procName))),
             "sp_datatype_info" => InvokeSpDatatypeInfo(batch, classic: true),
             "sp_datatype_info_100" => InvokeSpDatatypeInfo(batch, classic: false),

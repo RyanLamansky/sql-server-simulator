@@ -2203,6 +2203,7 @@ internal abstract class Expression : ExpressionNode
                 "ISNUMERIC" => new IsNumeric(context),
                 "IS_MEMBER" => new RoleMemberCheck(context, serverScope: false),
                 "OBJECT_ID" => new ObjectId(context),
+                "ODBCSCALE" => new OdbcScale(context),
                 "PARSENAME" => new ParseName(context),
                 "QUOTENAME" => new QuoteName(context),
                 "REPLICATE" => new Replicate(context),

@@ -1606,7 +1606,7 @@ internal static partial class BuiltInResources
     /// for OCTET_LENGTH). NUMERIC_PRECISION is NULL for bit (and for non-
     /// numeric types); float / real use radix 2 with NULL scale.
     /// </summary>
-    private static (int? CharLength, int? OctetLength, byte? NumericPrecision, int? NumericRadix, int? NumericScale, short? DateTimePrecision) GetInformationSchemaColumnMetadata(HeapColumn col)
+    internal static (int? CharLength, int? OctetLength, byte? NumericPrecision, int? NumericRadix, int? NumericScale, short? DateTimePrecision) GetInformationSchemaColumnMetadata(HeapColumn col)
     {
         var t = col.Type;
         return t switch
@@ -1891,7 +1891,7 @@ internal static partial class BuiltInResources
     // A routine's parameter or return value of type vector reads as the
     // varbinary it is stored as, where a table column reads vector (probed
     // 2026-10-02 against SQL Server 2025).
-    private static SqlValue IsoRoutineDataTypeName(SqlType type, bool spelledNumeric) =>
+    internal static SqlValue IsoRoutineDataTypeName(SqlType type, bool spelledNumeric) =>
         type is VectorSqlType ? SqlValue.FromSystemName("varbinary") : IsoDataTypeName(type, spelledNumeric);
 
     /// <summary>
