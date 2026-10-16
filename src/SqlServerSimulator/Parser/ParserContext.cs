@@ -312,7 +312,11 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <c>SELECT abs(-1</c> → <c>near '1'</c>, <c>SELECT 1 FROM</c> →
     /// <c>near 'FROM'</c>, <c>IF 'abc'</c> → Msg 4145 <c>near 'abc'</c>. Only
     /// read once <see cref="Token"/> is null; a checkpoint restore leaves it
-    /// pointing past the restore, which no live parse can observe.
+    /// pointing past the restore, which no live parse can observe. A further
+    /// read past the end keeps it, so a look-ahead that probes the exhausted
+    /// input before the error is raised doesn't blank the name (probed
+    /// 2026-10-16 against SQL Server 2025: <c>CREATE TABLE #t (a int, b int</c>
+    /// is near <c>'int'</c>).
     /// </summary>
     public Token? LastToken;
 
@@ -1305,8 +1309,10 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
             this.index = commandText.Length;
             if (this.Token is { } last)
+            {
                 this.PreviousTokenEnd = last.EndIndex;
-            this.LastToken = this.Token;
+                this.LastToken = last;
+            }
             this.Token = null;
             return false;
         }
@@ -1375,8 +1381,10 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         }
 
         if (this.Token is { } final)
+        {
             this.PreviousTokenEnd = final.EndIndex;
-        this.LastToken = this.Token;
+            this.LastToken = final;
+        }
         this.Token = null;
         return false;
     }

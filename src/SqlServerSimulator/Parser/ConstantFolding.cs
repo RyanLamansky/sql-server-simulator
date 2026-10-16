@@ -430,9 +430,18 @@ internal static class ConstantFolding
         // "not less than one" comparison, which NULL leaves UNKNOWN — but the
         // simulator can't tell those NULLs apart from the untyped one, so it
         // reports 5309 for the whole family (see docs/claude/query.md).
-        throw !folded.IsNull && folded.Type == SqlType.Int32 && folded.AsInt32 >= 1
+        var refusal = !folded.IsNull && folded.Type == SqlType.Int32 && folded.AsInt32 >= 1
             ? SimulatedSqlException.IntegerIndexNotAllowedInOrderedAggregate()
             : SimulatedSqlException.ConstantNotAllowedInOrderedAggregate();
+
+        // A binder error, so the statement's syntax errors come first: a
+        // re-read for the whole report records it and parses on (probed
+        // 2026-10-16 against SQL Server 2025: `OVER (ORDER BY 1) +` is the
+        // Msg 102 alone).
+        if (context.Batch.BindErrors is not { } report || !report.Covers(context.Token ?? context.LastToken))
+            throw refusal;
+        report.Record(refusal, context.PreviousTokenEnd - 1);
+        return NeverEvaluatedKey();
     }
 
     /// <summary>

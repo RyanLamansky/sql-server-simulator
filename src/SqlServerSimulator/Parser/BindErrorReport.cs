@@ -70,7 +70,7 @@ internal sealed class BindErrorReport(string command)
     /// </summary>
     public static bool StartsReport(SimulatedSqlException error) =>
         error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 273 or 402 or 468 or 529 or 1011 or 1012 or 1013 or 1015
-            or 4101 or 4104 or 5310 or 5319 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
+            or 4101 or 4104 or 5308 or 5309 or 5310 or 5319 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
 
     /// <summary>
     /// Whether <paramref name="error"/> is a type check real reports where it

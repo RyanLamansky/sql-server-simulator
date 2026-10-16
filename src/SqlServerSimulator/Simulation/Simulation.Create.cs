@@ -2427,6 +2427,33 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether the token after a column's name ends its definition before a
+    /// data type: the list's punctuation, the end of the batch, or a column
+    /// constraint's keyword — though not <c>COLLATE</c>, <c>CLUSTERED</c> or
+    /// <c>NOT FOR REPLICATION</c>, which stay a syntax error (probed 2026-10-16
+    /// against SQL Server 2025). Except the timestamp column written as its
+    /// type's own name, which <see cref="ParseOneColumnIntoLists"/> reads first.
+    /// </summary>
+    private static bool IsColumnWithoutDataType(ParserContext context)
+    {
+        switch (context.Token)
+        {
+            case null:
+            case Operator { Character: ',' or ')' or ';' }:
+                return true;
+            case ReservedKeyword { Keyword: Keyword.Not }:
+                var checkpoint = context.SaveCheckpoint();
+                var afterNot = context.GetNextOptional();
+                context.RestoreCheckpoint(checkpoint);
+                return afterNot is not ReservedKeyword { Keyword: Keyword.For };
+            case ReservedKeyword { Keyword: Keyword.Check or Keyword.Constraint or Keyword.Default or Keyword.Foreign or Keyword.Identity or Keyword.Index or Keyword.Null or Keyword.Primary or Keyword.References or Keyword.RowGuidCol or Keyword.Unique or Keyword.With }:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
     /// Parses a single column definition starting at the column-name token
     /// and appends a <see cref="HeapColumn"/> entry to <paramref name="heapColumns"/>
     /// (or a <c>null</c> placeholder when the column is a non-persisted
@@ -2463,7 +2490,7 @@ partial class Simulation
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var atColumnName = context.SaveCheckpoint();
-        context.MoveNextRequired();
+        context.MoveNextOptional();
 
         // A column written as just `timestamp` is a timestamp column named
         // timestamp (probed 2026-09-30 against SQL Server 2025, in a table, a
@@ -2473,6 +2500,11 @@ partial class Simulation
             && context.Token is Operator { Character: ',' or ')' } or ReservedKeyword { Keyword: Keyword.Not or Keyword.Null or Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Default or Keyword.Check })
         {
             context.RestoreCheckpoint(atColumnName);
+        }
+        else if (IsColumnWithoutDataType(context))
+        {
+            context.RestoreCheckpoint(atColumnName);
+            throw SimulatedSqlException.ColumnDefinitionWithoutDataType(columnName.Value);
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })

@@ -117,6 +117,21 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareSetTarget(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 1);
 
     /// <summary>
+    /// <see cref="MustDeclareSetTarget(string)"/> raised once the assignment
+    /// has parsed — a <c>SET</c>'s or a <c>SELECT</c> item's — at the line of
+    /// the assignment's last token rather than the token the parser stands on,
+    /// which may begin the next statement (probed 2026-10-16 against SQL
+    /// Server 2025: <c>set @a = 1</c> and a later line's <c>select 1 +</c>
+    /// report the Msg 137 at the first line and the Msg 102 at the second).
+    /// </summary>
+    internal static SimulatedSqlException MustDeclareSetTarget(string name, Parser.ParserContext context)
+    {
+        var error = MustDeclareSetTarget(name);
+        error.Errors[0].LineNumber = Parser.Token.LineAt(context.Command.CommandText, Math.Max(context.PreviousTokenEnd - 1, 0));
+        return error;
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 137 for a table variable read as a scalar —
     /// <c>SELECT @t</c>, <c>SET @t = 1</c>, <c>@t.a</c> — which real reports
     /// at class 16 state 1 where an undeclared name is class 15 state 2

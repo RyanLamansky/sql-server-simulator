@@ -997,7 +997,7 @@ partial class Simulation
                 context.MoveNextRequired();
                 _ = Expression.Parse(context);
             }
-            throw SimulatedSqlException.MustDeclareSetTarget(variableToken.Value);
+            throw SimulatedSqlException.MustDeclareSetTarget(variableToken.Value, context);
         }
         var slot = context.Batch.GetVariableSlot(variableToken.Value);
 

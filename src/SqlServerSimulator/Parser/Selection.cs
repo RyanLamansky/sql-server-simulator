@@ -2264,14 +2264,24 @@ internal sealed partial class Selection
                     {
                         var checkpoint = context.SaveCheckpoint();
                         _ = context.MoveNext();
+                        var afterVariable = context.Token;
+                        // An undeclared target is refused once its item has
+                        // parsed, at state 1 as SET's is, so a syntax error or
+                        // an undeclared variable in its value comes first
+                        // (probed 2026-10-16 against SQL Server 2025).
+                        var undeclaredTarget = !context.Batch.Variables.ContainsKey(atPrefixed.Value)
+                            && !context.Batch.HasTableVariable(atPrefixed.Value)
+                            && !context.Batch.HasCursorVariable(atPrefixed.Value);
                         if (context.Token is Operator { Character: '=' })
                         {
-                            var slot = context.Batch.GetVariableSlot(atPrefixed.Value);
+                            var slot = undeclaredTarget ? null : context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
                             Expression rhs;
                             assignedSequences ??= [];
                             using (ParserScope.Enter(ref context.SequenceCollector, assignedSequences))
                                 rhs = Expression.Parse(context);
+                            if (slot is null)
+                                throw SimulatedSqlException.MustDeclareSetTarget(atPrefixed.Value, context);
                             // One sequence drawn twice across a variable-assigning
                             // SELECT is refused as the statement runs, ending the
                             // batch (probed 2026-10-04 against SQL Server 2025).
@@ -2286,14 +2296,18 @@ internal sealed partial class Selection
                             && context.GetNextOptional() is Operator { Character: '=' } equals
                             && equals.StartIndex == compound.EndIndex)
                         {
-                            var slot = context.Batch.GetVariableSlot(atPrefixed.Value);
+                            var slot = undeclaredTarget ? null : context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
                             var rhs = Expression.Parse(context);
+                            if (slot is null)
+                                throw SimulatedSqlException.MustDeclareSetTarget(atPrefixed.Value, context);
                             expressions.Add(new AssignmentExpression(atPrefixed.Value, slot,
                                 TwoSidedExpression.FromCompoundOp(compound.Character, new VariableReference(atPrefixed, context), rhs, context)));
                         }
                         else
                         {
+                            if (afterVariable is UnterminatedToken unterminated && scope.Position is QueryPosition.Statement or QueryPosition.InsertSource && !scope.Parenthesized)
+                                RefuseUndeclaredItemBeforeUnterminated(context, atPrefixed, unterminated);
                             context.RestoreCheckpoint(checkpoint);
                             expressions.Add(Expression.Parse(context));
                         }
@@ -4114,6 +4128,33 @@ internal sealed partial class Selection
 
         context.RestoreCheckpoint(checkpoint);
         return null;
+    }
+
+    /// <summary>
+    /// An undeclared variable standing alone as an item of the statement's own
+    /// select list, the batch ending inside the string or comment after it:
+    /// real's binder names the variable only once its item ends, which the
+    /// lexer's error comes first, so the Msg 137 follows the Msg 105 / 113 at
+    /// the variable's own line, while a table or cursor variable read as a
+    /// scalar, a binder error, isn't reported at all (probed 2026-10-16
+    /// against SQL Server 2025: <c>select @a 'x</c>, <c>select 1, @a 'x</c>
+    /// and an <c>INSERT … SELECT</c>'s or a <c>UNION</c> branch's item alike;
+    /// <c>select x = @a 'x</c>, <c>select -@a 'x</c> and a subquery's or a
+    /// derived table's item report the Msg 137 first).
+    /// </summary>
+    private static void RefuseUndeclaredItemBeforeUnterminated(ParserContext context, AtPrefixedString variable, UnterminatedToken unterminated)
+    {
+        try
+        {
+            _ = context.Batch.GetVariableSlot(variable.Value);
+        }
+        catch (SimulatedSqlException undeclared)
+        {
+            if (undeclared.Class == 16)
+                throw unterminated.Alone;
+            undeclared.Errors[0].LineNumber = variable.LineNumber;
+            throw SimulatedSqlException.Aggregate([unterminated.Alone, undeclared]);
+        }
     }
 
     /// <summary>

@@ -535,12 +535,96 @@ public sealed class BatchCompilationTests
     [DataRow("set @x = 1; select 2 +;", "137@1 102@1")]
     [DataRow("set @x = 1 +", "102@1")]
     [DataRow("exec sp_executesql N'select @q; select 1 +'", "137@1 102@1")]
+    [DataRow("create table #t (a int,\nb int", "102@2")]
+    [DataRow("create table #t (a int, b)", "173@1")]
+    [DataRow("create table #t (a int,\nb\n)", "173@2")]
+    [DataRow("create table #t (a int, b", "173@1")]
+    [DataRow("create table #t (a int, b not null)", "173@1")]
+    [DataRow("create table #t (a int, b primary key)", "173@1")]
+    [DataRow("create table #t (a int, b default 1)", "173@1")]
+    [DataRow("create table #t (a int, b identity)", "173@1")]
+    [DataRow("declare @t table (a int, b)", "173@1")]
+    [DataRow("alter table t add b", "173@1")]
+    [DataRow("if 1 = 0 create table #t (a int, b)", "173@1")]
+    [DataRow("create table #t (b)\ncreate table #u (c)", "173@1 173@2")]
+    [DataRow("create table #t (b, c)", "173@1")]
+    [DataRow("create table #t (a int, b) select 1 +", "173@1 102@1")]
+    [DataRow("select 1 +; create table #t (b)", "102@1 173@1")]
+    [DataRow("create table #t (a int, b with (x = 1))", "173@1 319@1")]
+    [DataRow("create table #t (a int, b) with x as (select 1 a) select a from x", "173@1 319@1")]
+    [DataRow("select 1 + ) with x as (select 1 a) select a from x", "102@1 319@1")]
+    [DataRow("select 1 + with x as (select 1 a) select a from x", "156@1 319@1")]
+    [DataRow("select 1 +; with x as (select 1 a) select a from x", "102@1")]
+    [DataRow("select row_number() over (order by 1) +", "102@1")]
+    [DataRow("select row_number() over (order by 1)\nselect 1 +", "102@2")]
+    [DataRow("select row_number() over (order by 'a')\nselect 1 +", "102@2")]
+    [DataRow("select row_number() over (order by\n1", "102@2")]
+    [DataRow("select @a 'x", "105@1 137@1")]
+    [DataRow("select @a\n'x", "105@2 137@1")]
+    [DataRow("select 1, @a 'x", "105@1 137@1")]
+    [DataRow("select @a /* x", "113@1 137@1")]
+    [DataRow("insert t select @a 'x", "105@1 137@1")]
+    [DataRow("select 1 union select @a 'x", "105@1 137@1")]
+    [DataRow("select (@a 'x", "137@1 105@1")]
+    [DataRow("select x = @a 'x", "137@1 105@1")]
+    [DataRow("select 1 from (select @a 'x", "137@1 105@1")]
+    [DataRow("declare @t table (a int) select @t 'x", "105@1")]
+    [DataRow("select @a = 1 +", "102@1")]
+    [DataRow("select @a = 'x", "105@1 102@1")]
+    [DataRow("select @a = 1\nselect 1 +", "137@1 102@2")]
+    [DataRow("select @a = 1\nselect @b", "137@1 137@2")]
+    [DataRow("select @a = 1, @b = 'x", "137@1 105@1")]
+    [DataRow("set @a = 1\nselect 1 +", "137@1 102@2")]
+    [DataRow("set @a = 1\nselect @b", "137@1 137@2")]
     public void SyntaxErrors_ReportThoseRecoveryReaches(string batch, string expected)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (c int)");
         var ex = sim.AssertSqlError(batch, int.Parse(expected[..expected.IndexOf('@')], System.Globalization.CultureInfo.InvariantCulture));
         AreEqual(expected, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}")));
+    }
+
+    /// <summary>
+    /// An unterminated list ending the batch names its last token, at that
+    /// token's line, whichever statement holds it (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table #t (a int,\nb int", "int", 2)]
+    [DataRow("create table #t (a int, b int -- c", "int", 1)]
+    [DataRow("create table #t (a int\n\n", "int", 1)]
+    [DataRow("insert t (c) values (1,\n2", "2", 2)]
+    [DataRow("select isnull(1,\n2", "2", 2)]
+    [DataRow("select 1 where 1 in (1,\n2", "2", 2)]
+    [DataRow("declare @t table (a int,\nb int", "int", 2)]
+    public void UnterminatedList_EndingTheBatch_NamesItsLastToken(string batch, string near, int line)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (c int)");
+        var ex = sim.AssertSqlError(batch, 102);
+        AreEqual($"Incorrect syntax near '{near}'.", ex.Errors[0].Message);
+        AreEqual(line, ex.Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// A column without a data type is Msg 173 state 13 naming it, and a
+    /// SELECT assignment's undeclared target Msg 137 at SET's state 1, after
+    /// its value's own undeclared variable (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void MissingTypeAndAssignmentTarget_ReportAsReal()
+    {
+        var sim = new Simulation();
+        var missingType = sim.AssertSqlError("create table #t (a int, b)", 173);
+        AreEqual("The definition for column 'b' must include a data type.", missingType.Errors[0].Message);
+        AreEqual((byte)13, missingType.Errors[0].State);
+        AreEqual((byte)1, sim.AssertSqlError("select @a = 1", 137).Errors[0].State);
+        AreEqual((byte)1, sim.AssertSqlError("select @a += 1", 137).Errors[0].State);
+        var value = sim.AssertSqlError("select @a = @b", 137);
+        AreEqual("Must declare the scalar variable \"@b\".", value.Errors[0].Message);
+        AreEqual(1, value.Errors.Count);
+        AreEqual(1, sim.ExecuteScalar("create table #ts (timestamp, a int); select 1"));
     }
 
     /// <summary>

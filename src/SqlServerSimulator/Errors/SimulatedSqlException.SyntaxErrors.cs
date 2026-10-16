@@ -39,6 +39,17 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
+    /// Msg 173: a table list's column with no data type — its name followed by
+    /// the list's <c>,</c> or <c>)</c>, the end of the batch, or a column
+    /// constraint (<c>NULL</c>, <c>DEFAULT</c>, <c>PRIMARY KEY</c>, …), in a
+    /// table, a table variable, a table type, a function's return table and
+    /// <c>ALTER TABLE … ADD</c> alike, raised while the batch compiles (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ColumnDefinitionWithoutDataType(string columnName) =>
+        new($"The definition for column '{columnName}' must include a data type.", 173, 15, 13);
+
+    /// <summary>
     /// Mimics SQL Server error 1080: an integral literal in a grammar slot
     /// that demands an <c>int</c> (<c>SET TEXTSIZE</c> / <c>SET ROWCOUNT</c>)
     /// exceeds the int range. Probe-confirmed against SQL Server 2025

@@ -138,11 +138,23 @@ What it carries past the blanking, each probed 2026-09-30 against SQL Server 202
   One raised on a `(` ended the condition before it, so the parser reads on from that `(` as a statement, query or not — `WHERE [abs](1) IS NULL` reports nothing more (probed 2026-10-01 against SQL Server 2025).
   A Msg 137 (an undeclared variable) counts through its variable, so `DECLARE @a int = @b + @c` reports only `@b` while `SELECT @nope; SELECT @nope2` reports both, and a variable whose `DECLARE` a syntax error cost is Msg 137 where it is next read.
   A binder error after either still waits for a batch that parses.
+- **A column without a data type** (Msg 173 state 13, a table list's name followed by `,`, `)`, the batch's end or a column constraint's keyword) is a grammar-action error raised on the name: always reported, the parser reading on past the name, so `create table #t (b) with (x = 1)` adds the `WITH`'s Msg 319 and `create table #t (b, c)` reports `b` alone (probed 2026-10-16 against SQL Server 2025).
+- **A `WITH` recovery reaches by discarding tokens** reads as a common table expression after an unterminated statement, Msg 319, whether or not the expression then parses (`select 1 + ) with x as (select 1 a) select a from x`); one past a `;` doesn't.
 - **An error at the end of the text** counts every token before it and names the last one — `WITH CUBE` read as a common table expression after a refused `GROUP BY ALL` is its Msg 319 — except in a scalar or multi-statement function body, captured without its closing `END`, where it is Msg 156 near that `END`, as written and at its line.
 
 A schema-bound body's Msg 1054 (a select-list star, `GROUP BY ALL`) is a grammar-action error too, and the schema-bound rule outlives the blanked header, since the body runs to the end of its batch ([`programmable.md`](programmable.md#schema-binding-with-schemabinding)).
 
 A `SET` to an undeclared variable is Msg 137 at **state 1**, raised once the statement has parsed, so a syntax error or an undeclared variable (state 2, as every read is) on its right-hand side comes first.
+A `SELECT @a = …` item's undeclared target is the same state-1 refusal, raised once its item has parsed (probed 2026-10-16 against SQL Server 2025).
+Either is raised on the token after the assignment, at the line of the assignment's last token: recovery reads on from that next token, counting the last one, so `set @a = 1` then a later line's `select @b` reports both.
+
+**An undeclared variable standing alone as an item of the statement's own select list** — an `INSERT … SELECT`'s and a `UNION` branch's included — with the batch ending inside the string or comment right after it reports the lexer's error first and the Msg 137 after it, at the variable's line (`select @a 'x`, `select @a /* x`); real's binder names the variable only once its item ends (probed 2026-10-16 against SQL Server 2025).
+Anywhere else the Msg 137 comes first: `select x = @a 'x`, `select -@a 'x`, `select (@a 'x`, a subquery's or a derived table's item.
+A table variable read as a scalar there, a binder error, isn't reported at all.
+
+**A window or `WITHIN GROUP` key folding to a constant** (Msg 5308 / 5309) is a binder error, so any syntax error in the batch reports instead; the statement is read again for its binder report, which records the refusal and parses on.
+
+**An unterminated list ending the batch** names its last token at that token's line, a `CREATE TABLE`'s and a table variable's column list as every other list does (`create table #t (a int,\nb int` is near `'int'` at line 2; probed 2026-10-16 against SQL Server 2025).
 
 **A string or block comment the batch ends inside** (Msg 105 / 113) ends the parse where it opens, as if the text ended there (probed 2026-10-15 against SQL Server 2025): a statement complete before it reports the lexer's error alone (`select 1 'x`, `select 1 /*x`), while one that needs more — an `AS` awaiting its alias, an operator its operand, a derived table its `)`, a `BEGIN` its `END` — adds the Msg 102 its parser raises there, near the string's body or, for a comment, near the last token before it (`select 1 + /*x` is near `'+'`).
 A recovering parser reports the lexer's error after its own (`select 1 in ('x` is Msg 156 then Msg 105).
@@ -190,7 +202,8 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 
 - **Syntax-error recovery where the simulator's parser restarts differently from real's grammar** (probed 2026-09-28 against SQL Server 2025): `begin try end try begin catch select 1 end catch` on one line adds a Msg 102 near the last `catch` on real and nothing here, and the Msg 178 a misplaced `CREATE PROCEDURE`'s valued `RETURN` raises names the procedure on real and nothing here.
   Past a `CREATE FUNCTION`'s Msg 181 (an `OUTPUT` parameter), a `WITH SCHEMABINDING` after the return type is real's Msg 319 and Msg 156 near the body's `BEGIN` here (probed 2026-10-06).
-- **An undeclared variable read just before an unterminated string** (`select @a 'x`) reports Msg 137 then Msg 105 here, Msg 105 then Msg 137 on real (probed 2026-10-15 against SQL Server 2025), whose binder names the variable only once its select item ends.
+- **Past a Msg 137 the simulator's recovery restarts at the next keyword**, where real's parser reads on in place: `select @a, row_number() over (order by 1) +` adds a Msg 156 near `over` here and nothing on real (probed 2026-10-16 against SQL Server 2025).
+- **A table column's name before `NOT FOR REPLICATION`, `GENERATED`, `MASKED` or `ENCRYPTED`** is Msg 156 near `not` or a Msg 2715 for the word read as a type here, where real raises Msg 102 near `not`, near `always`, or Msg 156 near the `WITH` with its Msg 319 (probed 2026-10-16 against SQL Server 2025).
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
 
 Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).

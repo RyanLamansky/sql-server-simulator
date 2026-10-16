@@ -262,19 +262,35 @@ partial class Simulation
         return compile;
     }
 
+    /// <summary>The Msg 319 a WITH at <paramref name="restart"/> raises on recovery.</summary>
+    private static SimulatedSqlException CteAfterUnterminatedStatement(BatchContext compileBatch, string masked, int restart)
+    {
+        var error = SimulatedSqlException.CteRequiresPrecedingSemicolon();
+        error.ResolveDiagnostics(Parser.Token.LineAt(masked, restart), compileBatch.LineOffset, compileBatch.ErrorProcedureName);
+        return error;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="error"/> is the Msg 137 a <c>SET</c>'s or a
+    /// <c>SELECT</c> item's undeclared target raises once its assignment has
+    /// parsed: raised on the token after it, which the parser reads on from.
+    /// </summary>
+    private static bool IsAssignmentTargetRefusal(SimulatedSqlException error) => error.Number == 137 && error.State == 1;
+
     /// <summary>The parse-phase errors real's parser recovers from and parses on past.</summary>
-    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 178 or 181 or 319 or 1054 or 4145;
+    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 173 or 178 or 181 or 319 or 1054 or 4145;
 
     /// <summary>
     /// Whether <paramref name="error"/> is one the grammar's own actions raise
     /// rather than a token the parser can't take — a module <c>CREATE</c> not
     /// first in its batch (Msg 111), a valued <c>RETURN</c> outside a module
-    /// (Msg 178), a <c>WITH</c> after an unterminated statement (Msg 319), a
+    /// (Msg 178), a table column without a data type (Msg 173, raised on its
+    /// name), a <c>WITH</c> after an unterminated statement (Msg 319), a
     /// schema-bound body's select-list star or <c>GROUP BY ALL</c> (Msg 1054),
     /// a non-boolean expression where a condition belongs (Msg 4145) — which
     /// recovery reports however few tokens have parsed since the last.
     /// </summary>
-    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 178 or 319 or 1054 or 4145;
+    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 173 or 178 or 319 or 1054 or 4145;
 
     /// <summary>
     /// <paramref name="first"/> followed by the syntax errors real's parser
@@ -315,14 +331,19 @@ partial class Simulation
         // recovery, so the tokens after it count toward the next report — the
         // 4145's own token among them, since the parser raised it on reading
         // that token, not past it (probed 2026-09-30 against SQL Server 2025).
-        var restart = first.Number == 4145 ? errorToken.StartIndex
+        var restart = first.Number == 4145 || IsAssignmentTargetRefusal(first) ? errorToken.StartIndex
             : IsGrammarActionError(first) || first.Number == 137 ? errorToken.EndIndex
             : errorToken.StartIndex;
         // Where each error stopped the parser, and where the count of tokens
         // parsed since the last error starts — which a block's END, read as
         // one rather than as an error, doesn't reset.
         List<int> errorOffsets = [errorToken.StartIndex];
-        int? countFrom = first.Number is 4145 or 137 ? restart : null;
+        // An assignment's target refusal is raised on reducing its last token,
+        // which the count takes in (probed 2026-10-16 against SQL Server 2025:
+        // `select @a = 1` and a later line's `select @b` report both).
+        int? countFrom = IsAssignmentTargetRefusal(first) ? compileBatch.Parser.PreviousTokenEnd - 1
+            : first.Number is 4145 or 137 ? restart
+            : null;
         // A Msg 4145 raised on a `(` ended the condition before it, so the
         // parser reads on from that `(` as the start of a statement, a query
         // or not: `WHERE [abs](1) IS NULL` reports nothing past the 4145
@@ -362,9 +383,18 @@ partial class Simulation
             // that body, which recovery reads as statements.
             if (compileBatch.Parser.SchemaBoundBody != SchemaBoundBody.None)
                 recovery.Parser.SchemaBoundBody = SchemaBoundBody.Statements;
+            // A WITH the parser restarts at reads as a common table
+            // expression after an unterminated statement, and fails as one,
+            // whether or not the expression then parses (probed 2026-10-16
+            // against SQL Server 2025: `select 1 + ) with x as (select 1 a)
+            // select a from x` adds the Msg 319).
+            var startsWithWith = masked.AsSpan(restart).StartsWith("with", StringComparison.OrdinalIgnoreCase)
+                && (restart + 4 >= masked.Length || (!char.IsLetterOrDigit(masked[restart + 4]) && masked[restart + 4] != '_'));
             try
             {
                 _ = this.BindWithoutRunning(recovery, []);
+                if (startsWithWith)
+                    errors.Add(CteAfterUnterminatedStatement(compileBatch, masked, restart));
                 break;
             }
             // An error at the end of the text names the last token.
@@ -384,7 +414,7 @@ partial class Simulation
                 // At the end of the text every token has parsed; a Msg 137's
                 // variable has too.
                 var atEnd = recovery.Parser.Token is null;
-                var parsed = TokensBetween(text, countFrom.Value, atEnd || next.Number == 137 ? at.EndIndex : at.StartIndex);
+                var parsed = TokensBetween(text, countFrom.Value, atEnd || (next.Number == 137 && !IsAssignmentTargetRefusal(next)) ? at.EndIndex : at.StartIndex);
                 if (atEnd && next.Number == 102 && closingEnd is not null)
                 {
                     next = SimulatedSqlException.SyntaxErrorNearKeyword(closingEnd);
@@ -392,24 +422,20 @@ partial class Simulation
                 }
                 countFrom = next.Number switch
                 {
+                    137 when IsAssignmentTargetRefusal(next) => recovery.Parser.PreviousTokenEnd - 1,
                     137 => at.EndIndex,
                     4145 => at.StartIndex,
                     _ => null,
                 };
-                // A WITH the parser restarts at reads as a common table
-                // expression after an unterminated statement, and fails as one.
-                var startsWithWith = masked.AsSpan(restart).StartsWith("with", StringComparison.OrdinalIgnoreCase)
-                    && (restart + 4 >= masked.Length || (!char.IsLetterOrDigit(masked[restart + 4]) && masked[restart + 4] != '_'));
                 var readAsCte = startsWithWith && parsed < 3;
                 if (readAsCte)
-                {
-                    next = SimulatedSqlException.CteRequiresPrecedingSemicolon();
-                    next.ResolveDiagnostics(Parser.Token.LineAt(masked, restart), compileBatch.LineOffset, compileBatch.ErrorProcedureName);
-                }
+                    next = CteAfterUnterminatedStatement(compileBatch, masked, restart);
+                else if (startsWithWith)
+                    errors.Add(CteAfterUnterminatedStatement(compileBatch, masked, restart));
                 var reported = parsed >= 3 || IsGrammarActionError(next);
                 if (reported)
                     errors.Add(next);
-                var resume = reported && !readAsCte && next.Number != 137 ? at.StartIndex : at.EndIndex;
+                var resume = reported && !readAsCte && (next.Number is not (137 or 173) || IsAssignmentTargetRefusal(next)) ? at.StartIndex : at.EndIndex;
                 restart = resume > restart ? resume : at.EndIndex;
             }
             // A string or comment the text ends inside ends the parse.
