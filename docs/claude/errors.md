@@ -145,12 +145,15 @@ What it carries past the blanking, each probed 2026-09-30 against SQL Server 202
 A schema-bound body's Msg 1054 (a select-list star, `GROUP BY ALL`) is a grammar-action error too, and the schema-bound rule outlives the blanked header, since the body runs to the end of its batch ([`programmable.md`](programmable.md#schema-binding-with-schemabinding)).
 
 A `SET` to an undeclared variable is Msg 137 at **state 1**, raised once the statement has parsed, so a syntax error or an undeclared variable (state 2, as every read is) on its right-hand side comes first.
-A `SELECT @a = …` item's undeclared target is the same state-1 refusal, raised once its item has parsed (probed 2026-10-16 against SQL Server 2025).
+A `SELECT @a = …` item's undeclared target is the same state-1 refusal, raised once its item has parsed (probed 2026-10-16 against SQL Server 2025), and a value the batch ends inside a string or comment after reports the lexer's error first (`select @a = 1 'x` is Msg 105, then 137).
 Either is raised on the token after the assignment, at the line of the assignment's last token: recovery reads on from that next token, counting the last one, so `set @a = 1` then a later line's `select @b` reports both.
 
 **An undeclared variable standing alone as an item of the statement's own select list** — an `INSERT … SELECT`'s and a `UNION` branch's included — with the batch ending inside the string or comment right after it reports the lexer's error first and the Msg 137 after it, at the variable's line (`select @a 'x`, `select @a /* x`); real's binder names the variable only once its item ends (probed 2026-10-16 against SQL Server 2025).
 Anywhere else the Msg 137 comes first: `select x = @a 'x`, `select -@a 'x`, `select (@a 'x`, a subquery's or a derived table's item.
 A table variable read as a scalar there, a binder error, isn't reported at all.
+
+**An `@@` name no built-in claims** is a variable, so an unknown one is an undeclared variable everywhere `@a` is — Msg 137 naming it whole (`"@@nope"`), at state 2 as a read and state 1 as a `SET`'s or a `SELECT` item's target, in the same orders against a string or comment the batch ends inside (probed 2026-10-16 against SQL Server 2025).
+A built-in matches only as real spells it: `@@LOCK_TIMEOUT` and its siblings need their underscores, so `@@LOCKTIMEOUT` and `@@CPU__BUSY` are undeclared variables too.
 
 **A window or `WITHIN GROUP` key folding to a constant** (Msg 5308 / 5309) is a binder error, so any syntax error in the batch reports instead; the statement is read again for its binder report, which records the refusal and parses on.
 

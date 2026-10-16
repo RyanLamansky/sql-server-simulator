@@ -133,4 +133,36 @@ public sealed class AtAtKeywordExpansionTests
             select @@servername a, @@servicename b, @@version c, @@remserver d into #x;
             select string_agg(cast(max_length as varchar(5)), '|') within group (order by column_id) from tempdb.sys.columns where object_id = object_id('tempdb..#x')
             """));
+
+    /// <summary>
+    /// An <c>@@</c> name no built-in claims — spelled as real spells none,
+    /// underscores included — is an undeclared variable, Msg 137 at state 2,
+    /// and state 1 as an assignment's target (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select @@nope", "@@nope", (byte)2)]
+    [DataRow("select @@nope x", "@@nope", (byte)2)]
+    [DataRow("select 1 + @@nope", "@@nope", (byte)2)]
+    [DataRow("print @@nope", "@@nope", (byte)2)]
+    [DataRow("declare @a int = @@nope", "@@nope", (byte)2)]
+    [DataRow("if @@nope = 1 select 1", "@@nope", (byte)2)]
+    [DataRow("select @@nope('x')", "@@nope", (byte)2)]
+    [DataRow("select @@", "@@", (byte)2)]
+    [DataRow("select @@locktimeout", "@@locktimeout", (byte)2)]
+    [DataRow("select @@cpu__busy", "@@cpu__busy", (byte)2)]
+    [DataRow("exec sp_executesql N'select @@nope'", "@@nope", (byte)2)]
+    [DataRow("set @@nope = 1", "@@nope", (byte)1)]
+    [DataRow("select @@nope = 1", "@@nope", (byte)1)]
+    [DataRow("select @@nope += 1", "@@nope", (byte)1)]
+    [DataRow("select @@nope = @@nope2", "@@nope2", (byte)2)]
+    public void AtAt_UnknownName_IsAnUndeclaredVariable(string sql, string name, byte state)
+    {
+        var error = new Simulation().AssertSqlError(sql, 137);
+        AreEqual(($"Must declare the scalar variable \"{name}\".", (byte)15, state, 1), (error.Errors[0].Message, error.Class, error.State, error.Errors.Count));
+    }
+
+    [TestMethod]
+    public void AtAt_UnderscoredBuiltIn_ReadsAsRealSpellsIt()
+        => AreEqual(-1, new Simulation().ExecuteScalar("select @@LOCK_TIMEOUT"));
 }

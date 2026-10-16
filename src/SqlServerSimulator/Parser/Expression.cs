@@ -258,6 +258,9 @@ internal abstract class Expression : ExpressionNode
         Literal literal => new Value(literal.Value),
         AtPrefixedString atPrefixed when context.RuleVariables is { } ruleVariables => RuleVariable(ruleVariables, atPrefixed),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
+        // An `@@` name no built-in function claims is a variable no one
+        // declared (probed 2026-10-16 against SQL Server 2025).
+        DoubleAtPrefixedString { IsBuiltIn: false } undeclared => throw SimulatedSqlException.MustDeclareScalarVariable(undeclared.ErrorText[1..]),
         DoubleAtPrefixedString doubleAtPrefixedString => MarkOpeningAtAt(context, doubleAtPrefixedString.Parse()) switch
         {
             AtAtKeyword.Connections => new ConnectionsExpression(),

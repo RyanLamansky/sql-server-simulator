@@ -576,6 +576,12 @@ public sealed class BatchCompilationTests
     [DataRow("select @a = 1, @b = 'x", "137@1 105@1")]
     [DataRow("set @a = 1\nselect 1 +", "137@1 102@2")]
     [DataRow("set @a = 1\nselect @b", "137@1 137@2")]
+    [DataRow("select @a = 1 'x", "105@1 137@1")]
+    [DataRow("select @@nope 'x", "105@1 137@1")]
+    [DataRow("select @@nope /* x", "113@1 137@1")]
+    [DataRow("select x = @@nope 'x", "137@1 105@1")]
+    [DataRow("select @@nope = 1 'x", "105@1 137@1")]
+    [DataRow("select @@nope; select @@nope2", "137@1 137@1")]
     public void SyntaxErrors_ReportThoseRecoveryReaches(string batch, string expected)
     {
         var sim = new Simulation();

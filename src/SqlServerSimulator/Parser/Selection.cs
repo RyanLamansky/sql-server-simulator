@@ -2264,6 +2264,29 @@ internal sealed partial class Selection
                     context.MoveNextOptional();
                     break;
 
+                // An `@@` name no built-in function claims is an undeclared
+                // variable, so standing alone as an item before the string
+                // or comment the batch ends inside, it reports as `@a` does.
+                // An assignment to one is refused once its value has parsed.
+                case DoubleAtPrefixedString { IsBuiltIn: false } undeclared:
+                    {
+                        var checkpoint = context.SaveCheckpoint();
+                        var afterVariable = context.GetNextOptional();
+                        if (afterVariable is Operator { Character: '=' }
+                            || (afterVariable is Operator { Character: '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } compound
+                                && context.GetNextOptional() is Operator { Character: '=' } equals && equals.StartIndex == compound.EndIndex))
+                        {
+                            context.MoveNextRequired();
+                            _ = Expression.Parse(context);
+                            throw UndeclaredAssignmentTarget(context, undeclared.ErrorText[1..]);
+                        }
+                        if (afterVariable is UnterminatedToken unterminated && scope.Position is QueryPosition.Statement or QueryPosition.InsertSource && !scope.Parenthesized)
+                            throw UndeclaredItemBeforeUnterminated(SimulatedSqlException.MustDeclareScalarVariable(undeclared.ErrorText[1..]), undeclared, unterminated);
+                        context.RestoreCheckpoint(checkpoint);
+                        expressions.Add(Expression.Parse(context));
+                    }
+                    break;
+
                 // SELECT-assign disambiguation: `@v = expr` at projection-
                 // element-start position is variable assignment;
                 // `@v` followed by anything else (`+`, `,`, AS, etc.) is just
@@ -2289,7 +2312,7 @@ internal sealed partial class Selection
                             using (ParserScope.Enter(ref context.SequenceCollector, assignedSequences))
                                 rhs = Expression.Parse(context);
                             if (slot is null)
-                                throw SimulatedSqlException.MustDeclareSetTarget(atPrefixed.Value, context);
+                                throw UndeclaredAssignmentTarget(context, atPrefixed.Value);
                             // One sequence drawn twice across a variable-assigning
                             // SELECT is refused as the statement runs, ending the
                             // batch (probed 2026-10-04 against SQL Server 2025).
@@ -2308,7 +2331,7 @@ internal sealed partial class Selection
                             context.MoveNextRequired();
                             var rhs = Expression.Parse(context);
                             if (slot is null)
-                                throw SimulatedSqlException.MustDeclareSetTarget(atPrefixed.Value, context);
+                                throw UndeclaredAssignmentTarget(context, atPrefixed.Value);
                             expressions.Add(new AssignmentExpression(atPrefixed.Value, slot,
                                 TwoSidedExpression.FromCompoundOp(compound.Character, new VariableReference(atPrefixed, context), rhs, context)));
                         }
@@ -2541,7 +2564,7 @@ internal sealed partial class Selection
                     if (intoTarget is not null || DefinesModuleQuery(context, scope))
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
-                    intoTarget = BatchContext.ParseObjectName(context);
+                    intoTarget = BatchContext.TableDefinitionName(context, BatchContext.ParseObjectName(context));
                     intoDataSpace = ParseOptionalIntoDataSpace(context);
                     continue;
 
@@ -4175,9 +4198,31 @@ internal sealed partial class Selection
         {
             if (undeclared.Class == 16)
                 throw unterminated.Alone;
-            undeclared.Errors[0].LineNumber = variable.LineNumber;
-            throw SimulatedSqlException.Aggregate([unterminated.Alone, undeclared]);
+            throw UndeclaredItemBeforeUnterminated(undeclared, variable, unterminated);
         }
+    }
+
+    /// <summary>
+    /// Msg 137 at state 1 for an assignment item's undeclared target, raised
+    /// once its value has parsed; a value the batch ends inside a string or
+    /// comment after reports the lexer's error first (probed 2026-10-16
+    /// against SQL Server 2025: <c>select @a = 1 'x</c> is Msg 105, then 137).
+    /// </summary>
+    private static SimulatedSqlException UndeclaredAssignmentTarget(ParserContext context, string name)
+    {
+        var undeclared = SimulatedSqlException.MustDeclareSetTarget(name, context);
+        return context.Token is UnterminatedToken unterminated ? SimulatedSqlException.Aggregate([unterminated.Alone, undeclared]) : undeclared;
+    }
+
+    /// <summary>
+    /// The lexer's error for <paramref name="unterminated"/>, then the Msg 137
+    /// <paramref name="undeclared"/> for the <paramref name="variable"/> ahead
+    /// of it, at the variable's line (see <see cref="RefuseUndeclaredItemBeforeUnterminated"/>).
+    /// </summary>
+    private static SimulatedSqlException UndeclaredItemBeforeUnterminated(SimulatedSqlException undeclared, Token variable, UnterminatedToken unterminated)
+    {
+        undeclared.Errors[0].LineNumber = variable.LineNumber;
+        return SimulatedSqlException.Aggregate([unterminated.Alone, undeclared]);
     }
 
     /// <summary>
