@@ -269,8 +269,9 @@ internal static partial class BuiltInResources
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",
-        // xp_cmdshell and the OLE Automation procedures, refused as blocked
-        // components while their configuration options are off.
+        // xp_cmdshell, the OLE Automation procedures and Database Mail's
+        // extended procedures, refused as blocked components while their
+        // configuration options are off.
         "sp_OACreate",
         "sp_OADestroy",
         "sp_OAGetErrorInfo",
@@ -279,6 +280,9 @@ internal static partial class BuiltInResources
         "sp_OASetProperty",
         "sp_OAStop",
         "xp_cmdshell",
+        "xp_sysmail_activate",
+        "xp_sysmail_attachment_load",
+        "xp_sysmail_format_query",
         // The error log: its readers, its cycle and xp_logevent's writes.
         "sp_cycle_errorlog",
         "sp_enumerrorlogs",

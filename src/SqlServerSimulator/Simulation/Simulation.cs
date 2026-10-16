@@ -89,6 +89,7 @@ public sealed partial class Simulation
         SeedMsdbTables(msdb);
         SeedMsdbHistoryAndAgentTables(msdb);
         this.SeedMsdbAgentObjects(msdb);
+        this.SeedMsdbMailObjects(msdb);
     }
 
     /// <summary>
@@ -641,7 +642,8 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Opens the data and format files that <c>BULK INSERT</c> and
-    /// <c>OPENROWSET(BULK …)</c> name, standing in for the server's file
+    /// <c>OPENROWSET(BULK …)</c> name, and the attachments
+    /// <c>sp_send_dbmail</c> names, standing in for the server's file
     /// system. Defaults to <see langword="null"/>, under which every path
     /// behaves as a file that doesn't exist; set it in an object initializer
     /// (<c>new Simulation { OpenBulkFile = path =&gt; … }</c>).

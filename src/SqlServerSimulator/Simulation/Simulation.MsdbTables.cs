@@ -133,6 +133,7 @@ partial class Simulation
             "tinyint" => SqlType.TinyInt,
             "uniqueidentifier" => SqlType.UniqueIdentifier,
             "varbinary" => VarbinarySqlType.Get(length!.Value),
+            "varchar" => VarcharSqlType.Get(length!.Value, msdb.Collation, Coercibility.Implicit),
             _ => throw new InvalidOperationException(spec),
         };
         return new HeapColumn(parts[0], sqlType, baseName == "sysname" ? 128 : baseName == "numeric" ? null : length, nullable, identity, spelledNumeric: baseName == "numeric");

@@ -50,16 +50,20 @@ partial class Simulation
         }
         if (procName.Count >= 2 && procName[procName.Count - 2] is { Length: > 0 } schema && !msdb.Collation.Equals(schema, Database.DefaultSchemaName))
             return null;
-        foreach (var name in AgentProcedureNames)
+        foreach (var names in (ReadOnlySpan<string[]>)[AgentProcedureNames, DatabaseMailProcedureNames])
         {
-            if (msdb.Collation.Equals(name, procName.Leaf))
-                return name;
+            foreach (var name in names)
+            {
+                if (msdb.Collation.Equals(name, procName.Leaf))
+                    return name;
+            }
         }
         return null;
     }
 
-    /// <summary>Whether <paramref name="name"/> is an Agent procedure's canonical name.</summary>
-    private static bool IsAgentProcedure(string name) => Array.IndexOf(AgentProcedureNames, name) >= 0;
+    /// <summary>Whether <paramref name="name"/> is the canonical name of an msdb procedure the simulator dispatches: an Agent or a Database Mail one.</summary>
+    private static bool IsAgentProcedure(string name) =>
+        Array.IndexOf(AgentProcedureNames, name) >= 0 || Array.IndexOf(DatabaseMailProcedureNames, name) >= 0;
 
     private IEnumerable<SimulatedStatementOutcome> InvokeAgentProcedure(BatchContext batch, string name, string? returnCodeVar)
     {
@@ -120,7 +124,7 @@ partial class Simulation
         "sp_update_jobschedule" => this.InvokeSpUpdateJobSchedule(batch, returnCodeVar),
         "sp_update_jobstep" => this.InvokeSpUpdateJobStep(batch, returnCodeVar),
         "sp_update_schedule" => this.InvokeSpUpdateSchedule(batch, returnCodeVar),
-        _ => throw new InvalidOperationException($"{name} is an Agent procedure without a dispatch arm."),
+        _ => this.DatabaseMailProcedure(batch, name, returnCodeVar),
     };
 
     /// <summary>A parameter of an Agent procedure that may be left out, taking NULL.</summary>
