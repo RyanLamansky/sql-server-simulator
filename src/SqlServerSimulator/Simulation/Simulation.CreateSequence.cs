@@ -193,6 +193,7 @@ partial class Simulation
         if (schema.HasNameInSharedNamespace(sequence.Name) || !schema.Sequences.TryAdd(sequence.Name, sequence))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(sequenceName.ToString(), state: 8);
         RecordSlotUndo<Sequence>(context, schema.Sequences, sequence.Name, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, sequence);
         RecordDdlEvent(context, "CREATE_SEQUENCE", schema.Name, sequence.Name, "SEQUENCE");
         SendSequenceCacheMessages(context.Batch, sequence);
         return true;

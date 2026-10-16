@@ -39,7 +39,22 @@ internal static class XeEvents
     /// </summary>
     public static bool Takes(Simulation simulation, XeEventKind kind) =>
         (simulation.ExtendedEventsIfMade is { } server ? server.Taken[(int)kind] : XeEventKinds.TakenAtStartup[(int)kind])
+        || Traced(simulation, kind);
+
+    /// <summary>
+    /// Whether a running session or a user's trace takes
+    /// <paramref name="kind"/> — anything but the default trace, whose object
+    /// events a firing site can write without the Extended Events catalog
+    /// (<see cref="Trace.TraceEvents.WriteDefaultObjectEvent"/>).
+    /// </summary>
+    public static bool TakesBeyondDefaultTrace(Simulation simulation, XeEventKind kind) =>
+        (simulation.ExtendedEventsIfMade is { } server ? server.Taken[(int)kind] : XeEventKinds.TakenAtStartup[(int)kind])
         || (simulation.TraceTaken is { } traced && traced[(int)kind]);
+
+    /// <summary>Whether a running trace — a user's, or the default trace — takes <paramref name="kind"/>.</summary>
+    private static bool Traced(Simulation simulation, XeEventKind kind) =>
+        (simulation.TraceTaken is { } traced && traced[(int)kind])
+        || (Trace.TraceEvents.DefaultTraceKinds[(int)kind] && simulation.DefaultTraceRunning);
 
     /// <summary>
     /// <c>error_reported</c> for <paramref name="error"/>, intercepted when a
@@ -219,20 +234,25 @@ internal static class XeEvents
     /// takes and no trace takes costs nothing — not even the catalog's load —
     /// and their predicates are asked before the state is made for one.
     /// </summary>
-    internal static void Fire(SimulatedDbConnection connection, XeEventKind kind, Func<XeObject, XeValue[]> data, bool systemTask = false, string? traceText = null)
+    internal static void Fire(SimulatedDbConnection connection, XeEventKind kind, Func<XeObject, XeValue[]> data, bool systemTask = false, string? traceText = null, System.Runtime.CompilerServices.StrongBox<long>? tracePairing = null)
     {
         var simulation = connection.Simulation;
         var server = simulation.ExtendedEventsIfMade;
         var sessionsTake = server is null ? XeEventKinds.TakenAtStartup[(int)kind] : server.Taken[(int)kind];
-        var traced = simulation.TraceTaken is { } traceTaken && traceTaken[(int)kind];
+        var traced = Traced(simulation, kind);
         if (!sessionsTake && !traced)
             return;
+#if DEBUG
+        // What a firing reads of the session — an action, a predicate — shapes
+        // nothing a cached plan keeps, even fired while a query compiles.
+        using var excused = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
         var @event = Resolve(kind);
         XeFiring? firing = null;
         if (traced)
         {
             firing = new XeFiring(@event, data(@event), connection, DateTime.UtcNow, systemTask);
-            Trace.TraceEvents.Deliver(simulation, kind, firing, traceText);
+            Trace.TraceEvents.Deliver(simulation, kind, firing, traceText, tracePairing);
             if (!sessionsTake)
                 return;
         }

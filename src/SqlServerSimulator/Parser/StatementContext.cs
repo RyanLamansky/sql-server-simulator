@@ -397,6 +397,13 @@ internal sealed class StatementContext
     public bool DeferredReadToEnd;
 
     /// <summary>
+    /// The closing phases of the object events an autocommit statement fired
+    /// (<c>XeObjectEvents</c>), each its commit and its rollback, which the
+    /// statement's end fires in reverse as it succeeded or failed.
+    /// </summary>
+    public List<(Action Commit, Action Rollback)>? ObjectEventPhases;
+
+    /// <summary>
     /// Set by <c>OPTION (USE HINT ('DISABLE_TSQL_SCALAR_UDF_INLINING'))</c>,
     /// which keeps the statement's scalar function calls from inlining (see
     /// <see cref="InlinedScalarCalls"/>).
@@ -553,6 +560,7 @@ internal sealed class StatementContext
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
         this.DeferredReadToEnd = false;
+        this.ObjectEventPhases = null;
         this.DisablesScalarUdfInlining = false;
         this.Recompiles = false;
         this.ReadsTableVariable = false;

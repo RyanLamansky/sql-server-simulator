@@ -79,12 +79,14 @@ partial class Simulation
         {
             _ = schema.Rules.TryAdd(name.Leaf, new RuleObject(schema, name.Leaf, objectId, createDate, definition, rulePredicate));
             RecordSlotUndo<RuleObject>(context, schema.Rules, name.Leaf, null);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, objectId, "R ", 0, name.Leaf);
             RecordDdlEvent(context, "CREATE_RULE", schema.Name, name.Leaf, "RULE");
         }
         else
         {
             _ = schema.Defaults.TryAdd(name.Leaf, new DefaultObject(schema, name.Leaf, objectId, createDate, definition, defaultExpression!));
             RecordSlotUndo<DefaultObject>(context, schema.Defaults, name.Leaf, null);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, objectId, "D ", 0, name.Leaf);
             RecordDdlEvent(context, "CREATE_DEFAULT", schema.Name, name.Leaf, "DEFAULT");
         }
         return true;
@@ -131,12 +133,14 @@ partial class Simulation
         {
             _ = schema.Rules.TryRemove(leaf, out _);
             RecordSlotUndo(context, schema.Rules, leaf, rule);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, rule);
             RecordDdlEvent(context, "DROP_RULE", schema.Name, leaf, "RULE");
         }
         else
         {
             _ = schema.Defaults.TryRemove(leaf, out _);
             RecordSlotUndo(context, schema.Defaults, leaf, (DefaultObject)existing);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, existing);
             RecordDdlEvent(context, "DROP_DEFAULT", schema.Name, leaf, "DEFAULT");
         }
     }

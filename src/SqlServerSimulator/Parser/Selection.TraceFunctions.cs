@@ -14,7 +14,8 @@ partial class Selection
     /// opening with real's header row and the trace's start rows among its
     /// events. The default trace's file, named by its own path or by its
     /// rollover set's base <c>log.trc</c> in the log directory, any case,
-    /// holds no events. Without <c>ALTER TRACE</c> the function is Msg 8189,
+    /// holds the events of the classes it takes the simulator fires — the
+    /// object events. Without <c>ALTER TRACE</c> the function is Msg 8189,
     /// an empty or NULL name Msg 19050 and any other file Msg 19049, all as
     /// the function runs.
     /// </summary>
@@ -25,12 +26,20 @@ partial class Selection
             var path = args[0].IsNull ? "" : args[0].CoerceTo(SqlType.NVarchar).AsString;
             if (path.Length == 0)
                 throw SimulatedSqlException.TraceFileNameInvalid(path);
-            if (string.Equals(path, BuiltInResources.DefaultTracePath, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(path, ErrorLog.Directory + "log.trc", StringComparison.OrdinalIgnoreCase))
+            var simulation = batch.Connection.Simulation;
+            // The default trace's base name reads its first file.
+            if (string.Equals(path, ErrorLog.Directory + "log.trc", StringComparison.OrdinalIgnoreCase))
+                path = BuiltInResources.DefaultTracePath;
+            var files = simulation.TracesIfMade?.Files;
+            if (path.StartsWith(ErrorLog.Directory + "log_", StringComparison.OrdinalIgnoreCase))
             {
-                return [];
+                var server = simulation.TracesFor();
+                var written = server.DefaultLog.Render(simulation, server);
+                if (written.ContainsKey(path))
+                    files = written;
+                else if (string.Equals(path, BuiltInResources.DefaultTracePath, StringComparison.OrdinalIgnoreCase))
+                    return [];
             }
-            var files = batch.Connection.Simulation.TracesIfMade?.Files;
             if (files is null || !files.TryGetValue(path, out var file))
                 throw SimulatedSqlException.TraceFileNotFound(path);
             var limit = args[1].IsNull ? 0 : args[1].CoerceTo(SqlType.Int32).AsInt32;

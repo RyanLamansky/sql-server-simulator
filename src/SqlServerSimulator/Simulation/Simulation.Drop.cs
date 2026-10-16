@@ -264,14 +264,18 @@ partial class Simulation
         if (BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, name))
             throw SimulatedSqlException.CannotDropDatabaseInUse(name);
         bool removed;
+        Database? droppedDatabase;
         lock (simulation.Databases)
         {
-            removed = simulation.Databases.TryRemove(name, out _);
+            removed = simulation.Databases.TryRemove(name, out droppedDatabase);
             if (!removed && !ifExists)
                 throw SimulatedSqlException.CannotDropDatabaseNotFound(name);
         }
         if (removed)
+        {
+            ExtendedEvents.XeObjectEvents.NoteDatabase(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, droppedDatabase!);
             RecordServerDdlEvent(context, "DROP_DATABASE", name, loginName: null);
+        }
     }
 
     /// <summary>
@@ -316,6 +320,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropSchemaBecauseNotEmpty(schemaName, blocker);
         if (context.CurrentDatabase.Schemas.TryRemove(schemaName, out var droppedSchema))
             RecordSlotUndo(context, context.CurrentDatabase.Schemas, schemaName, droppedSchema);
+        if (droppedSchema is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, context.CurrentDatabase, droppedSchema.SchemaId, "SC", 0, droppedSchema.Name);
         RecordDdlEvent(context, "DROP_SCHEMA", schemaName, schemaName, "SCHEMA");
     }
 
@@ -489,6 +495,8 @@ partial class Simulation
             if (existing.Parent is HeapTable parentTable)
                 VersionStore.NoteDefinitionChange(context.Batch, parentTable);
         }
+        if (removed is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, removed);
         RecordDdlEvent(
             context, "DROP_TRIGGER", schema.Name, name.Leaf, "TRIGGER",
             existing.Parent.Name,
@@ -574,6 +582,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         if (removed is not null)
             RecordSlotUndo(context, schema.Sequences, name.Leaf, removed);
+        if (removed is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, removed);
         RecordDdlEvent(context, "DROP_SEQUENCE", schema.Name, name.Leaf, "SEQUENCE");
     }
 
@@ -635,6 +645,8 @@ partial class Simulation
                 RecordSlotUndo(context, schema.AliasTypes, name.Leaf, droppedAlias);
                 DropSecurablePermissions(context, schema.Database, PermissionChecker.ClassType, droppedAlias.UserTypeId);
             }
+            if (droppedAlias is not null)
+                ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, droppedAlias.UserTypeId, "TY", 0, droppedAlias.Name);
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
             return;
         }
@@ -679,6 +691,8 @@ partial class Simulation
             RecordSlotUndo(context, schema.TableTypes, name.Leaf, droppedTableType);
             DropSecurablePermissions(context, schema.Database, PermissionChecker.ClassType, droppedTableType.UserTypeId);
         }
+        if (droppedTableType is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, droppedTableType.UserTypeId, "TY", 0, droppedTableType.Name);
         RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
     }
 
@@ -772,6 +786,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         if (removed is not null)
             RecordSlotUndo(context, schema.Procedures, name.Leaf, removed);
+        if (removed is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, removed);
         RecordDdlEvent(context, "DROP_PROCEDURE", schema.Name, name.Leaf, "PROCEDURE");
     }
 
@@ -846,6 +862,7 @@ partial class Simulation
             ReattachIndexedViewDependencies(droppedView, formerBases);
         });
         CascadeDropTriggers(context, droppedView);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, droppedView);
         RecordDdlEvent(context, "DROP_VIEW", schema.Name, name.Leaf, "VIEW");
     }
 
@@ -896,6 +913,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         if (removed is not null)
             RecordSlotUndo(context, schema.Functions, name.Leaf, removed);
+        if (removed is not null)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, removed);
         if (!aggregate)
             RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
     }
@@ -1010,6 +1029,7 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.Written);
         }
+        ExtendedEvents.XeObjectEvents.NoteTable(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, removedTable);
         // DROP TABLE participates in transaction rollback, restoring the
         // table with its rows (probe-confirmed).
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
@@ -1365,6 +1385,7 @@ partial class Simulation
                     table.FilegroupId = FilegroupFor(context.Batch, table, moveTo);
                     table.Partitioning = placement;
                 }
+                ExtendedEvents.XeObjectEvents.NoteIndex(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, ExtendedEvents.XeObjectEvents.DatabaseOf(context.Batch, table), table.ObjectId, table.Indexes[i].IndexId, table.Indexes[i].Name, statistics: false);
                 table.RemoveIndex(table.Indexes[i]);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;

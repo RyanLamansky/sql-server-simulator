@@ -76,14 +76,18 @@ partial class Simulation
         compileBatch.CurrentStatement.UtcNow = DateTime.UtcNow;
         compileBatch.CompilingForRun = true;
         if (dynamicKey is null)
-            compileBatch.StatementEnds = [];
+            compileBatch.StatementEnds = new StatementEnds();
         // A USE the walk meets switches the database it binds in.
         var connection = compileBatch.Connection;
         var enteredDatabase = connection.CurrentDatabase;
         try
         {
             if (!this.BindWithoutRunning(compileBatch, errors) || compileBatch.BatchAborted)
+            {
                 inlined.CompileOnRunFrom(compileBatch.Parser.Token?.StartIndex ?? int.MaxValue);
+                if (compileBatch.StatementEnds is { } walked)
+                    walked.Incomplete = true;
+            }
         }
         catch (SimulatedSqlException parsePhase)
         {
@@ -152,8 +156,11 @@ partial class Simulation
                 }
             }
         }
-        if (compileBatch.StatementEnds is { } ends)
-            this.NoteStatementEnds(compileBatch.Parser.Command.CommandText, ends);
+        if (compileBatch.StatementEnds is { } ends && this.NoteStatementEnds(compileBatch.Parser.Command.CommandText, ends) is { } filled
+            && compileBatch.CompiledFor is { } running)
+        {
+            running.StatementEnds = filled;
+        }
         if (remembered is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))
@@ -259,6 +266,7 @@ partial class Simulation
         // A trigger body binds inserted / deleted against the firing frame.
         compile.TriggerFrame = executing.TriggerFrame;
         compile.ModuleSchema = executing.ModuleSchema;
+        compile.CompiledFor = executing;
         return compile;
     }
 

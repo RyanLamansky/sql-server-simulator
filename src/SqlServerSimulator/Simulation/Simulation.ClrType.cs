@@ -66,6 +66,7 @@ partial class Simulation
             createDate: context.Batch.CurrentStatement.UtcNow,
             spelledNumeric: false);
         RecordSlotUndo<AliasType>(context, schema.AliasTypes, typeName.Leaf, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, udt.UserTypeId, "TY", 0, typeName.Leaf);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }

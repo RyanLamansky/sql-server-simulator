@@ -517,11 +517,12 @@ internal static partial class BuiltInResources
     {
         if (!simulation.DefaultTraceEnabled)
             yield break;
+        var log = simulation.TracesIfMade?.DefaultLog;
         yield return StandInRow(columns,
         [
             ("id", SqlValue.FromInt32(1)),
             ("status", SqlValue.FromInt32(1)),
-            ("path", SqlValue.FromNVarchar(DefaultTracePath)),
+            ("path", SqlValue.FromNVarchar(log?.CurrentPath ?? DefaultTracePath)),
             ("max_size", SqlValue.FromInt64(20)),
             ("max_files", SqlValue.FromInt32(5)),
             ("is_rowset", SqlValue.FromBoolean(false)),
@@ -532,7 +533,7 @@ internal static partial class BuiltInResources
             ("buffer_size", SqlValue.FromInt32(1024)),
             ("file_position", SqlValue.FromInt64(0)),
             ("start_time", SqlValue.FromDateTime(simulation.SeedDate)),
-            ("event_count", SqlValue.FromInt64(0)),
+            ("event_count", SqlValue.FromInt64(log?.EventCount ?? 0)),
         ]);
     }
 

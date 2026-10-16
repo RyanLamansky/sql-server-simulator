@@ -204,6 +204,7 @@ partial class Simulation
         var adHocWas = simulation.AdHocDistributedQueriesEnabled;
         foreach (var entry in configuration)
             configuration[entry.Key] = (entry.Value.Configured, entry.Value.Configured);
+        simulation.SettleDefaultTrace();
         // Compiled plans over an ad hoc rowset were checked against the option
         // when they compiled, so a change retires them.
         if (simulation.AdHocDistributedQueriesEnabled != adHocWas)

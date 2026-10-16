@@ -250,6 +250,7 @@ partial class Simulation
             Segments = [new(documents, restoring ? 0 : database.AllocateXmlComponentIds(componentCount))],
         };
         RecordSlotUndo<XmlSchemaCollection>(context, ownerSchema.XmlSchemaCollections, name.Leaf, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, ownerSchema.Database, id, "SX", 0, name.Leaf);
         RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
@@ -332,6 +333,7 @@ partial class Simulation
             collection.Segments = previousSegments;
             collection.ModifyDate = previousModified;
         });
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, ownerSchema.Database, collection.Id, "SX", 0, collection.Name);
         RecordDdlEvent(context, "ALTER_XML_SCHEMA_COLLECTION", ownerSchema.Name, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
@@ -732,6 +734,7 @@ partial class Simulation
         }
         _ = ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _);
         DropSecurablePermissions(context, ownerSchema.Database, PermissionChecker.ClassXmlSchemaCollection, existing.Id);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, ownerSchema.Database, existing.Id, "SX", 0, existing.Name);
         RecordDdlEvent(context, "DROP_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }

@@ -39,7 +39,7 @@ internal static class XeStatementEvents
         if (start >= text.Length)
             return null;
         var simulation = batch.Connection.Simulation;
-        var end = LockReports.StatementEnd(simulation, text, start);
+        var end = LockReports.StatementEnd(simulation, text, start, out var recorded);
         var through = end < 0 ? text.Length - 1 : end;
         var statement = text[start..(through + 1)];
         var word = FirstWord(statement);
@@ -55,12 +55,19 @@ internal static class XeStatementEvents
             if (!(rest.StartsWith("TRAN", StringComparison.OrdinalIgnoreCase) || rest.Equals("DISTRIBUTED", StringComparison.OrdinalIgnoreCase)))
                 return null;
         }
-        if (word.Equals("DECLARE", StringComparison.OrdinalIgnoreCase) && !statement.Contains('=', StringComparison.Ordinal))
+        // A cursor's DECLARE reports itself, a variable's only when it
+        // initializes one, and CREATE SCHEMA none.
+        if (word.Equals("DECLARE", StringComparison.OrdinalIgnoreCase) && !statement.Contains('=', StringComparison.Ordinal)
+            && statement.AsSpan(7).TrimStart().StartsWith('@'))
+        {
+            return null;
+        }
+        if (word.Equals("CREATE", StringComparison.OrdinalIgnoreCase) && FirstWord(statement.AsSpan(6).TrimStart()).Equals("SCHEMA", StringComparison.OrdinalIgnoreCase))
             return null;
         var module = batch.ModuleObjectId != 0 ? batch.ModuleSchema?.Database ?? batch.CurrentDatabase : null;
         var offset = module is not null && batch.ModuleDefinitionText is not null ? batch.ModuleBodyOffset() : 0;
         return new XeStatement(statement, batch.CurrentStatement.StartLine + batch.LineOffset, 2 * (offset + start), end < 0 && module is null ? -1 : 2 * (offset + through),
-            batch.ModuleObjectId, module, Parser.Expressions.ObjectProperty.FindObject(module ?? batch.CurrentDatabase, batch.ModuleObjectId), CountsRows(word));
+            batch.ModuleObjectId, module, Parser.Expressions.ObjectProperty.FindObject(module ?? batch.CurrentDatabase, batch.ModuleObjectId), CountsRows(word), recorded);
     }
 
     private static ReadOnlySpan<char> FirstWord(ReadOnlySpan<char> text)
@@ -219,7 +226,7 @@ internal static class XeStatementEvents
 }
 
 /// <summary>A statement as the statement events place it, and the module it runs in when it does.</summary>
-internal sealed class XeStatement(string text, int line, int offset, int offsetEnd, int objectId, Database? module, Schemas.SchemaObject? @object, bool countsRows)
+internal sealed class XeStatement(string text, int line, int offset, int offsetEnd, int objectId, Database? module, Schemas.SchemaObject? @object, bool countsRows, bool endRecorded)
 {
     public readonly string Text = text;
     public readonly int Line = line;
@@ -232,6 +239,12 @@ internal sealed class XeStatement(string text, int line, int offset, int offsetE
 
     public readonly Schemas.SchemaObject? Object = @object;
     public readonly bool CountsRows = countsRows;
+
+    /// <summary>
+    /// Whether the statement's end was recorded when it was placed; one the
+    /// compile walk stopped inside is placed again once its run records it.
+    /// </summary>
+    public readonly bool EndRecorded = endRecorded;
 
     /// <summary>When the statement began, for its completed event's duration.</summary>
     public readonly long StartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();

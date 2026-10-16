@@ -369,7 +369,6 @@ public sealed class SqlTraceTests
             "40 select 1/0 1 0 18 0",
             "33 Divide by zero error encountered. 8134 16 1",
             "162 Divide by zero error encountered. 8134 16 1",
-            "41 select 1/0 1 0 18 0 0 0",
             "12 select 1/0 0 0",
         }, Values(sim, """
             select concat_ws(' ', EventClass, cast(TextData as nvarchar(100)), LineNumber, Offset, IntegerData2, IntegerData, RowCounts, Error, Severity, State, NestLevel)

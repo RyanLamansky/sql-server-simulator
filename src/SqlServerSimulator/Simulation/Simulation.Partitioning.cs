@@ -65,6 +65,7 @@ partial class Simulation
                 throw SimulatedSqlException.PartitionFunctionReferenced(name, module.Name);
             _ = database.PartitionFunctions.TryRemove(function.Name, out _);
             RecordSlotUndo<PartitionFunction>(context, database.PartitionFunctions, function.Name, function);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, database, function.FunctionId, "PF", 0, function.Name);
             RecordDdlEvent(context, "DROP_PARTITION_FUNCTION", null, function.Name, "PARTITION FUNCTION");
         }
         else
@@ -75,6 +76,7 @@ partial class Simulation
                 throw SimulatedSqlException.PartitionSchemeInUse(scheme.Name);
             _ = database.PartitionSchemes.TryRemove(scheme.Name, out _);
             RecordSlotUndo<PartitionScheme>(context, database.PartitionSchemes, scheme.Name, scheme);
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, database, scheme.DataSpaceId, "PS", 0, scheme.Name);
             RecordDdlEvent(context, "DROP_PARTITION_SCHEME", null, scheme.Name, "PARTITION SCHEME");
         }
         return true;
@@ -217,6 +219,7 @@ partial class Simulation
         if (!database.PartitionFunctions.TryAdd(name, function))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(name, state: 58);
         RecordSlotUndo<PartitionFunction>(context, database.PartitionFunctions, name, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, database, function.FunctionId, "PF", 0, function.Name);
         RecordDdlEvent(context, "CREATE_PARTITION_FUNCTION", null, name, "PARTITION FUNCTION");
         return true;
     }
@@ -450,6 +453,7 @@ partial class Simulation
                 scheme.Destinations.RemoveAt(slot);
         }
         function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, context.CurrentDatabase, function.FunctionId, "PF", 0, function.Name);
         RecordDdlEvent(context, "ALTER_PARTITION_FUNCTION", null, function.Name, "PARTITION FUNCTION");
         return true;
     }
@@ -595,6 +599,8 @@ partial class Simulation
             if (!all && filegroups.Count > fanout + 1)
                 context.Batch.AppendInfoError(0, 1, 7713, SimulatedSqlException.PartitionSchemeIgnoredFilegroupsMessage(filegroups.Count - fanout - 1));
         }
+        if (database.PartitionSchemes.TryGetValue(name, out var createdScheme))
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, database, createdScheme.DataSpaceId, "PS", 0, createdScheme.Name);
         RecordDdlEvent(context, "CREATE_PARTITION_SCHEME", null, name, "PARTITION SCHEME");
         return true;
     }
@@ -655,6 +661,7 @@ partial class Simulation
         var previous = scheme.NextUsed;
         RecordDdlUndo(context, () => scheme.NextUsed = previous);
         scheme.NextUsed = nextUsed;
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, context.CurrentDatabase, scheme.DataSpaceId, "PS", 0, scheme.Name);
         RecordDdlEvent(context, "ALTER_PARTITION_SCHEME", null, scheme.Name, "PARTITION SCHEME");
         return true;
     }

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.ExtendedEvents;
 using SqlServerSimulator.Storage;
 
@@ -48,7 +49,28 @@ internal static class TraceEvents
         classes[(int)XeEventKind.ObjectAltered] = [164];
         classes[(int)XeEventKind.ObjectDeleted] = [47];
         classes[(int)XeEventKind.UserEvent] = [82, 83, 84, 85, 86, 87, 88, 89, 90, 91];
+        classes[(int)XeEventKind.LockEscalation] = [60];
+        classes[(int)XeEventKind.AutoStats] = [58];
         return classes;
+    }
+
+    /// <summary>
+    /// The event classes the default trace takes, as
+    /// <c>fn_trace_geteventinfo(1)</c> lists them — written here, rather than
+    /// read off the catalog, so a firing site asks without loading it.
+    /// </summary>
+    internal static readonly short[] DefaultTraceClasses =
+        [18, 20, 22, 46, 47, 55, 69, 79, 80, 81, 92, 93, 94, 95, 102, 103, 104, 105, 106, 108, 109, 110, 111, 115, 116, 117, 152, 153, 155, 156, 164, 167, 175, 218];
+
+    /// <summary>Per <see cref="XeEventKind"/>, whether the default trace takes it while it runs.</summary>
+    public static readonly bool[] DefaultTraceKinds = BuildDefaultTraceKinds();
+
+    private static bool[] BuildDefaultTraceKinds()
+    {
+        var events = new bool[DefaultTraceClasses.Max() + 1];
+        foreach (var eventClass in DefaultTraceClasses)
+            events[eventClass] = true;
+        return KindsTaken(events);
     }
 
     /// <summary>Per <see cref="XeEventKind"/>, whether a trace taking the event classes <paramref name="events"/> marks takes it.</summary>
@@ -59,7 +81,7 @@ internal static class TraceEvents
         {
             foreach (var eventClass in ClassesByKind[i])
             {
-                if (events[eventClass])
+                if (eventClass < events.Length && events[eventClass])
                     taken[i] = true;
             }
         }
@@ -70,11 +92,15 @@ internal static class TraceEvents
     /// Writes <paramref name="firing"/> into every running trace taking the
     /// class it produces; <paramref name="text"/> is the <c>TextData</c> a
     /// class whose event carries no text of its own reports — a module's
-    /// calling statement.
+    /// calling statement. The default trace takes its classes while it runs.
+    /// An object event's <paramref name="pairing"/> holds the sequence its
+    /// <c>Begin</c> phase was written under, which the closing phase's
+    /// <c>BigintData1</c> carries (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    public static void Deliver(Simulation simulation, XeEventKind kind, XeFiring firing, string? text)
+    public static void Deliver(Simulation simulation, XeEventKind kind, XeFiring firing, string? text, StrongBox<long>? pairing = null)
     {
-        if (simulation.TracesIfMade is not { } server)
+        var defaultTrace = simulation.DefaultTraceRunning && DefaultTraceKinds[(int)kind];
+        if ((defaultTrace ? simulation.TracesFor() : simulation.TracesIfMade) is not { } server)
             return;
         var running = server.Running;
         foreach (var eventClass in ClassesByKind[(int)kind])
@@ -82,19 +108,104 @@ internal static class TraceEvents
             if (!Produces(eventClass, firing))
                 continue;
             SqlValue?[]? values = null;
-            long sequence = 0;
-            foreach (var trace in running)
+            var defaultTakes = defaultTrace && DefaultTraceClasses.Contains(eventClass);
+            for (var i = defaultTakes ? -1 : 0; i < running.Length; i++)
             {
-                if (!trace.TakesEvent(eventClass))
+                if (i >= 0 && !running[i].TakesEvent(eventClass))
                     continue;
                 if (values is null)
                 {
                     values = Values(eventClass, firing, text);
-                    sequence = Interlocked.Increment(ref server.EventSequence);
+                    var sequence = Interlocked.Increment(ref server.EventSequence);
                     values[51] = SqlValue.FromInt64(sequence);
+                    if (pairing is not null)
+                    {
+                        if (pairing.Value == 0)
+                            pairing.Value = sequence;
+                        else
+                            values[52] = SqlValue.FromInt64(pairing.Value);
+                    }
                 }
-                trace.Write(simulation, server, firing.Connection, eventClass, values, firing.Timestamp);
+                if (i < 0)
+                    server.DefaultLog.Add(eventClass, values, firing.Timestamp);
+                else
+                    running[i].Write(simulation, server, firing.Connection, eventClass, values, firing.Timestamp);
             }
+        }
+    }
+
+    /// <summary>
+    /// Keeps an object event's phase for the default trace alone, as a
+    /// compact row its read writes out (<see cref="ObjectRow.Values"/>).
+    /// </summary>
+    public static void WriteDefaultObjectEvent(SimulatedDbConnection connection, XeEventKind kind, int phase, Database database, int objectId, ulong typeKey, int indexId, string name, long transactionId, StrongBox<long> pairing)
+    {
+        var simulation = connection.Simulation;
+        if (!simulation.DefaultTraceRunning)
+            return;
+#if DEBUG
+        // The session's columns shape nothing a cached plan keeps, even read
+        // while a query compiles (a statistic it creates).
+        using var excused = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+        var server = simulation.TracesFor();
+        var sequence = Interlocked.Increment(ref server.EventSequence);
+        var paired = pairing.Value;
+        if (paired == 0)
+            pairing.Value = sequence;
+        server.DefaultLog.Add(new ObjectRow(connection, ClassesByKind[(int)kind][0], phase, database, objectId, (int)typeKey, indexId, name, transactionId, sequence, paired));
+    }
+
+    /// <summary>
+    /// One object event the default trace took through
+    /// <see cref="WriteDefaultObjectEvent"/>: what its row carries, captured
+    /// as it fired — the session's own columns as they stood then.
+    /// </summary>
+    internal sealed class ObjectRow(SimulatedDbConnection connection, int eventClass, int phase, Database database, int objectId, int typeKey, int indexId, string name, long transactionId, long sequence, long paired)
+    {
+        public readonly int EventClass = eventClass;
+        public readonly DateTime Time = DateTime.UtcNow;
+        private readonly string host = connection.ClientHostName;
+        private readonly int processId = connection.ClientProcessId;
+        private readonly string application = connection.ClientApplicationName;
+        private readonly string login = connection.Security.Effective.LoginName;
+        private readonly string originalLogin = connection.Security.OriginalLoginName;
+        private readonly int spid = connection.Spid;
+        private readonly short databaseId = database.Id;
+        private readonly string databaseName = database.Name;
+
+        /// <summary>The row's columns, as <see cref="TraceEvents.Values"/> makes them of the same event fired through Extended Events.</summary>
+        public SqlValue?[] Values()
+        {
+            var values = new SqlValue?[TraceCatalog.MaxColumnId + 1];
+            values[3] = SqlValue.FromInt32(this.databaseId);
+            if (transactionId != 0)
+                values[4] = SqlValue.FromInt64(transactionId);
+            values[8] = SqlValue.FromNVarchar(this.host);
+            values[9] = SqlValue.FromInt32(this.processId);
+            values[10] = SqlValue.FromNVarchar(this.application);
+            values[11] = SqlValue.FromNVarchar(this.login);
+            values[12] = SqlValue.FromInt32(this.spid);
+            values[14] = SqlValue.FromDateTime(this.Time);
+            values[21] = SqlValue.FromInt32(phase);
+            if (objectId != 0)
+                values[22] = SqlValue.FromInt32(objectId);
+            if (indexId != 0)
+                values[24] = SqlValue.FromInt32(indexId);
+            values[26] = SqlValue.FromNVarchar(Simulation.ServerNameValue);
+            values[28] = SqlValue.FromInt32(typeKey);
+            if (typeKey != 16964)
+                values[34] = SqlValue.FromNVarchar(name);
+            values[35] = SqlValue.FromNVarchar(this.databaseName);
+            values[41] = SqlValue.FromImage(Simulation.LoginSid(this.login));
+            values[49] = SqlValue.FromInt32(0);
+            values[50] = SqlValue.FromInt64(0);
+            values[51] = SqlValue.FromInt64(sequence);
+            if (paired != 0)
+                values[52] = SqlValue.FromInt64(paired);
+            values[64] = SqlValue.FromNVarchar(this.originalLogin);
+            values[66] = SqlValue.FromInt32(2);
+            return values;
         }
     }
 
@@ -109,6 +220,9 @@ internal static class TraceEvents
     {
         33 => Field(firing, "user_defined") is { } userDefined && !userDefined.Boolean && Field(firing, "severity") is { Signed: > 10 },
         >= 82 and <= 91 => Field(firing, "event_id") is { } eventId && eventId.Signed == eventClass,
+        // Auto Stats reports a statistic's refresh alone (probed 2026-10-16
+        // against SQL Server 2025: a creation and the loads write no row).
+        58 => Field(firing, "status") is { Unsigned: 1 } && Field(firing, "index_id") is { Unsigned: not 0 },
         _ => true,
     };
 
@@ -278,6 +392,11 @@ internal static class TraceEvents
                 break;
             case 25 or 27 or 189:
                 Lock();
+                // A timeout's TextData is the resource as sys.dm_tran_locks
+                // describes it, a key's hash (probed 2026-10-16 against SQL
+                // Server 2025).
+                if (eventClass != 25 && text is { Length: > 0 })
+                    values[1] = SqlValue.FromNText(text);
                 if (eventClass == 25)
                     Int(25, "deadlock_id");
                 Completed();
@@ -334,14 +453,43 @@ internal static class TraceEvents
                 }
                 break;
             case 46 or 47 or 164:
+                // A table's events carry no IndexID, a database's no ObjectID
+                // or ObjectName, and none an ObjectID2 (probed 2026-10-16
+                // against SQL Server 2025).
                 Database();
                 BigInt(4, "transaction_id");
                 Int(21, "ddl_phase");
+                if (Field(firing, "object_id") is { Signed: not 0 })
+                    Int(22, "object_id");
+                if (Field(firing, "index_id") is { Unsigned: not 0 })
+                    Int(24, "index_id");
+                Int(28, "object_type");
+                if (Field(firing, "object_type") is not { Unsigned: 16964 })
+                    Text(34, "object_name");
+                break;
+            case 58:
+                Database();
                 Int(22, "object_id");
                 Int(24, "index_id");
-                Int(28, "object_type");
-                Text(34, "object_name");
-                BigInt(56, "related_object_id");
+                Int(21, "status");
+                Int(25, "count");
+                Text(1, "statistics_list");
+                Completed();
+                if (Field(firing, "success") is { } success)
+                    values[23] = SqlValue.FromInt32(success.Boolean ? 1 : 0);
+                break;
+            case 60:
+                // The escalating statement's text, the lock counts real's
+                // IntegerData pair carries (probed 2026-10-16 against SQL
+                // Server 2025: 6,248 and 6,249).
+                Lock();
+                if (text is { Length: > 0 })
+                    values[1] = SqlValue.FromNText(text);
+                Int(21, "escalation_cause");
+                BigInt(56, "hobt_id");
+                Int(25, "hobt_lock_count");
+                Int(55, "escalated_lock_count");
+                values[52] = null;
                 break;
             case 137:
                 Database();

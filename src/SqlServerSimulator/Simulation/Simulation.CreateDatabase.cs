@@ -203,6 +203,7 @@ partial class Simulation
             RegisterUserDatabaseLocked(database);
         }
         LogDatabaseStartup(context.Batch, database);
+        ExtendedEvents.XeObjectEvents.NoteDatabase(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, database);
         RecordServerDdlEvent(context, "CREATE_DATABASE", databaseName, loginName: null);
         return true;
     }

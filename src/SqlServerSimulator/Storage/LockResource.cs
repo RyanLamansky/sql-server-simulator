@@ -386,9 +386,15 @@ internal sealed class LockManager
     /// </exception>
     public void Acquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
-        switch (this.TryAcquire(resource, mode, owner, timeoutMillis, sweepAbandoned))
+        switch (this.TryAcquireMeasured(resource, mode, owner, timeoutMillis, sweepAbandoned, out var waitedMilliseconds))
         {
             case LockAcquireOutcome.TimedOut:
+                if (this.OwningSimulation is { } simulation
+                    && (ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.LockTimeout) || ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.LockTimeoutGreaterThan0))
+                    && owner.TryResolveActing() is { } waiter)
+                {
+                    ExtendedEvents.XeLockEvents.Timeout(waiter, resource, mode, waitedMilliseconds, timeoutMillis);
+                }
                 throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource, mode));
             case LockAcquireOutcome.Deadlocked:
                 throw SimulatedSqlException.TransactionDeadlocked(owner.Acting.Spid, TimeoutState(resource, mode));
@@ -435,9 +441,16 @@ internal sealed class LockManager
     /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
     /// an immediate grant for sp_getapplock's return-code 1.
     /// </summary>
-    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
+    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true) =>
+        this.TryAcquireMeasured(resource, mode, owner, timeoutMillis, sweepAbandoned, out _);
+
+    /// <summary>
+    /// <see cref="TryAcquire"/>, answering how long the request waited, -1
+    /// when it didn't, which <see cref="Acquire"/>'s timeout reports.
+    /// </summary>
+    private LockAcquireOutcome TryAcquireMeasured(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned, out long waitedMilliseconds)
     {
-        var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned, out var waitedMilliseconds);
+        var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned, out waitedMilliseconds);
         // A wait that ended reports itself to a session taking wait_info —
         // system_health does, keeping a lock wait past thirty seconds. One
         // shorter than the tick clock's granularity measures zero and is

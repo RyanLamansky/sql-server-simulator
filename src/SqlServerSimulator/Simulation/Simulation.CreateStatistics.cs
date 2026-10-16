@@ -191,6 +191,7 @@ partial class Simulation
         // (probed 2026-10-06).
         EvaluateStatisticsKey(context.Batch, table, ordinals, filter);
         created.Statistics.Snapshot = BuildStatisticsSnapshot(context.Batch, table, ordinals, ordinals, filter);
+        ExtendedEvents.XeObjectEvents.NoteIndex(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, ExtendedEvents.XeObjectEvents.DatabaseOf(context.Batch, table), table.ObjectId, created.StatsId, statisticsName, statistics: true);
         RecordDdlEvent(context, "CREATE_STATISTICS", EventSchemaName(targetTableName), statisticsName, "STATISTICS", table.Name, "TABLE");
         return true;
     }
@@ -252,6 +253,7 @@ partial class Simulation
                     table.UserStatistics = restored;
                 }
             });
+            ExtendedEvents.XeObjectEvents.NoteIndex(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, ExtendedEvents.XeObjectEvents.DatabaseOf(context.Batch, table), table.ObjectId, dropped.StatsId, dropped.Name, statistics: true);
             RecordDdlEvent(context, "DROP_STATISTICS", EventSchemaName(tableName), written.Leaf, "STATISTICS", table.Name, "TABLE");
         }
         return true;

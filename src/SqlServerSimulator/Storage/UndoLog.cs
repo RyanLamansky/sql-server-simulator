@@ -215,6 +215,18 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         this.entries.Add(new BrokerChange(undo, commit));
 
     /// <summary>
+    /// Records an object event's closing phase: <paramref name="commit"/>
+    /// fires as the transaction commits — a log's in the reverse of the order
+    /// recorded, as real closes them — and <paramref name="rollback"/> as it
+    /// rolls back past it (see <c>XeObjectEvents</c>).
+    /// </summary>
+    public void RecordObjectEvent(Action commit, Action rollback)
+    {
+        this.entries.Add(new ObjectEventPhase(commit, rollback));
+        this.recordsObjectEvents = true;
+    }
+
+    /// <summary>
     /// Records a <c>DBCC CHECKIDENT</c> reseed, which a rollback undoes
     /// (probed 2026-09-24 against SQL Server 2025) though a generated value
     /// never is.
@@ -259,6 +271,10 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     // Set by the first logged row, so a commit that wrote none in a logging
     // database skips the publishing pass.
     private bool recordsLog;
+
+    // Set by the first object event, so a commit that recorded none skips
+    // the closing pass.
+    private bool recordsObjectEvents;
 
     /// <summary>
     /// Appends one <see cref="Backup.LoggedCommit"/> to each logging database
@@ -485,6 +501,15 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         }
         for (var i = 0; i < this.entries.Count; i++)
             this.entries[i].Commit(reclamation);
+        if (this.recordsObjectEvents)
+        {
+            this.recordsObjectEvents = false;
+            for (var i = this.entries.Count - 1; i >= 0; i--)
+            {
+                if (this.entries[i] is ObjectEventPhase phase)
+                    phase.Committed();
+            }
+        }
         this.entries.Clear();
     }
 
@@ -757,6 +782,13 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         public override void Undo(LobReclamation? reclamation) => undo();
 
         public override void Commit(LobReclamation? reclamation) => commit();
+    }
+
+    private sealed class ObjectEventPhase(Action commit, Action rollback) : UndoEntry
+    {
+        public override void Undo(LobReclamation? reclamation) => rollback();
+
+        public void Committed() => commit();
     }
 
     private sealed class IdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) : UndoEntry

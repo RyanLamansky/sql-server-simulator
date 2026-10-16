@@ -15,32 +15,47 @@ partial class Simulation
     internal readonly CachedPlanRegistry CachedPlans = new();
 
     /// <summary>
-    /// Per batch text the compile walked, where each of its statements' text
-    /// ends: by the index its first token starts at, the index of the
-    /// character before the next statement's first token — its terminator and
-    /// the white space after it included — or -1 for the batch's last
-    /// statement, as real's <c>statement_end_offset</c> places a running
-    /// statement's end (probed 2026-10-16 against SQL Server 2025).
+    /// Per batch text the compile walked, where each of its statements ends
+    /// (see <see cref="StatementEnds"/>), as real's <c>statement_end_offset</c>
+    /// and statement events place it.
     /// </summary>
-    private readonly ConcurrentDictionary<string, Dictionary<int, int>> statementEnds = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, StatementEnds> statementEnds = new(StringComparer.Ordinal);
 
     /// <summary>How many texts <see cref="statementEnds"/> holds, counted as the other compile memos are.</summary>
     private int statementEndsCount;
 
-    /// <summary>Remembers where the statements of a batch the compile walked end.</summary>
-    internal void NoteStatementEnds(string batchText, Dictionary<int, int> ends)
+    /// <summary>
+    /// Publishes where the statements of a batch the compile walked end,
+    /// answering the ends a run of the text fills in — <paramref name="ends"/>,
+    /// or an earlier walk's still missing some — or null when nothing needs
+    /// filling in.
+    /// </summary>
+    internal StatementEnds? NoteStatementEnds(string batchText, StatementEnds ends)
     {
-        if (ends.Count != 0 && Volatile.Read(ref this.statementEndsCount) < PlanCacheCapacity && this.statementEnds.TryAdd(batchText, ends))
+        ends.Publish();
+        if (ends.IsEmpty && !ends.Incomplete)
+            return null;
+        if (this.statementEnds.TryGetValue(batchText, out var earlier))
+        {
+            // A complete walk replaces one that left ends to its run.
+            if (earlier.Incomplete && !ends.Incomplete && this.statementEnds.TryUpdate(batchText, ends, earlier))
+                return null;
+            return earlier.Incomplete ? earlier : null;
+        }
+        if (Volatile.Read(ref this.statementEndsCount) >= PlanCacheCapacity)
+            return null;
+        if (this.statementEnds.TryAdd(batchText, ends))
             _ = Interlocked.Increment(ref this.statementEndsCount);
+        return ends.Incomplete ? ends : null;
     }
 
     /// <summary>
-    /// Where the statement of <paramref name="batchText"/> starting at
-    /// <paramref name="startIndex"/> ends, as <see cref="statementEnds"/> holds
-    /// it; -1 when the batch's walk didn't record it.
+    /// The two ends of the statement of <paramref name="batchText"/> starting
+    /// at <paramref name="startIndex"/>, as <see cref="statementEnds"/> holds
+    /// them; null when no walk or run recorded it.
     /// </summary>
-    internal int StatementEndIndex(string batchText, int startIndex) =>
-        this.statementEnds.TryGetValue(batchText, out var ends) && ends.TryGetValue(startIndex, out var end) ? end : -1;
+    internal (int Tight, int Loose)? StatementEndIndex(string batchText, int startIndex) =>
+        this.statementEnds.TryGetValue(batchText, out var ends) && ends.TryGet(startIndex, out var end) ? end : null;
 
     /// <summary>
     /// The cached plan the statements of <paramref name="batch"/>, a client's
@@ -117,7 +132,7 @@ partial class Simulation
     internal RunningStatement ReportedStatement(SimulatedDbConnection connection, string batchText, int statementStart, Database database)
     {
         var start = Math.Clamp(statementStart, 0, batchText.Length);
-        var end = this.StatementEndIndex(batchText, start);
+        var end = ExtendedEvents.LockReports.StatementEnd(this, batchText, start);
         var through = end < 0 ? batchText.Length : Math.Min(end + 1, batchText.Length);
         var statement = batchText.AsSpan(start, through - start).TrimEnd().TrimEnd(';').TrimEnd();
         if (connection.NestingLevel == 0 && statement.Length != 0

@@ -110,6 +110,7 @@ partial class Simulation
         RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, procedure);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, procedure);
         RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
         return true;
     }

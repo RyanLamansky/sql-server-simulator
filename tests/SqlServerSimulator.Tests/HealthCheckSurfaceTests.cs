@@ -42,12 +42,12 @@ public sealed class HealthCheckSurfaceTests
     }
 
     [TestMethod]
-    public void DefaultTrace_ListsWhileEnabledAndReadsNoEvents()
+    public void DefaultTrace_ListsWhileEnabledAndOpensWithItsHeader()
     {
         var sim = new Simulation();
         AreEqual("/var/opt/mssql/log/log_1.trc", sim.ExecuteScalar("select path from sys.traces where is_default = 1"));
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.fn_trace_gettable('/var/opt/mssql/log/log.trc', default)"));
-        AreEqual(0, sim.ExecuteScalar("select count(*) from ::fn_trace_gettable(N'/VAR/OPT/MSSQL/LOG/LOG_1.TRC', 1)"));
+        AreEqual("65528,65534", sim.ExecuteScalar("select string_agg(EventClass, ',') within group (order by EventSequence) from sys.fn_trace_gettable('/var/opt/mssql/log/log.trc', default)"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from ::fn_trace_gettable(N'/VAR/OPT/MSSQL/LOG/LOG_1.TRC', 1)"));
         AreEqual("GroupID", sim.ExecuteReader("select top 0 * from sys.fn_trace_gettable('/var/opt/mssql/log/log.trc', default)").GetName(65));
         _ = sim.ExecuteNonQuery("exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'default trace enabled', 0; reconfigure");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.traces"));

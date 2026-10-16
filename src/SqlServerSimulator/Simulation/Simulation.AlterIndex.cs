@@ -225,6 +225,7 @@ partial class Simulation
                 {
                     var constraintPartition = RejectNamedIndexTarget(context.Batch, form, partitionNumber, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, table.Name, constraint.IsDisabled, tableName.ToString());
                     ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch, tableName.ToString(), constraintPartition);
+                    ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -236,6 +237,7 @@ partial class Simulation
                 {
                     var indexPartition = RejectNamedIndexTarget(context.Batch, form, partitionNumber, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, table.Name, index.IsDisabled, tableName.ToString());
                     ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions, tableName.ToString(), indexPartition);
+                    ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -266,6 +268,7 @@ partial class Simulation
                     }
                     if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
                         jsonIndex.IsDisabled = form == AlterIndexForm.Disable;
+                    ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -290,6 +293,7 @@ partial class Simulation
                     throw SimulatedSqlException.OperationOnDisabledIndex(spatialIndex.Name, tableName.ToString());
                 if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
                     spatialIndex.IsDisabled = form == AlterIndexForm.Disable;
+                ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
                 RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                 return true;
             }

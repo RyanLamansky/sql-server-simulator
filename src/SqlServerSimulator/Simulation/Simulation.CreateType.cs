@@ -211,6 +211,7 @@ partial class Simulation
         context.Batch.LockDefinition(schema, tableType, created: true, types: true);
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, ExtendedEvents.XeObjectEvents.TypeIdOf(schema, typeName.Leaf), "TY", 0, typeName.Leaf);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }
@@ -448,6 +449,7 @@ partial class Simulation
             createDate: context.Batch.CurrentStatement.UtcNow,
             spelledNumeric: SqlType.IsNumericSpelling(baseName, null));
         RecordSlotUndo<AliasType>(context, schema.AliasTypes, typeName.Leaf, null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, ExtendedEvents.XeObjectEvents.TypeIdOf(schema, typeName.Leaf), "TY", 0, typeName.Leaf);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }

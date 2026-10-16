@@ -149,7 +149,7 @@ public sealed class ClientIdentityTests
         using var reader = connection.CreateCommand(Text).ExecuteReader();
         IsTrue(reader.NextResult());
         IsTrue(reader.Read());
-        AreEqual("0|-1|20|-1|Language Event", reader.GetString(0));
+        AreEqual("0|-1|20|678|Language Event", reader.GetString(0));
     }
 
     [TestMethod]

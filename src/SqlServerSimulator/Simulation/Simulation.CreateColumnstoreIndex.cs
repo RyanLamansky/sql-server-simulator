@@ -172,6 +172,7 @@ partial class Simulation
             table.AddIndex(index);
         }
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
+        ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, table, indexName);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

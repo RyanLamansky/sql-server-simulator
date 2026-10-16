@@ -245,20 +245,29 @@ internal static class LockReports
     /// <summary>
     /// Where the statement of <paramref name="text"/> starting at
     /// <paramref name="start"/> ends, as real's reports and statement events
-    /// place it: a query — <c>SELECT</c>, a DML statement, <c>EXEC</c>,
-    /// <c>WITH</c> — at its own last character, anything else at the
-    /// character before the next statement, its terminator and the white
-    /// space after it included, or -1 when it runs to the text's end (probed
-    /// 2026-10-16 against SQL Server 2025: <c>select 1 as a;</c> ends at its
-    /// <c>a</c>, <c>set nocount on</c> at the line break after it, and a
-    /// query ending its batch on its last character still).
+    /// place it: the index of its last character, or -1 when it runs to the
+    /// text's end (see <c>Simulation.StatementEndOf</c>).
     /// </summary>
-    public static int StatementEnd(Simulation simulation, string text, int start)
+    public static int StatementEnd(Simulation simulation, string text, int start) =>
+        StatementEnd(simulation, text, start, out _);
+
+    /// <summary>
+    /// <see cref="StatementEnd(Simulation, string, int)"/>, with whether the
+    /// compile walk or a run recorded it (<paramref name="recorded"/>); one
+    /// neither did reads as running to the text's end, a query's at its last
+    /// character there.
+    /// </summary>
+    public static int StatementEnd(Simulation simulation, string text, int start, out bool recorded)
     {
-        var end = simulation.StatementEndIndex(text, start);
+        if (simulation.StatementEndIndex(text, start) is { } end)
+        {
+            recorded = true;
+            return Simulation.ReportedStatementEnd(text, start, end.Tight, end.Loose);
+        }
+        recorded = false;
         if (!StartsQuery(text, start))
-            return end;
-        var last = end < 0 ? text.Length - 1 : end;
+            return -1;
+        var last = text.Length - 1;
         while (last > start && (char.IsWhiteSpace(text[last]) || text[last] == ';'))
             last--;
         return last;
@@ -274,13 +283,7 @@ internal static class LockReports
             || word.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
             || word.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
             || word.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("MERGE", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("EXEC", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase)
             || word.Equals("WITH", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("CREATE", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("ALTER", StringComparison.OrdinalIgnoreCase)
-            || word.Equals("DROP", StringComparison.OrdinalIgnoreCase)
             || (word.IsEmpty && start < text.Length && text[start] == '(');
     }
 

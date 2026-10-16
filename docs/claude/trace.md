@@ -57,7 +57,7 @@ A trace never started has an empty file.
 ## Events
 
 A trace shares the seam Extended Events fires through: `XeEvents.Fire` delivers each firing to the running traces taking a class it maps onto (`TraceEvents`), the mapping real's `sys.trace_xe_event_map` lists, and every column is read off the event's own fields or the session it fired on (`sys.trace_xe_action_map`'s columns).
-So a site that starts firing an Extended Event a trace class maps onto — `object_created`, `lock_timeout` — reaches traces without further work.
+So a site that starts firing an Extended Event a trace class maps onto reaches traces without further work, as the object, lock-timeout, escalation and statistics events do.
 
 | Class | Fired from | Columns beyond the session's |
 | --- | --- | --- |
@@ -70,12 +70,21 @@ So a site that starts firing an Extended Event a trace class maps onto — `obje
 | 33 Exception, 162 User Error Message | `error_reported` | message, `Severity`, `State`, `Error`; `Exception` only for an error the engine raised, not `RAISERROR`, `THROW` or a message of severity 10 or less |
 | 40 / 41 SQL:StmtStarting / Completed, 44 / 45 SP:StmtStarting / Completed | the statement events | `LineNumber`, `Offset` and `IntegerData2` the byte offsets, `NestLevel`, and on completion `RowCounts` and `IntegerData` the last row count; a module's `ObjectID`, `ObjectType` (two characters, the first in the low byte: `P ` is 8272), `ObjectName` and `SourceDatabaseID` |
 | 42 / 43 SP:Starting / Completed | `module_start` / `module_end` | `TextData` the calling statement or the reconstructed RPC call, the module's columns, `NestLevel`; on completion `Duration` 0, as real reports it |
-| 46 / 47 / 164 Object:Created / Deleted / Altered, 27 / 189 Lock:Timeout | mapped, firing when their Extended Events do | |
+| 27 / 189 Lock:Timeout / Lock:Timeout (timeout > 0) | `lock_timeout` / `lock_timeout_greater_than_0` | `TextData` the resource as `sys.dm_tran_locks` describes it (a key's hash), `Duration`, `Mode`, `Type`, `ObjectID2` the rowset, `OwnerID`, `BigintData1` and `IntegerData2` 0 |
+| 46 / 47 / 164 Object:Created / Deleted / Altered | the object events | `EventSubClass` the phase (0 `Begin`, 1 `Commit`, 2 `Rollback`), `ObjectID` (none for a database), `ObjectType`, `IndexID` (none for a table), `ObjectName` (none for a database), the database, `TransactionID`, and on a closing phase `BigintData1` its `Begin`'s `EventSequence` |
+| 58 Auto Stats | `auto_stats`, a refresh's `Updated:` firing alone (a creation and the loads write no row) | `TextData` the statistics list, `ObjectID`, `IndexID`, `EventSubClass` the status, `IntegerData` the count, `Duration`, `Success` |
+| 60 Lock:Escalation | `lock_escalation` | `TextData` the escalating statement's text, `ObjectID`, `ObjectID2` the rowset, `Mode`, `Type` 5, `IntegerData` the rowset's locks and `IntegerData2` the table's, `OwnerID`, `TransactionID` |
 | 82–91 UserConfigurable | `user_event`, from `sp_trace_generateevent` | `TextData`, `BinaryData` |
 | 137 Blocked process report | `blocked_process_report` | the report document, `Duration`, `ObjectID`, `IndexID`, `Mode`; the columns are unprobed |
 
 The session columns are the database and its name, the host, client process, application, login and its SID (`0x01` for `sa`), `SPID`, `RequestID` 0, `XactSequence` 0, `SessionLoginName`, `GroupID` 2 and `ServerName`; `EventSequence` numbers every event any trace writes, server-wide, and a completed event's `StartTime` is its `EndTime` less its duration.
 A row carries a column only when the trace chose it for the class and the class binds it.
+
+**The default trace** runs from the simulation's start while `default trace enabled` is on, as real's does, and takes real's own events and columns (`DefaultTraceEvents.tsv`, 34 classes) — of which the simulator fires the object events, so its file holds every object created, altered or deleted, which `sp_Blitz` and SSMS's schema-changes report read off it.
+A firing it alone takes keeps a compact row (`TraceEvents.ObjectRow`, captured with the session's columns as they stood) in `Trace.DefaultTraceLog`, with no Extended Events catalog read; its files are written from the kept rows only as `fn_trace_gettable` reads them — the header and start rows, then each event, rolling over at 20 MB to five files as real's do (`log_1.trc`, `log_2.trc` …) — so a server nobody reads the default trace of never loads the trace catalog.
+`RECONFIGURE` turning the option off writes a stop row and keeps nothing more until it is on again, which writes a start row; `sys.traces` lists the default trace's path as last written and its event count.
+An event a session or user trace also takes reaches the default trace with the row the trace classes make of it, the same `EventSequence` both.
+The probed shapes are real's own default trace over the same statements (2026-10-16): `create table t (a int primary key, b int)` writes the key's index `Begin`, the table's `Begin` and `Commit`, the index's `Commit`, each `Commit`'s `BigintData1` its `Begin`'s sequence.
 
 **Filters** read left to right, each joining what came before by its own logical operator, the first's ignored — `TextData LIKE 'a%'` then `OR DatabaseID = 9` takes either.
 A column the event lacks passes every filter but `<> NULL`; string comparisons are case-insensitive, `=` ignores trailing spaces, and `LIKE` is the simulator's matcher with real's wildcards.
@@ -87,9 +96,12 @@ A trace's files are the simulator's own form, kept in memory on the server's tra
 
 **Cost.**
 A firing site asks one flag the trace state publishes (`Simulation.TraceTaken`, null while no trace runs) beside the Extended Events one, so without a trace nothing changes; a workload of 4,000 client batches and a 40,000-statement loop ran as fast with no trace, and with a trace running that takes only a class nothing fires, as before the trace surface, and a trace taking `SQL:StmtCompleted` behind a filter refusing every statement cost about what an Extended Events session taking `sql_statement_completed` behind a refusing predicate does (measured 2026-10-16, Release build, median of six runs in a shared container).
+The default trace, running from the start, costs a statement that changes no object nothing — a warm workload of 4,000 client batches and a 40,000-statement loop ran within 2% of the same build before it — and a DDL-heavy one (1,500 rounds of `CREATE TABLE` with a key, `CREATE INDEX`, `ALTER TABLE`, `INSERT` and `DROP TABLE`) about as fast warm and 5% slower in a cold process (measured 2026-10-16, Release build, median of six runs in a shared container).
 
 ### Divergences
 
+- The default trace keeps its last 400,000 events, about what real's five files hold of the object events, and writes its files afresh from them at each read, so a rollover file's name follows the kept events rather than the server's uptime; `XactSequence` reads 0 where real's numbers each transaction, an autocommit statement's rows carry a `TransactionID` only when something else drew the statement one (drawing it would move the ids the session's later transactions take), and the system sessions' own object events (a statistic real's background tasks create) aren't recorded.
+- `Lock:Escalation`'s `TextData` is the statement as written where real's is its simply parameterized form (`(@1 int)UPDATE [big] set [b] = @1`), without its `Offset` and `LineNumber`, and none at all for a statement the compile walk didn't read whole.
 - A file's size counts each row at the simulator's estimate of real's encoding — a six-byte header and per column six bytes and its data — so a rollover lands near, not at, the event real's does.
 - `Exception` fires once for a compile error real raises twice (its compile and its recompile), and after the statement's `SQL:StmtStarting` where real's constant folding raises it before.
 - `Reads`, `Writes` and `CPU` read 0, `TransactionID` is the session's open transaction rather than real's per-event one, the batch and RPC events' `RowCounts` and the login options' `BinaryData` read zero as their Extended Events do, and an RPC's `BinaryData` (its TDS data stream) is left out.
@@ -99,6 +111,6 @@ A firing site asks one flag the trace state publishes (`Simulation.TraceTaken`, 
 
 ### Not modeled yet
 
-- The default trace records nothing: its file reads empty however the server is used.
-- Every event class the simulator fires no Extended Event for — scans, lock acquisition and release, auto statistics, showplans, the audit classes, recompiles — takes, lists and never fires.
+- The default trace's other classes — the error log, the audit events, autogrowth, `DBCC` and the hash and sort warnings: the simulator fires none of them.
+- Every event class the simulator fires no Extended Event for — scans, lock acquisition and release, showplans, the audit classes, recompiles — takes, lists and never fires.
 - Rowset traces (`TRACE_PRODUCE_ROWSET`, `sp_trace_getdata`), which real refuses through `sp_trace_create` as well, and `SHUTDOWN_ON_ERROR`'s shutdown, which no file error here reaches.

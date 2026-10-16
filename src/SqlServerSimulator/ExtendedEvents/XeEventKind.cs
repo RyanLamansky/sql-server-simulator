@@ -32,6 +32,8 @@ internal enum XeEventKind
     DatabaseCreated,
     DatabaseDropped,
     UserEvent,
+    LockEscalation,
+    AutoStats,
 }
 
 /// <summary>Each <see cref="XeEventKind"/>'s package and name, and whether a session that starts with the server takes it.</summary>
@@ -68,6 +70,8 @@ internal static class XeEventKinds
         ("sqlserver", "database_created"),
         ("sqlserver", "database_dropped"),
         ("sqlserver", "user_event"),
+        ("sqlserver", "lock_escalation"),
+        ("sqlserver", "auto_stats"),
     ];
 
     public static int Count => Names.Length;

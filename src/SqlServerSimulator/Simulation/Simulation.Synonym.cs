@@ -61,6 +61,7 @@ partial class Simulation
             throw SimulatedSqlException.NameTakenEndingOnlyStatement(synonymName.ToString(), state: 8);
         RecordSlotUndo<Synonym>(context, schema.Synonyms, leaf, null);
         // Real reports the base object as TargetObjectName with no type.
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, schema.Database, synonym);
         RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf);
         return true;
     }
@@ -111,6 +112,7 @@ partial class Simulation
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(written);
         }
         RecordSlotUndo(context, schema.Synonyms, leaf, dropped);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, schema.Database, dropped);
         RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
         return true;
     }

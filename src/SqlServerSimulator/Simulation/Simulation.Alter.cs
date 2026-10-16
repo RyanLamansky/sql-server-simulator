@@ -1587,6 +1587,7 @@ partial class Simulation
         }
         RecordDdlUndo(context, () =>
             (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.LastUsedValue) = before);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, sequence.Schema.Database, sequence);
         RecordDdlEvent(context, "ALTER_SEQUENCE", sequence.Schema.Name, sequence.Name, "SEQUENCE");
         SendSequenceCacheMessages(context.Batch, sequence);
         return true;
@@ -1718,6 +1719,7 @@ partial class Simulation
         // Real reports the transferred object, not the schema — SchemaName is
         // the destination, ObjectName the object and ObjectType its kind
         // (TABLE, RULE, TYPE, XML SCHEMA COLLECTION …, probed 2026-09-26).
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, context.CurrentDatabase, destSchema.SchemaId, "SC", 0, destSchema.Name);
         RecordDdlEvent(context, "ALTER_SCHEMA", destSchemaName, sourceName.Leaf, objectType);
         return true;
     }
@@ -2069,12 +2071,24 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        // A key's index the action adds fires its own object event ahead of
+        // the table's (probed 2026-10-16 against SQL Server 2025).
+        var keyIndexes = !context.Batch.IsSkipping && ExtendedEvents.XeObjectEvents.AnyTaken(context.Simulation) && context.Batch.TryResolveTable(tableName, out var observed) && !observed.IsTableVariable
+            ? ExtendedEvents.XeObjectEvents.KeyIndexIds(observed)
+            : null;
         var handled = TryParseAlterTableAction(context, tableName, withCheckExplicit);
         // Every accepted shape raises one ALTER_TABLE event (probe-confirmed:
         // ADD COLUMN and ADD CONSTRAINT both report ALTER_TABLE, differing only
         // in the AlterTableActionList detail the simulator doesn't emit).
         if (handled)
+        {
+            if (keyIndexes is not null && context.Batch.TryResolveTable(tableName, out var altered))
+            {
+                ExtendedEvents.XeObjectEvents.NoteKeyIndexes(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, altered, keyIndexes);
+                ExtendedEvents.XeObjectEvents.NoteTable(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, altered);
+            }
             RecordDdlEvent(context, "ALTER_TABLE", EventSchemaName(tableName), tableName.Leaf, "TABLE");
+        }
         return handled;
     }
 

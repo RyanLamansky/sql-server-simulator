@@ -427,6 +427,7 @@ partial class Simulation
         context.Batch.LockDefinition(triggerSchema, trigger, created: true);
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         RecordSlotUndo(context, triggerSchema.Triggers, triggerName.Leaf, existed ? existing : null);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, existed ? ExtendedEvents.XeEventKind.ObjectAltered : ExtendedEvents.XeEventKind.ObjectCreated, triggerSchema.Database, trigger);
         if (parent is HeapTable redefined)
             VersionStore.NoteDefinitionChange(context.Batch, redefined);
         RecordDdlEvent(

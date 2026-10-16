@@ -86,13 +86,22 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
         }
     }
 
-    /// <summary>Opens the trace's first file, which <c>sp_trace_create</c> creates empty.</summary>
-    public void CreateFile(SqlTraceServer server)
+    /// <summary>
+    /// Opens the trace's first file, which <c>sp_trace_create</c> creates
+    /// empty — <paramref name="number"/> the rollover number it takes, as the
+    /// default trace's first is <c>log_1.trc</c>.
+    /// </summary>
+    public void CreateFile(System.Collections.Concurrent.ConcurrentDictionary<string, TraceFile> registry, int number = 0)
     {
+        this.registry = registry;
+        this.fileNumber = number;
         var file = new TraceFile(this.CurrentPath, FilePath(this.Stem, this.fileNumber + 1));
         this.files.Add(file);
-        server.Files[file.Path] = file;
+        registry[file.Path] = file;
     }
+
+    /// <summary>Where the trace's files are found by path: the server's (<see cref="SqlTraceServer.Files"/>), or the default trace's own.</summary>
+    private System.Collections.Concurrent.ConcurrentDictionary<string, TraceFile>? registry;
 
     public bool TakesEvent(int eventClass) => eventClass < this.takenEvents.Length && this.takenEvents[eventClass];
 
@@ -191,7 +200,7 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
     /// file's header and start rows written, and each open session reported
     /// as an <c>ExistingConnection</c> when the trace takes it.
     /// </summary>
-    public void Start(Simulation simulation, SqlTraceServer server, DateTime now)
+    public void Start(Simulation simulation, SqlTraceServer server, DateTime now, bool publish = true)
     {
         lock (this.gate)
         {
@@ -207,6 +216,8 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
             this.StartTime = now;
             this.IsRunning = true;
         }
+        if (!publish)
+            return;
         server.Publish(simulation);
         if (this.TakesEvent(17))
         {
@@ -229,7 +240,7 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
     private const int ExistingPacketSize = 8000;
 
     /// <summary>Stops the trace, writing its stop row; false when it wasn't running.</summary>
-    public bool Stop(Simulation simulation, SqlTraceServer server, DateTime now, bool writeStopRow = true)
+    public bool Stop(Simulation simulation, SqlTraceServer server, DateTime now, bool writeStopRow = true, bool publish = true)
     {
         lock (this.gate)
         {
@@ -241,7 +252,8 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
             if (writeStopRow)
                 this.files[^1].Append(MetaRow(StopClass, now));
         }
-        server.Publish(simulation);
+        if (publish)
+            server.Publish(simulation);
         return true;
     }
 
@@ -252,7 +264,7 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
     /// trace, and a stop time passed stops and closes it — as real's do
     /// (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    public void Write(Simulation simulation, SqlTraceServer server, SimulatedDbConnection connection, int eventClass, SqlValue?[] values, DateTime now)
+    public void Write(Simulation simulation, SqlTraceServer server, SimulatedDbConnection? connection, int eventClass, SqlValue?[] values, DateTime now)
     {
         string? stoppedBecause = null;
         lock (this.gate)
@@ -301,7 +313,7 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
         // does; one stopped by an error writes none.
         _ = this.Stop(simulation, server, now, writeStopRow: stoppedBecause.Length == 0);
         server.Remove(this);
-        simulation.ErrorLog.Write(now, ErrorLog.SessionProcess(connection.Spid), stoppedBecause.Length == 0
+        simulation.ErrorLog.Write(now, ErrorLog.SessionProcess(connection?.Spid ?? 1), stoppedBecause.Length == 0
             ? string.Create(CultureInfo.InvariantCulture, $"SQL Trace stopped. Trace ID = '{this.Id}'. Login Name = '{this.Creator}'.")
             : string.Create(CultureInfo.InvariantCulture, $"Trace ID '{this.Id}' was stopped because of an error. Cause: {stoppedBecause}. Restart the trace after correcting the problem."));
     }
@@ -314,10 +326,11 @@ internal sealed class UserTrace(int id, int options, string stem, long maxSizeMe
         file.Append(this.Header(HeaderClass, now));
         file.Append(MetaRow(RolloverClass, now));
         this.files.Add(file);
-        server.Files[file.Path] = file;
+        var registry = this.registry ?? server.Files;
+        registry[file.Path] = file;
         if (this.MaxFiles > 0 && this.files.Count > this.MaxFiles)
         {
-            _ = server.Files.TryRemove(this.files[0].Path, out _);
+            _ = registry.TryRemove(this.files[0].Path, out _);
             this.files.RemoveAt(0);
         }
         return file;

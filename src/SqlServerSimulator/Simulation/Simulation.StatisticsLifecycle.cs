@@ -296,7 +296,18 @@ partial class Simulation
             foreach (var statistic in StatisticsOn(table))
             {
                 if (statistic.LeadingOrdinal == columnOrdinal && !statistic.NoRecompute && IsStale(table, statistic.State, columnOrdinal))
+                {
+                    if (!ExtendedEvents.XeStatisticsEvents.Taken(batch.Connection.Simulation))
+                    {
+                        BuildStatistics(batch, table, statistic);
+                        continue;
+                    }
+                    ExtendedEvents.XeStatisticsEvents.Refreshing(batch, table, statistic.StatsId, statistic.Name);
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     BuildStatistics(batch, table, statistic);
+                    ExtendedEvents.XeStatisticsEvents.Refreshed(batch, table, statistic.StatsId, statistic.Name,
+                        (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMicroseconds);
+                }
             }
         }
         if (led || !database.Switches.HasFlag(DatabaseSwitches.AutoCreateStatistics) || table.Heap.RowCount == 0)
@@ -321,11 +332,13 @@ partial class Simulation
         {
             return;
         }
+        var creating = System.Diagnostics.Stopwatch.GetTimestamp();
+        UserStatistic created;
         lock (table)
         {
             if (table.UserStatistics.Exists(statistic => statistic.ColumnFullOrdinals.Length > 0 && statistic.ColumnFullOrdinals[0] == columnOrdinal))
                 return;
-            var created = new UserStatistic(
+            created = new UserStatistic(
                 $"_WA_Sys_{column.ColumnId:X8}_{table.ObjectId:X8}",
                 table.NextFreeIndexId(),
                 [columnOrdinal],
@@ -339,6 +352,15 @@ partial class Simulation
             table.UserStatistics = [.. table.UserStatistics, created];
         }
         batch.Connection.Simulation.CatalogRows.Invalidate();
+        // The statistic is an object of its own, made outside the query's
+        // transaction (probed 2026-10-16 against SQL Server 2025:
+        // Object:Created for _WA_Sys_… as the query compiles).
+        ExtendedEvents.XeObjectEvents.NoteIndex(batch, ExtendedEvents.XeEventKind.ObjectCreated, database, table.ObjectId, created.StatsId, created.Name, statistics: true, independent: true);
+        if (ExtendedEvents.XeStatisticsEvents.Taken(batch.Connection.Simulation))
+        {
+            ExtendedEvents.XeStatisticsEvents.Created(batch, table, created.StatsId, created.Name, column.Name,
+                (long)System.Diagnostics.Stopwatch.GetElapsedTime(creating).TotalMicroseconds);
+        }
     }
 
     /// <summary>

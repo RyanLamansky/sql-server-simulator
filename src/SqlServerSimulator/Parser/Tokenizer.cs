@@ -565,7 +565,7 @@ static class Tokenizer
             index = close + 1;
             return close == start + 1
                 ? throw SimulatedSqlException.EmptyColumnAlias()
-                : new(command.Substring(start + 1, close - start - 1), command, start, close - start);
+                : new(command.Substring(start + 1, close - start - 1), command, start, close + 1 - start);
         }
 
         var builder = new StringBuilder();
@@ -591,7 +591,7 @@ static class Tokenizer
         if (index >= command.Length)
             throw SimulatedSqlException.UnclosedStringLiteral(builder.ToString(), Token.LineAt(command, start));
 
-        var length = index - start;
+        var length = index + 1 - start;
         index++;
         if (builder.Length == 0)
             throw SimulatedSqlException.EmptyColumnAlias();

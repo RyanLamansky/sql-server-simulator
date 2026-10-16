@@ -259,6 +259,52 @@ public sealed class ExtendedEventsFiringTests
         }), string.Join("\n", Summaries(RingBuffer(sim), "row_count", "last_row_count", "offset", "offset_end")));
     }
 
+    // Each statement ends where SQL Server 2025 ended the same batch's: the
+    // statements real's grammar ends at their last token leave out the
+    // separator and comment after them (MERGE keeps the terminator it
+    // requires), the rest take them; an ALTER of a table the batch creates
+    // ends at its own end although the compile walk stops inside it; and the
+    // CREATE refused for a taken name reports no completion.
+    [TestMethod]
+    public void StatementEvents_EndEachStatementAsRealsGrammarDoes()
+    {
+        var sim = WithSession("add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        using var client = Client(sim, "app");
+        Run(client, "create table t (a int)\nalter table t add j int\ncreate synonym s for t;\ndrop synonym s;\n"
+            + "merge t using (select 1 as a) as y on t.a = y.a when not matched then insert (a) values (y.a) ;\nselect a from [t] -- c\n"
+            + "create index ix on t (a) with (fillfactor = 80);\ndeclare c cursor for select a from t\nset nocount on\nalter table t drop column j\ncreate table t (a int)");
+        AreEqual(string.Join("\n", new[]
+        {
+            "sql_statement_completed offset=0 offset_end=42 statement=create table t (a int)",
+            "sql_statement_completed offset=46 offset_end=90 statement=alter table t add j int",
+            "sql_statement_completed offset=94 offset_end=140 statement=create synonym s for t;\n",
+            "sql_statement_completed offset=142 offset_end=168 statement=drop synonym s",
+            "sql_statement_completed offset=174 offset_end=362 statement=merge t using (select 1 as a) as y on t.a = y.a when not matched then insert (a) values (y.a) ;",
+            "sql_statement_completed offset=366 offset_end=398 statement=select a from [t]",
+            "sql_statement_completed offset=412 offset_end=504 statement=create index ix on t (a) with (fillfactor = 80)",
+            "sql_statement_completed offset=510 offset_end=580 statement=declare c cursor for select a from t",
+            "sql_statement_completed offset=584 offset_end=612 statement=set nocount on\n",
+            "sql_statement_completed offset=614 offset_end=666 statement=alter table t drop column j",
+        }), string.Join("\n", Summaries(RingBuffer(sim), "offset", "offset_end", "statement")));
+    }
+
+    // A statement an error ended completes only when the error was a
+    // RAISERROR's, of severity 11 or less, or terminated a write.
+    [TestMethod]
+    public void StatementEvents_CompleteAfterAnErrorOnlyAsRealDoes()
+    {
+        var sim = WithSession("add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        _ = sim.ExecuteNonQuery("create table e (a int primary key); insert e values (1)");
+        using var client = Client(sim, "app");
+        Run(client, "select 1/(a-1) from e\nupdate e set a = a / 0\ndrop table missing\nkill 9999\nraiserror('x', 16, 1)\nexec missing_procedure");
+        AreEqual(string.Join("\n", new[]
+        {
+            "sql_statement_completed statement=update e set a = a / 0",
+            "sql_statement_completed statement=drop table missing",
+            "sql_statement_completed statement=raiserror('x', 16, 1)\n",
+        }), string.Join("\n", Summaries(RingBuffer(sim), "statement")));
+    }
+
     // A batch the plan cache replays fires its statements' events as its
     // first run did.
     [TestMethod]
@@ -361,6 +407,173 @@ public sealed class ExtendedEventsFiringTests
         command.CommandTimeout = 1;
         _ = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
         AreEqual("attention request_id=0", string.Join("\n", Summaries(RingBuffer(sim), "request_id")));
+    }
+
+    // The object events SQL Server 2025 fired for the same statements: each
+    // object's Begin as the statement changes it and its Commit as the
+    // statement ends, a key's index ahead of its table and committing after
+    // it, a CHECK constraint only altering its table, a temporary table in
+    // tempdb (database 2), and a database's own pair before database_created.
+    [TestMethod]
+    public void ObjectEvents_FireEachPhaseInRealsOrder()
+    {
+        var sim = WithSession("""
+            add event sqlserver.object_created (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.object_altered (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.object_deleted (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.database_created (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        using var client = Client(sim, "app");
+        Run(client, "create table t (a int primary key, b int unique)");
+        Run(client, "alter table t add constraint ck check (b > 0)");
+        Run(client, "create index ix on t (b); create statistics st on t (a, b); drop statistics t.st; drop index ix on t");
+        Run(client, "create table #x (a int); drop table #x");
+        Run(client, "create view v as select a from t");
+        Run(client, "drop view v; drop table t");
+        Run(client, "create database d2");
+        var summaries = Summaries(RingBuffer(sim), "object_type", "index_id", "ddl_phase", "object_name")
+            .Select(summary => System.Text.RegularExpressions.Regex.Replace(summary, "(__t__)[0-9A-F]+", "$1"));
+        AreEqual(string.Join("\n",
+            "object_created object_type=22601 index_id=1 ddl_phase=0 object_name=PK__t__",
+            "object_created object_type=22601 index_id=2 ddl_phase=0 object_name=UQ__t__",
+            "object_created object_type=8277 index_id=0 ddl_phase=0 object_name=t",
+            "object_created object_type=8277 index_id=0 ddl_phase=1 object_name=t",
+            "object_created object_type=22601 index_id=2 ddl_phase=1 object_name=UQ__t__",
+            "object_created object_type=22601 index_id=1 ddl_phase=1 object_name=PK__t__",
+            "object_altered object_type=8277 index_id=0 ddl_phase=0 object_name=t",
+            "object_altered object_type=8277 index_id=0 ddl_phase=1 object_name=t",
+            "object_created object_type=22601 index_id=3 ddl_phase=0 object_name=ix",
+            "object_created object_type=22601 index_id=3 ddl_phase=1 object_name=ix",
+            "object_created object_type=21587 index_id=4 ddl_phase=0 object_name=st",
+            "object_created object_type=21587 index_id=4 ddl_phase=1 object_name=st",
+            "object_deleted object_type=21587 index_id=4 ddl_phase=0 object_name=st",
+            "object_deleted object_type=21587 index_id=4 ddl_phase=1 object_name=st",
+            "object_deleted object_type=22601 index_id=3 ddl_phase=0 object_name=ix",
+            "object_deleted object_type=22601 index_id=3 ddl_phase=1 object_name=ix",
+            "object_created object_type=8277 index_id=0 ddl_phase=0 object_name=#x",
+            "object_created object_type=8277 index_id=0 ddl_phase=1 object_name=#x",
+            "object_deleted object_type=8277 index_id=0 ddl_phase=0 object_name=#x",
+            "object_deleted object_type=8277 index_id=0 ddl_phase=1 object_name=#x",
+            "object_created object_type=8278 index_id=0 ddl_phase=0 object_name=v",
+            "object_created object_type=8278 index_id=0 ddl_phase=1 object_name=v",
+            "object_deleted object_type=8278 index_id=0 ddl_phase=0 object_name=v",
+            "object_deleted object_type=8278 index_id=0 ddl_phase=1 object_name=v",
+            "object_deleted object_type=8277 index_id=0 ddl_phase=0 object_name=t",
+            "object_deleted object_type=8277 index_id=0 ddl_phase=1 object_name=t",
+            "object_created object_type=16964 index_id=0 ddl_phase=0 object_name=d2",
+            "object_created object_type=16964 index_id=0 ddl_phase=1 object_name=d2",
+            "database_created"), string.Join("\n", summaries));
+        Contains("<data name=\"database_id\"><type name=\"uint32\" package=\"package0\"></type><value>2</value></data><data name=\"object_id\">", RingBuffer(sim));
+        Contains("<value><![CDATA[d2]]></value>", RingBuffer(sim));
+    }
+
+    // Inside a transaction each object's closing phase waits for its end, the
+    // commits in the reverse of the changes' order, and a rollback reports
+    // Rollback (probed 2026-10-16 against SQL Server 2025).
+    [TestMethod]
+    public void ObjectEvents_CloseWithTheirTransaction()
+    {
+        var sim = WithSession("""
+            add event sqlserver.object_created (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.object_deleted (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        using var client = Client(sim, "app");
+        Run(client, "begin tran; create table t2 (a int); drop table t2; commit");
+        Run(client, "begin tran; create table t3 (a int); rollback");
+        AreEqual(string.Join("\n",
+            "object_created ddl_phase=0 object_name=t2",
+            "object_deleted ddl_phase=0 object_name=t2",
+            "object_deleted ddl_phase=1 object_name=t2",
+            "object_created ddl_phase=1 object_name=t2",
+            "object_created ddl_phase=0 object_name=t3",
+            "object_created ddl_phase=2 object_name=t3"), string.Join("\n", Summaries(RingBuffer(sim), "ddl_phase", "object_name")));
+    }
+
+    // A lock request timing out fires lock_timeout twice — no duration, then
+    // the wait's — and, under a LOCK_TIMEOUT above 0,
+    // lock_timeout_greater_than_0 once, each naming the key the holder's row
+    // of sys.dm_tran_locks names.
+    [TestMethod]
+    public void LockTimeout_FiresAsRealDoes()
+    {
+        var sim = WithSession("""
+            add event sqlserver.lock_timeout (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.lock_timeout_greater_than_0 (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        _ = sim.ExecuteNonQuery("create table lk (a int primary key); insert lk values (1)");
+        using var holder = sim.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update lk set a = a").ExecuteNonQuery();
+        using var client = Client(sim, "app");
+        Run(client, "set lock_timeout 0; select a from lk where a = 1");
+        Run(client, "set lock_timeout 100; select a from lk where a = 1");
+        var summaries = Summaries(RingBuffer(sim), "resource_type", "mode", "owner_type", "duration");
+        HasCount(5, summaries);
+        AreEqual("lock_timeout resource_type=7 mode=3 owner_type=1 duration=0", summaries[0]);
+        AreEqual("lock_timeout resource_type=7 mode=3 owner_type=1 duration=0", summaries[1]);
+        AreEqual("lock_timeout resource_type=7 mode=3 owner_type=1 duration=0", summaries[2]);
+        StartsWith("lock_timeout resource_type=7 mode=3 owner_type=1 duration=", summaries[3]);
+        StartsWith("lock_timeout_greater_than_0 resource_type=7 mode=3 owner_type=1 duration=", summaries[4]);
+        IsGreaterThanOrEqualTo(100_000L, long.Parse(summaries[4][(summaries[4].LastIndexOf('=') + 1)..], System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    // A statement escalating to a table lock fires lock_escalation with the
+    // locks it held, by lock threshold.
+    [TestMethod]
+    public void LockEscalation_FiresAsAStatementEscalates()
+    {
+        var sim = WithSession("add event sqlserver.lock_escalation (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        _ = sim.ExecuteNonQuery("create table big (id int primary key, b int); insert big select value, 0 from generate_series(1, 7000)");
+        using var client = Client(sim, "app");
+        Run(client, "begin tran; update big set b = 1; rollback");
+        var summary = Summaries(RingBuffer(sim), "resource_type", "mode", "escalation_cause", "escalated_lock_count").Single();
+        StartsWith("lock_escalation resource_type=5 mode=5 escalation_cause=0 escalated_lock_count=", summary);
+    }
+
+    // A query's compile that creates a column statistic fires auto_stats
+    // twice — Created, then its load — and object_created for the statistic,
+    // which commits at once whatever transaction the query is in.
+    [TestMethod]
+    public void AutoStats_FireAsAQueryCreatesAStatistic()
+    {
+        var sim = WithSession("""
+            add event sqlserver.auto_stats (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.object_created (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        _ = sim.ExecuteNonQuery("create table s (id int primary key, c int); insert s values (1, 1), (2, 2)");
+        using var client = Client(sim, "app");
+        Run(client, "begin tran; select count(*) from s where c = 5; rollback");
+        AreEqual(string.Join("\n",
+            "object_created ddl_phase=0 statistics_list=",
+            "object_created ddl_phase=1 statistics_list=",
+            "auto_stats status=1 statistics_list=Created: c",
+            "auto_stats status=9 statistics_list=Loading without updating: s._WA_Sys_00000002_00000066"),
+            string.Join("\n", Summaries(RingBuffer(sim), "status", "ddl_phase", "statistics_list")
+                .Select(summary => summary.StartsWith("object_created", StringComparison.Ordinal) ? summary + " statistics_list=" : summary)));
+    }
+
+    // The default trace records the object events from the server's start,
+    // a closing phase's BigintData1 its Begin's sequence, and stops while
+    // its option is off.
+    [TestMethod]
+    public void DefaultTrace_RecordsTheObjectEvents()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int); drop table t");
+        const string Read = """
+            select string_agg(concat(EventClass, ':', EventSubClass, ':', ObjectName, ':', isnull(IndexID, -1), ':', iif(BigintData1 = EventSequence - 1, 'paired', isnull(cast(BigintData1 as varchar), 'none'))), ',')
+                within group (order by EventSequence)
+            from fn_trace_gettable((select path from sys.traces where is_default = 1), default)
+            """;
+        AreEqual("65528:::-1:none,65534:::-1:none,46:0:t:-1:none,46:1:t:-1:paired,47:0:t:-1:none,47:1:t:-1:paired", sim.ExecuteScalar(Read));
+        _ = sim.ExecuteNonQuery("exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'default trace enabled', 0; reconfigure");
+        _ = sim.ExecuteNonQuery("create table u (a int)");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.traces"));
+        _ = sim.ExecuteNonQuery("exec sp_configure 'default trace enabled', 1; reconfigure");
+        Contains(",65533:::-1:none,65534:::-1:none", (string)sim.ExecuteScalar(Read)!);
     }
 
     public TestContext TestContext { get; set; } = null!;

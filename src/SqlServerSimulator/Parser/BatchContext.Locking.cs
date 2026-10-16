@@ -1685,7 +1685,7 @@ internal sealed partial class BatchContext
             return;
         tally.Count += added;
         var estimated = EstimatedLockTotal(table, tally.Count);
-        if (estimated >= tally.NextAttempt && !this.TryEscalate(table, tally.Exclusive))
+        if (estimated >= tally.NextAttempt && !this.TryEscalate(table, tally.Exclusive, estimated))
             tally.NextAttempt = estimated + LockEscalationTally.RetryInterval;
     }
 
@@ -1715,7 +1715,7 @@ internal sealed partial class BatchContext
     /// The table's intent lock folds into the escalated mode, as real reports
     /// a single OBJECT S / X afterwards.
     /// </summary>
-    private bool TryEscalate(HeapTable table, bool exclusive)
+    private bool TryEscalate(HeapTable table, bool exclusive, int heldLocks)
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
@@ -1736,6 +1736,7 @@ internal sealed partial class BatchContext
             _ = tx.EscalatedTables.Add(table);
         else
             _ = tx.SharedEscalatedTables.Add(table);
+        ExtendedEvents.XeLockEvents.Escalation(this, table, mode, heldLocks);
         return true;
     }
 
@@ -1908,7 +1909,7 @@ internal sealed partial class BatchContext
             {
                 // Too many keys to lock one by one: escalate if that can be
                 // granted, else lock them all after all.
-                if (table.LockEscalation != 1 && this.TryEscalate(table, keyPart != LockMode.Shared))
+                if (table.LockEscalation != 1 && this.TryEscalate(table, keyPart != LockMode.Shared, cap))
                     return;
                 capped = true;
                 anchors = cache.KeyLockAnchors(heap, table.StoredColumns, heap, group.Ordinals, commons,

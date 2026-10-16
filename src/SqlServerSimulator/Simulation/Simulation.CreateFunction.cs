@@ -389,6 +389,7 @@ partial class Simulation
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, function);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, function);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
@@ -559,6 +560,7 @@ partial class Simulation
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, function);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, function);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
@@ -691,6 +693,7 @@ partial class Simulation
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, function);
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, function);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }

@@ -386,16 +386,28 @@ partial class Simulation
         private readonly void Leave(BatchContext batch)
         {
             var connection = batch.Connection;
+            // A statement read whole records where it ends; one an error
+            // stopped inside leaves its end to the batch's run.
+            var placed = this.xeStatement;
             if (batch.StatementEnds is { } ends && this.StatementStart.Token is { } statementToken)
             {
-                var next = NextStatementStart(batch.Parser);
-                ends[statementToken.StartIndex] = next >= batch.Parser.Command.CommandText.Length ? -1 : next - 1;
+                if (this.Error is null || this.resumedAtStatementEnd || (this.Ending == StatementEnding.Deferred && batch.CurrentStatement.DeferredReadToEnd))
+                {
+                    var (tight, loose) = StatementEndsOf(batch.Parser, statementToken.StartIndex);
+                    if (ends.Record(statementToken.StartIndex, tight, loose) && placed is { EndRecorded: false })
+                        placed = ExtendedEvents.XeStatementEvents.Place(batch, statementToken.StartIndex) ?? placed;
+                }
+                else
+                {
+                    ends.Incomplete = true;
+                }
             }
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
             connection.RunningBatch = this.savedRunningBatch;
-            if (this.xeStatement is { } placed)
-                ExtendedEvents.XeStatementEvents.Completed(connection, placed, (long)System.Diagnostics.Stopwatch.GetElapsedTime(placed.StartedTimestamp).TotalMicroseconds);
+            ExtendedEvents.XeObjectEvents.Close(batch, this.Error is null);
+            if (placed is not null && (this.Error is not { } failed || CompletesDespite(batch, failed)))
+                ExtendedEvents.XeStatementEvents.Completed(connection, placed, (long)System.Diagnostics.Stopwatch.GetElapsedTime(this.xeStatement!.StartedTimestamp).TotalMicroseconds);
             if (this.announcedReader)
             {
                 LobReclamation.Leave(connection.Session);

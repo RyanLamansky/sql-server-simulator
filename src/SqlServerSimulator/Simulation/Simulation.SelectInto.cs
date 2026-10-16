@@ -220,6 +220,7 @@ partial class Simulation
             rowCount++;
         }
 
+        ExtendedEvents.XeObjectEvents.NoteTable(batch, ExtendedEvents.XeEventKind.ObjectCreated, destTable);
         // SELECT … INTO creates a table, so real raises CREATE_TABLE for it
         // (probe-confirmed) — but not for a temp destination.
         if (!isLocalTemp && !isGlobalTemp)

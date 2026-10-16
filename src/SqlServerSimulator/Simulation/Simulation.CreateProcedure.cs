@@ -294,6 +294,8 @@ partial class Simulation
         RecordSlotUndo(context, schema.Procedures, key, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, procedure);
+        if (!temporary)
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, procedure);
         // The database's DDL triggers don't fire for a temporary procedure
         // (probed 2026-10-16 against SQL Server 2025).
         if (!temporary)

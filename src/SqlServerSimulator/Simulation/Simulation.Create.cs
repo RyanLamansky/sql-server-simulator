@@ -670,6 +670,8 @@ partial class Simulation
             key.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, heapTable.Columns, key.FullOrdinals, key.Name, key.IsClustered);
             heapTable.KeysMayExceedLimit |= key.KeyMayExceedLimit;
         }
+        ExtendedEvents.XeObjectEvents.NoteKeyIndexes(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, heapTable);
+        ExtendedEvents.XeObjectEvents.NoteTable(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, heapTable);
         // Real raises no DDL event for a temp table (tempdb owns it), only for
         // a permanent one in the current database.
         if (!isTempTable)

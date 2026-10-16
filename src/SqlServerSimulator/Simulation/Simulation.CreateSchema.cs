@@ -189,6 +189,8 @@ partial class Simulation
         RecordSlotUndo<Schema>(context, context.CurrentDatabase.Schemas, schemaName, null);
 
         // Real reports the new schema as both SchemaName and ObjectName.
+        if (context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var createdSchema))
+            ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, context.CurrentDatabase, createdSchema.SchemaId, "SC", 0, createdSchema.Name);
         RecordDdlEvent(context, "CREATE_SCHEMA", schemaName, schemaName, "SCHEMA");
         return true;
     }

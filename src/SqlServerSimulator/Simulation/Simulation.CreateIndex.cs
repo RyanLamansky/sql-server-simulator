@@ -314,6 +314,7 @@ partial class Simulation
             constraint.DataCompression = indexOptions.DataCompression ?? 0;
             constraint.XmlCompression = indexOptions.XmlCompression ?? false;
             BuildStatistics(context.Batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
+            ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, table, indexName);
             RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
             return true;
         }
@@ -351,6 +352,7 @@ partial class Simulation
             table.SettleIndexIds();
             table.HypotheticalIndexes.Add(index);
             table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
+            ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, table, indexName);
             RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
             return true;
         }
@@ -420,6 +422,7 @@ partial class Simulation
             index.Partitioning = placement;
             index.FilegroupId = filegroup;
         }
+        ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, table, indexName);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

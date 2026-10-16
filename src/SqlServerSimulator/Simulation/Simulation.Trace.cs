@@ -23,6 +23,13 @@ partial class Simulation
     /// </summary>
     internal volatile bool[]? TraceTaken;
 
+    /// <summary>
+    /// Whether the default trace runs — <c>default trace enabled</c>'s
+    /// installed value, on from the start as real's is — which a firing
+    /// site of an event it takes asks beside <see cref="TraceTaken"/>.
+    /// </summary>
+    internal volatile bool DefaultTraceRunning = true;
+
     /// <summary>The server's trace state, made on first use.</summary>
     internal SqlTraceServer TracesFor()
     {
@@ -30,6 +37,20 @@ partial class Simulation
             return existing;
         var created = new SqlTraceServer();
         return Interlocked.CompareExchange(ref this.traces, created, null) ?? created;
+    }
+
+    /// <summary>
+    /// Brings the default trace in line with <c>default trace enabled</c> as
+    /// <c>RECONFIGURE</c> installs it: off stops it, writing its stop row, and
+    /// on starts it again.
+    /// </summary>
+    internal void SettleDefaultTrace()
+    {
+        var enabled = this.DefaultTraceEnabled;
+        if (enabled == this.DefaultTraceRunning)
+            return;
+        this.DefaultTraceRunning = enabled;
+        this.TracesIfMade?.DefaultLog.Add(enabled ? UserTrace.StartClass : UserTrace.StopClass, null, DateTime.UtcNow);
     }
 
     /// <summary>The server's trace state if anything has made it, null before.</summary>
@@ -291,7 +312,7 @@ partial class Simulation
         }
 
         var trace = server.Add(id => new UserTrace(id, options, file, maxSize, stopTime, rollover ? fileCount ?? 0 : 1, connection.Security.OriginalLoginName));
-        trace.CreateFile(server);
+        trace.CreateFile(server.Files);
         output.Value = SqlValue.FromInt32(trace.Id);
         SetProcedureReturnCode(batch, returnCodeVariableName, 0);
     }

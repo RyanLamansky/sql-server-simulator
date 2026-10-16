@@ -31,6 +31,9 @@ internal sealed class SqlTraceServer
     /// </summary>
     public long EventSequence;
 
+    /// <summary>The default trace's events, from which its files are written as something reads them.</summary>
+    public readonly DefaultTraceLog DefaultLog = new();
+
     /// <summary>Every trace, in id order.</summary>
     public UserTrace[] Traces()
     {

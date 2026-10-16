@@ -306,6 +306,7 @@ partial class Simulation
             ReattachIndexedViewDependencies(replaced, replacedBases!);
             ReseatTriggerParents(database, view, replaced);
         });
+        ExtendedEvents.XeObjectEvents.Note(context.Batch, replaced is null ? ExtendedEvents.XeEventKind.ObjectCreated : ExtendedEvents.XeEventKind.ObjectAltered, schema.Database, view);
         RecordDdlEvent(context, replaced is null ? "CREATE_VIEW" : "ALTER_VIEW", schema.Name, viewName.Leaf, "VIEW");
         return true;
     }

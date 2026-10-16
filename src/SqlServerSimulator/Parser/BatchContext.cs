@@ -502,10 +502,19 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// On a top-level batch's compile walk, where each statement it walks
-    /// ends, by its start (see <c>Simulation.NoteStatementEnds</c>); null on
-    /// every other context.
+    /// ends (see <c>Simulation.NoteStatementEnds</c>); on the batch running
+    /// that text when the walk left a statement's end unrecorded, the same
+    /// published ends, which its own statements fill in as each parses
+    /// whole; null on every other context.
     /// </summary>
-    public Dictionary<int, int>? StatementEnds;
+    public StatementEnds? StatementEnds;
+
+    /// <summary>
+    /// On a compile walk, the batch that runs the text it compiles, which
+    /// takes over recording the ends the walk couldn't (see
+    /// <see cref="Parser.StatementEnds.Incomplete"/>).
+    /// </summary>
+    public BatchContext? CompiledFor;
 
     /// <summary>
     /// The batch whose statement called this one's body — a procedure call,
