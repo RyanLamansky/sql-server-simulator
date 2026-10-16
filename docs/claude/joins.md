@@ -299,6 +299,9 @@ Two kinds of source qualify:
   SQL Server requires `APPLY` for laterality, so none of them can read a sibling FROM source.
   Each *can* read an enclosing statement's row, but that row is fixed for one execution of this `Selection` (the enclosing query re-executes the whole plan per enclosing row), so every re-execution within one enumeration would return identical rows.
 
+What materializes is the source, never the product: a cross join of two catalog views holds the right side's rows once and nested-loops the left over them, so a `TOP (n)` above it reads n tuples.
+The numbers-table idiom over such a product streams through its window too — see [`query.md`](query.md#a-window-numbering-in-arrival-order-streams).
+
 **The rows outlive the enumeration when the body reads nothing outside itself.**
 An enumeration nested in an enclosing query re-runs per enclosing row — the body of a correlated `EXISTS`, once per outer row — and would materialize the source again each time.
 So inside such a scope the materializing execution runs under the [uncorrelated-subquery memo](subqueries.md#an-outer-independent-inner-plan-runs-once-per-statement)'s latch, and a body that consulted neither the enclosing row nor a per-call-varying built-in stores its rows on the statement under its plan, which every later enumeration reuses.

@@ -2344,6 +2344,14 @@ internal sealed partial class Selection
         }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
+        if (windows.Count > 0 && aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
+            && !distinct && !topPercent && !topWithTies
+            && NumbersInArrivalOrder(windows) && ArrivalOrderSatisfies(orderBy, expressions, outputColumnNames, windows))
+        {
+            var numbered = windows.ConvertAll(window => ProjectedWindowOrdinal(expressions, window)).FindAll(static ordinal => ordinal >= 0);
+            if (numbered.Count > 0)
+                selection.ArrivalNumberedColumns = [.. numbered];
+        }
         selection.SimplyParameterizable = sources.Length == 1 && joins.Length == 0 && IsParameterizableSource(sources[0])
             && !distinct && windows.Count == 0 && !selection.HasTopOrOffsetOrFetch && fromClause.GroupingSets.Count == 0
             && fromClause.Having is null && intoTarget is null && !isAssignmentOnly;
@@ -3224,6 +3232,14 @@ internal sealed partial class Selection
         // read only the rows they need. TOP PERCENT / WITH TIES need the full
         // buffered rowcount / ORDER BY keys, so they skip the streaming paths.
         var hasJoinGroup = ContainsJoinGroup(joins);
+        if (!distinct && !top.RequiresBuffering && orderBy.Count > 0
+            && OrderArrivesFromSources(sources, joins, orderBy, expressions, outputColumnNames))
+        {
+            if (!hasJoinGroup)
+                sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, where: true);
+            (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
+            return ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
+        }
         if (!hasJoinGroup && !distinct && !top.RequiresBuffering && orderBy.Count > 0
             && TryApplyOrderedScan(sources, joins, orderBy, excluders, offsetCount ?? 0, batch, outerResolver, out var orderedSources, out var skipped))
         {

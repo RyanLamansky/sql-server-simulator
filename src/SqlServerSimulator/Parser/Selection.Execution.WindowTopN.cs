@@ -446,6 +446,15 @@ partial class Selection
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
 
+        // A window numbering in arrival order ranks nothing: the bound is a
+        // row count over the input as it arrives, as real's Top is there.
+        if (NumbersInArrivalOrder([window]))
+        {
+            foreach (var row in ProjectRowNumberWindowInOrder(sources, joins, expressions, excluders, window, lower, upper, 0, batch, outerResolver))
+                yield return row;
+            yield break;
+        }
+
         // The hoisted per-row scaffolding the other executors use: one mutable
         // tuple slot, one cached self-referencing resolver, one RuntimeContext
         // for the whole enumeration. The same slot serves the scan below and the

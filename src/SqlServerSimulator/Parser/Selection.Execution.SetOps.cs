@@ -65,6 +65,16 @@ internal sealed partial class Selection
     internal bool HasWindows;
 
     /// <summary>
+    /// The output columns that number the rows in the order they leave — each a
+    /// projected <c>ROW_NUMBER()</c> the plan computes as it streams (see
+    /// <c>NumbersInArrivalOrder</c>) — so an enclosing query reading this plan
+    /// as its only source finds an ascending ORDER BY on one already met, as
+    /// real's Sequence Project hands its order to the Top above it. Null when
+    /// no column does.
+    /// </summary>
+    internal int[]? ArrivalNumberedColumns;
+
+    /// <summary>
     /// Whether the plan reads stored rows — a table, a view, a catalog view, or
     /// a derived source that itself does — rather than only constants. Real
     /// runs a query over constants alone as a constant scan, which evaluates

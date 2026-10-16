@@ -50,6 +50,15 @@ internal sealed partial class Selection
         sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
 
+        if (NumbersInArrivalOrder(windows)
+            && !distinct && top.Percent is null && !top.WithTies
+            && ArrivalOrderSatisfies(orderBy, expressions, outputColumnNames, windows))
+        {
+            foreach (var row in ProjectArrivalNumberedRows(sources, joins, expressions, excluders, windows, offsetCount ?? 0, top.Count ?? fetchCount, batch, outerResolver))
+                yield return row;
+            yield break;
+        }
+
         // Step 1: buffer post-WHERE tuples. The same byte[]?[] instance is
         // reused across yields by EnumerateJoinedRows, so each entry is
         // cloned. For each buffered tuple, also pre-compute every window's
@@ -201,6 +210,172 @@ internal sealed partial class Selection
 
         foreach (var (projected, _) in windowed)
             yield return projected;
+    }
+
+    /// <summary>
+    /// Whether every window numbers its rows in the order they arrive: each is
+    /// a <c>ROW_NUMBER()</c> with no <c>PARTITION BY</c> whose ordering is
+    /// constant (<c>ORDER BY (SELECT NULL)</c>, the numbers-table idiom), so
+    /// all rows tie and the arrival-position tiebreak the ranking sort uses
+    /// (see <see cref="ComputeWindowResults"/>) is the whole order. Such a
+    /// window needs no sort and no buffer — real's plan is a Segment and a
+    /// Sequence Project over the input, streaming, with no Worktable in its
+    /// <c>STATISTICS IO</c> (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static bool NumbersInArrivalOrder(List<WindowExpression> windows)
+    {
+        foreach (var window in windows)
+        {
+            if (window.Kind != WindowKind.RowNumber || window.PartitionBy.Length != 0)
+                return false;
+            foreach (var term in window.OrderBy)
+            {
+                if (term.Expr is not { } expr || !IsConstantOrdering(expr))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> has one value for the whole
+    /// statement, so ordering by it ties every row: an expression reading no
+    /// column and drawing nothing per row (<see cref="Expression.IsRowIndependent"/>),
+    /// or a FROM-less, clause-free scalar subquery projecting one — the
+    /// <c>(SELECT NULL)</c> a window's ORDER BY takes where Msg 5309 refuses a
+    /// bare constant.
+    /// </summary>
+    private static bool IsConstantOrdering(Expression expression) => expression switch
+    {
+        Parenthesized parenthesized => IsConstantOrdering(parenthesized.Wrapped),
+        ScalarSubqueryExpression { Inner: { BranchFromSources: [], ProjectionExpressions: [var only], ClauseExpressions: null or [] } } => IsConstantOrdering(only),
+        _ => expression.IsRowIndependent,
+    };
+
+    /// <summary>
+    /// Whether rows emitted in arrival order already stand in the statement's
+    /// <paramref name="orderBy"/>, given windows that number in arrival order
+    /// (<see cref="NumbersInArrivalOrder"/>): every term is constant, or the
+    /// first non-constant one is such a row number ascending — a number unique
+    /// to its row, so nothing after it can reorder. A statement ORDER BY ties
+    /// keep the windows' emit order, which is arrival here.
+    /// </summary>
+    private static bool ArrivalOrderSatisfies(List<OrderBySpec> orderBy, List<Expression> expressions, string[] outputColumnNames, List<WindowExpression> windows)
+    {
+        foreach (var spec in orderBy)
+        {
+            if (!spec.IsOrdinal && IsConstantOrdering(spec.Expr!))
+                continue;
+            if (spec.Descending)
+                return false;
+            var term = spec.IsOrdinal ? expressions[spec.Ordinal - 1] : spec.Expr!;
+            if (!spec.IsOrdinal && spec.MayNameAlias && Peel(term) is Reference { ReferencedName: { ImmediateQualifier: null } name })
+            {
+                var alias = Array.FindIndex(outputColumnNames, column => BuiltInToken.Equals(column, name.Leaf));
+                if (alias < 0)
+                    return false;
+                term = expressions[alias];
+            }
+            return Peel(term) is WindowExpression window && windows.Contains(window);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a query without windows of its own receives its rows already in
+    /// <paramref name="orderBy"/>: every term is constant, so the sort ties
+    /// every row and keeps them as they arrive, or the first non-constant term
+    /// is ascending on a column its one source numbers in arrival order
+    /// (<see cref="ArrivalNumberedColumns"/>) — the numbers CTE read as
+    /// <c>SELECT TOP (n) rn FROM n ORDER BY rn</c>, which real answers with a
+    /// Top over the CTE's streaming Sequence Project, sorting nothing.
+    /// </summary>
+    private static bool OrderArrivesFromSources(FromSource[] sources, JoinSpec[] joins, List<OrderBySpec> orderBy, List<Expression> expressions, string[] outputColumnNames)
+    {
+        foreach (var spec in orderBy)
+        {
+            if (!spec.IsOrdinal && IsConstantOrdering(spec.Expr!))
+                continue;
+            if (spec.Descending || sources is not [{ LateralPlan.ArrivalNumberedColumns: { } numbered }] || joins.Length != 0)
+                return false;
+            var term = spec.IsOrdinal ? expressions[spec.Ordinal - 1] : spec.Expr!;
+            if (!spec.IsOrdinal && spec.MayNameAlias && Peel(term) is Reference { ReferencedName: { ImmediateQualifier: null } alias }
+                && Array.FindIndex(outputColumnNames, column => BuiltInToken.Equals(column, alias.Leaf)) is >= 0 and var projected)
+            {
+                term = expressions[projected];
+            }
+            return Peel(term) is Reference reference
+                && TryResolveSourceColumn(sources, reference.ReferencedName) is (0, var column)
+                && Array.IndexOf(numbered, column) >= 0;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The streaming route of <see cref="ProjectWindowedRows"/> for windows
+    /// that number in arrival order (<see cref="NumbersInArrivalOrder"/>):
+    /// each surviving row takes the next number and is projected and sent at
+    /// once, the first <paramref name="skip"/> numbered but not projected, and
+    /// reading stops after <paramref name="take"/> rows — so a
+    /// <c>TOP (n)</c> over a cross join of two large catalogs reads n rows of
+    /// the product rather than all of it, as real's Top over its Sequence
+    /// Project does, and a row past the limit never evaluates its projection.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> ProjectArrivalNumberedRows(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        List<BooleanExpression> excluders,
+        List<WindowExpression> windows,
+        int skip,
+        int? take,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        if (take <= 0)
+            yield break;
+
+        var memo = new SourceColumnMemo();
+        var currentTuple = default(byte[]?[])!;
+        Func<MultiPartName, SqlValue> resolveSource = null!;
+        resolveSource = name => ResolveAcrossTuple(sources, currentTuple, name, batch, outerResolver, memo);
+        var rowRuntime = new RuntimeContext(resolveSource, batch);
+
+        long rowNumber = 0;
+        var end = take is { } count ? (long)skip + count : long.MaxValue;
+        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+        {
+            currentTuple = tuple;
+            var include = true;
+            foreach (var excluder in excluders)
+            {
+                if (excluder.Run(rowRuntime) != true)
+                {
+                    include = false;
+                    break;
+                }
+            }
+            if (!include || ++rowNumber <= skip)
+                continue;
+
+            var number = SqlValue.FromInt64(rowNumber);
+            foreach (var window in windows)
+                window.BindResult(batch, number);
+            var projected = new SqlValue[expressions.Count];
+            try
+            {
+                for (var j = 0; j < expressions.Count; j++)
+                    projected[j] = expressions[j].Run(rowRuntime);
+            }
+            catch (SimulatedSqlException projectionError)
+            {
+                projectionError.RaisedInRowProjection = true;
+                throw;
+            }
+            yield return projected;
+            if (rowNumber >= end)
+                yield break;
+        }
     }
 
     /// <summary>Notes each window's partitioning and ordering as the sort of its own it is.</summary>

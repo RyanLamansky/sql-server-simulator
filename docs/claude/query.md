@@ -1110,6 +1110,36 @@ Measured on WWI `Sales.Orders` (73k rows, 663 partitions), against the same quer
 
 A bare `SELECT COUNT(*), MAX(OrderDate)` over the same table costs ~21 ms here, so the `rn = 1` shape sits about 5 ms above the scan it has to do anyway — and below the reference server's own time for it.
 
+### A window numbering in arrival order streams
+
+The numbers-table idiom numbers a large product and keeps its head:
+
+```sql
+SELECT TOP (100000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) FROM sys.all_columns a CROSS JOIN sys.all_columns b
+```
+
+A `ROW_NUMBER()` with no `PARTITION BY` whose ordering is constant ties every row, so the arrival-position tiebreak [the ranking sort](#bounded-per-partition-row_number-selection) takes is its whole order: the number is the row's arrival position (`NumbersInArrivalOrder`).
+`ProjectWindowedRows` then routes to `ProjectArrivalNumberedRows`, which numbers, projects and sends each row as it arrives and stops at the `TOP` or `FETCH`, where the general path buffers every post-WHERE tuple before numbering any — the whole product, which ran out of a 4 GB heap.
+Real's plan is the same shape: a Segment and a Sequence Project over the scan, a Top above, and no Worktable in `STATISTICS IO` (probed 2026-10-16 against SQL Server 2025), so a row past the limit never evaluates its projection either — `TOP (5) 10 / (6 - id)` raises nothing.
+A constant ordering is one reading no column and drawing nothing per row (`IsRowIndependent`) or a FROM-less, clause-free scalar subquery projecting one — the `(SELECT NULL)` that stands in where Msg 5309 refuses a bare constant.
+`ORDER BY NEWID()` reads no column but draws per row, so it sorts.
+
+The route takes every window in the select list numbering this way, no DISTINCT, no `PERCENT` or `WITH TIES`, and a statement ORDER BY the arrival already satisfies: every term constant, or the first other term one of those row numbers ascending, which is unique to its row.
+The same order reaches three neighbours:
+
+- **A bound on the number** (`WHERE rn <= n` over a derived table or CTE, [above](#bounded-per-partition-row_number-selection)) reads it as a row count over the arrival, as the ordered-scan route does, and stops after the window's last row instead of filling a heap from the whole input.
+- **An enclosing query over the numbered body** finds its `ORDER BY rn` met: a plan whose output columns number in arrival order lists them in `Selection.ArrivalNumberedColumns`, and `ProjectSqlRows` streams a single-source, joinless query whose ORDER BY leads with one ascending (`OrderArrivesFromSources`) — `WITH n AS (…) SELECT TOP (n) rn FROM n ORDER BY rn`.
+- **A constant statement ORDER BY** (`ORDER BY (SELECT NULL) OFFSET … FETCH …`) over any source streams too, since the sort it replaces kept tied rows as they arrived.
+
+A window ordered by a column buffers and sorts its whole input even where the input arrives in that order; the [bounded](#bounded-per-partition-row_number-selection) form's key-order walk is the one route around that sort.
+Measured 2026-10-16, Release, the `TOP (100000)` read whole (after: wrapped in `SELECT COUNT(*)`, as real's in-server time is):
+
+| shape | before | after | real |
+|---|---|---|---|
+| `sys.all_columns` × itself (20M-row product) | out of memory at 4 GB | **69 ms, 9 MB** | 4.1 ms |
+| `master..spt_values` × itself | 2.5 s, 1.4 GB | **50 ms, 9 MB** | 4.1 ms |
+| CTE over `sys.all_columns` × itself, `WHERE rn <= 100000` | out of memory at 4 GB | **115 ms, 13 MB** | 8.2 ms |
+
 ### Argument rules
 
 Probed 2026-09-25 against SQL Server 2025, all while compiling (`WindowExpression.BindArguments`): a PARTITION BY or ORDER BY key must be comparable, reporting a query clause's own Msg 306 / 305 / 249 (the last naming `PARTITION BY` or `ORDER BY`); NTILE's bucket count must be an integer type other than `bit` (Msg 4116) and may read an outer query's columns but not its own level's (Msg 4195, checked at parse); PERCENTILE_CONT interpolates, so a non-numeric ordering key is Msg 402 naming the fraction's type and the key's; a LAG / LEAD default converts to the operand's type as an assignment does, and a literal default converts at once, so `LAG(v, 1, 'x')` over an int is Msg 245 even over no rows.

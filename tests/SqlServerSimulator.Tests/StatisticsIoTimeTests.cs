@@ -147,6 +147,9 @@ public sealed partial class StatisticsIoTimeTests
     [DataRow("select id from a union select id from c", true)]
     [DataRow("select id from a union all select id from c", false)]
     [DataRow("select id, row_number() over (order by g) from c", true)]
+    [DataRow("select id, row_number() over (order by (select null)) from a", false)]
+    [DataRow("select * from a order by (select null)", false)]
+    [DataRow("with n as (select row_number() over (order by (select null)) rn from a) select top (2) rn from n order by rn", false)]
     public void Io_SortsAndHashesListAWorktable(string sql, bool worktable)
     {
         using var connection = Open("create table a (id int, g int); insert a values (1, 1); create table c (id int primary key, g int); insert c values (1, 1); set statistics io on");
