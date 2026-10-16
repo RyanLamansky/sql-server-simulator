@@ -167,13 +167,18 @@ public sealed class ActivityMonitoringTests
         using var runner = sim.CreateOpenConnection();
         using var observer = sim.CreateOpenConnection();
         var spid = runner.CreateCommand("select @@spid").ExecuteScalar().ToInvariantString();
-        var running = Task.Run(() => runner.CreateCommand("select 1; waitfor delay '00:00:03'; select 2").ExecuteNonQuery(), TestContext.CancellationToken);
+        // Long enough to outlast a starved poll, and cancelled once the
+        // assertion has seen it: a short delay could end while the poll's
+        // continuation waited for a pool thread, leaving no request to find.
+        using var command = runner.CreateCommand("select 1; waitfor delay '00:00:30'; select 2");
+        var running = Task.Run(command.ExecuteNonQuery, TestContext.CancellationToken);
         var offsets = await PollUntil(
             () => observer.CreateCommand($"select concat(statement_start_offset, '|', statement_end_offset, '|', wait_type) from sys.dm_exec_requests where session_id = {spid}").ExecuteScalar() as string,
             value => value is not null && value.EndsWith("WAITFOR", StringComparison.Ordinal),
             TestContext.CancellationToken);
         AreEqual("20|70|WAITFOR", offsets);
-        _ = await running;
+        command.Cancel();
+        _ = await ThrowsAsync<SimulatedSqlException>(() => running);
     }
 
     [TestMethod]
