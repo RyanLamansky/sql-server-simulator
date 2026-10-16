@@ -91,8 +91,11 @@ partial class Simulation
     /// <param name="loginName">The login a <c>*_LOGIN</c> event names; null for a database event.</param>
     /// <param name="passwordStart">Where the statement's password literal starts, or -1.</param>
     /// <param name="passwordEnd">Where it ends.</param>
+    /// <param name="objectName">The server object another kind of event names (an event session), with <paramref name="objectType"/>.</param>
+    /// <param name="objectType">That object's <c>ObjectType</c> (<c>EVENT SESSION</c>).</param>
     internal static void RecordServerDdlEvent(
-        ParserContext context, string eventType, string? databaseName, string? loginName, int passwordStart = -1, int passwordEnd = -1)
+        ParserContext context, string eventType, string? databaseName, string? loginName, int passwordStart = -1, int passwordEnd = -1,
+        string? objectName = null, string? objectType = null)
     {
         if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.Simulation.ServerTriggers.All.Length == 0)
             return;
@@ -112,8 +115,8 @@ partial class Simulation
         (context.Batch.CurrentStatement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
             eventType,
             schemaName: null,
-            objectName: loginName,
-            objectType: loginName is null ? null : "LOGIN",
+            objectName: loginName ?? objectName,
+            objectType: loginName is null ? objectType : "LOGIN",
             serverLevelDatabase: databaseName ?? "",
             trailingElements: loginElements,
             masks: PasswordMask(passwordStart, passwordEnd)));

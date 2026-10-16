@@ -69,6 +69,8 @@ partial class Simulation
                 return TryParseCreateApplicationRole(context);
             case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateCredential(context);
+            case Name eventWord when eventWord.Value.Equals("EVENT", StringComparison.OrdinalIgnoreCase) && AtEventSession(context):
+                return TryParseCreateEventSession(context);
             case UnquotedString masterWord when masterWord.Value.Equals("MASTER", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateMasterKey(context);
             case UnquotedString certificateWord when certificateWord.Value.Equals("CERTIFICATE", StringComparison.OrdinalIgnoreCase):

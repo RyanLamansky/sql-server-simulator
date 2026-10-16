@@ -1,0 +1,104 @@
+S	hkenginexesession	1	block	1	flush_on_close	internal	3	1441587	4324761	0
+S	sp_server_diagnostics session	0	drop_event	17	flush_on_close private	internal	3	130867	392601	0
+E	hkenginexesession	trace_cfp_removed_from_freelist	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delete_cfd_rows_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_cfd_entry_deleted	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_populate_storage_array	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_cfp_handles_opened	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_deserialize_source_delta_file_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_offline_process_stale_merge_item	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_merge_cancelled	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_source_file_load_stats	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_process_source_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_process_target_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_queue_merge_work_item	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_mrtrow_not_found	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_merge_complete_log_rec_ignored	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_process_merge_request	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_process_merge_complete_log_record	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_serialize_tx_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_serialize_tx_end	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delete_merged_source_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_cfdtable_dump	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_mrt_dump	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_dump_mrt_row	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_mrt_row_inplace_update	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_deserialize_chained_records	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_checkpoint_load_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_load_thread_stats	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_stream_io_stats	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_dump_cfd_row	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_mrt_dump	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_closed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_future_count_pages_update	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_file_future_count_rows_pages_update	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_file_lastgood_count_rows_pages_update	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_initial_merge	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_wrote_delta_watermark	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_new_delta_watermark_inserted	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_watermark_updated	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_filter_removed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_file_skipped	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_data_file_pages_txs	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_file_skipped_with_tx_range	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_file_pages_txs	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_post_writefile	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_file_processed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delete_DeletedObjectTable_row_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_insert_DeletedObjectTable_row_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_entry_skipped	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_add_delta_filter_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_add_duplicate_delta_filter	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_adding_tx_filter	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_data_row_modified	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_deserialize_data_from_page_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_data_from_page_deserialized	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_cfd_rows_created	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_recovered_existing_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_close_file_log_rec_created	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_checksum_validation_succeeded	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_close_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_flush_io_operation_for_delta_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_checkpoint_file_flush	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_resyncing_state_of_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_mark_data_file_closed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_first_page_header_flushed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_flush_skipped_for_closed_data_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_uninitialize_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_serialize_abort_transaction_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_serialization_state_dump	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delete_mrtrow_for_target_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_watermark_removed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_serialization_object_cleaned	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_merge_complete_log_rec_processed	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_file_close_skipped	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_process_file_close_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_intialize_worker_file_begin	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_pending_tx	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_checkpoint_write_io	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_delta_file_set_clean_or_dirty	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_serialized_delta_rows_to_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_storage_refreshed_for_file	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_begin_close_ckpt_processing	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	hkenginexesession	trace_ckpt_close_signaled	e2fc7ccd-b0b7-45a7-8d16-312846369fd4
+E	sp_server_diagnostics session	spinlock_backoff_warning	bd97cc63-3f38-4922-aa93-607bd12e78b2
+E	sp_server_diagnostics session	resource_monitor_ring_buffer_recorded	bd97cc63-3f38-4922-aa93-607bd12e78b2
+E	sp_server_diagnostics session	latch_suspend_warning	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+E	sp_server_diagnostics session	stack_trace	655fd93f-3364-40d5-b2ba-330f7ffb6491
+E	sp_server_diagnostics session	bad_memory_detected	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+E	sp_server_diagnostics session	bad_memory_fixed	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+E	sp_server_diagnostics session	spinlock_backoff	bd97cc63-3f38-4922-aa93-607bd12e78b2
+T	hkenginexesession	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+T	sp_server_diagnostics session	router	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+C	hkenginexesession	filename	0	HkEngineEventFile.xel	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	max_file_size	1	5	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	max_rollover_files	2	20	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	increment	3	0	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	metadatafile	4	\N	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	lazy_create_blob	5	true	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	is_indexed_file_target	6	false	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	external_telemetry_query	7	false	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	hkenginexesession	add_app_name	8	false	target	event_file	60aa9fbf-673b-4553-b7ed-71dca7f5e972
+C	sp_server_diagnostics session	max_callbacks	0	7	target	router	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+C	sp_server_diagnostics session	target_pointer	1	0x0000000588503868	target	router	03fda7d0-91ba-45f8-9875-8b6dd0b8e9f2
+C	sp_server_diagnostics session	collect_call_stack	0	false	event	resource_monitor_ring_buffer_recorded	bd97cc63-3f38-4922-aa93-607bd12e78b2

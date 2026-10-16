@@ -53,6 +53,8 @@
     <!-- The Extended Events catalog is some 3 MB of text, zipped by the target
          below so the assembly carries a tenth of that. -->
     <XeMetadataFile Include="ExtendedEvents/Metadata/*.tsv" />
+    <EmbeddedResource Include="ExtendedEvents/DefaultSessions.tsv" LogicalName="SqlServerSimulator.XeDefaultSessions.tsv" />
+    <EmbeddedResource Include="ExtendedEvents/InternalSessions.tsv" LogicalName="SqlServerSimulator.XeInternalSessions.tsv" />
     <EmbeddedResource Include="$(BaseIntermediateOutputPath)XeMetadata.zip" LogicalName="SqlServerSimulator.XeMetadata.zip" />
   </ItemGroup>
 

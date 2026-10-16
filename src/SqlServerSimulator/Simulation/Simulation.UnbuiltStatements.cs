@@ -48,7 +48,6 @@ partial class Simulation
         new(null, "ROUTE", "Service Broker (routes)"),
         new(null, "REMOTE SERVICE BINDING", "Service Broker (remote service bindings)"),
         new(null, "BROKER PRIORITY", "Service Broker (broker priorities)"),
-        new(null, "EVENT SESSION", "Extended Events sessions"),
         new(null, "EVENT NOTIFICATION", "Event notifications"),
         new(null, "ENDPOINT", "Endpoints"),
         new(null, "RESOURCE POOL", "Resource Governor (resource pools)"),

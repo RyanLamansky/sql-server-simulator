@@ -72,6 +72,15 @@ internal static partial class BuiltInResources
         ("sys.dm_xe_object_columns", DmvGateKind.ServerState),
         ("sys.dm_xe_objects", DmvGateKind.ServerState),
         ("sys.dm_xe_packages", DmvGateKind.ServerState),
+        ("sys.dm_xe_session_event_actions", DmvGateKind.ExtendedEventsState),
+        ("sys.dm_xe_session_events", DmvGateKind.ExtendedEventsState),
+        ("sys.dm_xe_session_object_columns", DmvGateKind.ExtendedEventsState),
+        ("sys.dm_xe_session_targets", DmvGateKind.ExtendedEventsState),
+        ("sys.dm_xe_sessions", DmvGateKind.ExtendedEventsState),
+        // Real reads this one through a view that asks VIEW DATABASE
+        // PERFORMANCE STATE, where its companions filter their rows away
+        // (probed 2026-10-16 against SQL Server 2025).
+        ("sys.server_event_session_events", DmvGateKind.DatabaseState),
         ("sys.sysaltfiles", DmvGateKind.ControlServer),
         ("sys.sysperfinfo", DmvGateKind.ServerState),
         ("sys.sysprocesses", DmvGateKind.SessionSelfFilter),
@@ -156,6 +165,12 @@ internal static partial class BuiltInResources
             case DmvGateKind.ControlServer:
                 if (!simulation.HoldsServerPermission(login, Permission.ControlServer))
                     throw SimulatedSqlException.PermissionDenied("SELECT", view.Name, "mssqlsystemresource", "sys");
+                return rows;
+            // Real refuses the running-session Extended Events views with Msg
+            // 297 alone (probed 2026-10-16 against SQL Server 2025).
+            case DmvGateKind.ExtendedEventsState:
+                if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
+                    throw SimulatedSqlException.UserLacksPermissionToPerformAction(13);
                 return rows;
             // VIEW SERVER PERFORMANCE STATE opens every session's rows
             // (probed 2026-10-16 against SQL Server 2025).

@@ -724,6 +724,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 | `ALTER SERVER ROLE <fixed> ADD` / `DROP MEMBER` | `sysadmin`, or a member of that same role — `CONTROL SERVER`, `ALTER ANY SERVER ROLE` and `securityadmin` are all refused | **Msg 15151** |
 | `CREATE LOGIN`, `ALTER` / `DROP LOGIN` | see [Login DDL gating](#login-ddl-gating) | |
 | `CREATE` / `ALTER` / `DROP CREDENTIAL` | `ALTER ANY CREDENTIAL` | **Msg 15247** for `CREATE`, the missing-credential **Msg 15151** for `ALTER` / `DROP` |
+| `CREATE` / `ALTER` / `DROP EVENT SESSION` | `ALTER ANY EVENT SESSION`, or the clause's own granular permission under it | **Msg 15247** for `CREATE`, **Msg 15151** at a state per clause for `ALTER` / `DROP` — see [`extended-events.md`](extended-events.md#permissions) |
 | `SHUTDOWN [WITH NOWAIT]` | `SHUTDOWN` (`sysadmin`, `serveradmin`) | informational **Msg 6004**, then the batch ends and the transaction rolls back, uncaught, with the client's own class-11 severe error — or silently inside a `TRY` with no transaction open (probed 2026-10-06 against SQL Server 2025, as a refused login); a permitted `SHUTDOWN` is `NotSupportedException`, the simulation having no server process to stop |
 | `CREATE` / `DROP DATABASE` | see [DDL statement gates](#ddl-statement-gates) | |
 | `EXECUTE AS LOGIN` | see [`ON LOGIN::` securables](#on-login-securables) | |
@@ -908,7 +909,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server permissions whose statements aren't built** — endpoints, event sessions, audits, traces, and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
+- **Server permissions whose statements aren't built** — endpoints, audits, traces, and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — a pooled TDS reset clears the role instead of killing the session (real's Msg 596), `sp_setapprole` under `EXECUTE AS` leaves the impersonated identity on top, and the ODBC `{Encrypt}` password escape doesn't parse.

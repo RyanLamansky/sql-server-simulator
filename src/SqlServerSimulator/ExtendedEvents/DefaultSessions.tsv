@@ -1,0 +1,85 @@
+S	65536	system_health	S	120000	4096	0	G	0	1	0
+S	65537	AlwaysOn_health	S	30000	4096	0	G	0	0	0
+E	65536	1	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	error_reported	([severity]>=(20) OR ([error_number]=(17803) OR [error_number]=(701) OR [error_number]=(802) OR [error_number]=(8645) OR [error_number]=(8651) OR [error_number]=(8657) OR [error_number]=(8902) OR [error_number]=(41354) OR [error_number]=(41355) OR [error_number]=(41367) OR [error_number]=(41384) OR [error_number]=(41336) OR [error_number]=(41309) OR [error_number]=(41312) OR [error_number]=(41313)))
+E	65536	7	sqlclr	CE79811F-1A80-40E1-8F5D-7445A3F375E7	clr_allocation_failure	\N
+E	65536	10	sqlclr	CE79811F-1A80-40E1-8F5D-7445A3F375E7	clr_virtual_alloc_failure	\N
+E	65536	13	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_non_yielding_ring_buffer_recorded	\N
+E	65536	14	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	xml_deadlock_report	\N
+E	65536	15	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	wait_info	([duration]>(15000) AND ([wait_type]>=N'LATCH_NL' AND ([wait_type]>=N'PAGELATCH_NL' AND [wait_type]<=N'PAGELATCH_DT' OR [wait_type]<=N'LATCH_DT' OR [wait_type]>=N'PAGEIOLATCH_NL' AND [wait_type]<=N'PAGEIOLATCH_DT' OR [wait_type]>=N'IO_COMPLETION' AND [wait_type]<=N'NETWORK_IO' OR [wait_type]=N'RESOURCE_SEMAPHORE' OR [wait_type]=N'SOS_WORKER' OR [wait_type]>=N'FCB_REPLICA_WRITE' AND [wait_type]<=N'WRITELOG' OR [wait_type]=N'CMEMTHREAD' OR [wait_type]=N'TRACEWRITE' OR [wait_type]=N'RESOURCE_SEMAPHORE_MUTEX') OR [duration]>(30000) AND [wait_type]<=N'LCK_M_RX_X'))
+E	65536	19	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	wait_info_external	([duration]>(5000) AND ([wait_type]>=N'PREEMPTIVE_OS_GENERICOPS' AND [wait_type]<=N'PREEMPTIVE_OS_ENCRYPTMESSAGE' OR [wait_type]>=N'PREEMPTIVE_OS_INITIALIZESECURITYCONTEXT' AND [wait_type]<=N'PREEMPTIVE_OS_QUERYSECURITYCONTEXTTOKEN' OR [wait_type]>=N'PREEMPTIVE_OS_AUTHZGETINFORMATIONFROMCONTEXT' AND [wait_type]<=N'PREEMPTIVE_OS_REVERTTOSELF' OR [wait_type]>=N'PREEMPTIVE_OS_CRYPTACQUIRECONTEXT' AND [wait_type]<=N'PREEMPTIVE_OS_DEVICEOPS' OR [wait_type]>=N'PREEMPTIVE_OS_NETGROUPGETUSERS' AND [wait_type]<=N'PREEMPTIVE_OS_NETUSERMODALSGET' OR [wait_type]>=N'PREEMPTIVE_OS_NETVALIDATEPASSWORDPOLICYFREE' AND [wait_type]<=N'PREEMPTIVE_OS_DOMAINSERVICESOPS' OR [wait_type]=N'PREEMPTIVE_OS_VERIFYSIGNATURE' OR [duration]>(45000) AND ([wait_type]>=N'PREEMPTIVE_OS_SETNAMEDSECURITYINFO' AND [wait_type]<=N'PREEMPTIVE_CLUSAPI_CLUSTERRESOURCECONTROL' OR [wait_type]>=N'PREEMPTIVE_OS_RSFXDEVICEOPS' AND [wait_type]<=N'PREEMPTIVE_OS_DSGETDCNAME' OR [wait_type]>=N'PREEMPTIVE_OS_DTCOPS' AND [wait_type]<=N'PREEMPTIVE_DTC_ABORT' OR [wait_type]>=N'PREEMPTIVE_OS_CLOSEHANDLE' AND [wait_type]<=N'PREEMPTIVE_OS_FINDFILE' OR [wait_type]>=N'PREEMPTIVE_OS_GETCOMPRESSEDFILESIZE' AND [wait_type]<=N'PREEMPTIVE_ODBCOPS' OR [wait_type]>=N'PREEMPTIVE_OS_DISCONNECTNAMEDPIPE' AND [wait_type]<=N'PREEMPTIVE_CLOSEBACKUPMEDIA' OR [wait_type]=N'PREEMPTIVE_OS_AUTHENTICATIONOPS' OR [wait_type]=N'PREEMPTIVE_OS_FREECREDENTIALSHANDLE' OR [wait_type]=N'PREEMPTIVE_OS_AUTHORIZATIONOPS' OR [wait_type]=N'PREEMPTIVE_COM_COCREATEINSTANCE' OR [wait_type]=N'PREEMPTIVE_OS_NETVALIDATEPASSWORDPOLICY' OR [wait_type]=N'PREEMPTIVE_VSS_CREATESNAPSHOT' OR [wait_type]=N'PREEMPTIVE_OS_GETFINALFILEPATHBYHANDLE')))
+E	65536	23	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	memory_broker_ring_buffer_recorded	\N
+E	65536	24	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_deadlock_ring_buffer_recorded	\N
+E	65536	25	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_system_health_ring_buffer_recorded	\N
+E	65536	26	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_non_yielding_iocp_ring_buffer_recorded	\N
+E	65536	27	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_non_yielding_rm_ring_buffer_recorded	\N
+E	65536	28	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	scheduler_monitor_stalled_dispatcher_ring_buffer_recorded	\N
+E	65536	29	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	memory_node_oom_ring_buffer_recorded	\N
+E	65536	34	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	security_error_ring_buffer_recorded	(NOT ([calling_api_name]=N'NLShimImpersonate' AND [error_code]=(5023)))
+E	65536	37	sqlserver	6D503F55-3041-4A62-BB8C-57C3CF081B7B	connectivity_ring_buffer_recorded	\N
+E	65536	40	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sp_server_diagnostics_component_result	([sqlserver].[is_system]=(1) AND [component]<>(4))
+E	65536	42	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	job_object_ring_buffer_stats	\N
+E	65536	43	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	nonyield_copiedstack_ring_buffer_recorded	\N
+E	65536	44	sqlos	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	process_killed	\N
+E	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sql_exit_invoked	\N
+E	65537	1	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	alwayson_ddl_executed	\N
+E	65537	2	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	availability_group_lease_expired	\N
+E	65537	3	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	availability_replica_automatic_failover_validation	\N
+E	65537	4	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	availability_replica_manager_state_change	\N
+E	65537	5	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	availability_replica_state	\N
+E	65537	6	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	availability_replica_state_change	\N
+E	65537	7	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	hadr_db_partner_set_sync_state	\N
+E	65537	8	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	lock_redo_blocked	\N
+E	65537	9	ucs	CE79811F-1A80-40E1-8F5D-7445A3F375E7	ucs_connection_setup	\N
+E	65537	10	sqlserver	D5149520-6282-11DE-8A39-0800200C9A66	hadr_trace_message	\N
+E	65537	11	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sp_server_diagnostics_component_result	([state]=(3))
+E	65537	13	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	error_reported	([error_number]=(9691) OR [error_number]=(35204) OR [error_number]=(9693) OR [error_number]=(26024) OR [error_number]=(28047) OR [error_number]=(26023) OR [error_number]=(9692) OR [error_number]=(28034) OR [error_number]=(28036) OR [error_number]=(28048) OR [error_number]=(28080) OR [error_number]=(28091) OR [error_number]=(26022) OR [error_number]=(9642) OR [error_number]=(35201) OR [error_number]=(35202) OR [error_number]=(35206) OR [error_number]=(35207) OR [error_number]=(26069) OR [error_number]=(26070) OR [error_number]>(41047) AND [error_number]<(41056) OR [error_number]=(41142) OR [error_number]=(41144) OR [error_number]=(1480) OR [error_number]=(823) OR [error_number]=(824) OR [error_number]=(829) OR [error_number]=(35264) OR [error_number]=(35265) OR [error_number]=(41188) OR [error_number]=(41189) OR [error_number]=(35217))
+A	65536	1	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	1	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	1	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	database_id
+A	65536	1	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sql_text
+A	65536	1	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	tsql_stack
+A	65536	7	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	7	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	10	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	10	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	15	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	15	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	15	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sql_text
+A	65536	19	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	19	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	19	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sql_text
+A	65536	29	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	29	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	29	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	sql_text
+A	65536	29	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	tsql_stack
+A	65536	34	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	37	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_app_name
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_hostname
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_pid
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	query_hash
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	44	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_nt_username
+A	65536	44	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_app_name
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_hostname
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	client_pid
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	query_hash
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_id
+A	65536	52	sqlserver	CE79811F-1A80-40E1-8F5D-7445A3F375E7	session_nt_username
+A	65536	52	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	callstack_rva
+T	65536	64	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	ring_buffer
+T	65536	67	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	event_file
+T	65537	18	package0	5B2DA06D-898A-43C8-9309-39BBBE93EBBD	event_file
+F	65536	34	collect_call_stack	int	0
+F	65536	37	collect_call_stack	int	0
+F	65536	40	collect_data	int	1
+F	65536	64	max_memory	int	4096
+F	65536	64	max_events_limit	int	5000
+F	65536	67	filename	nvarchar	system_health.xel
+F	65536	67	max_file_size	int	100
+F	65536	67	max_rollover_files	int	10
+F	65537	11	collect_data	int	1
+F	65537	18	filename	nvarchar	AlwaysOn_health.xel
+F	65537	18	max_file_size	int	100
+F	65537	18	max_rollover_files	int	10

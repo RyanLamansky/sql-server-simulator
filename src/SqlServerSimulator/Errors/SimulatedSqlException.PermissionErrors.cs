@@ -121,10 +121,11 @@ public sealed partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 297, the second error a DMV read refused with Msg 300 or Msg 262
-    /// sends (probed 2026-10-15 against SQL Server 2025).
+    /// sends (probed 2026-10-15 against SQL Server 2025), and alone, state 13,
+    /// for a running-session Extended Events view (probed 2026-10-16).
     /// </summary>
-    internal static SimulatedSqlException UserLacksPermissionToPerformAction() =>
-        new("The user does not have permission to perform this action.", 297, 16, 1);
+    internal static SimulatedSqlException UserLacksPermissionToPerformAction(byte state = 1) =>
+        new("The user does not have permission to perform this action.", 297, 16, state);
 
     /// <summary>
     /// Msg 15562: a database-scoped identity — an <c>EXECUTE AS USER</c>

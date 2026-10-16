@@ -226,6 +226,9 @@ internal sealed class XeObject(int index, string? name, string? objectType, XePa
     /// <summary>This map's rows of <c>sys.dm_xe_map_values</c>, in real's order.</summary>
     public XeMapValue[] MapValues = [];
 
+    /// <summary>An event's data fields in column order — the values a firing carries.</summary>
+    public XeObjectColumn[] DataColumns => field ??= [.. this.Columns.Where(column => column.ColumnType == "data").OrderBy(column => column.ColumnId)];
+
     /// <summary>Whether real hides the object from sessions: its capabilities carry the <c>private</c> bit.</summary>
     public bool IsPrivate => this.Capabilities is { } bits && (bits & 1) != 0;
 

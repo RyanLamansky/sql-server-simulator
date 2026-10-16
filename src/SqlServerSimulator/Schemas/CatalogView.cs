@@ -333,6 +333,9 @@ internal enum DmvGateKind : byte
 
     /// <summary><c>sysaltfiles</c> — needs <c>CONTROL SERVER</c>; denial raises Msg 229 naming the view in <c>mssqlsystemresource</c>.</summary>
     ControlServer,
+
+    /// <summary>The running-session Extended Events views — need <c>VIEW SERVER PERFORMANCE STATE</c>; denial raises Msg 297 state 13 alone.</summary>
+    ExtendedEventsState,
 }
 
 /// <summary>
