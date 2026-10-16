@@ -545,7 +545,8 @@ partial class Simulation
     /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
     private static bool OwnsReturnCode(string systemProcName) =>
         systemProcName is "sp_executesql" or "sp_get_query_template" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"
-            or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent";
+            or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent"
+        || IsAgentProcedure(systemProcName);
 
     /// <summary>
     /// Passes a system procedure's outcomes through, attributing an error it
@@ -579,7 +580,7 @@ partial class Simulation
                         entry.Procedure = inner;
                 }
                 exception.RaisedBySystemProcedure = exception.Number != 201 && !exception.SystemProcedureBindingError;
-                if (returnCode is not null && exception.RaisedBySystemProcedure)
+                if (returnCode is not null && exception.RaisedBySystemProcedure && !exception.CaughtBeforeReturn)
                     returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
                 throw;
             }
@@ -615,6 +616,10 @@ partial class Simulation
     /// </summary>
     private static (int Line, string? Procedure)? SystemProcedureErrorSite(string systemProcName, SimulatedSqlException exception) => (systemProcName, exception.Number) switch
     {
+        // An Agent procedure's error carries its site, often an inner
+        // verification procedure (probed 2026-10-16 against SQL Server 2025).
+        // A Msg 229 names the procedure as the call wrote it.
+        _ when exception.AgentSite is { } agentSite => (agentSite.Line, exception.Number == 229 ? null : agentSite.Procedure ?? systemProcName),
         // The Query Store procedures report every error at line 1, a missing
         // parameter's included (probed 2026-09-29).
         (var name, _) when name.StartsWith("sp_query_store_", StringComparison.Ordinal) => (1, null),

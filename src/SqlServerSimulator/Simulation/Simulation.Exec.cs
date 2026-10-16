@@ -272,7 +272,7 @@ partial class Simulation
         // switch arms below match ordinary string constants regardless of
         // the SQL text's casing. A null falls through to user-procedure
         // resolution.
-        var systemProcName = ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf);
+        var systemProcName = ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf) ?? ResolveAgentProcedureName(batch, procName);
         var calledAs = procName.WithoutOmittedLeading().Written;
         var systemProc = systemProcName switch
         {
@@ -457,6 +457,7 @@ partial class Simulation
             "sp_reset_connection" => InvokeSpResetConnection(batch, CalledName(procName)),
             "sp_releaseschemalock" => InvokeSpReleaseSchemaLock(batch, CalledName(procName)),
             "sp_table_statistics2_rowset" => Uncounted(InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))!),
+            var agent when IsAgentProcedure(agent) => this.InvokeAgentProcedure(batch, agent, returnCodeVar),
             _ => InvokeOleDbRowsetProcedure(batch, systemProcName, CalledName(procName))
                 ?? throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
         };

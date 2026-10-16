@@ -74,8 +74,10 @@ partial class SimulatedSqlException
         // partitioned view's write a row fits no member of (probed
         // 2026-10-01). From a body SELECT sending rows to the client, the
         // notice is that statement's, in the module that ran it — the trigger, or a
-        // procedure it called (probed 2026-10-06).
-        if (error is { EndedTriggerBody: true, RaisingScopeRecorded: true, RaisedByClientSelect: true })
+        // procedure it called (probed 2026-10-06). An Agent procedure's write
+        // reports it where its error was raised (probed 2026-10-16:
+        // sp_add_job's NULL name at its line 148).
+        if (error is { EndedTriggerBody: true, RaisingScopeRecorded: true, RaisedByClientSelect: true } or { AgentSite: not null })
         {
             message.LineNumber = error.LineNumber;
             message.Procedure = error.Procedure;

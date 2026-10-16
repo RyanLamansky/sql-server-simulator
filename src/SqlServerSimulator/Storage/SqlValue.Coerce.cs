@@ -760,8 +760,9 @@ internal readonly partial struct SqlValue
         // `smalldatetime` reports its own Msg 295 for a format failure where
         // every other target reports Msg 241; an out-of-range *value* is
         // Msg 242 on all of them (probe-confirmed).
+        var sourceType = this.Type;
         SimulatedSqlException Fail(bool outOfRange) =>
-            outOfRange && legacyFamily ? SimulatedSqlException.OutOfRangeDateTimeConversion(target)
+            outOfRange && legacyFamily ? SimulatedSqlException.OutOfRangeDateTimeConversion(target, sourceType)
             : target is SmallDateTimeSqlType ? SimulatedSqlException.ConversionFailedSmallDateTimeFromString()
             : SimulatedSqlException.ConversionFailedDateTimeFromString();
         var input = this.AsString.Trim();
@@ -769,6 +770,8 @@ internal readonly partial struct SqlValue
         // A bare time anchors to 1900-01-01 and is accepted under every style.
         if (TryParseBareTime(input, out var timeOnly))
             return FromDateTime2(SqlType.GetDateTime2(7), timeOnly).CoerceTo(target);
+        if (IsClockShape(input))
+            throw Fail(outOfRange: true);
 
         var (datePart, timePart, separator) = SplitDateAndTime(input);
 
@@ -899,16 +902,31 @@ internal readonly partial struct SqlValue
 
     // A fraction or colon milliseconds may precede AM / PM, spaced or not —
     // the shape styles 9 / 109 / 130 / 131 write (probed 2026-09-26 against SQL
-    // Server 2025).
+    // Server 2025). The minutes and seconds take one digit or two, as the
+    // unstyled grammar's do (probed 2026-10-16: style 120 reads
+    // `2026-10-16 0:0:5`).
     private static readonly string[] BareTimeFormats =
     [
-        "H:mm", "H:mm:ss", "H:mm:ss.f", "H:mm:ss.ff", "H:mm:ss.fff", "H:mm:ss.ffff",
-        "H:mm:ss.fffff", "H:mm:ss.ffffff", "H:mm:ss.fffffff", "H:mm:ss:fff",
-        "h:mm tt", "h:mm:ss tt", "h:mmtt", "h:mm:sstt",
+        "H:m", "H:m:s", "H:m:s.f", "H:m:s.ff", "H:m:s.fff", "H:m:s.ffff",
+        "H:m:s.fffff", "H:m:s.ffffff", "H:m:s.fffffff", "H:m:s:fff",
+        "h:m tt", "h:m:s tt", "h:mtt", "h:m:stt",
         .. from fraction in (string[])[".f", ".ff", ".fff", ".ffff", ".fffff", ".ffffff", ".fffffff", ":fff"]
            from meridiem in (string[])["tt", " tt"]
-           select $"h:mm:ss{fraction}{meridiem}",
+           select $"h:m:s{fraction}{meridiem}",
     ];
+
+    /// <summary>
+    /// Whether <paramref name="timePart"/> is a plain clock reading — two or
+    /// three colon-separated numbers of at most two digits — whose failure to
+    /// parse is a field out of range (<c>0:60:0</c>, <c>24:0:0</c>), which the
+    /// legacy targets report as Msg 242 (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static bool IsClockShape(string timePart)
+    {
+        var parts = timePart.Trim().Split(':');
+        return parts.Length is 2 or 3 && parts.All(part => part.Length is 1 or 2 && part.All(char.IsAsciiDigit));
+    }
 
     private static readonly string[] MonthNameFormats =
     [
@@ -948,7 +966,7 @@ internal readonly partial struct SqlValue
             // Only a genuine clock reading ends the date half. An AM/PM marker
             // is part of the time, so keep widening left past it.
             if (tail.Contains(':', StringComparison.Ordinal)
-                && DateTime.TryParseExact(tail, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out _))
+                && (IsClockShape(tail) || DateTime.TryParseExact(tail, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out _)))
             {
                 return (input[..i].TrimEnd(' '), tail, ' ');
             }
@@ -1025,7 +1043,7 @@ internal readonly partial struct SqlValue
             // out of range (`05/13/2026` read day-first under 103, month 13):
             // real reports the out-of-range Msg 242 rather than a format
             // failure. A shape that doesn't fit the style at all stays 241.
-            outOfRange = MatchesLayoutShape(grammar, normalized);
+            outOfRange = MatchesLayoutShape(grammar, normalized, yearFirst);
             return false;
         }
 
@@ -1040,7 +1058,10 @@ internal readonly partial struct SqlValue
             return false;
         }
 
-        return TryAttachTime(parsed, timePart, allowsZoneSuffix, out result);
+        if (TryAttachTime(parsed, timePart, allowsZoneSuffix, out result))
+            return true;
+        outOfRange = IsClockShape(timePart);
+        return false;
     }
 
     /// <summary>
@@ -1052,12 +1073,12 @@ internal readonly partial struct SqlValue
     /// <c>01/02/99</c> as a y-m-d with an impossible day and reports 242, but
     /// <c>01/02/1999</c> isn't its layout at all and reports 241.
     /// </summary>
-    private static bool MatchesLayoutShape(StyleDateGrammar grammar, string normalized)
+    private static bool MatchesLayoutShape(StyleDateGrammar grammar, string normalized, bool yearFirst)
     {
         var parts = normalized.Split('/');
         if (parts.Length != 3 || !parts.All(t => t.Length > 0 && t.All(char.IsAsciiDigit)))
             return false;
-        var yearIndex = grammar.Order == DatePartOrder.Ymd ? 0 : 2;
+        var yearIndex = grammar.Order == DatePartOrder.Ymd || yearFirst ? 0 : 2;
         for (var i = 0; i < 3; i++)
         {
             if (i != yearIndex && parts[i].Length > 2)

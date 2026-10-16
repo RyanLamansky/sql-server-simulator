@@ -895,4 +895,28 @@ public sealed class ConvertTests
     [DataRow("cast(0x41 as sql_variant)", 1, "0x41")]
     public void VariantSource_TakesTheStyleOfItsValue(string source, int style, string expected)
         => AreEqual(expected, ExecuteScalar($"select convert(varchar(30), {source}, {style})"));
+
+    /// <summary>
+    /// A styled conversion reads a time's minutes and seconds at one digit or
+    /// two, as the unstyled one does, and a clock reading whose field is out
+    /// of range is the legacy targets' Msg 242, naming the source's own type
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'2026-10-16 0:0:5'", 120, "2026-10-16 00:00:05")]
+    [DataRow("N'1900-1-1 0:0:0'", 120, "1900-01-01 00:00:00")]
+    [DataRow("N'2026-10-16 0:0:5'", 121, "2026-10-16 00:00:05")]
+    [DataRow("N'10/16/2026 0:0:5'", 101, "2026-10-16 00:00:05")]
+    [DataRow("N'10:5'", 120, "1900-01-01 10:05:00")]
+    public void StyledInput_TakesSingleDigitClockFields(string input, int style, string expected)
+        => AreEqual(expected, ExecuteScalar($"select convert(varchar(19), convert(datetime, {input}, {style}), 120)"));
+
+    [TestMethod]
+    [DataRow("N'2026-10-16 0:60:0'", "datetime", "The conversion of a nvarchar data type to a datetime data type resulted in an out-of-range value.")]
+    [DataRow("N'2026-10-16 24:0:0'", "datetime", "The conversion of a nvarchar data type to a datetime data type resulted in an out-of-range value.")]
+    [DataRow("N'2026-2-30 0:0:0'", "datetime", "The conversion of a nvarchar data type to a datetime data type resulted in an out-of-range value.")]
+    [DataRow("N'0:60:0'", "datetime", "The conversion of a nvarchar data type to a datetime data type resulted in an out-of-range value.")]
+    [DataRow("'2026-10-16 0:60:0'", "smalldatetime", "The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.")]
+    public void StyledInput_ClockFieldOutOfRange_IsMsg242(string input, string target, string message)
+        => new Simulation().AssertSqlError($"select convert({target}, {input}, 120)", 242, message);
 }

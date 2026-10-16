@@ -86,15 +86,17 @@ public sealed partial class Simulation
         SeedMsdbPolicyAutomationFunction(msdb);
         SeedMsdbTables(msdb);
         SeedMsdbHistoryAndAgentTables(msdb);
+        this.SeedMsdbAgentObjects(msdb);
     }
 
     /// <summary>
     /// Seeds the msdb tables health checks read beside the backup history
     /// (<see cref="MsdbTables"/>) — suspect pages, jobs, steps, schedules,
     /// history, alerts, operators, maintenance subplans and SSIS packages —
-    /// empty and in SQL Server 2025's column shapes (probed 2026-10-16): the
-    /// simulator runs no Agent. Real ships seven data-collector schedules
-    /// and eight SSIS packages in the last two, which aren't seeded.
+    /// empty and in SQL Server 2025's column shapes (probed 2026-10-16); the
+    /// Agent procedures fill the job, schedule, alert and operator tables, and
+    /// <see cref="SeedMsdbAgentObjects"/> the data collector's schedules. Real
+    /// ships eight SSIS packages, which aren't seeded.
     /// </summary>
     private static void SeedMsdbHistoryAndAgentTables(Database msdb)
     {
@@ -110,7 +112,7 @@ public sealed partial class Simulation
         ]);
         SeedMsdbTable(msdb, "sysalerts",
         [
-            new("id", SqlType.Int32, maxLength: null, nullable: false),
+            new("id", SqlType.Int32, maxLength: null, nullable: false, new IdentityState(1, 1)),
             new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
             new("event_source", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: false),
             new("event_category_id", SqlType.Int32, maxLength: null, nullable: true),
@@ -152,7 +154,7 @@ public sealed partial class Simulation
         ]);
         SeedMsdbTable(msdb, "sysjobhistory",
         [
-            new("instance_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("instance_id", SqlType.Int32, maxLength: null, nullable: false, new IdentityState(1, 1)),
             new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
             new("step_id", SqlType.Int32, maxLength: null, nullable: false),
             new("step_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
@@ -240,7 +242,7 @@ public sealed partial class Simulation
         ]);
         SeedMsdbTable(msdb, "sysoperators",
         [
-            new("id", SqlType.Int32, maxLength: null, nullable: false),
+            new("id", SqlType.Int32, maxLength: null, nullable: false, new IdentityState(1, 1)),
             new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
             new("enabled", SqlType.TinyInt, maxLength: null, nullable: false),
             new("email_address", NVarcharSqlType.Get(100, collation, Coercibility.Implicit), maxLength: 100, nullable: true),
@@ -263,7 +265,7 @@ public sealed partial class Simulation
         ]);
         SeedMsdbTable(msdb, "sysschedules",
         [
-            new("schedule_id", SqlType.Int32, maxLength: null, nullable: false),
+            new("schedule_id", SqlType.Int32, maxLength: null, nullable: false, new IdentityState(1, 1)),
             new("schedule_uid", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
             new("originating_server_id", SqlType.Int32, maxLength: null, nullable: false),
             new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),

@@ -1,0 +1,497 @@
+using System.Globalization;
+using SqlServerSimulator.Parser;
+using SqlServerSimulator.Storage;
+
+namespace SqlServerSimulator;
+
+// The Agent procedures over operators, alerts, their notifications and the
+// categories jobs, alerts and operators file under, plus the job-history
+// purge, as SQL Server 2025 runs them (probed 2026-10-16). Only a sysadmin
+// manages operators, alerts and categories; SQLAgentUserRole reads operators
+// and categories, and SQLAgentOperatorRole alerts and the history purge.
+partial class Simulation
+{
+    private static readonly SystemProcedureParameter[] SpAddOperatorParameters =
+    [
+        AgentRequired("name", AgentName, 128),
+        AgentParameter("enabled", SqlType.TinyInt, SqlValue.FromByte(1)),
+        AgentParameter("email_address", AgentText, 100),
+        AgentParameter("pager_address", AgentText, 100),
+        AgentParameter("weekday_pager_start_time", SqlType.Int32, SqlValue.FromInt32(90000)),
+        AgentParameter("weekday_pager_end_time", SqlType.Int32, SqlValue.FromInt32(180000)),
+        AgentParameter("saturday_pager_start_time", SqlType.Int32, SqlValue.FromInt32(90000)),
+        AgentParameter("saturday_pager_end_time", SqlType.Int32, SqlValue.FromInt32(180000)),
+        AgentParameter("sunday_pager_start_time", SqlType.Int32, SqlValue.FromInt32(90000)),
+        AgentParameter("sunday_pager_end_time", SqlType.Int32, SqlValue.FromInt32(180000)),
+        AgentParameter("pager_days", SqlType.TinyInt, SqlValue.FromByte(0)),
+        AgentParameter("netsend_address", AgentText, 100),
+        AgentParameter("category_name", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_add_operator</c>: a new operator, after <c>sp_verify_operator</c>'s
+    /// checks — a name no operator holds (Msg 14261), pager days 0 to 127 and
+    /// pager hours of day (14266), and an operator category that exists
+    /// (14262) — filed under <c>[Uncategorized]</c> by default.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAddOperator(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_add_operator", SpAddOperatorParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_add_operator", grantedRole: null);
+        var name = call.Text(0)!.Trim();
+        if (this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(name))) is not null)
+            throw SimulatedSqlException.AgentAlreadyExists("@name", name).AtAgentSite(31, "sp_verify_operator");
+        if (call.Int(10) is < 0 or > 127)
+            throw SimulatedSqlException.AgentInvalidValue("@pager_days", "0..127 [1 = Sunday .. 64 = Saturday]").AtAgentSite(45, "sp_verify_operator");
+        string[] times = ["@weekday_pager_start_time", "@weekday_pager_end_time", "@saturday_pager_start_time", "@saturday_pager_end_time", "@sunday_pager_start_time", "@sunday_pager_end_time"];
+        for (var i = 0; i < times.Length; i++)
+            VerifyAgentTime(call.Int(4 + i)!.Value, times[i]);
+        var categoryId = 99;
+        if (call.Text(12) is { } category)
+        {
+            categoryId = this.AgentScalar(batch, "select category_id from dbo.syscategories where name = @name and category_class = 3", ("name", SqlValue.FromNVarchar(category)))?.AsInt32
+                ?? throw SimulatedSqlException.AgentDoesNotExist("@category_name", category).AtAgentSite(87, "sp_verify_operator");
+        }
+        _ = this.AgentSql(batch, """
+            insert dbo.sysoperators (name, enabled, email_address, last_email_date, last_email_time, pager_address, last_pager_date, last_pager_time,
+                weekday_pager_start_time, weekday_pager_end_time, saturday_pager_start_time, saturday_pager_end_time, sunday_pager_start_time,
+                sunday_pager_end_time, pager_days, netsend_address, last_netsend_date, last_netsend_time, category_id)
+            values (@name, @enabled, @email, 0, 0, @pager, 0, 0, @t1, @t2, @t3, @t4, @t5, @t6, @days, @netsend, 0, 0, @category)
+            """,
+            ("name", SqlValue.FromNVarchar(name)), ("enabled", call.Values[1]), ("email", call.Values[2]), ("pager", call.Values[3]),
+            ("t1", call.Values[4]), ("t2", call.Values[5]), ("t3", call.Values[6]), ("t4", call.Values[7]), ("t5", call.Values[8]), ("t6", call.Values[9]),
+            ("days", call.Values[10]), ("netsend", call.Values[11]), ("category", SqlValue.FromInt32(categoryId)));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpDeleteOperatorParameters =
+    [
+        AgentRequired("name", AgentName, 128),
+        AgentParameter("reassign_to_operator", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_delete_operator</c>: the operator and its notifications, the jobs
+    /// that notified it notifying <c>@reassign_to_operator</c> or no one; one
+    /// that doesn't exist is Msg 14262.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpDeleteOperator(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_delete_operator", SpDeleteOperatorParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_delete_operator", grantedRole: null);
+        var name = call.Text(0)!;
+        var id = this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(name)))
+            ?? throw SimulatedSqlException.AgentDoesNotExist("@name", name).AtAgentSite(39);
+        var reassign = call.Text(1) is { } other
+            ? this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(other)))
+                ?? throw SimulatedSqlException.AgentDoesNotExist("@reassign_to_operator", other).AtAgentSite(48)
+            : SqlValue.FromInt32(0);
+        _ = this.AgentSql(batch, """
+            update dbo.sysjobs set notify_email_operator_id = @to where notify_email_operator_id = @id;
+            update dbo.sysjobs set notify_netsend_operator_id = @to where notify_netsend_operator_id = @id;
+            update dbo.sysjobs set notify_page_operator_id = @to where notify_page_operator_id = @id;
+            delete dbo.sysnotifications where operator_id = @id;
+            update dbo.sysalerts set has_notification = isnull((select max(n.notification_method) from dbo.sysnotifications as n where n.alert_id = sysalerts.id), 0);
+            delete dbo.sysoperators where id = @id;
+            """, ("id", id), ("to", reassign));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpHelpOperatorParameters =
+    [
+        AgentParameter("operator_name", AgentName, 128),
+        AgentParameter("operator_id", SqlType.Int32),
+    ];
+
+    /// <summary><c>sp_help_operator</c>: every operator, or the one named, by name, with its category.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpOperator(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_help_operator", SpHelpOperatorParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_help_operator", AgentUserRoleId);
+        if (call.Text(0) is { } operatorName
+            && this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(operatorName))) is null)
+        {
+            throw SimulatedSqlException.AgentDoesNotExist("@operator_name", operatorName).AtAgentSite(21);
+        }
+        var rows = this.AgentSql(batch, """
+            select o.id, o.name, o.enabled, o.email_address, o.last_email_date, o.last_email_time, o.pager_address, o.last_pager_date,
+                o.last_pager_time, o.weekday_pager_start_time, o.weekday_pager_end_time, o.saturday_pager_start_time, o.saturday_pager_end_time,
+                o.sunday_pager_start_time, o.sunday_pager_end_time, o.pager_days, o.netsend_address, o.last_netsend_date, o.last_netsend_time,
+                (select c.name from dbo.syscategories as c where c.category_id = o.category_id)
+            from dbo.sysoperators as o
+            where (@name is null or o.name = @name) and (@id is null or o.id = @id)
+            order by o.name
+            """, ("name", call.Values[0]), ("id", call.Values[1]));
+        yield return this.AgentResultSet(
+            [
+                "id int", "name nvarchar(128)", "enabled tinyint", "email_address nvarchar(100) null", "last_email_date int", "last_email_time int",
+                "pager_address nvarchar(100) null", "last_pager_date int", "last_pager_time int", "weekday_pager_start_time int",
+                "weekday_pager_end_time int", "saturday_pager_start_time int", "saturday_pager_end_time int", "sunday_pager_start_time int",
+                "sunday_pager_end_time int", "pager_days tinyint", "netsend_address nvarchar(100) null", "last_netsend_date int",
+                "last_netsend_time int", "category_name nvarchar(128) null",
+            ], rows);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpAddAlertParameters =
+    [
+        AgentRequired("name", AgentName, 128),
+        AgentParameter("message_id", SqlType.Int32, SqlValue.FromInt32(0)),
+        AgentParameter("severity", SqlType.Int32, SqlValue.FromInt32(0)),
+        AgentParameter("enabled", SqlType.TinyInt, SqlValue.FromByte(1)),
+        AgentParameter("delay_between_responses", SqlType.Int32, SqlValue.FromInt32(0)),
+        AgentParameter("notification_message", AgentText, 512),
+        AgentParameter("include_event_description_in", SqlType.TinyInt, SqlValue.FromByte(5)),
+        AgentParameter("database_name", AgentName, 128),
+        AgentParameter("event_description_keyword", AgentText, 100),
+        AgentParameter("job_id", SqlType.UniqueIdentifier),
+        AgentParameter("job_name", AgentName, 128),
+        AgentParameter("raise_snmp_trap", SqlType.TinyInt, SqlValue.FromByte(0)),
+        AgentParameter("performance_condition", AgentText, 512),
+        AgentParameter("category_name", AgentName, 128),
+        AgentParameter("wmi_namespace", AgentName, 128),
+        AgentParameter("wmi_query", AgentText, 512),
+    ];
+
+    /// <summary>
+    /// <c>sp_add_alert</c>: a new alert on one condition — a message number, a
+    /// severity, a performance condition or a WMI query (Msg 14500 for none or
+    /// two), a message <c>sys.messages</c> holds and a severity 0 to 25, a
+    /// database that exists (15010) and a job (14262) — that no alert already
+    /// watches (14501), filed under <c>[Uncategorized]</c> by default, with the
+    /// stopped Agent's notice. Real's procedure answers 0 even when it
+    /// refuses.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAddAlert(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_add_alert", SpAddAlertParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_add_alert", grantedRole: null);
+        try
+        {
+            this.AddAgentAlert(batch, call);
+        }
+        catch (SimulatedSqlException refusal) when (refusal.AgentSite is not null)
+        {
+            refusal.SystemProcedureReturnCode = 0;
+            throw;
+        }
+        yield return AgentNotRunningNotice(batch);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private void AddAgentAlert(BatchContext batch, AgentCall call)
+    {
+        const string verifier = "sp_verify_alert";
+        var name = call.Text(0)!.Trim();
+        if (this.AgentScalar(batch, "select id from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(name))) is not null)
+            throw SimulatedSqlException.AgentAlreadyExists("@name", name).AtAgentSite(71, verifier);
+        var messageId = call.Int(1)!.Value;
+        var severity = call.Int(2)!.Value;
+        var conditions = (messageId != 0 ? 1 : 0) + (severity != 0 ? 1 : 0) + (call.IsNull(12) ? 0 : 1) + (call.IsNull(14) ? 0 : 1);
+        if (conditions != 1)
+            throw SimulatedSqlException.AgentAlertNeedsCondition().AtAgentSite(81, verifier);
+        if (severity is < 0 or > 25)
+            throw SimulatedSqlException.AgentInvalidValue("@severity", "0..25").AtAgentSite(88, verifier);
+        // The engine's own messages aren't catalogued here, so any number
+        // below the user range stands for one; a user message must have been
+        // added with sp_addmessage.
+        if (messageId != 0 && (messageId < 1 || (messageId >= 50000
+            && this.AgentScalar(batch, "select 1 from sys.messages where message_id = @id", ("id", SqlValue.FromInt32(messageId))) is null)))
+        {
+            throw SimulatedSqlException.AgentDoesNotExist("@message_id", messageId.ToString(CultureInfo.InvariantCulture)).AtAgentSite(102, verifier);
+        }
+        if (call.Text(7) is { } database && !this.Databases.ContainsKey(database))
+            throw SimulatedSqlException.HelpDatabaseDoesNotExist(database).AtAgentSite(158, verifier);
+        var jobId = SqlValue.FromGuid(Guid.Empty);
+        if (!call.IsNull(9) || !call.IsNull(10))
+            jobId = AgentJobId(this.ResolveAgentJob(batch, call.Guid(9), call.Text(10)));
+        var categoryId = 98;
+        if (call.Text(13) is { } category)
+        {
+            categoryId = this.AgentScalar(batch, "select category_id from dbo.syscategories where name = @name and category_class = 2", ("name", SqlValue.FromNVarchar(category)))?.AsInt32
+                ?? throw SimulatedSqlException.AgentDoesNotExist("@category_name", category).AtAgentSite(50, "sp_verify_category_identifiers");
+        }
+        if (this.AgentScalar(batch, """
+            select top (1) name from dbo.sysalerts
+            where message_id = @message and severity = @severity and isnull(database_name, N'') = isnull(@database, N'')
+                and isnull(event_description_keyword, N'') = isnull(@keyword, N'') and performance_condition is null and @performance is null
+            """,
+            ("message", SqlValue.FromInt32(messageId)), ("severity", SqlValue.FromInt32(severity)), ("database", call.Values[7]),
+            ("keyword", call.Values[8]), ("performance", call.Values[12])) is { } existing)
+        {
+            throw SimulatedSqlException.AgentAlertConditionTaken(existing.AsString).AtAgentSite(177, "msdb.dbo.sp_add_alert_internal");
+        }
+        _ = this.AgentSql(batch, """
+            insert dbo.sysalerts (name, event_source, event_category_id, event_id, message_id, severity, enabled, delay_between_responses,
+                last_occurrence_date, last_occurrence_time, last_response_date, last_response_time, notification_message, include_event_description,
+                database_name, event_description_keyword, occurrence_count, count_reset_date, count_reset_time, job_id, has_notification, flags,
+                performance_condition, category_id)
+            values (@name, N'MSSQLSERVER', null, null, @message, @severity, @enabled, @delay, 0, 0, 0, 0, @text, @include, @database, @keyword,
+                0, 0, 0, @job, 0, 0, @performance, @category)
+            """,
+            ("name", SqlValue.FromNVarchar(name)), ("message", SqlValue.FromInt32(messageId)), ("severity", SqlValue.FromInt32(severity)),
+            ("enabled", call.Values[3]), ("delay", call.Values[4]), ("text", call.Values[5]), ("include", call.Values[6]), ("database", call.Values[7]),
+            ("keyword", call.Values[8]), ("job", jobId), ("performance", call.Values[12]), ("category", SqlValue.FromInt32(categoryId)));
+    }
+
+    private static readonly SystemProcedureParameter[] SpDeleteAlertParameters = [AgentRequired("name", AgentName, 128)];
+
+    /// <summary><c>sp_delete_alert</c>: the alert and its notifications, with the stopped Agent's notice; one that doesn't exist is Msg 14262.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpDeleteAlert(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_delete_alert", SpDeleteAlertParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_delete_alert", grantedRole: null);
+        var name = call.Text(0)!;
+        var id = this.AgentScalar(batch, "select id from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(name)))
+            ?? throw SimulatedSqlException.AgentDoesNotExist("@name", name).AtAgentSite(30);
+        _ = this.AgentSql(batch, "delete dbo.sysnotifications where alert_id = @id; delete dbo.sysalerts where id = @id;", ("id", id));
+        yield return AgentNotRunningNotice(batch);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpHelpAlertParameters =
+    [
+        AgentParameter("alert_name", AgentName, 128),
+        AgentParameter("order_by", AgentName, SqlValue.FromNVarchar("name")),
+        AgentParameter("alert_id", SqlType.Int32),
+        AgentParameter("category_name", AgentName, 128),
+        AgentParameter("legacy_format", SqlType.Bit, SqlValue.FromBoolean(false)),
+    ];
+
+    /// <summary><c>sp_help_alert</c>: every alert, or the one named, by name, with its job's and category's names.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpAlert(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_help_alert", SpHelpAlertParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_help_alert", AgentOperatorRoleId);
+        var rows = this.AgentSql(batch, """
+            select a.id, a.name, a.event_source, a.event_category_id, a.event_id, a.message_id, a.severity, a.enabled, a.delay_between_responses,
+                a.last_occurrence_date, a.last_occurrence_time, a.last_response_date, a.last_response_time, a.notification_message,
+                a.include_event_description, a.database_name, a.event_description_keyword, a.occurrence_count, a.count_reset_date,
+                a.count_reset_time, a.job_id, (select j.name from dbo.sysjobs as j where j.job_id = a.job_id), a.has_notification, a.flags,
+                a.performance_condition, (select c.name from dbo.syscategories as c where c.category_id = a.category_id), null, null,
+                case when a.performance_condition is not null then 2 else 1 end
+            from dbo.sysalerts as a
+            where (@name is null or a.name = @name) and (@id is null or a.id = @id)
+                and (@category is null or a.category_id in (select c.category_id from dbo.syscategories as c where c.name = @category))
+            order by a.name
+            """, ("name", call.Values[0]), ("id", call.Values[2]), ("category", call.Values[3]));
+        yield return this.AgentResultSet(
+            [
+                "id int", "name nvarchar(128)", "event_source nvarchar(100)", "event_category_id int null", "event_id int null", "message_id int",
+                "severity int", "enabled tinyint", "delay_between_responses int", "last_occurrence_date int", "last_occurrence_time int",
+                "last_response_date int", "last_response_time int", "notification_message nvarchar(512) null", "include_event_description tinyint",
+                "database_name nvarchar(512) null", "event_description_keyword nvarchar(100) null", "occurrence_count int", "count_reset_date int",
+                "count_reset_time int", "job_id uniqueidentifier null", "job_name nvarchar(128) null", "has_notification int", "flags int",
+                "performance_condition nvarchar(512) null", "category_name nvarchar(128) null", "wmi_namespace nvarchar(512) null",
+                "wmi_query nvarchar(512) null", "type int",
+            ], rows);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpNotificationParameters =
+    [
+        AgentRequired("alert_name", AgentName, 128),
+        AgentRequired("operator_name", AgentName, 128),
+        AgentRequired("notification_method", SqlType.TinyInt),
+    ];
+
+    /// <summary>
+    /// <c>sp_add_notification</c>: the alert notifies the operator by the
+    /// method given (1 e-mail, 2 pager, 4 net send, in any sum), once
+    /// (Msg 14261), with the stopped Agent's notice.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAddNotification(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_add_notification", SpNotificationParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_add_notification", grantedRole: null);
+        var (alertId, operatorId) = this.ResolveAgentNotification(batch, call.Text(0)!, call.Text(1)!);
+        var method = call.Int(2)!.Value;
+        if (method is < 1 or > 7)
+            throw SimulatedSqlException.AgentInvalidValue("@notification_method", "1..7 [1 = E-mail, 2 = Pager, 4 = NetSend]").AtAgentSite(60, "msdb.dbo.sp_verify_notification");
+        if (this.AgentScalar(batch, "select 1 from dbo.sysnotifications where alert_id = @alert and operator_id = @op", ("alert", alertId), ("op", operatorId)) is not null)
+            throw SimulatedSqlException.AgentNotificationExists(call.Text(0)!, call.Text(1)!).AtAgentSite(55);
+        _ = this.AgentSql(batch, """
+            insert dbo.sysnotifications (alert_id, operator_id, notification_method) values (@alert, @op, @method);
+            update dbo.sysalerts set has_notification = has_notification | @method where id = @alert;
+            """, ("alert", alertId), ("op", operatorId), ("method", SqlValue.FromInt32(method)));
+        yield return AgentNotRunningNotice(batch);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpDeleteNotificationParameters =
+    [
+        AgentRequired("alert_name", AgentName, 128),
+        AgentRequired("operator_name", AgentName, 128),
+    ];
+
+    /// <summary><c>sp_delete_notification</c>: the alert stops notifying the operator, with the stopped Agent's notice.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpDeleteNotification(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_delete_notification", SpDeleteNotificationParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_delete_notification", grantedRole: null);
+        var (alertId, operatorId) = this.ResolveAgentNotification(batch, call.Text(0)!, call.Text(1)!);
+        _ = this.AgentSql(batch, """
+            delete dbo.sysnotifications where alert_id = @alert and operator_id = @op;
+            update dbo.sysalerts set has_notification = isnull((select max(n.notification_method) from dbo.sysnotifications as n where n.alert_id = @alert), 0) where id = @alert;
+            """, ("alert", alertId), ("op", operatorId));
+        yield return AgentNotRunningNotice(batch);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    /// <summary>The ids of the alert and operator a notification procedure names (Msg 14262 for either missing).</summary>
+    private (SqlValue AlertId, SqlValue OperatorId) ResolveAgentNotification(BatchContext batch, string alert, string op)
+    {
+        var alertId = this.AgentScalar(batch, "select id from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(alert)))
+            ?? throw SimulatedSqlException.AgentDoesNotExist("@alert_name", alert).AtAgentSite(33, "msdb.dbo.sp_verify_notification");
+        var operatorId = this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(op)))
+            ?? throw SimulatedSqlException.AgentDoesNotExist("@operator_name", op).AtAgentSite(44, "msdb.dbo.sp_verify_notification");
+        return (alertId, operatorId);
+    }
+
+    /// <summary>The <c>category_class</c> a category procedure's <c>@class</c> names (Msg 14266 for none of the three).</summary>
+    private static int AgentCategoryClass(string? written, int line, string? procedure) => written?.Trim().ToUpperInvariant() switch
+    {
+        "ALERT" => 2,
+        "JOB" => 1,
+        "OPERATOR" => 3,
+        _ => throw SimulatedSqlException.AgentInvalidValue("@class", "JOB, ALERT, OPERATOR").AtAgentSite(line, procedure),
+    };
+
+    private static readonly SystemProcedureParameter[] SpAddCategoryParameters =
+    [
+        AgentParameter("class", AgentVarchar, SqlValue.FromVarchar("JOB")),
+        AgentParameter("type", AgentVarchar, SqlValue.FromVarchar("LOCAL")),
+        AgentRequired("name", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_add_category</c>: a job category of type <c>LOCAL</c> or
+    /// <c>MULTI-SERVER</c>, or an alert or operator category of type
+    /// <c>NONE</c> (Msg 14266 for any other pairing, the default <c>LOCAL</c>
+    /// with an alert included), named as no category of its class is
+    /// (14261).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpAddCategory(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_add_category", SpAddCategoryParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_add_category", grantedRole: null);
+        var categoryClass = AgentCategoryClass(call.Text(0), 30, "sp_verify_category");
+        var name = call.Text(2)!.Trim();
+        if (this.AgentScalar(batch, "select 1 from dbo.syscategories where name = @name and category_class = @class", ("name", SqlValue.FromNVarchar(name)), ("class", SqlValue.FromInt32(categoryClass))) is not null)
+            throw SimulatedSqlException.AgentAlreadyExists("@name", name).AtAgentSite(32);
+        var type = call.Text(1)?.Trim().ToUpperInvariant();
+        var categoryType = (categoryClass, type) switch
+        {
+            (1, "LOCAL") => 1,
+            (1, "MULTI-SERVER") => 2,
+            (1, _) => throw SimulatedSqlException.AgentInvalidValue("@type", "LOCAL, MULTI-SERVER").AtAgentSite(54, "sp_verify_category"),
+            (_, "NONE") => 3,
+            _ => throw SimulatedSqlException.AgentInvalidValue("@type", "NONE").AtAgentSite(62, "sp_verify_category"),
+        };
+        _ = this.AgentSql(batch, "insert dbo.syscategories (category_class, category_type, name) values (@class, @type, @name)",
+            ("class", SqlValue.FromInt32(categoryClass)), ("type", SqlValue.FromByte((byte)categoryType)), ("name", SqlValue.FromNVarchar(name)));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpDeleteCategoryParameters =
+    [
+        AgentRequired("class", AgentVarchar, 8),
+        AgentRequired("name", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_delete_category</c>: the category, its jobs, alerts or operators
+    /// returning to the class's uncategorized one; one that doesn't exist is
+    /// Msg 14262.
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpDeleteCategory(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_delete_category", SpDeleteCategoryParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_delete_category", grantedRole: null);
+        var categoryClass = AgentCategoryClass(call.Text(0), 30, "sp_verify_category");
+        var name = call.Text(1)!;
+        var id = this.AgentScalar(batch, "select category_id from dbo.syscategories where name = @name and category_class = @class",
+            ("name", SqlValue.FromNVarchar(name)), ("class", SqlValue.FromInt32(categoryClass)))
+            ?? throw SimulatedSqlException.AgentDoesNotExist("@name", name).AtAgentSite(33);
+        _ = this.AgentSql(batch, categoryClass switch
+        {
+            1 => "update dbo.sysjobs set category_id = 0 where category_id = @id; delete dbo.syscategories where category_id = @id;",
+            2 => "update dbo.sysalerts set category_id = 98 where category_id = @id; delete dbo.syscategories where category_id = @id;",
+            _ => "update dbo.sysoperators set category_id = 99 where category_id = @id; delete dbo.syscategories where category_id = @id;",
+        }, ("id", id));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpHelpCategoryParameters =
+    [
+        AgentParameter("class", AgentVarchar, SqlValue.FromVarchar("JOB")),
+        AgentParameter("type", AgentVarchar, 12),
+        AgentParameter("name", AgentName, 128),
+        AgentParameter("suffix", SqlType.Bit, SqlValue.FromBoolean(false)),
+    ];
+
+    /// <summary><c>sp_help_category</c>: the categories of one class, by type and then name, optionally one type or name.</summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpCategory(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_help_category", SpHelpCategoryParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_help_category", AgentUserRoleId);
+        var categoryClass = AgentCategoryClass(call.Text(0), 30, "sp_verify_category");
+        var type = (categoryClass, call.Text(1)?.Trim().ToUpperInvariant()) switch
+        {
+            (_, null) => (int?)null,
+            (1, "LOCAL") => 1,
+            (1, "MULTI-SERVER") => 2,
+            (1, _) => throw SimulatedSqlException.AgentInvalidValue("@type", "LOCAL, MULTI-SERVER").AtAgentSite(54, "sp_verify_category"),
+            (_, "NONE") => 3,
+            _ => throw SimulatedSqlException.AgentInvalidValue("@type", "NONE").AtAgentSite(62, "sp_verify_category"),
+        };
+        var rows = this.AgentSql(batch, """
+            select category_id, category_type, name from dbo.syscategories
+            where category_class = @class and (@type is null or category_type = @type) and (@name is null or name = @name)
+            order by category_type, name
+            """, ("class", SqlValue.FromInt32(categoryClass)), ("type", type is { } t ? SqlValue.FromInt32(t) : SqlValue.Null(SqlType.Int32)), ("name", call.Values[2]));
+        yield return this.AgentResultSet(["category_id int", "category_type tinyint", "name nvarchar(128)"], rows);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    private static readonly SystemProcedureParameter[] SpPurgeJobHistoryParameters =
+    [
+        AgentParameter("job_name", AgentName, 128),
+        AgentParameter("job_id", SqlType.UniqueIdentifier),
+        AgentParameter("oldest_date", SqlType.DateTime),
+    ];
+
+    /// <summary>
+    /// <c>sp_purge_jobhistory</c>: a job's history, or every job's, older than
+    /// <c>@oldest_date</c> when given, reporting the count (Msg 14226).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpPurgeJobHistory(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_purge_jobhistory", SpPurgeJobHistoryParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_purge_jobhistory", AgentOperatorRoleId);
+        var jobId = SqlValue.Null(SqlType.UniqueIdentifier);
+        if (!call.IsNull(0) || !call.IsNull(1))
+            jobId = AgentJobId(this.ResolveAgentJob(batch, call.Guid(1), call.Text(0)));
+        var purged = this.AgentScalar(batch, """
+            delete dbo.sysjobhistory
+            where (@job is null or job_id = @job)
+                and (@oldest is null or run_date < convert(int, convert(char(8), @oldest, 112))
+                    or (run_date = convert(int, convert(char(8), @oldest, 112)) and run_time < datepart(hour, @oldest) * 10000 + datepart(minute, @oldest) * 100 + datepart(second, @oldest)));
+            select @@rowcount;
+            """, ("job", jobId), ("oldest", call.Values[2]))!.Value.AsInt32;
+        yield return AgentPrint(batch, "sp_purge_jobhistory", 79, 14226, string.Create(CultureInfo.InvariantCulture, $"{purged} history entries purged."));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+}

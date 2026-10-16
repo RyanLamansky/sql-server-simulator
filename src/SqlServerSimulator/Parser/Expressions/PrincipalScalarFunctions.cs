@@ -169,8 +169,11 @@ internal sealed class SUserSid : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // With no argument, the effective login's (probed 2026-10-16 against
+        // SQL Server 2025: a SQL login reads its own sid, which is what the
+        // Agent views filter a job's owner by).
         if (this.loginArg is null)
-            return SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, [0x01]);
+            return SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, Simulation.LoginSid(runtime.Batch.Connection.Security.Effective.LoginName));
         var nameValue = this.loginArg.Run(runtime);
         if (nameValue.IsNull)
             return SqlValue.Null(PrincipalPlaceholders.SidType);

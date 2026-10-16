@@ -354,6 +354,9 @@ Style 0 is the permissive default: mdy at either width, and the only non-ISO sty
 So `CONVERT(date, '2026-05-13', 101)` raises Msg 241 where `CONVERT(datetime, …)` succeeds — a different grammar, not a leniency difference.
 The modern family also accepts an unambiguous ISO **date-with-`T`** under every style (`CONVERT(date, '1999-01-02T10:00:00', 3)` parses) independently of that style's numeric grammar.
 
+A time after the date reads its minutes and seconds at one digit or two under every style, as the unstyled grammar does (`CONVERT(datetime, '2026-10-16 0:0:5', 120)`), and a clock reading whose field is out of range (`0:60:0`, `24:0:0`) is the legacy targets' Msg 242, as an impossible day is, its wording naming the source's own string type (probed 2026-10-16 against SQL Server 2025).
+`msdb.dbo.agent_datetime` reads Agent's integers through exactly this shape.
+
 **`T` separator**: legacy reserves it for 0 / 126 / 127; modern accepts it everywhere.
 Conversely legacy 126 / 127 reject a *space*-separated time, since ISO 8601 wants the `T`.
 A trailing **`Z`** is universal on the modern targets, and legacy-side belongs to style 0 and style 127 (whose own output carries it) — legacy 126 rejects it.
