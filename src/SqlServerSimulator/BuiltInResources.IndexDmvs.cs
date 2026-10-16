@@ -157,8 +157,9 @@ internal static partial class BuiltInResources
     /// unique constraint, 64 a standalone statistic, 0x800000 one the optimizer
     /// created; <c>keycnt</c> counts a nonclustered index's clustered-key
     /// columns as its own; <c>rowmodctr</c> is the leading column's
-    /// modification count since the statistic was built. The physical
-    /// columns read the simulator's own pages.
+    /// modification count since the statistic was built. <c>dpages</c>,
+    /// <c>reserved</c> and <c>used</c> are the rowset's leaf, reserved and
+    /// used pages over its partitions (<see cref="StorageLayout"/>).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysindexes(Parser.BatchContext batch, Database database)
     {
@@ -173,7 +174,6 @@ internal static partial class BuiltInResources
         {
             foreach (var table in CatalogTables(schema, batch))
             {
-                var pages = table.Heap.Pages.Count;
                 var rows = table.Heap.CountLiveRows();
                 var statistics = Simulation.StatisticsOn(table);
                 foreach (var identity in table.IndexIdentities())
@@ -189,20 +189,30 @@ internal static partial class BuiltInResources
                     var statistic = statistics.Find(candidate => candidate.StatsId == identity.IndexId && candidate.User is null);
                     var keyCount = identity.IsHeap ? 0 : statistic.DensityOrdinals?.Length ?? 0;
                     var fillFactor = identity.Constraint?.FillFactor ?? identity.Index?.FillFactor ?? 0;
-                    yield return SysindexesRow(table, identity.IndexId, status, keyCount, 1, pages, rows,
+                    long data = 0, reserved = 0, used = 0;
+                    if (HoldsStorage(identity))
+                    {
+                        foreach (var figures in StorageLayout.Of(batch, table, identity, Simulation.PlacementOf(table, identity)))
+                        {
+                            data += figures.InRowDataPages;
+                            reserved += figures.ReservedPageCount;
+                            used += figures.UsedPageCount;
+                        }
+                    }
+                    yield return SysindexesRow(table, identity.IndexId, status, keyCount, 1, (data, reserved, used), rows,
                         statistic.State is null ? 0 : ModificationsSince(table, statistic), fillFactor, identity.Name);
                 }
                 foreach (var statistic in statistics)
                 {
                     if (statistic.User is not { } user)
                         continue;
-                    yield return SysindexesRow(table, statistic.StatsId, user.AutoCreated ? 0x800040 : 64, statistic.KeyOrdinals.Length, 0, 0, 0,
+                    yield return SysindexesRow(table, statistic.StatsId, user.AutoCreated ? 0x800040 : 64, statistic.KeyOrdinals.Length, 0, (0, 0, 0), 0,
                         ModificationsSince(table, statistic), 0, statistic.Name);
                 }
             }
         }
 
-        SqlValue[] SysindexesRow(HeapTable table, int indid, int status, int keyCount, short groupId, int pages, long rows, long modifications, byte fillFactor, string? name) =>
+        SqlValue[] SysindexesRow(HeapTable table, int indid, int status, int keyCount, short groupId, (long Data, long Reserved, long Used) pages, long rows, long modifications, byte fillFactor, string? name) =>
         [
             SqlValue.FromInt32(table.ObjectId),
             SqlValue.FromInt32(status),
@@ -212,9 +222,9 @@ internal static partial class BuiltInResources
             zeroSmall,
             SqlValue.FromInt16((short)keyCount),
             SqlValue.FromInt16(groupId),
-            SqlValue.FromInt32(pages),
-            SqlValue.FromInt32(pages),
-            SqlValue.FromInt32(pages),
+            SqlValue.FromInt32((int)Math.Min(int.MaxValue, pages.Data)),
+            SqlValue.FromInt32((int)Math.Min(int.MaxValue, pages.Reserved)),
+            SqlValue.FromInt32((int)Math.Min(int.MaxValue, pages.Used)),
             SqlValue.FromInt64(rows),
             SqlValue.FromInt32((int)Math.Min(int.MaxValue, modifications)),
             zeroTiny,
@@ -275,17 +285,22 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// <c>sys.dm_db_index_physical_stats(database_id, object_id, index_id,
-    /// partition_number, mode)</c>'s rows: one per partition of each index
-    /// holding storage, in-row pages only, the leaf level alone (the
-    /// simulator keeps no B-tree above it). The mode is <c>LIMITED</c>,
+    /// partition_number, mode)</c>'s rows, from the pages
+    /// <see cref="StorageLayout"/> lays each rowset out on: per index and
+    /// partition its in-row unit — every level from the leaf up under
+    /// <c>DETAILED</c>, the leaf alone otherwise — then its LOB and
+    /// row-overflow units when they hold pages. The mode is <c>LIMITED</c>,
     /// <c>SAMPLED</c>, <c>DETAILED</c>, <c>DEFAULT</c> or NULL, else Msg 2561;
     /// an unknown database is Msg 2521 and an index the table lacks Msg 2591.
-    /// <c>LIMITED</c> leaves the record figures NULL.
+    /// <c>LIMITED</c> leaves the record figures NULL, and a heap's
+    /// fragmentation reads 0 under <c>SAMPLED</c>, as real's do (probed
+    /// 2026-10-16 against SQL Server 2025).
     /// </summary>
     internal static List<SqlValue[]> IndexPhysicalStats(Parser.BatchContext batch, int? databaseId, int? objectId, int? indexId, int? partitionNumber, string? mode)
     {
         var limited = mode is null || BuiltInToken.Equals(mode, "LIMITED") || BuiltInToken.Equals(mode, "DEFAULT");
-        if (!limited && !BuiltInToken.Equals(mode, "SAMPLED") && !BuiltInToken.Equals(mode, "DETAILED"))
+        var detailed = !limited && BuiltInToken.Equals(mode, "DETAILED");
+        if (!limited && !detailed && !BuiltInToken.Equals(mode, "SAMPLED"))
             throw SimulatedSqlException.ParameterIncorrectForStatement(5);
         var simulation = batch.Connection.Simulation;
         if (databaseId is { } named && named > 0 && !Parser.Expressions.DbId.DatabasesWithIds(simulation).Any(entry => entry.Id == named))
@@ -311,61 +326,121 @@ internal static partial class BuiltInResources
                     {
                         if (!HoldsStorage(identity) || (indexId is { } only && only >= 0 && only != identity.IndexId))
                             continue;
-                        var typeDesc = identity.Type switch
-                        {
-                            0 => "HEAP",
-                            1 => "CLUSTERED INDEX",
-                            2 => "NONCLUSTERED INDEX",
-                            5 => "CLUSTERED COLUMNSTORE INDEX",
-                            6 => "NONCLUSTERED COLUMNSTORE INDEX",
-                            _ => "NONCLUSTERED INDEX",
-                        };
-                        foreach (var unit in census.Units(table, identity.IndexId, Simulation.PlacementOf(table, identity)))
+                        var placement = Simulation.PlacementOf(table, identity);
+                        var figures = StorageLayout.Of(batch, table, identity, placement);
+                        foreach (var unit in census.Units(table, identity.IndexId, placement))
                         {
                             if (partitionNumber is { } wantedPartition && wantedPartition > 0 && wantedPartition != unit.Number)
                                 continue;
-                            var nullFloat = SqlValue.Null(SqlType.Float);
-                            var nullBig = SqlValue.Null(SqlType.BigInt);
-                            var nullInt = SqlValue.Null(SqlType.Int32);
-                            rows.Add(
-                            [
-                                SqlValue.FromInt16(id),
-                                SqlValue.FromInt32(table.ObjectId),
-                                SqlValue.FromInt32(identity.IndexId),
-                                SqlValue.FromInt32(unit.Number),
-                                SqlValue.FromString(nvarchar60Catalog, typeDesc),
-                                SqlValue.FromString(nvarchar60Catalog, "IN_ROW_DATA"),
-                                SqlValue.FromByte(unit.InRowPages == 0 ? (byte)0 : (byte)1),
-                                SqlValue.FromByte(0),
-                                SqlValue.FromDouble(0),
-                                SqlValue.FromInt64(unit.InRowPages == 0 ? 0 : 1),
-                                SqlValue.FromDouble(unit.InRowPages),
-                                SqlValue.FromInt64(unit.InRowPages),
-                                limited ? nullFloat : SqlValue.FromDouble(0),
-                                limited ? nullBig : SqlValue.FromInt64(unit.Rows),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullInt : SqlValue.FromInt32(0),
-                                limited ? nullInt : SqlValue.FromInt32(0),
-                                limited ? nullFloat : SqlValue.FromDouble(0),
-                                limited || identity.Type != 0 ? nullBig : SqlValue.FromInt64(0),
-                                SqlValue.FromInt64(0),
-                                SqlValue.FromInt64(unit.PartitionId),
-                                SqlValue.FromByte(0),
-                                SqlValue.FromString(nvarchar60Catalog, "NOT VALID"),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                                limited ? nullBig : SqlValue.FromInt64(0),
-                            ]);
+                            PhysicalStatsRows(rows, id, table, identity, unit, figures[unit.Number - 1], limited, detailed);
                         }
                     }
                 }
             }
         }
         return rows;
+    }
+
+    /// <summary>
+    /// One rowset partition's <see cref="IndexPhysicalStats"/> rows. A heap's
+    /// fragment size reads 0 under <c>SAMPLED</c>, a LOB or row-overflow unit
+    /// reports no fragments, and <c>forwarded_record_count</c> is a heap's
+    /// alone (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static void PhysicalStatsRows(List<SqlValue[]> rows, short databaseId, HeapTable table, IndexIdentity identity, PartitionCensus.Unit unit, RowsetFigures figures, bool limited, bool detailed)
+    {
+        // A columnstore index reports as the rowstore index of its kind.
+        var typeDesc = identity.Type switch
+        {
+            0 => "HEAP",
+            1 or 5 => "CLUSTERED INDEX",
+            _ => "NONCLUSTERED INDEX",
+        };
+        var sampled = !limited && !detailed;
+        var nullBig = SqlValue.Null(SqlType.BigInt);
+        var depth = (byte)figures.Levels.Length;
+        var levels = figures.Levels.Length == 0 ? [new LevelFigures()] : figures.Levels;
+        var top = detailed ? levels.Length : 1;
+        for (var l = 0; l < top; l++)
+        {
+            var level = levels[l];
+            var heapSampled = figures.IsHeap && sampled;
+            var fragmentation = heapSampled || level.Pages == 0 ? 0 : 100.0 * level.OutOfOrder / level.Pages;
+            var fragmentSize = heapSampled || level.Fragments == 0 ? 0 : (double)level.Pages / level.Fragments;
+            var records = limited ? (RecordFigures?)null : new RecordFigures(level.Bytes, level.Records, l == 0 ? level.Ghosts : 0, level.SizedRecords, level.RecordBytes, level.MinRecord, level.MaxRecord);
+            rows.Add(PhysicalStatsRow(databaseId, table, identity, unit, typeDesc, "IN_ROW_DATA", depth, (byte)l,
+                SqlValue.FromDouble(fragmentation), SqlValue.FromInt64(level.Fragments), SqlValue.FromDouble(fragmentSize), level.Pages,
+                records, limited || !figures.IsHeap ? nullBig : SqlValue.FromInt64(level.Forwarded)));
+        }
+        AddSpill("LOB_DATA", figures.Lob);
+        AddSpill("ROW_OVERFLOW_DATA", figures.Overflow);
+
+        void AddSpill(string unitDesc, RealRecordFormat.SpillUnit spill)
+        {
+            if (spill.Pages == 0)
+                return;
+            var records = limited ? (RecordFigures?)null : new RecordFigures(spill.Bytes, spill.Records, 0, spill.Records, spill.Bytes - (2 * spill.Records), spill.MinRecord, spill.MaxRecord);
+            rows.Add(PhysicalStatsRow(databaseId, table, identity, unit, typeDesc, unitDesc, 1, 0,
+                SqlValue.FromDouble(0), nullBig, SqlValue.Null(SqlType.Float), spill.Pages,
+                records, limited || !figures.IsHeap ? nullBig : SqlValue.FromInt64(0)));
+        }
+    }
+
+    /// <summary>A level's record figures, which <c>LIMITED</c> leaves out.</summary>
+    private readonly struct RecordFigures(long bytes, long records, long ghosts, long sized, long recordBytes, int min, int max)
+    {
+        public readonly long Bytes = bytes;
+        public readonly long Records = records;
+        public readonly long Ghosts = ghosts;
+        public readonly long Sized = sized;
+        public readonly long RecordBytes = recordBytes;
+        public readonly int Min = min;
+        public readonly int Max = max;
+    }
+
+    private static SqlValue[] PhysicalStatsRow(short databaseId, HeapTable table, IndexIdentity identity, PartitionCensus.Unit unit, string typeDesc, string unitDesc, byte depth, byte level,
+        SqlValue fragmentation, SqlValue fragments, SqlValue fragmentSize, long pages, RecordFigures? records, SqlValue forwarded)
+    {
+        var nullBig = SqlValue.Null(SqlType.BigInt);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullFloat = SqlValue.Null(SqlType.Float);
+        var zero = records is null ? nullBig : SqlValue.FromInt64(0);
+        if (records is not { } r)
+            r = default;
+        var known = records is not null;
+        return
+        [
+            SqlValue.FromInt16(databaseId),
+            SqlValue.FromInt32(table.ObjectId),
+            SqlValue.FromInt32(identity.IndexId),
+            SqlValue.FromInt32(unit.Number),
+            SqlValue.FromString(nvarchar60Catalog, typeDesc),
+            SqlValue.FromString(nvarchar60Catalog, unitDesc),
+            SqlValue.FromByte(depth),
+            SqlValue.FromByte(level),
+            fragmentation,
+            fragments,
+            fragmentSize,
+            SqlValue.FromInt64(pages),
+            known ? SqlValue.FromDouble(pages == 0 ? 0 : 100.0 * r.Bytes / (pages * (double)RealRecordFormat.PageBytes)) : nullFloat,
+            known ? SqlValue.FromInt64(r.Records) : nullBig,
+            known ? SqlValue.FromInt64(r.Ghosts) : nullBig,
+            zero,
+            known ? SqlValue.FromInt32(r.Min) : nullInt,
+            known ? SqlValue.FromInt32(r.Max) : nullInt,
+            known ? SqlValue.FromDouble(r.Sized == 0 ? 0 : (double)r.RecordBytes / r.Sized) : nullFloat,
+            forwarded,
+            zero,
+            SqlValue.FromInt64(unit.PartitionId),
+            SqlValue.FromByte(0),
+            SqlValue.FromString(nvarchar60Catalog, "NOT VALID"),
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+            zero,
+        ];
     }
 
     /// <summary>

@@ -354,6 +354,32 @@ internal sealed class IndexWritePlan(HeapTable table, WriteKind kind, IReadOnlyL
     public readonly List<IndexUsage> Ghosts = [];
     public readonly List<IndexUsage> Updates = [];
     public readonly List<IndexUsage> Deletes = [];
+
+    private InsertGroup? inserted;
+
+    private (int PageIndex, int SlotIndex)? firstInserted;
+
+    /// <summary>
+    /// Notes the row the statement inserted at <paramref name="address"/>,
+    /// publishing the statement's range of rows to the table's insert ranges
+    /// (<see cref="HeapTable.AddInsertGroup"/>) once it has inserted a second.
+    /// </summary>
+    public void NoteInsertedRow((int PageIndex, int SlotIndex) address, bool tuples)
+    {
+        if (this.inserted is { } group)
+        {
+            group.Last = address;
+            group.Rows++;
+            return;
+        }
+        if (this.firstInserted is not { } first)
+        {
+            this.firstInserted = address;
+            return;
+        }
+        this.inserted = group = new InsertGroup(first, tuples) { Last = address, Rows = 2 };
+        this.Table.AddInsertGroup(group);
+    }
 }
 
 /// <summary>Which rows a write statement changed, as <see cref="IndexUsageAccounting.NoteWrite"/> charges them.</summary>

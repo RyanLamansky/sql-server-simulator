@@ -656,15 +656,108 @@ internal sealed class HeapTable : SchemaObject
 
     /// <summary>
     /// <c>sys.tables.text_in_row_limit</c>, set by <c>sp_tableoption 'text in row'</c>:
-    /// 0 when off. Catalog only — a <c>text</c> / <c>ntext</c> / <c>image</c> value's storage doesn't follow it.
+    /// 0 when off. The simulator's own storage doesn't follow it; the storage
+    /// figures real reports do (<see cref="StorageLayout"/>), as if every value
+    /// had been written under the setting.
     /// </summary>
     public int TextInRowLimit;
 
     /// <summary>
-    /// <c>sys.tables.large_value_types_out_of_row</c>, set by <c>sp_tableoption 'large value types out of row'</c>.
-    /// Catalog only, as <see cref="TextInRowLimit"/> is.
+    /// <c>sys.tables.large_value_types_out_of_row</c>, set by <c>sp_tableoption 'large value types out of row'</c>,
+    /// which reaches the storage figures as <see cref="TextInRowLimit"/> does.
     /// </summary>
     public bool LargeValueTypesOutOfRow;
+
+    /// <summary>
+    /// Per index id (0 for a heap), the heap address the index was last built
+    /// or rebuilt at: the rows below it were laid out in key order by the
+    /// build, the rows past it inserted since (<see cref="StorageLayout"/>).
+    /// An index with no entry was built over an empty table.
+    /// </summary>
+    public readonly ConcurrentDictionary<int, (int PageIndex, int SlotIndex)> LayoutBuilds = new();
+
+    /// <summary>Bumped whenever <see cref="LayoutBuilds"/> or a storage option changes, so a kept layout knows it is stale.</summary>
+    public int LayoutVersion;
+
+    /// <summary>
+    /// The heap address ranges of the statements that inserted more than one
+    /// row, oldest first: real's plan sorts such a statement's rows by each
+    /// index's key before it inserts them (probed 2026-10-16 against SQL
+    /// Server 2025: 2,000 rows in random key order fill an empty clustered
+    /// index's pages as a load in key order does), which
+    /// <see cref="StorageLayout"/> replays. Read through
+    /// <see cref="InsertGroupsInOrder"/>.
+    /// </summary>
+    /// <remarks>
+    /// Bounded at <see cref="MaxInsertGroups"/>: a table that reaches it has
+    /// its oldest half merged pairwise, two statements' rows then sorting as
+    /// one, so an append stays constant-time amortized and a long run of
+    /// multi-row inserts (an ORM's batched saves) holds no more than the cap;
+    /// a build of every index forgets the ranges it laid out.
+    /// </remarks>
+    private readonly List<InsertGroup> insertGroups = [];
+
+    private const int MaxInsertGroups = 1024;
+
+    private readonly Lock insertGroupsLock = new();
+
+    /// <summary>Publishes <paramref name="group"/> at the end of the table's insert ranges.</summary>
+    public void AddInsertGroup(InsertGroup group)
+    {
+        lock (this.insertGroupsLock)
+        {
+            if (this.insertGroups.Count >= MaxInsertGroups)
+            {
+                var merged = MaxInsertGroups / 4;
+                for (var i = 0; i < merged; i++)
+                    this.insertGroups[i] = InsertGroup.Merge(this.insertGroups[2 * i], this.insertGroups[(2 * i) + 1]);
+                this.insertGroups.RemoveRange(merged, merged);
+            }
+            this.insertGroups.Add(group);
+        }
+    }
+
+    /// <summary>The table's insert ranges, ordered by where they begin.</summary>
+    public InsertGroup[] InsertGroupsInOrder()
+    {
+        InsertGroup[] groups;
+        lock (this.insertGroupsLock)
+            groups = [.. this.insertGroups];
+        Array.Sort(groups, static (x, y) => x.First.CompareTo(y.First));
+        return groups;
+    }
+
+    /// <summary>
+    /// Records that index <paramref name="indexId"/> — every index, and the
+    /// heap, for null — was built over the rows the heap holds now.
+    /// </summary>
+    public void NoteLayoutBuild(int? indexId)
+    {
+        var mark = this.Heap.Pages.Count == 0 ? (0, 0) : (this.Heap.Pages.Count - 1, this.Heap.Pages[^1].SlotCount);
+        if (indexId is { } only)
+        {
+            this.LayoutBuilds[only] = mark;
+        }
+        else
+        {
+            this.LayoutBuilds[0] = mark;
+            foreach (var identity in this.IndexIdentities())
+                this.LayoutBuilds[identity.IndexId] = mark;
+            // Every rowset is laid out over these rows now.
+            lock (this.insertGroupsLock)
+                this.insertGroups.Clear();
+        }
+        _ = Interlocked.Increment(ref this.LayoutVersion);
+    }
+
+    /// <summary>Forgets every build mark and insert range, as a <c>TRUNCATE</c> empties the heap they address.</summary>
+    public void ResetLayoutHistory()
+    {
+        this.LayoutBuilds.Clear();
+        lock (this.insertGroupsLock)
+            this.insertGroups.Clear();
+        _ = Interlocked.Increment(ref this.LayoutVersion);
+    }
 
     /// <summary>
     /// The heap row's <c>allow_row_locks</c> / <c>allow_page_locks</c> — a table with no

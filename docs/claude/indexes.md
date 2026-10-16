@@ -109,7 +109,7 @@ The observable surface (enforcement, the lockout, the catalog) is what's modeled
 ## REORGANIZE, and the resumable trio
 
 `ALTER INDEX … REORGANIZE` compacts a B-tree's pages in place.
-A flat page list has nothing to compact, so what the statement does here is validate and succeed — probe-confirmed that real leaves the rows identical either way.
+A flat page list has nothing to compact, so what the statement does here is validate, lay the index's [storage figures](#storage-figures) out again in key order, and succeed — probe-confirmed that real leaves the rows identical either way.
 The grammar is `REORGANIZE [PARTITION = { ALL | <n> }] [WITH ( option = ON | OFF [, …] )]`, and the validation is where the fidelity sits:
 
 - The `WITH` block takes `LOB_COMPACTION` and `COMPRESS_ALL_ROW_GROUPS` — real accepts the columnstore-shaped second option on a rowstore index without complaint, so neither name is gated on the index kind.
@@ -701,7 +701,7 @@ Msg 2528 follows the rows unless `NO_INFOMSGS` joins the options.
 
 ## Index DMVs
 
-`sys.dm_db_index_physical_stats` (a row per index and partition, its argument refusals Msg 2591 / 2561 / 2521 as real's), `sys.dm_db_stats_properties`, `sys.dm_db_stats_histogram` and the compatibility views `sysindexes` / `sysindexkeys` project from the same identities and snapshots (`BuiltInResources.IndexDmvs.cs`, `Selection.IndexDmvs.cs`).
+`sys.dm_db_index_physical_stats` (its rows the [storage figures](#storage-figures), its argument refusals Msg 2591 / 2561 / 2521 as real's), `sys.dm_db_stats_properties`, `sys.dm_db_stats_histogram` and the compatibility views `sysindexes` / `sysindexkeys` project from the same identities and snapshots (`BuiltInResources.IndexDmvs.cs`, `Selection.IndexDmvs.cs`).
 The `sys.dm_db_missing_index_*` family and `sys.dm_db_incremental_stats_properties` exist with real's columns and no rows: the simulator keeps no optimizer suggestions.
 A NULL or 0 database names every database, as real's functions read it.
 
@@ -719,9 +719,46 @@ A NULL or 0 database names every database, as real's functions read it.
 
 **Divergences**: the plan real picks decides its counts, and the simulator's access paths aren't real's plans — real scans a narrower covering index for `COUNT(*)`, scans rather than seeks-and-looks-up on a small table, and decorrelates a subquery into a second scan — so `user_lookups` stays 0, and a statement's counts can differ where real's optimizer would have chosen otherwise.
 The lock, latch, allocation, page-merge, LOB and row-overflow counters of the operational view read 0.
-The physical figures (`page_count`, `avg_fragmentation_in_percent`, record sizes) are the simulator's own flat page list's, never byte-matching real's.
-Probed 2026-10-16 against SQL Server 2025 with Ola Hallengren's `IndexOptimize`, which reads them to pick each index's action: a clustered index loaded in key order reports real's page count and here no fragmentation, where real's random-order load fragments it a little; a nonclustered index here reports its table's pages, where real counts its own leaf pages (7 and 11 against 115); each partition reports the whole table's pages, where real counts its own; and a `nvarchar(max)` value real keeps in row here sits off row, so the in-row page count is far below real's and no `LOB_DATA` row is listed.
-So `IndexOptimize` issues real's commands wherever the figures it compares agree, and the action a page count or fragmentation threshold picks otherwise follows the simulator's figures.
+Ola Hallengren's `IndexOptimize` picks each index's action from the [storage figures](#storage-figures) below.
+
+### Storage figures
+
+`sys.dm_db_index_physical_stats`, `sys.allocation_units`, `sys.dm_db_partition_stats`, `sysindexes`' page columns, `sp_spaceused`, `sp_estimate_data_compression_savings`, the buffer descriptors and the data file's `SpaceUsed` all read one model of the pages real would lay each rowset out on (`Storage/StorageLayout.cs`), computed when a view reads it and kept until the table changes, its records sized by `RealRecordFormat` — the format `RealPageLayout` and `LockPageMap` place locks with.
+Probed 2026-10-16 against SQL Server 2025, every figure below compared run for run against the same scripts.
+
+Each rowset — the heap, the clustered index, each nonclustered index, and each partition of a partitioned one — is replayed rather than counted:
+
+- **The rows an index was built over are packed in key order**, every level full, the leaf to its fill factor and the levels above it too under `PAD_INDEX`: a `CREATE INDEX`, an added key constraint, `REBUILD`, `REORGANIZE` and `ALTER TABLE … REBUILD` record the heap position they built at (`HeapTable.LayoutBuilds`), a clustered build marking every index, and `TRUNCATE` forgets it.
+- **Every later row is inserted in the order the heap holds it**, splitting pages by real's rules, which the `StorageLayout` XML doc lists; the rows of one multi-row statement go in sorted by the index's key, as real's plan sorts them (`HeapTable.AddInsertGroup`, its history bounded by merging the oldest statements' ranges pairwise).
+  This reproduces real's page count and fill for ascending, descending, strided, interleaved and MD5-random singleton orders of up to 20,000 rows and for statements of 20 to 5,000 rows, a nonclustered index grown alongside included.
+- **A row an open transaction deleted stays in its place as a ghost** (`ghost_record_count`), and a deleted row whose bytes the simulator's page still holds is inserted in its turn and taken out after the rest, as real's ghost cleanup frees its slot: the page stays, an emptied page leaves the index, a heap keeps it.
+- **A heap fills its pages in the order it holds its rows**: an `INSERT … SELECT`'s rows to the brim, a row inserted alone while real's free-space map still offers the page (no more than 95% full); a widened row grows in place while its page has room, else leaves a nine-byte stub and moves to the pages after the rest.
+
+What the views read off the replay:
+
+- **Records**: real's data, nonclustered-leaf and non-leaf formats — the row locator, the uniquifier of a repeated non-unique clustered key, a nullable column's NULL bitmap in a non-leaf record, the first non-leaf record of an insert-grown level keeping no key — and real's placement of long values (`RealRecordFormat.Place`): in the row up to 8,000 bytes while the row fits 8,060, the longest pushed off first, LOB pieces of 8,040 bytes, `large value types out of row` and `text in row` as `sp_tableoption` sets them.
+- **Fragmentation**: pages are numbered per level in the order they were allocated, the first root taking the leaf numbering's second number as real's does, so a key-ordered load has one page out of order, a descending one all but one, and a random order nearly all.
+- **Allocation**: `data_pages` is the leaf, `used_pages` every page of the unit and its IAM page, `total_pages` the IAM page and the extents reserved — a build's leaf and upper levels in extents of their own, an insert-grown index's sharing theirs, an `INSERT … SELECT` of 25 rows or more into an empty clustered index without LOB columns starting its leaf and root each in an extent of its own.
+- **Units**: `IN_ROW_DATA` always, `LOB_DATA` for a rowset with a LOB column and `ROW_OVERFLOW_DATA` for one whose longest record would pass 8,060 bytes, empty or not; `sys.dm_db_index_physical_stats` lists the last two only while they hold pages.
+- **Modes**: `DETAILED` every level, `LIMITED` and `SAMPLED` the leaf; `LIMITED` leaves the record figures NULL, and `SAMPLED` reads a heap's fragmentation and fragment size as 0, as real's does.
+  A filtered index counts the rows its filter admits, `sys.partitions.rows` included.
+
+**Divergences**:
+
+- **Fragment counts run lower than real's**, whose allocation interleaves the extents of the table's other rowsets and of other tables: an ascending load beside four other tables' made eight fragments on real, two here, and a clustered index grown one row at a time beside its nonclustered index read 99% fragmented on real, 0.7% here.
+  Real's default `CREATE INDEX` over 20,000 400-byte keys built in parallel, leaving 1,059 leaf pages where its serial build and the figures here leave 1,053.
+- **A few random-order loads differ by a page**: 1,950 rows sorted into a 50-row index took 67 pages on real, 66 here, and an interleaved and an MD5-random load read 96.3% and 97.4% fragmented on real, 98.1% and 98.7% here.
+- **Real's non-leaf page fullness runs a fraction below its records' bytes** (3.756% for 18 15-byte records on one page, where the bytes give 3.780%), which the figures don't reproduce.
+- **The delete order isn't kept**: a deleted row is taken out after every insert, where real's freed slot can take a later row, and one the simulator's page has compacted away is replayed as never inserted; ghosts leave once their transaction ends, where real's cleanup takes some seconds; an update changes a row in place, where real moves one whose key changed.
+- **Forwarding starts from the simulator's own first sizes**: 476 of 500 widened rows forwarded here, 482 on real.
+- **Reserved extents follow real's allocation history**, which the figures don't keep: in a database that had dropped tables, `INSERT … SELECT` of 21 to 200 rows reserved one extent where 25 had reserved three before, and an index grown alongside its table's load reserved 201 pages on real, 177 here.
+- **LOB pages are filled in turn**, where real's free-space map kept a 6,014-byte record off a page three small records had started (two pages on real, one here).
+- **An `xml` value's binary size is the simulator's**, so its record differs from real's (23 bytes for `<a/>` where real took 31).
+- **`sp_tableoption` applies to every value**, where real moves an existing value only when it is next written.
+- **`SAMPLED` reads every page**, where real samples past 10,000.
+- **A columnstore index holds no pages**: real reports a clustered one as one `CLUSTERED INDEX` row of no pages — a nonclustered one as three, one per delete buffer — with its segments in a LOB unit (five pages used and 25 reserved for 5,000 rows of two `int`s), where one row and no LOB unit are reported here.
+- **Real lists its Service Broker queues' internal tables** (`EventNotificationErrorsQueue` and its siblings) in every database; they aren't modeled.
+- `DBCC SHOWCONTIG` is unbuilt (see [`dbcc.md`](dbcc.md#not-modeled-yet)), and a `PAGE` or `ROW` compressed rowset reports its uncompressed pages.
 
 ## EF Migrations integration
 

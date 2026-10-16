@@ -705,7 +705,7 @@ internal static partial class BuiltInResources
         var simulation = batch.Connection.Simulation;
         long bufferPoolKb = 0;
         foreach (var (database, _) in DbId.DatabasesWithIds(simulation))
-            bufferPoolKb += SumDataFilePages(database) * 8;
+            bufferPoolKb += SumBufferedPages(database, batch) * 8;
         long sqlPlansBytes = 0;
         long objectPlansBytes = 0;
         foreach (var plan in simulation.LiveCachedPlans())
@@ -740,11 +740,13 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// <c>sys.dm_os_buffer_descriptors</c>: every page of every database's
-    /// tables is in memory, so the buffer pool lists each, under the
-    /// allocation unit <c>sys.allocation_units</c> reports it in — a data page
-    /// for a row page, a text page for a LOB page. Page ids are numbered
-    /// through each database's primary file; a page's row count and free
-    /// space aren't kept, and no page waits to be written.
+    /// tables is in memory, so the buffer pool lists each page in use in the
+    /// allocation units <c>sys.allocation_units</c> reports, under its unit —
+    /// the IAM page, a heap's or clustered index's leaf pages as data pages,
+    /// the rest of an index's as index pages, a LOB or row-overflow page as a
+    /// text page. Page ids are numbered through each database's primary file;
+    /// a page's row count and free space aren't kept, and no page waits to be
+    /// written.
     /// </summary>
     private static IEnumerable<SqlValue[]> BufferDescriptorRows(Parser.BatchContext batch)
     {
@@ -755,6 +757,8 @@ internal static partial class BuiltInResources
         var noBinary = SqlValue.Null(SqlType.Varbinary);
         var noLatch = SqlValue.Null(SqlType.NVarchar);
         var dataPage = SqlValue.FromNVarchar("DATA_PAGE");
+        var indexPage = SqlValue.FromNVarchar("INDEX_PAGE");
+        var iamPage = SqlValue.FromNVarchar("IAM_PAGE");
         var textPage = SqlValue.FromNVarchar("TEXT_MIX_PAGE");
         foreach (var (database, id) in DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
@@ -762,14 +766,16 @@ internal static partial class BuiltInResources
             // Past the pages real's file header, allocation maps and boot
             // page take.
             var pageId = 16;
-            foreach (var (containerId, type, totalPages, _, _, _) in EnumerateAllocationUnitData(database))
+            foreach (var (containerId, type, _, usedPages, dataPages, _) in EnumerateAllocationUnitData(batch, database))
             {
                 var unit = SqlValue.FromInt64(PartitionCensus.AllocationUnitId(containerId, type));
-                for (long i = 0; i < totalPages; i++)
+                var leafType = (containerId & 0xFFFF) <= 1 ? dataPage : indexPage;
+                for (long i = 0; i < usedPages; i++)
                 {
+                    var pageType = i == 0 ? iamPage : type != 1 ? textPage : i <= dataPages ? leafType : indexPage;
                     yield return
                     [
-                        databaseId, fileId, SqlValue.FromInt32(pageId++), zero, unit, type == 2 ? textPage : dataPage,
+                        databaseId, fileId, SqlValue.FromInt32(pageId++), zero, unit, pageType,
                         nullInt, nullInt, off, zero, SqlValue.FromInt64(0), off, zero, noBinary, noBinary, noBinary, noLatch,
                     ];
                 }

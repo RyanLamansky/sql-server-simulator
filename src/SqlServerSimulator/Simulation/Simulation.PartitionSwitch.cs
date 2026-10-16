@@ -108,7 +108,7 @@ partial class Simulation
         // every shape difference.
         if (target.Partitioning is { } targetPlacement)
         {
-            if (targetPlacement.Census(target).Rows[targetNumber - 1] != 0)
+            if (targetPlacement.Census(target)[targetNumber - 1] != 0)
                 throw SimulatedSqlException.SwitchTargetPartitionNotEmpty(targetNumber, targetText);
         }
         // The slot count keeps a deleted row's tombstone, so only a live row

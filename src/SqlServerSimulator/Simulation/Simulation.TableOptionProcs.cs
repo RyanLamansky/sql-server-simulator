@@ -208,6 +208,7 @@ partial class Simulation
                 table.TextInRowLimit = textInRow;
                 break;
         }
+        _ = Interlocked.Increment(ref table.LayoutVersion);
         yield break;
     }
 

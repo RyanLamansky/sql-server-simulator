@@ -507,6 +507,10 @@ partial class Simulation
     private static void ApplyToConstraint(
         HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions, BatchContext batch, string writtenTableName, long? partition = null)
     {
+        // A rebuild lays the index out again in key order, and a reorganize
+        // compacts and orders its leaf pages.
+        if (form is AlterIndexForm.Rebuild or AlterIndexForm.Reorganize)
+            table.NoteLayoutBuild(constraint.IndexId);
         switch (form)
         {
             case AlterIndexForm.Disable:
@@ -607,6 +611,8 @@ partial class Simulation
     private static void ApplyToIndex(
         ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions, string writtenTableName, long? partition = null)
     {
+        if (form is AlterIndexForm.Rebuild or AlterIndexForm.Reorganize)
+            table.NoteLayoutBuild(index.IndexId);
         switch (form)
         {
             case AlterIndexForm.Disable:

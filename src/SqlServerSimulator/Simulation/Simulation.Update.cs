@@ -1860,7 +1860,10 @@ partial class Simulation
         {
             var unlocked = table.Heap.Insert(image, undoLog);
             if (unlocked.PageIndex >= 0)
+            {
                 IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
+                NoteInsertedRow(batch, table, unlocked);
+            }
             return unlocked;
         }
         batch.ProbeKeyLocksForInsert(table, image);
@@ -1879,6 +1882,7 @@ partial class Simulation
         if (address.PageIndex >= 0)
         {
             IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
+            NoteInsertedRow(batch, table, address);
             batch.NoteKeyPutBack(table, image);
             // The page the row landed on, while some read or write locks
             // pages of the table whole.
@@ -1886,6 +1890,14 @@ partial class Simulation
                 batch.LockRowPage(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive, writes: true, inserted: true);
         }
         return address;
+    }
+
+    // The statement's range of inserted rows, which the storage figures sort
+    // by key as real's plan does (HeapTable.AddInsertGroup).
+    private static void NoteInsertedRow(BatchContext batch, HeapTable table, (int PageIndex, int SlotIndex) address)
+    {
+        if (batch.CurrentStatement.IndexWrites is { Kind: WriteKind.Insert } plan && ReferenceEquals(plan.Table, table))
+            plan.NoteInsertedRow(address, batch.CurrentStatement.InsertsTuples);
     }
 
     /// <summary>

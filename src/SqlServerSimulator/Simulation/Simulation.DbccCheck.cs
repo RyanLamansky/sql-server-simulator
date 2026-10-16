@@ -94,7 +94,7 @@ partial class Simulation
             if (!physicalOnly)
             {
                 foreach (var (table, display) in tables)
-                    rows.Add(CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(table.Heap.CountLiveRows(), table.Heap.Pages.Count, display), databaseId, table.ObjectId, table.HasClusteredIndex() ? 1 : 0, locatesRow: true));
+                    rows.Add(CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display), databaseId, table.ObjectId, table.HasClusteredIndex() ? 1 : 0, locatesRow: true));
             }
             rows.Add(CheckResultRow(8989, SimulatedSqlException.CheckFoundErrorsText(command, database.Name), databaseId, objectId: 0, indexId: 0, locatesRow: false));
             var outcomes = DbccRows(batch, CheckResultSchema(batch), CheckResultColumnNames, rows);
@@ -118,7 +118,7 @@ partial class Simulation
             foreach (var (table, display) in tables)
             {
                 Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, display));
-                Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, table.Heap.CountLiveRows(), table.Heap.Pages.Count, display));
+                Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display));
             }
         }
         Info(batch, SimulatedSqlException.CheckFoundErrorsMessage(batch, command, database.Name));
@@ -185,12 +185,12 @@ partial class Simulation
         {
             var databaseId = DatabaseIdOf(batch.Connection.Simulation, database);
             var outcomes = DbccRows(batch, CheckResultSchema(batch), CheckResultColumnNames,
-                [CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(table.Heap.CountLiveRows(), table.Heap.Pages.Count, display), databaseId, table.ObjectId, table.HasClusteredIndex() ? 1 : 0, locatesRow: true)]);
+                [CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display), databaseId, table.ObjectId, table.HasClusteredIndex() ? 1 : 0, locatesRow: true)]);
             batch.Connection.LastStatementRowCount = 0;
             return DbccCompleted(batch, dbcc, outcomes);
         }
         Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, display));
-        Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, table.Heap.CountLiveRows(), table.Heap.Pages.Count, display));
+        Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display));
         return DbccCompleted(batch, dbcc, []);
     }
 

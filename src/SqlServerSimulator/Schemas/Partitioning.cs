@@ -129,29 +129,16 @@ internal sealed class PartitionPlacement(PartitionScheme scheme, HeapColumn colu
         this.Scheme.Function.PartitionOf(RowDecoder.DecodeColumn(table.StoredColumns, row, storageOrdinal, table.Heap));
 
     /// <summary>
-    /// Each partition's live row count and the number of heap pages holding
-    /// at least one of its rows, indexed by partition number less one. Rows
-    /// aren't stored apart by partition, so this reads every row.
+    /// Each partition's live row count, indexed by partition number less one.
+    /// Rows aren't stored apart by partition, so this reads every row.
     /// </summary>
-    public (long[] Rows, long[] Pages) Census(HeapTable table)
+    public long[] Census(HeapTable table)
     {
-        var fanout = this.Fanout;
-        var rows = new long[fanout];
-        var pages = new long[fanout];
-        var lastPage = new int[fanout];
-        Array.Fill(lastPage, -1);
+        var rows = new long[this.Fanout];
         var storageOrdinal = this.StorageOrdinal(table);
-        foreach (var (pageIndex, _, bytes) in table.Heap.EnumerateRowsWithAddress())
-        {
-            var partition = this.PartitionOfRow(table, storageOrdinal, bytes) - 1;
-            rows[partition]++;
-            if (lastPage[partition] != pageIndex)
-            {
-                lastPage[partition] = pageIndex;
-                pages[partition]++;
-            }
-        }
-        return (rows, pages);
+        foreach (var (_, _, bytes) in table.Heap.EnumerateRowsWithAddress())
+            rows[this.PartitionOfRow(table, storageOrdinal, bytes) - 1]++;
+        return rows;
     }
 }
 

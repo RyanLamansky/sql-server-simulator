@@ -39,14 +39,14 @@ public sealed class TableSpaceTests
     }
 
     [TestMethod]
-    public void Table_HeapWithNoSecondaryIndex_HasZeroIndexSpace()
+    public void Table_WithNoSecondaryIndex_HasOnlyItsIamPageAsIndexSpace()
     {
-        // People has only a clustered PK — no separate index storage, so
-        // IndexSpaceUsed computes to zero (Σ used − base data = 0).
+        // People has only a one-page clustered PK — no non-leaf page and no
+        // other index, so IndexSpaceUsed (Σ used − base data) is its IAM page.
         var people = FixtureDatabase.Tables["People", "Application"];
         IsNotNull(people);
         IsGreaterThanOrEqualTo(0.0, (double)people.DataSpaceUsed);
-        AreEqual(0.0, (double)people.IndexSpaceUsed);
+        AreEqual(8.0, (double)people.IndexSpaceUsed);
     }
 
     [TestMethod]

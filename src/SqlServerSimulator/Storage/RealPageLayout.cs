@@ -22,12 +22,6 @@ namespace SqlServerSimulator.Storage;
 /// </remarks>
 internal sealed class RealPageLayout
 {
-    /// <summary>The bytes a data page holds records and slots in: 8,192 less its 96-byte header.</summary>
-    private const int PageBytes = 8096;
-
-    /// <summary>The row-versioning tag a row written while snapshot isolation or <c>READ_COMMITTED_SNAPSHOT</c> is on carries.</summary>
-    private const int VersioningTagBytes = 14;
-
     private static readonly ConditionalWeakTable<Heap, RealPageLayout> layouts = [];
 
     private readonly long generation;
@@ -112,7 +106,7 @@ internal sealed class RealPageLayout
                 previousKey = key;
             }
             var cost = RecordBytes(columns, values, versioned, duplicate) + 2;
-            if (used + cost > PageBytes && used > 0)
+            if (used + cost > RealRecordFormat.PageBytes && used > 0)
             {
                 page++;
                 used = 0;
@@ -129,50 +123,21 @@ internal sealed class RealPageLayout
 
     /// <summary>
     /// The bytes real's record of a row of <paramref name="columns"/> holding
-    /// <paramref name="values"/> takes: a four-byte header, the fixed-length
-    /// columns — every eight bits sharing a byte — the column count and NULL
-    /// bitmap, and, when a variable-length column holds a value, the count and
-    /// end offset of each up to the last that does and their data, a LOB value
-    /// kept in row while it fits and a 24-byte pointer past that, <c>text</c>,
-    /// <c>ntext</c> and <c>image</c> a 16-byte one; then the uniquifier of a
+    /// <paramref name="values"/> takes, its long values placed as real places
+    /// them (<see cref="RealRecordFormat.Place"/>), with the uniquifier of a
     /// non-unique clustered key's repeated value and the versioning tag.
     /// </summary>
-    internal static int RecordBytes(ReadOnlySpan<HeapColumn> columns, ReadOnlySpan<SqlValue> values, bool versioned, bool uniquified)
+    internal static int RecordBytes(ReadOnlySpan<HeapColumn> columns, ReadOnlySpan<SqlValue> values, bool versioned, bool uniquified, StorageOptions options = default)
     {
-        var fixedBytes = 0;
-        var bits = 0;
-        var variable = 0;
-        var offsets = 0;
-        var data = 0;
+        var natural = columns.Length <= 64 ? stackalloc int[columns.Length] : new int[columns.Length];
+        var ordinals = columns.Length <= 64 ? stackalloc int[columns.Length] : new int[columns.Length];
+        var inRow = columns.Length <= 64 ? stackalloc int[columns.Length] : new int[columns.Length];
         for (var i = 0; i < columns.Length; i++)
         {
+            ordinals[i] = i;
             var type = columns[i].Type;
-            if (type == SqlType.Bit)
-            {
-                bits++;
-                continue;
-            }
-            if (type.IsFixedLength)
-            {
-                fixedBytes += type.FixedLength;
-                continue;
-            }
-            variable++;
-            if (values[i].IsNull)
-                continue;
-            offsets = variable;
-            data += type is TextSqlType or NTextSqlType or ImageSqlType ? 16
-                : type.GetVariableByteCount(values[i]) is var length && columns[i].IsLob && length > 8000 ? 24
-                : length;
+            natural[i] = values[i].IsNull ? -1 : type == SqlType.Bit ? 0 : type.IsFixedLength ? type.FixedLength : type.GetVariableByteCount(values[i]);
         }
-        if (uniquified)
-        {
-            offsets++;
-            data += 4;
-        }
-        var bytes = 4 + fixedBytes + ((bits + 7) / 8) + 2 + ((columns.Length + 7) / 8);
-        if (offsets > 0)
-            bytes += 2 + (2 * offsets) + data;
-        return versioned ? bytes + VersioningTagBytes : bytes;
+        return RealRecordFormat.Place(columns, ordinals, natural, inRow, options, new RecordShape(indexLeaf: false, heapLocator: false, versioned, uniquified), spill: null);
     }
 }

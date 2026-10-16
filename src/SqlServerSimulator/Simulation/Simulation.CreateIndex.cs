@@ -402,6 +402,10 @@ partial class Simulation
             table.SettleIndexIds();
             table.AddIndex(index);
         }
+        // The build lays the index out over the rows the table holds; a
+        // clustered one rebuilds every index, whose rows now point into it.
+        table.SettleIndexIds();
+        table.NoteLayoutBuild(isClustered ? null : index.IndexId);
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         // Building an index builds its statistic; a clustered one rebuilds
         // every index, whose rows now point into it.

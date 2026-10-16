@@ -2518,6 +2518,12 @@ partial class Simulation
             }
         }
 
+        // The rebuild lays the rows out again: a heap's, with the indexes
+        // whose row locators it moves, or the clustered index's.
+        if (ClusteredScan.Key(table) is null)
+            table.NoteLayoutBuild(null);
+        else
+            table.NoteLayoutBuild(1);
         return true;
     }
 

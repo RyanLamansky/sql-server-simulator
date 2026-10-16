@@ -630,6 +630,7 @@ partial class Simulation
         // by row (probed 2026-10-04 against SQL Server 2025).
         var batch = context.Batch;
         RowSecurity.NoteWrite(batch, plan.DestinationTable);
+        batch.CurrentStatement.InsertsTuples = true;
         var retainsDraws = plan.ValueTuples!.Count > 1 && batch.SequenceValuesByRow is null;
         if (retainsDraws)
             batch.SequenceValuesByRow = [];

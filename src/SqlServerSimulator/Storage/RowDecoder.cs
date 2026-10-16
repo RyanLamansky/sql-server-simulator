@@ -317,6 +317,45 @@ internal static class RowDecoder
         return false;
     }
 
+    /// <summary>
+    /// Fills <paramref name="lengths"/> with each column's value length as real
+    /// stores it, without materializing a value: -1 for NULL, the type's width
+    /// for a fixed-length column (0 for a bit), and for a variable-length one
+    /// the natural byte count the encoder wrote — inline or the length an
+    /// off-row pointer records, which is <see cref="SqlType.GetVariableByteCount"/>
+    /// of the value either way.
+    /// </summary>
+    public static void ReadValueLengths(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes, Span<int> lengths)
+    {
+        var header = ValidateHeader(schema, bytes);
+        var varIndex = 0;
+        var prevVarEnd = header.VarDataStart;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            var type = schema[i].Type;
+            var isNull = IsNullColumn(bytes, header.BitmapStart, i);
+            if (type == SqlType.Bit || type.IsFixedLength)
+            {
+                lengths[i] = isNull ? -1 : type == SqlType.Bit ? 0 : type.FixedLength;
+                continue;
+            }
+            var end = ReadVarOffset(header, bytes, varIndex);
+            if (isNull)
+            {
+                lengths[i] = -1;
+            }
+            else
+            {
+                var payload = bytes[prevVarEnd..end];
+                lengths[i] = payload.Length > 0 && payload[0] == RowEncoder.VarPointerMarker
+                    ? BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(5, 4))
+                    : payload.Length - 1;
+            }
+            prevVarEnd = end;
+            varIndex++;
+        }
+    }
+
     private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)
     {
         if (payload.Length == 0)

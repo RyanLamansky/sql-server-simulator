@@ -657,6 +657,9 @@ internal sealed class StatementContext
     /// <summary>The indexes the statement's last write maintains, settled once for its rows; null before its first write.</summary>
     public Storage.IndexWritePlan? IndexWrites;
 
+    /// <summary>Whether the statement is an <c>INSERT … VALUES</c>, whose rows reach an empty table's pages as real's insert of a row set does rather than its bulk path (<see cref="Storage.InsertGroup"/>).</summary>
+    public bool InsertsTuples;
+
     /// <summary>
     /// Freezes the current time for one run of the statement's text and
     /// clears the caches that run fills — once per run, a re-read for the
@@ -683,6 +686,7 @@ internal sealed class StatementContext
         this.RemoteWriteAlias = null;
         this.CountedIndexUses = null;
         this.IndexWrites = null;
+        this.InsertsTuples = false;
     }
 }
 

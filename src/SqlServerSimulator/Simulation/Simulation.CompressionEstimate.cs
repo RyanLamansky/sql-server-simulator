@@ -75,7 +75,7 @@ partial class Simulation
         {
             var objectValue = SqlValue.FromSystemName(objectName);
             var schemaValue = SqlValue.FromSystemName(schema.Name);
-            foreach (var (unitIndex, unitPartition, usedPages) in BuiltInResources.PartitionUsedPages(database, table))
+            foreach (var (unitIndex, unitPartition, usedPages) in BuiltInResources.PartitionUsedPages(batch, table))
             {
                 if ((partitionNumber is { } p && unitPartition != p) || (indexId is { } i && unitIndex != i))
                     continue;

@@ -99,12 +99,12 @@ public sealed class SystemInfoProcTests
         AreEqual("sized", ((string)row[0]!).TrimEnd());
         // CONVERT(char(20), …) left-aligns the count in a fixed-width cell.
         AreEqual("3", ((string)row[1]!).TrimEnd());
-        // One data page for the heap plus the nonclustered index's partition,
-        // so reserved is twice data and nothing is unused.
-        AreEqual("16 KB", row[2]);
+        // One page for the clustered index and one for the nonclustered, each
+        // with its IAM page and an extent reserved.
+        AreEqual("144 KB", row[2]);
         AreEqual("8 KB", row[3]);
-        AreEqual("8 KB", row[4]);
-        AreEqual("0 KB", row[5]);
+        AreEqual("24 KB", row[4]);
+        AreEqual("112 KB", row[5]);
     }
 
     [TestMethod]

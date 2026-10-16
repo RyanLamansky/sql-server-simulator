@@ -54,8 +54,8 @@ The row-at-a-time DML paths (`INSERT` / `UPDATE` / `MERGE` and the FK-cascade, t
 Every other family's value factory normalizes its payload at construction (`FromTime` quantizes to the declared precision, `FromDecimal` re-tags to the declared scale, `FromChar` pads by byte count, `FromDateTime` quantizes to 1/300 s, `FromMoney` scales to a long), so for those `Decode(Encode(v))` is the identity.
 `RowEncoder.NarrowingColumns` / `RowEncoder.StorageForm` are the pair that lets a consumer holding already-projected `SqlValue` rows apply that one narrowing without building a page image — see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads).
 
-**The live page counts are surfaced to the catalog**: `Heap.Pages.Count` (data pages) and `Heap.LobPages.Count` (LOB-chain pages) back `sys.allocation_units.total_pages` / `used_pages` / `data_pages`, and their per-database sum (`BuiltInResources.SumDataFilePages`) sizes `sys.database_files` / `sys.master_files` and `FILEPROPERTY(<db>, 'SpaceUsed')`.
-Because reclaimed interior pages stay in `Pages` (only the tail trims), these counts reflect the peak concurrent working set, not a post-GC minimum — a divergence from real SQL Server's IAM-tracked allocation.
+**The catalog's page counts are real's, not these pages'**: `sys.allocation_units`, `sys.dm_db_partition_stats`, `sys.dm_db_index_physical_stats` and the data-file sizes read the layout real would give each rowset (see [`indexes.md`](indexes.md#storage-figures)), which reads this heap's rows — their order, the bytes a deleted slot still holds, the original extent a forwarded row left — and never its page count, since the encoder's row format and page fill are the simulator's own.
+What `Heap.Pages.Count` and `Heap.LobPages.Count` still size is `DBCC SHRINKFILE`'s and `CHECKDB`'s own reports.
 See [`catalog-views.md`](catalog-views.md) for the self-consistency contract.
 
 ## Row addresses reach expressions through a row locator

@@ -409,8 +409,9 @@ public sealed class SsmsTablesNodeCatalogTests
     }
 
     /// <summary>
-    /// allocation_unit page counts read the live heap page total, so they grow
-    /// as rows are inserted — mirroring sys.partitions' live rows column.
+    /// allocation_unit page counts read the table's pages as real lays them
+    /// out, so they grow as rows are inserted — mirroring sys.partitions' live
+    /// rows column.
     /// </summary>
     [TestMethod]
     public void AllocationUnits_PageCountsMoveAfterInsert()
@@ -430,8 +431,9 @@ public sealed class SsmsTablesNodeCatalogTests
             where p.object_id = object_id('t') and a.type = 1
             """);
         IsGreaterThan(before, after);
-        // IN_ROW total_pages = used_pages = data_pages (no separate index/IAM
-        // overhead modeled).
+        // total_pages is the extents reserved and the IAM page, used_pages the
+        // pages in use and the IAM page, data_pages the leaf pages: 200 rows
+        // of 2,015 bytes, four to a page, under one root.
         using var reader = sim.ExecuteReader("""
             select a.total_pages, a.used_pages, a.data_pages
             from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
@@ -439,8 +441,9 @@ public sealed class SsmsTablesNodeCatalogTests
             """);
         IsTrue(reader.Read());
         AreEqual(after, reader.GetInt64(0));
-        AreEqual(after, reader.GetInt64(1));
-        AreEqual(after, reader.GetInt64(2));
+        AreEqual(52L, reader.GetInt64(1));
+        AreEqual(50L, reader.GetInt64(2));
+        AreEqual(1L, after % 8);
     }
 
     /// <summary>
@@ -532,10 +535,11 @@ public sealed class SsmsTablesNodeCatalogTests
     }
 
     /// <summary>
-    /// Cross-view consistency contract: a table's SUM(used_page_count) across its
-    /// dm_db_partition_stats rows equals the SUM of its allocation-unit total_pages
-    /// (both derive from the same live heap page counts), and used = reserved on
-    /// every row. This is the invariant SSMS's Table IndexSpaceUsed math relies on.
+    /// Cross-view consistency contract: a table's SUM(used_page_count) and
+    /// SUM(reserved_page_count) across its dm_db_partition_stats rows equal the
+    /// SUMs of its allocation units' used_pages and total_pages (both derive
+    /// from the same page layout). This is the invariant SSMS's Table
+    /// IndexSpaceUsed math relies on.
     /// </summary>
     [TestMethod]
     public void DmDbPartitionStats_PageCounts_ConsistentWithAllocationUnits()
@@ -544,22 +548,16 @@ public sealed class SsmsTablesNodeCatalogTests
         _ = sim.ExecuteNonQuery("create table t (id int not null primary key, a int null, big nvarchar(max) null)");
         _ = sim.ExecuteNonQuery("create index ix_a on t(a)");
         _ = sim.ExecuteNonQuery("insert into t (id, a, big) select value, value, replicate(cast(N'y' as nvarchar(max)), 10000) from generate_series(1, 40)");
-        var partitionStatsUsed = sim.ExecuteScalar<long>(
-            "select sum(used_page_count) from sys.dm_db_partition_stats where object_id = object_id('t')");
-        var allocationTotal = sim.ExecuteScalar<long>("""
-            select sum(a.total_pages)
+        var partitionStats = (string)sim.ExecuteScalar(
+            "select concat(sum(used_page_count), ':', sum(reserved_page_count)) from sys.dm_db_partition_stats where object_id = object_id('t')")!;
+        var allocationUnits = (string)sim.ExecuteScalar("""
+            select concat(sum(a.used_pages), ':', sum(a.total_pages))
             from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
             where p.object_id = object_id('t')
-            """);
-        AreEqual(allocationTotal, partitionStatsUsed);
-        // used = reserved on every row (no separate index/IAM overhead modeled).
-        AreEqual(0, sim.ExecuteScalar<int>("""
-            select count(*) from sys.dm_db_partition_stats
-            where object_id = object_id('t') and used_page_count <> reserved_page_count
-            """));
-        // The LOB pages land only on the base (clustered) partition, matching
-        // allocation_units' per-table LOB attachment; nonclustered partitions
-        // report lob_used_page_count = 0.
+            """)!;
+        AreEqual(allocationUnits, partitionStats);
+        // The LOB pages are the clustered index's, whose rows hold the values;
+        // the nonclustered index carries no LOB column.
         AreEqual(0L, sim.ExecuteScalar<long>(
             "select lob_used_page_count from sys.dm_db_partition_stats where object_id = object_id('t') and index_id = 2"));
         IsGreaterThan(0L, sim.ExecuteScalar<long>(

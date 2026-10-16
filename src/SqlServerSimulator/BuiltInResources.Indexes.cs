@@ -185,24 +185,8 @@ internal static partial class BuiltInResources
         ], EnumerateSysPartitions);
 
         // sys.allocation_units: probe-confirmed 8-column shape against SQL
-        // Server 2025 (2026-07-15). One IN_ROW_DATA row per sys.partitions row
-        // (container_id = that partition's synthetic partition_id — the join
-        // key SSMS's space query uses), plus one LOB_DATA row per table that
-        // has off-row LOB pages (attached to the base heap/clustered partition,
-        // since the simulator's LOB-page chain is per-table, not per-index).
-        // ROW_OVERFLOW_DATA (type 3) isn't surfaced — the row encoder pushes
-        // oversize columns into the LOB chain, so there is no separate
-        // row-overflow allocation to report. total_pages / used_pages /
-        // data_pages all read the table's live heap page count
-        // (Heap.Pages.Count for IN_ROW, Heap.LobPages.Count for LOB); LOB rows
-        // report data_pages = 0, matching real. Because separate nonclustered-
-        // index storage isn't modeled, every index partition's IN_ROW unit
-        // reports the base heap's page count — an over-count for multi-index
-        // tables, kept self-consistent with sys.database_files.size (both
-        // derive from SumDataFilePages) so SSMS never computes negative
-        // SpaceAvailable. allocation_unit_id is synthetic-deterministic
-        // (distinct per partition/type; not SQL Server's real id). See
-        // docs/claude/catalog-views.md.
+        // Server 2025 (2026-07-15), its rows and pages
+        // EnumerateAllocationUnitData's. See docs/claude/catalog-views.md.
         Sys("allocation_units",
         [
             new("allocation_unit_id", SqlType.BigInt, null, false),
@@ -215,24 +199,10 @@ internal static partial class BuiltInResources
             new("data_pages", SqlType.BigInt, null, false),
         ], EnumerateSysAllocationUnits);
 
-        // sys.dm_db_partition_stats: probe-confirmed 14-column shape against SQL
-        // Server 2025 (2026-07-16). One row per partition that
-        // sys.partitions / sys.allocation_units report,
-        // partition_id = the same synthetic id those views use (the join key).
-        // Page counts derive from the table's live heap page count, kept
-        // consistent with sys.allocation_units: in_row_* = Heap.Pages.Count on
-        // every partition; lob_* = Heap.LobPages.Count only on the base
-        // heap/clustered partition (index_id 0/1), matching allocation_units'
-        // per-table LOB attachment; row_overflow_* = 0 (the row encoder pushes
-        // oversize columns into the LOB chain, so no separate row-overflow
-        // allocation — same as allocation_units omitting type 3). used_page_count
-        // / reserved_page_count are the row-level sums (in_row + lob + overflow),
-        // so SUM(used_page_count) across a table's partitions equals its
-        // allocation_units total and never exceeds SumDataFilePages — the
-        // cross-view consistency contract SSMS's Table IndexSpaceUsed math relies
-        // on. row_count = live Heap.RowCount. SMO's DataSpaceUsed reads
-        // allocation_units; IndexSpaceUsed reads this view. See
-        // docs/claude/catalog-views.md.
+        // sys.dm_db_partition_stats: probe-confirmed 14-column shape against
+        // SQL Server 2025 (2026-07-16), its rows EnumerateSysDmDbPartitionStats'.
+        // SMO's DataSpaceUsed reads allocation_units; IndexSpaceUsed reads this
+        // view. See docs/claude/catalog-views.md.
         Sys("dm_db_partition_stats",
         [
             new("partition_id", SqlType.BigInt, null, true),
@@ -1029,59 +999,93 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Each rowset of <paramref name="database"/>'s tables that holds storage,
+    /// with its partition placement — the identities <c>sys.partitions</c>,
+    /// <c>sys.allocation_units</c> and <c>sys.dm_db_partition_stats</c> report.
+    /// </summary>
+    private static IEnumerable<(HeapTable Table, IndexIdentity Identity, PartitionPlacement? Placement)> EnumerateStorageIdentities(Database database, Parser.BatchContext? batch)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var table in CatalogTables(schema, batch))
+            {
+                foreach (var identity in table.IndexIdentities())
+                {
+                    if (HoldsStorage(identity))
+                        yield return (table, identity, Simulation.PlacementOf(table, identity));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The data pages of <paramref name="table"/>'s heap or clustered index
+    /// over its partitions — what <c>DBCC CHECKTABLE</c> reports the rows in
+    /// (probed 2026-10-16 against SQL Server 2025: 20,000 rows in the 1,112
+    /// leaf pages of a three-level clustered index).
+    /// </summary>
+    internal static int BaseDataPages(Parser.BatchContext? batch, HeapTable table)
+    {
+        long pages = 0;
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (identity.IndexId > 1)
+                break;
+            foreach (var figures in StorageLayout.Of(batch, table, identity, Simulation.PlacementOf(table, identity)))
+                pages += figures.InRowDataPages;
+        }
+        return (int)Math.Min(int.MaxValue, pages);
+    }
+
+    /// <summary>The storage figures of <paramref name="identity"/>'s partition <paramref name="partitionNumber"/> (<see cref="StorageLayout"/>).</summary>
+    internal static RowsetFigures FiguresOf(Parser.BatchContext? batch, HeapTable table, IndexIdentity identity, PartitionPlacement? placement, int partitionNumber) =>
+        StorageLayout.Of(batch, table, identity, placement)[partitionNumber - 1];
+
+    /// <summary>
     /// The <c>used_page_count</c> <c>sys.dm_db_partition_stats</c> reports for
     /// each of <paramref name="table"/>'s (index_id, partition) units, in its
     /// order — what <c>sp_estimate_data_compression_savings</c> sizes from.
     /// </summary>
-    internal static List<(int IndexId, int PartitionNumber, long UsedPages)> PartitionUsedPages(Database database, HeapTable table)
+    internal static List<(int IndexId, int PartitionNumber, long UsedPages)> PartitionUsedPages(Parser.BatchContext? batch, HeapTable table)
     {
         var partitions = new List<(int IndexId, int PartitionNumber, long UsedPages)>();
-        HeapTable? lastTable = null;
-        var census = new PartitionCensus();
-        foreach (var (candidate, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
+        foreach (var identity in table.IndexIdentities())
         {
-            var isBase = !ReferenceEquals(candidate, lastTable);
-            lastTable = candidate;
-            if (!ReferenceEquals(candidate, table))
+            if (!HoldsStorage(identity))
                 continue;
-            foreach (var unit in census.Units(candidate, indexId, placement))
-                partitions.Add((indexId, unit.Number, unit.InRowPages + (isBase && unit.Number == 1 ? candidate.Heap.LobPages.Count : 0)));
+            var figures = StorageLayout.Of(batch, table, identity, Simulation.PlacementOf(table, identity));
+            for (var i = 0; i < figures.Length; i++)
+                partitions.Add((identity.IndexId, i + 1, figures[i].UsedPageCount));
         }
         return partitions;
     }
 
     /// <summary>
     /// The four page/row totals <c>sp_spaceused</c> reports, accumulated over
-    /// the same (table, index_id) identities <c>sys.dm_db_partition_stats</c>
-    /// projects and with real's own formulas: <c>ReservedPages</c> /
-    /// <c>UsedPages</c> sum every partition's reserved / used count,
-    /// <c>DataPages</c> sums only the <c>index_id &lt; 2</c> partitions'
-    /// in-row + LOB pages, and <c>RowCount</c> sums those partitions' row
+    /// the same rowsets <c>sys.dm_db_partition_stats</c> projects and with
+    /// real's own formulas: <c>ReservedPages</c> / <c>UsedPages</c> sum every
+    /// partition's reserved / used count, <c>DataPages</c> sums only the
+    /// <c>index_id &lt; 2</c> partitions' in-row data pages and LOB and
+    /// row-overflow used pages, and <c>RowCount</c> sums those partitions' row
     /// counts. <paramref name="only"/> restricts the walk to one table (the
     /// object form); null totals the whole database.
     /// </summary>
     internal static (long ReservedPages, long UsedPages, long DataPages, long RowCount) SpaceUsedTotals(
-        Database database, HeapTable? only)
+        Parser.BatchContext? batch, Database database, HeapTable? only)
     {
         long reserved = 0, used = 0, data = 0, rows = 0;
-        HeapTable? lastTable = null;
-        var census = new PartitionCensus();
-        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
+        foreach (var (table, identity, placement) in EnumerateStorageIdentities(database, batch))
         {
-            var isBase = !ReferenceEquals(table, lastTable);
-            lastTable = table;
             if (only is not null && !ReferenceEquals(table, only))
                 continue;
-            foreach (var unit in census.Units(table, indexId, placement))
+            foreach (var figures in StorageLayout.Of(batch, table, identity, placement))
             {
-                var inRow = unit.InRowPages;
-                var lob = isBase && unit.Number == 1 ? table.Heap.LobPages.Count : 0;
-                reserved += inRow + lob;
-                used += inRow + lob;
-                if (indexId >= 2)
+                reserved += figures.ReservedPageCount;
+                used += figures.UsedPageCount;
+                if (identity.IndexId >= 2)
                     continue;
-                data += inRow + lob;
-                rows += unit.Rows;
+                data += figures.InRowDataPages + RowsetFigures.UsedPages(figures.Lob) + RowsetFigures.UsedPages(figures.Overflow);
+                rows += figures.Rows;
             }
         }
 
@@ -1139,7 +1143,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(indexId),
                     unit.Number == 1 ? partitionNumber : SqlValue.FromInt32(unit.Number),
                     partitionIdValue,
-                    SqlValue.FromInt64(unit.Rows),
+                    SqlValue.FromInt64(index is { Filter: not null } ? FilteredRows(batch, table, indexId, placement, unit.Number) : unit.Rows),
                     filestreamFg,
                     .. compression,
                     xmlCompressedThere ? xmlOn : xmlOff,
@@ -1148,6 +1152,11 @@ internal static partial class BuiltInResources
             }
         }
     }
+
+    // A filtered index's rows are the ones its filter admits (probed 2026-10-16
+    // against SQL Server 2025).
+    private static long FilteredRows(Parser.BatchContext batch, HeapTable table, int indexId, PartitionPlacement? placement, int partitionNumber) =>
+        FiguresOf(batch, table, table.IndexIdentities().Find(identity => identity.IndexId == indexId), placement, partitionNumber).Rows;
 
     /// <summary>
     /// The rowstore <c>DATA_COMPRESSION</c> level and <c>XML_COMPRESSION</c> of
@@ -1170,47 +1179,35 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// The raw allocation-unit stream shared by <see cref="EnumerateSysAllocationUnits"/>
-    /// and <see cref="SumDataFilePages"/>. Yields one IN_ROW_DATA tuple per
-    /// (table, index_id) that <see cref="EnumerateSysPartitions"/> reports —
-    /// container_id = the same synthetic partition_id — plus one LOB_DATA tuple
-    /// per table with off-row LOB pages, attached to the base heap/clustered
-    /// partition (the first identity yielded per table). Page counts read the
-    /// live <see cref="Storage.Heap"/> state (Pages.Count for IN_ROW,
-    /// LobPages.Count for LOB), so they track same-batch INSERT/DELETE. LOB
-    /// tuples report data_pages = 0, matching real SQL Server.
+    /// The raw allocation-unit stream shared by <see cref="EnumerateSysAllocationUnits"/>,
+    /// <see cref="SumDataFilePages"/> and the buffer descriptors: per partition
+    /// of each rowset <see cref="EnumerateSysPartitions"/> reports —
+    /// container_id = the same synthetic partition_id — its IN_ROW_DATA unit,
+    /// and its LOB_DATA and ROW_OVERFLOW_DATA units when its columns call for
+    /// them, each unit's pages as <see cref="StorageLayout"/> lays real's out:
+    /// <c>total_pages</c> the extents reserved and the IAM page,
+    /// <c>used_pages</c> every page in use and the IAM page,
+    /// <c>data_pages</c> the in-row leaf (data) pages, 0 for the other units.
     /// </summary>
-    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Database database)
+    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Parser.BatchContext? batch, Database database)
     {
         var census = new PartitionCensus();
-        foreach (var (_, schema) in database.Schemas)
+        foreach (var (table, identity, placement) in EnumerateStorageIdentities(database, batch))
         {
-            foreach (var table in CatalogTables(schema, batch: null))
+            var figures = StorageLayout.Of(batch, table, identity, placement);
+            foreach (var unit in census.Units(table, identity.IndexId, placement))
             {
-                var isBase = true;
-                foreach (var identity in table.IndexIdentities())
-                {
-                    if (!HoldsStorage(identity))
-                        continue;
-                    var placement = Simulation.PlacementOf(table, identity);
-                    foreach (var unit in census.Units(table, identity.IndexId, placement))
-                    {
-                        // A partition's allocation lives on the filegroup its
-                        // scheme maps it to (probed 2026-09-27 against SQL
-                        // Server 2025), an unpartitioned index's on its own
-                        // filegroup and the LOB data on TEXTIMAGE_ON's
-                        // (probed 2026-09-28).
-                        var dataSpaceId = placement is null ? Simulation.FilegroupOf(table, identity) : placement.Scheme.Destinations[unit.Number - 1];
-                        yield return (unit.PartitionId, 1, unit.InRowPages, unit.InRowPages, unit.InRowPages, dataSpaceId);
-                        if (isBase && unit.Number == 1)
-                        {
-                            long lobPages = table.Heap.LobPages.Count;
-                            if (lobPages > 0)
-                                yield return (unit.PartitionId, 2, lobPages, lobPages, 0, placement is null ? table.LobFilegroupId : dataSpaceId);
-                        }
-                    }
-                    isBase = false;
-                }
+                // A partition's allocation lives on the filegroup its scheme
+                // maps it to (probed 2026-09-27 against SQL Server 2025), an
+                // unpartitioned index's on its own filegroup and the LOB data
+                // on TEXTIMAGE_ON's (probed 2026-09-28).
+                var dataSpaceId = placement is null ? Simulation.FilegroupOf(table, identity) : placement.Scheme.Destinations[unit.Number - 1];
+                var rowset = figures[unit.Number - 1];
+                yield return (unit.PartitionId, 1, rowset.InRowReserved, rowset.InRowUsedPages, rowset.InRowDataPages, dataSpaceId);
+                if (rowset.HasLobUnit)
+                    yield return (unit.PartitionId, 2, RowsetFigures.ReservedPages(rowset.Lob), RowsetFigures.UsedPages(rowset.Lob), 0, placement is null ? table.LobFilegroupId : dataSpaceId);
+                if (rowset.HasOverflowUnit)
+                    yield return (unit.PartitionId, 3, RowsetFigures.ReservedPages(rowset.Overflow), RowsetFigures.UsedPages(rowset.Overflow), 0, dataSpaceId);
             }
         }
     }
@@ -1224,16 +1221,16 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysAllocationUnits(Parser.BatchContext batch, Database database)
     {
-        _ = batch;
         var inRowDesc = SqlValue.FromNVarchar("IN_ROW_DATA");
         var lobDesc = SqlValue.FromNVarchar("LOB_DATA");
-        foreach (var (containerId, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(database))
+        var overflowDesc = SqlValue.FromNVarchar("ROW_OVERFLOW_DATA");
+        foreach (var (containerId, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(batch, database))
         {
             yield return
             [
                 SqlValue.FromInt64(PartitionCensus.AllocationUnitId(containerId, type)),
                 SqlValue.FromByte(type),
-                type == 2 ? lobDesc : inRowDesc,
+                type switch { 2 => lobDesc, 3 => overflowDesc, _ => inRowDesc },
                 SqlValue.FromInt64(containerId),
                 SqlValue.FromInt32(dataSpaceId),
                 SqlValue.FromInt64(totalPages),
@@ -1245,72 +1242,76 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.dm_db_partition_stats</c>: one per partition that
-    /// <see cref="EnumerateSysPartitions"/> reports,
-    /// partition_id = the same synthetic id (the <c>sys.partitions</c> /
-    /// <c>sys.allocation_units</c> join key). Page counts derive from the live
-    /// <see cref="Storage.Heap"/> the same way <see cref="EnumerateAllocationUnitData"/>
-    /// does — in_row_* = Pages.Count on every partition, lob_* = LobPages.Count
-    /// only on the base heap/clustered partition (the first identity per table),
-    /// row_overflow_* = 0. used_page_count / reserved_page_count are the
-    /// in_row + lob + overflow row-level sums, so a table's SUM(used_page_count)
-    /// equals its allocation-unit total (the cross-view consistency contract).
+    /// <see cref="EnumerateSysPartitions"/> reports, partition_id = the same
+    /// synthetic id (the <c>sys.partitions</c> / <c>sys.allocation_units</c>
+    /// join key), its page counts the units' of <see cref="EnumerateAllocationUnitData"/>:
+    /// <c>in_row_data_page_count</c> the leaf pages, the used and reserved
+    /// counts each unit's, and <c>used_page_count</c> /
+    /// <c>reserved_page_count</c> their sums, so a table's Σ
+    /// <c>used_page_count</c> equals its allocation units' Σ
+    /// <c>used_pages</c>; <c>row_count</c> the rowset's rows, a filtered
+    /// index's those its filter admits.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDmDbPartitionStats(Parser.BatchContext batch, Database database)
     {
-        _ = batch;
         var partitionNumber = SqlValue.FromInt32(1);
-        var zeroPages = SqlValue.FromInt64(0);
-        HeapTable? lastTable = null;
         var census = new PartitionCensus();
-        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch))
+        foreach (var (table, identity, placement) in EnumerateStorageIdentities(database, batch))
         {
-            var isBase = !ReferenceEquals(table, lastTable);
-            lastTable = table;
-            foreach (var unit in census.Units(table, indexId, placement))
-                yield return StatsRow(table, indexId, unit, isBase && unit.Number == 1 ? table.Heap.LobPages.Count : 0);
-        }
-
-        SqlValue[] StatsRow(HeapTable table, int indexId, PartitionCensus.Unit unit, long lob)
-        {
-            var partitionId = unit.PartitionId;
-            var inRow = unit.InRowPages;
-            var inRowValue = SqlValue.FromInt64(inRow);
-            var lobValue = SqlValue.FromInt64(lob);
-            var usedReserved = SqlValue.FromInt64(inRow + lob);
-            return
-            [
-                SqlValue.FromInt64(partitionId),
-                SqlValue.FromInt32(table.ObjectId),
-                SqlValue.FromInt32(indexId),
-                unit.Number == 1 ? partitionNumber : SqlValue.FromInt32(unit.Number),
-                inRowValue, // in_row_data_page_count
-                inRowValue, // in_row_used_page_count
-                inRowValue, // in_row_reserved_page_count
-                lobValue,   // lob_used_page_count
-                lobValue,   // lob_reserved_page_count
-                zeroPages,  // row_overflow_used_page_count
-                zeroPages,  // row_overflow_reserved_page_count
-                usedReserved, // used_page_count
-                usedReserved, // reserved_page_count
-                SqlValue.FromInt64(unit.Rows),
-            ];
+            var figures = StorageLayout.Of(batch, table, identity, placement);
+            foreach (var unit in census.Units(table, identity.IndexId, placement))
+            {
+                var rowset = figures[unit.Number - 1];
+                yield return
+                [
+                    SqlValue.FromInt64(unit.PartitionId),
+                    SqlValue.FromInt32(table.ObjectId),
+                    SqlValue.FromInt32(identity.IndexId),
+                    unit.Number == 1 ? partitionNumber : SqlValue.FromInt32(unit.Number),
+                    SqlValue.FromInt64(rowset.InRowDataPages),
+                    SqlValue.FromInt64(rowset.InRowUsedPages),
+                    SqlValue.FromInt64(rowset.InRowReserved),
+                    SqlValue.FromInt64(RowsetFigures.UsedPages(rowset.Lob)),
+                    SqlValue.FromInt64(RowsetFigures.ReservedPages(rowset.Lob)),
+                    SqlValue.FromInt64(RowsetFigures.UsedPages(rowset.Overflow)),
+                    SqlValue.FromInt64(RowsetFigures.ReservedPages(rowset.Overflow)),
+                    SqlValue.FromInt64(rowset.UsedPageCount),
+                    SqlValue.FromInt64(rowset.ReservedPageCount),
+                    SqlValue.FromInt64(identity.Index is { Filter: not null } ? rowset.Rows : unit.Rows),
+                ];
+            }
         }
     }
 
     /// <summary>
-    /// Live page total across every modeled allocation unit of
+    /// Reserved page total across every allocation unit of
     /// <paramref name="database"/> — the sum of <c>total_pages</c> over
     /// <see cref="EnumerateAllocationUnitData"/>. Backs the data-file
     /// <c>size</c> reported by <c>sys.database_files</c> / <c>sys.master_files</c>
     /// (via <see cref="ComputeDataFileSizePages"/>) and FILEPROPERTY's
     /// data-file <c>SpaceUsed</c>, keeping SSMS's
-    /// SpaceAvailable = size − SUM(total_pages) non-negative.
+    /// SpaceAvailable = size − SUM(total_pages) non-negative. Without a
+    /// <paramref name="batch"/> a filtered index counts every row, which can
+    /// only raise the total.
     /// </summary>
-    internal static long SumDataFilePages(Database database)
+    internal static long SumDataFilePages(Database database, Parser.BatchContext? batch = null)
     {
         long total = 0;
-        foreach (var (_, _, totalPages, _, _, _) in EnumerateAllocationUnitData(database))
+        foreach (var (_, _, totalPages, _, _, _) in EnumerateAllocationUnitData(batch, database))
             total += totalPages;
+        return total;
+    }
+
+    /// <summary>
+    /// The pages in use across every allocation unit of <paramref name="database"/>
+    /// — the sum of <c>used_pages</c>, the pages <c>sys.dm_os_buffer_descriptors</c>
+    /// lists, every one of them being in memory.
+    /// </summary>
+    internal static long SumBufferedPages(Database database, Parser.BatchContext? batch)
+    {
+        long total = 0;
+        foreach (var (_, _, _, usedPages, _, _) in EnumerateAllocationUnitData(batch, database))
+            total += usedPages;
         return total;
     }
 
@@ -2227,25 +2228,23 @@ internal static partial class BuiltInResources
 
 /// <summary>
 /// The partitions one catalog read reports for each (table, index): one for
-/// an index on a filegroup, carrying the heap's live row and page counts, or
-/// one per partition of a scheme, each counted by reading the partition column
-/// off every row (the rows aren't stored apart). A census is taken once per
-/// (table, placement) and shared by the indexes aligned on it.
+/// an index on a filegroup, carrying the heap's live row count, or one per
+/// partition of a scheme, each counted by reading the partition column off
+/// every row (the rows aren't stored apart). A census is taken once per
+/// (table, placement) and shared by the indexes aligned on it. The pages a
+/// partition takes are <see cref="StorageLayout"/>'s.
 /// </summary>
 internal sealed class PartitionCensus
 {
-    private readonly Dictionary<(HeapTable Table, PartitionPlacement Placement), (long[] Rows, long[] Pages)> taken = [];
+    private readonly Dictionary<(HeapTable Table, PartitionPlacement Placement), long[]> taken = [];
 
     /// <summary>One partition as the page and row views report it.</summary>
-    internal readonly struct Unit(long partitionId, int number, long rows, long inRowPages)
+    internal readonly struct Unit(long partitionId, int number, long rows)
     {
         /// <summary>Synthetic, distinct per (object, index, partition); partition 1 keeps the unpartitioned id.</summary>
         public readonly long PartitionId = partitionId;
         public readonly int Number = number;
         public readonly long Rows = rows;
-
-        /// <summary>The heap pages holding one of the partition's rows; every heap page for an unpartitioned index.</summary>
-        public readonly long InRowPages = inRowPages;
     }
 
     /// <summary>The synthetic <c>partition_id</c> of an unpartitioned index, its only partition's.</summary>
@@ -2256,13 +2255,13 @@ internal sealed class PartitionCensus
         var baseId = UnpartitionedId(table, indexId);
         if (placement is null)
         {
-            yield return new Unit(baseId, 1, table.Heap.CountLiveRows(), table.Heap.Pages.Count);
+            yield return new Unit(baseId, 1, table.Heap.CountLiveRows());
             yield break;
         }
-        if (!this.taken.TryGetValue((table, placement), out var counts))
-            this.taken[(table, placement)] = counts = placement.Census(table);
-        for (var i = 0; i < counts.Rows.Length; i++)
-            yield return new Unit(baseId | ((long)i << 47), i + 1, counts.Rows[i], counts.Pages[i]);
+        if (!this.taken.TryGetValue((table, placement), out var rows))
+            this.taken[(table, placement)] = rows = placement.Census(table);
+        for (var i = 0; i < rows.Length; i++)
+            yield return new Unit(baseId | ((long)i << 47), i + 1, rows[i]);
     }
 
     /// <summary>

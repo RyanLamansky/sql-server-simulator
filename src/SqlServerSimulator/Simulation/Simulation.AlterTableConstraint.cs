@@ -590,6 +590,8 @@ partial class Simulation
         if (placement is null)
             RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
         table.KeyConstraints.Add(constraint);
+        table.SettleIndexIds();
+        table.NoteLayoutBuild(isClustered ? null : constraint.IndexId);
         table.NoteStatisticsCreated(constraint.Name, context.CurrentDatabase.Collation);
         BuildStatistics(context.Batch, table, statistic => isClustered ? statistic.User is null : ReferenceEquals(statistic.State, constraint.Statistics));
         constraint.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, table.Columns, fullOrdinals, constraint.Name, isClustered);

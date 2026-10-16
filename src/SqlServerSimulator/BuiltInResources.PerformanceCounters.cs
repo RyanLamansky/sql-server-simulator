@@ -117,8 +117,8 @@ internal static partial class BuiltInResources
 
         foreach (var (database, _) in DbId.DatabasesWithIds(simulation))
         {
-            var pages = SumDataFilePages(database);
-            reading.DatabasePages += pages;
+            var pages = SumDataFilePages(database, batch);
+            reading.DatabasePages += SumBufferedPages(database, batch);
             long dataKb = 0;
             long freeKb = 0;
             foreach (var file in database.FilesInOrder())

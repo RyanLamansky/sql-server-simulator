@@ -327,47 +327,18 @@ internal sealed class LockPageMap(BatchContext batch, HeapTable table)
 
     /// <summary>
     /// The bytes real's nonclustered leaf record of <paramref name="leaf"/>
-    /// holding <paramref name="values"/> takes: a status byte, the fixed-length
-    /// columns — every eight bits sharing a byte — and a heap's eight-byte RID,
-    /// the column count and NULL bitmap, which the record always carries, and,
-    /// when a variable-length column holds a value, the count and end offset of
-    /// each up to the last that does and their data (probed 2026-10-16 against
-    /// SQL Server 2025 with <c>%%physloc%%</c> through the index: 578 rows of an
-    /// <c>int</c> key over an <c>int</c> clustered key to a page, 449 over a
-    /// <c>bigint</c> one or a heap, 337 of a ten-character <c>varchar</c>, 71
-    /// with a <c>char(100)</c> <c>INCLUDE</c>).
+    /// holding <paramref name="values"/> takes
+    /// (<see cref="RealRecordFormat.IndexLeafRecordBytes"/>).
     /// </summary>
     internal static int IndexRecordBytes(ReadOnlySpan<HeapColumn> columns, ReadOnlySpan<int> leaf, ReadOnlySpan<SqlValue> values, bool heapLocator)
     {
-        var fixedBytes = heapLocator ? 8 : 0;
-        var bits = 0;
-        var variable = 0;
-        var offsets = 0;
-        var data = 0;
+        var lengths = leaf.Length <= 64 ? stackalloc int[leaf.Length] : new int[leaf.Length];
         for (var i = 0; i < leaf.Length; i++)
         {
             var type = columns[leaf[i]].Type;
-            if (type == SqlType.Bit)
-            {
-                bits++;
-                continue;
-            }
-            if (type.IsFixedLength)
-            {
-                fixedBytes += type.FixedLength;
-                continue;
-            }
-            variable++;
-            if (values[i].IsNull)
-                continue;
-            offsets = variable;
-            data += type.GetVariableByteCount(values[i]);
+            lengths[i] = values[i].IsNull ? -1 : type == SqlType.Bit ? 0 : type.IsFixedLength ? type.FixedLength : type.GetVariableByteCount(values[i]);
         }
-        var count = leaf.Length + (heapLocator ? 1 : 0);
-        var bytes = 1 + fixedBytes + ((bits + 7) / 8) + 2 + ((count + 7) / 8);
-        if (offsets > 0)
-            bytes += 2 + (2 * offsets) + data;
-        return bytes;
+        return RealRecordFormat.IndexLeafRecordBytes(columns, leaf, lengths, heapLocator, uniquified: false);
     }
 
     // An image's components at ordinals, NULLs included, as an index orders them.

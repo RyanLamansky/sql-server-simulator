@@ -149,14 +149,18 @@ public sealed class SqlOsDmvTests
             and m.system_high_memory_signal_state ^ m.system_low_memory_signal_state = 1
             """));
 
-    // The buffer pool's clerk and descriptors hold every page of the
+    // The buffer pool's clerk and descriptors hold every page in use of the
     // database's tables, under the allocation units that report them.
     [TestMethod]
     public void BufferPool_HoldsEveryTablePage()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (a int, b char(2000)); insert t select top 40 1, 'x' from sys.all_objects");
-        var pages = sim.ExecuteScalar<int>("select cast(sum(total_pages) as int) from sys.allocation_units");
+        var pages = sim.ExecuteScalar<int>("select cast(sum(used_pages) as int) from sys.allocation_units");
+        AreEqual("IAM_PAGE:1 DATA_PAGE:10", sim.ExecuteScalar("""
+            select string_agg(concat(page_type, ':', n), ' ') within group (order by page_type desc)
+            from (select page_type, count(*) n from sys.dm_os_buffer_descriptors where database_id = db_id() group by page_type) d
+            """));
         AreEqual(pages, sim.ExecuteScalar<int>("select count(*) from sys.dm_os_buffer_descriptors where database_id = db_id()"));
         AreEqual(sim.ExecuteScalar<int>("select count(*) from sys.dm_os_buffer_descriptors where database_id = db_id()"), sim.ExecuteScalar<int>("""
             select count(*) from sys.dm_os_buffer_descriptors b

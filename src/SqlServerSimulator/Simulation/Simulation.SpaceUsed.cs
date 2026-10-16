@@ -150,23 +150,23 @@ partial class Simulation
 
         if (target is null)
         {
-            foreach (var set in SpaceUsedDatabaseResultSets(database, oneResultSet, includeXtp))
+            foreach (var set in SpaceUsedDatabaseResultSets(batch, database, oneResultSet, includeXtp))
                 yield return set;
             yield break;
         }
 
         yield return target.Object switch
         {
-            HeapTable table => SpaceUsedObjectResultSet(database, table),
+            HeapTable table => SpaceUsedObjectResultSet(batch, database, table),
             View view => SpaceUsedNoAllocationResultSet(view.Name),
             _ => throw SimulatedSqlException.SpaceUsedObjectHasNoSpace(),
         };
     }
 
     private static IEnumerable<SimulatedStatementOutcome> SpaceUsedDatabaseResultSets(
-        Database database, bool oneResultSet, bool includeXtp)
+        BatchContext batch, Database database, bool oneResultSet, bool includeXtp)
     {
-        var (reservedPages, usedPages, dataPages, _) = BuiltInResources.SpaceUsedTotals(database, only: null);
+        var (reservedPages, usedPages, dataPages, _) = BuiltInResources.SpaceUsedTotals(batch, database, only: null);
         var dataFilePages = BuiltInResources.DataFileSizePages(database);
         var databaseSize = SpaceMegabytes(BuiltInResources.TotalFileSizePages(database));
         var unallocated = SpaceMegabytes(Math.Max(0, dataFilePages - reservedPages));
@@ -206,9 +206,9 @@ partial class Simulation
             [[name, databaseSize, unallocated, reserved, data, indexSize, unused, nullSize, nullSize, nullSize]]);
     }
 
-    private static SimulatedSqlResultSet SpaceUsedObjectResultSet(Database database, HeapTable table)
+    private static SimulatedSqlResultSet SpaceUsedObjectResultSet(BatchContext batch, Database database, HeapTable table)
     {
-        var (reservedPages, usedPages, dataPages, rowCount) = BuiltInResources.SpaceUsedTotals(database, table);
+        var (reservedPages, usedPages, dataPages, rowCount) = BuiltInResources.SpaceUsedTotals(batch, database, table);
         return new SimulatedSqlResultSet(SpaceUsedObjectSchema, SpaceUsedObjectColumnNames,
         [
             [

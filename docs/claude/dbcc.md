@@ -132,4 +132,6 @@ A caller outside `db_owner` is Msg 7983 state 36 and a non-integer argument Msg 
 
 - `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
   `SHOWCONTIG` over one table first asks `ALTER` on it (Msg 229 naming the `DBCC` permission), as real does, and then is `NotSupportedException`.
-  What these report is real's storage — `IND`'s page list (none over an empty table), `SHOWCONTIG`'s fragmentation, `CHECKALLOC`'s per-allocation-unit rows, `PAGE`'s dump — or the server process's own state, which a flat page list doesn't reproduce: not chased (probed 2026-10-06 against SQL Server 2025).
+  What these report is real's storage — `IND`'s page list (none over an empty table), `SHOWCONTIG`'s fragmentation, `CHECKALLOC`'s per-allocation-unit rows, `PAGE`'s dump — or the server process's own state (probed 2026-10-06 against SQL Server 2025).
+  `SHOWCONTIG`'s and `CHECKALLOC`'s page and fragmentation figures are the [storage figures](indexes.md#storage-figures) the index DMVs report, so those two are the nearest to built; a page's id and contents aren't kept.
+  `CHECKTABLE`'s and `CHECKDB`'s rows-in-pages counts are those figures' leaf pages.
