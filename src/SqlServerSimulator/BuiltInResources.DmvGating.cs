@@ -36,6 +36,7 @@ internal static partial class BuiltInResources
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
         ("sys.dm_database_encryption_keys", DmvGateKind.ServerSecurityState),
         ("sys.dm_os_process_memory", DmvGateKind.ServerState),
+        ("sys.dm_os_performance_counters", DmvGateKind.ServerState),
         ("sys.dm_db_log_space_usage", DmvGateKind.ServerState),
         ("sys.dm_tran_database_transactions", DmvGateKind.ServerState),
         ("sys.dm_exec_query_profiles", DmvGateKind.ServerState),
@@ -66,8 +67,10 @@ internal static partial class BuiltInResources
         ("sys.dm_tran_version_store", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store_space_usage", DmvGateKind.ServerState),
         ("sys.sysaltfiles", DmvGateKind.ControlServer),
+        ("sys.sysperfinfo", DmvGateKind.ServerState),
         ("sys.sysprocesses", DmvGateKind.SessionSelfFilter),
         ("sysaltfiles", DmvGateKind.ControlServer),
+        ("sysperfinfo", DmvGateKind.ServerState),
         ("sysprocesses", DmvGateKind.SessionSelfFilter),
     ];
 

@@ -800,6 +800,24 @@ Rows follow the simulator's own state where it has that state; where real's figu
   Either `VIEW SERVER PERFORMANCE STATE` or `VIEW SERVER SECURITY STATE` opens it, and a refusal is two Msg 300s whose wording names each permission where the database belongs, then Msg 297.
   `sys.dm_server_registry` is empty, as on real's Linux server, and `sys.dm_exec_query_profiles` is empty, the simulator's plans having no operators to profile.
 
+### Performance counters
+
+`sys.dm_os_performance_counters` and its `sysperfinfo` compatibility view (object id -209, the same rows) list the `SQLServer:` objects monitoring tools read — Buffer Manager and Node, General Statistics, Locks, Databases, Latches, Access Methods, SQL Errors, SQL Statistics, Plan Cache, Cursor Manager Total, Memory Manager and Node, User Settable, Transactions, Wait Statistics and Exec Statistics — each counter with real's name, instance names and `cntr_type`, in real's order (`Storage/PerformanceCounters.tsv`, probed 2026-10-16 against SQL Server 2025).
+The names are `nchar(128)`, padded as real pads them, and both views take the server-scope gate.
+Rate counters (`272696576`) are the cumulative counts real reports, which a tool differences over an interval.
+What follows the simulator's state:
+
+- General Statistics: `User Connections` / `Logical Connections` are the sessions `sys.dm_exec_sessions` lists, `Logins/sec` and `Connection Reset/sec` count the session opens `FireLogonTriggers` sees (a pooled reset apart), `Logouts/sec` the logged-in sessions that ended other than by a reset, `Transactions` the sessions in a transaction, `Processes blocked` the sessions waiting on a lock, `Active Temp Tables` the live temporary tables.
+- SQL Statistics: `Batch Requests/sec` counts the commands and TDS batches run (`Simulation.BatchRequestCount`), `SQL Compilations/sec` the plans compiled into the plan cache.
+- Locks: requests, waits, wait milliseconds, timeouts and deadlocks per resource kind (`LockCounters`, counted under the lock manager's gate) under real's `Key`, `RID`, `Page`, `Object`, `Metadata` and `Application` instances, summed for `_Total`; real's other instances (`Database`, `HoBT`, `Extent`, `File`, `AllocUnit`, `Xact`, `RowGroup`, `OIB`) take locks the simulator doesn't, and read zero.
+- Databases: one instance per database in id order, then `_Total` summing them, with each database's data and log file sizes, the log in use `DBCC SQLPERF(LOGSPACE)` reports, and as `Active Transactions` the transactions that have written there.
+- Buffer Manager and Memory Manager: `Database pages` (and Database Cache Memory) are the table pages `sys.dm_os_buffer_descriptors` lists, `Page life expectancy` the seconds since the simulation was made, since no page is ever evicted, `Buffer cache hit ratio` 100% (value and base equal), `Total` / `Target Server Memory` the host process's working set and the memory the runtime sees, `SQL Cache Memory` the cached plans.
+- Plan Cache: `SQL Plans` (batch plans) and `Object Plans` (module plans) count the cached plans, their pages from `size_in_bytes`, and their hit ratio from their use counts.
+- Transactions: the active transactions, the snapshot ones, the longest one's running seconds, the version store's size and tempdb's free space; Wait Statistics: the server's lock waits under `Lock waits` and `ASYNC_NETWORK_IO` under `Network IO waits`.
+
+Every other counter reads zero.
+**Divergences**: real lists its databases' instances in an internal hash order, also lists `mssqlsystemresource` and the Linux server's `model_msdb` / `model_replicatedmaster` templates, and has some forty further objects (Broker, Columnstore, Query Store, Resource Pool and Workload Group stats, the XTP and `SQLPAL:` families …) the subset leaves out.
+
 ## Cross-statement row cache and indexes
 
 Real's catalog views read indexed base tables (`sysschobjs`, `syscolpars`, `sysiscols`), so an equality or a join on a catalog column is an index seek there; the simulator projects its views from live metadata, and before this cache every execution projected every object in the database again.

@@ -178,6 +178,9 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public WaitStatistics? Waits;
 
+    /// <summary>1 once the session has logged in, until <c>Simulation.UnregisterConnection</c> counts its logout.</summary>
+    public int LoggedIn;
+
     /// <summary>
     /// Set under <c>LockManager</c>'s gate when another session's request
     /// closed a deadlock cycle and this blocked session carries the lower

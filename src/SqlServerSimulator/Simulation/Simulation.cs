@@ -927,7 +927,18 @@ public sealed partial class Simulation
     {
         lock (this.Sessions)
             _ = this.Sessions.Remove(connection.Session);
+        // A session that logged in logs out once, a pooled reset's replaced
+        // one excepted, since its successor carries the login on.
+        if (Interlocked.Exchange(ref connection.Session.LoggedIn, 0) == 1 && !connection.ReplacedByReset)
+            _ = Interlocked.Increment(ref this.LogoutCount);
     }
+
+    /// <summary>
+    /// The server's cumulative activity the <c>sys.dm_os_performance_counters</c>
+    /// rate counters report: logins and logouts (a pooled reset counted
+    /// apart), and the batches its sessions sent.
+    /// </summary>
+    internal long LoginCount, LogoutCount, ConnectionResetCount, BatchRequestCount;
 
     /// <summary>
     /// Snapshot of the sessions whose connection is still resolvable. The
@@ -1277,6 +1288,7 @@ public sealed partial class Simulation
         // still in flight. Child batches (proc / UDF / dynamic-SQL bodies)
         // don't re-enter here, so one execution counts once.
         _ = Interlocked.Increment(ref this.statementsInFlight);
+        _ = Interlocked.Increment(ref this.BatchRequestCount);
         SessionRequest? request = null;
         SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)

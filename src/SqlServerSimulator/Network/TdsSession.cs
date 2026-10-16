@@ -1635,6 +1635,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var clientHostName = previous.ClientHostName;
         var clientApplicationName = previous.ClientApplicationName;
         var loginName = previous.Security.OriginalLoginName;
+        previous.ReplacedByReset = true;
         previous.Dispose();
 
         var fresh = new SimulatedDbConnection(simulation, previous.Spid);

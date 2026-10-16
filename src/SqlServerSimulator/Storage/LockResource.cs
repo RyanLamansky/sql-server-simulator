@@ -174,6 +174,9 @@ internal sealed class LockResource
     /// </summary>
     public DefinitionLock? Definition;
 
+    /// <summary>Set for an application lock (<c>sp_getapplock</c>), which the lock counters report apart.</summary>
+    public bool IsApplicationLock;
+
     /// <summary>
     /// One owner's hold on this resource, with re-entrance count. Stored
     /// as a struct in <see cref="Holders"/>; same-owner / same-mode re-
@@ -310,6 +313,9 @@ internal sealed class LockManager
     /// </summary>
     internal Simulation? OwningSimulation;
 
+    /// <summary>The lock traffic the performance counters report, counted under the gate.</summary>
+    internal readonly LockCounters Counters = new();
+
     /// <summary>
     /// The hold entries, across every resource, in a mode that can keep a
     /// reader waiting (<see cref="CanBlockReaders"/>); each owner's own are in
@@ -408,13 +414,33 @@ internal sealed class LockManager
     /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
     /// an immediate grant for sp_getapplock's return-code 1.
     /// </summary>
-    [MethodImpl(Tiering.OptimizeFirstCall)]
     public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
+    {
+        var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned);
+        switch (outcome)
+        {
+            case LockAcquireOutcome.TimedOut:
+                var kind = (int)LockCounters.Of(resource);
+                _ = Interlocked.Increment(ref this.Counters.Timeouts[kind]);
+                if (timeoutMillis > 0)
+                    _ = Interlocked.Increment(ref this.Counters.TimeoutsAfterWaiting[kind]);
+                break;
+            case LockAcquireOutcome.Deadlocked or LockAcquireOutcome.DeadlockedOnOwnThread:
+                _ = Interlocked.Increment(ref this.Counters.Deadlocks[(int)LockCounters.Of(resource)]);
+                break;
+        }
+        return outcome;
+    }
+
+    [MethodImpl(Tiering.OptimizeFirstCall)]
+    private LockAcquireOutcome TryAcquireCore(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned)
     {
         if (sweepAbandoned)
             this.SweepAbandonedSessions();
         lock (this.gate)
         {
+            var counted = (int)LockCounters.Of(resource);
+            this.Counters.Requests[counted]++;
             // Same-owner / same-mode re-entrance: bump the existing hold's
             // count and return. Same-owner / different-mode falls through
             // to the compatibility check, where same-owner holders are
@@ -548,6 +574,8 @@ internal sealed class LockManager
                 {
                     var waitedMilliseconds = Environment.TickCount64 - owner.WaitStartedTicks;
                     owner.LockWaitedMilliseconds += waitedMilliseconds;
+                    this.Counters.Waits[counted]++;
+                    this.Counters.WaitMilliseconds[counted] += waitedMilliseconds;
                     this.OwningSimulation?.RecordWait(owner.Acting, LockDmvs.WaitType(mode), waitedMilliseconds);
                     owner.WaitingOnResource = null;
                     owner.WaitingForMode = null;

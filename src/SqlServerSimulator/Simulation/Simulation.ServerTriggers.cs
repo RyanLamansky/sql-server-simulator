@@ -41,14 +41,21 @@ partial class Simulation
     /// to the error log), and the refusal is the one message the client sees.
     /// </para>
     /// <para>
-    /// The no-trigger case costs one array-length read, since every session
-    /// open passes through here.
+    /// The no-trigger case costs one array-length read past the login count,
+    /// since every session open passes through here.
     /// </para>
     /// </remarks>
     /// <param name="connection">The opening session, its login already stamped.</param>
     /// <param name="isPooled">True for a pooled connection's reset, which <c>EVENTDATA()</c> reports as <c>IsPooled</c> 1.</param>
     internal void FireLogonTriggers(SimulatedDbConnection connection, bool isPooled)
     {
+        // Every session open passes through here, which is where the
+        // performance counters count logins and pooled resets.
+        if (isPooled)
+            _ = Interlocked.Increment(ref this.ConnectionResetCount);
+        else
+            _ = Interlocked.Increment(ref this.LoginCount);
+        connection.Session.LoggedIn = 1;
         var all = this.ServerTriggers.All;
         if (all.Length == 0)
             return;

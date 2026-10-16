@@ -1711,6 +1711,9 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal string ClientHostName = "";
 
+    /// <summary>Set on a pooled session a reset replaces, whose end is no logout.</summary>
+    internal bool ReplacedByReset;
+
     /// <summary>
     /// The client application name this session reported: the connection
     /// string's <c>Application Name</c> / <c>App</c> keyword in-process, the

@@ -750,7 +750,7 @@ internal sealed partial class Database
         lock (this.ApplicationLocks)
         {
             if (!this.ApplicationLocks.TryGetValue((principalId, resource), out var existing))
-                this.ApplicationLocks[(principalId, resource)] = existing = new LockResource();
+                this.ApplicationLocks[(principalId, resource)] = existing = new LockResource { IsApplicationLock = true };
             return existing;
         }
     }

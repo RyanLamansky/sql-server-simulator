@@ -1,0 +1,454 @@
+SQLServer:Buffer Manager	RBPEX cache hit ratio		537003264
+SQLServer:Buffer Manager	RBPEX cache hit ratio base		1073939712
+SQLServer:Buffer Manager	Buffer cache hit ratio		537003264
+SQLServer:Buffer Manager	Tiered Buffer cache hit ratio		537003264
+SQLServer:Buffer Manager	Buffer cache hit ratio base		1073939712
+SQLServer:Buffer Manager	Page lookups/sec		272696576
+SQLServer:Buffer Manager	Free list stalls/sec		272696576
+SQLServer:Buffer Manager	Database pages		65792
+SQLServer:Buffer Manager	Target pages		65792
+SQLServer:Buffer Manager	Integral Controller Slope		65792
+SQLServer:Buffer Manager	Lazy writes/sec		272696576
+SQLServer:Buffer Manager	Readahead pages/sec		272696576
+SQLServer:Buffer Manager	Readahead time/sec		272696576
+SQLServer:Buffer Manager	Page reads/sec		272696576
+SQLServer:Buffer Manager	Page writes/sec		272696576
+SQLServer:Buffer Manager	Checkpoint pages/sec		272696576
+SQLServer:Buffer Manager	Background writer pages/sec		272696576
+SQLServer:Buffer Manager	Page life expectancy		65792
+SQLServer:Buffer Manager	Extension page writes/sec		272696576
+SQLServer:Buffer Manager	Extension page reads/sec		272696576
+SQLServer:Buffer Manager	Extension outstanding IO counter		65792
+SQLServer:Buffer Manager	Extension page evictions/sec		272696576
+SQLServer:Buffer Manager	Extension allocated pages		65792
+SQLServer:Buffer Manager	Extension free pages		65792
+SQLServer:Buffer Manager	Extension in use as percentage		65792
+SQLServer:Buffer Manager	Extension page unreferenced time		65792
+SQLServer:Buffer Node	Database pages	000	65792
+SQLServer:Buffer Node	Page life expectancy	000	65792
+SQLServer:Buffer Node	Local node page lookups/sec	000	272696576
+SQLServer:Buffer Node	Remote node page lookups/sec	000	272696576
+SQLServer:General Statistics	Active Temp Tables		65792
+SQLServer:General Statistics	Temp Tables Creation Rate		272696576
+SQLServer:General Statistics	Logins/sec		272696576
+SQLServer:General Statistics	Connection Reset/sec		272696576
+SQLServer:General Statistics	Logouts/sec		272696576
+SQLServer:General Statistics	User Connections		65792
+SQLServer:General Statistics	Logical Connections		65792
+SQLServer:General Statistics	Transactions		65792
+SQLServer:General Statistics	Non-atomic yield rate		272696576
+SQLServer:General Statistics	Mars Deadlocks		272696576
+SQLServer:General Statistics	HTTP Authenticated Requests		272696576
+SQLServer:General Statistics	SOAP Empty Requests		272696576
+SQLServer:General Statistics	SOAP SQL Requests		272696576
+SQLServer:General Statistics	SOAP Method Invocations		272696576
+SQLServer:General Statistics	SOAP WSDL Requests		272696576
+SQLServer:General Statistics	SOAP Session Initiate Requests		272696576
+SQLServer:General Statistics	SOAP Session Terminate Requests		272696576
+SQLServer:General Statistics	Processes blocked		65792
+SQLServer:General Statistics	Temp Tables For Destruction		65792
+SQLServer:General Statistics	Event Notifications Delayed Drop		65792
+SQLServer:General Statistics	Trace Event Notification Queue		65792
+SQLServer:General Statistics	SQL Trace IO Provider Lock Waits		272696576
+SQLServer:General Statistics	Tempdb recovery unit id		272696576
+SQLServer:General Statistics	Tempdb rowset id		272696576
+SQLServer:Locks	Lock Requests/sec	Xact	272696576
+SQLServer:Locks	Lock Timeouts/sec	Xact	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Xact	272696576
+SQLServer:Locks	Lock Waits/sec	Xact	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Xact	272696576
+SQLServer:Locks	Average Wait Time (ms)	Xact	1073874176
+SQLServer:Locks	Average Wait Time Base	Xact	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Xact	272696576
+SQLServer:Locks	Lock Requests/sec	RowGroup	272696576
+SQLServer:Locks	Lock Timeouts/sec	RowGroup	272696576
+SQLServer:Locks	Number of Deadlocks/sec	RowGroup	272696576
+SQLServer:Locks	Lock Waits/sec	RowGroup	272696576
+SQLServer:Locks	Lock Wait Time (ms)	RowGroup	272696576
+SQLServer:Locks	Average Wait Time (ms)	RowGroup	1073874176
+SQLServer:Locks	Average Wait Time Base	RowGroup	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	RowGroup	272696576
+SQLServer:Locks	Lock Requests/sec	OIB	272696576
+SQLServer:Locks	Lock Timeouts/sec	OIB	272696576
+SQLServer:Locks	Number of Deadlocks/sec	OIB	272696576
+SQLServer:Locks	Lock Waits/sec	OIB	272696576
+SQLServer:Locks	Lock Wait Time (ms)	OIB	272696576
+SQLServer:Locks	Average Wait Time (ms)	OIB	1073874176
+SQLServer:Locks	Average Wait Time Base	OIB	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	OIB	272696576
+SQLServer:Locks	Lock Requests/sec	AllocUnit	272696576
+SQLServer:Locks	Lock Timeouts/sec	AllocUnit	272696576
+SQLServer:Locks	Number of Deadlocks/sec	AllocUnit	272696576
+SQLServer:Locks	Lock Waits/sec	AllocUnit	272696576
+SQLServer:Locks	Lock Wait Time (ms)	AllocUnit	272696576
+SQLServer:Locks	Average Wait Time (ms)	AllocUnit	1073874176
+SQLServer:Locks	Average Wait Time Base	AllocUnit	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	AllocUnit	272696576
+SQLServer:Locks	Lock Requests/sec	HoBT	272696576
+SQLServer:Locks	Lock Timeouts/sec	HoBT	272696576
+SQLServer:Locks	Number of Deadlocks/sec	HoBT	272696576
+SQLServer:Locks	Lock Waits/sec	HoBT	272696576
+SQLServer:Locks	Lock Wait Time (ms)	HoBT	272696576
+SQLServer:Locks	Average Wait Time (ms)	HoBT	1073874176
+SQLServer:Locks	Average Wait Time Base	HoBT	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	HoBT	272696576
+SQLServer:Locks	Lock Requests/sec	Metadata	272696576
+SQLServer:Locks	Lock Timeouts/sec	Metadata	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Metadata	272696576
+SQLServer:Locks	Lock Waits/sec	Metadata	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Metadata	272696576
+SQLServer:Locks	Average Wait Time (ms)	Metadata	1073874176
+SQLServer:Locks	Average Wait Time Base	Metadata	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Metadata	272696576
+SQLServer:Locks	Lock Requests/sec	Application	272696576
+SQLServer:Locks	Lock Timeouts/sec	Application	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Application	272696576
+SQLServer:Locks	Lock Waits/sec	Application	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Application	272696576
+SQLServer:Locks	Average Wait Time (ms)	Application	1073874176
+SQLServer:Locks	Average Wait Time Base	Application	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Application	272696576
+SQLServer:Locks	Lock Requests/sec	RID	272696576
+SQLServer:Locks	Lock Timeouts/sec	RID	272696576
+SQLServer:Locks	Number of Deadlocks/sec	RID	272696576
+SQLServer:Locks	Lock Waits/sec	RID	272696576
+SQLServer:Locks	Lock Wait Time (ms)	RID	272696576
+SQLServer:Locks	Average Wait Time (ms)	RID	1073874176
+SQLServer:Locks	Average Wait Time Base	RID	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	RID	272696576
+SQLServer:Locks	Lock Requests/sec	Extent	272696576
+SQLServer:Locks	Lock Timeouts/sec	Extent	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Extent	272696576
+SQLServer:Locks	Lock Waits/sec	Extent	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Extent	272696576
+SQLServer:Locks	Average Wait Time (ms)	Extent	1073874176
+SQLServer:Locks	Average Wait Time Base	Extent	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Extent	272696576
+SQLServer:Locks	Lock Requests/sec	Key	272696576
+SQLServer:Locks	Lock Timeouts/sec	Key	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Key	272696576
+SQLServer:Locks	Lock Waits/sec	Key	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Key	272696576
+SQLServer:Locks	Average Wait Time (ms)	Key	1073874176
+SQLServer:Locks	Average Wait Time Base	Key	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Key	272696576
+SQLServer:Locks	Lock Requests/sec	Page	272696576
+SQLServer:Locks	Lock Timeouts/sec	Page	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Page	272696576
+SQLServer:Locks	Lock Waits/sec	Page	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Page	272696576
+SQLServer:Locks	Average Wait Time (ms)	Page	1073874176
+SQLServer:Locks	Average Wait Time Base	Page	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Page	272696576
+SQLServer:Locks	Lock Requests/sec	Object	272696576
+SQLServer:Locks	Lock Timeouts/sec	Object	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Object	272696576
+SQLServer:Locks	Lock Waits/sec	Object	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Object	272696576
+SQLServer:Locks	Average Wait Time (ms)	Object	1073874176
+SQLServer:Locks	Average Wait Time Base	Object	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Object	272696576
+SQLServer:Locks	Lock Requests/sec	File	272696576
+SQLServer:Locks	Lock Timeouts/sec	File	272696576
+SQLServer:Locks	Number of Deadlocks/sec	File	272696576
+SQLServer:Locks	Lock Waits/sec	File	272696576
+SQLServer:Locks	Lock Wait Time (ms)	File	272696576
+SQLServer:Locks	Average Wait Time (ms)	File	1073874176
+SQLServer:Locks	Average Wait Time Base	File	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	File	272696576
+SQLServer:Locks	Lock Requests/sec	Database	272696576
+SQLServer:Locks	Lock Timeouts/sec	Database	272696576
+SQLServer:Locks	Number of Deadlocks/sec	Database	272696576
+SQLServer:Locks	Lock Waits/sec	Database	272696576
+SQLServer:Locks	Lock Wait Time (ms)	Database	272696576
+SQLServer:Locks	Average Wait Time (ms)	Database	1073874176
+SQLServer:Locks	Average Wait Time Base	Database	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	Database	272696576
+SQLServer:Locks	Lock Requests/sec	_Total	272696576
+SQLServer:Locks	Lock Timeouts/sec	_Total	272696576
+SQLServer:Locks	Number of Deadlocks/sec	_Total	272696576
+SQLServer:Locks	Lock Waits/sec	_Total	272696576
+SQLServer:Locks	Lock Wait Time (ms)	_Total	272696576
+SQLServer:Locks	Average Wait Time (ms)	_Total	1073874176
+SQLServer:Locks	Average Wait Time Base	_Total	1073939712
+SQLServer:Locks	Lock Timeouts (timeout > 0)/sec	_Total	272696576
+SQLServer:Databases	Data File(s) Size (KB)	*	65792
+SQLServer:Databases	Log File(s) Size (KB)	*	65792
+SQLServer:Databases	Active parallel redo threads	*	65792
+SQLServer:Databases	Log File(s) Used Size (KB)	*	65792
+SQLServer:Databases	Percent Log Used	*	65792
+SQLServer:Databases	XTP Memory Used (KB)	*	65792
+SQLServer:Databases	XTP Controller Log Processed/sec	*	272696576
+SQLServer:Databases	XTP Controller DLC Latency/Fetch	*	1073874176
+SQLServer:Databases	XTP Controller DLC Latency Base	*	1073939712
+SQLServer:Databases	XTP Controller DLC Peak Latency	*	65792
+SQLServer:Databases	Active Transactions	*	65792
+SQLServer:Databases	Transactions/sec	*	272696576
+SQLServer:Databases	Repl. Pending Xacts	*	65792
+SQLServer:Databases	Repl. Trans. Rate	*	272696576
+SQLServer:Databases	Log Cache Reads/sec	*	272696576
+SQLServer:Databases	Log Cache Hit Ratio	*	537003264
+SQLServer:Databases	Log Cache Hit Ratio Base	*	1073939712
+SQLServer:Databases	Log Pool Requests/sec	*	272696576
+SQLServer:Databases	Log Pool Requests Old VLF/sec	*	272696576
+SQLServer:Databases	Avg Dist From EOL/LP Request	*	1073874176
+SQLServer:Databases	Log Pool Requests Base	*	1073939712
+SQLServer:Databases	Log Pool Cache Misses/sec	*	272696576
+SQLServer:Databases	Tail Log Cache Misses/sec	*	272696576
+SQLServer:Databases	TLC Req. Behind Trunc/sec	*	272696576
+SQLServer:Databases	Log Pool Req. Behind Trunc/sec	*	272696576
+SQLServer:Databases	Log Pool Push Empty FreePool/sec	*	272696576
+SQLServer:Databases	Log Pool Push Low Memory/sec	*	272696576
+SQLServer:Databases	Log Pool Push No Free Buffer/sec	*	272696576
+SQLServer:Databases	Log Pool LogWriter Pushes/sec	*	272696576
+SQLServer:Databases	TLC LogWriter Pushes/sec	*	272696576
+SQLServer:Databases	Log Pool Log Scan Pushes/sec	*	272696576
+SQLServer:Databases	Log Pool Hash Inserts/sec	*	272696576
+SQLServer:Databases	Log Pool Hash Deletes/sec	*	272696576
+SQLServer:Databases	Tail Log Cache Deletes/sec	*	272696576
+SQLServer:Databases	Log Pool Invalid Hash Entry/sec	*	272696576
+SQLServer:Databases	Log Pool Disk Reads/sec	*	272696576
+SQLServer:Databases	Log Pool Total Active Log Size	*	65792
+SQLServer:Databases	Log Pool Total Shared Pool Size	*	65792
+SQLServer:Databases	Bulk Copy Rows/sec	*	272696576
+SQLServer:Databases	Bulk Copy Throughput/sec	*	272696576
+SQLServer:Databases	Backup/Restore Throughput/sec	*	272696576
+SQLServer:Databases	DBCC Logical Scan Bytes/sec	*	272696576
+SQLServer:Databases	Shrink Data Movement Bytes/sec	*	272696576
+SQLServer:Databases	Log Flushes/sec	*	272696576
+SQLServer:Databases	Log Bytes Flushed/sec	*	272696576
+SQLServer:Databases	Log Flush Waits/sec	*	272696576
+SQLServer:Databases	Log Flush Wait Time	*	272696576
+SQLServer:Databases	Group Commit Time/sec	*	272696576
+SQLServer:Databases	Log Flush Write Time (ms)	*	272696576
+SQLServer:Databases	Log Truncations	*	65792
+SQLServer:Databases	Log Growths	*	65792
+SQLServer:Databases	Log Shrinks	*	65792
+SQLServer:Databases	Tracked transactions/sec	*	272696576
+SQLServer:Databases	Write Transactions/sec	*	272696576
+SQLServer:Databases	Commit table entries	*	65792
+SQLServer:Databases	PVS off-row record generated/sec	*	272696576
+SQLServer:Databases	PVS off-row record retrieved/sec	*	272696576
+SQLServer:Databases	PVS off-row pages allocated/sec	*	272696576
+SQLServer:Databases	PVS off-row pages deleted/sec	*	272696576
+SQLServer:Databases	PVS in-row diff generated/sec	*	272696576
+SQLServer:Databases	PVS in-row diff retrieved/sec	*	272696576
+SQLServer:Databases	WPR add lsn bucket miss	*	65792
+SQLServer:Databases	WPR stale check bucket miss	*	65792
+SQLServer:Databases	WPR bucket swaps	*	65792
+SQLServer:Latches	Latch Waits/sec		272696576
+SQLServer:Latches	Average Latch Wait Time (ms)		1073874176
+SQLServer:Latches	Average Latch Wait Time Base		1073939712
+SQLServer:Latches	Total Latch Wait Time (ms)		272696576
+SQLServer:Latches	Number of SuperLatches		65792
+SQLServer:Latches	SuperLatch Promotions/sec		272696576
+SQLServer:Latches	SuperLatch Demotions/sec		272696576
+SQLServer:Access Methods	Full Scans/sec		272696576
+SQLServer:Access Methods	Range Scans/sec		272696576
+SQLServer:Access Methods	Probe Scans/sec		272696576
+SQLServer:Access Methods	Scan Point Revalidations/sec		272696576
+SQLServer:Access Methods	Workfiles Created/sec		272696576
+SQLServer:Access Methods	Worktables Created/sec		272696576
+SQLServer:Access Methods	Worktables From Cache Ratio		537003264
+SQLServer:Access Methods	Worktables From Cache Base		1073939712
+SQLServer:Access Methods	Forwarded Records/sec		272696576
+SQLServer:Access Methods	Skipped Ghosted Records/sec		272696576
+SQLServer:Access Methods	Index Searches/sec		272696576
+SQLServer:Access Methods	FreeSpace Scans/sec		272696576
+SQLServer:Access Methods	FreeSpace Page Fetches/sec		272696576
+SQLServer:Access Methods	Pages Allocated/sec		272696576
+SQLServer:Access Methods	Extents Allocated/sec		272696576
+SQLServer:Access Methods	Mixed page allocations/sec		272696576
+SQLServer:Access Methods	Extent Deallocations/sec		272696576
+SQLServer:Access Methods	Page Deallocations/sec		272696576
+SQLServer:Access Methods	Page Splits/sec		272696576
+SQLServer:Access Methods	Table Lock Escalations/sec		272696576
+SQLServer:Access Methods	Deferred Dropped rowsets		65792
+SQLServer:Access Methods	Dropped rowset cleanups/sec		272696576
+SQLServer:Access Methods	Dropped rowsets skipped/sec		272696576
+SQLServer:Access Methods	Deferred dropped AUs		65792
+SQLServer:Access Methods	AU cleanups/sec		272696576
+SQLServer:Access Methods	AU cleanup batches/sec		272696576
+SQLServer:Access Methods	Failed AU cleanup batches/sec		272696576
+SQLServer:Access Methods	Used tree page cookie		272696576
+SQLServer:Access Methods	Failed tree page cookie		272696576
+SQLServer:Access Methods	Used leaf page cookie		272696576
+SQLServer:Access Methods	Failed leaf page cookie		272696576
+SQLServer:Access Methods	LobSS Provider Create Count		272696576
+SQLServer:Access Methods	LobSS Provider Destroy Count		272696576
+SQLServer:Access Methods	LobSS Provider Truncation Count		272696576
+SQLServer:Access Methods	LobHandle Create Count		272696576
+SQLServer:Access Methods	LobHandle Destroy Count		272696576
+SQLServer:Access Methods	By-reference Lob Create Count		272696576
+SQLServer:Access Methods	By-reference Lob Use Count		272696576
+SQLServer:Access Methods	Count Push Off Row		272696576
+SQLServer:Access Methods	Count Pull In Row		272696576
+SQLServer:Access Methods	Count Lob Readahead		272696576
+SQLServer:Access Methods	Page compression attempts/sec		272696576
+SQLServer:Access Methods	Pages compressed/sec		272696576
+SQLServer:Access Methods	InSysXact waits/sec		272696576
+SQLServer:SQL Errors	Errors/sec	DB Offline Errors	272696576
+SQLServer:SQL Errors	Errors/sec	Kill Connection Errors	272696576
+SQLServer:SQL Errors	Errors/sec	User Errors	272696576
+SQLServer:SQL Errors	Errors/sec	Info Errors	272696576
+SQLServer:SQL Errors	Errors/sec	_Total	272696576
+SQLServer:SQL Statistics	Batch Requests/sec		272696576
+SQLServer:SQL Statistics	Forced Parameterizations/sec		272696576
+SQLServer:SQL Statistics	Auto-Param Attempts/sec		272696576
+SQLServer:SQL Statistics	Failed Auto-Params/sec		272696576
+SQLServer:SQL Statistics	Safe Auto-Params/sec		272696576
+SQLServer:SQL Statistics	Unsafe Auto-Params/sec		272696576
+SQLServer:SQL Statistics	SQL Compilations/sec		272696576
+SQLServer:SQL Statistics	SQL Re-Compilations/sec		272696576
+SQLServer:SQL Statistics	SQL Attention rate		272696576
+SQLServer:SQL Statistics	Guided plan executions/sec		272696576
+SQLServer:SQL Statistics	Misguided plan executions/sec		272696576
+SQLServer:Plan Cache	Cache Hit Ratio	Temporary Tables & Table Variables	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	Temporary Tables & Table Variables	1073939712
+SQLServer:Plan Cache	Cache Pages	Temporary Tables & Table Variables	65792
+SQLServer:Plan Cache	Cache Object Counts	Temporary Tables & Table Variables	65792
+SQLServer:Plan Cache	Cache Objects in use	Temporary Tables & Table Variables	65792
+SQLServer:Plan Cache	Cache Hit Ratio	Extended Stored Procedures	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	Extended Stored Procedures	1073939712
+SQLServer:Plan Cache	Cache Pages	Extended Stored Procedures	65792
+SQLServer:Plan Cache	Cache Object Counts	Extended Stored Procedures	65792
+SQLServer:Plan Cache	Cache Objects in use	Extended Stored Procedures	65792
+SQLServer:Plan Cache	Cache Hit Ratio	Bound Trees	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	Bound Trees	1073939712
+SQLServer:Plan Cache	Cache Pages	Bound Trees	65792
+SQLServer:Plan Cache	Cache Object Counts	Bound Trees	65792
+SQLServer:Plan Cache	Cache Objects in use	Bound Trees	65792
+SQLServer:Plan Cache	Cache Hit Ratio	SQL Plans	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	SQL Plans	1073939712
+SQLServer:Plan Cache	Cache Pages	SQL Plans	65792
+SQLServer:Plan Cache	Cache Object Counts	SQL Plans	65792
+SQLServer:Plan Cache	Cache Objects in use	SQL Plans	65792
+SQLServer:Plan Cache	Cache Hit Ratio	Object Plans	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	Object Plans	1073939712
+SQLServer:Plan Cache	Cache Pages	Object Plans	65792
+SQLServer:Plan Cache	Cache Object Counts	Object Plans	65792
+SQLServer:Plan Cache	Cache Objects in use	Object Plans	65792
+SQLServer:Plan Cache	Cache Hit Ratio	_Total	537003264
+SQLServer:Plan Cache	Cache Hit Ratio Base	_Total	1073939712
+SQLServer:Plan Cache	Cache Pages	_Total	65792
+SQLServer:Plan Cache	Cache Object Counts	_Total	65792
+SQLServer:Plan Cache	Cache Objects in use	_Total	65792
+SQLServer:Cursor Manager Total	Cursor conversion rate		272696576
+SQLServer:Cursor Manager Total	Async population count		65792
+SQLServer:Cursor Manager Total	Cursor flushes		65792
+SQLServer:Memory Manager	External benefit of memory		65792
+SQLServer:Memory Manager	Connection Memory (KB)		65792
+SQLServer:Memory Manager	Database Cache Memory (KB)		65792
+SQLServer:Memory Manager	Free Memory (KB)		65792
+SQLServer:Memory Manager	Granted Workspace Memory (KB)		65792
+SQLServer:Memory Manager	Lock Memory (KB)		65792
+SQLServer:Memory Manager	Lock Blocks Allocated		65792
+SQLServer:Memory Manager	Lock Owner Blocks Allocated		65792
+SQLServer:Memory Manager	Lock Blocks		65792
+SQLServer:Memory Manager	Lock Owner Blocks		65792
+SQLServer:Memory Manager	Maximum Workspace Memory (KB)		65792
+SQLServer:Memory Manager	Memory Grants Outstanding		65792
+SQLServer:Memory Manager	Memory Grants Pending		65792
+SQLServer:Memory Manager	Optimizer Memory (KB)		65792
+SQLServer:Memory Manager	Reserved Server Memory (KB)		65792
+SQLServer:Memory Manager	SQL Cache Memory (KB)		65792
+SQLServer:Memory Manager	Stolen Server Memory (KB)		65792
+SQLServer:Memory Manager	Log Pool Memory (KB)		65792
+SQLServer:Memory Manager	Decommit Memory (KB)/sec		272696576
+SQLServer:Memory Manager	Target Server Memory (KB)		65792
+SQLServer:Memory Manager	Total Server Memory (KB)		65792
+SQLServer:Memory Node	Database Node Memory (KB)	000	65792
+SQLServer:Memory Node	Free Node Memory (KB)	000	65792
+SQLServer:Memory Node	Foreign Node Memory (KB)	000	65792
+SQLServer:Memory Node	Stolen Node Memory (KB)	000	65792
+SQLServer:Memory Node	Decommit Node Memory (KB)/sec	000	272696576
+SQLServer:Memory Node	Target Node Memory (KB)	000	65792
+SQLServer:Memory Node	Total Node Memory (KB)	000	65792
+SQLServer:User Settable	Query	User counter 10	65792
+SQLServer:User Settable	Query	User counter 9	65792
+SQLServer:User Settable	Query	User counter 8	65792
+SQLServer:User Settable	Query	User counter 7	65792
+SQLServer:User Settable	Query	User counter 6	65792
+SQLServer:User Settable	Query	User counter 5	65792
+SQLServer:User Settable	Query	User counter 4	65792
+SQLServer:User Settable	Query	User counter 3	65792
+SQLServer:User Settable	Query	User counter 2	65792
+SQLServer:User Settable	Query	User counter 1	65792
+SQLServer:Transactions	Transactions		65792
+SQLServer:Transactions	Snapshot Transactions		65792
+SQLServer:Transactions	Update Snapshot Transactions		65792
+SQLServer:Transactions	NonSnapshot Version Transactions		65792
+SQLServer:Transactions	Longest Transaction Running Time		65792
+SQLServer:Transactions	Update conflict ratio		1073874176
+SQLServer:Transactions	Update conflict ratio base		1073939712
+SQLServer:Transactions	Free Space in tempdb (KB)		65792
+SQLServer:Transactions	Version Generation rate (KB/s)		272696576
+SQLServer:Transactions	Version Cleanup rate (KB/s)		272696576
+SQLServer:Transactions	Version Store Size (KB)		65792
+SQLServer:Transactions	Version Store unit count		65792
+SQLServer:Transactions	Version Store unit creation		65792
+SQLServer:Transactions	Version Store unit truncation		65792
+SQLServer:Wait Statistics	Lock waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Memory grant queue waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Thread-safe memory objects waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Log write waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Log buffer waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Network IO waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Page IO latch waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Page latch waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Non-Page latch waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Wait for the worker	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Workspace synchronization waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Transaction ownership waits	Average wait time (ms)	65792
+SQLServer:Wait Statistics	Lock waits	Waits in progress	65792
+SQLServer:Wait Statistics	Memory grant queue waits	Waits in progress	65792
+SQLServer:Wait Statistics	Thread-safe memory objects waits	Waits in progress	65792
+SQLServer:Wait Statistics	Log write waits	Waits in progress	65792
+SQLServer:Wait Statistics	Log buffer waits	Waits in progress	65792
+SQLServer:Wait Statistics	Network IO waits	Waits in progress	65792
+SQLServer:Wait Statistics	Page IO latch waits	Waits in progress	65792
+SQLServer:Wait Statistics	Page latch waits	Waits in progress	65792
+SQLServer:Wait Statistics	Non-Page latch waits	Waits in progress	65792
+SQLServer:Wait Statistics	Wait for the worker	Waits in progress	65792
+SQLServer:Wait Statistics	Workspace synchronization waits	Waits in progress	65792
+SQLServer:Wait Statistics	Transaction ownership waits	Waits in progress	65792
+SQLServer:Wait Statistics	Lock waits	Waits started per second	65792
+SQLServer:Wait Statistics	Memory grant queue waits	Waits started per second	65792
+SQLServer:Wait Statistics	Thread-safe memory objects waits	Waits started per second	65792
+SQLServer:Wait Statistics	Log write waits	Waits started per second	65792
+SQLServer:Wait Statistics	Log buffer waits	Waits started per second	65792
+SQLServer:Wait Statistics	Network IO waits	Waits started per second	65792
+SQLServer:Wait Statistics	Page IO latch waits	Waits started per second	65792
+SQLServer:Wait Statistics	Page latch waits	Waits started per second	65792
+SQLServer:Wait Statistics	Non-Page latch waits	Waits started per second	65792
+SQLServer:Wait Statistics	Wait for the worker	Waits started per second	65792
+SQLServer:Wait Statistics	Workspace synchronization waits	Waits started per second	65792
+SQLServer:Wait Statistics	Transaction ownership waits	Waits started per second	65792
+SQLServer:Wait Statistics	Lock waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Memory grant queue waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Thread-safe memory objects waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Log write waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Log buffer waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Network IO waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Page IO latch waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Page latch waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Non-Page latch waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Wait for the worker	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Workspace synchronization waits	Cumulative wait time (ms) per second	65792
+SQLServer:Wait Statistics	Transaction ownership waits	Cumulative wait time (ms) per second	65792
+SQLServer:Exec Statistics	Extended Procedures	Average execution time (ms)	65792
+SQLServer:Exec Statistics	DTC calls	Average execution time (ms)	65792
+SQLServer:Exec Statistics	OLEDB calls	Average execution time (ms)	65792
+SQLServer:Exec Statistics	Distributed Query	Average execution time (ms)	65792
+SQLServer:Exec Statistics	Extended Procedures	Execs in progress	65792
+SQLServer:Exec Statistics	DTC calls	Execs in progress	65792
+SQLServer:Exec Statistics	OLEDB calls	Execs in progress	65792
+SQLServer:Exec Statistics	Distributed Query	Execs in progress	65792
+SQLServer:Exec Statistics	Extended Procedures	Execs started per second	65792
+SQLServer:Exec Statistics	DTC calls	Execs started per second	65792
+SQLServer:Exec Statistics	OLEDB calls	Execs started per second	65792
+SQLServer:Exec Statistics	Distributed Query	Execs started per second	65792
+SQLServer:Exec Statistics	Extended Procedures	Cumulative execution time (ms) per second	65792
+SQLServer:Exec Statistics	DTC calls	Cumulative execution time (ms) per second	65792
+SQLServer:Exec Statistics	OLEDB calls	Cumulative execution time (ms) per second	65792
+SQLServer:Exec Statistics	Distributed Query	Cumulative execution time (ms) per second	65792

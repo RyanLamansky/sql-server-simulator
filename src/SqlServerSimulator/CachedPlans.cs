@@ -289,6 +289,13 @@ internal sealed class CachedPlanRegistry
     public CachedPlan? Find(in CachedPlanKey key) => this.entries.GetValueOrDefault(key);
 
     /// <summary>
+    /// The plans compiled into the cache, all told — what the
+    /// <c>SQL Compilations/sec</c> performance counter reports. Written under
+    /// the gate.
+    /// </summary>
+    public long Compilations;
+
+    /// <summary>
     /// Adds <paramref name="plan"/> under its key, unless another session added
     /// one there first, which is returned instead; <paramref name="added"/>
     /// says which.
@@ -304,6 +311,7 @@ internal sealed class CachedPlanRegistry
             }
             if (this.count >= Capacity)
                 this.EvictOldest();
+            this.Compilations++;
             _ = this.entries.TryAdd(plan.Key, plan);
             this.count++;
             this.order.Enqueue(plan.Key);
