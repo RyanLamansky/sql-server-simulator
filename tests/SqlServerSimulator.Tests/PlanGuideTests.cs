@@ -108,6 +108,8 @@ public sealed class PlanGuideTests
         Refused("exec sp_create_plan_guide N'x', N'select * from t where a = 2', N'SQL', NULL, NULL, N''", 10504);
         Refused("exec sp_create_plan_guide N'x', N'select * from t where a = 1', N'SQL', NULL, NULL, NULL", 10502);
         Refused("exec sp_create_plan_guide N'G1', N'select * from t where a = 5', N'SQL'", 10510);
+        // A name in use whose guide covers the same statement is the statement match, whatever the hints.
+        Refused("exec sp_create_plan_guide N'G1', N'select * from t where a = 1', N'SQL', NULL, NULL, N'OPTION (MAXDOP 2)'", 10502);
         Refused("exec sp_create_plan_guide N'x', N'select * from t where a = @0', N'TEMPLATE', NULL, N'@0 int', NULL", 10522);
     }
 

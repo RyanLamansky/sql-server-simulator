@@ -76,8 +76,14 @@ partial class Simulation
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideNameInvalid(name), line);
         if (scope is not { } kind)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideTypeNotAllowed(name, type), line);
-        if (database.PlanGuides.ContainsKey(name))
+        // A name in use is refused here unless its guide covers this statement,
+        // which real reports later as the statement match (Msg 10502), whatever
+        // the hints (probed 2026-10-16 against SQL Server 2025).
+        if (database.PlanGuides.TryGetValue(name, out var named)
+            && !(named.Scope == kind && string.Equals(named.Parameters, parameters, StringComparison.Ordinal) && SameStatement(named.QueryText, stmt, database)))
+        {
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideNameExists(name), line);
+        }
         var typeWord = kind == PlanGuideScope.Object ? "object" : kind == PlanGuideScope.Sql ? "sql" : "template";
         switch (kind)
         {
