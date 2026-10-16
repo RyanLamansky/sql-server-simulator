@@ -54,6 +54,7 @@ public sealed partial class Simulation
             if (!isAlter && !createOrAlter)
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3);
             context.Batch.LockDefinition(schema, existing);
+            RejectChangeOfPlanGuideModule(context.CurrentDatabase, existing, name.ToString(), alter: true);
             return existing is View or UserDefinedFunction
                 && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
                 ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(

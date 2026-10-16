@@ -517,10 +517,9 @@ internal static partial class BuiltInResources
             new("scale", SqlType.TinyInt, null, true),
         ], EnumerateSysSequences);
 
-        // sys.plan_guides: plan guides aren't modeled, so the view is always
-        // empty. SMO's Object-Explorer Plan Guides node reads name / is_disabled;
-        // the full documented shape ships so a direct SELECT sees an authentic
-        // (empty) result. Probe-confirmed column shape (SQL Server 2025).
+        // sys.plan_guides: the database's plan guides in id order. SMO's
+        // Object-Explorer Plan Guides node reads name / is_disabled.
+        // Probe-confirmed column shape (SQL Server 2025).
         Sys("plan_guides",
         [
             new("plan_guide_id", SqlType.Int32, null, false),
@@ -535,6 +534,17 @@ internal static partial class BuiltInResources
             new("scope_batch", SqlType.NVarcharMax, null, true),
             new("parameters", SqlType.NVarcharMax, null, true),
             new("hints", SqlType.NVarcharMax, null, true),
+        ], EnumerateSysPlanGuides);
+
+        // sys.fn_validate_plan_guide(plan_guide_id): listed among the system
+        // objects as the inline function real ships, with its columns; a call
+        // is answered by Selection.ParseValidatePlanGuide.
+        Sys("fn_validate_plan_guide",
+        [
+            new("msgnum", SqlType.Int32, null, false),
+            new("severity", SqlType.TinyInt, null, false),
+            new("state", SqlType.SmallInt, null, true),
+            new("message", NVarcharSqlType.Get(1024, Collation.Baseline, Coercibility.Implicit), 1024, false),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.assembly_types: the three CLR-backed system types shipped by
@@ -912,6 +922,43 @@ internal static partial class BuiltInResources
                     trueBit,
                 ];
             }
+        }
+    }
+
+    /// <summary>
+    /// The rows of <c>sys.plan_guides</c>, which a principal sees only with
+    /// <c>VIEW DEFINITION</c> on the database or what implies it (probed
+    /// 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysPlanGuides(Parser.BatchContext batch, Database database)
+    {
+        static SqlValue Text(string? value) => value is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(value);
+        if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(batch, database, out var principalId)
+            || (principalId is { } filtered && !PermissionChecker.HasFullMetadataVisibility(database, filtered, ServerLoginRights.For(batch.Connection))))
+        {
+            yield break;
+        }
+        foreach (var guide in database.PlanGuides.Select(static pair => pair.Value).OrderBy(static guide => guide.Id))
+        {
+            yield return [
+                SqlValue.FromInt32(guide.Id),
+                SqlValue.FromSystemName(guide.Name),
+                SqlValue.FromDateTime(guide.CreateDate),
+                SqlValue.FromDateTime(guide.ModifyDate),
+                SqlValue.FromBoolean(guide.IsDisabled),
+                Text(guide.QueryText),
+                SqlValue.FromByte((byte)guide.Scope),
+                SqlValue.FromNVarchar(guide.Scope switch
+                {
+                    Schemas.PlanGuideScope.Object => "OBJECT",
+                    Schemas.PlanGuideScope.Sql => "SQL",
+                    _ => "TEMPLATE",
+                }),
+                guide.ScopeObjectId is { } objectId ? SqlValue.FromInt32(objectId) : SqlValue.Null(SqlType.Int32),
+                Text(guide.ScopeBatch),
+                Text(guide.Parameters),
+                Text(guide.Hints),
+            ];
         }
     }
 

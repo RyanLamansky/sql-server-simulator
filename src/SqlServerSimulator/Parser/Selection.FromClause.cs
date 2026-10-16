@@ -1192,6 +1192,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseBuiltinPermissions(context, objectName.Leaf));
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_my_permissions"))
                         return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_validate_plan_guide"))
+                        return BuiltInRowsetSource(context, ParseValidatePlanGuide(context, objectName.ToString()));
                 }
 
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text,

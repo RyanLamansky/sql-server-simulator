@@ -465,6 +465,7 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
         }
         context.Batch.LockDefinition(schema, existing);
+        RejectChangeOfPlanGuideModule(schema.Database, existing, name.ToString(), alter: false);
         if (existing.Parent is HeapTable parent)
             context.Batch.AcquireTableRedefinitionLock(parent);
         else
@@ -750,6 +751,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("procedure", name.Leaf);
         context.Batch.LockDefinition(schema, existing);
+        RejectChangeOfPlanGuideModule(schema.Database, existing, name.ToString(), alter: false);
         if (!schema.Procedures.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
         if (removed is not null)
@@ -846,6 +848,7 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
         context.Batch.LockDefinition(schema, existing);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
+        RejectChangeOfPlanGuideModule(schema.Database, existing, name.ToString(), alter: false);
         if (existing is UserDefinedFunction function && SchemaBinding.FindReferencingConstraint(context.CurrentDatabase, function) is { } constraint)
             throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP FUNCTION", name.ToString(), constraint);
         if (!schema.Functions.TryRemove(name.Leaf, out var removed) && !ifExists)
@@ -938,6 +941,8 @@ partial class Simulation
         // self-reference doesn't count; it goes with the table.
         if (removedTable.IncomingForeignKeys.Exists(fk => fk.ChildTable != removedTable))
             throw SimulatedSqlException.CannotDropTableReferencedByForeignKey(name.ToString());
+        if (schema is not null)
+            RejectDropOfPlanGuideTriggerTable(schema.Database, removedTable, name.ToString());
         // A node table an edge constraint names can't go either, though its
         // own edges may (probed 2026-09-27 against SQL Server 2025).
         if (removedTable.GraphKind == GraphTableKind.Node && schema is not null

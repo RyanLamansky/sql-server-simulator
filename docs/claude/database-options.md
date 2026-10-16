@@ -71,7 +71,7 @@ See [Query Store](#query-store).
 
 ## Recorded switches
 
-The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION`, the access mode, `TARGET_RECOVERY_TIME`, `DELAYED_DURABILITY`, `FILESTREAM` and the broker switches are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess` / `TargetRecoveryTimeSeconds` / `DelayedDurability` / `FileStreamNonTransactedAccess` / `BrokerEnabled`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
+The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION`, the access mode, `TARGET_RECOVERY_TIME`, `DELAYED_DURABILITY`, `FILESTREAM` and the broker switches are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess` / `TargetRecoveryTimeSeconds` / `DelayedDurability` / `FileStreamNonTransactedAccess` / `BrokerEnabled`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025) — save `PARAMETERIZATION FORCED`, which decides the text [Query Store](#query-store) stores.
 Every database, system or user, starts from the same defaults: automatic statistics creation and update and temporal history retention on, page verification `CHECKSUM`, `MULTI_USER`, a target recovery time of 60 seconds, Service Broker enabled, everything else off — save what the system databases ship with (`master` a recovery time of 0, `master` and `model` the broker off, `master` and `msdb` snapshot isolation allowed; probed 2026-09-30).
 `TORN_PAGE_DETECTION OFF` clears torn-page detection alone: a `CHECKSUM` database stays `CHECKSUM` (probed 2026-09-30).
 Turning `AUTO_CREATE_STATISTICS` off takes its incremental mode with it.
@@ -185,7 +185,9 @@ Probed 2026-09-29 against SQL Server 2025, with `sp_query_store_flush_db` and a 
   A statement real simply parameterizes is stored in real's parameterized form, `(@1 tinyint)SELECT * FROM [t] WHERE [a]=@1`, whose rendering rules sit on `Parser/SimpleParameterization.cs`; `<>`, `!=`, `NOT`, `TOP` and a catalog view keep a statement as written.
   A statement reading variables or parameters is prefixed with their declarations, spelled as declared — `(@X int,@s varchar(10))select …` — except a condition or `RETURN`, stored bare.
   They come in the order real's binder meets them (`QueryStoreShape.VariablesInBinderOrder`): a query's FROM clause and joins, WHERE, GROUP BY and HAVING, then its select list, ORDER BY, TOP or FETCH, OFFSET, and last the variables its select list assigns, each set-operation branch in turn; an `UPDATE` or `DELETE`'s FROM, WHERE and TOP ahead of its SET list; a `SET` or `DECLARE`'s expression ahead of its target; anything else, and whatever a parenthesis holds, as written (probed 2026-10-06 against SQL Server 2025).
-  `query_parameterization_type` is 2 for the parameterized form, 1 for a parameterized command or `sp_executesql` whose text declares its parameters (only those it reads), 0 otherwise; a module body is never parameterized.
+  In a database whose `PARAMETERIZATION` is `FORCED`, a statement forced parameterization covers is stored in that form instead: the template `sp_get_query_template` returns behind its declaration, `(@0 int)select * from t where a = @0`, an `UPDATE` declaring its `WHERE` clause's parameters first (`Parser/ForcedParameterization.cs` holds the rules; probed 2026-10-15 against SQL Server 2025).
+  **Divergence**: real declares an `IN` list's parameters in reverse — `(@1 int,@0 int)… in ( @0 , @1 )` — where the simulator keeps number order.
+  `query_parameterization_type` is 3 for the forced form, 2 for the parameterized form, 1 for a parameterized command or `sp_executesql` whose text declares its parameters (only those it reads), 0 otherwise; a module body is never parameterized.
 - **What makes a query distinct**: its stored text, context settings, containing module (`object_id`) and parameterization type, and for a statement reading a table variable its batch — such a query carries a `batch_sql_handle`.
 - **Context settings.**
   `set_options` carries real's plan-attribute bits for the session's options (0xFB for a SqlClient session, 0x10FB with `ARITHABORT`), with the language, `DATEFORMAT` (1 for mdy, 2 for dmy) and `DATEFIRST`; `default_schema_id` is the schema a one-part object name resolved through, -2 when the statement names none that way, and -2 always in a module.
@@ -238,7 +240,7 @@ Forced plans are recorded, not applied: the simulator has one plan per query and
 ### Not modeled yet
 
 - Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes) — not chased: cleanup follows real's store size and clock, and the simulator keeps one plan per query for the cap to bite on.
-- The AUTO / CUSTOM compile-CPU threshold, forced parameterization, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
+- The AUTO / CUSTOM compile-CPU threshold, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
 - A forced plan steers real's optimizer, which the simulator doesn't have — not chased.
   So do a hint's `MAXDOP`, `FAST`, grant percentages and the rest that have no effect the simulator models.
 

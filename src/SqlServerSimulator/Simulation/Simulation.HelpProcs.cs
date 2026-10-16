@@ -536,7 +536,7 @@ partial class Simulation
 
     /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
     private static bool OwnsReturnCode(string systemProcName) =>
-        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"
+        systemProcName is "sp_executesql" or "sp_get_query_template" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"
             or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent";
 
     /// <summary>
@@ -618,6 +618,7 @@ partial class Simulation
         // The extended procedures report every error at line 1 (probed
         // 2026-10-04 against SQL Server 2025).
         ("sp_bindsession" or "sp_getbindtoken" or "sp_testlinkedserver", _) => (1, null),
+        ("sp_get_query_template", 201) => (1, null),
         (_, 201) => (0, null),
         ("sp_datatype_info" or "sp_datatype_info_100" or "sp_server_info", 8114) => (0, null),
         (_, 8144 or 8145 or 8146) when exception.SystemProcedureBindingError => (0, null),

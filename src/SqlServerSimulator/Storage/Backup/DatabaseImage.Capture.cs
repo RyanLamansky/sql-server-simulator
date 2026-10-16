@@ -91,6 +91,7 @@ partial class DatabaseImage
         foreach (var (key, value) in database.ExtendedProperties)
             image.ExtendedProperties.Add((key, value));
         image.CaptureKeys(database);
+        image.CapturePlanGuides(database);
 
         foreach (var schema in database.Schemas.Select(static pair => pair.Value).OrderBy(static schema => schema.SchemaId))
         {

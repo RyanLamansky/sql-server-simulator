@@ -186,7 +186,16 @@ partial class Simulation
         string text;
         byte parameterizationType;
         string? tableVariableScope = null;
-        if (shape.Parameterized is { } parameterized && !isModule)
+        // A database parameterizing by force stores a statement's forced form
+        // as type 3 (probed 2026-10-15 against SQL Server 2025).
+        if (shape.Forced is { } forced && !isModule && (database.Switches & DatabaseSwitches.ParameterizationForced) != 0)
+        {
+            text = forced;
+            parameterizationType = 3;
+            offsetStart = 2L * shape.ForcedPrefixLength;
+            offsetEnd = 2L * (forced.Length - 1);
+        }
+        else if (shape.Parameterized is { } parameterized && !isModule)
         {
             text = parameterized;
             parameterizationType = 2;
@@ -615,9 +624,12 @@ partial class Simulation
     /// </summary>
     private static string ShowPlanXml(QueryStoreQuery query, QueryStoreShape shape, short compatibilityLevel)
     {
-        var statementText = query.Key.ParameterizationType == 2 && shape.Parameterized is { } parameterized
-            ? parameterized[shape.ParameterizedPrefixLength..]
-            : shape.Text;
+        var statementText = query.Key.ParameterizationType switch
+        {
+            2 when shape.Parameterized is { } parameterized => parameterized[shape.ParameterizedPrefixLength..],
+            3 when shape.Forced is { } forced => forced[shape.ForcedPrefixLength..],
+            _ => shape.Text,
+        };
         return AppendShowPlanStatement(OpenShowPlan(), statementText, 1, shape, query.Text.StatementSqlHandle, query.Context.Id, query.Key.ObjectId,
                 query.Key.ParameterizationType, retrievedFromCache: false, compatibilityLevel, query.Context.Key.SetOptions)
             .Append(ShowPlanClose)
@@ -743,6 +755,18 @@ internal sealed class QueryStoreShape
     /// </summary>
     public readonly int ParameterizedPrefixLength;
 
+    /// <summary>
+    /// The forced-parameterized form a database whose <c>PARAMETERIZATION</c>
+    /// is <c>FORCED</c> stores, declaration first —
+    /// <c>(@0 int)select * from t where a = @0</c> — or null for a statement
+    /// forced parameterization leaves as written; see
+    /// <see cref="ForcedParameterization"/>.
+    /// </summary>
+    public readonly string? Forced;
+
+    /// <summary>The length of <see cref="Forced"/>'s declaration.</summary>
+    public readonly int ForcedPrefixLength;
+
     /// <summary>Every <c>@name</c> the statement reads, without its <c>@</c> (the <see cref="BatchContext.Variables"/> key form), in first-appearance order.</summary>
     public readonly string[] Variables;
 
@@ -762,7 +786,7 @@ internal sealed class QueryStoreShape
     public readonly byte[] QueryHash;
     public readonly byte[] QueryPlanHash;
 
-    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, (string QueryStore, string Prepared)? parameterized, string[] variables,
+    private QueryStoreShape(string text, bool captured, bool capturedWhenCallingFunction, (string QueryStore, string Prepared)? parameterized, ForcedParameterization.Template? forced, string[] variables,
         bool isConditionOrReturn, bool usesDefaultSchema, bool isTrivial, string statementType, byte[] hash)
     {
         this.Text = text;
@@ -771,6 +795,12 @@ internal sealed class QueryStoreShape
         this.Parameterized = parameterized?.QueryStore;
         this.PreparedText = parameterized?.Prepared;
         this.ParameterizedPrefixLength = parameterized is { QueryStore: var declared } ? DeclarationLength(declared) : 0;
+        if (forced is not null)
+        {
+            var declaration = $"({forced.StoredDeclaration})";
+            this.Forced = declaration + forced.Text;
+            this.ForcedPrefixLength = declaration.Length;
+        }
         this.Variables = variables;
         this.IsConditionOrReturn = isConditionOrReturn;
         this.UsesDefaultSchema = usesDefaultSchema;
@@ -901,6 +931,7 @@ internal sealed class QueryStoreShape
             captured,
             capturedWhenCallingFunction: !captured && lead is ReservedKeyword { Keyword: Keyword.Select },
             parameterized,
+            captured ? ForcedParameterization.Parameterize(tokens, out _) : null,
             VariablesInBinderOrder(tokens),
             isCondition,
             usesDefaultSchema,

@@ -920,7 +920,7 @@ internal sealed partial class BatchContext
     /// </summary>
     public static bool IsSystemTableValuedFunction(MultiPartName name)
     {
-        if (name.Count > 3 || !BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_virtualfilestats"))
+        if (name.Count > 3 || !BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_validate_plan_guide", "fn_virtualfilestats"))
             return false;
         return name.Count == 1
             || (name.Count == 2 && BuiltInToken.Equals(name.ImmediateQualifier, "sys"))

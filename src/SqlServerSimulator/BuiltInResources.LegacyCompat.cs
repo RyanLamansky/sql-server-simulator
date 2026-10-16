@@ -255,6 +255,10 @@ internal static partial class BuiltInResources
         "sp_unprepare",
         // The compression estimate, over the simulator's own page counts.
         "sp_estimate_data_compression_savings",
+        // The plan guides and the forced-parameterization template they take.
+        "sp_create_plan_guide",
+        "sp_control_plan_guide",
+        "sp_get_query_template",
         "sp_addapprole",
         "sp_dropapprole",
         "sp_approlepassword",
@@ -1023,7 +1027,7 @@ internal static partial class BuiltInResources
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
         || proc.StartsWith("sp_OA", StringComparison.Ordinal)
-        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_execute" or "sp_executesql" or "sp_getbindtoken" or "sp_prepare" or "sp_prepexec" or "sp_unprepare" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+        || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_execute" or "sp_executesql" or "sp_getbindtoken" or "sp_get_query_template" or "sp_prepare" or "sp_prepexec" or "sp_unprepare" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
     internal static bool TryResolveSystemObject(int objectId, out SystemObject system)

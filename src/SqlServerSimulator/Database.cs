@@ -112,6 +112,7 @@ internal sealed partial class Database
         ];
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
+        this.PlanGuides = new(collation);
         this.EncryptionKeys = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         // guest's schema hosts objects like any other: a user defaulting to it
@@ -937,6 +938,20 @@ internal sealed partial class Database
     /// a scheme's name may not repeat a filegroup's (<see cref="Filegroups"/>).
     /// </summary>
     public readonly ConcurrentDictionary<string, Schemas.PartitionScheme> PartitionSchemes;
+
+    /// <summary>
+    /// The database's plan guides by name, compared under its collation;
+    /// <c>sys.plan_guides</c> lists them in id order.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Schemas.PlanGuide> PlanGuides;
+
+    /// <summary>
+    /// The last id a plan guide took. A <c>SQL</c> or <c>TEMPLATE</c> guide
+    /// steps it by two and an <c>OBJECT</c> guide by one, so a database's
+    /// first guide is 65537 or 65536 (probed 2026-10-15 against SQL Server
+    /// 2025).
+    /// </summary>
+    public int LastPlanGuideId = 65535;
 
     private int nextPartitionFunctionId = 65535;
 

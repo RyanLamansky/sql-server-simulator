@@ -994,9 +994,9 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException StatementsCouldNotBePrepared() =>
         new("Statement(s) could not be prepared.", 8180, 16, 1);
 
-    /// <summary>Msg 214 state 2: an extended procedure's argument of another type than the one it takes.</summary>
-    internal static SimulatedSqlException ProcedureExpectsParameterOfType(string parameterName, string typeName) =>
-        new($"Procedure expects parameter '{parameterName}' of type '{typeName}'.", 214, 16, 2);
+    /// <summary>Msg 214, state 2 unless the procedure raises it at another: an extended procedure's argument of another type than the one it takes.</summary>
+    internal static SimulatedSqlException ProcedureExpectsParameterOfType(string parameterName, string typeName, byte state = 2) =>
+        new($"Procedure expects parameter '{parameterName}' of type '{typeName}'.", 214, 16, state);
 
     /// <summary>Msg 591: a procedure's OUTPUT parameter given an argument not marked OUTPUT, which ends the batch.</summary>
     internal static SimulatedSqlException FormalParameterNotOutput(string procedure, string parameterName, byte state) =>

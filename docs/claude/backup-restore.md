@@ -23,7 +23,7 @@ Row values are stored in the engine's own storage encodings, so the header recor
 
 ## What a backup carries
 
-A [`DatabaseImage`](../../src/SqlServerSimulator/Storage/Backup/DatabaseImage.cs): the database's settings, files, filegroups, schemas, principals, permissions, role memberships and extended properties as values; every schema object as the T-SQL that recreates it, with the object ids it allocates; the state that DDL can't set (column and index ids, constraint trust and disabled flags, system-named marks, index options, identity and sequence positions, owners, `EXECUTE AS` principals, trigger switches and order, modification dates); and every table's rows.
+A [`DatabaseImage`](../../src/SqlServerSimulator/Storage/Backup/DatabaseImage.cs): the database's settings, files, filegroups, schemas, principals, permissions, role memberships, extended properties, keys and plan guides as values; every schema object as the T-SQL that recreates it, with the object ids it allocates; the state that DDL can't set (column and index ids, constraint trust and disabled flags, system-named marks, index options, identity and sequence positions, owners, `EXECUTE AS` principals, trigger switches and order, modification dates); and every table's rows.
 Modules replay their stored definition verbatim, under the `QUOTED_IDENTIFIER` and `ANSI_NULLS` they were created with and in their own schema.
 
 Recreating objects through the engine's DDL, rather than copying the object graph, is what rebinds every parsed expression — a default calling a sequence, a computed column calling a function, a view's bound base tables — to the restored database's own objects.

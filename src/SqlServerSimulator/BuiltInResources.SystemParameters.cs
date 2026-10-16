@@ -53,6 +53,8 @@ partial class BuiltInResources
             ["sp_columns_rowset"] = [new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@column_name", 256, 256, 0, 0)],
             ["sp_columns_rowset2"] = [new("@table_schema", 256, 256, 0, 0), new("@column_name", 256, 256, 0, 0)],
             ["sp_configure"] = [new("@configname", 167, 35, 0, 0), new("@configvalue", 56, 4, 10, 0)],
+            ["sp_control_plan_guide"] = [new("@operation", 231, 120, 0, 0), new("@name", 256, 256, 0, 0)],
+            ["sp_create_plan_guide"] = [new("@name", 256, 256, 0, 0), new("@stmt", 231, -1, 0, 0), new("@type", 231, 120, 0, 0), new("@module_or_batch", 231, -1, 0, 0), new("@params", 231, -1, 0, 0), new("@hints", 231, -1, 0, 0)],
             ["sp_createstats"] = [new("@indexonly", 175, 9, 0, 0), new("@fullscan", 175, 9, 0, 0), new("@norecompute", 175, 12, 0, 0), new("@incremental", 175, 12, 0, 0)],
             ["sp_cursor_list"] = [new("@cursor_return", 56, 4, 10, 0, isOutput: true), new("@cursor_scope", 56, 4, 10, 0)],
             ["sp_datatype_info"] = [new("@data_type", 56, 4, 10, 0), new("@ODBCVer", 48, 1, 3, 0)],

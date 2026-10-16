@@ -955,7 +955,10 @@ public sealed class HelpProcTests
         var sim = new Simulation();
         var all = ResultSets(sim, "exec sp_helpextendedproc")[0].Rows;
         CollectionAssert.Contains(all.ConvertAll(static row => $"{row[0]}|{row[1]}"), "sp_executesql|(server internal)");
-        CollectionAssert.AreEqual(all.ConvertAll(static row => (string)row[0]!).Order(StringComparer.OrdinalIgnoreCase).ToList(), all.ConvertAll(static row => (string)row[0]!));
+        // Real's collation sorts an underscore ahead of every letter: sp_get_query_template before sp_getbindtoken.
+        CollectionAssert.AreEqual(
+            all.ConvertAll(static row => (string)row[0]!).Order(StringComparer.Create(System.Globalization.CultureInfo.InvariantCulture, ignoreCase: true)).ToList(),
+            all.ConvertAll(static row => (string)row[0]!));
         CollectionAssert.AreEqual(new object?[] { "xp_msver", "xplog70.dll" }, ResultSets(sim, "exec sp_helpextendedproc N'XP_MSVER'")[0].Rows.Single());
         var refused = sim.AssertSqlError("exec sp_helpextendedproc N'sp_help'", 15019);
         AreEqual((15, "sp_helpextendedproc"), (refused.Errors[0].LineNumber, refused.Errors[0].Procedure));

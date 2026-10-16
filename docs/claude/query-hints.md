@@ -224,6 +224,43 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 `nolock` / `readpast` / etc. aren't reserved keywords, so they're valid bare aliases via the standard `ConsumeOptionalAlias` `Name`-token path.
 The hint-vs-alias question here has only one answer (alias), no divergence.
 
+## Plan guides
+
+`sp_create_plan_guide`, `sp_control_plan_guide`, `sys.plan_guides` and `sys.fn_validate_plan_guide` (`Simulation.PlanGuides.cs`, the errors in `SimulatedSqlException.PlanGuideErrors.cs`; probed 2026-10-15 against SQL Server 2025).
+A guide is stored in `Database.PlanGuides`, listed, enabled, disabled, validated, dropped, rolled back with its transaction and carried by a backup; the simulator has no optimizer for one to steer, so it changes nothing a statement does.
+
+- **Its hints are checked, not applied.**
+  A `SQL` or `OBJECT` guide's hints compile as the statement's own `OPTION` clause — replacing any the statement writes — through this document's OPTION parser, which is what makes real's refusals come out: a hint text not opening with `OPTION`, holding a `;`, or failing the clause's own grammar (Msg 102, 137, 1042) is that error then **Msg 10504**, and a semantic refusal of the clause (`TABLE HINT`'s Msg 8722 / 8723, `USE PLAN`'s Msg 6913) comes alone.
+  An index hint naming no index (Msg 308) and a plan the hints leave impossible (Msg 8622) are left to `sys.fn_validate_plan_guide`, as real leaves them.
+  A `TEMPLATE` guide's hints must be exactly `OPTION (PARAMETERIZATION FORCED | SIMPLE)` (Msg 10522).
+- **Its statement compiles with `@params` declared**, in its batch for a `SQL` guide: a failure is the compile's errors then **Msg 10516**, while a missing object defers as a batch's compile does — and `sys.fn_validate_plan_guide` reports it (Msg 208) as one row of `msgnum` / `severity` / `state` / `message`, the first error a fresh compile of the guide meets.
+  `@stmt` must be one statement (Msg 10506) of a kind a guide takes (Msg 10509), match one of the batch's or the module's statements (Msg 10507, which an `OBJECT` guide's module reports as its own at line 1), and read a table (Msg 10519, whatever the hints) — a statement's text matches under the database's collation, spaced exactly as written there, a trailing `;` aside.
+  An empty `@stmt` is taken as it stands.
+- **Every refusal of both procedures ends the batch as under `XACT_ABORT`**, because real's procedures run in a transaction of their own: uncaught the caller's transaction rolls back too, and a `CATCH` finds the procedure's transaction open and doomed, `@@TRANCOUNT` one higher.
+  A compile's errors and the refusal after them are one report whose first entry a `CATCH` and `@@ERROR` read.
+  The exceptions: the binder's Msg 201 and the NULL-argument Msg 214, which end only their statement — though Msg 8144 ends the batch.
+- **Identity.**
+  Names compare under the database's collation, and a guide over the scope, `@params` and statement (collation-compared) of another is **Msg 10502**, a second `TEMPLATE` guide over one statement **Msg 10529**.
+  `plan_guide_id` steps by two for a `SQL` or `TEMPLATE` guide and by one for an `OBJECT` guide from 65535, so a database's first guide is 65537 or 65536.
+- **Control.**
+  `DROP`, `ENABLE` and `DISABLE` take a guide's name (an identifier, brackets stripped) and the `ALL` forms ignore it; an unknown operation is **Msg 10503** and a missing guide **Msg 10508** (state 1 / 2 / 3 for drop / enable / disable), both from `sys.sp_control_plan_guide_int` at line 1.
+  `ENABLE` and `DISABLE` move `modify_date`.
+- **What a guide holds back.**
+  A procedure, function or trigger an `OBJECT` guide names refuses `DROP` (Msg 10513 state 1) and `ALTER` (state 2), and its table's `DROP TABLE` (Msg 10526); `sp_rename` is allowed, the guide following the object id.
+- **Permissions.** A `SQL` or `TEMPLATE` guide needs `ALTER` on the database (Msg 10517), an `OBJECT` guide `ALTER` on its module (else Msg 10515), and control either (Msg 10518); `sys.plan_guides` lists guides only to a principal with `VIEW DEFINITION` on the database.
+- **Events.** `CREATE_PLAN_GUIDE`, `ALTER_PLAN_GUIDE` (enable and disable) and `DROP_PLAN_GUIDE` reach `DDL_PLAN_GUIDE_EVENTS` triggers with the call's arguments as `<Parameters>`, and an `ALL` form's with an empty `ObjectName`.
+
+### Divergences
+
+- A refused guide takes no id here, where real's failures past its argument checks consume one or two.
+- A `CATCH` around a NULL-argument Msg 214 finds no open transaction here; real's procedure had already opened its own.
+- The `@stmt` match reads the scope's tokens, not its parse, so a statement real's parser wouldn't count — a CTE's final `SELECT`, an `IF`'s condition — may match here.
+
+### Not modeled yet
+
+- `sp_create_plan_guide_from_handle`: its guide's hints are the cached plan's showplan XML, an operator tree the simulator doesn't produce.
+- Msg 10537 (enabling a guide another enabled one shadows) and Msg 10525 (a guide's `RECOMPILE` ignored under automatic parameterization).
+
 ## Probe artifacts
 
 Captured against SQL Server 2025 from `/tmp/hint-probe/` and `/tmp/insert-hints/` (both deleted after use).

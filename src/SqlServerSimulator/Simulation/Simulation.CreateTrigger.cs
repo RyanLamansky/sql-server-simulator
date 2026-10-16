@@ -388,7 +388,10 @@ partial class Simulation
         // Sch-M on the existing trigger instance's SchemaLock before
         // replacement — same pattern as ALTER PROCEDURE.
         if (existed)
+        {
             context.Batch.LockDefinition(triggerSchema, existing!);
+            RejectChangeOfPlanGuideModule(context.CurrentDatabase, existing!, triggerName.ToString(), alter: true);
+        }
 
         var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
         var trigger = new Trigger(

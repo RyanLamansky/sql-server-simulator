@@ -10,8 +10,8 @@ namespace SqlServerSimulator;
 /// <c>sys.all_objects</c>, <c>sys.sequences</c> (create_date / principal_id —
 /// the missing columns that left the Sequences node empty),
 /// <c>sys.types.max_length</c> / precision / scale (User-Defined Data Types
-/// node), <c>sys.assembly_types</c> (the three CLR system types), the empty
-/// <c>sys.plan_guides</c> view, and <c>sys.database_files</c> (current-database
+/// node), <c>sys.assembly_types</c> (the three CLR system types), the
+/// <c>sys.plan_guides</c> view a new database holds none in, and <c>sys.database_files</c> (current-database
 /// projection of <c>sys.master_files</c>, cross-database resolvable). Shapes /
 /// values probed against SQL Server 2025 (2026-07-15).
 /// </summary>

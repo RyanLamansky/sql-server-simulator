@@ -84,6 +84,7 @@ partial class DatabaseImage
             database.RoleMembers.AddRange(this.RoleMembers);
         }
         this.ApplyKeys(database);
+        this.ApplyPlanGuides(database);
     }
 
     /// <summary>

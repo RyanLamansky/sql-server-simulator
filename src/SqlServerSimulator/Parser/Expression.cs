@@ -2445,7 +2445,7 @@ internal abstract class Expression : ExpressionNode
                 _ => null
             },
             _ => null
-        } ?? throw (BuiltInToken.EqualsAny(name, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_virtualfilestats")
+        } ?? throw (BuiltInToken.EqualsAny(name, "fn_builtin_permissions", "fn_helpcollations", "fn_listextendedproperty", "fn_my_permissions", "fn_validate_plan_guide", "fn_virtualfilestats")
             ? SimulatedSqlException.UnrecognizedSystemFunction(name)
             : SimulatedSqlException.UnrecognizedBuiltInFunction(name));
 
