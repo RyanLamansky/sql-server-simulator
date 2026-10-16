@@ -1061,6 +1061,36 @@ public sealed partial class Simulation
     /// </remarks>
     internal readonly HashSet<SessionToken> Sessions = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>
+    /// The session ids a pooled connection's reset is moving onto a fresh
+    /// connection, guarded by <see cref="Sessions"/>. Real's session outlives
+    /// <c>sp_reset_connection</c>, so a <c>KILL</c> meeting one mid-reset
+    /// waits for its successor rather than finding no session (Msg 6106) or
+    /// one whose transport isn't yet attached.
+    /// </summary>
+    internal readonly HashSet<int> ResettingSpids = [];
+
+    /// <summary>Marks <paramref name="spid"/> as mid-reset, until <see cref="EndSessionReset"/>.</summary>
+    internal void BeginSessionReset(int spid)
+    {
+        lock (this.Sessions)
+            _ = this.ResettingSpids.Add(spid);
+    }
+
+    /// <summary>Ends <see cref="BeginSessionReset"/>'s mark.</summary>
+    internal void EndSessionReset(int spid)
+    {
+        lock (this.Sessions)
+            _ = this.ResettingSpids.Remove(spid);
+    }
+
+    /// <summary>Whether a pooled connection's reset is moving <paramref name="spid"/> onto a fresh connection.</summary>
+    internal bool IsResettingSession(int spid)
+    {
+        lock (this.Sessions)
+            return this.ResettingSpids.Contains(spid);
+    }
+
     /// <summary>Whether <paramref name="session"/> is still one of the simulation's sessions.</summary>
     internal bool HasSession(SessionToken session)
     {

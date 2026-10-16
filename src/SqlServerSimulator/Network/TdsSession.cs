@@ -1676,6 +1676,20 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
     private void ResetConnection()
     {
+        var spid = this.connection!.Spid;
+        simulation.BeginSessionReset(spid);
+        try
+        {
+            this.ReplaceConnectionForReset();
+        }
+        finally
+        {
+            simulation.EndSessionReset(spid);
+        }
+    }
+
+    private void ReplaceConnectionForReset()
+    {
         var previous = this.connection!;
         var database = previous.Database;
         var clientHostName = previous.ClientHostName;

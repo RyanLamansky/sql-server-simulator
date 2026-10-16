@@ -141,8 +141,17 @@ partial class Simulation
         if (spid <= MaxSystemSessionId)
             throw SimulatedSqlException.KillSystemProcess();
 
+        // A pooled session mid-reset is still a session; its successor
+        // takes the kill once the reset has attached it.
+        var simulation = connection.Simulation;
+        var spinner = default(SpinWait);
+        while (simulation.IsResettingSession(spid))
+        {
+            batch.ThrowIfCancelled();
+            spinner.SpinOnce();
+        }
         SimulatedDbConnection? victim = null;
-        foreach (var candidate in connection.Simulation.SnapshotConnections())
+        foreach (var candidate in simulation.SnapshotConnections())
         {
             if (candidate.Spid == spid && !candidate.Killed)
             {
