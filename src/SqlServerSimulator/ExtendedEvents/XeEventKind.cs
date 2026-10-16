@@ -31,6 +31,7 @@ internal enum XeEventKind
     ObjectDeleted,
     DatabaseCreated,
     DatabaseDropped,
+    UserEvent,
 }
 
 /// <summary>Each <see cref="XeEventKind"/>'s package and name, and whether a session that starts with the server takes it.</summary>
@@ -66,6 +67,7 @@ internal static class XeEventKinds
         ("sqlserver", "object_deleted"),
         ("sqlserver", "database_created"),
         ("sqlserver", "database_dropped"),
+        ("sqlserver", "user_event"),
     ];
 
     public static int Count => Names.Length;

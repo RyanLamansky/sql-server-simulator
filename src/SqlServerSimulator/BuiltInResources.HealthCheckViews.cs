@@ -345,7 +345,7 @@ internal static partial class BuiltInResources
             new("event_count", SqlType.BigInt, null, true),
             new("dropped_event_count", SqlType.Int32, null, true),
         ];
-        Sys("traces", traces, (batch, _) => DefaultTraceRows(batch.Connection.Simulation, traces));
+        Sys("traces", traces, (batch, _) => DefaultTraceRows(batch.Connection.Simulation, traces).Concat(UserTraceRows(batch.Connection.Simulation)));
     }
 
     /// <summary>
@@ -509,7 +509,7 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// <c>sys.traces</c>: the default trace while <c>default trace
+    /// <c>sys.traces</c>' default trace row while <c>default trace
     /// enabled</c> is on, with real's file sizing and rollover; it records no
     /// events here (see <c>fn_trace_gettable</c>).
     /// </summary>

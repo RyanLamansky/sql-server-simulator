@@ -725,6 +725,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 | `ALTER SERVER ROLE <fixed> ADD` / `DROP MEMBER` | `sysadmin`, or a member of that same role — `CONTROL SERVER`, `ALTER ANY SERVER ROLE` and `securityadmin` are all refused | **Msg 15151** |
 | `CREATE LOGIN`, `ALTER` / `DROP LOGIN` | see [Login DDL gating](#login-ddl-gating) | |
 | `CREATE` / `ALTER` / `DROP CREDENTIAL` | `ALTER ANY CREDENTIAL` | **Msg 15247** for `CREATE`, the missing-credential **Msg 15151** for `ALTER` / `DROP` |
+| the `sp_trace_*` procedures, the `fn_trace_get*` functions, `sys.traces` | `ALTER TRACE` | **Msg 8189** at a state per surface — see [`trace.md`](trace.md#the-procedures) |
 | `CREATE` / `ALTER` / `DROP EVENT SESSION` | `ALTER ANY EVENT SESSION`, or the clause's own granular permission under it | **Msg 15247** for `CREATE`, **Msg 15151** at a state per clause for `ALTER` / `DROP` — see [`extended-events.md`](extended-events.md#permissions) |
 | `SHUTDOWN [WITH NOWAIT]` | `SHUTDOWN` (`sysadmin`, `serveradmin`) | informational **Msg 6004**, then the batch ends and the transaction rolls back, uncaught, with the client's own class-11 severe error — or silently inside a `TRY` with no transaction open (probed 2026-10-06 against SQL Server 2025, as a refused login); a permitted `SHUTDOWN` is `NotSupportedException`, the simulation having no server process to stop |
 | `CREATE` / `DROP DATABASE` | see [DDL statement gates](#ddl-statement-gates) | |
@@ -749,7 +750,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 #### Not modeled yet
 
-- The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG` and `ALTER RESOURCES`.
+- The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-notification, audit and availability-group families and `ALTER RESOURCES`.
 - `UNSAFE ASSEMBLY` as a signing certificate's or key's login holds it under `clr strict security`; it is read only as a `TRUSTWORTHY` database's owner's (see [`clr-assemblies.md`](clr-assemblies.md#what-the-server-takes-the-edition-the-catalog-and-clr-strict-security)).
 - `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
 - `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry, and `ALTER LOGIN [sa] WITH PASSWORD` (or `sp_password` on it) meets real's policy check (Msg 33062 for a too-short password, probed 2026-09-30 against SQL Server 2025) and then `NotSupportedException`: recording a password for `sa` would switch the TDS endpoint from accepting any credentials to enforcing them, and real's own answer to a wrong `OLD_PASSWORD` is Msg 15151.
@@ -910,7 +911,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server permissions whose statements aren't built** — endpoints, audits, traces, and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
+- **Server permissions whose statements aren't built** — endpoints, audits, and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — a pooled TDS reset clears the role instead of killing the session (real's Msg 596), `sp_setapprole` under `EXECUTE AS` leaves the impersonated identity on top, and the ODBC `{Encrypt}` password escape doesn't parse.

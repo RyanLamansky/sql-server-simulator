@@ -38,7 +38,8 @@ internal static class XeEvents
     /// more.
     /// </summary>
     public static bool Takes(Simulation simulation, XeEventKind kind) =>
-        simulation.ExtendedEventsIfMade is { } server ? server.Taken[(int)kind] : XeEventKinds.TakenAtStartup[(int)kind];
+        (simulation.ExtendedEventsIfMade is { } server ? server.Taken[(int)kind] : XeEventKinds.TakenAtStartup[(int)kind])
+        || (simulation.TraceTaken is { } traced && traced[(int)kind]);
 
     /// <summary>
     /// <c>error_reported</c> for <paramref name="error"/>, intercepted when a
@@ -132,7 +133,7 @@ internal static class XeEvents
     /// takes no argument), <c>exec sp_executesql N'…',N'@p int',@p=1</c> for a
     /// parameterized command.
     /// </summary>
-    private static string RpcStatement(SimulatedDbCommand command)
+    internal static string RpcStatement(SimulatedDbCommand command)
     {
         var builder = new StringBuilder("exec ");
         var parameters = command.Parameters;
@@ -210,22 +211,34 @@ internal static class XeEvents
     /// Fires <paramref name="kind"/> on every running session that takes it,
     /// <paramref name="connection"/> the session it fires on — or, under
     /// <paramref name="systemTask"/>, the session a system task's report is
-    /// about. A server whose Extended Events state no statement has
+    /// about — and into every running SQL Trace taking a class it maps onto
+    /// (<see cref="Trace.TraceEvents"/>), <paramref name="traceText"/> the
+    /// <c>TextData</c> a class reports that the event's own fields don't
+    /// carry. A server whose Extended Events state no statement has
     /// made yet has only the default sessions running: an event none of them
-    /// takes costs nothing — not even the catalog's load — and their
-    /// predicates are asked before the state is made for one.
+    /// takes and no trace takes costs nothing — not even the catalog's load —
+    /// and their predicates are asked before the state is made for one.
     /// </summary>
-    internal static void Fire(SimulatedDbConnection connection, XeEventKind kind, Func<XeObject, XeValue[]> data, bool systemTask = false)
+    internal static void Fire(SimulatedDbConnection connection, XeEventKind kind, Func<XeObject, XeValue[]> data, bool systemTask = false, string? traceText = null)
     {
         var simulation = connection.Simulation;
         var server = simulation.ExtendedEventsIfMade;
-        if (server is null ? !XeEventKinds.TakenAtStartup[(int)kind] : !server.Taken[(int)kind])
+        var sessionsTake = server is null ? XeEventKinds.TakenAtStartup[(int)kind] : server.Taken[(int)kind];
+        var traced = simulation.TraceTaken is { } traceTaken && traceTaken[(int)kind];
+        if (!sessionsTake && !traced)
             return;
         var @event = Resolve(kind);
         XeFiring? firing = null;
-        if (server is null)
+        if (traced)
         {
             firing = new XeFiring(@event, data(@event), connection, DateTime.UtcNow, systemTask);
+            Trace.TraceEvents.Deliver(simulation, kind, firing, traceText);
+            if (!sessionsTake)
+                return;
+        }
+        if (server is null)
+        {
+            firing ??= new XeFiring(@event, data(@event), connection, DateTime.UtcNow, systemTask);
             if (!DefaultsTake(connection, firing))
                 return;
             server = simulation.ExtendedEventsFor(connection);

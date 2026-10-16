@@ -93,11 +93,15 @@ partial class Selection
     /// <paramref name="notNullColumns"/> columns declared NOT NULL as real
     /// declares them (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    private static Selection ParseSystemTvf(ParserContext context, string functionName, Database? database, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows, int notNullColumns = 0)
+    private static Selection ParseSystemTvf(ParserContext context, string functionName, Database? database, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows, int notNullColumns = 0, byte arityState = 2)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var arguments = new Expression?[arity];
+        var afterParenthesis = context.SaveCheckpoint();
+        if (arity > 0 && context.GetNextRequired() is Operator { Character: ')' })
+            throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, arityState);
+        context.RestoreCheckpoint(afterParenthesis);
         for (var i = 0; ; i++)
         {
             context.MoveNextRequired();
@@ -113,9 +117,9 @@ partial class Selection
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (i < arity - 1)
-                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName);
+                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, arityState);
             if (i >= arity)
-                throw SimulatedSqlException.TooManyArgumentsToFunction(functionName);
+                throw SimulatedSqlException.TooManyArgumentsToFunction(functionName, arityState);
             break;
         }
         context.MoveNextOptional();

@@ -1205,6 +1205,12 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseValidatePlanGuide(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_gettable"))
                         return BuiltInRowsetSource(context, ParseTraceGetTable(context, "sys.fn_trace_gettable"));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_getinfo"))
+                        return BuiltInRowsetSource(context, ParseTraceGetInfo(context, "sys.fn_trace_getinfo"));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_geteventinfo"))
+                        return BuiltInRowsetSource(context, ParseTraceGetEventInfo(context, "sys.fn_trace_geteventinfo"));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_getfilterinfo"))
+                        return BuiltInRowsetSource(context, ParseTraceGetFilterInfo(context, "sys.fn_trace_getfilterinfo"));
                 }
 
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text,
@@ -2092,7 +2098,7 @@ internal sealed partial class Selection
     /// </summary>
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         ((name.Count == 1 || (name.Count == 2 && BuiltInToken.Equals(name.ImmediateQualifier, "sys")))
-            && BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_my_permissions", "fn_trace_gettable", "fn_validate_plan_guide", "fn_virtualfilestats"))
+            && BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_my_permissions", "fn_trace_geteventinfo", "fn_trace_getfilterinfo", "fn_trace_getinfo", "fn_trace_gettable", "fn_validate_plan_guide", "fn_virtualfilestats"))
         || (name.Count is 2 or 3
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
         && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_file_exists", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats", "fn_xe_file_target_read_file"));
@@ -2158,7 +2164,7 @@ internal sealed partial class Selection
         if (context.GetNextOptional() is Operator { Character: '.' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.RestoreCheckpoint(afterName);
-        return BuiltInToken.EqualsAny(name.Value, "fn_helpcollations", "fn_listextendedproperty", "fn_trace_gettable", "fn_virtualfilestats")
+        return BuiltInToken.EqualsAny(name.Value, "fn_helpcollations", "fn_listextendedproperty", "fn_trace_geteventinfo", "fn_trace_getfilterinfo", "fn_trace_getinfo", "fn_trace_gettable", "fn_virtualfilestats")
             ? name
             : throw SimulatedSqlException.UnrecognizedSystemFunction(name.Value, state: 15);
     }

@@ -278,6 +278,9 @@ internal static class LockReports
             || word.Equals("EXEC", StringComparison.OrdinalIgnoreCase)
             || word.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase)
             || word.Equals("WITH", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("CREATE", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("ALTER", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("DROP", StringComparison.OrdinalIgnoreCase)
             || (word.IsEmpty && start < text.Length && text[start] == '(');
     }
 

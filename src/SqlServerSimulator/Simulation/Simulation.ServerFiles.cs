@@ -118,6 +118,14 @@ partial class Simulation
             yield return number == 0 ? ErrorLog.FileName : ErrorLog.FileName + "." + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
         foreach (var (key, _) in this.BackupDevices)
             yield return key;
+        if (this.TracesIfMade is { } traces)
+        {
+            foreach (var (path, _) in traces.Files)
+            {
+                if (CanonicalServerPath(path) is { } canonical)
+                    yield return canonical;
+            }
+        }
     }
 
     /// <summary>Creates <paramref name="canonical"/> and every directory above it.</summary>

@@ -56,10 +56,17 @@
     <EmbeddedResource Include="ExtendedEvents/DefaultSessions.tsv" LogicalName="SqlServerSimulator.XeDefaultSessions.tsv" />
     <EmbeddedResource Include="ExtendedEvents/InternalSessions.tsv" LogicalName="SqlServerSimulator.XeInternalSessions.tsv" />
     <EmbeddedResource Include="$(BaseIntermediateOutputPath)XeMetadata.zip" LogicalName="SqlServerSimulator.XeMetadata.zip" />
+    <!-- SQL Trace's catalog, zipped the same way. -->
+    <TraceMetadataFile Include="Trace/Metadata/*.tsv" />
+    <EmbeddedResource Include="$(BaseIntermediateOutputPath)TraceMetadata.zip" LogicalName="SqlServerSimulator.TraceMetadata.zip" />
   </ItemGroup>
 
   <Target Name="ZipXeMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(XeMetadataFile)" Outputs="$(BaseIntermediateOutputPath)XeMetadata.zip">
     <ZipDirectory SourceDirectory="ExtendedEvents/Metadata" DestinationFile="$(BaseIntermediateOutputPath)XeMetadata.zip" Overwrite="true" />
+  </Target>
+
+  <Target Name="ZipTraceMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(TraceMetadataFile)" Outputs="$(BaseIntermediateOutputPath)TraceMetadata.zip">
+    <ZipDirectory SourceDirectory="Trace/Metadata" DestinationFile="$(BaseIntermediateOutputPath)TraceMetadata.zip" Overwrite="true" />
   </Target>
 
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">

@@ -368,7 +368,7 @@ partial class Simulation
     }
 
     /// <summary>The <c>ServerName</c> EVENTDATA reports, matching <c>@@SERVERNAME</c>.</summary>
-    private const string ServerNameValue = "SIMULATED";
+    internal const string ServerNameValue = "SIMULATED";
 
     /// <summary>
     /// The <c>SchemaName</c> a DDL event reports for a written object name: the

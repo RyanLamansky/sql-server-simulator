@@ -17,14 +17,13 @@ internal static class XeStatementEvents
     /// Whether a running session takes any statement event — one array read
     /// for each of the four, which is all a statement pays when none does.
     /// </summary>
-    public static bool AnyTaken(Simulation simulation)
-    {
-        if (simulation.ExtendedEventsIfMade is not { } server)
-            return false;
-        var taken = server.Taken;
-        return taken[(int)XeEventKind.SqlStatementStarting] || taken[(int)XeEventKind.SqlStatementCompleted]
-            || taken[(int)XeEventKind.SpStatementStarting] || taken[(int)XeEventKind.SpStatementCompleted];
-    }
+    public static bool AnyTaken(Simulation simulation) =>
+        (simulation.ExtendedEventsIfMade is { } server && AnyStatementEvent(server.Taken))
+        || (simulation.TraceTaken is { } traced && AnyStatementEvent(traced));
+
+    private static bool AnyStatementEvent(bool[] taken) =>
+        taken[(int)XeEventKind.SqlStatementStarting] || taken[(int)XeEventKind.SqlStatementCompleted]
+        || taken[(int)XeEventKind.SpStatementStarting] || taken[(int)XeEventKind.SpStatementCompleted];
 
     /// <summary>
     /// The statement at <paramref name="start"/> of <paramref name="batch"/>'s
@@ -180,9 +179,20 @@ internal static class XeStatementEvents
             ("offset_end", XeValue.FromSigned(placed?.OffsetEnd ?? 0)),
             ("object_type", XeValue.FromAnsi("P ")),
             ("object_name", XeValue.FromUnicode(procedure.Name)),
-            ("statement", XeValue.FromUnicode(""))));
+            ("statement", XeValue.FromUnicode(""))), traceText: CallingText(caller, placed));
         return enclosing;
     }
+
+    /// <summary>
+    /// The statement calling a module as SQL Trace's <c>SP:Starting</c> and
+    /// <c>SP:Completed</c> report it: the calling statement, or for a procedure
+    /// called by RPC the statement real reconstructs for the call (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static string? CallingText(BatchContext caller, XeStatement? placed) =>
+        caller.Parser.Command is { CommandType: System.Data.CommandType.StoredProcedure } command && caller.ModuleObjectId == 0
+            ? XeEvents.RpcStatement(command)
+            : placed?.Text;
 
     /// <summary><c>module_end</c>: <see cref="ModuleStart"/>'s fields with the body's duration and the rows its statements counted.</summary>
     public static void ModuleEnd(BatchContext caller, Schemas.Procedure procedure, long durationMicroseconds, long enclosing)
@@ -204,7 +214,7 @@ internal static class XeStatementEvents
             ("offset_end", XeValue.FromSigned(placed?.OffsetEnd ?? 0)),
             ("object_type", XeValue.FromAnsi("P ")),
             ("object_name", XeValue.FromUnicode(procedure.Name)),
-            ("statement", XeValue.FromUnicode(""))));
+            ("statement", XeValue.FromUnicode(""))), traceText: CallingText(caller, placed));
     }
 }
 

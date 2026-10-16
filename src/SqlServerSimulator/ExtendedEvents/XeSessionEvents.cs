@@ -24,7 +24,7 @@ internal static class XeSessionEvents
         var simulation = connection.Simulation;
         // system_health's predicate takes neither message, so a server whose
         // Extended Events state no statement made fires them nowhere.
-        if (simulation.ExtendedEventsIfMade is not null && XeEvents.Takes(simulation, XeEventKind.ErrorReported))
+        if ((simulation.ExtendedEventsIfMade is not null || simulation.TraceTaken is not null) && XeEvents.Takes(simulation, XeEventKind.ErrorReported))
         {
             XeEvents.ErrorReported(connection, 5701, 10, 2, $"Changed database context to '{connection.CurrentDatabase.Name}'.", intercepted: false);
             XeEvents.ErrorReported(connection, 5703, 10, 1, connection.Language.ChangedMessage, intercepted: false);

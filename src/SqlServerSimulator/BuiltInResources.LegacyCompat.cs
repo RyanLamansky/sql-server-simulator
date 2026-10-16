@@ -290,6 +290,12 @@ internal static partial class BuiltInResources
         "xp_enumerrorlogs",
         "xp_logevent",
         "xp_readerrorlog",
+        // SQL Trace's procedures.
+        "sp_trace_create",
+        "sp_trace_generateevent",
+        "sp_trace_setevent",
+        "sp_trace_setfilter",
+        "sp_trace_setstatus",
         // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
@@ -1053,6 +1059,9 @@ internal static partial class BuiltInResources
         ("fn_builtin_permissions", -413116802, "IF"),
         ("fn_listextendedproperty", -572068538, "TF"),
         ("fn_my_permissions", -462384620, "TF"),
+        ("fn_trace_geteventinfo", -81646787, "TF"),
+        ("fn_trace_getfilterinfo", -99011299, "TF"),
+        ("fn_trace_getinfo", -905021835, "TF"),
         ("fn_trace_gettable", -718311503, "IF"),
         ("fn_varbintohexstr", -565035985, "FN"),
         ("fn_varbintohexsubstring", -403477184, "FN"),
@@ -1116,6 +1125,7 @@ internal static partial class BuiltInResources
         proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
         || proc.StartsWith("sp_OA", StringComparison.Ordinal)
+        || proc.StartsWith("sp_trace_", StringComparison.Ordinal)
         || proc is "sp_add_trusted_assembly" or "sp_bindsession" or "sp_getschemalock" or "sp_releaseschemalock" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_drop_trusted_assembly" or "sp_execute" or "sp_executesql" or "sp_flush_log" or "sp_getbindtoken" or "sp_get_query_template" or "sp_prepare" or "sp_prepexec" or "sp_unprepare" or "sp_reset_connection" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
 
     /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
