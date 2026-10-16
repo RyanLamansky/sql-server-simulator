@@ -37,6 +37,13 @@ internal sealed class ExtendedEventsServer
     private volatile Dictionary<XeObject, (RunningEventSession Session, SessionEvent Event)[]> subscriptions = [];
 
     /// <summary>
+    /// Whether a running session takes each event the simulator fires, by
+    /// <see cref="XeEventKind"/>, published with <see cref="subscriptions"/>
+    /// so a firing site asks it with one array read.
+    /// </summary>
+    public volatile bool[] Taken = new bool[XeEventKinds.Count];
+
+    /// <summary>
     /// The <c>.xel</c> files the event-file targets have written, by path. A
     /// file outlives its session, as one on disk does, so a dropped session's
     /// events still read back.
@@ -57,7 +64,7 @@ internal sealed class ExtendedEventsServer
             this.sessions.Add(definition.Name, definition);
             this.lastSessionId = Math.Max(this.lastSessionId, definition.Id);
             if (definition.Options.StartupState)
-                this.StartLocked(definition, startTime);
+                _ = this.StartLocked(definition, startTime);
         }
         this.startupStarts = this.starts;
         this.Publish();
@@ -149,12 +156,13 @@ internal sealed class ExtendedEventsServer
         }
     }
 
-    public void Start(EventSessionDefinition definition, DateTime utcNow)
+    public RunningEventSession Start(EventSessionDefinition definition, DateTime utcNow)
     {
         lock (this.gate)
         {
-            this.StartLocked(definition, utcNow);
+            var started = this.StartLocked(definition, utcNow);
             this.Publish();
+            return started;
         }
     }
 
@@ -168,10 +176,10 @@ internal sealed class ExtendedEventsServer
         }
     }
 
-    private void StartLocked(EventSessionDefinition definition, DateTime utcNow)
+    private RunningEventSession StartLocked(EventSessionDefinition definition, DateTime utcNow)
     {
         var order = ++this.starts;
-        this.running[definition.Id] = new RunningEventSession(definition, utcNow, order, this);
+        return this.running[definition.Id] = new RunningEventSession(definition, utcNow, order, this);
     }
 
     /// <summary>The running sessions' events that fire on <paramref name="event"/>, empty for none.</summary>
@@ -191,6 +199,13 @@ internal sealed class ExtendedEventsServer
             }
         }
         this.subscriptions = byEvent.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
+        var taken = new bool[XeEventKinds.Count];
+        foreach (var (@event, _) in byEvent)
+        {
+            if (XeEventKinds.Of(@event) is { } kind)
+                taken[(int)kind] = true;
+        }
+        this.Taken = taken;
     }
 }
 

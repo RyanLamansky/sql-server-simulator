@@ -176,7 +176,7 @@ partial class Simulation
                 throw SimulatedSqlException.EventSessionAlreadyStopped();
             RequireEventSessionPermission(context, state == "START" ? Permission.AlterAnyEventSessionEnable : Permission.AlterAnyEventSessionDisable, name, state == "START" ? (byte)20 : (byte)19);
             if (state == "START")
-                server.Start(definition, context.Batch.CurrentStatement.UtcNow);
+                XeSessionEvents.ExistingConnections(context.Batch.Connection, server.Start(definition, context.Batch.CurrentStatement.UtcNow));
             else
                 server.Stop(definition);
             RecordEventSessionDdl(context, "ALTER_EVENT_SESSION", name);

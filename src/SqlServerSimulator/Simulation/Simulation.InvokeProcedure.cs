@@ -321,6 +321,8 @@ partial class Simulation
         BatchContext? innerBatch = null;
         // What the body's run changed on the session, given back as it ends.
         var bodyEntered = false;
+        var moduleStarted = 0L;
+        var enclosingModuleRows = 0L;
         CachedModuleCall? planCall = null;
         var savedImpersonationDepth = 0;
         var savedQuotedIdentifiers = false;
@@ -393,6 +395,8 @@ partial class Simulation
                 }
                 bodyEntered = true;
                 connection.NestingLevel++;
+                moduleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                enclosingModuleRows = ExtendedEvents.XeStatementEvents.ModuleStart(outerBatch, procedure);
                 // SET TEXTSIZE issued inside a proc body reverts at proc exit
                 // (probe-confirmed 2026-07-19), like the standard SET options;
                 // the body's result sets keep their production-time cap via the
@@ -487,6 +491,7 @@ partial class Simulation
             if (bodyEntered)
             {
                 EndCachedModuleCall(innerBatch!, planCall);
+                ExtendedEvents.XeStatementEvents.ModuleEnd(outerBatch, procedure, (long)System.Diagnostics.Stopwatch.GetElapsedTime(moduleStarted).TotalMicroseconds, enclosingModuleRows);
                 if (compiles)
                     outcomes.Insert(0, new SimulatedInfoOutcome(CompileTime(innerBatch!, clock: null, innerBatch!.LastTopLevelStatementLine + innerBatch.LineOffset, attributionName)));
                 connection.NestingLevel--;

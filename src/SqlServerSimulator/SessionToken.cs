@@ -202,6 +202,18 @@ internal sealed class SessionToken(int spid)
     public bool ChosenAsDeadlockVictim;
 
     /// <summary>
+    /// The deadlock this owner's wait is ending as its victim, captured under
+    /// <c>LockManager</c>'s gate as the cycle was found and reported by the
+    /// victim before its error rolls anything back; null when no report is
+    /// wanted.
+    /// </summary>
+    public Storage.DeadlockCycle? DeadlockCycle;
+
+    /// <summary>How many <c>blocked_process_report</c> events the lock wait under way has fired, one per threshold it has passed.</summary>
+    public int BlockedProcessReports;
+
+
+    /// <summary>
     /// How many stretches of execution of the session's requests are under
     /// way (<c>Simulation.CreateResultSetsForCommand</c>), which a session
     /// bound to the same transaction waits out before running.

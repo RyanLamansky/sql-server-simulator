@@ -79,6 +79,14 @@ partial class Simulation
     internal bool DefaultTraceEnabled => this.ConfigurationInUse(DefaultTraceEnabledConfigurationId) != 0;
 
     /// <summary>
+    /// <c>blocked process threshold (s)</c>: how long a lock wait goes on
+    /// before each <c>blocked_process_report</c> about it, 0 for none.
+    /// </summary>
+    internal int BlockedProcessThresholdSeconds => this.ConfigurationInUse(BlockedProcessThresholdConfigurationId);
+
+    private const int BlockedProcessThresholdConfigurationId = 1569;
+
+    /// <summary>
     /// The installed value of <paramref name="configurationId"/>, falling back
     /// to the stock default when <c>sp_configure</c> never wrote it.
     /// </summary>

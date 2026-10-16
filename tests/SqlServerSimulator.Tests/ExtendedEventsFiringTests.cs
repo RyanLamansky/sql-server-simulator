@@ -54,7 +54,7 @@ public sealed class ExtendedEventsFiringTests
     public void ErrorReported_WritesRealsFieldsAndActionsNewestFirst()
     {
         var sim = WithSession("""
-            add event sqlserver.error_reported (action (sqlserver.session_id, sqlserver.sql_text, sqlserver.database_name) where sqlserver.client_app_name = N'app')
+            add event sqlserver.error_reported (action (sqlserver.session_id, sqlserver.sql_text, sqlserver.database_name) where sqlserver.client_app_name = N'app' and error_number <> 5701 and error_number <> 5703)
             add target package0.ring_buffer
             """);
         using var client = Client(sim, "app");
@@ -72,7 +72,7 @@ public sealed class ExtendedEventsFiringTests
     [TestMethod]
     public void ErrorReported_MarksInterceptionAndSkipsPrint()
     {
-        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app' and error_number <> 5701 and error_number <> 5703) add target package0.ring_buffer");
         using var client = Client(sim, "app");
         Run(client, "begin try select 1/0 end try begin catch end catch; raiserror('ten', 10, 1); print 'p'");
         var data = RingBuffer(sim);
@@ -132,7 +132,7 @@ public sealed class ExtendedEventsFiringTests
     [TestMethod]
     public void RingBuffer_KeepsTheNewestUpToItsLimit()
     {
-        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app') add target package0.ring_buffer (set max_events_limit = 2)");
+        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app' and error_number <> 5701 and error_number <> 5703) add target package0.ring_buffer (set max_events_limit = 2)");
         using var client = Client(sim, "app");
         Run(client, "raiserror('one', 16, 1); raiserror('two', 16, 1); raiserror('three', 16, 1)");
         var data = RingBuffer(sim);
@@ -145,7 +145,7 @@ public sealed class ExtendedEventsFiringTests
     public void CounterAndHistogram_CountTheEvents()
     {
         var sim = WithSession("""
-            add event sqlserver.error_reported (where sqlserver.client_app_name = N'app')
+            add event sqlserver.error_reported (where sqlserver.client_app_name = N'app' and error_number <> 5701 and error_number <> 5703)
             add target package0.event_counter, add target package0.histogram (set source = N'sqlserver.client_app_name')
             """);
         using var client = Client(sim, "app");
@@ -159,7 +159,7 @@ public sealed class ExtendedEventsFiringTests
     [TestMethod]
     public void EventFile_ReadsBackThroughFnXeFileTargetReadFile()
     {
-        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app') add target package0.event_file (set filename = N'f.xel')");
+        var sim = WithSession("add event sqlserver.error_reported (where sqlserver.client_app_name = N'app' and error_number <> 5701 and error_number <> 5703) add target package0.event_file (set filename = N'f.xel')");
         using (var client = Client(sim, "app"))
             Run(client, "raiserror('logged', 16, 1)");
         _ = sim.ExecuteNonQuery("drop event session s on server");
@@ -181,6 +181,190 @@ public sealed class ExtendedEventsFiringTests
 
     // system_health takes an error of severity 20 or more into its ring
     // buffer, as real's does from the server's start.
+    /// <summary>Each event's name and the values of the named fields in the event's own order, events in firing order.</summary>
+    private static List<string> Summaries(string data, params string[] fields)
+    {
+        var document = System.Xml.Linq.XDocument.Parse(data);
+        var summaries = new List<string>();
+        foreach (var @event in document.Root!.Elements("event"))
+        {
+            var parts = new List<string> { (string)@event.Attribute("name")! };
+            foreach (var field in @event.Elements("data"))
+            {
+                if (fields.Contains((string?)field.Attribute("name")))
+                    parts.Add((string?)field.Attribute("name") + "=" + (string?)field.Element("value"));
+            }
+            summaries.Add(string.Join(' ', parts));
+        }
+        return summaries;
+    }
+
+    // The statement events of a batch calling a procedure, every field
+    // placed as SQL Server 2025 placed them for the same batch: a query ends
+    // at its last character, a DECLARE at the line break after it, the call's
+    // row count the sum of its body's.
+    [TestMethod]
+    public void StatementEvents_PlaceEachStatementAndModule()
+    {
+        var sim = WithSession("""
+            add event sqlserver.sql_statement_starting (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.sp_statement_starting (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.sp_statement_completed (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.module_start (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.module_end (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        sim.ExecuteBatches(
+            "create table k (id int primary key, v int); insert k values (1, 0), (2, 0)",
+            "create procedure dbo.p2 @x int = 3 as\nbegin\n  select @x as x;\n  update dbo.k set v = v where id = @x;\nend");
+        using var client = Client(sim, "app");
+        Run(client, "select 1 as a;\nexec dbo.p2 2;\ndeclare @y int = 5\nselect @y from dbo.k where id = 1");
+        AreEqual(string.Join("\n", new[]
+        {
+            "sql_statement_starting line_number=1 offset=0 offset_end=24 statement=select 1 as a",
+            "sql_statement_completed row_count=1 last_row_count=1 line_number=1 offset=0 offset_end=24 statement=select 1 as a",
+            "sql_statement_starting line_number=2 offset=30 offset_end=54 statement=exec dbo.p2 2",
+            "module_start line_number=2 offset=30 offset_end=54 object_type=P  object_name=p2 statement=",
+            "sp_statement_starting object_type=8272 nest_level=1 line_number=3 offset=92 offset_end=118 object_name= statement=select @x as x",
+            "sp_statement_completed object_type=8272 row_count=1 last_row_count=1 nest_level=1 line_number=3 offset=92 offset_end=118 object_name= statement=select @x as x",
+            "sp_statement_starting object_type=8272 nest_level=1 line_number=4 offset=128 offset_end=198 object_name= statement=update dbo.k set v = v where id = @x",
+            "sp_statement_completed object_type=8272 row_count=1 last_row_count=1 nest_level=1 line_number=4 offset=128 offset_end=198 object_name= statement=update dbo.k set v = v where id = @x",
+            "module_end row_count=2 line_number=2 offset=30 offset_end=54 object_type=P  object_name=p2 statement=",
+            "sql_statement_completed row_count=2 last_row_count=1 line_number=2 offset=30 offset_end=54 statement=exec dbo.p2 2",
+            "sql_statement_starting line_number=3 offset=60 offset_end=96 statement=declare @y int = 5\n",
+            "sql_statement_completed row_count=1 last_row_count=1 line_number=3 offset=60 offset_end=96 statement=declare @y int = 5\n",
+            "sql_statement_starting line_number=4 offset=98 offset_end=162 statement=select @y from dbo.k where id = 1",
+            "sql_statement_completed row_count=1 last_row_count=1 line_number=4 offset=98 offset_end=162 statement=select @y from dbo.k where id = 1",
+        }), string.Join("\n", Summaries(RingBuffer(sim), "row_count", "last_row_count", "object_type", "nest_level", "line_number", "offset", "offset_end", "object_name", "statement")));
+    }
+
+    // A session option and PRINT leave last_row_count standing, a lone
+    // non-query statement runs to its batch's end (-1), and a DECLARE
+    // initializing nothing fires no event.
+    [TestMethod]
+    public void StatementEvents_KeepTheLastRowCountAndSkipABareDeclare()
+    {
+        var sim = WithSession("add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        using var client = Client(sim, "app");
+        Run(client, "select 1\nset nocount on\ndeclare @a int\nprint 'x'\nselect 5");
+        Run(client, "set textsize 100");
+        AreEqual(string.Join("\n", new[]
+        {
+            "sql_statement_completed row_count=1 last_row_count=1 offset=0 offset_end=14",
+            "sql_statement_completed row_count=0 last_row_count=1 offset=18 offset_end=46",
+            "sql_statement_completed row_count=0 last_row_count=1 offset=78 offset_end=96",
+            "sql_statement_completed row_count=1 last_row_count=1 offset=98 offset_end=112",
+            "sql_statement_completed row_count=0 last_row_count=1 offset=0 offset_end=-1",
+        }), string.Join("\n", Summaries(RingBuffer(sim), "row_count", "last_row_count", "offset", "offset_end")));
+    }
+
+    // A batch the plan cache replays fires its statements' events as its
+    // first run did.
+    [TestMethod]
+    public void StatementEvents_FireForACachedBatch()
+    {
+        var sim = WithSession("add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 0)");
+        using var client = Client(sim, "app");
+        for (var i = 0; i < 3; i++)
+            Run(client, "update t set v = v + 1 where id = 1; select v from t where id = 1");
+        Run(client, "declare @i int = 0; while @i < 3 begin set @i += 1; update t set v = @i where id = 1 end");
+        var summaries = Summaries(RingBuffer(sim), "statement");
+        AreEqual(6, summaries.Count(summary => summary.StartsWith("sql_statement_completed statement=update t set v = v + 1", StringComparison.Ordinal) || summary.StartsWith("sql_statement_completed statement=select v", StringComparison.Ordinal)));
+        AreEqual(3, summaries.Count(summary => summary == "sql_statement_completed statement=set @i += 1; "));
+        AreEqual(3, summaries.Count(summary => summary == "sql_statement_completed statement=update t set v = @i where id = 1"));
+    }
+
+    // A login reports its database and language changes as error_reported
+    // first, as real's does; the session's end is a logout.
+    [TestMethod]
+    public void Login_FollowsItsMessagesAndEndsInALogout()
+    {
+        var sim = WithSession("""
+            add event sqlserver.error_reported (where sqlserver.client_app_name = N'app'),
+            add event sqlserver.login (set collect_options_text = 1 where sqlserver.client_app_name = N'app'),
+            add event sqlserver.logout (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        using (Client(sim, "app"))
+        {
+        }
+        var summaries = Summaries(RingBuffer(sim), "error_number", "state", "is_cached", "database_id", "packet_size");
+        AreEqual(string.Join("\n",
+            "error_reported error_number=5701 state=2",
+            "error_reported error_number=5703 state=1",
+            "login is_cached=false database_id=5 packet_size=4096",
+            "logout is_cached=false"), string.Join("\n", summaries));
+        Contains("<data name=\"options_text\"><type name=\"unicode_string\" package=\"package0\"></type><value><![CDATA[-- network protocol: TCP/IP\nset quoted_identifier on\nset arithabort off\nset numeric_roundabort off\nset ansi_warnings on\nset ansi_padding on\nset ansi_nulls on\nset concat_null_yields_null on\nset cursor_close_on_commit off\nset implicit_transactions off\nset language us_english\nset dateformat mdy\nset datefirst 7\nset transaction isolation level read committed\n]]></value></data>", RingBuffer(sim));
+    }
+
+    // Starting a session reports each open session to it alone, by the
+    // open session's own fields.
+    [TestMethod]
+    public void ExistingConnection_ReportsTheOpenSessionsAsTheSessionStarts()
+    {
+        var sim = new Simulation();
+        using var client = Client(sim, "app");
+        Run(client, "begin tran");
+        _ = sim.ExecuteNonQuery("""
+            create event session s on server add event sqlserver.existing_connection (where client_app_name = N'app') add target package0.ring_buffer;
+            alter event session s on server state = start
+            """);
+        var data = RingBuffer(sim);
+        HasCount(1, Summaries(data));
+        Contains("<data name=\"transaction_count\"><type name=\"uint32\" package=\"package0\"></type><value>1</value></data>", data);
+        Contains("<data name=\"started_event_session_name\"><type name=\"unicode_string\" package=\"package0\"></type><value><![CDATA[s]]></value></data>", data);
+        Contains("<data name=\"client_app_name\"><type name=\"unicode_string\" package=\"package0\"></type><value><![CDATA[app]]></value></data>", data);
+        Contains("<data name=\"server_principal_name\"><type name=\"unicode_string\" package=\"package0\"></type><value><![CDATA[sa]]></value></data>", data);
+    }
+
+    // A WAITFOR's wait ends timed out, a lock wait's granted, each with its
+    // wait type and its duration in milliseconds.
+    [TestMethod]
+    public async Task WaitEvents_ReportWaitForAndLockWaits()
+    {
+        var sim = WithSession("""
+            add event sqlos.wait_info (where sqlserver.client_app_name = N'app'),
+            add event sqlos.wait_completed (where sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 0)");
+        using var client = Client(sim, "app");
+        Run(client, "waitfor delay '00:00:00.100'");
+        using var holder = sim.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update t set v = 1 where id = 1").ExecuteNonQuery();
+        var read = Task.Run(() => Run(client, "select v from t where id = 1"), this.TestContext.CancellationToken);
+        _ = await Extensions.PollUntil(
+            () => sim.ExecuteScalar("select count(*) from sys.dm_exec_requests where blocking_session_id <> 0"),
+            count => count is 1,
+            this.TestContext.CancellationToken);
+        _ = holder.CreateCommand("commit").ExecuteNonQuery();
+        await read.WaitAsync(TimeSpan.FromSeconds(10), this.TestContext.CancellationToken);
+        var summaries = Summaries(RingBuffer(sim), "wait_type", "opcode", "wait_result");
+        AreEqual(string.Join("\n",
+            "wait_info wait_type=308 opcode=1",
+            "wait_completed wait_type=308 wait_result=258",
+            "wait_info wait_type=3 opcode=1",
+            "wait_completed wait_type=3 wait_result=0"), string.Join("\n", summaries));
+        Contains("<text><![CDATA[WAITFOR]]></text>", RingBuffer(sim));
+        Contains("<text><![CDATA[LCK_M_S]]></text>", RingBuffer(sim));
+    }
+
+    // A command timeout ends its request with an attention.
+    [TestMethod]
+    public void Attention_FiresAsACommandTimeoutEndsTheRequest()
+    {
+        var sim = WithSession("add event sqlserver.attention (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        using var client = Client(sim, "app");
+        using var command = client.CreateCommand("waitfor delay '00:00:05'");
+        command.CommandTimeout = 1;
+        _ = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual("attention request_id=0", string.Join("\n", Summaries(RingBuffer(sim), "request_id")));
+    }
+
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public void SystemHealth_TakesSevereErrors()
     {

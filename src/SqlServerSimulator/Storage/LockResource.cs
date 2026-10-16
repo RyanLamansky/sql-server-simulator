@@ -437,7 +437,16 @@ internal sealed class LockManager
     /// </summary>
     public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
+        var waitedBefore = owner.LockWaitedMilliseconds;
         var outcome = this.TryAcquireCore(resource, mode, owner, timeoutMillis, sweepAbandoned);
+        // A wait that ended reports itself to a session taking wait_info —
+        // system_health does, keeping a lock wait past thirty seconds.
+        if (owner.LockWaitedMilliseconds != waitedBefore && this.OwningSimulation is { } simulation
+            && (ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.WaitInfo) || ExtendedEvents.XeEvents.Takes(simulation, ExtendedEvents.XeEventKind.WaitCompleted))
+            && owner.TryResolveActing() is { } waiter)
+        {
+            ExtendedEvents.XeSessionEvents.WaitEnded(waiter, mode, owner.LockWaitedMilliseconds - waitedBefore);
+        }
         switch (outcome)
         {
             case LockAcquireOutcome.TimedOut:
@@ -448,6 +457,13 @@ internal sealed class LockManager
                 break;
             case LockAcquireOutcome.Deadlocked or LockAcquireOutcome.DeadlockedOnOwnThread:
                 _ = Interlocked.Increment(ref this.Counters.Deadlocks[(int)LockCounters.Of(resource)]);
+                // The victim reports the cycle while it still holds its locks,
+                // so every session in it stands as it was found.
+                if (owner.DeadlockCycle is { } cycle)
+                {
+                    owner.DeadlockCycle = null;
+                    this.OwningSimulation?.ReportDeadlock(cycle);
+                }
                 break;
         }
         return outcome;
@@ -510,13 +526,17 @@ internal sealed class LockManager
                     // unless a session in the cycle runs at a lower
                     // DEADLOCK_PRIORITY — then that one's wait ends in
                     // Msg 1205 and the caller waits on for its rollback.
-                    if (FindDeadlockVictim(resource, mode, owner) is { } victim)
+                    if (FindDeadlockVictim(resource, mode, owner, out var cycle) is { } victim)
                     {
                         if (ReferenceEquals(victim, owner))
+                        {
+                            this.CaptureDeadlock(victim, cycle, resource, mode, waited);
                             return LockAcquireOutcome.Deadlocked;
+                        }
                         if (!victim.ChosenAsDeadlockVictim)
                         {
                             victim.ChosenAsDeadlockVictim = true;
+                            this.CaptureDeadlock(victim, cycle, resource, mode, waited);
                             Monitor.PulseAll(this.gate);
                         }
                     }
@@ -541,6 +561,7 @@ internal sealed class LockManager
                     if (!waited)
                     {
                         owner.WaitStartedTicks = Environment.TickCount64;
+                        owner.BlockedProcessReports = 0;
                         (resource.Queue ??= []).Add((owner, mode));
                         // A statement producing its rows in the background
                         // lets its client have the ones before this wait.
@@ -565,6 +586,21 @@ internal sealed class LockManager
                             return LockAcquireOutcome.Cancelled;
                         if (timeoutMillis > 0 && Environment.TickCount64 >= deadline)
                             return LockAcquireOutcome.TimedOut;
+                        // A wait past each multiple of the blocked process
+                        // threshold reports itself, as real's lock monitor
+                        // does, outside the gate as the sweep runs.
+                        if (this.OwningSimulation is { } reporting && reporting.DueBlockedProcessReport(owner))
+                        {
+                            Monitor.Exit(this.gate);
+                            try
+                            {
+                                reporting.ReportBlockedProcess(owner, resource, mode);
+                            }
+                            finally
+                            {
+                                Monitor.Enter(this.gate);
+                            }
+                        }
                         // A session abandoned since the wait began may hold
                         // what it waits for: real's server resets a session
                         // once its client's finalizer closes the connection,
@@ -983,8 +1019,9 @@ internal sealed class LockManager
     /// <see cref="SessionToken.WaitingOnResource"/> under the manager's gate —
     /// consistent snapshot.
     /// </summary>
-    private static SessionToken? FindDeadlockVictim(LockResource resource, LockMode mode, SessionToken caller)
+    private static SessionToken? FindDeadlockVictim(LockResource resource, LockMode mode, SessionToken caller, out List<SessionToken>? cycle)
     {
+        cycle = null;
         var visited = new HashSet<SessionToken>(ReferenceEqualityComparer.Instance);
         var path = new List<SessionToken>();
         foreach (var blocker in Blockers(resource, mode, caller))
@@ -1001,9 +1038,56 @@ internal sealed class LockManager
                 if (PriorityOf(participant) is var priority && priority < lowest)
                     (victim, lowest) = (participant, priority);
             }
+            path.Insert(0, caller);
+            cycle = path;
             return victim;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Captures the cycle <paramref name="waitFor"/> — the requester first,
+    /// each session waiting on the next, the last on the requester — for its
+    /// victim to report, when anything reports deadlocks: a trace flag or an
+    /// event session (<c>Simulation.ReportsDeadlocks</c>). Caller holds the gate.
+    /// </summary>
+    private void CaptureDeadlock(SessionToken victim, List<SessionToken>? waitFor, LockResource resource, LockMode mode, bool requesterWaited)
+    {
+        if (waitFor is null || this.OwningSimulation is not { } simulation || !simulation.ReportsDeadlocks())
+            return;
+        var count = waitFor.Count;
+        var at = waitFor.IndexOf(victim);
+        var edges = new DeadlockCycle.Edge[count];
+        for (var k = 0; k < count; k++)
+        {
+            var i = (((at - k) % count) + count) % count;
+            var waiter = waitFor[i];
+            var holder = waitFor[(i + 1) % count];
+            var (waitsOn, waitMode) = i == 0 ? (resource, mode) : (waiter.WaitingOnResource!, waiter.WaitingForMode!.Value);
+            var started = i == 0 && !requesterWaited ? Environment.TickCount64 : waiter.WaitStartedTicks;
+            edges[k] = new DeadlockCycle.Edge(waiter, waitsOn, waitMode, holder, HeldMode(waitsOn, holder, waitMode), started);
+        }
+        victim.DeadlockCycle = new DeadlockCycle(edges, Interlocked.Increment(ref simulation.DeadlockCount));
+    }
+
+    /// <summary>The mode <paramref name="holder"/> blocks a <paramref name="waitMode"/> request on <paramref name="resource"/> in: its conflicting hold, else its request queued ahead.</summary>
+    private static LockMode HeldMode(LockResource resource, SessionToken holder, LockMode waitMode)
+    {
+        LockMode? any = null;
+        foreach (var hold in resource.Holders)
+        {
+            if (!ReferenceEquals(hold.Owner, holder))
+                continue;
+            if (!IsCompatible(hold.Mode, waitMode))
+                return hold.Mode;
+            any ??= hold.Mode;
+        }
+        foreach (var (queued, queuedMode) in resource.Queue ?? [])
+        {
+            if (ReferenceEquals(queued, holder))
+                return queuedMode;
+        }
+        return any ?? waitMode;
     }
 
     private static int PriorityOf(SessionToken session) => session.TryResolveActing()?.DeadlockPriority ?? 0;

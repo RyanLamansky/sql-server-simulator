@@ -160,13 +160,20 @@ internal readonly struct XeValue
 
     public static XeValue FromGuid(Guid value) => new(XeTypeFamily.Guid, guid: value);
 
+    /// <summary>An <c>xml</c> field's document, which an event's XML embeds as it stands.</summary>
+    public static XeValue FromXml(string document) => new(XeTypeFamily.Other, text: document);
+
+    /// <summary>A <c>ptr</c> field's address.</summary>
+    public static XeValue FromPointer(ulong address) => new(XeTypeFamily.Pointer, unsigned: address);
+
     public bool Boolean => this.Unsigned != 0;
 
     /// <summary>The text an event's XML carries in its <c>&lt;value&gt;</c> element (CDATA wrapping is the writer's).</summary>
     public string XmlText => this.Family switch
     {
         XeTypeFamily.Signed => this.Signed.ToString(CultureInfo.InvariantCulture),
-        XeTypeFamily.Unsigned or XeTypeFamily.Map or XeTypeFamily.Pointer => this.Unsigned.ToString(CultureInfo.InvariantCulture),
+        XeTypeFamily.Unsigned or XeTypeFamily.Map => this.Unsigned.ToString(CultureInfo.InvariantCulture),
+        XeTypeFamily.Pointer => "0x" + this.Unsigned.ToString("x16", CultureInfo.InvariantCulture),
         XeTypeFamily.Float => this.Float.ToString("R", CultureInfo.InvariantCulture),
         XeTypeFamily.Boolean => this.Boolean ? "true" : "false",
         XeTypeFamily.BinaryData => this.Bytes is { } bytes ? Convert.ToHexString(bytes) : "",

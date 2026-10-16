@@ -508,6 +508,16 @@ internal sealed partial class BatchContext
     public Dictionary<int, int>? StatementEnds;
 
     /// <summary>
+    /// The batch whose statement called this one's body — a procedure call,
+    /// a trigger's firing statement, a dynamic batch's <c>EXEC</c> — as the
+    /// body's first statement found it running
+    /// (<see cref="SimulatedDbConnection.RunningBatch"/>); null for a client's batch.
+    /// The execution stack a deadlock or blocked-process report gives a
+    /// session walks it outward.
+    /// </summary>
+    public BatchContext? CallerBatch;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the

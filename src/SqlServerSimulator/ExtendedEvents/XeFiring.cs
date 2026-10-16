@@ -9,15 +9,18 @@ namespace SqlServerSimulator.ExtendedEvents;
 /// fields and the predicate sources through it, and each session it reaches
 /// renders it as the XML its targets keep.
 /// </summary>
-internal sealed class XeFiring(XeObject @event, XeValue[] data, SimulatedDbConnection connection, DateTime timestamp)
+internal sealed class XeFiring(XeObject @event, XeValue[] data, SimulatedDbConnection connection, DateTime timestamp, bool systemTask = false)
 {
     public readonly XeObject Event = @event;
 
     /// <summary>The values of <see cref="XeObject.DataColumns"/>, position for position.</summary>
     public readonly XeValue[] Data = data;
 
+    /// <summary>The session the event fired on, or for a system task's — the lock monitor's reports — the session it reports on.</summary>
     public readonly SimulatedDbConnection Connection = connection;
 
+    /// <summary>Whether a system task fired the event, whose actions read the task's session rather than <see cref="Connection"/>.</summary>
+    public readonly bool SystemTask = systemTask;
 
     public readonly DateTime Timestamp = timestamp;
 
@@ -63,9 +66,15 @@ internal sealed class XeFiring(XeObject @event, XeValue[] data, SimulatedDbConne
 /// </summary>
 internal static class XeContextValues
 {
+    /// <summary>
+    /// The session id a system task's events report: real's lock monitor,
+    /// which fires the deadlock and blocked-process reports, ran as session 44
+    /// on the probed instance (2026-10-16, SQL Server 2025).
+    /// </summary>
+    public const int LockMonitorSpid = 44;
+
     public static XeValue? Value(string package, string name, XeFiring firing)
     {
-        var connection = firing.Connection;
         if (package == "package0")
         {
             return name switch
@@ -78,6 +87,16 @@ internal static class XeContextValues
         }
         if (package != "sqlserver")
             return null;
+        if (firing.SystemTask)
+        {
+            return name switch
+            {
+                "is_system" => XeValue.FromBoolean(true),
+                "session_id" => XeValue.FromUnsigned(LockMonitorSpid),
+                _ => null,
+            };
+        }
+        var connection = firing.Connection;
         var security = connection.Security.Effective;
         return name switch
         {
@@ -106,7 +125,8 @@ internal static class XeContextValues
         XeTypeFamily.BinaryData => XeValue.FromBinary([]),
         XeTypeFamily.Guid => XeValue.FromGuid(Guid.Empty),
         XeTypeFamily.Map => XeValue.FromMap(0, null),
-        XeTypeFamily.Unsigned or XeTypeFamily.Pointer => XeValue.FromUnsigned(0),
+        XeTypeFamily.Pointer => XeValue.FromPointer(0),
+        XeTypeFamily.Unsigned => XeValue.FromUnsigned(0),
         _ => XeValue.FromAnsi(""),
     };
 }

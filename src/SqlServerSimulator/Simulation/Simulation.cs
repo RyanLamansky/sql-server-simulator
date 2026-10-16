@@ -1201,7 +1201,10 @@ public sealed partial class Simulation
         // A session that logged in logs out once, a pooled reset's replaced
         // one excepted, since its successor carries the login on.
         if (Interlocked.Exchange(ref connection.Session.LoggedIn, 0) == 1 && !connection.ReplacedByReset)
+        {
             _ = Interlocked.Increment(ref this.LogoutCount);
+            ExtendedEvents.XeSessionEvents.Logout(connection);
+        }
     }
 
     /// <summary>

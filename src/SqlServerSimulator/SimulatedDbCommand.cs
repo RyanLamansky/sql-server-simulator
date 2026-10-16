@@ -402,6 +402,8 @@ public sealed class SimulatedDbCommand : DbCommand
         var cancelled = connection?.ExecutionTimedOut == true && this.Request is not { CancelledByUser: true }
             ? SimulatedSqlException.ExecutionTimeoutExpired()
             : SimulatedSqlException.CommandCancelled();
+        if (connection is not null)
+            ExtendedEvents.XeSessionEvents.Attention(connection);
         if (connection is not { AttentionEndedWrite: true })
             return cancelled;
         connection.AttentionEndedWrite = false;

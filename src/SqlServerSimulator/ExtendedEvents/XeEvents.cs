@@ -13,16 +13,32 @@ namespace SqlServerSimulator.ExtendedEvents;
 /// </summary>
 internal static class XeEvents
 {
-    private static class Objects
-    {
-        public static readonly XeObject ErrorReported = Event("error_reported");
-        public static readonly XeObject BatchStarting = Event("sql_batch_starting");
-        public static readonly XeObject BatchCompleted = Event("sql_batch_completed");
-        public static readonly XeObject RpcStarting = Event("rpc_starting");
-        public static readonly XeObject RpcCompleted = Event("rpc_completed");
+    /// <summary>
+    /// Each event the simulator fires, resolved against the catalog on its
+    /// first firing a session takes.
+    /// </summary>
+    private static readonly XeObject?[] Objects = new XeObject?[XeEventKinds.Count];
 
-        private static XeObject Event(string name) => XeMetadata.Instance.Find("sqlserver", name, "event")!;
+    private static XeObject Resolve(XeEventKind kind)
+    {
+        var index = (int)kind;
+        if (Volatile.Read(ref Objects[index]) is { } resolved)
+            return resolved;
+        var (package, name) = XeEventKinds.Names[index];
+        var found = XeMetadata.Instance.Find(package, name, "event")!;
+        Volatile.Write(ref Objects[index], found);
+        return found;
     }
+
+    /// <summary>
+    /// Whether a running session takes <paramref name="kind"/>: before any
+    /// statement made the server's Extended Events state, whether one of the
+    /// sessions that start with the server lists it, its predicate unasked.
+    /// One array read, so an event nothing takes costs its call site nothing
+    /// more.
+    /// </summary>
+    public static bool Takes(Simulation simulation, XeEventKind kind) =>
+        simulation.ExtendedEventsIfMade is { } server ? server.Taken[(int)kind] : XeEventKinds.TakenAtStartup[(int)kind];
 
     /// <summary>
     /// <c>error_reported</c> for <paramref name="error"/>, intercepted when a
@@ -34,33 +50,36 @@ internal static class XeEvents
     /// </summary>
     public static void ErrorReported(SimulatedDbConnection connection, SimulatedError error, bool intercepted)
     {
-        if (error.Number == 0)
-            return;
-        Fire(connection, "error_reported", static () => Objects.ErrorReported, @event => Data(@event,
-            ("error_number", XeValue.FromSigned(error.Number)),
-            ("severity", XeValue.FromSigned(error.Class == 0 ? 10 : error.Class)),
-            ("state", XeValue.FromSigned(error.State)),
-            ("user_defined", XeValue.FromBoolean(error.Number >= 50000)),
+        if (error.Number != 0)
+            ErrorReported(connection, error.Number, error.Class == 0 ? 10 : error.Class, error.State, error.Message, intercepted);
+    }
+
+    /// <summary><c>error_reported</c> for a message of <paramref name="number"/> sent to the client at <paramref name="severity"/>.</summary>
+    public static void ErrorReported(SimulatedDbConnection connection, int number, int severity, int state, string message, bool intercepted) =>
+        Fire(connection, XeEventKind.ErrorReported, @event => Data(@event,
+            ("error_number", XeValue.FromSigned(number)),
+            ("severity", XeValue.FromSigned(severity)),
+            ("state", XeValue.FromSigned(state)),
+            ("user_defined", XeValue.FromBoolean(number >= 50000)),
             ("category", XeValue.FromMap(2, "SERVER")),
             ("destination", XeValue.FromMap(2, "USER")),
             ("is_intercepted", XeValue.FromBoolean(intercepted)),
-            ("message", XeValue.FromUnicode(error.Message)),
+            ("message", XeValue.FromUnicode(message)),
             ("nsp", XeValue.FromUnicode(""))));
-    }
 
     /// <summary><c>sql_batch_starting</c>, or <c>rpc_starting</c> for a parameterized or procedure command.</summary>
     public static void RequestStarting(SimulatedDbConnection connection, SimulatedDbCommand command)
     {
         if (IsRpc(command, out var objectName))
         {
-            Fire(connection, "rpc_starting", static () => Objects.RpcStarting, @event => Data(@event,
+            Fire(connection, XeEventKind.RpcStarting, @event => Data(@event,
                 ("connection_reset_option", XeValue.FromMap(0, "None")),
                 ("object_name", XeValue.FromUnicode(objectName)),
                 ("statement", XeValue.FromUnicode(RpcStatement(command))),
                 ("data_stream", XeValue.FromBinary([]))));
             return;
         }
-        Fire(connection, "sql_batch_starting", static () => Objects.BatchStarting, @event => Data(@event, ("batch_text", XeValue.FromUnicode(command.CommandText))));
+        Fire(connection, XeEventKind.SqlBatchStarting, @event => Data(@event, ("batch_text", XeValue.FromUnicode(command.CommandText))));
     }
 
     /// <summary>
@@ -74,7 +93,7 @@ internal static class XeEvents
         var result = ended ? XeValue.FromMap(1, "Error") : XeValue.FromMap(0, "OK");
         if (IsRpc(command, out var objectName))
         {
-            Fire(connection, "rpc_completed", static () => Objects.RpcCompleted, @event => Data(@event,
+            Fire(connection, XeEventKind.RpcCompleted, @event => Data(@event,
                 ("duration", XeValue.FromUnsigned((ulong)durationMicroseconds)),
                 ("result", result),
                 ("connection_reset_option", XeValue.FromMap(0, "None")),
@@ -83,7 +102,7 @@ internal static class XeEvents
                 ("data_stream", XeValue.FromBinary([]))));
             return;
         }
-        Fire(connection, "sql_batch_completed", static () => Objects.BatchCompleted, @event => Data(@event,
+        Fire(connection, XeEventKind.SqlBatchCompleted, @event => Data(@event,
             ("duration", XeValue.FromUnsigned((ulong)durationMicroseconds)),
             ("result", result),
             ("batch_text", XeValue.FromUnicode(command.CommandText))));
@@ -171,7 +190,7 @@ internal static class XeEvents
     };
 
     /// <summary>The event's data values in column order, from those named; the rest read as their type's zero.</summary>
-    private static XeValue[] Data(XeObject @event, params ReadOnlySpan<(string Name, XeValue Value)> values)
+    internal static XeValue[] Data(XeObject @event, params ReadOnlySpan<(string Name, XeValue Value)> values)
     {
         var columns = @event.DataColumns;
         var data = new XeValue[columns.Length];
@@ -188,23 +207,25 @@ internal static class XeEvents
     }
 
     /// <summary>
-    /// Fires the event named <paramref name="eventName"/> on every running
-    /// session that takes it. A server whose Extended Events state no
-    /// statement has made yet has only the default sessions running: an event
-    /// none of them takes costs nothing — not even the catalog's load — and
-    /// their predicates are asked before the state is made for one.
+    /// Fires <paramref name="kind"/> on every running session that takes it,
+    /// <paramref name="connection"/> the session it fires on — or, under
+    /// <paramref name="systemTask"/>, the session a system task's report is
+    /// about. A server whose Extended Events state no statement has
+    /// made yet has only the default sessions running: an event none of them
+    /// takes costs nothing — not even the catalog's load — and their
+    /// predicates are asked before the state is made for one.
     /// </summary>
-    private static void Fire(SimulatedDbConnection connection, string eventName, Func<XeObject> resolve, Func<XeObject, XeValue[]> data)
+    internal static void Fire(SimulatedDbConnection connection, XeEventKind kind, Func<XeObject, XeValue[]> data, bool systemTask = false)
     {
         var simulation = connection.Simulation;
         var server = simulation.ExtendedEventsIfMade;
-        if (server is null && !DefaultEventSessions.Started.Contains(eventName))
+        if (server is null ? !XeEventKinds.TakenAtStartup[(int)kind] : !server.Taken[(int)kind])
             return;
-        var @event = resolve();
+        var @event = Resolve(kind);
         XeFiring? firing = null;
         if (server is null)
         {
-            firing = new XeFiring(@event, data(@event), connection, DateTime.UtcNow);
+            firing = new XeFiring(@event, data(@event), connection, DateTime.UtcNow, systemTask);
             if (!DefaultsTake(connection, firing))
                 return;
             server = simulation.ExtendedEventsFor(connection);
@@ -212,21 +233,25 @@ internal static class XeEvents
         var subscribers = server.Subscribers(@event);
         if (subscribers.Length == 0)
             return;
-        firing ??= new XeFiring(@event, data(@event), connection, DateTime.UtcNow);
+        firing ??= new XeFiring(@event, data(@event), connection, DateTime.UtcNow, systemTask);
         foreach (var (session, sessionEvent) in subscribers)
+            FireInto(session, sessionEvent, firing);
+    }
+
+    /// <summary>Delivers <paramref name="firing"/> to one session's event: its predicate asked, then each of its targets.</summary>
+    internal static void FireInto(RunningEventSession session, SessionEvent sessionEvent, XeFiring firing)
+    {
+        lock (session.Gate)
         {
-            lock (session.Gate)
+            firing.Session = session;
+            firing.SessionEvent = sessionEvent;
+            if (sessionEvent.Predicate is { } predicate && !predicate.Evaluate(firing))
+                return;
+            var record = XeEventXml.Render(firing, sessionEvent);
+            foreach (var target in session.Definition.Targets)
             {
-                firing.Session = session;
-                firing.SessionEvent = sessionEvent;
-                if (sessionEvent.Predicate is { } predicate && !predicate.Evaluate(firing))
-                    continue;
-                var record = XeEventXml.Render(firing, sessionEvent);
-                foreach (var target in session.Definition.Targets)
-                {
-                    if (session.Targets.TryGetValue(target.Id, out var state))
-                        state.Accept(firing, sessionEvent, record);
-                }
+                if (session.Targets.TryGetValue(target.Id, out var state))
+                    state.Accept(firing, sessionEvent, record);
             }
         }
     }

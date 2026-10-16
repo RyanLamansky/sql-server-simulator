@@ -178,6 +178,11 @@ partial class Simulation
             var waited = System.Diagnostics.Stopwatch.GetElapsedTime(started);
             batch.Connection.WaitedTicks += waited.Ticks;
             batch.Connection.Simulation.RecordWait(session, "WAITFOR", (long)waited.TotalMilliseconds);
+            if (ExtendedEvents.XeEvents.Takes(batch.Connection.Simulation, ExtendedEvents.XeEventKind.WaitInfo)
+                || ExtendedEvents.XeEvents.Takes(batch.Connection.Simulation, ExtendedEvents.XeEventKind.WaitCompleted))
+            {
+                ExtendedEvents.XeSessionEvents.WaitEnded(batch.Connection, lockMode: null, (long)waited.TotalMilliseconds);
+            }
         }
     }
 

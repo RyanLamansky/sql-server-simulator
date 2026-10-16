@@ -68,16 +68,56 @@ None of them opens the views: `sys.server_event_sessions` and three of its compa
 
 ## Events
 
-`XeEvents` fires five events, each with every data field real gives it in column order and the actions after them in the reverse of their written order, as real writes them:
+`XeEvents` and its siblings fire the events below, each with every data field real gives it in column order and the actions after them in the reverse of their written order, as real writes them (probed 2026-10-16 against SQL Server 2025):
 
 - `error_reported` for every error a statement raises — from `StatementLifecycle.RouteError`, once per error however many frames it unwinds through, `is_intercepted` when a `TRY` frame anywhere on the session will catch it — and for every numbered message as it is queued (`PendingMessageQueue`); `PRINT`'s unnumbered message fires none, and a message sent as class 0 reports the severity 10 it was raised at.
   Category and destination are the `SERVER` / `USER` pair every probed statement error reports.
 - `sql_batch_starting` and `sql_batch_completed` around a command sent as a batch, `rpc_starting` and `rpc_completed` around a parameterized command (SqlClient's `sp_executesql`) or a procedure call, with the statement real reconstructs (`exec sp_executesql N'…',N'@p int',@p=1`, `exec dbo.p @a=7`).
   `result` is `Error` only for a request an error ended — a statement error the batch went on past is `OK`, as on real.
+- `sql_statement_starting` / `_completed` around each statement of a batch, and `sp_statement_starting` / `_completed` around each of a module body's — procedure, trigger, function — with `source_database_id`, `object_id`, `object_type`, `nest_level` and an empty `object_name` (`XeStatementEvents`, from `StatementLifecycle.Enter` and `Leave`, the plan cache's replays included).
+  The offsets are bytes into the batch or the module's whole definition, the line the definition's; a query — `SELECT`, a DML statement, `EXEC`, `WITH` — ends at its own last character, anything else at the character before the next statement, its terminator and white space included (`set nocount on` takes the line break after it, `set @i += 1;` its `; `), or -1 when it runs to the batch's end.
+  `row_count` is the statement's own, an `EXEC` of a procedure the sum of its body's; `last_row_count` stays at the last count a query, `SET @v` or initializing `DECLARE` set, which a session option or `PRINT` leaves standing.
+  A block, `TRY` / `CATCH`, a label and a `DECLARE` initializing nothing fire none.
+- `module_start` / `module_end` around a procedure's body, with the calling statement's line and offsets, the two-character type code (`P `), the name, an empty statement, and at the end its duration and the rows its statements counted.
+- `login` as a session opens — in-process, over TDS and on a pooled reset (`is_cached`) — after the `error_reported` real fires for the login's Msg 5701 (state 2) and 5703; `options_text`, when collected, lists the session's settings in real's words.
+  `logout` as it ends, its duration since the login.
+- `existing_connection` into the session starting, alone, for every other open session, by that session's own fields (`client_app_name`, `transaction_count`, `started_event_session_name`…) — a predicate on its actions reads the starter.
+- `attention` as a command timeout or a cancel ends a request (`SimulatedDbCommand.CancellationException`).
+- `wait_info` (its `End`) and `wait_completed` as a lock wait or a `WAITFOR` ends, typed `LCK_M_*` / `WAITFOR` with the duration in milliseconds, granted (`wait_result` 0) or timed out (258); `system_health` keeps a lock wait past thirty seconds.
+- `blocked_process_report`: a lock wait past each multiple of `sp_configure 'blocked process threshold (s)'` reports itself (`BlockedProcessReport`, from the wait's own slices while a session takes the event) — the blocked process as a deadlock graph gives one, the blocking one with its status (`suspended` while it waits or sleeps in `WAITFOR`, `running`, else `sleeping`), wait, real `trancount` and session attributes, each stack as bare frames (line, offsets, handle).
 
-An event none of the sessions that start with the server takes costs one set lookup until a statement makes the server's Extended Events state; an `error_reported` is first judged against `system_health`'s own predicate, so the state is made only for an error it would keep.
+Each event the simulator fires is an `XeEventKind`, and the server publishes which of them a running session takes (`ExtendedEventsServer.Taken`) with its subscriptions, so a firing site nothing subscribes to costs one array read — before any statement made the server's Extended Events state, whether a session that starts with the server lists the event (`XeEventKinds.TakenAtStartup`, read off the resource without loading the catalog).
+An `error_reported` is first judged against `system_health`'s own predicate, so the state is made only for an error it would keep; the login's two messages and a wait of fifteen seconds or less, which its predicates can't take, skip even that.
+A hot workload of 44,000 small statements (client batches and a `WHILE` loop) ran in the same time before and after the statement events with nothing subscribed and with `system_health` alone running, and about 1% slower with a session taking `sql_statement_completed` behind a predicate refusing every statement (measured 2026-10-16, Release build, median of six runs).
 The actions read the session (`session_id`, `client_app_name`, `client_hostname`, `client_pid`, `database_id` / `database_name`, the principal names, `transaction_id`, `sql_text` — the batch's text, none for an RPC as on real) and the session's own counters (`event_sequence`, `package0.counter`); one the simulator keeps no state for reads as its type's zero.
 A predicate evaluates over the same values, its string comparators case-insensitive and its `like` the simulator's `LIKE` matcher.
+
+## Deadlock reports
+
+A deadlock the lock manager finds (see [`locking.md`](locking.md#cycle-detection)) is captured under its gate while every session in the cycle waits — when something reports deadlocks: trace flag 1204 or 1222 on server-wide, or a running session taking `xml_deadlock_report`, `lock_deadlock` or `lock_deadlock_chain`, which `system_health` always does (`Simulation.ReportsDeadlocks`).
+The victim reports it (`DeadlockReport`) as its wait ends, before its Msg 1205 rolls anything back, so every lock of the cycle is still held and the lock views read it as it was found.
+Probed 2026-10-16 against SQL Server 2025 over key, RID, page and object deadlocks of two and three sessions, inside procedures and out:
+
+- **The order.** `lock_deadlock_chain` once per process, then `lock_deadlock` for the victim, then `xml_deadlock_report`, all at one timestamp.
+  The processes run from the victim through the session waiting on it, and on against the wait-for order, so the last process holds what the victim waits for; resource *k* is the one process *k* waits on, owned by the process before it.
+- **The graph.** `<deadlock>` holds `victim-list`, `process-list` and `resource-list` in real's layout to the white space — one-space indentation, `<stackFrames>` present and empty, a frame's text on its own line before four spaces and `</frame>`, the input buffer before three, apostrophes escaped as `&apos;`.
+  A process carries real's thirty-odd attributes in real's order: the wait resource as `sys.dm_exec_requests` spells it, the wait time, the transaction (`user_transaction`, its `BEGIN TRAN` name, or the statement's verb for an autocommit one) and when it began, the requested mode, `priority` the session's `DEADLOCK_PRIORITY` and `taskpriority` its negation, `trancount` the transaction count with one more for a write statement's own (an autocommit write reports 2, an autocommit read 0), the batch times, the client, the login, `isolationlevel` as `read committed (2)`, the database and `lockTimeout` as an unsigned 32-bit value.
+- **The execution stack** comes from the session's running batch (`SimulatedDbConnection.RunningBatch`, each module body's `BatchContext.CallerBatch` the batch that called it), innermost first.
+  A module's frame names it `db.schema.name` with its statement's line in the `CREATE`, offsets into the definition and the module's handle; the batch that called it gives its own statement under its legacy `0x01` handle; the batch statement running innermost writes `unknown` under its `0x02` handle, behind a frame of its own for the prepared text a simple parameterization runs it as.
+  A frame's text stops one character short of its statement, real's own slip, and a start offset of 0 or an end of -1 is left out.
+- **The resources** are `keylock` (`hobtid`, `indexname`), `ridlock` and `pagelock` (`fileid`, `pageid`), `objectlock` (`lockPartition`, `objid`, `subresource`) and `applicationlock`, each with `dbid`, `objectname` as `db.schema.table`, a stand-in `id` and the holder's `mode`, read off the holder's own row of `sys.dm_tran_locks` (`LockDmvs.EnumerateDmTranLocks`).
+- **`lock_deadlock_chain` / `lock_deadlock`** carry the waited resource as the lock manager keys it — a key's hobt in `resource_0` and its hash's bytes little-endian in `resource_1`'s high half and `resource_2`, a row's page and file, a page's number and file, an object's id in `resource_0` and `object_id` — the mode the process asked for, its transaction and the server's deadlock count as `deadlock_id`; `lock_deadlock` adds the victim's wait as `duration`.
+- **Trace flags.** With 1204 on server-wide, real writes its wait-for graph under `spid44s` — `Deadlock encountered .... Printing deadlock information`, then per resource a `Node:n` with its wait resource, the holder's grant (mode padded to nine), statement type, line and input buffer, and the request waiting on it — and the victim's owner line; with 1222, the graph as indented `name=value` lines under `spid3s`.
+  A session-scope `DBCC TRACEON (1222)` writes nothing.
+- The lock monitor fires `lock_deadlock_chain` and `xml_deadlock_report`, so their `session_id` action reads its session, 44 on the probed instance; `lock_deadlock` fires on the victim's.
+
+### Divergences
+
+- `blocked_process_report` fires from the waiter, as soon as its wait passes each multiple of the threshold; real's lock monitor looks every few seconds, so its reports trail the threshold (a five-second threshold's wait reported at about 6 and 11 seconds).
+  `object_id` / `index_id` are the lock manager's words for the resource (a key's hobt in two parts), stand-ins where the hobt isn't real-shaped, and the blocking process of a sleeping session is unprobed: it reports `sleeping` with no frames.
+- The victim is the simulator's — the lowest `DEADLOCK_PRIORITY`, the requester on a tie — where real weighs the log each transaction would roll back; the graph follows whichever it chose.
+- Addresses (`process…`, `XDES`, `lock…`, the 1204 owners and proxies), `logused`, `schedulerid`, `kpid`, the `clientoption` words (sqlcmd's) and the `sqlhandle` bytes stand in for real's, and `<stackFrames>` holds none of real's native frames.
+- A deadlock between two requests of one MARS session (Msg 1205 on its own thread) reports nothing.
 
 ## Targets
 
@@ -91,9 +131,11 @@ A predicate evaluates over the same values, its string comparators case-insensit
 
 ### Not modeled yet
 
-- The statement-level and module events (`sql_statement_starting` / `_completed`, `sp_statement_*`, `module_end`), the lock, wait and deadlock events (`lock_acquired`, `wait_info`, `xml_deadlock_report` — which `system_health` takes), the login messages real's `error_reported` sees, and every other event in the catalog: a session takes them, and they never fire.
+- Every other event in the catalog: a session takes it, and it never fires.
+  Among the commonly captured ones: `lock_acquired` / `lock_released` / `lock_timeout` / `lock_escalation`, `object_created` / `_altered` / `_deleted` (real fires each twice, its `Begin` and `Commit` phase) and `database_created` / `_dropped`, `auto_stats`, `query_post_execution_showplan`, and `wait_info_external`.
+- An `IF` or `WHILE` condition's own statement events (real reports `if 1=1` as a statement, a loop's condition once per evaluation), `module_start` / `module_end` for a trigger or function, `wait_info`'s `Begin`, `wait_completed`'s `wait_resource` text (empty here), and `attention` for a TDS attention, which goes no way through the command.
 - The live event stream (`event_stream`, `sys.fn_MSxe_read_event_stream`), and a file target on a host disk: the event file never leaves the simulation.
-- `cpu_time`, the read and write counts and `row_count` read zero; `duration` is the request's measured time.
+- `cpu_time` and the read and write counts read zero, as do the batch events' `row_count`; `duration` is the measured time.
 
 ### Divergences
 

@@ -150,6 +150,12 @@ partial class Simulation
         public SimulatedSqlException? Error;
 
         private int? savedThreadId;
+
+        /// <summary>The batch the session ran a statement of before this one entered, put back as it leaves.</summary>
+        private BatchContext? savedRunningBatch;
+
+        /// <summary>The statement as the statement events place it, when a running session takes one of them.</summary>
+        private ExtendedEvents.XeStatement? xeStatement;
         private bool announcedReader;
         private IoStatistics? enclosingIo;
         private FunctionBodyShape? shape;
@@ -319,6 +325,18 @@ partial class Simulation
             var connection = batch.Connection;
             this.savedThreadId = connection.CurrentExecutingThreadId;
             connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+            this.savedRunningBatch = connection.RunningBatch;
+            // A client's batch has no caller, whatever request of the session
+            // ran last.
+            if (connection.NestingLevel > 0 && this.savedRunningBatch is { } caller && !ReferenceEquals(caller, batch))
+                batch.CallerBatch = caller;
+            connection.RunningBatch = batch;
+            if (!batch.IsSkipping && ExtendedEvents.XeStatementEvents.AnyTaken(connection.Simulation)
+                && ExtendedEvents.XeStatementEvents.Place(batch, batch.CurrentStatement.StartIndex) is { } placed)
+            {
+                this.xeStatement = placed;
+                ExtendedEvents.XeStatementEvents.Starting(connection, placed);
+            }
             // The outermost statement holds row images for its whole run, a
             // nested one's included, so it alone pins the LOB chains retired
             // meanwhile.
@@ -375,6 +393,9 @@ partial class Simulation
             }
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
+            connection.RunningBatch = this.savedRunningBatch;
+            if (this.xeStatement is { } placed)
+                ExtendedEvents.XeStatementEvents.Completed(connection, placed, (long)System.Diagnostics.Stopwatch.GetElapsedTime(placed.StartedTimestamp).TotalMicroseconds);
             if (this.announcedReader)
             {
                 LobReclamation.Leave(connection.Session);

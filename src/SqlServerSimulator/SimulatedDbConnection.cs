@@ -1107,6 +1107,16 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int DeadlockPriority;
 
     /// <summary>
+    /// The batch whose statement the session runs innermost — a module body's
+    /// inside its caller's (<see cref="Parser.BatchContext.CallerBatch"/>) —
+    /// which a deadlock or blocked-process report reads the execution stack
+    /// of while the session waits. Set as each statement enters and put back
+    /// as it leaves. Held here rather than on <see cref="Session"/>, whose
+    /// token must not keep an abandoned connection alive.
+    /// </summary>
+    internal Parser.BatchContext? RunningBatch;
+
+    /// <summary>
     /// Session-scoped <c>SET ROWCOUNT</c> cap: the maximum number of rows a
     /// statement returns or changes, <c>0</c> meaning unlimited (the default).
     /// <c>bigint</c>-wide because real accepts a <c>bigint</c> variable there
@@ -2157,6 +2167,20 @@ public sealed class SimulatedDbConnection : DbConnection
     /// (2026-05-12).
     /// </summary>
     internal int LastStatementRowCount;
+
+    /// <summary>
+    /// The row count the statement events' <c>last_row_count</c> reports: the
+    /// last statement's that counts rows, where a session option or
+    /// <c>PRINT</c> leaves it standing though <c>@@ROWCOUNT</c> reads 0
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal ulong XeLastRowCount;
+
+    /// <summary>The rows the statement events have counted in the procedure body running innermost.</summary>
+    internal long XeModuleRows;
+
+    /// <summary>The rows the procedure a statement just called counted, its completed event's <c>row_count</c>; -1 when it called none.</summary>
+    internal long XeCallRows = -1;
 
     /// <summary>
     /// Backs <c>@@ERROR</c>: error number of the most recently completed

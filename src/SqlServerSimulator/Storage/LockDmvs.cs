@@ -590,7 +590,7 @@ internal static class LockDmvs
     }
 
     /// <summary>A stand-in for the address of a lock resource's block, which real's wait descriptions name as <c>id=lock…</c>.</summary>
-    private static string LockBlockId(LockResource? resource) =>
+    internal static string LockBlockId(LockResource? resource) =>
         string.Create(System.Globalization.CultureInfo.InvariantCulture, $"lock{0xC00000000L + (((resource is null ? 0u : (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(resource)) & 0xFFFFFFF) * 0x40):x}");
 
     // 32-bit FNV-1a over the resource name's UTF-16 code units, for the
@@ -612,7 +612,7 @@ internal static class LockDmvs
     /// lists it; null when it waits for none
     /// (or was granted while the view looked).
     /// </summary>
-    private static LockRow? WaitedLock(BatchContext batch, SimulatedDbConnection waiter)
+    internal static LockRow? WaitedLock(BatchContext batch, SimulatedDbConnection waiter)
     {
         if (waiter.WaitingOnResource is not { } resource)
             return null;
@@ -637,8 +637,12 @@ internal static class LockDmvs
     /// </summary>
     internal static string WaitResource(BatchContext batch, SimulatedDbConnection waiter, bool sysprocesses = false)
     {
-        if (WaitedLock(batch, waiter) is not { } row)
-            return "";
+        return WaitedLock(batch, waiter) is { } row ? WaitResourceOf(row, sysprocesses) : "";
+    }
+
+    /// <summary>The <c>wait_resource</c> naming the resource <paramref name="row"/> locks, as <see cref="WaitResource"/> spells it.</summary>
+    internal static string WaitResourceOf(LockRow row, bool sysprocesses = false)
+    {
         var trail = sysprocesses ? "" : " ";
         return row.Type switch
         {

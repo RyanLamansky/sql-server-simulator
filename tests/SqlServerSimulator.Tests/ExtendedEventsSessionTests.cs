@@ -269,7 +269,7 @@ public sealed class ExtendedEventsSessionTests
     public void EventFileTarget_NamesItsFileUnderTheLogDirectory()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create event session s on server add event sqlserver.error_reported add target package0.event_file (set filename = N's.xel')");
+        _ = sim.ExecuteNonQuery("create event session s on server add event sqlserver.error_reported (where error_number <> 5701 and error_number <> 5703) add target package0.event_file (set filename = N's.xel')");
         _ = sim.ExecuteNonQuery("alter event session s on server state = start");
         var data = (string)sim.ExecuteScalar("select t.target_data from sys.dm_xe_session_targets t join sys.dm_xe_sessions s on s.address = t.event_session_address where s.name = 's'")!;
         StartsWith("<EventFileTarget truncated=\"0\"><Buffers logged=\"0\" dropped=\"0\"/><File name=\"/var/opt/mssql/log/s_0_", data);

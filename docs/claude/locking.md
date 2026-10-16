@@ -482,6 +482,7 @@ When a conflict-driven wait would block, `LockManager.Acquire`:
    Each connection's `WaitingOnResource` is read consistently under the manager's gate.
    If any walk reaches the caller's connection, a cycle exists, and its victim is the session in it with the lowest `SET DEADLOCK_PRIORITY`, the caller on a tie (probed 2026-09-28 against SQL Server 2025, whose tie picks the requester in the two-session shape).
    A victim other than the caller is blocked in its own wait: it is flagged (`SessionToken.ChosenAsDeadlockVictim`) and woken, its wait ends with Msg 1205, and the caller waits on until the victim's rollback releases what it held.
+   While anything reports deadlocks, the cycle is captured with its victim (`SessionToken.DeadlockCycle`), which reports it as its wait ends and before its rollback — the Extended Events graph and the trace-flag error-log lines in [`extended-events.md`](extended-events.md#deadlock-reports).
 3. **The victim's rollback on Msg 1205**: `StatementLifecycle.SettleError` undoes the victim's work and releases every lock it held — waking the survivor — before the error reaches anyone.
    Uncaught, the transaction ends with it; caught by a `TRY`, the transaction stays open and doomed (`@@TRANCOUNT` unchanged, `XACT_STATE()` -1) until a `ROLLBACK`, or the batch's end with Msg 3998 (`SimulatedDbTransaction.UndoAsDeadlockVictim`; probed 2026-10-03 against SQL Server 2025).
    Ending it outright, as it once did, let the `CATCH` read `@@TRANCOUNT` 0.
@@ -497,6 +498,7 @@ Applies uniformly to schema locks, data locks, and row locks.
 Without that, `SET LOCK_TIMEOUT`'s default of "wait forever" makes any block permanent, whatever the client asked for.
 `Monitor.Wait` can't take a token, so the wait is sliced (`LockManager.CancellationPollMillis`) and re-checks between slices; the slice bounds only how long a cancel goes unnoticed, since a release still `Pulse`s and wakes every waiter at once, so nothing is added to the granted path.
 The token is resolved from the waiting `SessionToken`'s own connection rather than threaded through every caller — a lock wait belongs to the session, which is where the answer already is, and the alternative (an optional parameter on `Acquire`) would oblige 40 existing test call sites to pass one.
+Between slices a wait also reports itself as a `blocked_process_report` each time it passes another multiple of `sp_configure 'blocked process threshold (s)'`, outside the gate as the sweep runs, and a wait that ended fires `wait_info` — both only while a session takes them ([`extended-events.md`](extended-events.md#events)).
 The two deadlines keep their own errors: `SET LOCK_TIMEOUT` elapsing is Msg 1222, while a cancellation reports what the command surface reports for an aborted execution — **Msg -2** for a `CommandTimeout` and **Msg 0** for a caller's `Cancel()`, the same split `SimulatedDbCommand` already makes.
 
 ## Hint surface
