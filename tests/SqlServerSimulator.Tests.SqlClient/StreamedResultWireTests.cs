@@ -37,18 +37,6 @@ public sealed class StreamedResultWireTests
         return (short)await command.ExecuteScalarAsync(TestContext.CancellationToken);
     }
 
-    /// <summary>Waits for <paramref name="spid"/>'s request to be waiting on its client, read off <c>sys.dm_exec_requests</c>.</summary>
-    private async Task AwaitSuspendedAsync(SqlConnection observer, short spid)
-    {
-        await using var probe = new SqlCommand($"select count(*) from sys.dm_exec_requests where session_id = {spid} and status = 'suspended' and wait_type = 'ASYNC_NETWORK_IO'", observer);
-        var waited = System.Diagnostics.Stopwatch.StartNew();
-        while ((int)await probe.ExecuteScalarAsync(TestContext.CancellationToken) == 0)
-        {
-            IsLessThan(10_000, waited.ElapsedMilliseconds, "the reader's request never waited on its client");
-            await Task.Delay(10, TestContext.CancellationToken);
-        }
-    }
-
     private async Task<int> AttemptAsync(SqlConnection connection, string sql)
     {
         try
@@ -89,7 +77,7 @@ public sealed class StreamedResultWireTests
         await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
         IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
-        await this.AwaitSuspendedAsync(other, spid);
+        await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
 
         // The statement runs on while the socket takes its rows, letting go of
         // where it stood each time; it settles once the socket is full.
@@ -126,7 +114,7 @@ public sealed class StreamedResultWireTests
         {
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
-            await this.AwaitSuspendedAsync(other, spid);
+            await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
 
             var held = await this.HeldKeysAsync(other, spid, "S");
             IsGreaterThan(2, held);
@@ -182,7 +170,7 @@ public sealed class StreamedResultWireTests
         {
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
-            await this.AwaitSuspendedAsync(other, spid);
+            await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
             var held = await this.HeldKeysAsync(other, spid, keyMode);
             IsGreaterThan(2, held);
             IsLessThan(Rows / 2, held);
@@ -225,7 +213,7 @@ public sealed class StreamedResultWireTests
         {
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
             IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
-            await this.AwaitSuspendedAsync(other, spid);
+            await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
             IsLessThan(Rows / 2, await this.HeldKeysAsync(other, spid, "S"));
             AreEqual(1222, await this.AttemptAsync(other, "update big set pad = pad where id = 1"));
             AreEqual(0, await this.AttemptAsync(other, "update big set pad = pad where id = 19000"));
@@ -369,7 +357,7 @@ public sealed class StreamedResultWireTests
         await using var command = new SqlCommand("select * from big", reader, transaction);
         await using var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken);
         IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
-        await this.AwaitSuspendedAsync(other, spid);
+        await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
 
         await using (var kill = new SqlCommand(string.Create(CultureInfo.InvariantCulture, $"kill {spid}"), other))
             _ = await kill.ExecuteNonQueryAsync(TestContext.CancellationToken);
@@ -410,7 +398,7 @@ public sealed class StreamedResultWireTests
         {
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-            await AwaitSuspendedAsync(observer, spid);
+            await Wire.AwaitSuspendedAsync(observer, spid, TestContext.CancellationToken);
             AreEqual(1, await HeldKeysAsync(observer, spid, "X"));
             await using (var logged = new SqlCommand("select count(*) from l with (nolock)", observer))
                 AreEqual(0, await logged.ExecuteScalarAsync(TestContext.CancellationToken));

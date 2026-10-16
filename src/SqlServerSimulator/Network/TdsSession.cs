@@ -1124,6 +1124,24 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private async ValueTask<bool> StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
     {
+        // The request runs on, reported waiting on its client only while a
+        // send of its response waits (see SessionToken.SendingToClient).
+        var session = this.connection!.Session;
+        var outer = session.SendingToClient;
+        session.SendingToClient = true;
+        try
+        {
+            return await this.WriteOutcomesAsync(command, writer, doneToken, trailingTokensFollow, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            session.SendingToClient = outer;
+        }
+    }
+
+    /// <summary>The body of <see cref="StreamOutcomesAsync"/>.</summary>
+    private async ValueTask<bool> WriteOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
+    {
         var scopes = new ResponseScopes { Resumed = this.resumedScopes };
         this.resumedScopes = 0;
         using var outcomes = RenderedOutcomes(simulation.CreateResultSetsForCommand(command, continueOnError: true), trailingTokensFollow, scopes).GetEnumerator();
@@ -1309,7 +1327,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     {
                         TdsTypeCodec.WriteRow(writer, query.Schema, cursor, query.ColumnNullability);
                         rows++;
-                        await writer.FlushAsync(final: false, cancellationToken).ConfigureAwait(false);
+                        await this.FlushRowAsync(writer, cancellationToken).ConfigureAwait(false);
                         // A MARS request's statement suspended on its client
                         // steps aside for the session's other requests while
                         // the client's window is shut, as real's does.
@@ -1510,6 +1528,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         var connection = this.connection!;
         var database = this.databaseAtMessageStart;
+        connection.Session.SendingToClient = false;
         connection.SuspendRequest(request);
         _ = this.engineExecutionGate.Release();
         try
@@ -1522,7 +1541,33 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // state under the gate.
             await this.engineExecutionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             connection.ResumeRequest(request);
+            connection.Session.SendingToClient = true;
             this.databaseAtMessageStart = database;
+        }
+    }
+
+    /// <summary>
+    /// Sends the packets a row completed, the request reported waiting on its
+    /// client (<see cref="SessionToken.SendingToClient"/>) only while the
+    /// socket can't take them.
+    /// </summary>
+    private async ValueTask FlushRowAsync(TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        var flush = writer.FlushAsync(final: false, cancellationToken);
+        if (flush.IsCompleted)
+        {
+            await flush.ConfigureAwait(false);
+            return;
+        }
+        var session = this.connection!.Session;
+        session.SendingToClient = false;
+        try
+        {
+            await flush.ConfigureAwait(false);
+        }
+        finally
+        {
+            session.SendingToClient = true;
         }
     }
 

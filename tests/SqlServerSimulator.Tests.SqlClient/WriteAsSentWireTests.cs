@@ -32,18 +32,6 @@ public sealed class WriteAsSentWireTests
         return (short)await command.ExecuteScalarAsync(TestContext.CancellationToken);
     }
 
-    /// <summary>Waits for <paramref name="spid"/>'s request to be waiting on its client, read off <c>sys.dm_exec_requests</c>.</summary>
-    private async Task AwaitSuspendedAsync(SqlConnection observer, short spid)
-    {
-        await using var probe = new SqlCommand($"select count(*) from sys.dm_exec_requests where session_id = {spid} and status = 'suspended' and wait_type = 'ASYNC_NETWORK_IO'", observer);
-        var waited = System.Diagnostics.Stopwatch.StartNew();
-        while ((int)await probe.ExecuteScalarAsync(TestContext.CancellationToken) == 0)
-        {
-            IsLessThan(10_000, waited.ElapsedMilliseconds, "the reader's request never waited on its client");
-            await Task.Delay(10, TestContext.CancellationToken);
-        }
-    }
-
     private async Task<object?> ScalarAsync(SqlConnection connection, string sql)
     {
         await using var command = new SqlCommand(sql, connection);
@@ -67,7 +55,7 @@ public sealed class WriteAsSentWireTests
         {
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-            await AwaitSuspendedAsync(observer, spid);
+            await Wire.AwaitSuspendedAsync(observer, spid, TestContext.CancellationToken);
             var locked = (int)(await ScalarAsync(observer, $"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'KEY' and request_mode = 'X'"))!;
             IsLessThan(100, locked);
             AreEqual(locked, await ScalarAsync(observer, "select count(*) from t with (nolock) where v = 1"));
@@ -117,7 +105,7 @@ public sealed class WriteAsSentWireTests
         {
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
             IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
-            await AwaitSuspendedAsync(observer, spid);
+            await Wire.AwaitSuspendedAsync(observer, spid, TestContext.CancellationToken);
             AreEqual(1, await ScalarAsync(observer, "select count(*) from l with (nolock)"));
             var read = 2;
             while (await reader.ReadAsync(TestContext.CancellationToken))

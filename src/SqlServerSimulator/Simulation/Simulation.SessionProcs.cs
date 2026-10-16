@@ -264,9 +264,9 @@ partial class Simulation
             // A SELECT waiting on its client to read its rows is suspended in
             // its statement (see ResultStream).
             var awaitingClient = !isSelf && connection.Session.AwaitingClientRequest >= 0;
-            var status = blockedBy != 0 || connection.WaitingOnResource is not null || awaitingClient
+            var status = blockedBy != 0 || connection.WaitingOnResource is not null || (awaitingClient && connection.Session.WaitsOnClient())
                 ? "suspended"
-                : isSelf || connection.CurrentExecutingThreadId is not null ? "runnable" : "sleeping";
+                : isSelf || connection.CurrentExecutingThreadId is not null || awaitingClient ? "runnable" : "sleeping";
             var command = isSelf || connection.CurrentExecutingThreadId is not null || awaitingClient
                 ? WhoSelfCommand
                 : WhoIdleCommand;

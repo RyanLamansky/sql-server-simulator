@@ -27,6 +27,22 @@ internal static class Wire
     }
 
     /// <summary>Runs a batch through the in-process ADO surface of the same simulation (no wire involved).</summary>
+    /// <summary>
+    /// Waits for <paramref name="spid"/>'s request to be waiting on its client
+    /// to read what it sent, read off <c>sys.dm_exec_requests</c>: from then
+    /// until the client reads on, the statement produces nothing more.
+    /// </summary>
+    public static async Task AwaitSuspendedAsync(SqlConnection observer, short spid, CancellationToken cancellationToken)
+    {
+        await using var probe = new SqlCommand($"select count(*) from sys.dm_exec_requests where session_id = {spid} and status = 'suspended' and wait_type = 'ASYNC_NETWORK_IO'", observer);
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while ((int)await probe.ExecuteScalarAsync(cancellationToken) == 0)
+        {
+            IsLessThan(10_000, waited.ElapsedMilliseconds, "the reader's request never waited on its client");
+            await Task.Delay(10, cancellationToken);
+        }
+    }
+
     public static void ExecInProc(Simulation simulation, string sql)
     {
         using var connection = simulation.CreateDbConnection();

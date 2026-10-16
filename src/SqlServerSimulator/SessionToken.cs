@@ -232,6 +232,20 @@ internal sealed class SessionToken(int spid)
     public int AwaitingClientRequest = -1;
 
     /// <summary>
+    /// Set while the TDS endpoint writes the executing request's response and
+    /// no send of it waits: a statement of it suspended between windows
+    /// (<see cref="AwaitingClientRequest"/>) waits on its client only once a
+    /// send of what it produced waits — the client's MARS window shut, or the
+    /// socket full — and until then is still running, the endpoint sending its
+    /// rows and producing the next window without the client reading anything
+    /// more.
+    /// </summary>
+    public bool SendingToClient;
+
+    /// <summary>Whether <see cref="AwaitingClientRequest"/> waits on its client rather than on the endpoint still sending its rows (<see cref="SendingToClient"/>).</summary>
+    public bool WaitsOnClient() => this.AwaitingClientRequest >= 0 && !this.SendingToClient;
+
+    /// <summary>
     /// The kind of the statement the session is running, as
     /// <c>sys.dm_exec_requests.command</c> reports it; written as each
     /// statement dispatches, so a nested body's statement names itself.

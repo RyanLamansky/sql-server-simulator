@@ -1564,7 +1564,7 @@ internal static partial class BuiltInResources
             {
                 var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
                     : inWaitFor ? "WAITFOR"
-                    : awaitingClient >= 0 ? "ASYNC_NETWORK_IO"
+                    : awaitingClient >= 0 && session.WaitsOnClient() ? "ASYNC_NETWORK_IO"
                     : null;
                 var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
                 var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - (lockWait is not null && connection.WaitRecord is { } record ? record.WaitStartedTicks : session.WaitStartedTicks)));

@@ -135,6 +135,7 @@ public sealed class MarsInterleavingWireTests
         await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, TestContext.CancellationToken);
 
         await using var rows = await this.ReadAsync(connection, "select k, v from big", 2, transaction);
+        await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
         var held = await this.LocksAsync(other, spid);
         AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'u' where k = 1500", transaction));
         AreEqual(0, await this.AttemptAsync(connection, "delete big where k = 1700", transaction));
