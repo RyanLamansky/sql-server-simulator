@@ -889,7 +889,8 @@ partial class SimulatedSqlException
     /// <c>TODATETIMEOFFSET</c> (state 2) produced a value whose UTC or local
     /// time falls outside the type's range — <c>SWITCHOFFSET('9999-12-31
     /// 23:00 +00:00', '+05:00')</c> (probed 2026-10-01 against SQL Server
-    /// 2025).
+    /// 2025) — or a wall clock given to <c>AT TIME ZONE</c> names an instant
+    /// outside the UTC range (state 1, probed 2026-10-16).
     /// </summary>
     internal static SimulatedSqlException TimeZoneOverflowsDateTimeOffset(string function, byte state) =>
         new($"The timezone provided to builtin function {function} would cause the datetimeoffset to overflow the range of valid date range in either UTC or local time.", 9813, 16, state);

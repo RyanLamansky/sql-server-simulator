@@ -19,15 +19,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><c>datetime2 / datetime / smalldatetime AT TIME ZONE 'X'</c>: treats
 /// the LHS wall-clock as already in zone X, returning that wall-clock with
 /// X's offset attached. Skipped (spring-forward) wall-clocks shift forward by
-/// the DST delta; ambiguous (fall-back) wall-clocks pick the daylight
-/// (pre-fall-back) interpretation — probe-confirmed against SQL Server 2025.</item>
+/// the DST delta; ambiguous (fall-back) wall-clocks pick the earlier instant
+/// (<see cref="WindowsTimeZone.LocalToUtc"/>).</item>
 /// <item><c>datetimeoffset AT TIME ZONE 'X'</c>: preserves the UTC instant
 /// and re-expresses it in zone X (offset and wall-clock both change to match).</item>
 /// </list>
 /// <para>A zone name must be one of the Windows ids <c>sys.time_zone_info</c>
-/// lists (<see cref="BuiltInResources.FindWindowsTimeZone"/>), resolved
-/// through ICU's Windows-to-IANA mapping. The lookup result is cached per
-/// zone-name string to keep per-row overhead at a hashtable lookup.</para>
+/// lists (<see cref="WindowsTimeZone.Find"/>), whose embedded Windows rules
+/// convert independently of the host's time-zone database.</para>
 /// <para>Zone-name binding is tighter than <c>+</c> (probe-confirmed: <c>expr AT
 /// TIME ZONE 'UT' + 'C'</c> raises Msg 402 because real SQL Server parses it as
 /// <c>(expr AT TIME ZONE 'UT') + 'C'</c>, not <c>expr AT TIME ZONE 'UTC'</c>).
@@ -39,8 +38,6 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class AtTimeZone(Expression source, Expression zoneNameExpression) : Expression
 {
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, TimeZoneInfo?> ZoneCache = new();
-
     private readonly Expression source = source;
     private readonly Expression zoneNameExpression = zoneNameExpression;
 
@@ -65,57 +62,37 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         if (input.Type is TimeSqlType)
             throw SimulatedSqlException.AtTimeZoneInvalidArgument("time");
 
-        var zone = ResolveZone(zoneName.AsString);
+        var zone = WindowsTimeZone.Find(zoneName.AsString) ?? throw SimulatedSqlException.InvalidTimeZoneParameter(zoneName.AsString);
 
+        long utcTicks;
         if (input.Type is DateTimeOffsetSqlType)
         {
-            // datetimeoffset → datetimeoffset: preserve the UTC instant,
-            // re-express it in the target zone.
-            var converted = TimeZoneInfo.ConvertTime(input.AsDateTimeOffset, zone);
-            return SqlValue.FromDateTimeOffset(resultType, converted);
-        }
-
-        // datetime2 / datetime / smalldatetime: take the wall-clock and
-        // attach the target zone's offset for that wall-clock.
-        var wall = input.Type == SqlType.DateTime ? input.AsDateTime
-            : input.Type == SqlType.SmallDateTime ? input.AsSmallDateTime
-            : input.Type is DateTime2SqlType ? input.AsDateTime2
-            : throw SimulatedSqlException.AtTimeZoneInvalidArgument(SimulatedSqlException.FamilyRootName(input.Type));
-
-        wall = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified);
-        DateTimeOffset zoned;
-        if (zone.IsInvalidTime(wall))
-        {
-            // Spring-forward gap (e.g. Pacific 2026-03-08 02:30): SQL Server
-            // shifts the wall-clock forward by the DST delta and stamps the
-            // post-transition (daylight) offset. .NET's GetUtcOffset returns
-            // the standard offset for invalid times, so we manually adjust.
-            var rule = zone.GetAdjustmentRules()
-                .FirstOrDefault(r => r.DateStart <= wall && wall <= r.DateEnd);
-            var delta = rule?.DaylightDelta ?? TimeSpan.FromHours(1);
-            var shifted = wall.Add(delta);
-            zoned = new DateTimeOffset(shifted, zone.GetUtcOffset(shifted));
-        }
-        else if (zone.IsAmbiguousTime(wall))
-        {
-            // Fall-back ambiguous wall-clock: SQL Server picks the daylight
-            // (pre-fall-back) interpretation. The daylight interpretation has
-            // the offset that produces the EARLIER UTC instant (because it's
-            // the "first occurrence" of that wall-clock).
-            var offsets = zone.GetAmbiguousTimeOffsets(wall);
-            var pick = offsets[0];
-            for (var i = 1; i < offsets.Length; i++)
-            {
-                if (wall - offsets[i] < wall - pick)
-                    pick = offsets[i];
-            }
-            zoned = new DateTimeOffset(wall, pick);
+            // datetimeoffset: keep the UTC instant, re-express it in the zone.
+            utcTicks = input.AsDateTimeOffset.UtcTicks;
         }
         else
         {
-            zoned = new DateTimeOffset(wall, zone.GetUtcOffset(wall));
+            // datetime2 / datetime / smalldatetime: the wall clock is already
+            // in the zone; an instant it names outside the type's UTC range is
+            // Msg 9813 (probed 2026-10-16 against SQL Server 2025).
+            var wall = input.Type == SqlType.DateTime ? input.AsDateTime
+                : input.Type == SqlType.SmallDateTime ? input.AsSmallDateTime
+                : input.Type is DateTime2SqlType ? input.AsDateTime2
+                : throw SimulatedSqlException.AtTimeZoneInvalidArgument(SimulatedSqlException.FamilyRootName(input.Type));
+            utcTicks = zone.LocalToUtc(wall.Ticks);
+            if (utcTicks < 0 || utcTicks > DateTime.MaxValue.Ticks)
+                throw SimulatedSqlException.TimeZoneOverflowsDateTimeOffset("AT TIME ZONE", 1);
         }
 
+        var offset = zone.OffsetMinutesAt(utcTicks);
+        var localTicks = utcTicks + (offset * TimeSpan.TicksPerMinute);
+        // A local time past either end of the range clamps to that end at
+        // +00:00 rather than raising (probed 2026-10-16 against SQL Server
+        // 2025): '0001-01-01 07:59 +00:00' AT TIME ZONE 'Pacific Standard
+        // Time' is 0001-01-01 00:00 +00:00.
+        var zoned = localTicks < 0 ? DateTimeOffset.MinValue
+            : localTicks > DateTime.MaxValue.Ticks ? DateTimeOffset.MaxValue
+            : new DateTimeOffset(localTicks, TimeSpan.FromMinutes(offset));
         return SqlValue.FromDateTimeOffset(resultType, zoned);
     }
 
@@ -124,9 +101,6 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     // answer for projection-schema resolution that may not be reached at
     // runtime.
     private static SqlType ResolveResultType(SqlType lhs) => SwitchOffset.ResultTypeFor(lhs);
-
-    private static TimeZoneInfo ResolveZone(string name) =>
-        ZoneCache.GetOrAdd(name, BuiltInResources.FindWindowsTimeZone) ?? throw SimulatedSqlException.InvalidTimeZoneParameter(name);
 
     /// <summary>Whether the <c>AT</c> at the cursor opens <c>AT TIME</c> rather than being an alias.</summary>
     public static bool IsAhead(ParserContext context)

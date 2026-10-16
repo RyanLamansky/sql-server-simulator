@@ -95,6 +95,89 @@ public sealed class AtTimeZoneTests
         AreEqual(TimeSpan.FromHours(-7), result.Offset);
     }
 
+    /// <summary>
+    /// Offsets follow Windows' own per-year rules as real embeds them, never
+    /// the host's time-zone history: the first rule reaches back unchanged
+    /// (summer time in 1800 Pacific, no local mean time in 1880 Tokyo), the
+    /// last reaches forward, and the rule-change years keep the artefacts
+    /// real shows at a year boundary (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('1800-07-01 12:00' as datetime2(0)) at time zone 'Pacific Standard Time'", "1800-07-01 12:00:00 -07:00")]
+    [DataRow("cast('1753-06-01 12:00' as datetime) at time zone 'Pacific Standard Time'", "1753-06-01 12:00:00.000 -07:00")]
+    [DataRow("cast('1880-01-01 12:00' as datetime2(0)) at time zone 'Tokyo Standard Time'", "1880-01-01 12:00:00 +09:00")]
+    [DataRow("cast('1900-07-01 12:00' as datetime2(0)) at time zone 'GMT Standard Time'", "1900-07-01 12:00:00 +01:00")]
+    [DataRow("cast('1752-09-10 12:00' as datetime2(0)) at time zone 'W. Europe Standard Time'", "1752-09-10 12:00:00 +02:00")]
+    [DataRow("cast('0001-01-15 12:00' as datetime2(0)) at time zone 'AUS Eastern Standard Time'", "0001-01-15 12:00:00 +11:00")]
+    [DataRow("cast('2500-07-01 12:00' as datetime2(0)) at time zone 'Eastern Standard Time'", "2500-07-01 12:00:00 -04:00")]
+    [DataRow("cast('3000-01-15 12:00' as datetime2(0)) at time zone 'New Zealand Standard Time'", "3000-01-15 12:00:00 +13:00")]
+    // Ramadan suspends Morocco's +01:00; half-hour and quarter-hour zones.
+    [DataRow("cast('2026-02-20 12:00' as datetime2(0)) at time zone 'Morocco Standard Time'", "2026-02-20 12:00:00 +00:00")]
+    [DataRow("cast('2026-04-01 12:00' as datetime2(0)) at time zone 'Morocco Standard Time'", "2026-04-01 12:00:00 +01:00")]
+    [DataRow("cast('2026-07-15 12:00' as datetime2(0)) at time zone 'Lord Howe Standard Time'", "2026-07-15 12:00:00 +10:30")]
+    [DataRow("cast('2026-01-15 12:00' as datetime2(0)) at time zone 'Lord Howe Standard Time'", "2026-01-15 12:00:00 +11:00")]
+    [DataRow("cast('2026-01-15 12:00' as datetime2(0)) at time zone 'Chatham Islands Standard Time'", "2026-01-15 12:00:00 +13:45")]
+    // Zones with no IANA counterpart keep their Windows rules.
+    [DataRow("cast('2026-07-01 00:00 +00:00' as datetimeoffset(0)) at time zone 'Kamchatka Standard Time'", "2026-07-01 13:00:00 +13:00")]
+    [DataRow("cast('2026-07-01 00:00 +00:00' as datetimeoffset(0)) at time zone 'Mid-Atlantic Standard Time'", "2026-06-30 23:00:00 -01:00")]
+    // Each side of a transition instant.
+    [DataRow("cast('2026-03-08 09:59:59.9999999 +00:00' as datetimeoffset) at time zone 'Pacific Standard Time'", "2026-03-08 01:59:59.9999999 -08:00")]
+    [DataRow("cast('2026-03-08 10:00 +00:00' as datetimeoffset) at time zone 'Pacific Standard Time'", "2026-03-08 03:00:00.0000000 -07:00")]
+    [DataRow("cast('2026-04-05 02:30 +00:00' as datetimeoffset(0)) at time zone 'Lord Howe Standard Time'", "2026-04-05 13:00:00 +10:30")]
+    // Samoa crosses the date line a day after the change it made.
+    [DataRow("cast('2011-12-31 10:59:59 +00:00' as datetimeoffset(0)) at time zone 'Samoa Standard Time'", "2011-12-31 00:59:59 -10:00")]
+    [DataRow("cast('2011-12-31 11:00:00 +00:00' as datetimeoffset(0)) at time zone 'Samoa Standard Time'", "2012-01-01 01:00:00 +14:00")]
+    // Summer ending on January 1 the year before leaves the first hour of
+    // the new year in daylight time on standard time; a rule change's
+    // year boundary blips for an hour.
+    [DataRow("cast('1904-01-01 03:30 +00:00' as datetimeoffset(0)) at time zone 'Central Brazilian Standard Time'", "1903-12-31 23:30:00 -04:00")]
+    [DataRow("cast('1904-01-01 04:00 +00:00' as datetimeoffset(0)) at time zone 'Central Brazilian Standard Time'", "1904-01-01 01:00:00 -03:00")]
+    [DataRow("cast('2013-12-31 17:30 +00:00' as datetimeoffset(0)) at time zone 'Altai Standard Time'", "2013-12-31 23:30:00 +06:00")]
+    [DataRow("cast('2013-12-31 18:30 +00:00' as datetimeoffset(0)) at time zone 'Altai Standard Time'", "2014-01-01 01:30:00 +07:00")]
+    public void Offsets_FollowWindowsRules(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select convert(varchar(40), {expression}, 121)"));
+
+    /// <summary>
+    /// A wall clock a transition skips reads with the offset in force before
+    /// it and lands past the gap; one a transition repeats reads as the
+    /// earlier instant, in both hemispheres — and where Windows writes a
+    /// change of standard offset as daylight time ending, the skipped hour
+    /// reads with the new offset and lands before the gap (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("2026-03-29 01:30", "GMT Standard Time", "2026-03-29 02:30:00 +01:00")]
+    [DataRow("2026-10-25 01:30", "GMT Standard Time", "2026-10-25 01:30:00 +01:00")]
+    [DataRow("2026-11-01 01:30", "Pacific Standard Time", "2026-11-01 01:30:00 -07:00")]
+    [DataRow("2026-10-04 02:30", "AUS Eastern Standard Time", "2026-10-04 03:30:00 +11:00")]
+    [DataRow("2026-04-05 02:30", "AUS Eastern Standard Time", "2026-04-05 02:30:00 +11:00")]
+    [DataRow("2026-10-04 02:15", "Lord Howe Standard Time", "2026-10-04 02:45:00 +11:00")]
+    [DataRow("2007-12-09 02:45", "Venezuela Standard Time", "2007-12-09 02:45:00 -04:00")]
+    [DataRow("2016-03-27 02:30", "Altai Standard Time", "2016-03-27 01:30:00 +06:00")]
+    [DataRow("1903-01-01 00:30", "Central Brazilian Standard Time", "1903-01-01 00:30:00 -04:00")]
+    public void WallClocks_SkippedAndRepeated_ResolveAsReal(string wall, string zone, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select convert(varchar(40), cast('{wall}' as datetime2(0)) at time zone '{zone}', 121)"));
+
+    /// <summary>
+    /// A datetimeoffset whose local time leaves the range clamps to that end
+    /// at +00:00, while a wall clock naming an instant outside the UTC range
+    /// is Msg 9813 state 1 (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('0001-01-01 07:59 +00:00' as datetimeoffset) at time zone 'Pacific Standard Time'", "0001-01-01 00:00:00.0000000 +00:00")]
+    [DataRow("cast('9999-12-31 15:00:00.1234 +00:00' as datetimeoffset(4)) at time zone 'Tokyo Standard Time'", "9999-12-31 23:59:59.9999 +00:00")]
+    [DataRow("cast('0001-01-01 12:00' as datetime2(0)) at time zone 'Pacific Standard Time'", "0001-01-01 12:00:00 -08:00")]
+    public void RangeEdges_LocalOverflowClamps(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select convert(varchar(40), {expression}, 121)"));
+
+    [TestMethod]
+    [DataRow("0001-01-01 05:00", "Tokyo Standard Time")]
+    [DataRow("9999-12-31 20:00", "Pacific Standard Time")]
+    public void RangeEdges_WallClockOutsideUtcRange_RaisesMsg9813(string wall, string zone) =>
+        AssertSqlError($"select cast('{wall}' as datetime2) at time zone '{zone}'", 9813, 1,
+            "The timezone provided to builtin function AT TIME ZONE would cause the datetimeoffset to overflow the range of valid date range in either UTC or local time.");
+
     [TestMethod]
     [DataRow("cast(null as datetime2) at time zone 'UTC'")]
     [DataRow("cast('2026-05-09' as datetime2) at time zone null")]

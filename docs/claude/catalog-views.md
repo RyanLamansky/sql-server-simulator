@@ -1200,14 +1200,10 @@ The "referenced by" set lists a table whose computed columns read it against its
 ## `sys.time_zone_info`
 
 The Windows time-zone catalog, server-scope: `name` / `current_utc_offset` / `is_currently_dst`, 141 rows matching the reference server.
-ORMs probe it as a zoneinfo-capability check (mssql-django's `has_zoneinfo_database` runs `SELECT TOP 1 1 FROM sys.time_zone_info`), and the capability is genuine — `AT TIME ZONE` already matches real including DST.
+ORMs probe it as a zoneinfo-capability check (mssql-django's `has_zoneinfo_database` runs `SELECT TOP 1 1 FROM sys.time_zone_info`), and the capability is genuine — the rows read the same embedded Windows rules `AT TIME ZONE` does ([`scalars.md`](scalars.md#windows-rules-not-the-hosts)).
 
-**Names are baked, offsets are computed.**
-Real always reports Windows ids, while the ICU mapping behind `TimeZoneInfo` yields IANA names on Linux, so the id list is a probed constant (`BuiltInResources.TimeZones.cs`); the offset and DST flag resolve per query against the current instant the way real's do.
-132 of the 141 ids resolve directly through `TimeZoneInfo.FindSystemTimeZoneById`; the rest go through a small IANA fallback table checked against the reference server's reported values.
-
-**Divergence**: `Kamchatka Standard Time` and `Mid-Atlantic Standard Time` are deprecated Windows zones that Microsoft retains with obsolete DST rules and that have no IANA equivalent, so they report their standard offset with `is_currently_dst = 0` where real reports the DST-shifted offset.
-The other 139 match.
+The rows come in real's order, by standard offset rather than by id — `Dateline Standard Time` first, `Line Islands Standard Time` last — and the offset and DST flag are the zone's at the statement's instant (probed 2026-10-16 against SQL Server 2025).
+All 141 rows matched real's offset and flag at the probe.
 
 ## Stable column ids
 

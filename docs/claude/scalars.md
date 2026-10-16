@@ -189,18 +189,32 @@ Per-builder quirks: `DATETIMEFROMPARTS` ms 999 + h23:m59:s59 rolls to next day (
 ## `AT TIME ZONE`
 Postfix operator; LHS-type-discriminated semantics:
 - `datetime2`/`datetime`/`smalldatetime AT TIME ZONE 'X'`: treats LHS wall-clock as already in zone X, attaches X's offset.
-  Skipped (spring-forward) wall-clocks shift forward by DST delta with post-transition offset; ambiguous (fall-back) picks daylight (pre-fall-back).
+  A skipped (spring-forward) wall clock reads with the offset in force before the gap and lands past it; a repeated (fall-back) one reads as the earlier instant, in both hemispheres.
+  Where a zone's rules write a change of standard offset as daylight time ending (Altai 2016, Venezuela 2007), a skipped wall clock reads with the new offset and lands *before* the gap, and a repeated one at a negative-delta start reads as standard.
 - `datetimeoffset AT TIME ZONE 'X'`: preserves UTC instant; both offset and wall-clock change.
 
 Result is always `datetimeoffset` with LHS fractional precision preserved (`datetime2(N)`/`datetimeoffset(N)` → `datetimeoffset(N)`; legacy `datetime` → `datetimeoffset(3)`, `smalldatetime` → `datetimeoffset(0)`).
 `date`/`time` LHS → Msg 8116.
 Unrecognized zone → Msg 9820.
 NULL on either side propagates.
+A wall clock naming an instant outside the UTC range is Msg 9813 state 1; a `datetimeoffset` whose local time would leave the range instead clamps to that end of the range at `+00:00` — `'0001-01-01 07:59 +00:00' AT TIME ZONE 'Pacific Standard Time'` is `0001-01-01 00:00 +00:00`, and `'9999-12-31 15:00:00.1234 +00:00'` in Tokyo is `9999-12-31 23:59:59.9999 +00:00` (probed 2026-10-16 against SQL Server 2025).
 
 A zone name must be one of the Windows ids `sys.time_zone_info` lists, in any case and without surrounding spaces; an IANA name (`America/New_York`, `Etc/UTC`) is Msg 9820 as on real (probed 2026-10-01 against SQL Server 2025).
-The id resolves through ICU's Windows-to-IANA mapping with the `BuiltInResources.WindowsTimeZoneIanaFallbacks` aliases for the ids it lacks, cached in a process-static `ConcurrentDictionary`.
 
-**Divergence:** the offsets come from the host's IANA history where real reads Windows' rules, which reach back unchanged before the first rule — `'1800-07-01 12:00' AT TIME ZONE 'Pacific Standard Time'` is `-07:00` on real (summer time applied in 1800) and the local-mean-time `-07:53` here; `1900`, `1920` and `1880` Tokyo (`+09:18`) differ the same way, while the zones' modern rules agree.
+### Windows' rules, not the host's
+
+Offsets come from Windows' own per-year rule set, the one real embeds, which the simulator carries as `WindowsTimeZones.tsv` and evaluates in `WindowsTimeZone` — never `TimeZoneInfo`, so a result is the same on every host, whatever its time-zone database.
+A zone's first rule reaches back unchanged and its last reaches forward: `'1800-07-01 12:00' AT TIME ZONE 'Pacific Standard Time'` is `-07:00` (summer time in 1800, no local mean time), `1880` Tokyo is `+09:00`, and year 1 in Sydney has January summer time.
+Zones with no IANA counterpart (`Kamchatka`, `Mid-Atlantic`) keep their Windows rules.
+
+The rules were reconstructed black-box from real's answers (probed 2026-10-16 against SQL Server 2025): every offset change of all 141 zones between 1900 and 2104, found by a six-hourly scan plus a fifteen-minute scan across each year boundary and bisected to the millisecond; local wall clocks at and around each change; and random instants across years 1 to 9999 in both directions.
+The evaluation reproduces all of them, including real's year-boundary artefacts, which are why `WindowsTimeZone` compares a transition date by month, day and time of day rather than as an instant:
+- A southern zone whose summer ends on the first Thursday of January (`Central Brazilian` before 2005) spends the first hour of a year in daylight time on standard time when the previous year's summer ended on January 1 — `'1904-01-01 03:30 +00:00'` is `1903-12-31 23:30 -04:00`, half an hour later `-03:00` again.
+- Several zones blip for an hour at the turn of a year their rules changed (`Altai` at the end of 2013 is `+06:00` for an hour between two `+07:00` years), and Samoa crosses the date line at `2011-12-31 11:00 UTC`, a day and an hour after the IANA history's crossing.
+- A constant year the reconstruction writes as all-year daylight time with a negative delta moves its year boundary to the written standard offset; `is_currently_dst` reports such a year as standard time, as real reports those zones.
+
+**Divergence:** forty probed wall clocks resolve differently from real, all in the first or last hours of a year in which a zone's rules changed twice: Samoa's on 2009-12-31 and 2010-01-01, and Volgograd's around the turns of 2019, 2020 and 2021.
+The reconstruction found no encoding that reproduces these wall clocks together with real's offsets, so the offsets win; every other probed wall clock and every probed instant match.
 
 **Precedence**: `AT TIME ZONE` binds tighter than `+`.
 The zone-name slot parses as a primary expression only — literals, `@variables`, single-segment column refs, or parenthesized full expressions.
