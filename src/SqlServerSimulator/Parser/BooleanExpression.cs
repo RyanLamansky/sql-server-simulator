@@ -591,7 +591,9 @@ internal abstract class BooleanExpression : ExpressionNode
             context.MoveNextRequired();
         if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var inner = Expression.ParseSubqueryRejectingNextValueFor(context, QueryPosition.Exists);
+        Selection inner;
+        using (ParserScope.Enter(ref context.LaterSetOperationBranch, false))
+            inner = Expression.ParseSubqueryRejectingNextValueFor(context, QueryPosition.Exists);
         for (var i = 0; i <= extraParens; i++)
         {
             if (context.Token is not Operator { Character: ')' })

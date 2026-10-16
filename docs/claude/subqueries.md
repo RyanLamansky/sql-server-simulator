@@ -85,6 +85,7 @@ A `TOP 0` body and a `(VALUES …) WHERE 1 = 0` body are two more ways to be emp
 Real needs the body's *shape* and not its values, so a projection that raises answers anyway: `NULL IN (SELECT 1/0 FROM <non-empty>)` is UNKNOWN and `EXISTS (SELECT 1/0 FROM <non-empty>)` TRUE, aggregates, windows, `DISTINCT` and a `TOP … ORDER BY` body included (probed 2026-09-25).
 `Selection.HasAnyRow` asks a plan for that: it marks the plan on `BatchContext.ExistenceProbe` while draining it, and a SELECT body so marked projects nothing unless an `ORDER BY` reads the projection; its WHERE, joins, `HAVING` and row limit still run, so a raising **WHERE** or `HAVING` raises on both.
 The probe leaves the uncorrelated-subquery memo alone, since a later non-NULL left side needs the values.
+An `EXISTS` body's bare `*` isn't expanded at all, so a grouped body may select it (`EXISTS (SELECT * FROM t GROUP BY a HAVING COUNT(*) > 1)`), while any other select list — a column, `t.*`, an expression, a set operation's branch — is still judged against the grouping, Msg 8120 for an ungrouped column (probed 2026-10-16 against SQL Server 2025).
 
 ### The hashed `IN` probe
 

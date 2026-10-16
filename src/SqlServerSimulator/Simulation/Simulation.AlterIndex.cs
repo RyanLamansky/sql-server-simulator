@@ -530,8 +530,11 @@ partial class Simulation
                 constraint.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? constraint.StatisticsNoRecompute;
                 ApplyRebuildCompressions(ref constraint.DataCompression, ref constraint.PartitionDataCompression, ref constraint.XmlCompression, ref constraint.PartitionXmlCompression,
                     rebuildOptions, partition, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, "index");
-                // A rebuild rebuilds the index's statistic from every row.
-                BuildStatistics(batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
+                // A rebuild rebuilds the index's statistic from every row; one
+                // partition's rebuild leaves it as it was (probed 2026-10-16
+                // against SQL Server 2025: a never-built statistic stays NULL).
+                if (partition is null)
+                    BuildStatistics(batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
                 break;
             case AlterIndexForm.Reorganize:
                 // Nothing to compact in a flat page list, but a disabled index
@@ -644,7 +647,7 @@ partial class Simulation
                 index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
                 ApplyRebuildCompressions(ref index.DataCompression, ref index.PartitionDataCompression, ref index.XmlCompression, ref index.PartitionXmlCompression,
                     rebuildOptions, partition, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, "index");
-                if (!index.IsColumnstore)
+                if (!index.IsColumnstore && partition is null)
                     BuildStatistics(context.Batch, table, statistic => ReferenceEquals(statistic.State, index.Statistics));
                 break;
             case AlterIndexForm.Reorganize:

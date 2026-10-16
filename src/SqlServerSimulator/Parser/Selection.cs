@@ -977,7 +977,9 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.SetOperatorAllNotSupported("EXCEPT", 2);
             }
 
-            var right = ParseIntersectChain(context, scope, isFirstBranch: false);
+            Selection right;
+            using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
+                right = ParseIntersectChain(context, scope, isFirstBranch: false);
             SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
@@ -1079,7 +1081,9 @@ internal sealed partial class Selection
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
                 throw SimulatedSqlException.SetOperatorAllNotSupported("INTERSECT", 1);
-            var right = ParseSetOpBranch(context, scope, allowOrderBy: ordersBranches);
+            Selection right;
+            using (ParserScope.Enter(ref context.LaterSetOperationBranch, true))
+                right = ParseSetOpBranch(context, scope, allowOrderBy: ordersBranches);
             SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
@@ -2484,6 +2488,21 @@ internal sealed partial class Selection
                     if (!context.Batch.IsSkipping && ReadsPredicateColumns(sources, fromClause, joins, distinct))
                         Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
+                    // An EXISTS body's bare star names no column, so it never
+                    // meets the grouping check a qualified star or a named
+                    // column does (`EXISTS (SELECT * FROM t GROUP BY a)` runs,
+                    // `EXISTS (SELECT t.* FROM t GROUP BY a)` is Msg 8120;
+                    // probed 2026-10-16 against SQL Server 2025). A set
+                    // operation's branches are read, stars and all.
+                    if (scope.Position == QueryPosition.Exists && !context.LaterSetOperationBranch
+                        && context.Token is not ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect })
+                    {
+                        for (var i = 0; i < expressions.Count; i++)
+                        {
+                            if (expressions[i] is StarProjection { Qualifier: null })
+                                expressions[i] = new Value(SqlValue.FromInt32(1));
+                        }
+                    }
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
                     NameKeyPseudoColumns(expressions, sources);
                     JoinSpec[] joinArray = [.. joins];

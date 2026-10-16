@@ -148,6 +148,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool FoldableArguments;
 
     /// <summary>
+    /// True while the query being parsed is a branch of a set operation after
+    /// its first, whose select list the operation reads even under
+    /// <c>EXISTS</c>; an <c>EXISTS</c> body's parse clears it for its own
+    /// query, and a set operation's later branches set it.
+    /// </summary>
+    public bool LaterSetOperationBranch;
+
+    /// <summary>
     /// The statement a variable reference is refused in with Msg 112 while
     /// its column definitions parse — <c>CREATE TABLE</c> or <c>ALTER
     /// TABLE</c> — and null everywhere a variable reads.

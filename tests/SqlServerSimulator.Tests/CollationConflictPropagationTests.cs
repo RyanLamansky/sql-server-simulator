@@ -589,4 +589,18 @@ public sealed class CollationConflictPropagationTests
             """);
         return sim;
     }
+
+    /// <summary>
+    /// A <c>sysname</c> variable or parameter holds its value at a variable's
+    /// coercible-default rank however it was set, so an equality with a
+    /// catalog column in another collation takes the column's (probed
+    /// 2026-10-16 against SQL Server 2025, where each form counts the table).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @t sysname = 'U'; select count(*) from sys.objects where type = @t")]
+    [DataRow("declare @t sysname; set @t = 'U'; select count(*) from sys.objects where type = @t")]
+    [DataRow("declare @c int; exec sp_executesql N'select @c = count(*) from sys.objects where type = @t', N'@t sysname, @c int output', @t = 'U', @c = @c output; select @c")]
+    public void SysnameVariable_ComparesWithAnImplicitCatalogColumn(string sql)
+        => AreEqual(1, new Simulation().ExecuteScalar("create table t (a int); " + sql));
 }
+

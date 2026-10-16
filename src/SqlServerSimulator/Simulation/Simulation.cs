@@ -84,65 +84,21 @@ public sealed partial class Simulation
         SeedMsdbPolicyHealthView(msdb);
         SeedMsdbPolicyConfigurationView(msdb);
         SeedMsdbPolicyAutomationFunction(msdb);
-        SeedMsdbBackupSet(msdb);
+        SeedMsdbTables(msdb);
         SeedMsdbHistoryAndAgentTables(msdb);
     }
 
     /// <summary>
-    /// Seeds the rest of the backup and restore history and the SQL Server
-    /// Agent tables health checks read — media sets and families, restore
-    /// history, suspect pages, jobs, steps, schedules, history, alerts,
-    /// operators, maintenance subplans and SSIS packages — empty and in SQL
-    /// Server 2025's column shapes (probed 2026-10-16): the simulator keeps no
-    /// history and runs no Agent. Real ships seven data-collector schedules
+    /// Seeds the msdb tables health checks read beside the backup history
+    /// (<see cref="MsdbTables"/>) — suspect pages, jobs, steps, schedules,
+    /// history, alerts, operators, maintenance subplans and SSIS packages —
+    /// empty and in SQL Server 2025's column shapes (probed 2026-10-16): the
+    /// simulator runs no Agent. Real ships seven data-collector schedules
     /// and eight SSIS packages in the last two, which aren't seeded.
     /// </summary>
     private static void SeedMsdbHistoryAndAgentTables(Database msdb)
     {
         var collation = msdb.Collation;
-        SeedMsdbTable(msdb, "backupmediafamily",
-        [
-            new("media_set_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("family_sequence_number", SqlType.TinyInt, maxLength: null, nullable: false),
-            new("media_family_id", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("media_count", SqlType.Int32, maxLength: null, nullable: true),
-            new("logical_device_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("physical_device_name", NVarcharSqlType.Get(260, collation, Coercibility.Implicit), maxLength: 260, nullable: true),
-            new("device_type", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("physical_block_size", SqlType.Int32, maxLength: null, nullable: true),
-            new("mirror", SqlType.TinyInt, maxLength: null, nullable: false),
-        ]);
-        SeedMsdbTable(msdb, "backupmediaset",
-        [
-            new("media_set_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("media_uuid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("media_family_count", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("description", NVarcharSqlType.Get(255, collation, Coercibility.Implicit), maxLength: 255, nullable: true),
-            new("software_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("software_vendor_id", SqlType.Int32, maxLength: null, nullable: true),
-            new("MTF_major_version", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("mirror_count", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("is_password_protected", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_compressed", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_encrypted", SqlType.Bit, maxLength: null, nullable: true),
-        ]);
-        SeedMsdbTable(msdb, "restorehistory",
-        [
-            new("restore_history_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("restore_date", SqlType.DateTime, maxLength: null, nullable: true),
-            new("destination_database_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("user_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("backup_set_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("restore_type", CharSqlType.Get(1, collation, Coercibility.Implicit), maxLength: 1, nullable: true),
-            new("replace", SqlType.Bit, maxLength: null, nullable: true),
-            new("recovery", SqlType.Bit, maxLength: null, nullable: true),
-            new("restart", SqlType.Bit, maxLength: null, nullable: true),
-            new("stop_at", SqlType.DateTime, maxLength: null, nullable: true),
-            new("device_count", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("stop_at_mark_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("stop_before", SqlType.Bit, maxLength: null, nullable: true),
-        ]);
         SeedMsdbTable(msdb, "suspect_pages",
         [
             new("database_id", SqlType.Int32, maxLength: null, nullable: false),
@@ -217,7 +173,7 @@ public sealed partial class Simulation
         [
             new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
             new("originating_server_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("name", SqlType.SystemName, maxLength: 128, nullable: false),
             new("enabled", SqlType.TinyInt, maxLength: null, nullable: false),
             new("description", NVarcharSqlType.Get(512, collation, Coercibility.Implicit), maxLength: 512, nullable: true),
             new("start_step_id", SqlType.Int32, maxLength: null, nullable: false),
@@ -246,7 +202,7 @@ public sealed partial class Simulation
         [
             new("job_id", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
             new("step_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("step_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: false),
+            new("step_name", SqlType.SystemName, maxLength: 128, nullable: false),
             new("subsystem", NVarcharSqlType.Get(40, collation, Coercibility.Implicit), maxLength: 40, nullable: false),
             new("command", NVarcharSqlType.Get(SqlType.MaxLengthSentinel, collation, Coercibility.Implicit), maxLength: null, nullable: true),
             new("flags", SqlType.Int32, maxLength: null, nullable: false),
@@ -256,9 +212,9 @@ public sealed partial class Simulation
             new("on_success_step_id", SqlType.Int32, maxLength: null, nullable: false),
             new("on_fail_action", SqlType.TinyInt, maxLength: null, nullable: false),
             new("on_fail_step_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("server", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("database_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("database_user_name", NVarcharSqlType.Get(128, collation, Coercibility.Implicit), maxLength: 128, nullable: true),
+            new("server", SqlType.SystemName, maxLength: 128, nullable: true),
+            new("database_name", SqlType.SystemName, maxLength: 128, nullable: true),
+            new("database_user_name", SqlType.SystemName, maxLength: 128, nullable: true),
             new("retry_attempts", SqlType.Int32, maxLength: null, nullable: false),
             new("retry_interval", SqlType.Int32, maxLength: null, nullable: false),
             new("os_run_priority", SqlType.Int32, maxLength: null, nullable: false),
@@ -352,87 +308,6 @@ public sealed partial class Simulation
     private static void SeedMsdbTable(Database msdb, string name, HeapColumn[] columns)
     {
         var table = new HeapTable(name, columns, msdb.AllocateObjectId()) { OwningDatabase = msdb, IsMsShipped = true };
-        msdb.Schemas[Database.DefaultSchemaName].HeapTables[table.Name] = table;
-    }
-
-    /// <summary>
-    /// Seeds <c>msdb.dbo.backupset</c>, the backup history table, empty and in
-    /// SQL Server 2025's column shape (probed 2026-09-30): the simulator takes
-    /// no backups, so its history is empty, which SMO reads as a database's
-    /// last backup dates being unset. Constructed directly so no connection is
-    /// materialized at construction.
-    /// </summary>
-    private static void SeedMsdbBackupSet(Database msdb)
-    {
-        HeapColumn[] columns =
-        [
-            new("backup_set_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("backup_set_uuid", SqlType.UniqueIdentifier, maxLength: null, nullable: false),
-            new("media_set_id", SqlType.Int32, maxLength: null, nullable: false),
-            new("first_family_number", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("first_media_number", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("last_family_number", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("last_media_number", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("catalog_family_number", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("catalog_media_number", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("position", SqlType.Int32, maxLength: null, nullable: true),
-            new("expiration_date", SqlType.DateTime, maxLength: null, nullable: true),
-            new("software_vendor_id", SqlType.Int32, maxLength: null, nullable: true),
-            new("name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("description", NVarcharSqlType.Get(255, msdb.Collation, Coercibility.Implicit), maxLength: 255, nullable: true),
-            new("user_name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("software_major_version", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("software_minor_version", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("software_build_version", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("time_zone", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("mtf_minor_version", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("first_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("last_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("checkpoint_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("database_backup_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("database_creation_date", SqlType.DateTime, maxLength: null, nullable: true),
-            new("backup_start_date", SqlType.DateTime, maxLength: null, nullable: true),
-            new("backup_finish_date", SqlType.DateTime, maxLength: null, nullable: true),
-            new("type", CharSqlType.Get(1, msdb.Collation, Coercibility.Implicit), maxLength: 1, nullable: true),
-            new("sort_order", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("code_page", SqlType.SmallInt, maxLength: null, nullable: true),
-            new("compatibility_level", SqlType.TinyInt, maxLength: null, nullable: true),
-            new("database_version", SqlType.Int32, maxLength: null, nullable: true),
-            new("backup_size", SqlType.GetDecimal(20, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("database_name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("server_name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("machine_name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("flags", SqlType.Int32, maxLength: null, nullable: true),
-            new("unicode_locale", SqlType.Int32, maxLength: null, nullable: true),
-            new("unicode_compare_style", SqlType.Int32, maxLength: null, nullable: true),
-            new("collation_name", NVarcharSqlType.Get(128, msdb.Collation, Coercibility.Implicit), maxLength: 128, nullable: true),
-            new("is_password_protected", SqlType.Bit, maxLength: null, nullable: true),
-            new("recovery_model", NVarcharSqlType.Get(60, msdb.Collation, Coercibility.Implicit), maxLength: 60, nullable: true),
-            new("has_bulk_logged_data", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_snapshot", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_readonly", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_single_user", SqlType.Bit, maxLength: null, nullable: true),
-            new("has_backup_checksums", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_damaged", SqlType.Bit, maxLength: null, nullable: true),
-            new("begins_log_chain", SqlType.Bit, maxLength: null, nullable: true),
-            new("has_incomplete_metadata", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_force_offline", SqlType.Bit, maxLength: null, nullable: true),
-            new("is_copy_only", SqlType.Bit, maxLength: null, nullable: true),
-            new("first_recovery_fork_guid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("last_recovery_fork_guid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("fork_point_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("database_guid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("family_guid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("differential_base_lsn", SqlType.GetDecimal(25, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("differential_base_guid", SqlType.UniqueIdentifier, maxLength: null, nullable: true),
-            new("compressed_backup_size", SqlType.GetDecimal(20, 0), maxLength: null, nullable: true, spelledNumeric: true),
-            new("key_algorithm", NVarcharSqlType.Get(32, msdb.Collation, Coercibility.Implicit), maxLength: 32, nullable: true),
-            new("encryptor_thumbprint", VarbinarySqlType.Get(20), maxLength: 20, nullable: true),
-            new("encryptor_type", NVarcharSqlType.Get(32, msdb.Collation, Coercibility.Implicit), maxLength: 32, nullable: true),
-            new("last_valid_restore_time", SqlType.DateTime, maxLength: null, nullable: true),
-            new("compression_algorithm", NVarcharSqlType.Get(32, msdb.Collation, Coercibility.Implicit), maxLength: 32, nullable: true),
-        ];
-        var table = new HeapTable("backupset", columns, msdb.AllocateObjectId()) { OwningDatabase = msdb, IsMsShipped = true };
         msdb.Schemas[Database.DefaultSchemaName].HeapTables[table.Name] = table;
     }
 

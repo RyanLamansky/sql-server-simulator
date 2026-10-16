@@ -1528,7 +1528,7 @@ internal sealed partial class Selection
     /// </summary>
     private static Schemas.SchemaObject? ColumnGrantableSecurable(FromSource source) =>
         source.ViaSynonym is not null ? null
-            : source.BackingTable is { } table ? (table.Name.StartsWith('#') ? null : table)
+            : source.BackingTable is { } table ? (table.Name.StartsWith('#') || table.IsTableVariable ? null : table)
             : source.BackingView;
 
     private static ColumnReadTarget NewReadTarget(FromSource source) =>
@@ -1814,17 +1814,6 @@ internal sealed partial class Selection
             }
         }
 
-        // An EXISTS body only counts rows, so real never evaluates its select
-        // list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
-        // (probe-confirmed 2026-09-23). Once the list is bound, each term
-        // becomes a typed NULL under its own name; a grouped or windowed body
-        // keeps its terms, which its aggregation machinery reads.
-        if (scope.ProjectionUnread && aggregates.Count == 0 && windows.Count == 0)
-        {
-            for (var i = 0; i < expressions.Count; i++)
-                expressions[i] = new NamedExpression(new Value(SqlValue.Null(outputSchema[i])), outputColumnNames[i]);
-        }
-
         // Nor does an EXISTS body's aggregate report a NULL it skipped
         // (probed 2026-09-23), nor one over groups that each hold one row.
         if (scope.ProjectionUnread || (aggregates.Count > 0 && GroupsHoldOneRow(sources, joins, fromClause)))
@@ -2076,6 +2065,18 @@ internal sealed partial class Selection
                     grouped ? new NullabilityContext(parseBatch, static _ => true, resolveColumnType) : null,
                     parseBatch.BindErrors);
             }
+        }
+
+        // An EXISTS body only counts rows, so real never evaluates its select
+        // list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
+        // (probe-confirmed 2026-09-23). Once the list is bound and judged against
+        // any grouping (`EXISTS (SELECT b FROM t GROUP BY a)` is Msg 8120), each term
+        // becomes a typed NULL under its own name; a grouped or windowed body
+        // keeps its terms, which its aggregation machinery reads.
+        if (scope.ProjectionUnread && aggregates.Count == 0 && windows.Count == 0)
+        {
+            for (var i = 0; i < expressions.Count; i++)
+                expressions[i] = new NamedExpression(new Value(SqlValue.Null(outputSchema[i])), outputColumnNames[i]);
         }
 
         // STRING_AGG keeps no partial state a subtotal could merge, so real

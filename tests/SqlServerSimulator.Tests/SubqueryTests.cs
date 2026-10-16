@@ -410,4 +410,25 @@ public sealed class SubqueryTests
     [DataRow("create table t (a int); insert t values (1); select 1 where exists (select top 1 a / 0 y from t order by y)")]
     public void Exists_NeverEvaluatesItsSelectList(string sql)
         => AreEqual(1, new Simulation().ExecuteScalar(sql));
+
+    /// <summary>
+    /// An EXISTS body's bare star names no column, so a grouped body may
+    /// select it; any other select list is judged against the grouping
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (values (1, 2)) v (a, b) group by a having count(*) <> 1", 0)]
+    [DataRow("select top 1 * from (values (1, 2)) v (a, b) group by a", 1)]
+    [DataRow("select distinct * from (values (1, 2)) v (a, b) group by a", 1)]
+    [DataRow("select * from (values (1, 2)) v (a, b) having count(*) > 0", 1)]
+    public void Exists_BareStarOverAGroupedBody_Runs(string body, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when exists ({body}) then 1 else 0 end"));
+
+    [TestMethod]
+    [DataRow("select b from (values (1, 2)) v (a, b) group by a")]
+    [DataRow("select v.* from (values (1, 2)) v (a, b) group by a")]
+    [DataRow("select b + 1 from (values (1, 2)) v (a, b) group by a")]
+    [DataRow("select * from (values (1, 2)) v (a, b) group by a union select 1, 2")]
+    public void Exists_GroupedBodyNamingAnUngroupedColumn_IsMsg8120(string body)
+        => new Simulation().AssertSqlError($"select case when exists ({body}) then 1 else 0 end", 8120, "Column 'v.b' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause.");
 }

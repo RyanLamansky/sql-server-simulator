@@ -34,10 +34,7 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
 
-    public SqlValue Value = declaredType is not SystemNameSqlType ? value
-        : value.IsNull ? SqlValue.Null(SysnameVariable)
-        : value.Type is SystemNameSqlType ? SqlValue.FromNVarchar(SysnameVariable, value.AsString)
-        : value;
+    public SqlValue Value = declaredType is SystemNameSqlType ? AsSysnameVariable(value) : value;
 
     private static readonly NVarcharSqlType SysnameVariable = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
 
@@ -97,8 +94,19 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
             throw SimulatedSqlException.XmlSchemaCollectionAlteredDuringBatch(binding.VariableName);
         this.Value = value.Type is XmlSqlType
             ? Expressions.Cast.ValidateTypedXml(value, this.XmlSchemaCollection, this.XmlDocument)
-            : value;
+            : ReferenceEquals(this.DeclaredType, SysnameVariable) ? AsSysnameVariable(value) : value;
     }
+
+    /// <summary>
+    /// A value converted to <c>sysname</c> as the variable holds it, at the
+    /// variable's rank rather than a column's (see <see cref="DeclaredType"/>):
+    /// a <c>DECLARE @v sysname = 'x'</c> initializer and a <c>sysname</c>
+    /// procedure or <c>sp_executesql</c> parameter both arrive as one.
+    /// </summary>
+    private static SqlValue AsSysnameVariable(SqlValue value) =>
+        value.IsNull ? SqlValue.Null(SysnameVariable)
+        : value.Type is SystemNameSqlType ? SqlValue.FromNVarchar(SysnameVariable, value.AsString)
+        : value;
 }
 
 /// <summary>What <see cref="VariableSlot.XmlBinding"/> records of a typed xml variable's declaration.</summary>

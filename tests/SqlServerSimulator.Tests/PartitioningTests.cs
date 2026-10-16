@@ -588,6 +588,21 @@ public sealed class PartitioningTests
     public void Rebuild_PartitionNumberOnAPartitionedHeap()
         => new Simulation().AssertSqlError(LeftFunctionAndScheme + "create table t (a int) on ps(a); alter table t rebuild partition = 9", 7730, "Alter table statement failed because partition number 9 does not exist in table 't'.");
 
+    /// <summary>
+    /// One partition's rebuild leaves the index's statistic as it was, where a
+    /// whole rebuild builds it (probed 2026-10-16 against SQL Server 2025: a
+    /// key declared over an empty table stays unbuilt past a partition's).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter index pk on t rebuild partition = 1", "NULL")]
+    [DataRow("alter index all on t rebuild partition = 2", "NULL")]
+    [DataRow("alter table t rebuild partition = 1", "NULL")]
+    [DataRow("alter index pk on t rebuild partition = all", "3")]
+    [DataRow("alter index pk on t rebuild", "3")]
+    public void Rebuild_OfOnePartitionLeavesTheStatistic(string rebuild, string rows)
+        => AreEqual(rows, Text(new Simulation(), LeftFunctionAndScheme + "create table t (a int not null constraint pk primary key) on ps(a); insert t values (1), (15), (30); " + rebuild
+            + "; select isnull(cast(sp.rows as varchar(10)), 'NULL') from sys.stats s outer apply sys.dm_db_stats_properties(s.object_id, s.stats_id) sp where s.name = 'pk'"));
+
     [TestMethod]
     public void Switch_PartitionOutAndBackIn()
     {
