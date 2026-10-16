@@ -169,6 +169,7 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
     // What the request's module calls hold on the connection while it is
     // parked inside one: another request runs outside them.
     public int NestingLevel;
+    public Database? TemporaryModuleCallerDatabase;
     public SecurityPrincipalFrame[]? ImpersonationFrames;
     public List<Storage.HeapTable>? ModuleTempTables;
 

@@ -235,6 +235,11 @@ partial class Simulation
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf, parentView is null ? (byte)4 : (byte)6);
         }
 
+        // A temporary trigger name is refused as an object that doesn't exist
+        // (probed 2026-10-16 against SQL Server 2025).
+        if (triggerName.Leaf.StartsWith('#'))
+            throw SimulatedSqlException.InvalidObjectName(triggerName, state: 77);
+
         // A trigger lives in its parent's schema: an unqualified name lands
         // there, and one naming another schema is Msg 2103 (probed 2026-10-04
         // against SQL Server 2025).

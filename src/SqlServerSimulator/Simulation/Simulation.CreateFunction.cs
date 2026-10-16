@@ -80,7 +80,11 @@ partial class Simulation
         // statement wrote it (probed 2026-09-25 against SQL Server 2025; see
         // the matching note in TryParseCreateView).
         RejectQualifiedModuleName(functionName, "FUNCTION");
-        context.Batch.ErrorProcedureName = functionName.Leaf;
+        // A temporary function's refusal names no module (probed 2026-10-16
+        // against SQL Server 2025).
+        var temporary = functionName.Leaf.StartsWith('#');
+        if (!temporary)
+            context.Batch.ErrorProcedureName = functionName.Leaf;
         var schema = ResolveModuleSchema(context, functionName, isAlter);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -109,6 +113,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
+        if (temporary)
+            throw SimulatedSqlException.TemporaryFunctionNotAllowed(scalar: context.Token is not (AtPrefixedString or ReservedKeyword { Keyword: Keyword.Table }));
         // RETURNS @r TABLE (...) → multi-statement TVF; RETURNS TABLE → inline
         // TVF; otherwise the existing scalar path.
         return context.Token switch

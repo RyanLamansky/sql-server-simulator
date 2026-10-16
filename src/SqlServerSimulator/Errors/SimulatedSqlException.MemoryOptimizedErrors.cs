@@ -193,6 +193,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException NativeModuleBodyNotAtomic() =>
         new("The body of a natively compiled module must be an ATOMIC block.", 10783, 15, 1);
 
+    /// <summary>Msg 12321 state 74: a natively compiled temporary procedure (probed 2026-10-16 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException NativeTemporaryProcedure() =>
+        new("Creating a temporary procedure is not supported with natively compiled modules.", 12321, 16, 74);
+
     /// <summary>Msg 10784: a <c>BEGIN ATOMIC</c> block missing a required option.</summary>
     internal static SimulatedSqlException AtomicBlockOptionRequired(string option) =>
         new($"The WITH clause of BEGIN ATOMIC statement must specify a value for the option '{option}'.", 10784, 15, 1);

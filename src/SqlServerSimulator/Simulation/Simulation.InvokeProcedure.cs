@@ -81,7 +81,9 @@ partial class Simulation
         {
             PermissionEnforcement.CheckSchemaObject(outerBatch, "EXECUTE", viaSynonym);
         }
-        else
+        // Any session that sees a temporary procedure may run it (probed
+        // 2026-10-16 against SQL Server 2025).
+        else if (procedure.TemporaryBindingDatabase is null)
         {
             // Attributed to the procedure as the call spells it, at its line 1
             // (probed 2026-09-27 against SQL Server 2025).
@@ -334,8 +336,11 @@ partial class Simulation
         IEnumerator<SimulatedStatementOutcome>? streamed = null;
         SimulatedDbCommand? bodyCommand = null;
         // The body binds and runs in the procedure's own database, which is
-        // the session's unless the call named it with a three-part name.
-        var moduleScope = ModuleDatabaseScope.Enter(connection, procedure.Schema.Database);
+        // the session's unless the call named it with a three-part name — a
+        // temporary procedure's being the one it was created in.
+        var moduleScope = procedure.TemporaryBindingDatabase is { } bindingDatabase
+            ? ModuleDatabaseScope.EnterTemporary(connection, bindingDatabase)
+            : ModuleDatabaseScope.Enter(connection, procedure.Schema.Database);
         var identityScope = IdentityScope.Enter(connection);
         try
         {
@@ -383,7 +388,7 @@ partial class Simulation
                     OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
                     ModuleObjectId = procedure.ObjectId,
                     ModuleDefinitionText = procedure.DefinitionText,
-                    ModuleSchema = procedure.Schema,
+                    ModuleSchema = procedure.TemporaryBindingDatabase is null ? procedure.Schema : null,
                     ResultSetsSink = resultSetsSink,
                 };
                 // Seed cursor parameters as unallocated cursor variables in the
@@ -434,7 +439,7 @@ partial class Simulation
                     // them from their statement plans.
                     if (!recompiles)
                         innerBatch.StatementPlanModule = procedure;
-                    if (this.CompileModuleBody(innerBatch, procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles, out var compileError) is { } failures)
+                    if (this.CompileModuleBody(innerBatch, procedure.TemporaryBindingDatabase ?? procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles, out var compileError) is { } failures)
                         outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
                     if (compileError is not null)
                     {

@@ -224,7 +224,10 @@ partial class Simulation
             // ParseObjectName consumes the empty leading segments.
             if (context.Token is not Name and not Operator { Character: '.' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            procName = BatchContext.ParseObjectName(context);
+            // A temporary procedure's database part is ignored with Msg 2701,
+            // and its server part dropped, as a temporary table's are (probed
+            // 2026-10-16 against SQL Server 2025).
+            procName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         }
         context.MoveNextOptional();
 
@@ -509,8 +512,9 @@ partial class Simulation
         if (batch.IsSkipping)
         {
             // A name a variable holds is known only as the body runs, so it
-            // draws no Msg 2007 (probed 2026-10-16 against SQL Server 2025).
-            if (batch.MissingProcedureReferences is { } missing && !namedByVariable && !BatchContext.IsLocalTempName(procName.Leaf) && !ResolvesProcedure(batch, procName))
+            // draws no Msg 2007, and neither does a temporary procedure's,
+            // global or local (probed 2026-10-16 against SQL Server 2025).
+            if (batch.MissingProcedureReferences is { } missing && !namedByVariable && !procName.Leaf.StartsWith('#') && !ResolvesProcedure(batch, procName))
                 missing.Add(procName.WithoutOmittedLeading().Written);
             yield break;
         }
@@ -520,10 +524,21 @@ partial class Simulation
         // wording (the synonym name never appears in that message). The synonym
         // itself is carried through as the securable the EXECUTE check runs on.
         var execSynonym = batch.TryResolveSynonym(procName, out var resolvedSynonym) ? resolvedSynonym : null;
-        var writtenName = procName.ToString();
+        // A temporary procedure answers to its leaf alone, in its messages
+        // and as the procedure its errors name (probed 2026-10-16 against SQL
+        // Server 2025).
+        var temporary = BatchContext.IsLocalTempName(procName.Leaf) || BatchContext.IsGlobalTempName(procName.Leaf);
+        var writtenName = temporary ? procName.Leaf : procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
         {
+            // A temporary table of the name is named as tempdb holds it.
+            if (temporary)
+            {
+                throw batch.TryResolveTable(procName, out var temporaryTable)
+                    ? SimulatedSqlException.ExecOfNonProcedureObject(temporaryTable.CatalogName, "table")
+                    : SimulatedSqlException.CouldNotFindStoredProcedure(procName.Leaf);
+            }
             // EXEC runs a scalar function as it runs a procedure, its value
             // the `@rc =` variable's, and finds a one-part name as it finds a
             // procedure's (probed 2026-10-04 and 2026-10-06 against SQL

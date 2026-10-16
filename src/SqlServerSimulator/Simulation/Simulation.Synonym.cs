@@ -31,6 +31,11 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // A temporary name is refused as an object that doesn't exist (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (synonymName.Leaf.StartsWith('#'))
+            throw SimulatedSqlException.InvalidObjectName(synonymName, state: 80);
+
         if (!context.Batch.TryResolveCreateSchema(synonymName, out var schema, statementOnly: true))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.ImmediateQualifier ?? Database.DefaultSchemaName, terminatesBatch: false);
 

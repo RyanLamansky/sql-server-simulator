@@ -984,8 +984,12 @@ partial class Simulation
 
         connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;
-        if (runsIn is not null)
-            connection.CurrentDatabase = runsIn;
+        // A temporary procedure's dynamic SQL runs in the database its call
+        // came from, not the one its body binds in (probed 2026-10-16 against
+        // SQL Server 2025).
+        var enteredCallerDatabase = connection.TemporaryModuleCallerDatabase;
+        connection.CurrentDatabase = runsIn ?? connection.ReportedDatabase;
+        connection.TemporaryModuleCallerDatabase = null;
         connection.EnterNestedDatabase(enteredDatabase);
         // An EXEC string is an ad hoc batch of its own to the plan cache, and
         // an sp_executesql statement a prepared one when it declares
@@ -1085,6 +1089,7 @@ partial class Simulation
             // sp_MSforeachdb's `USE [?]` idiom run each command against its
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
+            connection.TemporaryModuleCallerDatabase = enteredCallerDatabase;
             connection.LeaveNestedDatabase();
             identityScope.Exit(IdentityScopeKind.Procedure);
             connection.NoCount = enteredNoCount;

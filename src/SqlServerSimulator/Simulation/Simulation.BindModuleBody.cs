@@ -226,6 +226,15 @@ partial class Simulation
         // module parsing can't recurse without bound.
         var connection = bindBatch.Connection;
         connection.NestingLevel++;
+        // What the session queued ahead of the walk — a CREATE's own Msg 2701
+        // ahead of its body's bind — waits for its statement's end, which the
+        // outcomes the walk drains and discards never reach.
+        SimulatedError[]? queuedAhead = null;
+        if (connection.PendingMessages.Count != 0)
+        {
+            queuedAhead = [.. connection.PendingMessages];
+            connection.PendingMessages.Clear();
+        }
         try
         {
             bindBatch.Parser.MoveNextOptional();
@@ -261,6 +270,15 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            if (queuedAhead is not null)
+            {
+                SimulatedError[] queuedSince = [.. connection.PendingMessages];
+                connection.PendingMessages.Clear();
+                foreach (var message in queuedAhead)
+                    connection.PendingMessages.Enqueue(message);
+                foreach (var message in queuedSince)
+                    connection.PendingMessages.Enqueue(message);
+            }
         }
     }
 

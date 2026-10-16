@@ -132,7 +132,7 @@ partial class Simulation
         // raises Msg 2714 just as another table would (probe-confirmed).
         if (schema is not null)
             batch.LockDefinitionName(schema, leaf, DefinitionNameUse.Creates);
-        if (schema is not null && schema.HasNameInSharedNamespace(leaf))
+        if (schema is not null ? schema.HasNameInSharedNamespace(leaf) : batch.HasTemporaryProcedure(leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         VersionStore.NoteDefinitionChange(batch, destTable);
         // The new table is held to the transaction's end, as CREATE TABLE's is.

@@ -326,7 +326,9 @@ partial class Simulation
         if (caller.IsSkipping || module.IsNativelyCompiled)
             return null;
         var connection = body.Connection;
-        var database = connection.CurrentDatabase;
+        // A temporary procedure's plan is tempdb's, though its body runs bound
+        // in another database (probed 2026-10-16 against SQL Server 2025).
+        var database = module is Procedure { TemporaryBindingDatabase: not null } temporary ? temporary.Schema.Database : connection.CurrentDatabase;
         var key = new CachedPlanKey(kind, database.Id, module.ObjectId, text: null, declaration: null, SetOptionsOf(connection, connection.QuotedIdentifiers),
             connection.Language.LangId, DateFormatCode(connection.DateFormat), connection.DateFirst);
         var registry = connection.Simulation.CachedPlans;

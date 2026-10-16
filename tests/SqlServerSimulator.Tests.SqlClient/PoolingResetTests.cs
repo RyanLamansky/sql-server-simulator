@@ -42,6 +42,42 @@ public sealed class PoolingResetTests
     }
 
     /// <summary>
+    /// The reset ends the session that created a temporary procedure, so its
+    /// local and global ones go with it, as they do on real (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task PooledReopen_DropsTemporaryProcedures()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var connectionString = Wire.PooledConnectionString(listener);
+
+        await using (var first = new SqlConnection(connectionString))
+        {
+            await first.OpenAsync(TestContext.CancellationToken);
+            await using var local = new SqlCommand("create proc #p as select 1", first);
+            _ = await local.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            await using var global = new SqlCommand("create proc ##g as select 2", first);
+            _ = await global.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+
+        await using var second = new SqlConnection(connectionString);
+        await second.OpenAsync(TestContext.CancellationToken);
+        foreach (var name in (string[])["#p", "##g"])
+        {
+            var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+            {
+                await using var gone = new SqlCommand("exec " + name, second);
+                _ = await gone.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            });
+            AreEqual(2812, ex.Number);
+        }
+        await using var listed = new SqlCommand("select count(*) from tempdb.sys.procedures where name like '#%'", second);
+        AreEqual(0, await listed.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
     /// A pooled connection's first request after reuse may be SqlClient's
     /// <c>BeginTransaction</c>, which carries the reset bit on a transaction
     /// manager request: the reset applies there too, so the prior logical

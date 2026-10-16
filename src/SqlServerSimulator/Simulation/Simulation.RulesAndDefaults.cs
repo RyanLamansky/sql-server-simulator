@@ -34,6 +34,10 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = BatchContext.ParseObjectName(context);
         context.Batch.ErrorProcedureName = name.Leaf;
+        // A temporary name is refused as an object that doesn't exist (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (name.Leaf.StartsWith('#'))
+            throw SimulatedSqlException.InvalidObjectName(name, state: 77);
         var schema = ResolveModuleSchema(context, name, isAlter: false);
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);

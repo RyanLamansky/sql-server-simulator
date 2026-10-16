@@ -88,13 +88,29 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var procName = BatchContext.ParseObjectName(context);
+        // A temporary procedure lives in tempdb's dbo whatever qualifies it,
+        // a database part ignored with Msg 2701 (probed 2026-10-16 against SQL
+        // Server 2025).
+        var temporary = BatchContext.IsLocalTempName(procName.Leaf) || BatchContext.IsGlobalTempName(procName.Leaf);
+        if (temporary)
+        {
+            procName = BatchContext.TemporaryTableName(context, procName);
+            if (procName.Leaf.Length > 116)
+                throw SimulatedSqlException.TempTableNameTooLong(procName.Leaf);
+        }
+        else
+        {
+            RejectQualifiedModuleName(procName, "PROCEDURE");
+        }
         // Every error from here on names the procedure — its name collision and
         // its parameter list's included (probed 2026-09-26 against SQL Server
         // 2025). The statement is its batch's only one, so nothing after it
         // inherits this.
-        RejectQualifiedModuleName(procName, "PROCEDURE");
         context.Batch.ErrorProcedureName = procName.Leaf;
-        var schema = ResolveModuleSchema(context, procName, isAlter);
+        var schema = temporary ? context.Simulation.TempdbDbo : ResolveModuleSchema(context, procName, isAlter);
+        // The name the procedure is stored under: a local temporary one's is
+        // its name in tempdb.
+        var key = temporary ? context.Batch.TemporaryProcedureKey(procName.Leaf) : procName.Leaf;
 
         context.MoveNextRequired();
         var groupNumber = ParseProcedureGroupNumber(context, procName.Leaf);
@@ -149,6 +165,8 @@ partial class Simulation
         var executeAsClause = options.ExecuteAs;
         RequireExecuteAsUser(context, executeAsClause);
         var nativelyCompiled = options.NativeCompilation;
+        if (nativelyCompiled && temporary)
+            throw SimulatedSqlException.NativeTemporaryProcedure();
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -181,11 +199,15 @@ partial class Simulation
 
         // DDL gate: db-scope CREATE PROCEDURE + schema ALTER when the statement
         // creates (Msg 262 state 18 / Msg 2760), object ALTER when it replaces
-        // an existing proc (Msg 3701 state 20).
-        context.Batch.LockDefinitionName(schema, procName.Leaf);
-        CheckModuleDdlPermission(
-            context, "CREATE PROCEDURE", procName, schema, isAlter, createOrAlter,
-            schema.Procedures.GetValueOrDefault(procName.Leaf));
+        // an existing proc (Msg 3701 state 20). Any session may create a
+        // temporary procedure (probed 2026-10-16 against SQL Server 2025).
+        context.Batch.LockDefinitionName(schema, key);
+        if (!temporary)
+        {
+            CheckModuleDdlPermission(
+                context, "CREATE PROCEDURE", procName, schema, isAlter, createOrAlter,
+                schema.Procedures.GetValueOrDefault(key));
+        }
 
         // Newlines before the body start, so body errors — at bind time below
         // and per call later — report a line relative to the whole CREATE
@@ -206,7 +228,7 @@ partial class Simulation
 
         if (groupNumber > 1)
         {
-            StoreNumberedProcedure(context, schema, procName, groupNumber, isAlter, createOrAlter, new Procedure(
+            StoreNumberedProcedure(context, schema, procName, key, groupNumber, isAlter, createOrAlter, new Procedure(
                 schema, procName.Leaf, 0, [.. parameters], bodyText, context.Batch.CurrentStatement.UtcNow, bodyLineOffset)
             {
                 DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
@@ -227,9 +249,10 @@ partial class Simulation
         // 2010, and bare ALTER on a free name is Msg 208. The helper also
         // takes Sch-M on the instance being replaced, so a concurrent EXEC
         // (holding Sch-S via TryResolveProcedure) blocks the swap.
-        var replaced = (Procedure?)ResolveModuleAlterTarget(
-            context, schema, procName, isAlter, createOrAlter,
-            schema.Procedures.TryGetValue(procName.Leaf, out var existing) ? existing : null);
+        var existing = schema.Procedures.GetValueOrDefault(key);
+        if (temporary && existing is null)
+            RejectTemporaryProcedureOverTable(context, procName, isAlter || createOrAlter);
+        var replaced = (Procedure?)ResolveModuleAlterTarget(context, schema, procName, isAlter, createOrAlter, existing);
         // A T-SQL body can't replace a CLR procedure (probed 2026-09-28
         // against SQL Server 2025); the reverse is the CLR tail's Msg 6530.
         if (replaced is { ClrEntry: not null })
@@ -237,10 +260,10 @@ partial class Simulation
 
         var procedure = new Procedure(
             schema,
-            procName.Leaf,
+            key,
             // ALTER preserves the existing object_id (probe-confirmed). CREATE
             // and CREATE OR ALTER (on a missing name) allocate a fresh id.
-            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
+            replaced?.ObjectId ?? schema.Database.AllocateObjectId(),
             [.. parameters],
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
@@ -257,16 +280,42 @@ partial class Simulation
             IsStartup = replaced?.IsStartup ?? false,
             RecompilesEveryCall = options.Recompile,
             IsNativelyCompiled = nativelyCompiled,
+            // A temporary procedure binds in the database it is created in and
+            // belongs to the session creating it, an ALTER from another
+            // session leaving a global one its creator's (probed 2026-10-16
+            // against SQL Server 2025).
+            TemporaryBindingDatabase = temporary ? context.CurrentDatabase : null,
+            OwnerSession = temporary ? replaced?.OwnerSession ?? context.Batch.Connection.Session : null,
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         context.Batch.LockDefinition(schema, procedure, created: true);
-        schema.Procedures[procName.Leaf] = procedure;
-        RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
+        schema.Procedures[key] = procedure;
+        RecordSlotUndo(context, schema.Procedures, key, replaced);
         if (replaced is not null)
             RebindExtendedProperties(context.Batch, replaced, procedure);
-        RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
+        // The database's DDL triggers don't fire for a temporary procedure
+        // (probed 2026-10-16 against SQL Server 2025).
+        if (!temporary)
+            RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
         return true;
+    }
+
+    /// <summary>
+    /// A temporary procedure's name shares the session's temporary namespace
+    /// with its temporary tables: a <c>CREATE</c> over a local temporary table
+    /// of the name is Msg 2714 state 6, over a global one state 3, and an
+    /// <c>ALTER</c> or <c>CREATE OR ALTER</c> over either Msg 2010 (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static void RejectTemporaryProcedureOverTable(ParserContext context, MultiPartName name, bool alters)
+    {
+        var local = BatchContext.IsLocalTempName(name.Leaf);
+        if (!(local ? context.Batch.Connection.TempTables.ContainsKey(name.Leaf) : context.Simulation.GlobalTempTables.ContainsKey(name.Leaf)))
+            return;
+        throw alters
+            ? SimulatedSqlException.CannotAlterIncompatibleObjectType(name)
+            : SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: local ? (byte)6 : (byte)3);
     }
 
     /// <summary>
@@ -301,10 +350,10 @@ partial class Simulation
     /// procedure (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     private static void StoreNumberedProcedure(
-        ParserContext context, Schema schema, MultiPartName name, short groupNumber, bool isAlter, bool createOrAlter, Procedure numbered)
+        ParserContext context, Schema schema, MultiPartName name, string key, short groupNumber, bool isAlter, bool createOrAlter, Procedure numbered)
     {
         var leaf = name.Leaf;
-        var group = schema.Procedures.GetValueOrDefault(leaf);
+        var group = schema.Procedures.GetValueOrDefault(key);
         var existing = group?.Numbered?.GetValueOrDefault(groupNumber);
         SimulatedSqlException? refusal = null;
         if (group is null || (isAlter && existing is null))
@@ -323,7 +372,7 @@ partial class Simulation
             throw refusal;
         }
 
-        var stored = new Procedure(schema, leaf, group!.ObjectId, numbered.Parameters, numbered.BodyText, existing?.CreateDate ?? numbered.CreateDate, numbered.BodyLineOffset)
+        var stored = new Procedure(schema, key, group!.ObjectId, numbered.Parameters, numbered.BodyText, existing?.CreateDate ?? numbered.CreateDate, numbered.BodyLineOffset)
         {
             DefinitionText = numbered.DefinitionText,
             ExecuteAsClause = numbered.ExecuteAsClause,
@@ -331,6 +380,8 @@ partial class Simulation
             UsesQuotedIdentifier = numbered.UsesQuotedIdentifier,
             UsesAnsiNulls = numbered.UsesAnsiNulls,
             GroupNumber = groupNumber,
+            TemporaryBindingDatabase = group.TemporaryBindingDatabase,
+            OwnerSession = group.OwnerSession,
         };
         if (existing is not null)
             stored.ModifyDate = numbered.CreateDate;
@@ -345,7 +396,8 @@ partial class Simulation
             else
                 group.Numbered = null;
         });
-        RecordDdlEvent(context, existing is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, leaf, "PROCEDURE");
+        if (group.TemporaryBindingDatabase is null)
+            RecordDdlEvent(context, existing is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, leaf, "PROCEDURE");
     }
 
     /// <summary>

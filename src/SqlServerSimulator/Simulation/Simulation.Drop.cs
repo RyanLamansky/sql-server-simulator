@@ -122,6 +122,10 @@ partial class Simulation
         while (true)
         {
             var name = BatchContext.ParseObjectName(context);
+            // A temporary procedure's database part is ignored with Msg 2701
+            // (probed 2026-10-16 against SQL Server 2025).
+            if (targetKind == DropTargetKind.Procedure)
+                name = BatchContext.TemporaryTableName(context, name);
             try
             {
                 switch (targetKind)
@@ -731,6 +735,11 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
+        if (BatchContext.IsLocalTempName(name.Leaf) || BatchContext.IsGlobalTempName(name.Leaf))
+        {
+            DropTemporaryProcedure(context, name.Leaf, ifExists);
+            return;
+        }
         var schema = context.Batch.TryResolveSchemaToChange(name, types: false, out var resolved) ? resolved : null;
         if (schema is not null)
         {
@@ -759,6 +768,31 @@ partial class Simulation
         if (removed is not null)
             RecordSlotUndo(context, schema.Procedures, name.Leaf, removed);
         RecordDdlEvent(context, "DROP_PROCEDURE", schema.Name, name.Leaf, "PROCEDURE");
+    }
+
+    /// <summary>
+    /// <see cref="DropOneProcedure"/> for a temporary procedure, which any
+    /// session that sees it may drop: a temporary table of the name is Msg
+    /// 3705, and a name the session doesn't see Msg 3701 naming the leaf
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static void DropTemporaryProcedure(ParserContext context, string leaf, bool ifExists)
+    {
+        var schema = context.Simulation.TempdbDbo;
+        var key = context.Batch.TemporaryProcedureKey(leaf);
+        context.Batch.LockDefinitionName(schema, key);
+        if (!schema.Procedures.TryGetValue(key, out var existing))
+        {
+            context.Batch.ReleaseDefinitionName(schema, key);
+            if (BatchContext.IsLocalTempName(leaf) ? context.Batch.Connection.TempTables.ContainsKey(leaf) : context.Simulation.GlobalTempTables.ContainsKey(leaf))
+                throw SimulatedSqlException.CannotUseDropWithObjectKind("PROCEDURE", leaf, "table", "TABLE");
+            if (ifExists)
+                return;
+            throw SimulatedSqlException.CannotDropProcedureDoesNotExist(leaf);
+        }
+        context.Batch.LockDefinition(schema, existing);
+        if (schema.Procedures.TryRemove(key, out var removed))
+            RecordSlotUndo(context, schema.Procedures, key, removed);
     }
 
     /// <summary>

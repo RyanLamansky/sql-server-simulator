@@ -704,6 +704,7 @@ Body source captured from `AS` to end-of-batch (BEGIN/END is optional — probe-
 EXEC's result sets propagate to the outer caller (distinct from scalar UDFs, which discard).
 Same 32-level recursion cap (Msg 217) shared with UDFs / views via `SimulatedDbConnection.NestingLevel`.
 Probed against SQL Server 2025.
+A temporary procedure (`#p` / `##p`) lives in `tempdb` and binds in the database it was created in — see [`temp-tables.md`](temp-tables.md#temporary-procedures-p-and-p).
 
 **Grammar**:
 - **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).

@@ -121,6 +121,23 @@ internal sealed class Procedure(
     /// PROCEDURE</c> keeps.
     /// </summary>
     public bool IsStartup;
+
+    /// <summary>
+    /// For a temporary procedure (<c>#p</c> or <c>##p</c>), which lives in
+    /// <c>tempdb</c>'s <c>dbo</c> under its name there (a local one's written
+    /// name padded and suffixed, <see cref="SimulatedDbConnection.TemporaryProcedureName"/>),
+    /// the database that was current when it was created: its body binds and
+    /// runs there, while <c>DB_NAME()</c> and its dynamic SQL see the caller's
+    /// (probed 2026-10-16 against SQL Server 2025). Null for any other procedure.
+    /// </summary>
+    public Database? TemporaryBindingDatabase;
+
+    /// <summary>
+    /// The session that created a temporary procedure, whose end drops it — a
+    /// global one's too, whoever else is running it, though a call already
+    /// running finishes (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    public SessionToken? OwnerSession;
 }
 
 /// <summary>

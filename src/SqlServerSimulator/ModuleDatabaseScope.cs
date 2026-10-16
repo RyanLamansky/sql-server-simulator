@@ -23,26 +23,50 @@ internal readonly struct ModuleDatabaseScope
 {
     private readonly SimulatedDbConnection? connection;
     private readonly Database? enteredFrom;
+    private readonly Database? callerDatabase;
     private readonly int impersonationDepth;
+    private readonly bool switchedDatabase;
 
-    private ModuleDatabaseScope(SimulatedDbConnection connection, Database enteredFrom, int impersonationDepth)
+    private ModuleDatabaseScope(SimulatedDbConnection connection, Database enteredFrom, Database? callerDatabase, int impersonationDepth, bool switchedDatabase)
     {
         this.connection = connection;
         this.enteredFrom = enteredFrom;
+        this.callerDatabase = callerDatabase;
         this.impersonationDepth = impersonationDepth;
+        this.switchedDatabase = switchedDatabase;
     }
 
     /// <summary>
     /// Switches <paramref name="connection"/> into <paramref name="database"/>
     /// until <see cref="Exit"/>; a no-op scope when the session is already
-    /// there. <paramref name="bindsIdentity"/> false switches the database
-    /// alone, for a body that is only parsed.
+    /// there, outside a temporary procedure's body. <paramref name="bindsIdentity"/>
+    /// false switches the database alone, for a body that is only parsed.
     /// </summary>
-    public static ModuleDatabaseScope Enter(SimulatedDbConnection connection, Database database, bool bindsIdentity = true)
+    public static ModuleDatabaseScope Enter(SimulatedDbConnection connection, Database database, bool bindsIdentity = true) =>
+        Enter(connection, database, bindsIdentity, callerDatabase: null);
+
+    /// <summary>
+    /// <see cref="Enter(SimulatedDbConnection, Database, bool)"/> for a
+    /// temporary procedure's body, which binds and runs in
+    /// <paramref name="database"/> — the one it was created in — while
+    /// <c>DB_NAME()</c> and its dynamic SQL keep the database the call came
+    /// from (<see cref="SimulatedDbConnection.TemporaryModuleCallerDatabase"/>).
+    /// </summary>
+    public static ModuleDatabaseScope EnterTemporary(SimulatedDbConnection connection, Database database) =>
+        Enter(connection, database, bindsIdentity: true, connection.ReportedDatabase);
+
+    private static ModuleDatabaseScope Enter(SimulatedDbConnection connection, Database database, bool bindsIdentity, Database? callerDatabase)
     {
         var current = connection.CurrentDatabase;
+        var outerCaller = connection.TemporaryModuleCallerDatabase;
         if (ReferenceEquals(current, database))
-            return default;
+        {
+            if (ReferenceEquals(outerCaller, callerDatabase))
+                return default;
+            connection.TemporaryModuleCallerDatabase = callerDatabase;
+            return new(connection, current, outerCaller, connection.Security.ImpersonationDepth, switchedDatabase: false);
+        }
+        connection.TemporaryModuleCallerDatabase = callerDatabase;
         var security = connection.Security;
         var depth = security.ImpersonationDepth;
         if (bindsIdentity && !PermissionEnforcement.Bypasses(connection, database))
@@ -55,13 +79,16 @@ internal readonly struct ModuleDatabaseScope
         }
         connection.CurrentDatabase = database;
         connection.EnterNestedDatabase(current);
-        return new(connection, current, depth);
+        return new(connection, current, outerCaller, depth, switchedDatabase: true);
     }
 
     /// <summary>Returns the session to the database, and the identity, it entered from.</summary>
     public void Exit()
     {
         if (this.connection is null)
+            return;
+        this.connection.TemporaryModuleCallerDatabase = this.callerDatabase;
+        if (!this.switchedDatabase)
             return;
         this.connection.CurrentDatabase = this.enteredFrom!;
         this.connection.LeaveNestedDatabase();

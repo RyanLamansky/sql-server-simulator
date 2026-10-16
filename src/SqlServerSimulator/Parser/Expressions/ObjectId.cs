@@ -148,11 +148,13 @@ internal sealed class ObjectId : Expression
         {
             contested = found;
         }
-        // A temp table lives in tempdb, so a name not naming that database
-        // finds it only while tempdb is the current one (probed 2026-10-01
-        // against SQL Server 2025: OBJECT_ID('#t') is NULL elsewhere).
-        if (parsed.Leaf.StartsWith('#') && parsed.Count < 3
-            && !runtime.Batch.CurrentDatabase.Name.Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase))
+        // A temp table or procedure lives in tempdb, so a name not naming that
+        // database finds it only while tempdb is the current one, and a name
+        // naming another database never (probed 2026-10-01 and 2026-10-16
+        // against SQL Server 2025: OBJECT_ID('#t') is NULL elsewhere, and so is
+        // OBJECT_ID('master..#t')).
+        if (parsed.Leaf.StartsWith('#')
+            && !(parsed.Count < 3 ? runtime.Batch.CurrentDatabase.Name : parsed[parsed.Count - 3]).Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase))
         {
             return SqlValue.Null(SqlType.Int32);
         }
@@ -169,6 +171,12 @@ internal sealed class ObjectId : Expression
                 if (tempTable.InternalName is { } internalName && tempdb.Collation.Equals(internalName, parsed.Leaf))
                     return SqlValue.FromInt32(tempTable.ObjectId);
             }
+        }
+        // So does a local temporary procedure's (probed 2026-10-16).
+        if (BatchContext.IsLocalTempName(parsed.Leaf) && filter is ObjectTypeFilter.Any or ObjectTypeFilter.Procedure
+            && runtime.Batch.Connection.Simulation.TempdbDbo.Procedures.TryGetValue(parsed.Leaf, out var temporaryProcedure))
+        {
+            return SqlValue.FromInt32(temporaryProcedure.ObjectId);
         }
 
         // A restricted principal gets NULL for an object it can't view metadata

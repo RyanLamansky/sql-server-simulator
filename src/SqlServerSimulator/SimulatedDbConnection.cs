@@ -640,9 +640,11 @@ public sealed class SimulatedDbConnection : DbConnection
         request.OpenTryFrames = this.OpenTryFrames;
         request.EnclosingCatchError = this.EnclosingCatchError;
         request.NestingLevel = this.NestingLevel;
+        request.TemporaryModuleCallerDatabase = this.TemporaryModuleCallerDatabase;
         this.OpenTryFrames = 0;
         this.EnclosingCatchError = null;
         this.NestingLevel = 0;
+        this.TemporaryModuleCallerDatabase = null;
         // A statement suspended mid-way keeps what it pinned and timed.
         var statement = request.Statement ??= new();
         statement.ExecutionTimeout = this.executionTimeout;
@@ -744,6 +746,7 @@ public sealed class SimulatedDbConnection : DbConnection
         this.OpenTryFrames = request.OpenTryFrames;
         this.EnclosingCatchError = request.EnclosingCatchError;
         this.NestingLevel = request.NestingLevel;
+        this.TemporaryModuleCallerDatabase = request.TemporaryModuleCallerDatabase;
         if (request.ImpersonationFrames is { } frames)
         {
             request.ImpersonationFrames = null;
@@ -1971,6 +1974,37 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </remarks>
     internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(BuiltInToken.Comparer);
 
+    private int temporaryObjectSuffix;
+
+    /// <summary>
+    /// The name a local temporary procedure <paramref name="name"/> (<c>#p</c>)
+    /// of this session carries in <c>tempdb</c>, which its catalog lists and
+    /// Msg 201 / 8144 spell out: the written name padded with underscores to
+    /// 120 characters and eight hex digits naming the session, which every
+    /// temporary procedure of one session shares and each session draws from a
+    /// server-wide counter (probed 2026-10-16 against SQL Server 2025, whose
+    /// counter every login advances where this one advances as a session first
+    /// needs it).
+    /// </summary>
+    internal string TemporaryProcedureName(string name)
+    {
+        if (this.temporaryObjectSuffix == 0)
+            _ = Interlocked.CompareExchange(ref this.temporaryObjectSuffix, this.Simulation.AllocateTemporaryObjectSuffix(), 0);
+        return $"{name.PadRight(120, '_')}{this.temporaryObjectSuffix:X8}";
+    }
+
+    /// <summary>
+    /// The database <c>DB_NAME()</c>, <c>DB_ID()</c> and dynamic SQL see while
+    /// a temporary procedure's body runs bound to the database it was created
+    /// in: the one the call came from (probed 2026-10-16 against SQL Server
+    /// 2025). Null outside such a body, and for the duration of any other
+    /// module body it calls, which reports its own (<see cref="ModuleDatabaseScope"/>).
+    /// </summary>
+    internal Database? TemporaryModuleCallerDatabase;
+
+    /// <summary>The database <c>DB_NAME()</c> with no argument names: <see cref="TemporaryModuleCallerDatabase"/> inside a temporary procedure, else the current one.</summary>
+    internal Database ReportedDatabase => this.TemporaryModuleCallerDatabase ?? this.CurrentDatabase;
+
     /// <summary>
     /// The local temp tables a nested scope's same-named table hides, keyed by
     /// name, most recently hidden last. A procedure, trigger or dynamic-SQL
@@ -2968,6 +3002,16 @@ public sealed class SimulatedDbConnection : DbConnection
                 {
                     _ = this.Simulation.GlobalTempTables.TryRemove(name, out _);
                 }
+            }
+            // Temporary procedures, local and global, end with the session
+            // that created them — a pooled connection's reset included — while
+            // a call already running finishes (probed 2026-10-16 against SQL
+            // Server 2025).
+            var tempdbProcedures = this.Simulation.TempdbDbo.Procedures;
+            foreach (var (name, procedure) in tempdbProcedures)
+            {
+                if (ReferenceEquals(procedure.OwnerSession, this.Session))
+                    _ = tempdbProcedures.TryRemove(new KeyValuePair<string, Schemas.Procedure>(name, procedure));
             }
             this.Simulation.UnregisterConnection(this);
         }

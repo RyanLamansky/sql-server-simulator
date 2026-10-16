@@ -454,6 +454,19 @@ partial class SimulatedSqlException
         new($"\"{viewName}\": Temporary views are not allowed.", 4103, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1074: <c>CREATE</c> or <c>ALTER FUNCTION</c>
+    /// naming a temporary function, attributed to no module. A scalar
+    /// function's body then reads on as no function's, so the value its
+    /// <c>RETURN</c> carries follows with Msg 178 (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TemporaryFunctionNotAllowed(bool scalar)
+    {
+        var refusal = new SimulatedSqlException("Creation of temporary functions is not allowed.", 1074, 15, 1);
+        return scalar ? FollowedBy(refusal, ReturnWithValueNotAllowed()) : refusal;
+    }
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4505: a view projecting more than 1,024 columns,
     /// naming the first past the limit (probed 2026-10-04 against SQL Server
     /// 2025).

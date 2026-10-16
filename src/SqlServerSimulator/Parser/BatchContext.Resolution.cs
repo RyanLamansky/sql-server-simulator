@@ -648,12 +648,42 @@ internal sealed partial class BatchContext
     public bool TryResolveProcedure(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Procedure? procedure)
     {
         procedure = null;
+        if (IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf))
+            return this.TryResolveTemporaryProcedure(name.Leaf, out procedure);
         if (!this.TryResolveCallerSchema(name, out var schema)
             || !schema.Procedures.TryGetValue(name.Leaf, out procedure))
         {
             return false;
         }
         return this.LockResolved(schema.Procedures, name.Leaf, procedure) || this.TryResolveProcedure(name, out procedure);
+    }
+
+    /// <summary>
+    /// The name a temporary procedure <paramref name="leaf"/> carries in
+    /// <c>tempdb</c>'s <c>dbo</c>: a local one's padded and suffixed for this
+    /// session, a global one's as written.
+    /// </summary>
+    public string TemporaryProcedureKey(string leaf) =>
+        IsLocalTempName(leaf) ? this.Connection.TemporaryProcedureName(leaf) : leaf;
+
+    /// <summary>Whether the session sees a temporary procedure named <paramref name="leaf"/>.</summary>
+    public bool HasTemporaryProcedure(string leaf) =>
+        this.Connection.Simulation.TempdbDbo.Procedures.ContainsKey(this.TemporaryProcedureKey(leaf));
+
+    /// <summary>
+    /// Resolves a temporary procedure's name, whatever database and schema
+    /// qualify it (probed 2026-10-16 against SQL Server 2025): a local one
+    /// among this session's alone, a global one among every session's. The
+    /// procedure is the session's, so a plan binding it is too.
+    /// </summary>
+    private bool TryResolveTemporaryProcedure(string leaf, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Procedure? procedure)
+    {
+        var tempdb = this.Connection.Simulation.TempdbDbo;
+        var key = this.TemporaryProcedureKey(leaf);
+        if (!tempdb.Procedures.TryGetValue(key, out procedure))
+            return false;
+        this.HasSessionScopedReference = true;
+        return this.LockResolved(tempdb.Procedures, key, procedure) || this.TryResolveTemporaryProcedure(leaf, out procedure);
     }
 
     /// <summary>

@@ -32,7 +32,7 @@ internal sealed class DbId : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var targetName = this.nameArg is null ? runtime.Batch.CurrentDatabase.Name : ResolveNameArgument(runtime);
+        var targetName = this.nameArg is null ? runtime.Batch.Connection.ReportedDatabase.Name : ResolveNameArgument(runtime);
         if (targetName is null)
             return SqlValue.Null(SqlType.SmallInt);
         var connection = runtime.Batch.Connection;
@@ -116,7 +116,7 @@ internal sealed class DbName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.CurrentDatabase.Name);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.ReportedDatabase.Name);
         var v = this.idArg.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));

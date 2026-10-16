@@ -77,3 +77,34 @@ Cross-session visibility, the creating session's identity tracked via `HeapTable
 - **Duplicate CREATE from any session** raises Msg 2714 with the verbatim wording `There is already an object named '##X' in the database.` (same factory as regular-table dup, since the dict-add fails identically).
 - **Transactional CREATE / DROP**: `##foo` DDL participates in the creating session's undo log via the existing `RecordTempTableCreation` / `RecordTempTableRemoval` plumbing (the dict argument lets the same entries point at `GlobalTempTables`).
   Probe-confirmed.
+
+## Temporary procedures (`#p` and `##p`)
+
+A temporary procedure is an ordinary `Procedure` in `tempdb`'s `dbo`, so every surface listing `tempdb`'s modules lists it — `sys.objects`, `sys.procedures`, `sys.sql_modules`, `sys.parameters`, `INFORMATION_SCHEMA.ROUTINES`, `OBJECTPROPERTY`, `tempdb..sp_help`, `sp_stored_procedures` and `sys.dm_exec_procedure_stats` (under `database_id` 2) — with the `principal_id` NULL and the schema `dbo` real reports (probed 2026-10-16 against SQL Server 2025).
+A local one is stored under its name in `tempdb` (`SimulatedDbConnection.TemporaryProcedureName`): the written name padded with underscores to 120 characters and eight hex digits naming the session, which all of one session's temporary procedures share and each session draws from a server-wide counter — real's counter advances on every login, this one as a session first needs it.
+Msg 201 and 8144 spell that name out, while an error its body raises, `ERROR_PROCEDURE()` and Msg 2812 name the procedure by its leaf alone, however the call qualified it.
+A global one is stored under its written name.
+
+- **Scope.**
+  A local one is the creating session's alone: another session's `#p` is a different object, `EXEC`, `ALTER` and `DROP` from elsewhere miss it (Msg 2812, Msg 208 state 6, Msg 3701), and `OBJECT_ID('tempdb..#p')` there is NULL while `tempdb.sys.objects` still lists it.
+  A global one is every session's: any of them runs, alters or drops it, and a second `CREATE` is Msg 2714 state 3 from any session.
+  Both last until the session that created them ends — `Dispose`, a pooled connection's `sp_reset_connection`, or an abandoned session's reclamation — even when another session altered a global one, and a `CREATE` inside dynamic SQL or a procedure's body outlives that scope, unlike a temp table's.
+  A call already running when its creator ends finishes, but anything it calls by name finds the procedure gone (Msg 2812), whoever is still using it.
+- **Names.**
+  A database part is ignored with the class-0 Msg 2701 as for a temp table, a schema part is ignored and a server part dropped, at `CREATE`, `ALTER`, `EXEC` and `DROP` alike; a name over 116 characters is Msg 193.
+  The name shares the session's temporary namespace with its temp tables: `CREATE PROC #t` over a temp table `#t` is Msg 2714 state 6 (state 3 for `##`), `ALTER` or `CREATE OR ALTER` over one Msg 2010, `EXEC #t` Msg 2809 naming the table as `tempdb` holds it, `DROP PROC #t` Msg 3705, and `CREATE TABLE #p` or `SELECT … INTO #p` over a procedure Msg 2714.
+- **Binding.**
+  The body binds and runs in the database that was current when the procedure was created — its unqualified names, `OBJECT_ID`, the catalog views — while `DB_NAME()`, `DB_ID()` and its dynamic SQL see the database the call came from (`SimulatedDbConnection.TemporaryModuleCallerDatabase`, entered through `ModuleDatabaseScope.EnterTemporary`), so `OBJECT_NAME(@@PROCID)` is NULL outside `tempdb` and `OBJECT_NAME(@@PROCID, 2)` the padded name.
+  A missing object it names fails when it runs, as a permanent procedure's does, and a call naming another temporary procedure draws no Msg 2007 at `CREATE`.
+- **Permissions and events.**
+  Any session that sees one may create, run, alter or drop it without a permission of its own, and no database DDL trigger fires for it.
+  `GRANT` on a local one is Msg 15151, and on a global one from outside `tempdb` Msg 4610.
+- **Text.**
+  `sys.sql_modules.definition` and, from `tempdb`, `OBJECT_DEFINITION` carry the text, but `sp_helptext` reports none (Msg 15197, from line 91 of its own source).
+- **Transactions.**
+  `CREATE` and `DROP` roll back with the transaction.
+- **Refused.**
+  `NATIVE_COMPILATION` is Msg 12321 state 74; a temporary function is Msg 1074, a scalar one's `RETURN` value adding Msg 178; a view Msg 4103; a trigger named `#…` Msg 208 state 77 (one on a temp table being Msg 167); a synonym Msg 208 state 80, a rule or default Msg 208 state 77; a sequence Msg 11714.
+  `CREATE TYPE #t FROM int` is legal and makes a type in the current database, as on real.
+
+**Divergences**: `EXECUTE AS OWNER` in a temporary procedure runs as `dbo` where real's runs as `guest`, and real's `sys.all_sql_modules` lists a temporary procedure twice, the simulator once.

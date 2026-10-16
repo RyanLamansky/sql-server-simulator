@@ -447,6 +447,10 @@ partial class Simulation
             context.Batch.LockDefinitionName(schema!, tableName.Leaf, DefinitionNameUse.Creates);
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
+        // A temp table shares its name's namespace with the temporary
+        // procedures the session sees (probed 2026-10-16 against SQL Server 2025).
+        if (isTempTable && context.Batch.HasTemporaryProcedure(tableName.Leaf))
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
         RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null, pendingEdgeConstraints);
         ValidateTableDeclaration(createTargetDatabase, tableName.Leaf, memoryOptimization, heapColumns, pendingKeys, pendingIndexes);
 

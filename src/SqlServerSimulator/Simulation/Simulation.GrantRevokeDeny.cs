@@ -348,6 +348,16 @@ partial class Simulation
         {
             throw SimulatedSqlException.GrantOnAnotherDatabase();
         }
+        // A temporary procedure is tempdb's, so a global one the session sees
+        // is another database's object and a local one no securable at all
+        // (probed 2026-10-16 against SQL Server 2025).
+        else if (permClass == PermissionChecker.ClassObject && objectSecurableName!.Value.Leaf.StartsWith('#'))
+        {
+            var temporaryName = objectSecurableName.Value;
+            throw BatchContext.IsGlobalTempName(temporaryName.Leaf) && context.Batch.TryResolveProcedure(temporaryName, out _)
+                ? SimulatedSqlException.GrantOnAnotherDatabase()
+                : SimulatedSqlException.CannotFindSecurable("object", temporaryName.Leaf);
+        }
         else if (permClass == PermissionChecker.ClassObject
             && !TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out _)
             && context.Batch.TryResolveCatalogView(objectSecurableName.Value, out var catalogView, out var catalogDatabase)

@@ -1062,6 +1062,14 @@ public sealed partial class Simulation
     internal string AllocateTempTableInternalName(string name) =>
         $"{name.PadRight(116, '_')}{Interlocked.Increment(ref this.tempTableCounter):X12}";
 
+    private int temporaryObjectSuffixCounter;
+
+    /// <summary>The next session's share of the server-wide counter its local temporary procedures' names end in (<see cref="SimulatedDbConnection.TemporaryProcedureName"/>).</summary>
+    internal int AllocateTemporaryObjectSuffix() => Interlocked.Increment(ref this.temporaryObjectSuffixCounter);
+
+    /// <summary><c>tempdb</c>'s <c>dbo</c> schema, where the temporary procedures live.</summary>
+    internal Schema TempdbDbo => this.Databases[TempdbDatabaseName].Schemas[Database.DefaultSchemaName];
+
     private long tableVariableCounter;
 
     /// <summary>

@@ -147,7 +147,15 @@ partial class Simulation
         }
 
         // A module the principal sees without VIEW DEFINITION reads as one
-        // with no text (probed 2026-10-04 against SQL Server 2025).
+        // with no text (probed 2026-10-04 against SQL Server 2025), and so
+        // does a temporary procedure, whose text sys.sql_modules shows
+        // (probed 2026-10-16), at a line of its own.
+        if (target.Object is Procedure { TemporaryBindingDatabase: not null })
+        {
+            var noText = SimulatedSqlException.HelpNoTextForObject(objectName!);
+            noText.Errors[0].LineNumber = 91;
+            throw noText;
+        }
         if (target.DefinitionText is not null && target.Object is { } module && !PermissionEnforcement.CanSeeDefinition(batch, batch.CurrentDatabase, module))
             throw SimulatedSqlException.HelpNoTextForObject(objectName!);
         if (target.DefinitionText is { } definition)
@@ -694,7 +702,9 @@ partial class Simulation
         ("sp_helpstats", 15009) => (31, null),
         ("sp_helpstats", 15250) => (23, null),
         ("sp_helptext", 15009) => (54, null),
-        ("sp_helptext", 15197) => (107, null),
+        // A temporary procedure's comes from a line of its own, which the
+        // raise stamps (probed 2026-10-16 against SQL Server 2025).
+        ("sp_helptext", 15197) => (exception.Errors[0].LineNumber is > 0 and var stamped ? stamped : 107, null),
         ("sp_helptext", 15250) => (44, null),
         ("sp_helptext", 15645) => (70, null),
         ("sp_helptext", 15646) => (75, null),
@@ -948,6 +958,13 @@ partial class Simulation
             && batch.TryResolveTable(name, out var temp) && database.Schemas.TryGetValue(Database.DefaultSchemaName, out var tempSchema))
         {
             target = new HelpTarget(tempSchema, temp, temp.InternalName ?? temp.Name);
+            return true;
+        }
+        // A temporary procedure the session sees, likewise (probed 2026-10-16).
+        if ((BatchContext.IsLocalTempName(name.Leaf) || BatchContext.IsGlobalTempName(name.Leaf)) && database.Collation.Equals(database.Name, TempdbDatabaseName)
+            && batch.TryResolveProcedure(name, out var temporaryProcedure))
+        {
+            target = new HelpTarget(temporaryProcedure.Schema, temporaryProcedure);
             return true;
         }
         if (!batch.TryResolveSchema(name, out var schema))
