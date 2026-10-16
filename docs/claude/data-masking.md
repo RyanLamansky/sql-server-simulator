@@ -59,6 +59,10 @@ A `#temp` table's creator reads it unmasked; a table variable masks for its read
 
 The functions:
 - `default()`: `xxxx` cut to a shorter declared length (`char(2)` → `xx`, `nchar(1)` → `x`), sent unpadded for a fixed-length type; the single byte `0x30` for `binary` / `varbinary` / `image`, whatever `binary(n)`'s length; zero; `1900-01-01 00:00:00` (at `+00:00` for `datetimeoffset`, `00:00:00` for `time`); the empty GUID; eight zero bytes for `rowversion`; `<masked />`; `{"masked":true}`; the byte `0x00` for `hierarchyid`, which nothing can decode.
+  A `geography` or `geometry` reads as the single byte `0x00` too, a serialization the spatial library can't read, and a `vector` as the binary types' `0x30`, a vector of no elements (probed 2026-10-16 against SQL Server 2025 with SqlClient 7.0 and 5.1).
+  SqlClient's `GetValue` raises `FormatException` on the spatial byte (`HierarchyIdException` on `hierarchyid`'s) while `GetBytes` and `GetSqlBytes` read it; its native vector reader raises `ArgumentOutOfRangeException` on the one-byte vector, as it buffers the row under `ReadAsync`, and the connection is lost; a client reading vectors as text reads `[]`.
+  The in-process reader raises the same `FormatException` from `GetValue` and `GetString` and reads the byte through `GetBytes` (which reads any spatial or `hierarchyid` column's serialization), and reads the vector as `[]`.
+  Stored by `SELECT … INTO` or `INSERT … SELECT`, each keeps its byte: `DATALENGTH` 1 and a binary cast `0x00`, while any read of a spatial value's shape — a method, a property, `ToString()`, a string cast — is Msg 6522's `FormatException`, and the vector reads as `[]`, its norm 0, its cosine distance from itself 1, its normalization itself, against another vector Msg 42204 naming 0 dimensions, and `VECTORPROPERTY(…, 'Dimensions')` Msg 42206 state 4, whose detail is real's `BAD HEADER` read as UTF-16.
   A `sql_variant` masks as its base type does, but a character payload is always the whole `xxxx`.
 - `email()`: the first character, then `XXX@XXXX.com`, cut to the type's length; an empty string reads as `default()`.
 - `partial(p, "pad", s)`: when the value is longer than `p + s` (trailing spaces and a `char`'s padding count), its first `p` characters, the padding and its last `s`; otherwise the padding alone; cut to the type's length.
@@ -99,7 +103,5 @@ That is what lets one cached plan serve a principal with `UNMASK` and one withou
 
 - Only a `CAST`, a `CONVERT` or an operator redacts its error; a value-quoting error another function raises over a masked argument keeps its text here, unprobed on real (`ABS(s)` raises Msg 8114, which quotes nothing).
 - A cursor's `FETCH` and a masked `char` / `binary` value written to storage are padded to the type's length, as a stored value is, where a SELECT sends it unpadded.
-
-## Not modeled yet
-
-- **Masking a `geography`, `geometry` or `vector` value** raises `NotSupportedException`: real sends a single `0x00` byte its own client can't read back, and the simulator's values of those types are parsed, so there is no such value to send.
+- A masked `float16` vector reads as `[]` here; real breaks off its response inside the value, and the client reports a transport-level error (probed 2026-10-16 against SQL Server 2025).
+- Over a stored masked vector, real's vector functions read past its one byte: `VECTOR_DISTANCE` with `euclidean` or `dot`, and inserting it into another vector column, fail a server assertion (Msg 3624, severity 20, ending the session), and `VECTOR_NORM`'s `norm2` and `norminf` in one select list are Msg 8115 though each alone is 0 (probed 2026-10-16 against SQL Server 2025); the simulator reads it as a vector of no elements throughout.

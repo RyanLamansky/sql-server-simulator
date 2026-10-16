@@ -780,17 +780,11 @@ internal static class TdsTypeCodec
             case SqlVariantSqlType:
                 WriteVariant(writer, value);
                 break;
-            case SpatialSqlType spatial:
+            case SpatialSqlType:
                 if (value.IsNull)
-                {
                     writer.WriteUInt64(ulong.MaxValue);
-                }
                 else
-                {
-                    var isGeography = spatial is GeographySqlType;
-                    WritePlpChunks(writer, value.AsSpatial.Encoded(isGeography));
-                }
-
+                    WritePlpChunks(writer, value.SpatialBytes);
                 break;
             case HierarchyIdSqlType:
                 if (value.IsNull)

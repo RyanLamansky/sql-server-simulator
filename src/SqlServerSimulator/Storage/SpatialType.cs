@@ -43,17 +43,23 @@ internal abstract class SpatialSqlType() : SqlType(SqlTypeCategory.String, TypeP
     /// </summary>
     public override bool IsLob => true;
 
-    public override int GetVariableByteCount(SqlValue value) => value.AsSpatial.Encoded(this.IsGeography).Length;
+    public override int GetVariableByteCount(SqlValue value) => value.SpatialBytes.Length;
 
     public override int Encode(SqlValue value, Span<byte> destination)
     {
-        var bytes = value.AsSpatial.Encoded(this.IsGeography);
+        var bytes = value.SpatialBytes;
         bytes.CopyTo(destination);
         return bytes.Length;
     }
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) =>
-        SqlValue.FromSpatial(SpatialBinaryCodec.Decode(source, this.IsGeography), this.IsGeography);
+    /// <summary>
+    /// The stored serialization, parsed — or, for one the codec can't read
+    /// (a masked value an <c>INSERT … SELECT</c> stored), kept as its bytes,
+    /// since real stores it unchecked and fails only a read of its shape.
+    /// </summary>
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SpatialBinaryCodec.TryDecode(source, this.IsGeography) is { } shape
+        ? SqlValue.FromSpatial(shape, this.IsGeography)
+        : SqlValue.FromUnreadableSpatial(this, source.ToArray());
 
     /// <summary>
     /// Accepts either the WKT text or the UDT bytes: an ADO.NET parameter can

@@ -179,6 +179,21 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         isGeography ? FromGeography(value) : FromGeometry(value);
 
     /// <summary>
+    /// Non-NULL spatial value holding a serialization the spatial library
+    /// can't read — the single byte <c>0x00</c> a principal without
+    /// <c>UNMASK</c> reads of a masked column, and what storing that value
+    /// keeps. Its bytes reach storage, the wire, <c>DATALENGTH</c> and a
+    /// binary cast unchanged; anything reading it as a shape raises the
+    /// library's format failure, Msg 6522, as real's does (probed 2026-10-16
+    /// against SQL Server 2025). The caller transfers ownership of the array.
+    /// </summary>
+    public static SqlValue FromUnreadableSpatial(SpatialSqlType type, byte[] serialization)
+    {
+        ArgumentNullException.ThrowIfNull(serialization);
+        return new(type.IsGeography ? SqlType.Geography : SqlType.Geometry, 0, serialization, isNull: false);
+    }
+
+    /// <summary>
     /// Non-NULL SQL <c>sql_variant</c> value wrapping <paramref name="inner"/>.
     /// The inner value carries its own base type, which the variant surfaces
     /// per row. Wrapping is idempotent — a variant never nests, so passing a
@@ -803,18 +818,30 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <summary>Returns the value as <see cref="string"/>. Throws if NULL or if not a string-typed value.</summary>
     public string AsString => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.reference is SpatialGeometry spatial
+        : this.Type is SpatialSqlType
             // A spatial value's string form is its WKT, Z and M included —
             // what real returns from CAST(… AS nvarchar(max)) and ToString().
-            ? SpatialWktWriter.Write(spatial, includeZM: true)
+            ? SpatialWktWriter.Write(this.AsSpatial, includeZM: true)
             : this.Type.Category != SqlTypeCategory.String && this.Type is not JsonSqlType
                 ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
                 : (string)this.reference!;
 
     /// <summary>Returns the parsed spatial instance. Throws if NULL or not a <c>geography</c> / <c>geometry</c> value.</summary>
+    /// <remarks>An unreadable serialization (<see cref="FromUnreadableSpatial"/>) raises Msg 6522 here, which is where every shape-reading path meets it.</remarks>
     public SpatialGeometry AsSpatial => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.reference as SpatialGeometry ?? throw new InvalidOperationException($"Value is {this.Type}, not a spatial type.");
+        : this.reference as SpatialGeometry ?? (this.Type is SpatialSqlType spatial
+            ? throw SimulatedSqlException.SpatialPayloadInvalid(spatial.IsGeography)
+            : throw new InvalidOperationException($"Value is {this.Type}, not a spatial type."));
+
+    /// <summary>
+    /// A spatial value's UDT serialization — the bytes storage, the wire,
+    /// <c>DATALENGTH</c> and a binary cast read: an unreadable one's own,
+    /// else the parsed instance's encoding. Throws if NULL or not spatial.
+    /// </summary>
+    public byte[] SpatialBytes => this.reference is byte[] serialization && this.Type is SpatialSqlType
+        ? serialization
+        : this.AsSpatial.Encoded(((SpatialSqlType)this.Type).IsGeography);
 
     /// <summary>Returns the value as <see cref="byte"/><c>[]</c>. Throws if NULL or not a binary/varbinary/image/rowversion value. For rowversion, allocates a fresh 8-byte big-endian buffer on each call (the in-memory rep is the raw <see cref="long"/> counter); the row-encoding hot path goes through <see cref="RowVersionSqlType.Encode"/> instead, which writes the bytes directly into the row buffer.</summary>
     public byte[] AsBytes => this.IsNull
@@ -997,6 +1024,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         var t when t == SqlType.SmallInt => this.AsInt16,
         var t when t == SqlType.TinyInt => this.AsByte,
         var t when t == SqlType.Bit => this.AsBoolean,
+        // SqlClient can't deserialize an unreadable spatial serialization
+        // (a masked value's 0x00), and its accessors raise this (probed
+        // 2026-10-16 against SQL Server 2025 with SqlClient 7.0).
+        SpatialSqlType when this.reference is byte[] => throw new FormatException("One of the identified items was in an invalid format."),
         { Category: SqlTypeCategory.String } => this.AsString,
         VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType => this.AsBytes,
         // SqlClient surfaces a date column as DateTime at midnight (Kind=Unspecified)

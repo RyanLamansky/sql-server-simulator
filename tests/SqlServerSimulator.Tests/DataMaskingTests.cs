@@ -290,6 +290,65 @@ public sealed class DataMaskingTests
     }
 
     [TestMethod]
+    [DataRow("geography", "geography::Point(1, 2, 4326)")]
+    [DataRow("geometry", "geometry::Point(1, 2, 0)")]
+    public void SpatialDefault_IsAnUnreadableByte(string type, string value)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            $"create table m (id int, v {type} masked with (function = 'default()'))",
+            $"insert m values (1, {value}), (2, null)",
+            "create user u without login",
+            "grant select, insert on m to u",
+            "grant create table to u",
+            "grant alter on schema::dbo to u");
+        using var connection = sim.CreateOpenConnection();
+        using (var command = connection.CreateCommand("execute as user = 'u'; select v from m order by id"))
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            IsFalse(reader.IsDBNull(0));
+            _ = Throws<FormatException>(() => reader.GetValue(0));
+            _ = Throws<FormatException>(() => reader.GetString(0));
+            var bytes = new byte[4];
+            AreEqual(1L, reader.GetBytes(0, 0, bytes, 0, 4));
+            AreEqual(0, bytes[0]);
+            IsTrue(reader.Read());
+            IsTrue(reader.IsDBNull(0));
+        }
+
+        // Stored as it reads, the value keeps its byte and fails any read of its shape.
+        _ = connection.CreateCommand("select id, v into s from m; insert m select id + 10, v from m; revert").ExecuteNonQuery();
+        AreEqual("0x00|1", connection.CreateCommand("select concat(convert(varchar(10), cast(v as varbinary(max)), 1), '|', datalength(v)) from s where id = 1").ExecuteScalar());
+        AreEqual(1, connection.CreateCommand("select datalength(v) from m where id = 11").ExecuteScalar());
+        var ex = sim.AssertSqlError("select v.STAsText() from s where id = 1", 6522);
+        Contains($"\"{type}\": \r\nSystem.FormatException: One of the identified items was in an invalid format.", ex.Message);
+        _ = sim.AssertSqlError("select cast(v as nvarchar(max)) from s where id = 1", 6522);
+        _ = sim.AssertSqlError("select v.STSrid from s where id = 1", 6522);
+    }
+
+    [TestMethod]
+    public void VectorDefault_IsAnEmptyVector()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table m (id int, v vector(3) masked with (function = 'default()'))",
+            "insert m values (1, '[1, 2, 3]')",
+            "create user u without login",
+            "grant select on m to u",
+            "grant create table to u",
+            "grant alter on schema::dbo to u");
+        AreEqual("[]", AsUser(sim, "select v from m"));
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; select id, v into s from m; revert");
+        AreEqual("1|[]", sim.ExecuteScalar("select concat(datalength(v), '|', cast(v as varchar(max))) from s"));
+
+        // Stored, it reads as a vector of no elements, but for its header.
+        AreEqual("0|[]|1", sim.ExecuteScalar("select concat(vector_norm(v, 'norm1'), '|', cast(vector_normalize(v, 'norm2') as varchar(max)), '|', vector_distance('cosine', v, v)) from s"));
+        sim.AssertSqlError("select vector_distance('cosine', v, cast('[1, 2, 3]' as vector(3))) from s", 42204, "The vector dimensions 0 and 3 do not match.");
+        sim.AssertSqlError("select vectorproperty(v, 'Dimensions') from s", 42206, "The vector is invalid. Error details: '䅂⁄䕈䑁剅'.");
+    }
+
+    [TestMethod]
     [DataRow("binary(4)", "0x01020304")]
     [DataRow("varbinary(max)", "0xABCDEF")]
     public void BinaryDefault_IsOneByte(string type, string value)

@@ -49,7 +49,7 @@ internal sealed class DataLength(ParserContext context) : Expression
             // base-type header it stores (probed 2026-09-25 against SQL
             // Server 2025: a variant int is 4, a variant 1.5 is 5).
             SqlVariantSqlType => ByteCount(value.AsVariantInner),
-            SpatialSqlType spatial => value.AsSpatial.Encoded(spatial.IsGeography).Length,
+            SpatialSqlType => value.SpatialBytes.Length,
             // decimal / numeric is fixed-length on disk but DATALENGTH does not
             // report that width: real sizes the value by its own magnitude, so
             // a decimal(38, 0) holding 1 reports 5 rather than the column's 17.

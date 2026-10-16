@@ -142,11 +142,17 @@ internal sealed class VectorSqlType : SqlType
     }
 
     /// <summary>Whether a vector's storage bytes hold float16 elements, which the header's base-type byte says.</summary>
-    public static bool IsFloat16Bytes(ReadOnlySpan<byte> bytes) => bytes[4] == 1;
+    public static bool IsFloat16Bytes(ReadOnlySpan<byte> bytes) => bytes.Length > 4 && bytes[4] == 1;
 
-    /// <summary>The elements of a vector's storage bytes, a float16 vector's widened to float32.</summary>
+    /// <summary>
+    /// The elements of a vector's storage bytes, a float16 vector's widened to
+    /// float32. Bytes too short for a header — the <c>0x30</c> a masked vector
+    /// reads as — hold none, which real's text form shows as <c>[]</c>.
+    /// </summary>
     public static float[] Elements(ReadOnlySpan<byte> bytes)
     {
+        if (bytes.Length < HeaderLength)
+            return [];
         if (IsFloat16Bytes(bytes))
         {
             var halves = new float[(bytes.Length - HeaderLength) / 2];

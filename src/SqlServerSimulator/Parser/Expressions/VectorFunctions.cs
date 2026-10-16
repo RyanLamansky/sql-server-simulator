@@ -315,7 +315,12 @@ internal sealed class VectorNorm : Expression
             _ => throw SimulatedSqlException.VectorNormNotSupported(name),
         };
         var elements = VectorSqlType.Elements(value.AsVectorBytes);
-        return this.normalize ? Normalize((VectorSqlType)value.Type, elements, kind) : SqlValue.FromDouble(DoubleNorm(elements, kind));
+        // A vector of no elements — a masked one stored as it reads —
+        // normalizes to itself, '[]' (probed 2026-10-16 against SQL Server
+        // 2025).
+        return !this.normalize ? SqlValue.FromDouble(DoubleNorm(elements, kind))
+            : elements.Length == 0 ? value
+            : Normalize((VectorSqlType)value.Type, elements, kind);
     }
 
     /// <summary>
@@ -406,7 +411,9 @@ internal sealed class VectorProperty : Expression
             : VectorArguments.Choice(property.AsString, Properties) switch
             {
                 0 => SqlValue.FromVariant(SqlValue.FromNVarchar(NVarcharSqlType.Get(128, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault), ((VectorSqlType)value.Type).BaseTypeName)),
-                1 => SqlValue.FromVariant(SqlValue.FromInt16((short)((VectorSqlType)value.Type).dimensions)),
+                1 => value.AsVectorBytes.Length < VectorSqlType.HeaderLength
+                    ? throw SimulatedSqlException.VectorHeaderInvalid()
+                    : SqlValue.FromVariant(SqlValue.FromInt16((short)((VectorSqlType)value.Type).dimensions)),
                 _ => SqlValue.Null(SqlType.SqlVariant),
             };
     }

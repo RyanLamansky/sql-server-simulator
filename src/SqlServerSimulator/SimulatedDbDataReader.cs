@@ -323,14 +323,21 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// and slices, so behavior matches per-call but the streaming-memory
     /// guarantee doesn't. Honors SqlClient's <c>buffer == null</c> contract:
     /// returns the total length without copying so callers can size their
-    /// own buffer.
+    /// own buffer. A <c>geography</c>, <c>geometry</c> or <c>hierarchyid</c>
+    /// column reads as its UDT serialization, as SqlClient's does — the one
+    /// accessor that reads a masked spatial value's <c>0x00</c>.
     /// </summary>
     public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
         var v = cursor[ordinal];
         if (v.IsNull)
             throw new SqlNullValueException();
-        var bytes = v.AsBytes;
+        var bytes = v.Type switch
+        {
+            SpatialSqlType => v.SpatialBytes,
+            HierarchyIdSqlType => v.AsHierarchyIdBytes,
+            _ => v.AsBytes,
+        };
         if (buffer is null)
             return bytes.Length;
         if (dataOffset is < 0 or > int.MaxValue)
@@ -582,12 +589,15 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// way SqlClient's own accessors read it, so an empty element comes back
     /// as <c>&lt;a /&gt;</c> and attributes are single-spaced (confirmed
     /// 2026-09-25 against SqlClient 6.1 over SQL Server 2025). A vector reads
-    /// as its text form, as a client without vector support reads it.
+    /// as its text form, as a client without vector support reads it, and a
+    /// spatial value as its WKT — or, unreadable, as SqlClient's FormatException.
     /// </summary>
     internal static string ClientString(SqlValue value)
     {
         if (value.Type is VectorSqlType)
             return VectorSqlType.Format(value.AsVectorBytes);
+        if (value.Type is SpatialSqlType)
+            return (string)value.ToObject()!;
         if (value.Type is not XmlSqlType)
             return value.AsString;
         using var reader = System.Xml.XmlReader.Create(new StringReader(value.AsString), new System.Xml.XmlReaderSettings { ConformanceLevel = System.Xml.ConformanceLevel.Fragment });

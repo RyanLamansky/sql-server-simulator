@@ -38,6 +38,16 @@ partial class SimulatedSqlException
         new($"The vector dimensions {first.ToString(CultureInfo.InvariantCulture)} and {second.ToString(CultureInfo.InvariantCulture)} do not match.", 42204, 16, state);
 
     /// <summary>
+    /// Msg 42206 state 4: <c>VECTORPROPERTY(v, 'Dimensions')</c> over a vector
+    /// whose bytes hold no header — the one byte a masked vector reads as,
+    /// stored by <c>SELECT … INTO</c>. Real's detail is the ASCII text
+    /// <c>BAD HEADER</c> read as UTF-16, which is what it prints (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException VectorHeaderInvalid() =>
+        new($"The vector is invalid. Error details: '{System.Text.Encoding.Unicode.GetString("BAD HEADER"u8)}'.", 42206, 16, 4);
+
+    /// <summary>
     /// Msg 13670: text converted to a vector is JSON, but not a flat array of
     /// numbers. <paramref name="reason"/> is real's own phrase, capitalization
     /// and misspelling included (<c>Boolean not supported</c> for <c>true</c>

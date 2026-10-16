@@ -324,7 +324,8 @@ internal sealed class MaskingFunction
     /// a shorter string type's length, the single byte <c>0x30</c> for the
     /// binary types, zero, <c>1900-01-01 00:00:00</c> (at <c>+00:00</c>), the
     /// empty GUID, eight zero bytes for <c>rowversion</c>,
-    /// <c>&lt;masked /&gt;</c>, <c>{"masked":true}</c>; a <c>sql_variant</c>
+    /// <c>&lt;masked /&gt;</c>, <c>{"masked":true}</c>, an unreadable single byte for
+    /// <c>hierarchyid</c> and the spatial and vector types; a <c>sql_variant</c>
     /// masks as its base type does, but for a string's length. A fixed-length
     /// string or binary value is sent unpadded.
     /// </summary>
@@ -360,13 +361,20 @@ internal sealed class MaskingFunction
                 // can decode (probed 2026-09-27: CAST to varbinary reads 0x00,
                 // ToString() raises Msg 6522).
                 return SqlValue.FromHierarchyIdBytes([0x00]);
-            case SpatialSqlType or VectorSqlType:
-                // Real sends a single 0x00 byte its own client can't read back
-                // into the type (probed 2026-09-27: SqlClient raises on the
-                // geography / geometry / vector value, and CAST to varbinary
-                // reads 0x00); the simulator's values of these types are
-                // parsed, so there is no such value to send.
-                throw new NotSupportedException($"Dynamic Data Masking of a {type.SqlServerName} value isn't modeled.");
+            case SpatialSqlType spatial:
+                // Real sends the single byte 0x00, a serialization its own
+                // spatial library can't read: SqlClient's GetValue raises
+                // FormatException while GetBytes reads 0x00, a method on it is
+                // Msg 6522, and SELECT … INTO stores it as it is (probed
+                // 2026-10-16 against SQL Server 2025).
+                return SqlValue.FromUnreadableSpatial(spatial, [0x00]);
+            case VectorSqlType vector:
+                // Real sends the binary types' 0x30, which reads as a vector
+                // of no elements: '[]' as text, one byte natively, where
+                // SqlClient's vector reader raises ArgumentOutOfRangeException
+                // and the connection is lost (probed 2026-10-16 against SQL
+                // Server 2025 with SqlClient 7.0 and 5.1).
+                return SqlValue.FromVector(vector, [0x30]);
         }
         return type.Category switch
         {

@@ -191,10 +191,10 @@ internal readonly partial struct SqlValue
         // string-category branch below because the spatial types sit in that
         // category. The inbound direction raises real's own version failure
         // (Msg 6522 / 24210) on bytes it can't read.
-        if (this.Type is SpatialSqlType spatialToVarbinary && target is VarbinarySqlType)
-            return FromVarbinary((VarbinarySqlType)target, this.AsSpatial.Encoded(spatialToVarbinary.IsGeography));
-        if (this.Type is SpatialSqlType spatialToBinary && target is BinarySqlType spatialBinaryTarget)
-            return FromBinary(spatialBinaryTarget, this.AsSpatial.Encoded(spatialToBinary.IsGeography));
+        if (this.Type is SpatialSqlType && target is VarbinarySqlType)
+            return FromVarbinary((VarbinarySqlType)target, this.SpatialBytes);
+        if (this.Type is SpatialSqlType && target is BinarySqlType spatialBinaryTarget)
+            return FromBinary(spatialBinaryTarget, this.SpatialBytes);
 
         if (SqlType.IsStringCategory(this.Type) && target is VarbinarySqlType)
             return FromVarbinary((VarbinarySqlType)target, EncodeStringForBinary(this.AsString, this.Type));
