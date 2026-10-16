@@ -41,6 +41,13 @@ partial class SimulatedSqlException
         new("Error executing extended stored procedure: Invalid Parameter", number, 15, 1);
 
     /// <summary>
+    /// Msg 22049 at severity 15: <c>xp_delete_file</c> of one file that holds
+    /// no backup — a detached database's (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NotABackupFile() =>
+        new("Error executing xp_delete_file extended stored procedure: Specified file is not a SQL Server backup file.", 22049, 15, 0);
+
+    /// <summary>
     /// Msg 22048 (<c>xp_create_subdir</c>) or 22049 (<c>xp_delete_file</c>)
     /// at severity 16: the operating system refused the path, error 2 for
     /// one that doesn't exist and 183 for a file in the way.

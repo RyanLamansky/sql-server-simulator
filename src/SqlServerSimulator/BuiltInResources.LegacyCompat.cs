@@ -345,6 +345,10 @@ internal static partial class BuiltInResources
         // them to enumerate the current database's keys, indexes, and stored
         // procedures.
         "sp_pkeys",
+        // Detaching a database to its files and attaching it from them.
+        "sp_attach_db",
+        "sp_attach_single_file_db",
+        "sp_detach_db",
         // The ODBC catalog procedures over user-defined table types.
         "sp_table_types",
         "sp_table_type_columns_100",

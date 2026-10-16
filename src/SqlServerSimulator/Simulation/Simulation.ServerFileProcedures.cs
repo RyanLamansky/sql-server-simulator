@@ -119,6 +119,8 @@ partial class Simulation
         {
             if (type == 0 && this.IsBackupFile(target))
                 _ = this.BackupDevices.TryRemove(target, out _);
+            else if (type == 0 && this.BackupDevices.ContainsKey(target))
+                return SimulatedSqlException.NotABackupFile();
             return null;
         }
         if (arguments.Count < 4 || !IsGivenText(arguments[2]) || !IsGivenText(arguments[3])

@@ -29,6 +29,7 @@ partial class SimulatedSqlException
     {
         2 => "The system cannot find the file specified.",
         3 => "The system cannot find the path specified.",
+        32 => "The process cannot access the file because it is being used by another process.",
         _ => "Access is denied.",
     }})");
 

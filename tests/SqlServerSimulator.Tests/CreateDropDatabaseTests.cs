@@ -211,7 +211,6 @@ public sealed class CreateDropDatabaseTests
 
     [TestMethod]
     [DataRow("as snapshot of simulated")]
-    [DataRow("on (name = foo, filename = '/var/opt/mssql/data/foo.mdf') for attach")]
     [DataRow("with ledger = on")]
     [DataRow("with persistent_log_buffer = on (directory_name = '/pmem')")]
     [DataRow("with catalog_collation = SQL_Latin1_General_CP1_CI_AS")]

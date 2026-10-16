@@ -341,6 +341,8 @@ partial class Simulation
             "sp_clean_db_free_space" => InvokeSpCleanDbFreeSpace(batch, systemProcName, calledAs, oneFile: false),
             "sp_flush_log" => InvokeSpFlushLog(batch, returnCodeVar),
             "sp_resetstatus" => InvokeSpResetStatus(batch, systemProcName, calledAs, returnCodeVar),
+            "sp_attach_db" or "sp_attach_single_file_db" => this.InvokeSpAttachDb(batch, systemProcName, calledAs),
+            "sp_detach_db" => this.InvokeSpDetachDb(batch, calledAs, returnCodeVar),
             "sp_sqlexec" => this.InvokeSpSqlExec(batch, systemProcName, calledAs, returnCodeVar),
             "sp_srvrolepermission" => InvokeSpSrvRolePermission(batch, systemProcName, calledAs),
             "xp_fixeddrives" => InvokeXpFixedDrives(batch),

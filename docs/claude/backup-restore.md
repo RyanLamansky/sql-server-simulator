@@ -1,6 +1,6 @@
 # BACKUP and RESTORE
 
-`BACKUP DATABASE` (full and differential) and `BACKUP LOG` to `DISK`, tail-log backups, `RESTORE DATABASE` and `RESTORE LOG` sequences — a full set, then differential and log sets onto a database left restoring, point-in-time stops and marks, `STANDBY`, and the recovery that ends them — the `RESTORE` forms that only read a device, msdb's history of all of them, and the server's disk the backup tooling reads and tidies.
+`BACKUP DATABASE` (full and differential) and `BACKUP LOG` to `DISK`, tail-log backups, detaching and attaching databases, `RESTORE DATABASE` and `RESTORE LOG` sequences — a full set, then differential and log sets onto a database left restoring, point-in-time stops and marks, `STANDBY`, and the recovery that ends them — the `RESTORE` forms that only read a device, msdb's history of all of them, and the server's disk the backup tooling reads and tidies.
 Behavior was probed 2026-10-11 against SQL Server 2022 (16.0.1200) on Windows.
 The progress and summary messages, the refusals for a missing set or device, a new name over existing files, the restoring session's own database and a transaction, and the whole single-user admission sequence (the holder's `ROLLBACK IMMEDIATE`, Msg 924 on `USE` and on a three-part name, Msg 4060 at login, Msg 5064 to another session's `MULTI_USER`, the holder's restore, the first session in once the holder leaves) were re-checked the same day against SQL Server 2025 on Linux and matched.
 SQL Server 2025 on Linux creates a missing directory on a backup's path, nested ones included, refusing only where it can't (operating system error 5); with `OpenBackupFile`, whether a path can be written is the host's answer, and the in-memory store writes any.
@@ -28,6 +28,28 @@ Its directories are the root, `/tmp` and `/var/opt/mssql` with its `data` and `l
 `sys.dm_os_file_exists`, `xp_fileexist` (a row, or with an output argument the file flag alone), `xp_dirtree` (depth first, to a depth, files on request), `xp_create_subdir` and `xp_delete_file` read and change it; the last two are `sysadmin`'s alone (Msg 229), the first open to any login, and the other two answer a caller short of `sysadmin` as though nothing existed.
 A refusal of `xp_create_subdir` (Msg 22048) or `xp_delete_file` (Msg 22049) is an error the batch runs past, neither entering a `CATCH` nor setting `@@ERROR`, the procedure answering 1: severity 15 for an argument it can't read, 16 naming the operating system's error for a path it can't use.
 `xp_delete_file 0, folder, extension, date[, subfolders]` deletes the backup files whose last set finished before the date, in the folder and with `subfolders` the folders directly inside it; `xp_delete_file 0, file` deletes one.
+
+## Detach and attach
+
+`sp_detach_db` and `DBCC DETACHDB` write a database to its own files on the server's disk and take it off the server; `CREATE DATABASE … FOR ATTACH` / `FOR ATTACH_REBUILD_LOG`, `sp_attach_db` and `sp_attach_single_file_db` bring it back from them ([`Simulation.DetachAttach.cs`](../../src/SqlServerSimulator/Simulation/Simulation.DetachAttach.cs)), all as SQL Server 2025 was probed doing them (2026-10-16).
+A detached database is a backup written into its primary data file — the same `DatabaseImage`, so a database holding something a backup refuses refuses to detach — and each other file holds the database's identity and its own file id ([`DetachedDatabaseFile`](../../src/SqlServerSimulator/Storage/Backup/DetachedDatabaseFile.cs)).
+The files go where any device goes: the in-memory store, or `OpenBackupFile`'s host; their format is the simulator build's own, so real's `.mdf` / `.ldf` files don't attach here, nor these on real.
+
+- **`sp_detach_db [@dbname] [, @skipchecks] [, @keepfulltextindexfile]`** checks in real's order, each from its own line: a NULL name, or an option other than `true` / `false` in any case, is the class-0 usage message (Msg 15354 from line 17, 25 or 33), a missing database Msg 15010 from line 40, a transaction Msg 15002 from line 47, each returning 1.
+  `@skipchecks = 'false'` alone runs `sys.sp_updatestats` in the database first — NULL, the default, skips it as `true` does.
+  The detach itself is `DBCC DETACHDB` run as a dynamic batch: its refusals come at line 1 naming no procedure, and the procedure returns 0 whatever they were.
+- **`DBCC DETACHDB (database [, int])`** detaches without a message: an empty name is the current database and a NULL one Msg 2560; then a missing database is Msg 7939, a system database Msg 7940, a principal neither `sysadmin` nor in the database's `db_owner` Msg 7983, and the session's own current database Msg 3703, which ends the batch.
+  An `OFFLINE`, `EMERGENCY` or single-user database detaches, and a `RESTORING` one does with Msg 947 in the client and the error log, leaving files that attach refuses (Msg 1824).
+- **Attaching** needs the file list (Msg 1829 state 2 without one, state 3 when the first file is a log or secondary file), refuses `CONTAINMENT` (Msg 1841) and a taken name (Msg 1801) before it reads a file, and reads each listed file in order: a relative path is Msg 5105, a file missing, a directory or one an online database holds Msg 5120 with operating system error 2, 5 or 32, a file holding no database Msg 5172, one of another database Msg 5173 and a second primary file Msg 1830, each but the first two followed by Msg 1802.
+  Files it doesn't list it looks for where the database left them; a missing log is rebuilt there (Msgs 5111 and 5182, 63 pages growing 10 percent with no ceiling), as `FOR ATTACH_REBUILD_LOG` does too, while a log the list names must exist.
+  Sizes in the list change nothing.
+  `WITH ENABLE_BROKER` / `NEW_BROKER` / `ERROR_BROKER_CONVERSATIONS` (one of them) and `RESTRICTED_USER` follow `FOR ATTACH` alone; anything else is Msg 102 at it.
+- **The attached database** comes back online under the smallest free `database_id`, owned by the attaching login, with its data, objects, compatibility level and recovery model as they were, and with `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY`, `AUTO_CLOSE` and its broker off and `MULTI_USER` but for what the `WITH` list says — under any name, its files' logical names unchanged.
+  Dropping it deletes its files; dropping an `OFFLINE` database leaves them, attachable.
+- **`sp_attach_db @dbname, @filename1 [, … @filename16]`** and **`sp_attach_single_file_db @dbname, @physname`** refuse a NULL name or first file with Msg 15004 from line 27 or 17, then run `CREATE DATABASE … FOR ATTACH` over the files as a dynamic batch, whose refusals come at line 1 naming no procedure and return 1.
+- **The error log** gets what real writes: a startup line for an attach (a restoring database's included, ahead of its Msg 1824), Msg 17204's `FCB::Open failed: Could not open file … for file number 0.  OS error: …` for a file that wouldn't open, Msg 5105 and Msg 5173, and for a rebuilt log Msg 17207's `FileMgr::StartLogFiles: …` and `New log file '…' was created.`; a detach writes nothing.
+  A `CREATE DATABASE` over a taken path logs Msg 5170 at state 1 and then 4, and a file the disk holds — a detached database's, a backup — is a taken path too.
+- **The files** list on the disk's surfaces (`sys.dm_os_file_exists`, `xp_fileexist`, `xp_dirtree`); `xp_delete_file` refuses one as no backup (Msg 22049 class 15).
 
 ## Differential and log backups
 
@@ -154,6 +176,11 @@ Real's `DatabaseBackup` checks that the root `@Directory` exists and relies on `
 - **Statistics come back without the histograms they held**, as though never built; `UPDATE STATISTICS` or an automatic refresh builds them over the restored rows.
 - **Query Store** comes back with its options and no captured data.
 - **A different simulator build refuses a backup** (Msg 3169) in either direction, where real restores an older version's backup.
+- **A session already using a database it detaches keeps its old copy.**
+  Real lets another session in the database go on, its writes reaching the files, and a re-attach under the same `database_id` puts it back in the database; here the session keeps working in the detached copy, whose writes no file holds.
+- **`@skipchecks = 'false'`'s `sp_updatestats`** lists the database's user tables alone, where real's also lists some forty of its system tables.
+- **A detached database's file is refused as no database file** (Msg 5172) by a different simulator build, where real attaches an older version's.
+- **Real takes about a second** to refuse an attach of a file an online database holds; here the refusal is immediate.
 
 ## Not modeled yet
 
@@ -164,3 +191,5 @@ Real's `DatabaseBackup` checks that the root `@Directory` exists and relies on `
 - Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`, `MEDIANAME` on `RESTORE`.
 - Backing up a database holding CLR assemblies or modules, full-text catalogs, change tracking, security policies, `CREATE DEFAULT` / `CREATE RULE` objects or bindings, memory-optimized tables or table types, temporal or graph tables, XML / spatial / JSON / vector / columnstore / hash / hypothetical indexes, masked or `GENERATED ALWAYS` columns, edge constraints, encrypted or numbered modules, or a DDL trigger with a firing order.
 - Restoring `model` or `msdb`.
+- Detaching or attaching a database holding what a backup can't yet carry (above); `@keepfulltextindexfile` has nothing to keep.
+- Attaching a database whose log was lost without a clean shutdown, which no simulator detach leaves.

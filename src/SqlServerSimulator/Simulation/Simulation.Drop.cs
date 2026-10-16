@@ -273,7 +273,11 @@ partial class Simulation
         }
         if (removed)
         {
-            ExtendedEvents.XeObjectEvents.NoteDatabase(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, droppedDatabase!);
+            // An offline database's files stay on the disk, attachable (probed
+            // 2026-10-16 against SQL Server 2025).
+            if (droppedDatabase!.State == DatabaseState.Offline)
+                simulation.KeepDroppedOfflineFiles(droppedDatabase);
+            ExtendedEvents.XeObjectEvents.NoteDatabase(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, droppedDatabase);
             RecordServerDdlEvent(context, "DROP_DATABASE", name, loginName: null);
         }
     }

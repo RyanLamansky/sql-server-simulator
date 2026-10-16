@@ -34,7 +34,8 @@ partial class Simulation
     /// [DEFAULT] &lt;filespec&gt; [, …]] [LOG ON &lt;filespec&gt; [, …]]]</c>
     /// followed by either <c>FOR ATTACH</c> / <c>AS SNAPSHOT OF</c> or
     /// <c>[COLLATE &lt;collation&gt;] [WITH &lt;option&gt; [, …]]</c>, in that
-    /// order. The database name is a single identifier (bare or bracketed /
+    /// order. <c>FOR ATTACH</c> builds the database from detached files
+    /// (<see cref="AttachDatabase"/>). The database name is a single identifier (bare or bracketed /
     /// quoted); <c>COLLATE</c> sets the new database's collation (defaulting
     /// to the server collation, mirroring <c>model.collation</c>), and
     /// <c>TRUSTWORTHY</c> / <c>DB_CHAINING</c> its two flags. The file list
@@ -69,7 +70,8 @@ partial class Simulation
         // Server 2025).
         context.MoveNextOptional();
         var partial = false;
-        if (IsBareWord(context.Token, "CONTAINMENT"))
+        var containmentWritten = IsBareWord(context.Token, "CONTAINMENT");
+        if (containmentWritten)
         {
             if (context.GetNextRequired() is not Operator { Character: '=' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -94,20 +96,19 @@ partial class Simulation
         string? collationName = null;
         var options = new CreateDatabaseOptions();
         string? unbuiltForm = null;
+        AttachOptions? attach = null;
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.For }:
-                if (!IsBareWord(context.GetNextRequired(), "ATTACH") && !IsBareWord(context.Token, "ATTACH_REBUILD_LOG"))
+                var rebuildLog = IsBareWord(context.GetNextRequired(), "ATTACH_REBUILD_LOG");
+                if (!rebuildLog && !IsBareWord(context.Token, "ATTACH"))
                     throw SimulatedSqlException.SyntaxErrorNear(context.Token, state: 23);
-                // Attach options are taken as written: the statement attaches
-                // nothing either way.
-                while (context.GetNextOptional() is { } attachToken && !(IsStatementBoundary(attachToken) && attachToken is not ReservedKeyword { Keyword: Keyword.With }))
-                {
-                }
+                attach = new AttachOptions(rebuildLog);
+                context.MoveNextOptional();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                    ParseAttachOptions(context, attach);
                 if (groups is null)
                     options.MissingPrimaryFile = true;
-                else
-                    unbuiltForm = "CREATE DATABASE … FOR ATTACH, which reads the files of a detached database,";
                 break;
             case ReservedKeyword { Keyword: Keyword.As }:
                 if (!IsBareWord(context.GetNextRequired(), "SNAPSHOT"))
@@ -137,6 +138,14 @@ partial class Simulation
         }
         if (!IsStatementBoundary(context.Token) || context.Token is ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A file to create needs its logical name, which the batch's compile
+        // checks once the statement has read whole; an attach needs none
+        // (probed 2026-10-16 against SQL Server 2025).
+        if (attach is null
+            && (groups?.Exists(static group => group.Files.Exists(static spec => spec.Name is null)) == true || logFiles?.Exists(static spec => spec.Name is null) == true))
+        {
+            throw SimulatedSqlException.FileOptionRequired("NAME", 16, 2);
+        }
 
         // A skipped (un-taken IF branch) statement validates nothing and has no
         // schema effect — mirror ALTER DATABASE COLLATE, which defers collation
@@ -155,6 +164,15 @@ partial class Simulation
 
         if (options.MissingPrimaryFile)
             throw SimulatedSqlException.AttachNeedsPrimaryFile();
+        if (attach is not null)
+        {
+            if (containmentWritten)
+                throw SimulatedSqlException.ContainmentWithAttach();
+            var attached = this.AttachDatabase(context.Batch, databaseName, [.. groups!.SelectMany(static group => group.Files), .. logFiles ?? []], attach);
+            ExtendedEvents.XeObjectEvents.NoteDatabase(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, attached);
+            RecordServerDdlEvent(context, "CREATE_DATABASE", databaseName, loginName: null);
+            return true;
+        }
         if (unbuiltForm is not null)
             throw new NotSupportedException($"{unbuiltForm} isn't modeled by the simulator.");
         if (partial)
@@ -197,9 +215,9 @@ partial class Simulation
             if (this.Logins.TryGetValue(context.Connection.Security.Effective.LoginName, out var creator))
                 database.OwnerLoginName = creator.Name;
             if (groups is not null)
-                this.ApplyCreateDatabaseFileList(database, groups, logFiles ?? []);
+                this.ApplyCreateDatabaseFileList(context.Batch, database, groups, logFiles ?? []);
             else
-                this.RejectTakenPaths(database);
+                this.RejectTakenPaths(context.Batch, database);
             RegisterUserDatabaseLocked(database);
         }
         LogDatabaseStartup(context.Batch, database);
@@ -415,7 +433,7 @@ partial class Simulation
     /// registers its filegroups, refusing it the way real refuses the
     /// <c>CREATE DATABASE</c>.
     /// </summary>
-    private void ApplyCreateDatabaseFileList(Database database, List<DeclaredFilegroup> groups, List<FileSpecification> logFiles)
+    private void ApplyCreateDatabaseFileList(BatchContext batch, Database database, List<DeclaredFilegroup> groups, List<FileSpecification> logFiles)
     {
         var declared = new HashSet<string>(database.Collation) { "PRIMARY" };
         foreach (var group in groups)
@@ -439,7 +457,7 @@ partial class Simulation
             if (CreatedFileRefusal(spec, spec.SizePages ?? BuiltInResources.NewFileSizePages, isPrimary: spec == primary) is { } refusal)
                 throw SimulatedSqlException.FollowedByCreateDatabaseFailed(refusal, 1);
             if (!paths.Add(spec.FileName!) || PhysicalPathInUse(this, spec.FileName!))
-                throw SimulatedSqlException.FollowedByCreateDatabaseFailed(SimulatedSqlException.PhysicalFileExists(spec.FileName!, 4), 4);
+                throw TakenPathRefusal(batch, spec.FileName!);
         }
 
         database.Files.Clear();
@@ -495,12 +513,25 @@ partial class Simulation
     /// A database made without a file list takes the default paths, which a
     /// renamed database's files may still hold: Msg 5170, then Msg 1802.
     /// </summary>
-    private void RejectTakenPaths(Database database)
+    private void RejectTakenPaths(BatchContext batch, Database database)
     {
         foreach (var file in database.FilesInOrder())
         {
             if (PhysicalPathInUse(this, file.PhysicalName))
-                throw SimulatedSqlException.FollowedByCreateDatabaseFailed(SimulatedSqlException.PhysicalFileExists(file.PhysicalName, 4), 4);
+                throw TakenPathRefusal(batch, file.PhysicalName);
         }
+    }
+
+    /// <summary>
+    /// Msg 5170 then Msg 1802 for a new database's file on a taken path,
+    /// which writes Msg 5170 to the error log at state 1 and then at state 4
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException TakenPathRefusal(BatchContext batch, string path)
+    {
+        var message = SimulatedSqlException.PhysicalFileExists(path, 4).Message;
+        LogRaisedError(batch, 5170, 16, 1, message);
+        LogRaisedError(batch, 5170, 16, 4, message);
+        return SimulatedSqlException.FollowedByCreateDatabaseFailed(SimulatedSqlException.PhysicalFileExists(path, 4), 4);
     }
 }

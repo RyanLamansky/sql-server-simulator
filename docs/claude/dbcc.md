@@ -5,6 +5,8 @@ Every `DBCC` statement goes through one of two front ends in `Simulation/`.
 Everything else reaches `ParseDbccCommand` (`Simulation.DbccCommands.cs`), which reads any `DBCC name [( argument, … )] [WITH option, …]` and hands it to a handler per subcommand; the consistency checks and table maintenance live in `Simulation.DbccCheck.cs`, `OPENTRAN` and `HELP` in `Simulation.DbccSession.cs`.
 Everything below was probed 2026-09-28 against SQL Server 2025 through the `.vs/edge-probe` differential harness, where the modeled commands match real line for line apart from the environmental values listed under [Divergences](#divergences).
 
+`DETACHDB`, which `sp_detach_db` runs, is in [`backup-restore.md`](backup-restore.md#detach-and-attach); it refuses an option it doesn't take only once it has found its database.
+
 ## The statement's shape
 
 - **What settles at parse, what at run.**

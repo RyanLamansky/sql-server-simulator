@@ -100,6 +100,7 @@ partial class Simulation
             "CLEANTABLE" => RunDbccCleanTable(batch, dbcc),
             "DBINFO" => RunDbccDbInfo(batch, dbcc),
             "DBREINDEX" => RunDbccDbReindex(batch, dbcc),
+            "DETACHDB" => RunDbccDetachDb(batch, dbcc),
             "DROPCLEANBUFFERS" => RunDbccDropCleanBuffers(batch, dbcc),
             "ERRORLOG" => RunDbccErrorLog(batch, dbcc),
             "FLUSHAUTHCACHE" => RunDbccFlushAuthCache(batch, dbcc),

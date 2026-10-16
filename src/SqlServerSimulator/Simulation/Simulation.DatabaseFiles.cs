@@ -114,8 +114,9 @@ partial class Simulation
 
         if (site != FileSpecificationSite.ModifyFile && spec.FileName is null)
             throw SimulatedSqlException.FileOptionRequired("FILENAME", 15, 1);
-        return spec.Name is null
-            ? throw SimulatedSqlException.FileOptionRequired("NAME", 16, site == FileSpecificationSite.CreateDatabase ? (byte)2 : (byte)3)
+        // CREATE DATABASE asks for a name once it runs, and an attach needs none.
+        return spec.Name is null && site != FileSpecificationSite.CreateDatabase
+            ? throw SimulatedSqlException.FileOptionRequired("NAME", 16, 3)
             : spec;
     }
 
@@ -199,7 +200,9 @@ partial class Simulation
                     return true;
             }
         }
-        return false;
+        // A file no database holds — a detached database's, a backup — is in
+        // the way too (probed 2026-10-16 against SQL Server 2025).
+        return except is null && CanonicalServerPath(path) is { } canonical && simulation.BackupDevices.ContainsKey(canonical);
     }
 
     /// <summary>
