@@ -61,6 +61,7 @@ partial class Simulation
             _ = Interlocked.Increment(ref this.LoginCount);
         connection.Session.LoggedIn = 1;
         ExtendedEvents.XeSessionEvents.Login(connection, isPooled);
+        this.NoteTraceLogin(connection, isPooled);
         var all = this.ServerTriggers.All;
         if (all.Length == 0)
             return;

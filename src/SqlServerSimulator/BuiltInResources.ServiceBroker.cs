@@ -194,7 +194,34 @@ internal static partial class BuiltInResources
             new("broker_instance", brokerName128, 128, true),
             new("creator_sid", SqlType.Varbinary, 85, true),
             new("principal_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (batch, database) => database.EventNotifications.Where(notification => SeesEventNotification(batch, database, notification))
+            .OrderBy(static notification => notification.ObjectId).Select(EventNotificationRow));
+        Sys("server_event_notifications",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("parent_class", SqlType.TinyInt, null, false),
+            new("parent_class_desc", nvarchar60Catalog, 60, true),
+            new("parent_id", SqlType.Int32, null, false),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("service_name", brokerName256, 256, true),
+            new("broker_instance", brokerName128, 128, true),
+            new("creator_sid", SqlType.Varbinary, 85, true),
+            new("principal_id", SqlType.Int32, null, true),
+        ], static (batch, _) => batch.Connection.Simulation.ServerEventNotifications.Where(notification => SeesServerEventNotification(batch, notification))
+            .OrderBy(static notification => notification.ObjectId).Select(EventNotificationRow));
+        var eventTypeName = NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit);
+        Sys("event_notification_event_types",
+        [
+            new("type", SqlType.Int32, null, false),
+            new("type_name", eventTypeName, 64, true),
+            new("parent_type", SqlType.Int32, null, true),
+        ], (_, _) => EventNotificationEventTypes.All.Select(entry => (SqlValue[])[
+            SqlValue.FromInt32(entry.Type),
+            SqlValue.FromString(eventTypeName, entry.TypeName),
+            entry.ParentType is int parent ? SqlValue.FromInt32(parent) : SqlValue.Null(SqlType.Int32),
+        ]));
 
         var stateChar = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
         Sys("conversation_endpoints",
@@ -599,4 +626,69 @@ internal static partial class BuiltInResources
         {
             ObjectId = queue.ObjectId,
         };
+    /// <summary>A row of <c>sys.event_notifications</c> or <c>sys.server_event_notifications</c>.</summary>
+    private static SqlValue[] EventNotificationRow(EventNotification notification) =>
+    [
+        SqlValue.FromSystemName(notification.Name),
+        SqlValue.FromInt32(notification.ObjectId),
+        SqlValue.FromByte((byte)notification.Parent),
+        SqlValue.FromString(nvarchar60Catalog, notification.Parent switch
+        {
+            EventNotificationParent.Database => "DATABASE",
+            EventNotificationParent.Queue => "OBJECT_OR_COLUMN",
+            _ => "SERVER",
+        }),
+        SqlValue.FromInt32(notification.Queue?.ObjectId ?? 0),
+        SqlValue.FromDateTime(notification.CreateDate),
+        SqlValue.FromDateTime(notification.CreateDate),
+        SqlValue.FromString(brokerName256, notification.ServiceName),
+        SqlValue.FromString(brokerName128, notification.BrokerInstance),
+        notification.CreatorSid is { } sid ? SqlValue.FromVarbinary(VarbinarySqlType.Get(85), sid) : SqlValue.Null(VarbinarySqlType.Get(85)),
+        SqlValue.FromInt32(notification.PrincipalId),
+    ];
+
+    /// <summary>
+    /// Whether the reading principal sees a database's or queue's event
+    /// notification: its owner, the holder of <c>ALTER ANY DATABASE EVENT
+    /// NOTIFICATION</c>, or for a queue's whoever may alter the queue (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static bool SeesEventNotification(Parser.BatchContext batch, Database database, EventNotification notification) =>
+        PermissionEnforcement.MayActAs(batch, database, notification.PrincipalId)
+        || PermissionEnforcement.HoldsDatabasePermission(batch, database, "ALTER ANY DATABASE EVENT NOTIFICATION")
+        || (notification.Queue is { } queue && PermissionEnforcement.HasObjectAlter(batch, database, queue.ObjectId, queue.SchemaId));
+
+    /// <summary>Whether the reading login sees a server event notification: its own, or every one under <c>ALTER ANY EVENT NOTIFICATION</c>.</summary>
+    private static bool SeesServerEventNotification(Parser.BatchContext batch, EventNotification notification)
+    {
+        var connection = batch.Connection;
+        var simulation = connection.Simulation;
+        return simulation.SessionHoldsServerPermission(connection, Permission.AlterAnyEventNotification)
+            || (simulation.TryResolveServerPrincipalId(connection.Security.Effective.LoginName, out var principalId) && principalId == notification.PrincipalId);
+    }
+
+    /// <summary>
+    /// The event rows of <c>sys.events</c> / <c>sys.server_events</c> one
+    /// event notification contributes: each leaf event it takes, the group it
+    /// was named through, <c>is_trigger_event</c> 0.
+    /// </summary>
+    internal static IEnumerable<SqlValue[]> EventNotificationEventRows(EventNotification notification, NVarcharSqlType typeName)
+    {
+        var objectId = SqlValue.FromInt32(notification.ObjectId);
+        for (var i = 0; i < notification.Events.Length; i++)
+        {
+            var entry = notification.Events[i];
+            var (groupType, groupName) = notification.Groups[i] is int named && EventNotificationEventTypes.TryResolveType(named, out var group)
+                ? (SqlValue.FromInt32(group.Type), SqlValue.FromString(typeName, group.TypeName))
+                : (SqlValue.Null(SqlType.Int32), SqlValue.Null(typeName));
+            yield return [
+                objectId,
+                SqlValue.FromInt32(entry.Type),
+                SqlValue.FromString(typeName, entry.TypeName),
+                SqlValue.FromBoolean(false),
+                groupType,
+                groupName,
+            ];
+        }
+    }
 }

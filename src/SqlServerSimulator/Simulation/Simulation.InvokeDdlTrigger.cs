@@ -65,7 +65,8 @@ partial class Simulation
     /// </summary>
     internal static bool RaisesDdlEvents(ParserContext context) =>
         !context.Batch.IsSkipping && !context.Connection.SuppressDdlTriggers
-        && (!context.CurrentDatabase.DdlTriggers.IsEmptyLockFree() || context.Simulation.ServerTriggers.All.Length != 0);
+        && (!context.CurrentDatabase.DdlTriggers.IsEmptyLockFree() || context.Simulation.ServerTriggers.All.Length != 0
+            || context.CurrentDatabase.EventNotifications.Length != 0 || context.Simulation.ServerEventNotifications.Length != 0);
 
     /// <summary>
     /// Renders a <c>&lt;Parameters&gt;</c> list, one <c>&lt;Param&gt;</c> per
@@ -97,8 +98,11 @@ partial class Simulation
         ParserContext context, string eventType, string? databaseName, string? loginName, int passwordStart = -1, int passwordEnd = -1,
         string? objectName = null, string? objectType = null)
     {
-        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.Simulation.ServerTriggers.All.Length == 0)
+        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers
+            || (context.Simulation.ServerTriggers.All.Length == 0 && context.Simulation.ServerEventNotifications.Length == 0))
+        {
             return;
+        }
         string? loginElements = null;
         if (loginName is not null)
         {
@@ -167,7 +171,8 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var serverTriggers = this.ServerTriggers.All;
-        if (database.DdlTriggers.IsEmptyLockFree() && serverTriggers.Length == 0)
+        var notifies = database.EventNotifications.Length != 0 || this.ServerEventNotifications.Length != 0;
+        if (database.DdlTriggers.IsEmptyLockFree() && serverTriggers.Length == 0 && !notifies)
             return;
 
         // The statement's source text, which every event this statement
@@ -206,6 +211,8 @@ partial class Simulation
             var eventType = TriggerEventTypes.TryResolve(info.EventType, out var resolved) ? resolved.Type : 0;
             string? eventData = null;
             var text = info.Masks is { } masks ? Shaped(Masked(commandText, start, end, masks)) : statementText;
+            if (notifies)
+                this.NotifyDdlEvent(batch, database, info, eventType, () => eventData ??= BuildDdlEventData(batch, info, text));
             if (serverTriggers.Length != 0)
             {
                 List<DdlTrigger>? serverMatched = null;
@@ -450,6 +457,7 @@ partial class Simulation
             || ((create || alter) && (Is(1, "USER") || Is(1, "SEQUENCE")))
             || ((create || drop) && Is(1, "TYPE"))
             || (create && Is(1, "SYNONYM"))
+            || ((create || drop) && Is(1, "EVENT"))
             || (drop && (Is(1, "SCHEMA") || Is(1, "STATISTICS")))
             || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
             || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))

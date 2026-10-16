@@ -266,4 +266,21 @@ public sealed class ServiceBrokerDdlTests
         _ = simulation.AssertSqlError("grant insert on q to u", 4606);
         _ = simulation.AssertSqlError("execute as user = 'u'; create queue q2", 262);
     }
+    [TestMethod]
+    public void Queue_TransfersAndRenames_KeepingItsIdAndService()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create schema s2", "create queue rq; create service rs on queue rq");
+        var id = simulation.ExecuteScalar("select object_id('dbo.rq')");
+        _ = simulation.ExecuteNonQuery("alter schema s2 transfer dbo.rq");
+        AreEqual("s2|rq|rs", Rows(simulation, "select schema_name(q.schema_id), q.name, s.name from sys.services s join sys.service_queues q on q.object_id = s.service_queue_id where s.name = 'rs'"));
+        AreEqual(id, simulation.ExecuteScalar("select object_id('s2.rq')"));
+        _ = simulation.ExecuteNonQuery("alter schema dbo transfer object::s2.rq; exec sp_rename 'dbo.rq', 'rq2'");
+        AreEqual(id, simulation.ExecuteScalar("select object_id from sys.service_queues where name = 'rq2'"));
+        _ = simulation.ExecuteNonQuery("create queue rq9; create queue s2.rq9");
+        simulation.AssertSqlError("alter schema s2 transfer dbo.rq9", 15530, "The object with name \"rq9\" already exists.");
+        simulation.AssertSqlError("alter schema s2 transfer dbo.EventNotificationErrorsQueue", 15349, "Cannot transfer an MS Shipped object.");
+        simulation.AssertSqlError("exec sp_rename 'dbo.EventNotificationErrorsQueue', 'x'", 15001,
+            "Object 'dbo.EventNotificationErrorsQueue' does not exist or is not a valid object for this operation.");
+    }
 }

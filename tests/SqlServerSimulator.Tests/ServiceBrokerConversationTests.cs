@@ -123,7 +123,8 @@ public sealed class ServiceBrokerConversationTests
                 set @i += 1;
             end
             """);
-        IsTrue((bool)simulation.ExecuteScalar("select is_receive_enabled from sys.service_queues where name = 'tq'")!);
+        // The fifth rollback disables the queue as it rolls back (probed 2026-10-16 against SQL Server 2025).
+        IsFalse((bool)simulation.ExecuteScalar("select is_receive_enabled from sys.service_queues where name = 'tq'")!);
         _ = simulation.AssertSqlError("receive * from tq", 9617);
         AreEqual("False|False", Rows(simulation, "select is_receive_enabled, is_enqueue_enabled from sys.service_queues where name = 'tq'"));
 
@@ -415,4 +416,18 @@ public sealed class ServiceBrokerConversationTests
             select e.state, cast(cast(q.message_body as nvarchar(max)) as xml).value('(/*:Error/*:Code)[1]', 'int')
             from sys.conversation_endpoints e join iq q on q.conversation_handle = e.conversation_handle where e.conversation_handle = @h
             """));
+    [TestMethod]
+    public void AnotherDatabasesService_TakesMessagesOnlyFromATrustworthyDatabase()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database b; create database c",
+            "use b; create queue bq; create service bs on queue bq ([DEFAULT])",
+            "use c; create queue cq; create service cs on queue cq",
+            "use c; declare @h uniqueidentifier; begin dialog @h from service cs to service 'bs' with encryption = off; send on conversation @h (N'x')");
+        AreEqual("An exception occurred while enqueueing a message in the target queue. Error: 916, State: 3. The server principal \"sa\" is not able to access the database \"b\" under the current security context.|0",
+            Rows(simulation, "use c; select transmission_status, (select count(*) from b.dbo.bq) from sys.transmission_queue"));
+        _ = simulation.ExecuteNonQuery("alter database c set trustworthy on");
+        AreEqual("0|1", Rows(simulation, "use c; select (select count(*) from sys.transmission_queue), (select count(*) from b.dbo.bq)"));
+    }
 }

@@ -201,6 +201,12 @@ partial class Simulation
             : SimulatedSqlException.RenameAmbiguousOrWrongType("OBJECT").AtSystemProcedureLine(620);
         if (!ObjectId.TryParseObjectName(objName, out var name) || !batch.TryResolveSchema(name, out var schema))
             throw NotFound();
+        // A queue real ships is no object sp_rename takes (probed 2026-10-16 against SQL Server 2025).
+        if (schema.SchemaId == Database.DboSchemaId && DatabaseBroker.IsSystemQueueName(name.Leaf) && !schema.Queues.ContainsKey(name.Leaf)
+            && database.ServiceBroker.FindQueue(schema, name.Leaf) is { IsMsShipped: true })
+        {
+            throw SimulatedSqlException.ObjectNotValidForOperation(objName).AtSystemProcedureLine(677);
+        }
 
         if (schema.TryFindInSharedNamespace(name.Leaf, out var found))
         {
@@ -244,6 +250,7 @@ partial class Simulation
                 DefaultObject bindableDefault => Move(schema.Defaults, bindableDefault, "DEFAULT"),
                 RuleObject rule => Move(schema.Rules, rule, "RULE"),
                 SecurityPolicy policy => Move(schema.SecurityPolicies, policy, "SECURITY POLICY"),
+                ServiceQueue queue => Move(schema.Queues, queue, "QUEUE"),
                 _ => throw NotFound(),
             };
             BumpSchemaVersion();

@@ -369,6 +369,7 @@ The DDL they fire for joins that unit: outside a transaction, while a DDL trigge
 
 A no-arg built-in returning the `<EVENT_INSTANCE>` document as `xml`, or **NULL** outside a database-scope DDL trigger body — including inside a DML trigger (probe-confirmed).
 The document is built once per fire and carried on the body's `TriggerFrame`, so every call within one body returns the same instance, `PostTime` included.
+The same document is the body of the message an event notification taking the event sends (see [`service-broker.md`](service-broker.md#event-notifications)), so the event's recording gate (`RaisesDdlEvents`) asks for a notification as well as a trigger.
 
 ```
 <EVENT_INSTANCE><EventType>CREATE_TABLE</EventType><PostTime>2026-07-31T22:39:11.550</PostTime><SPID>53</SPID>

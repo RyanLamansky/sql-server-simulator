@@ -60,6 +60,7 @@ internal static class DeadlockReport
         var victimEdge = cycle.Edges[0];
         XeEvents.Fire(connections[0], XeEventKind.LockDeadlock, @event => LockEventData(@event, victimEdge, resources[0], victim, cycle.DeadlockId, victim.WaitTime * 1000));
         XeEvents.Fire(connections[0], XeEventKind.XmlDeadlockReport, @event => XeEvents.Data(@event, ("xml_report", XeValue.FromXml(Xml(processes, resources)))), systemTask: true);
+        simulation.NoteTraceDeadlockGraph(() => Xml(processes, resources), victim.Id, cycle.FoundUtc);
 
         var flag1204 = simulation.IsGlobalTraceFlagOn(1204);
         var flag1222 = simulation.IsGlobalTraceFlagOn(1222);

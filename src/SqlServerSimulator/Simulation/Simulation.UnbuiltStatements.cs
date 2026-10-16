@@ -40,7 +40,6 @@ partial class Simulation
         new(null, "SERVER AUDIT SPECIFICATION", "SQL Server Audit (server audit specifications)"),
         new(null, "SERVER AUDIT", "SQL Server Audit"),
         new("ALTER", "SERVICE MASTER KEY", "the service master key"),
-        new(null, "EVENT NOTIFICATION", "Event notifications"),
         new(null, "ENDPOINT", "Endpoints"),
         new(null, "RESOURCE POOL", "Resource Governor (resource pools)"),
         new(null, "EXTERNAL RESOURCE POOL", "Resource Governor (external resource pools)"),

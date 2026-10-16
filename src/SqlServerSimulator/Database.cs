@@ -464,6 +464,13 @@ internal sealed partial class Database
     /// <summary>The Service Broker objects when a statement has asked for them, else null.</summary>
     public DatabaseBroker? ServiceBrokerIfUsed => Volatile.Read(ref this.serviceBroker);
 
+    /// <summary>
+    /// The event notifications on the database and its queues, replaced whole
+    /// under the simulation's notification gate so a DDL statement reads them
+    /// without a lock — and an empty array costs nothing.
+    /// </summary>
+    public Schemas.EventNotification[] EventNotifications = [];
+
     /// <summary>Puts <paramref name="broker"/> in place of the database's Service Broker objects, as a restore does.</summary>
     public void ReplaceServiceBroker(DatabaseBroker? broker) => Volatile.Write(ref this.serviceBroker, broker);
 

@@ -229,7 +229,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
 - **DacFx / `sqlpackage /Action:Export` empty views** (full probe-confirmed SQL Server 2025 shape, zero rows — the accepted-but-empty precedent): the bacpac-export reverse-engineering references 38 catalog views for features the simulator built late or not at all; each resolves rather than raising Msg 208, and the ones whose feature is unbuilt answer empty.
   **All 38 exist on real SQL Server 2025** (none skipped).
   Grouped by topic and home file:
-  - **Service Broker** (`BuiltInResources.ServiceBroker.cs`): `sys.event_notifications` stays empty; the rest of the family projects the broker objects real ships and the ones statements create — see [`service-broker.md`](service-broker.md).
+  - **Service Broker** (`BuiltInResources.ServiceBroker.cs`): the family projects the broker objects real ships and the ones statements create, `sys.event_notifications` and its server and event siblings the event notifications — see [`service-broker.md`](service-broker.md).
   - **Partitioning** (`BuiltInResources.Indexes.cs`): `sys.partition_functions` / `partition_schemes` / `partition_range_values` / `partition_parameters` / `destination_data_spaces`.
     One row per function, scheme, boundary, parameter and scheme destination (the next-used filegroup listed one destination past the partitions) — see [`partitioning.md`](partitioning.md).
     `partition_range_values.value` is a first-class **`sql_variant`** whose inner type is the function's declared parameter type.

@@ -122,6 +122,31 @@ public sealed partial class ExtendedEventsDeadlockTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.fn_xe_file_target_read_file('system_health*.xel', null, null, null) where object_name = 'xml_deadlock_report'"));
     }
 
+    // A server event notification for DEADLOCK_GRAPH gets the graph in the
+    // trace's <deadlock-list> form, the victim named on <deadlock>, from the
+    // deadlock monitor's session.
+    [TestMethod]
+    public async Task DeadlockGraph_ReachesAnEventNotification()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table k (id int primary key, v int); insert k values (1, 0), (2, 0)");
+        var instance = sim.ExecuteScalar("select cast(service_broker_guid as nvarchar(36)) from sys.databases where name = db_name()").ToInvariantString();
+        _ = sim.ExecuteNonQuery($"""
+            create queue enq;
+            create service ens on queue enq ([http://schemas.microsoft.com/SQL/Notifications/PostEventNotification]);
+            create event notification dl on server for deadlock_graph to service 'ens', '{instance}';
+            """);
+        _ = await this.Deadlock(sim,
+            ("begin tran; update k set v = 1 where id = 1", "update k set v = 1 where id = 2; commit"),
+            ("begin tran; update k set v = 2 where id = 2", "update k set v = 2 where id = 1"));
+        var body = (string)sim.ExecuteScalar("select cast(message_body as nvarchar(max)) from enq")!;
+        StartsWith("\uFEFF<EVENT_INSTANCE><EventType>DEADLOCK_GRAPH</EventType>", body);
+        Contains("<SPID>3</SPID><TextData><deadlock-list>\n <deadlock victim=\"process", body);
+        Contains("\n  <process-list>\n   <process id=", body);
+        Contains("</resource-list>\n </deadlock>\n</deadlock-list>\n</TextData><TransactionID />", body);
+        DoesNotContain("victim-list", body);
+    }
+
     // Three sessions: the victim, then the session waiting on it, then the
     // one that session waits on.
     [TestMethod]

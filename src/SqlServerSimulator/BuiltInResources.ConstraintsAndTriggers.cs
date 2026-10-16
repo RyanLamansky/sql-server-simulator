@@ -467,12 +467,10 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(clause.To.ObjectId),
             });
 
-        // sys.events: one row per event a trigger or event notification fires
-        // for — the broader superset of sys.trigger_events (which the simulator
-        // projects for DML triggers). WWI has zero triggers and its sys.events
-        // is empty (probe-confirmed 2026-07-16), so an always-empty view with
-        // the full shape matches real; DacFx references it. If DDL/event-
-        // notification event projection is added later, populate here.
+        // sys.events / sys.server_events: one row per event a trigger or an
+        // event notification takes, in object_id order — a trigger's with
+        // is_trigger_event 1, a notification's 0 (probed 2026-10-16 against
+        // SQL Server 2025).
         Sys("events",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -481,7 +479,16 @@ internal static partial class BuiltInResources
             new("is_trigger_event", SqlType.Bit, null, true),
             new("event_group_type", SqlType.Int32, null, true),
             new("event_group_type_desc", nvarchar128Catalog, 128, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (batch, database) => EnumerateSysEvents(batch, database));
+        Sys("server_events",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("type", SqlType.Int32, null, false),
+            new("type_desc", nvarchar128Catalog, 128, false),
+            new("is_trigger_event", SqlType.Bit, null, true),
+            new("event_group_type", SqlType.Int32, null, true),
+            new("event_group_type_desc", nvarchar128Catalog, 128, true),
+        ], static (batch, _) => EnumerateSysServerEvents(batch));
 
         // sys.trusted_assemblies: the server's list sp_add_trusted_assembly
         // fills, the same from every database (probed 2026-10-07 against SQL
@@ -788,6 +795,40 @@ internal static partial class BuiltInResources
                 trigger.ExecuteAsPrincipalId is int principalId ? SqlValue.FromInt32(principalId) : SqlValue.Null(SqlType.Int32),
             ];
         }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.events</c>: the database's visible event notifications'
+    /// events and its DML and DDL triggers' (<c>sys.trigger_events</c>' rows
+    /// without the ordering pair), in object_id order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysEvents(Parser.BatchContext batch, Database database)
+    {
+        var typeName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var rows = new List<SqlValue[]>();
+        foreach (var notification in database.EventNotifications)
+        {
+            if (SeesEventNotification(batch, database, notification))
+                rows.AddRange(EventNotificationEventRows(notification, typeName));
+        }
+        foreach (var row in EnumerateSysTriggerEvents(batch, database))
+            rows.Add([row[0], row[1], row[2], row[7], row[5], row[6]]);
+        return rows.OrderBy(static row => row[0].AsInt32);
+    }
+
+    /// <summary>Rows for <c>sys.server_events</c>: the server's event notifications' events and its server-scope triggers', in object_id order.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerEvents(Parser.BatchContext batch)
+    {
+        var typeName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var rows = new List<SqlValue[]>();
+        foreach (var notification in batch.Connection.Simulation.ServerEventNotifications)
+        {
+            if (SeesServerEventNotification(batch, notification))
+                rows.AddRange(EventNotificationEventRows(notification, typeName));
+        }
+        foreach (var row in EnumerateSysServerTriggerEvents(batch))
+            rows.Add([row[0], row[1], row[2], row[3], row[6], row[7]]);
+        return rows.OrderBy(static row => row[0].AsInt32);
     }
 
     /// <summary>

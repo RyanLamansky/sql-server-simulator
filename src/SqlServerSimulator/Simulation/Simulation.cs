@@ -1121,6 +1121,7 @@ public sealed partial class Simulation
         {
             _ = Interlocked.Increment(ref this.LogoutCount);
             ExtendedEvents.XeSessionEvents.Logout(connection);
+            this.NoteTraceLogout(connection);
         }
     }
 

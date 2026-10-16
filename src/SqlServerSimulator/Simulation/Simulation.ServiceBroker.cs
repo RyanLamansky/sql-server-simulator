@@ -480,6 +480,14 @@ partial class Simulation
                 Hold(batch, broker, from, type, sequence, body, isError, isEnd, now, status);
                 return;
             }
+            // A service in another database takes the message as the sending
+            // database's owner, a context only a TRUSTWORTHY database's carries
+            // there (probed 2026-10-16 against SQL Server 2025).
+            if (!ReferenceEquals(service.Queue.Schema.Database, from.Database) && !from.Database.Trustworthy)
+            {
+                Hold(batch, broker, from, type, sequence, body, isError, isEnd, now, UntrustedSenderStatus(from.Database, service.Queue.Schema.Database));
+                return;
+            }
             var targetObjects = service.Queue.Schema.Database.ServiceBroker;
             if (!targetObjects.Contracts.TryGetValue(from.Contract.Name, out var targetContract) || Array.IndexOf(service.Contracts, targetContract) < 0)
             {
@@ -534,6 +542,17 @@ partial class Simulation
         }
     }
 
+    /// <summary>The start of what <c>sys.transmission_queue</c> reports for a message an untrusted database sent to another.</summary>
+    private const string UntrustedSenderPrefix = "An exception occurred while enqueueing a message in the target queue. Error: 916, State: 3.";
+
+    /// <summary>What <c>sys.transmission_queue</c> reports for a message <paramref name="sender"/>, not TRUSTWORTHY, sent to a service in <paramref name="target"/>.</summary>
+    private static string UntrustedSenderStatus(Database sender, Database target) =>
+        $"{UntrustedSenderPrefix} The server principal \"{sender.OwnerLoginName}\" is not able to access the database \"{target.Name}\" under the current security context.";
+
+    /// <summary>Delivers the messages <paramref name="database"/> held because it wasn't TRUSTWORTHY, once it is.</summary>
+    internal void RedeliverUntrusted(BatchContext batch, Database database) =>
+        this.RedeliverHeld(batch, database, null, static status => status.StartsWith(UntrustedSenderPrefix, StringComparison.Ordinal));
+
     /// <summary>What <c>sys.transmission_queue</c> reports for a message its database's disabled broker holds.</summary>
     private const string BrokerDisabledStatus = "The broker is disabled in the sender's database.";
 
@@ -542,14 +561,17 @@ partial class Simulation
     /// hold for <paramref name="status"/> once its cause is gone — a broker
     /// enabled, a queue turned back on — as real's broker retries them.
     /// </summary>
-    internal void RedeliverHeld(BatchContext batch, Database? database, string status)
+    internal void RedeliverHeld(BatchContext batch, Database? database, string status) => this.RedeliverHeld(batch, database, status, null);
+
+    private void RedeliverHeld(BatchContext batch, Database? database, string? status, Func<string, bool>? matches)
     {
         if (this.BrokerIfUsed is not { } broker)
             return;
         var now = batch.CurrentStatement.UtcNow;
         lock (broker.Gate)
         {
-            var held = broker.Transmission.FindAll(message => (database is null || ReferenceEquals(message.From.Database, database)) && message.PendingOwner is null && message.Status == status);
+            var held = broker.Transmission.FindAll(message => (database is null || ReferenceEquals(message.From.Database, database)) && message.PendingOwner is null
+                && (matches is null ? message.Status == status : matches(message.Status)));
             foreach (var message in held)
             {
                 _ = broker.Transmission.Remove(message);
@@ -1192,11 +1214,9 @@ partial class Simulation
                 while (true)
                 {
                     broker.FireDue(DateTime.UtcNow);
-                    // The fifth RECEIVE in a row a rollback undid disables a
+                    // The fifth RECEIVE in a row a rollback undid disabled a
                     // queue handling poison messages, which the next RECEIVE
                     // meets (probed 2026-10-16 against SQL Server 2025).
-                    if (queue.ConsecutiveRollbacks >= 5 && queue.Settings.PoisonMessageHandling && queue.Settings.Enabled)
-                        queue.Settings.Enabled = false;
                     if (!queue.Settings.Enabled)
                         throw SimulatedSqlException.QueueDisabled(queue.Name);
                     if (FindReceivable(broker, batch, queue, filterId, byGroup) is { } found)
@@ -1285,8 +1305,13 @@ partial class Simulation
             foreach (var message in taken)
                 message.ReceivedBy = null;
             // A rolled-back RECEIVE counts toward the queue's poison message
-            // handling (see TakeMessages).
-            queue.ConsecutiveRollbacks++;
+            // handling, the fifth in a row disabling the queue as it rolls
+            // back (probed 2026-10-16 against SQL Server 2025).
+            if (++queue.ConsecutiveRollbacks >= 5 && queue.Settings.PoisonMessageHandling && queue.Settings.Enabled)
+            {
+                queue.Settings.Enabled = false;
+                batch.Connection.Simulation.NoteQueueDisabledEvent(queue, queue.Schema.Database, batch.Connection);
+            }
         }, () =>
         {
             queue.ConsecutiveRollbacks = 0;

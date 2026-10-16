@@ -37,6 +37,7 @@ partial class Simulation
     /// </summary>
     internal void NoteQueueArrival(ServiceQueue queue, Database database)
     {
+        this.NoteQueueActivationEvent(queue, database);
         var settings = queue.Settings;
         if (!settings.ActivationEnabled || !settings.Enabled || settings.ActivationName is null || settings.MaxReaders <= 0 || !database.BrokerEnabled)
             return;
@@ -98,6 +99,7 @@ partial class Simulation
     {
         lock (this.ActivatedTasks)
             _ = this.NotifiedQueues.Remove(queue);
+        this.NoteQueueEventReceived(queue);
     }
 
     /// <summary>

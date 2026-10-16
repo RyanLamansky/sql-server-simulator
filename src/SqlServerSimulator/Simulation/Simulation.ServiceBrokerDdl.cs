@@ -23,6 +23,7 @@ partial class Simulation
         Route,
         RemoteServiceBinding,
         BrokerPriority,
+        EventNotification,
     }
 
     /// <summary>
@@ -44,6 +45,7 @@ partial class Simulation
         }
         return BuiltInToken.Equals(word, "BROKER") ? Followed("PRIORITY", BrokerObjectKind.BrokerPriority)
             : BuiltInToken.Equals(word, "CONTRACT") ? BrokerObjectKind.Contract
+            : BuiltInToken.Equals(word, "EVENT") ? Followed("NOTIFICATION", BrokerObjectKind.EventNotification)
             : BuiltInToken.Equals(word, "MESSAGE") ? Followed("TYPE", BrokerObjectKind.MessageType)
             : BuiltInToken.Equals(word, "QUEUE") ? BrokerObjectKind.Queue
             : BuiltInToken.Equals(word, "ROUTE") ? BrokerObjectKind.Route
@@ -93,11 +95,17 @@ partial class Simulation
             case ("CREATE" or "ALTER", BrokerObjectKind.BrokerPriority):
                 CreateOrAlterBrokerPriority(context, verb == "ALTER");
                 break;
+            case ("CREATE", BrokerObjectKind.EventNotification):
+                CreateEventNotification(context);
+                break;
+            case ("DROP", BrokerObjectKind.EventNotification):
+                DropEventNotification(context);
+                break;
             case ("DROP", _):
                 DropBrokerObject(context, kind);
                 break;
             default:
-                // ALTER CONTRACT: real has no such statement.
+                // ALTER CONTRACT and ALTER EVENT NOTIFICATION: real has no such statement.
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         return true;

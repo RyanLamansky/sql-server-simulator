@@ -18,7 +18,6 @@ public sealed class UnbuiltStatementTests
     [DataRow("alter database scoped credential dc with identity = 'y'", "ALTER DATABASE SCOPED CREDENTIAL")]
     [DataRow("create server audit specification s for server audit a", "CREATE SERVER AUDIT SPECIFICATION")]
     [DataRow("alter service master key regenerate", "ALTER SERVICE MASTER KEY")]
-    [DataRow("create event notification n on server for create_table to service 's', 'current database'", "CREATE EVENT NOTIFICATION")]
     [DataRow("create external data source e with (location = 'sqlserver://x')", "CREATE EXTERNAL DATA SOURCE")]
     [DataRow("alter resource governor reconfigure", "ALTER RESOURCE GOVERNOR")]
     [DataRow("create selective xml index sx on t (x) for (p = '/a')", "CREATE SELECTIVE XML INDEX")]

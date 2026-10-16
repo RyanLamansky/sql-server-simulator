@@ -159,4 +159,37 @@ partial class SimulatedSqlException
     internal static SimulatedError RestoredBrokerDisabledMessage(Parser.BatchContext batch, int databaseId) =>
         batch.InfoMessage(@class: 0, state: 2, number: 9773, string.Create(System.Globalization.CultureInfo.InvariantCulture,
             $"The Service Broker in database \"{databaseId}\" is disabled because there is already an enabled Service Broker with the same ID."));
+    /// <summary>
+    /// Mimics SQL Server error 1095: an event notification's list naming an
+    /// event twice, directly or through a group, which names the first event
+    /// the later item repeats (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException EventTypeAlreadySpecified(string eventType) =>
+        new($"\"{eventType}\" has already been specified as an event type.", 1095, 15, 1);
+
+    /// <summary>Mimics SQL Server error 2104 state 5: <c>CREATE EVENT NOTIFICATION</c> without its permission.</summary>
+    internal static SimulatedSqlException EventNotificationPermissionDenied(string name) =>
+        new($"Cannot create the event notification '{name}', because you do not have permission.", 2104, 14, 5);
+
+    /// <summary>Mimics SQL Server error 2116: <c>'current database'</c> naming a database with no broker id — <c>master</c> or <c>model</c>.</summary>
+    internal static SimulatedSqlException EventNotificationTargetNotBrokerDatabase(string databaseName) =>
+        new($"Cannot CREATE EVENT NOTIFICATION to database '{databaseName}' because it is not a valid broker database.", 2116, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2102: a server's event notification, which
+    /// sends from msdb (state 2), created by a login with no user there.
+    /// </summary>
+    internal static SimulatedSqlException EventNotificationNoUser(string name, string loginName, string databaseName, byte state) =>
+        new($"Cannot create event notification '{name}' since there is no user for login '{loginName}' in database '{databaseName}'.", 2102, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 for <c>DROP EVENT NOTIFICATION</c>, which
+    /// ends the batch and drops none of the list (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException EventNotificationNotFound(string name) =>
+        new($"Cannot drop the event notification '{name}', because it does not exist or you do not have permission.", 15151, 16, 1) { TerminatesBatch = true };
+    /// <summary>Mimics SQL Server error 15349: <c>ALTER SCHEMA … TRANSFER</c> of an object real ships — one of every database's queues.</summary>
+    internal static SimulatedSqlException CannotTransferMsShippedObject() =>
+        new("Cannot transfer an MS Shipped object.", 15349, 16, 1);
 }

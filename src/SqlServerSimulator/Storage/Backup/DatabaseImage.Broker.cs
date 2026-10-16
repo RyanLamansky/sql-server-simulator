@@ -4,9 +4,9 @@ namespace SqlServerSimulator.Storage.Backup;
 
 // The Service Broker state a backup carries: the database's broker id, its
 // message types, contracts, queues (settings and messages), services, routes,
-// remote service bindings and priorities under their own ids, and its
+// remote service bindings and priorities under their own ids, its
 // conversations — endpoints, groups and the messages its transmission queue
-// holds. None of it is recreated through DDL: a conversation has no statement
+// holds — and its event notifications. None of it is recreated through DDL: a conversation has no statement
 // that would rebuild it, so the whole state travels as one value, written
 // from the live objects and read straight into the restored database's.
 partial class DatabaseImage
@@ -28,6 +28,7 @@ partial class DatabaseImage
             {
                 WriteBrokerObjects(w, database, objects);
                 WriteConversations(w, database, null);
+                WriteEventNotifications(w, database);
             }
             else
             {
@@ -36,6 +37,7 @@ partial class DatabaseImage
                 {
                     WriteBrokerObjects(w, database, objects);
                     WriteConversations(w, database, conversations);
+                    WriteEventNotifications(w, database);
                 }
             }
         }
@@ -229,6 +231,52 @@ partial class DatabaseImage
         }
     }
 
+    /// <summary>The database's and its queues' event notifications, each naming its dialog's endpoint by handle.</summary>
+    private static void WriteEventNotifications(BinaryWriter w, Database database)
+    {
+        var notifications = database.EventNotifications;
+        w.Write(notifications.Length);
+        foreach (var notification in notifications)
+        {
+            w.Write(notification.Name);
+            w.Write(notification.ObjectId);
+            w.Write((byte)notification.Parent);
+            BackupBinary.WriteNullable(w, notification.Queue?.Schema.Name);
+            BackupBinary.WriteNullable(w, notification.Queue?.Name);
+            BackupBinary.WriteInts(w, [.. notification.Events.Select(static entry => entry.Type)]);
+            BackupBinary.WriteInts(w, [.. notification.Groups.Select(static group => group ?? 0)]);
+            w.Write(notification.CreateDate.Ticks);
+            w.Write(notification.ServiceName);
+            w.Write(notification.BrokerInstance);
+            WriteOptionalBytes(w, notification.CreatorSid);
+            w.Write(notification.PrincipalId);
+            w.Write((notification.Dialog?.Handle ?? Guid.Empty).ToByteArray());
+        }
+    }
+
+    private static void ReadEventNotifications(BinaryReader r, Database database, DatabaseBroker objects, BrokerRuntime runtime)
+    {
+        var notifications = new EventNotification[r.ReadInt32()];
+        for (var i = 0; i < notifications.Length; i++)
+        {
+            var name = r.ReadString();
+            var objectId = r.ReadInt32();
+            var parent = (EventNotificationParent)r.ReadByte();
+            var queueSchema = BackupBinary.ReadNullable(r);
+            var queueName = BackupBinary.ReadNullable(r);
+            var queue = queueSchema is null || queueName is null ? null : objects.FindQueue(database.Schemas[queueSchema], queueName);
+            var events = Array.ConvertAll(BackupBinary.ReadInts(r), static type => EventNotificationEventTypes.TryResolveType(type, out var entry)
+                ? entry
+                : throw new InvalidDataException($"The backup set names the event type {type}, which the simulator doesn't know."));
+            var groups = Array.ConvertAll(BackupBinary.ReadInts(r), static group => group == 0 ? null : (int?)group);
+            notifications[i] = new EventNotification(name, objectId, parent, database, queue, events, groups, ReadTime(r), r.ReadString(), r.ReadString(), ReadOptionalBytes(r), r.ReadInt32())
+            {
+                Dialog = runtime.Endpoints.GetValueOrDefault(new(database, ReadGuid(r))),
+            };
+        }
+        database.EventNotifications = notifications;
+    }
+
     private static void WriteOptionalBytes(BinaryWriter w, byte[]? bytes)
     {
         w.Write(bytes?.Length ?? -1);
@@ -253,6 +301,7 @@ partial class DatabaseImage
     private void ApplyBroker(Simulation simulation, Database database)
     {
         database.ServiceBrokerGuid = this.ServiceBrokerGuid;
+        database.EventNotifications = [];
         foreach (var (_, schema) in database.Schemas)
             schema.Queues.Clear();
         var conversations = simulation.BrokerIfUsed;
@@ -282,6 +331,7 @@ partial class DatabaseImage
         lock (runtime.Gate)
         {
             ReadConversations(r, simulation, database, objects, runtime);
+            ReadEventNotifications(r, database, objects, runtime);
             Monitor.PulseAll(runtime.Gate);
         }
     }

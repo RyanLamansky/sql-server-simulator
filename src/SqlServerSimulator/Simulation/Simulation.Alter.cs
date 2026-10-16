@@ -520,7 +520,11 @@ partial class Simulation
         {
             case DatabaseBooleanOption.AllowSnapshotIsolation: database.AllowSnapshotIsolation = value; break;
             case DatabaseBooleanOption.ReadCommittedSnapshot: database.ReadCommittedSnapshot = value; break;
-            case DatabaseBooleanOption.Trustworthy: database.Trustworthy = value; break;
+            case DatabaseBooleanOption.Trustworthy:
+                database.Trustworthy = value;
+                if (value)
+                    context.Connection.Simulation.RedeliverUntrusted(context.Batch, database);
+                break;
             case DatabaseBooleanOption.CrossDatabaseChaining: database.CrossDatabaseChaining = value; break;
             default: database.RecursiveTriggers = value; break;
         }
@@ -1899,6 +1903,15 @@ partial class Simulation
             return sameSchema ? "DEFAULT" : MoveSchemaObject(sourceSchema.Defaults, destSchema.Defaults, defaultObject, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "DEFAULT");
         if (sourceSchema.SecurityPolicies.TryGetValue(leafName, out var policy))
             return sameSchema ? "SECURITY POLICY" : MoveSchemaObject(sourceSchema.SecurityPolicies, destSchema.SecurityPolicies, policy, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "SECURITY POLICY");
+        // A queue moves with its services still bound and its object id kept;
+        // one real ships is Msg 15349 (probed 2026-10-16 against SQL Server 2025).
+        if (sourceSchema.Queues.TryGetValue(leafName, out var queue))
+            return sameSchema ? "QUEUE" : MoveSchemaObject(sourceSchema.Queues, destSchema.Queues, queue, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "QUEUE");
+        if (sourceSchema.SchemaId == Database.DboSchemaId && DatabaseBroker.IsSystemQueueName(leafName)
+            && sourceSchema.Database.ServiceBroker.FindQueue(sourceSchema, leafName) is { IsMsShipped: true })
+        {
+            throw SimulatedSqlException.CannotTransferMsShippedObject();
+        }
 
         throw SimulatedSqlException.CannotFindObject(leafName);
     }
