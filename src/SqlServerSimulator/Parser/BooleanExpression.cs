@@ -2489,7 +2489,7 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InSubqueryExpression(Expression source, Selection inner, bool negated) : BooleanExpression
     {
-        private protected override bool SeeksOn(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(source);
+        private protected override bool SeeksOn(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(source) && !inner.ForceSeekLeansOnIn;
 
         public override bool? Run(RuntimeContext runtime)
         {

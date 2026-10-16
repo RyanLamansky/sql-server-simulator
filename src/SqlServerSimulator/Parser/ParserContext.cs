@@ -213,6 +213,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BrowseFlatten;
 
     /// <summary>
+    /// Set by a derived table's and a CTE's body parse: the query blocks that
+    /// body begins leave a <c>FORCESEEK</c> they can't honor alone to the
+    /// query reading the body, whose predicates reach into it
+    /// (<see cref="ForceSeekDefersBlock"/>). Anything nested in such a block
+    /// starts without it.
+    /// </summary>
+    public bool ForceSeekDeferrable;
+
+    /// <summary>Whether the query block parsing defers its <c>FORCESEEK</c> refusal, taken from <see cref="ForceSeekDeferrable"/> as the block began.</summary>
+    public bool ForceSeekDefersBlock;
+
+    /// <summary>
     /// Set while a browse statement's <c>WITH</c> prefix parses, whose CTE
     /// bodies the statement then reads flattened.
     /// </summary>

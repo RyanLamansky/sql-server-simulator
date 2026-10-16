@@ -1910,6 +1910,8 @@ internal sealed partial class Selection
         context.BrowseFlatten = false;
         using var browseFromScope = ParserScope.Enter(ref context.BrowseFlattenFrom, false);
         using var browseBody = ParserScope.Enter(ref context.BrowseFlattenBody, flattensForBrowse);
+        using var seekDefers = ParserScope.Enter(ref context.ForceSeekDefersBlock, context.ForceSeekDeferrable && scope.Position == QueryPosition.Derived);
+        using var seekDeferrable = ParserScope.Enter(ref context.ForceSeekDeferrable, false);
         return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
     }
 
@@ -2511,7 +2513,7 @@ internal sealed partial class Selection
                         topWithTies = false;
                     }
                     RejectMisplacedIdentityFunction(context, expressions, intoTarget);
-                    ValidateForcedSeeks(context, [.. sources], [.. joins], fromClause.Having is { } having ? [.. fromClause.Excluders, having] : fromClause.Excluders, expressions, scope.Position == QueryPosition.Subquery && expressions.Count == 1 ? expressions[0] : null);
+                    var seeksDeferred = ValidateForcedSeeks(context, [.. sources], [.. joins], fromClause.Having is { } having ? [.. fromClause.Excluders, having] : fromClause.Excluders, expressions, scope.Position == QueryPosition.Subquery && expressions.Count == 1 ? expressions[0] : null, out var seekLeansOnIn);
                     if (!context.Batch.IsSkipping && ReadsPredicateColumns(sources, fromClause, joins, distinct))
                         Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
@@ -2537,6 +2539,8 @@ internal sealed partial class Selection
                     // The decorrelated key plan an enclosing EXISTS / IN can
                     // answer itself from; null for every body that isn't
                     // equi-correlated, which is every top-level query.
+                    plan.ForceSeekDeferred = seeksDeferred;
+                    plan.ForceSeekLeansOnIn = seekLeansOnIn;
                     plan.SemiJoin = TryBuildSemiJoinShape(
                         context.Batch, plan, [.. sources], joinArray, expressions, fromClause,
                         distinct, topExpression, aggregates, windows, scope.OuterTypeResolver);

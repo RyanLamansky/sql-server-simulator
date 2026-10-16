@@ -9,7 +9,7 @@ partial class Selection
     /// and its WHERE.
     /// </summary>
     internal static void ValidateForcedSeeks(ParserContext context, FromSource[] sources, JoinSpec[] joins, BooleanExpression? where)
-        => ValidateForcedSeeks(context, sources, joins, where is null ? [] : [where], projections: null, soleSubqueryColumn: null);
+        => _ = ValidateForcedSeeks(context, sources, joins, where is null ? [] : [where], projections: null, soleSubqueryColumn: null, out _);
 
     /// <summary>
     /// Refuses a query real's optimizer can't plan under its <c>FORCESEEK</c>
@@ -34,23 +34,33 @@ partial class Selection
     /// isn't optimized at all, which is why an earlier binder error in the
     /// batch keeps this one from being reported.
     /// </para>
+    /// <para>
+    /// A derived table's or CTE's block (<see cref="ParserContext.ForceSeekDefersBlock"/>)
+    /// answers true instead of refusing a seek it can't make alone, and the
+    /// query reading it judges the body again with its own predicates, as
+    /// real pushes them in (probed 2026-10-16 against SQL Server 2025).
+    /// </para>
     /// </summary>
-    private static void ValidateForcedSeeks(
+    private static bool ValidateForcedSeeks(
         ParserContext context,
         FromSource[] sources,
         JoinSpec[] joins,
         List<BooleanExpression> excluders,
         List<Expression>? projections,
-        Expression? soleSubqueryColumn)
+        Expression? soleSubqueryColumn,
+        out bool leansOnEnclosingIn)
     {
+        leansOnEnclosingIn = false;
         RecordJoinHintSite(context, sources, joins, excluders);
         var batch = context.Batch;
         if (batch.IsSkipping ? !batch.CompilingForRun : batch.CreateTimeBinding)
-            return;
+            return false;
         if (batch.CreateTimeBindErrors is { Count: > 0 })
-            return;
+            return false;
+        var defers = context.ForceSeekDefersBlock;
 
         List<BooleanExpression>? conjuncts = null;
+        List<int>? seekers = null;
         for (var i = 0; i < sources.Length; i++)
         {
             if (sources[i].ForcedSeekThrough is { } through)
@@ -60,6 +70,19 @@ partial class Selection
                     throw SimulatedSqlException.ForceSeekOnViewWithoutNoExpand(view.Name);
                 if (!BodySeeksAreFeasible(batch, sources[i], i, sources, conjuncts, soleSubqueryColumn))
                     throw SimulatedSqlException.ForceSeekPlanInfeasible();
+                (seekers ??= []).Add(i);
+                continue;
+            }
+            if (sources[i] is { LateralIsQueryBody: true, LateralPlan.ForceSeekDeferred: true } && !IsApplyBody(joins, i))
+            {
+                conjuncts ??= CollectConjuncts(excluders, joins);
+                if (!BodySeeksAreFeasible(batch, sources[i], i, sources, conjuncts, soleSubqueryColumn))
+                {
+                    if (defers)
+                        return true;
+                    throw SimulatedSqlException.ForceSeekPlanInfeasible();
+                }
+                (seekers ??= []).Add(i);
                 continue;
             }
             if (sources[i] is not { BackingTable: { } table } source || (source.ForcedAccessPath is null && source.WrittenHints?.IndexArguments is null))
@@ -80,13 +103,159 @@ partial class Selection
             {
                 throw SimulatedSqlException.ForceSeekPlanInfeasible(state: 2);
             }
-            if (hints.ForceSeek
-                ? !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn)
-                : hints.ForceScan && !ForcedScanIsFeasible(batch, source, i, sources, table, hints, conjuncts, projections))
+            if (hints.ForceSeek && !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn))
             {
+                if (defers)
+                    return true;
                 throw SimulatedSqlException.ForceSeekPlanInfeasible();
             }
+            if (!hints.ForceSeek && hints.ForceScan && !ForcedScanIsFeasible(batch, source, i, sources, table, hints, conjuncts, projections))
+                throw SimulatedSqlException.ForceSeekPlanInfeasible();
+            if (hints.ForceSeek)
+            {
+                (seekers ??= []).Add(i);
+                // A seek only the enclosing IN's values make, which an outer
+                // FORCESEEK on the IN's column then can't lean on in turn.
+                if (soleSubqueryColumn is not null && !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn: null))
+                    leansOnEnclosingIn = true;
+            }
         }
+
+        if (seekers is { Count: > 1 } && !SeeksSpread(batch, sources, seekers, conjuncts!, soleSubqueryColumn))
+        {
+            if (defers)
+                return true;
+            throw SimulatedSqlException.ForceSeekPlanInfeasible();
+        }
+        return false;
+    }
+
+    /// <summary>Whether source <paramref name="index"/> is an <c>APPLY</c>'s body, which a predicate of the reading query doesn't reach.</summary>
+    private static bool IsApplyBody(JoinSpec[] joins, int index) =>
+        index > 0 && index - 1 < joins.Length && joins[index - 1].Kind is JoinKind.CrossApply or JoinKind.OuterApply;
+
+    /// <summary>
+    /// Whether every <c>FORCESEEK</c> table — or view, CTE or derived table
+    /// carrying the hint — can seek, where some seek only on predicates
+    /// reading each other (Msg 8622 when not): a join's
+    /// predicate seeks one side only once the rows of the other come from a
+    /// seek of their own or from a source the hint doesn't bind, so seeking
+    /// spreads from what a constant or an unhinted source anchors (probed
+    /// 2026-10-16 against SQL Server 2025: <c>t1 WITH (FORCESEEK) JOIN t2
+    /// WITH (FORCESEEK) ON t1.id = t2.id</c> is refused, and a
+    /// <c>WHERE t1.id = 1</c> plans it).
+    /// </summary>
+    private static bool SeeksSpread(BatchContext batch, FromSource[] sources, List<int> seekers, List<BooleanExpression> conjuncts, Expression? soleSubqueryColumn)
+    {
+        var seeking = new bool[sources.Length];
+        Array.Fill(seeking, true);
+        foreach (var index in seekers)
+            seeking[index] = false;
+        var remaining = seekers.Count;
+        bool progressed;
+        do
+        {
+            progressed = false;
+            foreach (var index in seekers)
+            {
+                if (seeking[index])
+                    continue;
+                var anchored = conjuncts.FindAll(conjunct => ReadsOnlySeekingSources(sources, conjunct, index, seeking));
+                var source = sources[index];
+                if (source.ForcedSeekThrough is not null || source.BackingTable is null
+                    ? BodySeeksAreFeasible(batch, source, index, sources, anchored, soleSubqueryColumn)
+                    : ForcedSeekIsFeasible(batch, source, index, sources, source.BackingTable, source.ForcedAccessPath!.Value, anchored, soleSubqueryColumn))
+                {
+                    seeking[index] = true;
+                    progressed = true;
+                    remaining--;
+                }
+            }
+        }
+        while (progressed && remaining > 0);
+        return remaining == 0;
+    }
+
+    /// <summary>
+    /// Whether a <c>FORCESEEK</c> table a hash or merge join reads on its
+    /// inner side can seek without the join's predicate: on one of its own,
+    /// or on one the optimizer implies from a predicate over the column the
+    /// join equates it with (probed 2026-10-16 against SQL Server 2025:
+    /// <c>t1 INNER HASH JOIN t2 WITH (FORCESEEK) ON t1.id = t2.id WHERE
+    /// t1.id = 1</c> plans, the join's equality alone doesn't).
+    /// </summary>
+    private static bool SeeksWithoutJoin(BatchContext batch, FromSource[] sources, int index, List<BooleanExpression> conjuncts)
+    {
+        var source = sources[index];
+        if (source.BackingTable is not { } table || source.ForcedAccessPath is not { } hints)
+            return true;
+        var alone = new bool[sources.Length];
+        if (ForcedSeekIsFeasible(batch, source, index, sources, table, hints, conjuncts.FindAll(conjunct => ReadsOnlySeekingSources(sources, conjunct, index, alone)), soleSubqueryColumn: null))
+            return true;
+        if (hints.ForceSeekColumns is not null)
+            return false;
+        // The columns the joins' equalities chain a seek column to, each
+        // probed for a predicate of its own: the optimizer implies the same
+        // predicate on the seek column.
+        var probe = new ForceSeekProbe(batch, source, index, sources, SeekableLeads(batch, table, hints));
+        var equated = new List<(int Source, int Column)>();
+        var frontier = new Queue<Expression>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var a, out var b))
+            {
+                if (probe.IsSeekColumn(a))
+                    frontier.Enqueue(b);
+                if (probe.IsSeekColumn(b))
+                    frontier.Enqueue(a);
+            }
+        }
+        while (frontier.TryDequeue(out var operand))
+        {
+            if (operand is not Expressions.Reference reference)
+                continue;
+            var (partner, column) = FindSourceColumn(sources, reference.ReferencedName);
+            if (partner < 0 || partner == index || equated.Contains((partner, column)))
+                continue;
+            equated.Add((partner, column));
+            var ordinal = sources[partner].StorageOrdinals is { } map ? map[column] : column;
+            var partnerProbe = new ForceSeekProbe(batch, sources[partner], partner, sources, [ordinal]);
+            foreach (var conjunct in conjuncts)
+            {
+                if (conjunct.TryGetEqualityOperands(out var a, out var b) && (partnerProbe.IsSeekColumn(a) || partnerProbe.IsSeekColumn(b)))
+                {
+                    var other = partnerProbe.IsSeekColumn(a) ? b : a;
+                    if (other is Expressions.Reference)
+                    {
+                        frontier.Enqueue(other);
+                        continue;
+                    }
+                }
+                // Only a constant real folds implies a predicate: a variable or
+                // @@SPID doesn't (probed 2026-10-16 against SQL Server 2025).
+                var constant = true;
+                conjunct.VisitOperandExpressions(operand => constant &= partnerProbe.IsSeekColumn(operand) || operand.IsWrittenConstant);
+                if (constant && ReadsOnlySeekingSources(sources, conjunct, partner, alone) && conjunct.OffersSeek(partnerProbe, negated: false))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Whether every column <paramref name="conjunct"/> reads is the seeking source's own, an outer one, or one of a source already seeking.</summary>
+    private static bool ReadsOnlySeekingSources(FromSource[] sources, BooleanExpression conjunct, int sourceIndex, bool[] seeking)
+    {
+        var only = true;
+        conjunct.Walk((_, node) =>
+        {
+            if (only && node.Column is { } column)
+            {
+                var read = FindSourceColumnOfAnyKind(sources, column).SourceIndex;
+                only = read < 0 || read == sourceIndex || seeking[read];
+            }
+            return only;
+        });
+        return only;
     }
 
     private static List<BooleanExpression> CollectConjuncts(List<BooleanExpression> excluders, JoinSpec[] joins)
@@ -140,7 +309,7 @@ partial class Selection
         List<BooleanExpression> conjuncts,
         Expression? soleSubqueryColumn)
     {
-        return NestedBody(source) is not { } body || ShapeCanSeek(batch, body, source.ForcedSeekThrough!.Value, ReaderSeeks);
+        return NestedBody(batch, source) is not { } body || ShapeCanSeek(batch, body, source.ForcedSeekThrough, ReaderSeeks);
 
         bool ReaderSeeks(HashSet<int> columns)
         {
@@ -150,29 +319,45 @@ partial class Selection
         }
     }
 
-    /// <summary>The shape of the query body a view, CTE or derived-table source reads, or null for any other source or an unrecorded one.</summary>
-    private static SeekBodyShape? NestedBody(FromSource source) =>
-        source.BodySeekShape ?? (source.LateralIsQueryBody ? source.LateralPlan?.SeekShape : null);
+    /// <summary>
+    /// The shape of the query body a view, CTE, derived-table or inline
+    /// function source reads, or null for any other source or an unrecorded
+    /// one. An inline function's body is parsed here, as the hint reaches it.
+    /// </summary>
+    private static SeekBodyShape? NestedBody(BatchContext batch, FromSource source) =>
+        source.BodySeekShape
+            ?? (source.LateralIsQueryBody ? source.LateralPlan?.SeekShape
+            : source.InlineCall is var (function, arguments, name) ? Simulation.InlineTvfSeekShape(batch, function, arguments, name)
+            : null);
 
     /// <summary>
-    /// Whether every table <paramref name="shape"/> reads can seek, given
-    /// <paramref name="readerSeeks"/>, which answers whether the reading query
-    /// seeks on one of a set of the shape's output columns. A <c>UNION</c>
-    /// needs each branch to.
+    /// Whether every table <paramref name="shape"/> reads that has to seek
+    /// can, given <paramref name="readerSeeks"/>, which answers whether the
+    /// reading query seeks on one of a set of the shape's output columns. A
+    /// set operation needs each branch to. With <paramref name="carried"/>
+    /// — a view's or CTE reference's hint — every table has to seek under
+    /// it; without, only the tables the body hints itself, and a nested body
+    /// that couldn't honor its own alone.
     /// </summary>
-    private static bool ShapeCanSeek(BatchContext batch, SeekBodyShape shape, TableHintInfo hints, Func<HashSet<int>, bool> readerSeeks)
+    private static bool ShapeCanSeek(BatchContext batch, SeekBodyShape shape, TableHintInfo? carried, Func<HashSet<int>, bool> readerSeeks)
     {
         if (shape.Branches is { } branches)
-            return Array.TrueForAll(branches, branch => ShapeCanSeek(batch, branch, hints, readerSeeks));
+            return Array.TrueForAll(branches, branch => ShapeCanSeek(batch, branch, carried, readerSeeks));
         var sources = shape.Sources;
         var conjuncts = CollectConjuncts(shape.Filters, shape.Joins);
         var leads = new HashSet<int>?[sources.Length];
+        var bodies = new SeekBodyShape?[sources.Length];
         var seeking = new bool[sources.Length];
         var remaining = 0;
         for (var i = 0; i < sources.Length; i++)
         {
             if (sources[i].BackingTable is { } table)
             {
+                if ((carried ?? sources[i].ForcedAccessPath) is not { ForceSeek: true } hints)
+                {
+                    seeking[i] = true;
+                    continue;
+                }
                 // A heap or a table with no enabled key has nothing to seek.
                 table.SettleIndexIds();
                 leads[i] = SeekableLeads(batch, table, hints);
@@ -180,7 +365,7 @@ partial class Selection
                     return false;
                 remaining++;
             }
-            else if (NestedBody(sources[i]) is not null)
+            else if ((carried is not null || sources[i] is { LateralPlan.ForceSeekDeferred: true }) && (bodies[i] = NestedBody(batch, sources[i])) is not null)
             {
                 remaining++;
             }
@@ -202,7 +387,7 @@ partial class Selection
                 if (seeking[i])
                     continue;
                 var source = i;
-                if (leads[i] is { } own ? ColumnsSeek(source, own) : ShapeCanSeek(batch, NestedBody(sources[i])!, hints, columns => ColumnsSeek(source, columns)))
+                if (leads[i] is { } own ? ColumnsSeek(source, own) : ShapeCanSeek(batch, bodies[i]!, carried, columns => ColumnsSeek(source, columns)))
                 {
                     seeking[i] = true;
                     progressed = true;
@@ -218,7 +403,7 @@ partial class Selection
             var probe = new ForceSeekProbe(batch, sources[sourceIndex], sourceIndex, sources, columns);
             foreach (var conjunct in conjuncts)
             {
-                if (conjunct.OffersSeek(probe, negated: false) && ReadsOnlySeekingSources(conjunct, sourceIndex))
+                if (conjunct.OffersSeek(probe, negated: false) && ReadsOnlySeekingSources(sources, conjunct, sourceIndex, seeking))
                     return true;
             }
             var outward = new HashSet<int>();
@@ -228,21 +413,6 @@ partial class Selection
                     _ = outward.Add(p);
             }
             return outward.Count > 0 && readerSeeks(outward);
-        }
-
-        bool ReadsOnlySeekingSources(BooleanExpression conjunct, int sourceIndex)
-        {
-            var only = true;
-            conjunct.Walk((_, node) =>
-            {
-                if (only && node.Column is { } column)
-                {
-                    var read = FindSourceColumnOfAnyKind(sources, column).SourceIndex;
-                    only = read < 0 || read == sourceIndex || seeking[read];
-                }
-                return only;
-            });
-            return only;
         }
     }
 
@@ -427,6 +597,22 @@ partial class Selection
         }
         return true;
     }
+
+    /// <summary>
+    /// Whether a <c>FORCESEEK</c> this derived table's or CTE's body hints
+    /// couldn't be honored by the body alone, which leaves it to the query
+    /// reading the body (<see cref="ParserContext.ForceSeekDefersBlock"/>).
+    /// </summary>
+    internal bool ForceSeekDeferred;
+
+    /// <summary>
+    /// Whether this one-column subquery's <c>FORCESEEK</c> seeks only on the
+    /// values an enclosing <c>IN</c> hands it, so the <c>IN</c> offers no seek
+    /// to a <c>FORCESEEK</c> on its own column (probed 2026-10-16 against SQL
+    /// Server 2025: <c>t1 WITH (FORCESEEK) WHERE id IN (SELECT id FROM t2
+    /// WITH (FORCESEEK))</c> is refused).
+    /// </summary>
+    internal bool ForceSeekLeansOnIn;
 
     /// <summary>
     /// This query's <see cref="SeekBodyShape"/>, across which a view, CTE or

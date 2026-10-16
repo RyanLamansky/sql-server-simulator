@@ -1703,6 +1703,7 @@ internal sealed partial class Selection
                             UnwritableFunctionName = function is not InlineTableValuedFunction && context.Batch.CurrentStatement.StatementVerb is "UPDATE" or "DELETE"
                                 ? objectName.ToString()
                                 : null,
+                            InlineCall = function is InlineTableValuedFunction called ? (called, tvfArgs, objectName) : null,
                         };
                     }
                     // A table-valued function takes its parentheses (probed
@@ -1918,6 +1919,7 @@ internal sealed partial class Selection
                 Selection derivedSelection;
                 var derivedFlattens = context.BrowseFlattenFrom;
                 using (ParserScope.Enter(ref context.BrowseFlatten, derivedFlattens))
+                using (ParserScope.Enter(ref context.ForceSeekDeferrable, true))
                 {
                     derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
                         QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));

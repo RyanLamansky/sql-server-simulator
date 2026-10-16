@@ -457,9 +457,12 @@ internal sealed partial class Selection
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
         combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
-        // A predicate on a union's column reaches both branches.
-        if (kind is SetOpKind.Union or SetOpKind.UnionAll && left.SeekShape is { } leftShape && right.SeekShape is { } rightShape)
+        // A predicate on a set operation's column reaches both branches, and a
+        // FORCESEEK carried into one reaches both (probed 2026-10-16 against
+        // SQL Server 2025 for INTERSECT and EXCEPT).
+        if (left.SeekShape is { } leftShape && right.SeekShape is { } rightShape)
             combined.SeekShape = new SeekBodyShape([leftShape, rightShape]);
+        combined.ForceSeekDeferred = left.ForceSeekDeferred || right.ForceSeekDeferred;
         left.SetOperationParent = right.SetOperationParent = combined;
         return combined;
     }

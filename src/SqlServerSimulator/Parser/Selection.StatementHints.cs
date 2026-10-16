@@ -527,7 +527,7 @@ partial class Selection
         if (sites is not null && OptimizerChecksRun(context.Batch))
         {
             foreach (var site in sites)
-                ValidateJoinAlgorithms(site, clause?.Joins ?? JoinAlgorithms.None);
+                ValidateJoinAlgorithms(context.Batch, site, clause?.Joins ?? JoinAlgorithms.None);
         }
 
         // A TABLE HINT's forced-seek check records its site again.
@@ -554,7 +554,7 @@ partial class Selection
             try
             {
                 foreach (var site in sites)
-                    ValidateJoinAlgorithms(site, joins);
+                    ValidateJoinAlgorithms(context.Batch, site, joins);
             }
             catch (SimulatedSqlException refused) when (refused.Number == 8622)
             {
@@ -677,7 +677,7 @@ partial class Selection
             if (hints.ForceSeek || hints.IndexArguments is { Count: > 1 } || (hints.ForceScan && hints.IndexArguments is { Count: > 0 }))
             {
                 source.ForcedAccessPath = hints;
-                ValidateForcedSeeks(context, owner.Sources, owner.Joins, owner.Filters, projections: null, soleSubqueryColumn: null);
+                _ = ValidateForcedSeeks(context, owner.Sources, owner.Joins, owner.Filters, projections: null, soleSubqueryColumn: null, out _);
             }
         }
     }
@@ -691,9 +691,10 @@ partial class Selection
     /// loop builds anything. <c>APPLY</c>, whose decorrelation decides, is
     /// left alone.
     /// </summary>
-    private static void ValidateJoinAlgorithms(JoinHintSite site, JoinAlgorithms optionJoins)
+    private static void ValidateJoinAlgorithms(BatchContext batch, JoinHintSite site, JoinAlgorithms optionJoins)
     {
         List<BooleanExpression>? filterConjuncts = null;
+        List<BooleanExpression>? allConjuncts = null;
         for (var level = 1; level <= site.Joins.Length && level < site.Sources.Length; level++)
         {
             var join = site.Joins[level - 1];
@@ -718,7 +719,8 @@ partial class Selection
                 equi = onConjuncts.Exists(conjunct => IsCrossSideEquality(conjunct, site.Sources, level, right));
             }
             equi = equi || filterConjuncts.Exists(conjunct => IsCrossSideEquality(conjunct, site.Sources, level, right));
-            var seeksInner = site.Sources[level].ForcedAccessPath is { ForceSeek: true };
+            var seeksInner = site.Sources[level].ForcedAccessPath is { ForceSeek: true }
+                && !SeeksWithoutJoin(batch, site.Sources, level, allConjuncts ??= CollectConjuncts(site.Filters, site.Joins));
             var feasible = !seeksInner
                 && (((allowed & JoinAlgorithms.Hash) != 0 && equi)
                     || ((allowed & JoinAlgorithms.Merge) != 0 && (equi || join.Kind == JoinKind.Full)));

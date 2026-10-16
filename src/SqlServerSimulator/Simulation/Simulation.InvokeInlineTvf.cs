@@ -216,6 +216,31 @@ partial class Simulation
     /// </summary>
     internal static View FunctionDmlView(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
     {
+        var body = ParseInlineTvfCall(batch, inline, arguments, name);
+        return UnstoredDmlView(body, inline.Schema.Database, name.ToString(), body.ColumnNames, isDerivedTable: false);
+    }
+
+    /// <summary>
+    /// The shape of an inline function's body as a call of it reads it, which
+    /// a <c>FORCESEEK</c> on a view or CTE reading the call reaches (probed
+    /// 2026-10-16 against SQL Server 2025); null for a call whose arguments
+    /// or body can't be settled while compiling, which is left unjudged.
+    /// </summary>
+    internal static Selection.SeekBodyShape? InlineTvfSeekShape(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
+        try
+        {
+            return ParseInlineTvfCall(batch, inline, arguments, name).SeekShape;
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>An inline function's body parsed with <paramref name="arguments"/> evaluated as its parameters' values.</summary>
+    private static Selection ParseInlineTvfCall(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
         var (argValues, isDefault, _) = EvaluateFunctionArguments(
             inline, arguments, new RuntimeContext(written => throw SimulatedSqlException.InvalidColumnName(written), batch));
 
@@ -256,8 +281,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var body = ParseInlineTvfBody(parser, inline, name);
-            return UnstoredDmlView(body, inline.Schema.Database, name.ToString(), body.ColumnNames, isDerivedTable: false);
+            return ParseInlineTvfBody(parser, inline, name);
         }
         finally
         {

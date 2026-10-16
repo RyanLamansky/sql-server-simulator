@@ -357,6 +357,13 @@ internal sealed class FromSource(
     public View? FunctionWriteView;
 
     /// <summary>
+    /// For an inline function's call, the function and its arguments, whose
+    /// body a <c>FORCESEEK</c> carried into the call is judged across
+    /// (<c>Simulation.InlineTvfSeekShape</c>); null for every other source.
+    /// </summary>
+    public (Schemas.InlineTableValuedFunction Function, Expression?[] Arguments, MultiPartName Name)? InlineCall;
+
+    /// <summary>
     /// For a multi-statement or CLR function's call in a writing statement's
     /// <c>FROM</c> clause, the function's name as written, which a joined write
     /// aliasing it refuses with Msg 270 (probed 2026-10-06 against SQL Server

@@ -297,6 +297,8 @@ partial class Simulation
     /// </remarks>
     private static Selection ParseCteBody(ParserContext context, CteBinding binding, string[]? renameList)
     {
+        // A FORCESEEK the body can't honor alone is judged where the CTE is read.
+        using var seekDeferrable = Parser.ParserScope.Enter(ref context.ForceSeekDeferrable, true);
         var scope = QueryScope.Nested(QueryPosition.Derived, null);
         var firstBranch = Selection.ParseIntersectChain(context, scope, isFirstBranch: true);
 
