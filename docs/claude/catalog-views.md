@@ -784,6 +784,21 @@ Rows follow the simulator's own state where it has that state; where real's figu
   Every page is in memory, so `sys.dm_os_buffer_descriptors` lists each page `sys.allocation_units` counts, under its `allocation_unit_id` — a `DATA_PAGE` for a row page, a `TEXT_MIX_PAGE` for a LOB page — so the per-database and per-object buffer-usage queries join through it.
   **Divergences**: page ids are numbered through each database's primary file from 16 rather than read off a page map, a page's `row_count` and `free_space_in_bytes` are NULL, no page is ever dirty, and real's own catalog and allocation pages aren't listed.
 - `sys.dm_os_ring_buffers` is empty: the simulator samples none of the scheduler, memory-broker or connectivity records real's ring buffers keep.
+- **The log.**
+  `sys.dm_db_log_space_usage` (the current database), `sys.dm_db_log_info(database_id)` and `sys.dm_db_log_stats(database_id)` describe the log `DBCC LOGINFO` and `DBCC SQLPERF(LOGSPACE)` report — the log file's size less its header page, the four virtual log files real cuts a log under 64 MB into with the first active under sequence 34, and the fixed 54 pages in use a fresh database shows, which also stand for the log written since a backup the database never had.
+  Real cuts the virtual log files' sizes to two decimals and the log sizes to six (probed 2026-10-16), reports nothing holding truncation up and a 1900-01-01 log backup for a database never backed up; the end LSN is a stand-in past the start by the used bytes in 512-byte blocks.
+  Both TVFs read the current database for NULL or `DEFAULT`, nothing for an id no database has, and are Msg 313 without an argument; all three take the server-scope gate — no database permission opens them (probed 2026-10-16).
+- **Volumes.**
+  `sys.dm_os_volume_stats(database_id, file_id)` has a row for an existing file, none for a NULL argument or an unknown file, and on a Linux server only its sizes: the simulator reports the host volume its temporary directory is on.
+  It and the two log TVFs route through `APPLY` like the other system TVFs (`IsSysRowsetFunction`), as does `sys.dm_io_virtual_file_stats`, for Glenn Berry's per-file `CROSS APPLY`.
+- **Database transactions.**
+  `sys.dm_tran_database_transactions` lists, for each user transaction, each database it has written to — begun (state 4) at the transaction's start, its changed rows as log records — and each where it only holds a table lock, not yet begun (state 3); a transaction that has done nothing in a database, and a statement's own autocommit transaction, list nothing there (probed 2026-10-16).
+  "Written" is the test `DBCC OPENTRAN` makes (`Simulation.DatabaseTables`): a changed row, a catalog change, or a write lock.
+  **Divergences**: real begins the database transaction at its first write rather than the transaction's start, reports log bytes the simulator has none of, and lists its system transactions in `tempdb`.
+- **Services.**
+  `sys.dm_server_services` lists the three services a Linux server reports under their Windows-style names and paths (probed 2026-10-16): the engine and the full-text launcher running as the host process since the simulation was made, the Agent stopped.
+  Either `VIEW SERVER PERFORMANCE STATE` or `VIEW SERVER SECURITY STATE` opens it, and a refusal is two Msg 300s whose wording names each permission where the database belongs, then Msg 297.
+  `sys.dm_server_registry` is empty, as on real's Linux server, and `sys.dm_exec_query_profiles` is empty, the simulator's plans having no operators to profile.
 
 ## Cross-statement row cache and indexes
 

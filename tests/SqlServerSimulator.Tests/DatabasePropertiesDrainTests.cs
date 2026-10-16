@@ -88,12 +88,12 @@ public sealed class DatabasePropertiesDrainTests
     [TestMethod]
     public void CrossApplyUnknownTvf_InUntakenBranch_Compiles()
         => AreEqual(42, Scalar(
-            "IF 1 = 0 SELECT f.x FROM (SELECT 1 x) f CROSS APPLY sys.dm_os_volume_stats(1, 2); SELECT 42"));
+            "IF 1 = 0 SELECT f.x FROM (SELECT 1 x) f CROSS APPLY dbo.no_such_tvf(1, 2); SELECT 42"));
 
     [TestMethod]
     public void CrossApplyUnknownTvf_WhenTaken_RaisesInvalidObjectName()
         => new Simulation().AssertSqlError(
-            "SELECT f.x FROM (SELECT 1 x) f CROSS APPLY sys.dm_os_volume_stats(1, 2)", 208);
+            "SELECT f.x FROM (SELECT 1 x) f CROSS APPLY dbo.no_such_tvf(1, 2)", 208);
 
     // A bare (non-function) name after APPLY is a table, so a missing one is
     // Msg 208 (probed 2026-10-02 against SQL Server 2025).

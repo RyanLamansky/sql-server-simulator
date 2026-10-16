@@ -73,22 +73,8 @@ partial class Simulation
     /// </summary>
     private static (SimulatedDbConnection Connection, SimulatedDbTransaction Transaction)? OldestWritingTransaction(Simulation simulation, Database database)
     {
-        var tables = new List<HeapTable>();
-        foreach (var (_, schema) in database.Schemas)
-            tables.AddRange(schema.HeapTables.EnumerateValues());
         var connections = simulation.SnapshotConnections();
-        if (database.Name == TempdbDatabaseName)
-        {
-            tables.AddRange(simulation.GlobalTempTables.EnumerateValues());
-            foreach (var connection in connections)
-                tables.AddRange(connection.TempTables.EnumerateValues());
-        }
-
-        var heaps = new HashSet<Heap>(ReferenceEqualityComparer.Instance);
-        foreach (var table in tables)
-            _ = heaps.Add(table.Heap);
-        var isTempdb = database.Name == TempdbDatabaseName;
-
+        var tables = new DatabaseTables(simulation, database, connections);
         (SimulatedDbConnection, SimulatedDbTransaction)? oldest = null;
         foreach (var connection in connections)
         {
@@ -97,23 +83,70 @@ partial class Simulation
             {
                 continue;
             }
-            bool changedCatalog;
-            lock (transaction.CatalogChanges)
-                changedCatalog = transaction.CatalogChanges.Contains(database);
-            if (changedCatalog || transaction.UndoLog.Changes(heaps, isTempdb) || HoldsWriteLock(simulation, tables, connection.LockOwner))
+            if (tables.WrittenBy(connection, transaction) != 0)
                 oldest = (connection, transaction);
         }
         return oldest;
+    }
 
-        static bool HoldsWriteLock(Simulation simulation, List<HeapTable> tables, SessionToken session)
+    /// <summary>
+    /// The tables of one database — for <c>tempdb</c>, every session's
+    /// temporary tables — gathered once to ask of each session's transaction
+    /// what it has done there.
+    /// </summary>
+    internal sealed class DatabaseTables
+    {
+        private readonly Simulation simulation;
+        private readonly Database database;
+        private readonly List<HeapTable> tables = [];
+        private readonly HashSet<Heap> heaps = new(ReferenceEqualityComparer.Instance);
+        private readonly bool isTempdb;
+
+        public DatabaseTables(Simulation simulation, Database database, SimulatedDbConnection[] connections)
         {
-            lock (simulation.LockManager.gate)
-                return tables.Exists(table => IsWriteHold(table.TableDataLock, session));
+            this.simulation = simulation;
+            this.database = database;
+            foreach (var (_, schema) in database.Schemas)
+                this.tables.AddRange(schema.HeapTables.EnumerateValues());
+            this.isTempdb = database.Name == TempdbDatabaseName;
+            if (this.isTempdb)
+            {
+                this.tables.AddRange(simulation.GlobalTempTables.EnumerateValues());
+                foreach (var connection in connections)
+                    this.tables.AddRange(connection.TempTables.EnumerateValues());
+            }
+            foreach (var table in this.tables)
+                _ = this.heaps.Add(table.Heap);
         }
 
-        static bool IsWriteHold(LockResource resource, SessionToken session) =>
-            resource.Holders.Exists(hold => hold.Owner == session
-                && hold.Mode is LockMode.IntentExclusive or LockMode.SharedIntentExclusive or LockMode.Exclusive or LockMode.SchemaModification);
+        /// <summary>
+        /// Whether <paramref name="transaction"/> has written to the database —
+        /// changed one of its rows or its catalog, or holds a write lock there
+        /// (IX, SIX, X or Sch-M, which an <c>UPDATE</c> finding no row still
+        /// takes), as a transaction real has logged a change in does — as the
+        /// count of its changed rows, at least 1 for a catalog change or a
+        /// write lock, 0 when it hasn't.
+        /// </summary>
+        public int WrittenBy(SimulatedDbConnection connection, SimulatedDbTransaction transaction)
+        {
+            var changes = transaction.UndoLog.Changes(this.heaps, this.isTempdb);
+            if (changes != 0)
+                return changes;
+            bool changedCatalog;
+            lock (transaction.CatalogChanges)
+                changedCatalog = transaction.CatalogChanges.Contains(this.database);
+            return changedCatalog || this.Holds(connection.LockOwner, writeOnly: true) ? 1 : 0;
+        }
+
+        /// <summary>Whether <paramref name="session"/> holds a lock on one of the tables — with <paramref name="writeOnly"/>, a write lock.</summary>
+        public bool Holds(SessionToken session, bool writeOnly)
+        {
+            lock (this.simulation.LockManager.gate)
+            {
+                return this.tables.Exists(table => table.TableDataLock.Holders.Exists(hold => hold.Owner == session
+                    && (!writeOnly || hold.Mode is LockMode.IntentExclusive or LockMode.SharedIntentExclusive or LockMode.Exclusive or LockMode.SchemaModification)));
+            }
+        }
     }
 
     /// <summary>

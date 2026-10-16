@@ -837,9 +837,7 @@ internal sealed partial class Selection
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
             // real SQL Server binds the TVF name lazily, so an un-taken IF
-            // branch naming an unknown function (SSMS's EngineEdition-gated
-            // `CROSS APPLY sys.dm_os_volume_stats(...)` VolumeFreeSpace probe)
-            // compiles and is discarded.
+            // branch naming an unknown function compiles and is discarded.
             // A scalar function named as a rowset is an object the reference
             // can't use, state 224 (probed 2026-10-04 against SQL Server 2025).
             if (isFunctionCallShape && context.Batch.TryResolveFunction(resolvedName, out var applied) && applied is ScalarFunction)
@@ -1224,6 +1222,12 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_io_virtual_file_stats"))
                         return BuiltInRowsetSource(context, ParseVirtualFileStatsDmv(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_info"))
+                        return BuiltInRowsetSource(context, ParseLogInfoDmv(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_stats"))
+                        return BuiltInRowsetSource(context, ParseLogStatsDmv(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_os_volume_stats"))
+                        return BuiltInRowsetSource(context, ParseVolumeStatsDmv(context, objectName.ToString()));
                     if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString()) is { } indexDmv)
                         return BuiltInRowsetSource(context, indexDmv);
                 }
@@ -2057,7 +2061,7 @@ internal sealed partial class Selection
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         name.Count == 2
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     /// <summary>
     /// A <c>WITH</c> right after a rowset function's call, no alias between,

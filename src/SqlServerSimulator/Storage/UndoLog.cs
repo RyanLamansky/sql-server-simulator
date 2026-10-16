@@ -79,13 +79,16 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     private bool recordsChangeTracking;
 
     /// <summary>
-    /// Whether an entry changed a row of one of <paramref name="heaps"/>, or —
+    /// How many entries changed a row of one of <paramref name="heaps"/>, or —
     /// with <paramref name="temporaryTables"/> — created or dropped a temporary
-    /// table: what <c>DBCC OPENTRAN</c> asks of another session's transaction.
-    /// Walked by index, since that session may be appending meanwhile.
+    /// table: what <c>DBCC OPENTRAN</c> and
+    /// <c>sys.dm_tran_database_transactions</c> ask of another session's
+    /// transaction. Walked by index, since that session may be appending
+    /// meanwhile.
     /// </summary>
-    public bool Changes(HashSet<Heap> heaps, bool temporaryTables)
+    public int Changes(HashSet<Heap> heaps, bool temporaryTables)
     {
+        var changes = 0;
         for (var i = 0; i < this.entries.Count; i++)
         {
             var entry = this.entries[i];
@@ -93,10 +96,10 @@ internal sealed class UndoLog(LobReclamation? reclamation)
                 ? heaps.Contains(heap)
                 : temporaryTables && entry is TempTableCreation or TempTableRemoval or LocalTempTableCreation or LocalTempTableRemoval)
             {
-                return true;
+                changes++;
             }
         }
-        return false;
+        return changes;
     }
 
     /// <summary>

@@ -36,6 +36,11 @@ internal static partial class BuiltInResources
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
         ("sys.dm_database_encryption_keys", DmvGateKind.ServerSecurityState),
         ("sys.dm_os_process_memory", DmvGateKind.ServerState),
+        ("sys.dm_db_log_space_usage", DmvGateKind.ServerState),
+        ("sys.dm_tran_database_transactions", DmvGateKind.ServerState),
+        ("sys.dm_exec_query_profiles", DmvGateKind.ServerState),
+        ("sys.dm_server_registry", DmvGateKind.ServerState),
+        ("sys.dm_server_services", DmvGateKind.ServerServices),
         ("sys.dm_os_schedulers", DmvGateKind.ServerState),
         ("sys.dm_os_tasks", DmvGateKind.ServerState),
         ("sys.dm_os_workers", DmvGateKind.ServerState),
@@ -107,6 +112,22 @@ internal static partial class BuiltInResources
                 RejectUntrustedImpersonation(batch);
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerSecurityState))
                     throw ServerStateDenied("VIEW SERVER SECURITY STATE");
+                return rows;
+            // Either permission opens the services; refused, real names each
+            // in place of the database (probed 2026-10-16 against SQL Server
+            // 2025).
+            case DmvGateKind.ServerServices:
+                RejectUntrustedImpersonation(batch);
+                if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState)
+                    && !simulation.HoldsServerPermission(login, Permission.ViewServerSecurityState))
+                {
+                    throw SimulatedSqlException.Aggregate(
+                    [
+                        SimulatedSqlException.ServerStatePermissionDenied("server", "VIEW SERVER PERFORMANCE STATE"),
+                        SimulatedSqlException.ServerStatePermissionDenied("server", "VIEW SERVER SECURITY STATE"),
+                        SimulatedSqlException.UserLacksPermissionToPerformAction(),
+                    ]);
+                }
                 return rows;
             case DmvGateKind.ServerStatePolicy:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))

@@ -700,11 +700,12 @@ partial class Simulation
     private static readonly string[] SqlPerfColumnNames = ["Database Name", "Log Size (MB)", "Log Space Used (%)", "Status"];
 
     /// <summary>
-    /// The log space <c>DBCC SQLPERF(LOGSPACE)</c> reports in use: a fixed 54
-    /// pages, which is what a freshly created database reports on SQL Server
-    /// 2025. The simulator keeps no log, so the figure never moves.
+    /// The log space <c>DBCC SQLPERF(LOGSPACE)</c>, <c>sys.dm_db_log_space_usage</c>
+    /// and <c>sys.dm_db_log_stats</c> report in use: a fixed 54 pages, which is
+    /// what a freshly created database reports on SQL Server 2025. The
+    /// simulator keeps no log, so the figure never moves.
     /// </summary>
-    private const long ReportedLogBytesUsed = 54 * 8192;
+    internal const long ReportedLogBytesUsed = 54 * 8192;
 
     /// <summary>
     /// <c>DBCC SQLPERF ( LOGSPACE | 'sys.dm_os_wait_stats' , CLEAR | 'sys.dm_os_latch_stats' , CLEAR )
@@ -753,7 +754,7 @@ partial class Simulation
     }
 
     /// <summary>The size of <paramref name="database"/>'s log files, in bytes.</summary>
-    private static long LogFileBytes(Database database)
+    internal static long LogFileBytes(Database database)
     {
         long pages = 0;
         foreach (var file in database.Files)
@@ -768,10 +769,11 @@ partial class Simulation
 
     /// <summary>
     /// The sequence number of the one active virtual log file
-    /// <c>DBCC LOGINFO</c> reports, and the first part of every LSN
-    /// <c>DBCC OPENTRAN</c> prints. The simulator keeps no log to number.
+    /// <c>DBCC LOGINFO</c> and <c>sys.dm_db_log_info</c> report, and the first
+    /// part of every LSN <c>DBCC OPENTRAN</c>, the log DMVs and
+    /// <c>sys.dm_tran_database_transactions</c> print. The simulator keeps no log to number.
     /// </summary>
-    private const int ActiveLogSequence = 34;
+    internal const int ActiveLogSequence = 34;
 
     /// <summary>
     /// <c>DBCC PAGE ( database, file, page [, printopt] ) [WITH …]</c>,
