@@ -92,6 +92,7 @@ A simulated database is always consistent, so each check reports a healthy one:
 - `CHECKALLOC`: the heading, Msg 2538 / 8915 for the data file and 2539 / 8918 for the database, and Msg 8989.
 - `CHECKCATALOG`: Msg 2528 alone.
 - `ESTIMATEONLY` answers Msg 5281 instead of checking, `NO_INFOMSGS` or not.
+- Each check that completes writes real's completion line to the error log, and a `CHECKDB` short of `ESTIMATEONLY` sets the database's `LastGoodCheckDbTime` — see [the error log](catalog-views.md#the-sql-server-error-log).
 - A `REPAIR_*` argument is `NotSupportedException`: real refuses it outside single-user mode, and probing it against a live server is off limits.
 
 ## `PAGE`

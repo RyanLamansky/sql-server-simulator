@@ -561,6 +561,93 @@ public sealed class ErrorLogTests
     }
 
     [TestMethod]
+    public void DbccChecks_LogTheirCompletion()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create database cdb;
+            create login checker with password = 'Pa55word!';
+            """);
+        _ = simulation.ExecuteNonQuery("""
+            use cdb;
+            create table t (id int constraint pk_t primary key);
+            create user checker for login checker;
+            alter role db_owner add member checker;
+            dbcc checkdb;
+            dbcc checkdb (N'CDB', noindex) with physical_only, no_infomsgs, tablock;
+            dbcc checkdb with maxdop = 2, tableresults, all_errormsgs, extended_logical_checks;
+            dbcc checkdb with estimateonly;
+            dbcc checktable ('t', 1) with no_infomsgs;
+            dbcc checktable ('dbo.t', noindex);
+            dbcc checkalloc;
+            dbcc checkcatalog;
+            dbcc checkfilegroup;
+            execute as login = 'checker';
+            dbcc checkdb with no_infomsgs;
+            revert;
+            dbcc checkdb (master) with no_infomsgs;
+            dbcc checkdb (tempdb) with no_infomsgs;
+            """);
+        var logged = LoggedTexts(simulation, "executed by");
+        const string Done = " found 0 errors and repaired 0 errors. Elapsed time: 0 hours 0 minutes 0 seconds.  ";
+        CollectionAssert.AreEqual(new[]
+        {
+            "DBCC CHECKDB (cdb) executed by sa" + Done,
+            "DBCC CHECKDB (cdb, noindex) WITH no_infomsgs, tablock, physical_only executed by sa" + Done,
+            "DBCC CHECKDB (cdb) WITH all_errormsgs, tableresults, maxdop = 2 executed by sa" + Done,
+            "DBCC CHECKDB (cdb) WITH estimateonly executed by sa" + Done,
+            "DBCC CHECKTABLE (cdb.dbo.t, pk_t) WITH no_infomsgs executed by sa" + Done,
+            "DBCC CHECKTABLE (cdb.dbo.t, noindex) executed by sa" + Done,
+            "DBCC CHECKALLOC (cdb) executed by sa" + Done,
+            "DBCC CHECKCATALOG (cdb) executed by sa" + Done,
+            "DBCC CHECKFILEGROUP (PRIMARY) executed by sa" + Done,
+            "DBCC CHECKDB (cdb) WITH no_infomsgs executed by checker" + Done,
+            "DBCC CHECKDB (master) WITH no_infomsgs executed by sa" + Done,
+            "DBCC CHECKDB (mssqlsystemresource) WITH no_infomsgs executed by sa" + Done,
+            "DBCC CHECKDB (tempdb) WITH no_infomsgs executed by sa" + Done,
+        }, logged.ConvertAll(static text => text[..(text.IndexOf(Done, StringComparison.Ordinal) + Done.Length)]));
+        // Each takes an internal snapshot but under TABLOCK and in tempdb and the resource database.
+        var snapshots = logged.ConvertAll(static text => text[(text.IndexOf("seconds.  ", StringComparison.Ordinal) + "seconds.  ".Length)..]);
+        CollectionAssert.AreEqual(new[] { 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0 }, snapshots.ConvertAll(static tail => tail.Length == 0 ? 0 : 1));
+        foreach (var tail in snapshots.FindAll(static tail => tail.Length != 0))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(tail, "^Internal database snapshot has split point LSN = 00000022:([0-9a-f]{8}):0001 and first LSN = 00000022:([0-9a-f]{8}):0001\\.$");
+            IsTrue(match.Success, tail);
+            AreEqual(Convert.ToInt64(match.Groups[2].Value, 16) + 16, Convert.ToInt64(match.Groups[1].Value, 16));
+        }
+        // The summary goes to the log only when it went out as a message.
+        CollectionAssert.AreEqual(new[]
+        {
+            "CHECKDB found 0 allocation errors and 0 consistency errors in database 'cdb'.",
+            "CHECKALLOC found 0 allocation errors and 0 consistency errors in database 'cdb'.",
+            "CHECKFILEGROUP found 0 allocation errors and 0 consistency errors in database 'cdb'.",
+        }, LoggedTexts(simulation, "allocation errors"));
+    }
+
+    [TestMethod]
+    public void CheckDb_IsRecalledAsTheDatabaseStartsUp()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database rdb; alter database rdb set read_only; alter database rdb set read_write");
+        AreEqual("1900-01-01 00:00:00.000", simulation.ExecuteScalar("select convert(varchar(23), databasepropertyex('rdb', 'LastGoodCheckDbTime'), 121)"));
+        // Neither an estimate nor the narrower checks count.
+        _ = simulation.ExecuteNonQuery("use rdb; dbcc checkdb with estimateonly; dbcc checkalloc with no_infomsgs; dbcc checkcatalog");
+        AreEqual("1900-01-01 00:00:00.000", simulation.ExecuteScalar("select convert(varchar(23), databasepropertyex('rdb', 'LastGoodCheckDbTime'), 121)"));
+        _ = simulation.ExecuteNonQuery("use rdb; dbcc checkdb with physical_only, no_infomsgs");
+        var lastGood = (string)simulation.ExecuteScalar("select convert(varchar(23), databasepropertyex('rdb', 'LastGoodCheckDbTime'), 121)")!;
+        AreNotEqual("1900-01-01 00:00:00.000", lastGood);
+        _ = simulation.ExecuteNonQuery("alter database rdb set read_only");
+        CollectionAssert.AreEqual(new[]
+        {
+            "Starting up database 'rdb'.",
+            "Starting up database 'rdb'.",
+            "Starting up database 'rdb'.",
+            "Starting up database 'rdb'.",
+            $"CHECKDB for database 'rdb' finished without errors on {lastGood} (local time). This is an informational message only; no user action is required.",
+        }, LoggedTexts(simulation, "rdb''").FindAll(static text => !text.StartsWith("Setting", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
     public void DiagnosticsLogConfigurations_ReportsTheStockRow()
     {
         var simulation = new Simulation();

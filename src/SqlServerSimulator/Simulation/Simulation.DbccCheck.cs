@@ -54,16 +54,25 @@ partial class Simulation
 
         var informational = !dbcc.Has(DbccOptions.NoInfoMessages);
         var tables = UserTablesByObjectId(database, filegroupId);
+        var logTarget = isDatabase ? database.Name : FilegroupName(database, filegroupId!.Value);
+        if (isDatabase && dbcc.Arguments.Count > 1)
+            logTarget += ", noindex";
         if (dbcc.Has(DbccOptions.EstimateOnly))
         {
             // The estimate is the answer, so NO_INFOMSGS doesn't silence it.
             if (informational)
                 Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, database.Name));
             Info(batch, SimulatedSqlException.EstimatedTempdbSpaceMessage(batch, command, database.Name, CheckDatabaseEstimateBaseKilobytes + TotalPages(tables)));
+            LogDbccCheck(batch, dbcc, command, logTarget, database, foundIn: null);
             return DbccCompleted(batch, dbcc, []);
         }
+        if (isDatabase)
+            database.LastGoodCheckDbUtc = SqlValue.FromDateTime(batch.CurrentStatement.UtcNow).AsDateTime;
         if (!informational)
+        {
+            LogDbccCheck(batch, dbcc, command, logTarget, database, foundIn: null);
             return [];
+        }
 
         var physicalOnly = dbcc.Has(DbccOptions.PhysicalOnly);
         // CHECKDB WITH TABLOCK skips the catalog and Service Broker checks and
@@ -90,6 +99,7 @@ partial class Simulation
             rows.Add(CheckResultRow(8989, SimulatedSqlException.CheckFoundErrorsText(command, database.Name), databaseId, objectId: 0, indexId: 0, locatesRow: false));
             var outcomes = DbccRows(batch, CheckResultSchema(batch), CheckResultColumnNames, rows);
             batch.Connection.LastStatementRowCount = 0;
+            LogDbccCheck(batch, dbcc, command, logTarget, database, foundIn: null);
             return DbccCompleted(batch, dbcc, outcomes);
         }
 
@@ -112,6 +122,7 @@ partial class Simulation
             }
         }
         Info(batch, SimulatedSqlException.CheckFoundErrorsMessage(batch, command, database.Name));
+        LogDbccCheck(batch, dbcc, command, logTarget, database, foundIn: database.Name);
         return DbccCompleted(batch, dbcc, []);
     }
 
@@ -142,13 +153,30 @@ partial class Simulation
                 throw SimulatedSqlException.DbccIndexNotFound(indexId.ToString(CultureInfo.InvariantCulture), table.Name, 7);
         }
         batch.Connection.LastStatementRowCount = 0;
+        // Real's line names the table in full and an index by its name.
+        var logTarget = $"{database.Name}.{SchemaNameOf(database, table)}.{table.Name}";
+        if (dbcc.Arguments.Count == 2)
+        {
+            var second = dbcc.Arguments[1];
+            if (second.Kind == DbccArgumentKind.Name)
+            {
+                logTarget += ", noindex";
+            }
+            else if (second.Evaluate(batch) is { IsNull: false } secondValue && SqlType.IsIntegerCategory(secondValue.Type))
+            {
+                var indexId = secondValue.CoerceTo(SqlType.BigInt).AsInt64;
+                logTarget += ", " + (table.IndexIdentities().Find(identity => identity.IndexId == indexId).Name ?? indexId.ToString(CultureInfo.InvariantCulture));
+            }
+        }
         if (dbcc.Has(DbccOptions.EstimateOnly))
         {
             Info(batch, SimulatedSqlException.EstimatedTempdbSpaceMessage(batch, "CHECKTABLE", batch.CurrentDatabase.Name, Math.Max(1, table.Heap.Pages.Count)));
+            LogDbccCheck(batch, dbcc, "CHECKTABLE", logTarget, database, foundIn: null);
             return DbccCompleted(batch, dbcc, []);
         }
         if (!dbcc.Has(DbccOptions.TabLock) && batch.Connection.Security.Effective is { IsDatabaseScoped: true } identity)
             throw SimulatedSqlException.DbccSnapshotInaccessible(identity.LoginName, batch.CurrentDatabase.Name);
+        LogDbccCheck(batch, dbcc, "CHECKTABLE", logTarget, database, foundIn: null);
         if (dbcc.Has(DbccOptions.NoInfoMessages))
             return [];
         if (dbcc.Has(DbccOptions.PhysicalOnly))
@@ -185,13 +213,18 @@ partial class Simulation
         long used = 0;
         foreach (var (table, _) in tables)
             used += table.Heap.Pages.Count + table.Heap.LobPages.Count;
+        var logTarget = dbcc.Arguments.Count > 1 ? database.Name + ", noindex" : database.Name;
         if (dbcc.Has(DbccOptions.EstimateOnly))
         {
             Info(batch, SimulatedSqlException.EstimatedTempdbSpaceMessage(batch, "CHECKALLOC", database.Name, CheckAllocEstimateBaseKilobytes + used));
+            LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: null);
             return DbccCompleted(batch, dbcc, []);
         }
         if (dbcc.Has(DbccOptions.NoInfoMessages))
+        {
+            LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: null);
             return [];
+        }
         if (dbcc.Has(DbccOptions.TableResults))
             throw new NotSupportedException("DBCC CHECKALLOC WITH TABLERESULTS isn't modeled.");
         var extents = (used + 7) / 8;
@@ -199,6 +232,7 @@ partial class Simulation
         foreach (var message in SimulatedSqlException.AllocationTotalsMessages(batch, extents, used, extents * 8))
             Info(batch, message);
         Info(batch, SimulatedSqlException.CheckFoundErrorsMessage(batch, "CHECKALLOC", database.Name));
+        LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: database.Name);
         return DbccCompleted(batch, dbcc, []);
     }
 
@@ -209,6 +243,7 @@ partial class Simulation
         dbcc.RequireArgumentCount(0, 1);
         var database = ResolveDbccDatabase(batch, dbcc.Arguments.Count > 0 ? dbcc.Arguments[0] : null, 1);
         RequireDbccDatabaseOwner(batch, database, "checkcatalog");
+        LogDbccCheck(batch, dbcc, "CHECKCATALOG", database.Name, database, foundIn: null);
         return DbccCompleted(batch, dbcc, []);
     }
 
@@ -762,6 +797,69 @@ partial class Simulation
 
     /// <summary>Queues an informational message ahead of the statement's outcomes.</summary>
     private static void Info(BatchContext batch, SimulatedError message) => batch.Connection.PendingMessages.Enqueue(message);
+
+    /// <summary>
+    /// The <c>WITH</c> options real's completion line names, in its own order
+    /// whatever the order written; <c>EXTENDED_LOGICAL_CHECKS</c> is never
+    /// named (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static readonly (DbccOptions Option, string Name)[] LoggedCheckOptions =
+    [
+        (DbccOptions.AllErrorMessages, "all_errormsgs"),
+        (DbccOptions.NoInfoMessages, "no_infomsgs"),
+        (DbccOptions.TabLock, "tablock"),
+        (DbccOptions.EstimateOnly, "estimateonly"),
+        (DbccOptions.PhysicalOnly, "physical_only"),
+        (DbccOptions.TableResults, "tableresults"),
+        (DbccOptions.DataPurity, "data_purity"),
+    ];
+
+    /// <summary>
+    /// Writes the lines real writes as a consistency check completes, under
+    /// the session (probed 2026-10-16 against SQL Server 2025): when its
+    /// zero-error summary went out as a message, <c>CHECKDB found 0 allocation
+    /// errors and 0 consistency errors in database 'd'.</c> first
+    /// (<paramref name="foundIn"/> names the database), then <c>DBCC CHECKDB
+    /// (d[, noindex]) [WITH …] executed by login found 0 errors and repaired
+    /// 0 errors. Elapsed time: …</c>, naming the login the session runs as and
+    /// closing on the internal snapshot's two LSNs — on two spaces alone under
+    /// <c>TABLOCK</c> or in <c>tempdb</c>, which take no snapshot. A
+    /// <c>CHECKDB</c> of <c>master</c> also checks the resource database and
+    /// logs it the same way, snapshot aside.
+    /// </summary>
+    /// <remarks>
+    /// The LSNs stand in for real's: the virtual log file is the active one
+    /// <c>DBCC LOGINFO</c> reports, the block the server's last transaction id,
+    /// and the split point sixteen blocks on, as real's always is.
+    /// </remarks>
+    private static void LogDbccCheck(BatchContext batch, DbccInvocation dbcc, string command, string target, Database database, string? foundIn)
+    {
+        var options = new StringBuilder();
+        foreach (var (option, name) in LoggedCheckOptions)
+        {
+            if (dbcc.Has(option))
+                _ = options.Append(options.Length == 0 ? " WITH " : ", ").Append(name);
+        }
+        if (dbcc.Has(DbccOptions.MaxDop))
+            _ = options.Append(options.Length == 0 ? " WITH " : ", ").Append("maxdop = ").Append(dbcc.MaxDop.ToString(CultureInfo.InvariantCulture));
+        var elapsed = DateTime.UtcNow - batch.CurrentStatement.UtcNow;
+        var elapsedText = string.Create(CultureInfo.InvariantCulture, $"{(int)elapsed.TotalHours} hours {elapsed.Minutes} minutes {elapsed.Seconds} seconds.");
+        var login = batch.Connection.Security.Effective.LoginName;
+        var block = batch.Connection.Simulation.LastAllocatedTransactionId;
+        var snapshot = dbcc.Has(DbccOptions.TabLock) || BuiltInToken.Equals(database.Name, TempdbDatabaseName)
+            ? ""
+            : string.Create(CultureInfo.InvariantCulture, $"Internal database snapshot has split point LSN = {ActiveLogSequence:x8}:{block + 16:x8}:0001 and first LSN = {ActiveLogSequence:x8}:{block:x8}:0001.");
+        Write(foundIn, target, snapshot);
+        if (command == "CHECKDB" && BuiltInToken.Equals(database.Name, MasterDatabaseName))
+            Write(foundIn is null ? null : "mssqlsystemresource", "mssqlsystemresource", "");
+
+        void Write(string? found, string named, string tail)
+        {
+            if (found is not null)
+                LogSessionLine(batch, $"{command} found 0 allocation errors and 0 consistency errors in database '{found}'.");
+            LogSessionLine(batch, $"DBCC {command} ({named}){options} executed by {login} found 0 errors and repaired 0 errors. Elapsed time: {elapsedText}  {tail}");
+        }
+    }
 
     /// <summary>The <c>TABLERESULTS</c> schema of the consistency checks.</summary>
     private static SqlType[] CheckResultSchema(BatchContext batch)
