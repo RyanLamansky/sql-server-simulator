@@ -65,15 +65,6 @@ partial class Simulation
         new("", "BACKUP SERVICE MASTER KEY", "The service master key"),
         new("", "RESTORE MASTER KEY", "Database master keys"),
         new("", "RESTORE SERVICE MASTER KEY", "The service master key"),
-        new("", "BEGIN DIALOG", "Service Broker (dialogs)"),
-        new("", "BEGIN CONVERSATION TIMER", "Service Broker (conversation timers)"),
-        new("", "END CONVERSATION", "Service Broker (conversations)"),
-        new("", "SEND ON CONVERSATION", "Service Broker (SEND)"),
-        new("", "RECEIVE", "Service Broker (RECEIVE)"),
-        new("", "GET CONVERSATION GROUP", "Service Broker (conversation groups)"),
-        new("", "MOVE CONVERSATION", "Service Broker (conversation groups)"),
-        new("WAITFOR", "( RECEIVE", "Service Broker (RECEIVE)"),
-        new("WAITFOR", "( GET CONVERSATION GROUP", "Service Broker (conversation groups)"),
     ];
 
     /// <summary>

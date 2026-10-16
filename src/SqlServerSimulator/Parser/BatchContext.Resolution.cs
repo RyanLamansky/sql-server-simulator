@@ -398,7 +398,7 @@ internal sealed partial class BatchContext
             return false;
         PermissionEnforcement.CheckWhileParsing(this, "SELECT", name, queue);
         database = queue.Schema.Database;
-        rowset = BuiltInResources.QueueRowset(queue, database);
+        rowset = BuiltInResources.QueueRowset(queue);
         return true;
     }
 

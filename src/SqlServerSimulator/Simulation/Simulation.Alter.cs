@@ -764,6 +764,8 @@ partial class Simulation
                 {
                     target.BrokerEnabled = !BuiltInToken.Equals(name, "DISABLE_BROKER");
                     LogDatabaseOption(context.Batch, target, name.ToUpperInvariant(), "ON");
+                    if (target.BrokerEnabled)
+                        context.Connection.Simulation.RedeliverHeld(context.Batch, target, BrokerDisabledStatus);
                 }
                 return true;
             case AlterDatabaseOptionKind.State:

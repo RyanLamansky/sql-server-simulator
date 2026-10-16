@@ -205,6 +205,16 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         this.entries.Add(new SchemaChange(simulation, undo));
 
     /// <summary>
+    /// Records a Service Broker change — a message sent or received, an
+    /// endpoint created or ended, a conversation group locked — whose
+    /// rollback runs <paramref name="undo"/> and whose commit runs
+    /// <paramref name="commit"/>, which publishes the change to other
+    /// sessions (see <see cref="BrokerRuntime"/>).
+    /// </summary>
+    public void RecordBrokerChange(Action undo, Action commit) =>
+        this.entries.Add(new BrokerChange(undo, commit));
+
+    /// <summary>
     /// Records a <c>DBCC CHECKIDENT</c> reseed, which a rollback undoes
     /// (probed 2026-09-24 against SQL Server 2025) though a generated value
     /// never is.
@@ -740,6 +750,13 @@ internal sealed class UndoLog(LobReclamation? reclamation)
             else
                 heap.Uniquifiers![address] = previous;
         }
+    }
+
+    private sealed class BrokerChange(Action undo, Action commit) : UndoEntry
+    {
+        public override void Undo(LobReclamation? reclamation) => undo();
+
+        public override void Commit(LobReclamation? reclamation) => commit();
     }
 
     private sealed class IdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) : UndoEntry

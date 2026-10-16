@@ -2568,7 +2568,7 @@ public sealed partial class Simulation
                 if (batch.CancelledAtStatementBoundary())
                     yield break;
 
-                if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
+                if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end && !IsBrokerBeginOrEnd(context))
                     yield break;
 
                 if (context.Token is Operator { Character: ';' })
@@ -3718,6 +3718,18 @@ public sealed partial class Simulation
                 SetUserStatement(batch);
                 context.RejectTrailingToken();
                 rowCount = 0;
+                break;
+
+            // The conversation statements, ahead of the BEGIN / END / WAITFOR
+            // arms and the implicit EXEC a leading word reads as.
+            case UnquotedString or ReservedKeyword { Keyword: Keyword.Begin or Keyword.End or Keyword.WaitFor } when BrokerStatementAt(context) is not BrokerStatement.None and var brokerStatement:
+                outcome = RunBrokerStatement(context, brokerStatement);
+                context.RejectTrailingToken();
+                if (!batch.IsSkipping)
+                {
+                    connection.LastStatementRowCount = outcome.RecordsAffected;
+                    yield return outcome;
+                }
                 break;
 
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:

@@ -126,8 +126,8 @@ internal struct QueueSettings
 /// <summary>
 /// A Service Broker queue — a schema object of type <c>SQ</c>, readable with
 /// <c>SELECT</c> and written only by <c>SEND</c> and <c>RECEIVE</c>. Its
-/// messages live on <see cref="Messages"/>, guarded by its database's
-/// <see cref="DatabaseBroker.Gate"/>.
+/// messages live on <see cref="Messages"/>, guarded by the simulation's
+/// <see cref="BrokerRuntime.Gate"/>.
 /// </summary>
 internal sealed class ServiceQueue(Schema schema, string name, int objectId, DateTime createDate, QueueSettings settings)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
@@ -139,7 +139,7 @@ internal sealed class ServiceQueue(Schema schema, string name, int objectId, Dat
 
     public QueueSettings Settings = settings;
 
-    /// <summary>The queue's messages, in <see cref="QueuedMessage.QueuingOrder"/>; read and written under the broker's gate.</summary>
+    /// <summary>The queue's messages, in <see cref="QueuedMessage.QueuingOrder"/>; read and written under <see cref="BrokerRuntime.Gate"/>.</summary>
     public readonly List<QueuedMessage> Messages = [];
 
     /// <summary>The next <c>queuing_order</c> a message takes, which never goes back.</summary>
@@ -233,9 +233,6 @@ internal sealed class BrokerPriority(int id, string name)
 /// </summary>
 internal sealed class DatabaseBroker
 {
-    /// <summary>Guards every queue's messages and the conversation state.</summary>
-    public readonly Lock Gate = new();
-
     public readonly ConcurrentDictionary<string, BrokerMessageType> MessageTypes = new(StringComparer.Ordinal);
     public readonly ConcurrentDictionary<string, BrokerContract> Contracts = new(StringComparer.Ordinal);
     public readonly ConcurrentDictionary<string, BrokerService> Services = new(StringComparer.Ordinal);

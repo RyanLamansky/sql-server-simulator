@@ -1563,7 +1563,7 @@ internal static partial class BuiltInResources
             if (running)
             {
                 var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
-                    : inWaitFor ? "WAITFOR"
+                    : inWaitFor ? session.WaitForType
                     : awaitingClient >= 0 && session.WaitsOnClient() ? "ASYNC_NETWORK_IO"
                     : null;
                 var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;

@@ -16,7 +16,16 @@ partial class Simulation
     /// DONE tokens its parts send. <c>SET</c>, <c>DECLARE</c> and
     /// <c>RETURN</c> start here and are refined by their parsers.
     /// </summary>
-    private static ushort? StatementDoneKindOf(ParserContext context) => context.Token switch
+    private static ushort? StatementDoneKindOf(ParserContext context) => BrokerStatementAt(context) switch
+    {
+        // A RECEIVE closes as the SELECT its rows read like; real's own codes
+        // for the conversation statements aren't captured.
+        BrokerStatement.Receive or BrokerStatement.WaitForReceive => StatementDoneKind.Select,
+        BrokerStatement.None => StatementDoneKindOfToken(context),
+        _ => StatementDoneKind.NoDone,
+    };
+
+    private static ushort? StatementDoneKindOfToken(ParserContext context) => context.Token switch
     {
         Operator { Character: '(' } => StatementDoneKind.Select,
         UnquotedString { ContextualKeyword: ContextualKeyword.Throw } => StatementDoneKind.RaisError,

@@ -91,11 +91,11 @@ public sealed partial class Simulation
                     case ReservedKeyword { Keyword: Keyword.Case }:
                         open.Add(('c', 0));
                         break;
-                    case ReservedKeyword { Keyword: Keyword.Begin }:
+                    case ReservedKeyword { Keyword: Keyword.Begin } when !IsBrokerBeginOrEnd(context):
                         if (PeekAfterBeginOrEnd(context) is var after && after != BeginKind.Transaction)
                             open.Add(after == BeginKind.TryOrCatch ? ('t', ++scopesOpened) : ('b', 0));
                         break;
-                    case ReservedKeyword { Keyword: Keyword.End }:
+                    case ReservedKeyword { Keyword: Keyword.End } when !IsBrokerBeginOrEnd(context):
                         if (open.Count > 0)
                             open.RemoveAt(open.Count - 1);
                         break;

@@ -518,6 +518,10 @@ partial class Simulation
             });
         }
         RecordDdlEvent(context, "ALTER_QUEUE", schema.Name, queue.Name, "QUEUE");
+        // Turning a queue back on delivers what it refused; a message for a
+        // queue still off is held again.
+        if (options.Status is true)
+            batch.Connection.Simulation.RedeliverHeld(batch, null, QueueRefusedStatus);
     }
 
     /// <summary>
@@ -1248,6 +1252,7 @@ partial class Simulation
                     _ = broker.Services.TryRemove(name, out _);
                     RecordSlotUndo(context, broker.Services, name, service);
                     DropSecurablePermissions(context, database, 17, service.Id);
+                    DropServiceConversations(context, service);
                     RecordDdlEvent(context, "DROP_SERVICE", schemaName: null, name, "SERVICE");
                     break;
                 }

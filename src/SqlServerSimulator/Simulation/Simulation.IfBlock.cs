@@ -674,7 +674,7 @@ partial class Simulation
         // itself, as a plain token, only where the batch ends there (probed
         // 2026-09-24 and 2026-09-26 against SQL Server 2025: `BEGIN END;` is
         // near ';', `BEGIN END SELECT 1` near the keyword 'select').
-        if (context.Token is ReservedKeyword { Keyword: Keyword.End } end)
+        if (context.Token is ReservedKeyword { Keyword: Keyword.End } end && !IsBrokerBeginOrEnd(context))
         {
             context.MoveNextOptional();
             throw context.Token is null ? SimulatedSqlException.SyntaxErrorNear(end) : SimulatedSqlException.SyntaxErrorNear(context);

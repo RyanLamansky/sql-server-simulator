@@ -542,6 +542,9 @@ partial class Simulation
         var open = new Stack<bool>();
         var (index, nextError) = (0, 0);
         var afterBegin = false;
+        // END CONVERSATION closes no block; the END has popped one, which the
+        // CONVERSATION after it puts back.
+        bool? afterEnd = null;
         try
         {
             while (index < offset && Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token && token.StartIndex < offset)
@@ -553,10 +556,20 @@ partial class Simulation
                     while (open.TryPeek(out var isBlock) && !isBlock)
                         _ = open.Pop();
                 }
+                var poppedByEnd = afterEnd;
+                afterEnd = null;
                 switch (token)
                 {
                     case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Tran or Parser.Keyword.Transaction or Parser.Keyword.Distributed } when afterBegin:
                         _ = open.Pop();
+                        break;
+                    // BEGIN DIALOG and BEGIN CONVERSATION TIMER open no block.
+                    case Parser.Tokens.UnquotedString { Value: var word } when afterBegin && BuiltInToken.EqualsAny(word, "DIALOG", "CONVERSATION"):
+                        _ = open.Pop();
+                        break;
+                    case Parser.Tokens.UnquotedString { Value: var word } when poppedByEnd is { } popped && BuiltInToken.Equals(word, "CONVERSATION"):
+                        if (popped)
+                            open.Push(true);
                         break;
                     case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Begin }:
                         open.Push(true);
@@ -566,7 +579,7 @@ partial class Simulation
                         open.Push(false);
                         break;
                     case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.End }:
-                        _ = open.TryPop(out _);
+                        afterEnd = open.TryPop(out _);
                         break;
                 }
                 afterBegin = false;

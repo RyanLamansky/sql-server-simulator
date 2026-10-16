@@ -223,6 +223,9 @@ internal sealed class SessionToken(int spid)
     /// <summary>Set while the session sleeps in a <c>WAITFOR</c>, which <c>sys.dm_exec_requests</c> reports as its wait.</summary>
     public bool InWaitFor;
 
+    /// <summary>The wait type a <see cref="InWaitFor"/> sleep reports: <c>WAITFOR</c>, or <c>BROKER_RECEIVE_WAITFOR</c> for a <c>WAITFOR (RECEIVE …)</c>.</summary>
+    public string WaitForType = "WAITFOR";
+
     /// <summary>
     /// The id of the request whose <c>SELECT</c> waits on its client to read
     /// the rows it sent (see <see cref="ResultStream"/>), or -1 while none

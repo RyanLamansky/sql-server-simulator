@@ -32,6 +32,72 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SystemBrokerObjectCannotBeModified(byte state) =>
         new("The system object cannot be modified.", 9663, 16, state);
 
+    /// <summary>
+    /// Msg 8426: no endpoint answers a conversation handle — state 1 for
+    /// <c>END CONVERSATION</c>, 2 <c>MOVE CONVERSATION</c>, 3
+    /// <c>BEGIN CONVERSATION TIMER</c>, 4 <c>SEND</c>, 6 a
+    /// <c>RELATED_CONVERSATION</c>.
+    /// </summary>
+    internal static SimulatedSqlException ConversationHandleNotFound(Guid handle, byte state) =>
+        new($"The conversation handle \"{handle.ToString().ToUpperInvariant()}\" is not found.", 8426, 16, state);
+
+    /// <summary>Msg 8418: a NULL conversation handle — state 5, or 6 for a <c>RELATED_CONVERSATION</c>.</summary>
+    internal static SimulatedSqlException ConversationHandleMissing(byte state = 5) =>
+        new("The conversation handle is missing. Specify a conversation handle.", 8418, 16, state);
+
+    /// <summary>Msg 8429: <c>SEND</c> on an endpoint that has ended or errored, naming its state code.</summary>
+    internal static SimulatedSqlException EndpointStateRefusesSend(string state) =>
+        new($"The conversation endpoint is not in a valid state for SEND. The current endpoint state is '{state}'.", 8429, 16, 1);
+
+    /// <summary>Msg 8431: <c>SEND</c> of a message type the conversation's contract doesn't name.</summary>
+    internal static SimulatedSqlException MessageTypeNotInContract(string type) =>
+        new($"The message type '{type}' is not part of the service contract.", 8431, 16, 1);
+
+    /// <summary>Msg 8432: <c>SEND</c> of a message type the contract lets only the other side send.</summary>
+    internal static SimulatedSqlException MessageTypeWrongSide(string type, bool initiator) =>
+        new(initiator
+            ? $"The message cannot be sent because the message type '{type}' is marked SENT BY TARGET in the contract, however this service is an Initiator."
+            : $"The message cannot be sent because the message type '{type}' is marked SENT BY INITIATOR in the contract, however this service is a Target.", 8432, 16, 1);
+
+    /// <summary>Msg 8433: <c>SEND</c> of a NULL body.</summary>
+    internal static SimulatedSqlException MessageBodyNull() =>
+        new("The message body may not be NULL.  A zero-length UNICODE or binary string is allowed.", 8433, 16, 1);
+
+    /// <summary>Msg 8411: a dialog <c>LIFETIME</c> outside 1 to 2147483647.</summary>
+    internal static SimulatedSqlException DialogLifetimeOutOfRange(long value) =>
+        new($"The dialog lifetime value of {value} is outside the allowable range of 1 to 2147483647. Specify a valid dialog lifetime value.", 8411, 16, 1);
+
+    /// <summary>
+    /// Msg 8165: an <c>END CONVERSATION … WITH ERROR</c> code (state 3, up to
+    /// 2147483647) or a conversation timer's timeout (state 2, up to
+    /// 2147483646) below 1.
+    /// </summary>
+    internal static SimulatedSqlException InvalidSubcommandValue(long value, long maximum, byte state) =>
+        new($"Invalid subcommand value {value}. Legal range from 1 to {maximum}.", 8165, 16, state);
+
+    /// <summary>Msg 8439: <c>MOVE CONVERSATION</c> to a group that doesn't exist.</summary>
+    internal static SimulatedSqlException ConversationGroupInvalid(Guid group) =>
+        new($"The destination conversation group '{group.ToString().ToUpperInvariant()}' is invalid.", 8439, 16, 1);
+
+    /// <summary>Msg 8447: a <c>RECEIVE</c> column list mixing variable assignments with returned columns.</summary>
+    internal static SimulatedSqlException ReceiveAssignmentMixedWithRetrieval() =>
+        new("A RECEIVE statement that assigns a value to a variable must not be combined with data retrieval operations.", 8447, 15, 1);
+
+    /// <summary>Msg 9617: <c>RECEIVE</c> from a queue whose status is off.</summary>
+    internal static SimulatedSqlException QueueDisabled(string queue) =>
+        new($"The service queue \"{queue}\" is currently disabled.", 9617, 16, 1);
+
+    /// <summary>
+    /// Msg 1088: a queue its reader lacks <c>RECEIVE</c> on — state 41 for
+    /// <c>BEGIN DIALOG</c>'s initiator queue, 42 for <c>RECEIVE</c>.
+    /// </summary>
+    internal static SimulatedSqlException QueueNotFoundOrDenied(string queue, byte state) =>
+        new($"Cannot find the object \"{queue}\" because it does not exist or you do not have permissions.", 1088, 16, state);
+
+    /// <summary>Msg 8421: <c>BEGIN DIALOG</c> to a NULL service name.</summary>
+    internal static SimulatedSqlException BrokerTargetServiceMissing() =>
+        new("The service name is missing.  Specify a service name.", 8421, 16, 2);
+
     /// <summary>Msg 8403: a contract naming one message type twice.</summary>
     internal static SimulatedSqlException MessageTypeSpecifiedTwice(string name) =>
         new($"The message type '{name}' is specified more than once.  Remove the duplicate message type.", 8403, 16, 1);

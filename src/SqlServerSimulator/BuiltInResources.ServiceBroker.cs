@@ -196,6 +196,61 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
+        var stateChar = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
+        Sys("conversation_endpoints",
+        [
+            new("conversation_handle", SqlType.UniqueIdentifier, null, false),
+            new("conversation_id", SqlType.UniqueIdentifier, null, false),
+            new("is_initiator", SqlType.Bit, null, false),
+            new("service_contract_id", SqlType.Int32, null, false),
+            new("conversation_group_id", SqlType.UniqueIdentifier, null, false),
+            new("service_id", SqlType.Int32, null, false),
+            new("lifetime", SqlType.DateTime, null, false),
+            new("state", stateChar, 2, false),
+            new("state_desc", nvarchar60Catalog, 60, true),
+            new("far_service", brokerName256, 256, false),
+            new("far_broker_instance", brokerName128, 128, true),
+            new("principal_id", SqlType.Int32, null, false),
+            new("far_principal_id", SqlType.Int32, null, false),
+            new("outbound_session_key_identifier", SqlType.UniqueIdentifier, null, false),
+            new("inbound_session_key_identifier", SqlType.UniqueIdentifier, null, false),
+            new("security_timestamp", SqlType.DateTime, null, false),
+            new("dialog_timer", SqlType.DateTime, null, false),
+            new("send_sequence", SqlType.BigInt, null, false),
+            new("last_send_tran_id", SqlType.GetBinary(6), 6, false),
+            new("end_dialog_sequence", SqlType.BigInt, null, false),
+            new("receive_sequence", SqlType.BigInt, null, false),
+            new("receive_sequence_frag", SqlType.Int32, null, false),
+            new("system_sequence", SqlType.BigInt, null, false),
+            new("first_out_of_order_sequence", SqlType.BigInt, null, false),
+            new("last_out_of_order_sequence", SqlType.BigInt, null, false),
+            new("last_out_of_order_frag", SqlType.Int32, null, false),
+            new("is_system", SqlType.Bit, null, false),
+            new("priority", SqlType.TinyInt, null, false),
+        ], (batch, database) => EnumerateConversationEndpoints(batch, database, stateChar));
+        Sys("conversation_groups",
+        [
+            new("conversation_group_id", SqlType.UniqueIdentifier, null, false),
+            new("service_id", SqlType.Int32, null, false),
+            new("is_system", SqlType.Bit, null, true),
+        ], static (batch, database) => EnumerateConversationGroups(batch, database));
+        Sys("transmission_queue",
+        [
+            new("conversation_handle", SqlType.UniqueIdentifier, null, false),
+            new("to_service_name", brokerName256, 256, true),
+            new("to_broker_instance", brokerName128, 128, true),
+            new("from_service_name", brokerName256, 256, true),
+            new("service_contract_name", brokerName256, 256, true),
+            new("enqueue_time", SqlType.DateTime, null, false),
+            new("message_sequence_number", SqlType.BigInt, null, false),
+            new("message_type_name", brokerName256, 256, true),
+            new("is_conversation_error", SqlType.Bit, null, false),
+            new("is_end_of_dialog", SqlType.Bit, null, false),
+            new("message_body", SqlType.VarbinaryMax, SqlType.MaxLengthSentinel, true),
+            new("transmission_status", SqlType.NVarchar, 4000, true),
+            new("priority", SqlType.TinyInt, null, false),
+        ], static (batch, database) => EnumerateTransmissionQueue(batch, database));
+
         var defaultName = NVarcharSqlType.Get(32, Collation.Baseline, Coercibility.Implicit);
         Sys("dm_broker_queue_monitors",
         [
@@ -206,6 +261,117 @@ internal static partial class BuiltInResources
             new("last_activated_time", SqlType.DateTime, null, true),
             new("tasks_waiting", SqlType.Int32, null, true),
         ], static (batch, _) => EnumerateQueueMonitors(batch));
+    }
+
+    /// <summary>
+    /// <c>sys.conversation_endpoints</c>: the database's endpoints as the
+    /// reading session sees them, in handle order. The session keys, security
+    /// timestamp and out-of-order bookkeeping read as a local dialog's; an
+    /// unset timer as 1900-01-01.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateConversationEndpoints(Parser.BatchContext batch, Database database, CharSqlType stateChar)
+    {
+        var rows = new List<SqlValue[]>();
+        if (batch.Connection.Simulation.BrokerIfUsed is not { } broker)
+            return rows;
+        var owner = batch.Connection.LockOwner;
+        var never = SqlValue.FromDateTime(new DateTime(1900, 1, 1));
+        var noKey = SqlValue.FromGuid(Guid.Empty);
+        var zeroLong = SqlValue.FromInt64(0);
+        var zero = SqlValue.FromInt32(0);
+        var noTransaction = SqlValue.FromBinary(SqlType.GetBinary(6), new byte[6]);
+        lock (broker.Gate)
+        {
+            broker.FireDue(DateTime.UtcNow);
+            foreach (var (_, endpoint) in broker.Endpoints.OrderBy(static pair => pair.Key))
+            {
+                if (!ReferenceEquals(endpoint.Database, database) || !BrokerRuntime.Sees(endpoint.PendingOwner, owner))
+                    continue;
+                rows.Add([
+                    SqlValue.FromGuid(endpoint.Handle),
+                    SqlValue.FromGuid(endpoint.ConversationId),
+                    SqlValue.FromBoolean(endpoint.IsInitiator),
+                    SqlValue.FromInt32(endpoint.Contract.Id),
+                    SqlValue.FromGuid(endpoint.Group.Id),
+                    SqlValue.FromInt32(endpoint.Service.Id),
+                    SqlValue.FromDateTime(endpoint.Lifetime),
+                    SqlValue.FromChar(stateChar, endpoint.StateCode),
+                    SqlValue.FromNVarchar(endpoint.StateDescription),
+                    SqlValue.FromNVarchar(endpoint.FarService),
+                    NVarcharOrNull(endpoint.FarBrokerInstance),
+                    SqlValue.FromInt32(endpoint.PrincipalId),
+                    SqlValue.FromInt32(endpoint.FarPrincipalId),
+                    noKey,
+                    noKey,
+                    never,
+                    endpoint.DialogTimer is { } timer ? SqlValue.FromDateTime(timer) : never,
+                    SqlValue.FromInt64(endpoint.SendSequence),
+                    noTransaction,
+                    SqlValue.FromInt64(endpoint.EndDialogSequence),
+                    SqlValue.FromInt64(endpoint.ReceiveSequence),
+                    zero,
+                    zeroLong,
+                    SqlValue.FromInt64(-1),
+                    zeroLong,
+                    zero,
+                    notMsShipped,
+                    SqlValue.FromByte(5),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary><c>sys.conversation_groups</c>: the database's conversation groups as the reading session sees them.</summary>
+    private static List<SqlValue[]> EnumerateConversationGroups(Parser.BatchContext batch, Database database)
+    {
+        var rows = new List<SqlValue[]>();
+        if (batch.Connection.Simulation.BrokerIfUsed is not { } broker)
+            return rows;
+        var owner = batch.Connection.LockOwner;
+        lock (broker.Gate)
+        {
+            foreach (var (_, group) in broker.Groups.OrderBy(static pair => pair.Key))
+            {
+                if (ReferenceEquals(group.Database, database) && BrokerRuntime.Sees(group.PendingOwner, owner))
+                    rows.Add([SqlValue.FromGuid(group.Id), SqlValue.FromInt32(group.Service.Id), notMsShipped]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary><c>sys.transmission_queue</c>: the messages the database's endpoints sent that wait undelivered.</summary>
+    private static List<SqlValue[]> EnumerateTransmissionQueue(Parser.BatchContext batch, Database database)
+    {
+        var rows = new List<SqlValue[]>();
+        if (batch.Connection.Simulation.BrokerIfUsed is not { } broker)
+            return rows;
+        var owner = batch.Connection.LockOwner;
+        lock (broker.Gate)
+        {
+            foreach (var message in broker.Transmission)
+            {
+                var from = message.From;
+                if (!ReferenceEquals(from.Database, database) || !BrokerRuntime.Sees(message.PendingOwner, owner))
+                    continue;
+                rows.Add([
+                    SqlValue.FromGuid(from.Handle),
+                    SqlValue.FromNVarchar(from.FarService),
+                    SqlValue.FromNVarchar(from.FarBrokerInstance ?? ""),
+                    SqlValue.FromNVarchar(from.Service.Name),
+                    SqlValue.FromNVarchar(from.Contract.Name),
+                    SqlValue.FromDateTime(message.EnqueueTime),
+                    SqlValue.FromInt64(message.Sequence),
+                    SqlValue.FromNVarchar(message.MessageTypeName),
+                    SqlValue.FromBoolean(message.IsError),
+                    SqlValue.FromBoolean(message.IsEndOfDialog),
+                    message.Body is { } body ? SqlValue.FromVarbinary(SqlType.VarbinaryMax, body) : SqlValue.Null(SqlType.VarbinaryMax),
+                    SqlValue.FromNVarchar(message.Status),
+                    SqlValue.FromByte(5),
+                ]);
+            }
+        }
+        return rows;
     }
 
     private static SqlValue NVarcharOrNull(string? value) => value is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(value);
@@ -339,19 +505,35 @@ internal static partial class BuiltInResources
     /// passed over and its uncommitted receipts still listed, where real's
     /// read would wait on them.
     /// </summary>
-    internal static CatalogView QueueRowset(ServiceQueue queue, Database database) =>
+    internal static CatalogView QueueRowset(ServiceQueue queue) =>
         new(queue.Name, QueueColumns, (batch, _) =>
         {
             var owner = batch.Connection.LockOwner;
             var rows = new List<SqlValue[]>();
-            lock (database.ServiceBroker.Gate)
+            if (batch.Connection.Simulation.BrokerIfUsed is not { } broker)
+                return rows;
+            var listed = new List<QueuedMessage>();
+            lock (broker.Gate)
             {
+                broker.FireDue(DateTime.UtcNow);
                 foreach (var message in queue.Messages)
                 {
-                    if (message.PendingOwner is null || ReferenceEquals(message.PendingOwner, owner))
-                        rows.Add(QueueRow(message));
+                    // A session's own RECEIVE takes the message from its view;
+                    // another's still lists it until that commits.
+                    if (BrokerRuntime.Sees(message.PendingOwner, owner) && !ReferenceEquals(message.ReceivedBy, owner))
+                        listed.Add(message);
                 }
             }
+            // In the order of the queue's clustered index — status, group,
+            // priority, conversation, then queuing order — which a scan reads.
+            listed.Sort(static (a, b) =>
+                a.Status != b.Status ? a.Status.CompareTo(b.Status)
+                : new System.Data.SqlTypes.SqlGuid(a.ConversationGroupId).CompareTo(new System.Data.SqlTypes.SqlGuid(b.ConversationGroupId)) is var byGroup and not 0 ? byGroup
+                : a.Priority != b.Priority ? a.Priority.CompareTo(b.Priority)
+                : new System.Data.SqlTypes.SqlGuid(a.ConversationHandle).CompareTo(new System.Data.SqlTypes.SqlGuid(b.ConversationHandle)) is var byHandle and not 0 ? byHandle
+                : a.QueuingOrder.CompareTo(b.QueuingOrder));
+            foreach (var message in listed)
+                rows.Add(QueueRow(message));
             return rows;
         })
         {

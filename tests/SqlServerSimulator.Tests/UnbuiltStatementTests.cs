@@ -25,11 +25,6 @@ public sealed class UnbuiltStatementTests
     [DataRow("backup service master key to file = 'x' encryption by password = 'x'", "BACKUP SERVICE MASTER KEY")]
     [DataRow("restore master key from file = 'x' decryption by password = 'x' encryption by password = 'x'", "RESTORE MASTER KEY")]
     [DataRow("add signature to p by certificate c", "ADD SIGNATURE")]
-    [DataRow("declare @h uniqueidentifier; begin dialog conversation @h from service s to service 's'", "BEGIN DIALOG")]
-    [DataRow("declare @h uniqueidentifier; send on conversation @h (0x00)", "SEND ON CONVERSATION")]
-    [DataRow("receive top (1) * from q", "RECEIVE")]
-    [DataRow("declare @h uniqueidentifier; end conversation @h", "END CONVERSATION")]
-    [DataRow("waitfor (receive top (1) * from q), timeout 10", "WAITFOR (RECEIVE")]
     public void UnbuiltStatement_RaisesNotSupported(string sql, string statement)
     {
         var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(sql));
