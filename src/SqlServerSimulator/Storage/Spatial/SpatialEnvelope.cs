@@ -71,8 +71,8 @@ internal static class SpatialEnvelope
         return magnitude < DegenerateSum
             ? new SpatialCoordinate(0, 90)
             : new SpatialCoordinate(
-                double.RadiansToDegrees(Math.Atan2(y / magnitude, x / magnitude)),
-                double.RadiansToDegrees(Math.Asin(Math.Clamp(z / magnitude, -1, 1))));
+                SpatialEllipsoid.MultiplyDivideDegrees(Math.Atan2(y / magnitude, x / magnitude)),
+                SpatialEllipsoid.MultiplyDivideDegrees(Math.Asin(Math.Clamp(z / magnitude, -1, 1))));
     }
 
     /// <summary><c>EnvelopeAngle()</c>, or null for an empty instance.</summary>
@@ -94,7 +94,7 @@ internal static class SpatialEnvelope
             // real answers 0 for a lone point.
             var dot = (cx * x) + (cy * y) + (cz * z);
             var cross = new SpatialVector(cx, cy, cz).Cross(new SpatialVector(x, y, z)).Length;
-            widest = Math.Max(widest, double.RadiansToDegrees(Math.Atan2(cross, dot)));
+            widest = Math.Max(widest, SpatialEllipsoid.MultiplyDivideDegrees(Math.Atan2(cross, dot)));
         }
         return widest >= HemisphereDegrees ? 180 : widest;
     }
@@ -153,7 +153,7 @@ internal static class SpatialEnvelope
         if (Angle(row) is not { } degrees || degrees >= HemisphereDegrees || Center(row) is not { } center)
             return null;
         var (x, y, z) = UnitVector(center);
-        var cap = (Center: new SpatialVector(x, y, z), Radius: double.DegreesToRadians(degrees));
+        var cap = (Center: new SpatialVector(x, y, z), Radius: SpatialEllipsoid.MultiplyDivideRadians(degrees));
         if (sofar is not { } previous)
             return cap;
         var between = Math.Atan2(previous.Center.Cross(cap.Center).Length, previous.Center.Dot(cap.Center));
@@ -173,14 +173,14 @@ internal static class SpatialEnvelope
 
     /// <summary>The (longitude, latitude) of a unit vector, reading latitude as a spherical angle.</summary>
     public static SpatialCoordinate ToCoordinate(SpatialVector direction) => new(
-        double.RadiansToDegrees(Math.Atan2(direction.Y, direction.X)),
-        double.RadiansToDegrees(Math.Asin(Math.Clamp(direction.Z, -1, 1))));
+        SpatialEllipsoid.MultiplyDivideDegrees(Math.Atan2(direction.Y, direction.X)),
+        SpatialEllipsoid.MultiplyDivideDegrees(Math.Asin(Math.Clamp(direction.Z, -1, 1))));
 
     /// <summary>The unit vector of a (longitude, latitude) pair read as spherical angles.</summary>
     private static (double X, double Y, double Z) UnitVector(SpatialCoordinate point)
     {
-        var longitude = double.DegreesToRadians(point.X);
-        var latitude = double.DegreesToRadians(point.Y);
+        var longitude = SpatialEllipsoid.MultiplyDivideRadians(point.X);
+        var latitude = SpatialEllipsoid.MultiplyDivideRadians(point.Y);
         var horizontal = Math.Cos(latitude);
         return (horizontal * Math.Cos(longitude), horizontal * Math.Sin(longitude), Math.Sin(latitude));
     }

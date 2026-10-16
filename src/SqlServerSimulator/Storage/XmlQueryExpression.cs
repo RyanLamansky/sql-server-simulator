@@ -808,7 +808,7 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
             }
             else if (this.op == '*')
             {
-                value = Math.Round(value, 6, MidpointRounding.AwayFromZero);
+                value = DoubleDigitRounding.Round(value, 6, MidpointRounding.AwayFromZero);
             }
         }
         results.Add(XmlAtomicTypes.Number(value, this.TypeName));

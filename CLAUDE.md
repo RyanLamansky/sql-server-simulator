@@ -207,6 +207,7 @@ Write to them up front to save a build round trip:
 - **SSS016**: one `///` comment, one `<summary>`; a second is a member inserted between another member's documentation and its declaration, so move the displaced block back to its member.
 - **SSS017**: no `!` on a value already declared not-null (a non-nullable parameter, local, field, property or method result, a value type, `this`, `new`, a string); it stands in for the SDK's IDE0370, disabled for build speed → [`build-analyzers.md`](docs/claude/build-analyzers.md).
 - **SSS018**: a disposable `new` that is only used through its members, or thrown away at once, is declared `using`; it stands in for CA2000, disabled for build speed, so an ownership transfer it can't see takes the pragma.
+- **SSS019**: no BCL numeric operation whose result moved between .NET 10 and .NET 11 — a `double` / `float` → `decimal` conversion, `Math.Round(double, int)`, `RadiansToDegrees` / `DegreesToRadians`; the message names the engine's runtime-independent replacement.
 - A deliberate exception takes `#pragma warning disable SSSnnn` plus a one-line rationale.
 - **MSTEST0049**: async tests thread `TestContext.CancellationToken` (`public TestContext TestContext { get; set; } = null!;`).
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` and typed asserts over generic ones.

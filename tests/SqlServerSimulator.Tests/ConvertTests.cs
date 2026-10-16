@@ -919,4 +919,54 @@ public sealed class ConvertTests
     [DataRow("'2026-10-16 0:60:0'", "smalldatetime", "The conversion of a varchar data type to a smalldatetime data type resulted in an out-of-range value.")]
     public void StyledInput_ClockFieldOutOfRange_IsMsg242(string input, string target, string message)
         => new Simulation().AssertSqlError($"select convert({target}, {input}, 120)", 242, message);
+
+    /// <summary>
+    /// Hour 24 is out of range in every styled form, never the next day's
+    /// midnight (probed 2026-10-16 against SQL Server 2025): the legacy pair
+    /// reports Msg 242, the modern types Msg 241.
+    /// </summary>
+    [TestMethod]
+    [DataRow("datetime", "'2026-10-16 24:0:0'", 120, 242)]
+    [DataRow("datetime", "'2026-10-16 24:00'", 120, 242)]
+    [DataRow("datetime", "'2026-10-16 24:00:00.000'", 121, 242)]
+    [DataRow("datetime", "'2026-10-16 24:00:00:000'", 121, 242)]
+    [DataRow("smalldatetime", "'2026-10-16 24:00'", 120, 242)]
+    [DataRow("datetime", "'20261016 24:00'", 112, 242)]
+    [DataRow("datetime", "'Oct 16 2026 24:00'", 100, 242)]
+    [DataRow("datetime", "'10/16/2026 24:00'", 101, 242)]
+    [DataRow("datetime", "'16/10/2026 24:00:00'", 103, 242)]
+    [DataRow("datetime", "'24:00'", 108, 242)]
+    [DataRow("datetime", "'24:00:00:000'", 114, 242)]
+    [DataRow("datetime", "'2026-10-16T24:00:00'", 126, 242)]
+    [DataRow("datetime", "'2026-10-16 24:00'", 0, 242)]
+    [DataRow("datetime2", "'2026-10-16 24:0:0'", 120, 241)]
+    [DataRow("datetime2", "'2026-10-16 24:00:00.000'", 121, 241)]
+    [DataRow("datetime2", "'20261016 24:00'", 112, 241)]
+    [DataRow("datetime2", "'Oct 16 2026 24:00'", 100, 241)]
+    [DataRow("datetime2", "'10/16/2026 24:00'", 101, 241)]
+    [DataRow("datetime2", "'24:00:00'", 108, 241)]
+    [DataRow("datetime2", "'2026-10-16T24:00:00'", 126, 241)]
+    [DataRow("datetimeoffset", "'2026-10-16 24:00'", 120, 241)]
+    [DataRow("time", "'24:00'", 108, 241)]
+    [DataRow("time", "'24:00:00'", 114, 241)]
+    public void StyledInput_Hour24_IsRefused(string target, string input, int style, int number)
+        => _ = new Simulation().AssertSqlError($"select convert({target}, {input}, {style})", number);
+
+    /// <summary>
+    /// A clock field out of range is Msg 242 on the legacy pair whatever the
+    /// seconds carry and whichever date form leads, while a fraction or colon
+    /// milliseconds too long to read is a format failure (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'2026-10-16 0:60:0.000'", 121, 242)]
+    [DataRow("'2026-10-16 0:0:60.5'", 121, 242)]
+    [DataRow("'2026-10-16 0:60:0:000'", 121, 242)]
+    [DataRow("'2026-10-16 0:0:0:1000'", 121, 241)]
+    [DataRow("'2026-10-16 0:0:0.12345678'", 121, 241)]
+    [DataRow("'Oct 16 2026 0:60'", 100, 242)]
+    [DataRow("'20261016 0:60'", 112, 242)]
+    [DataRow("'0:60:00.000'", 114, 242)]
+    public void StyledInput_ClockFieldOutOfRange_BySecondsAndDateForm(string input, int style, int number)
+        => _ = new Simulation().AssertSqlError($"select convert(datetime, {input}, {style})", number);
 }

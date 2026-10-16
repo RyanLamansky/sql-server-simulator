@@ -151,7 +151,7 @@ internal static class XmlAtomicTypes
             return value > 0 ? "INF" : "-INF";
         if (Math.Abs(value) < 7.9e27)
         {
-            var exact = (decimal)double.Parse(value.ToString("G15", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+            var exact = BinaryFloatToDecimal.FromDouble(double.Parse(value.ToString("G15", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture));
             var text = exact.ToString(CultureInfo.InvariantCulture);
             if (text.Contains('.', StringComparison.Ordinal))
                 text = text.TrimEnd('0').TrimEnd('.');
@@ -169,7 +169,7 @@ internal static class XmlAtomicTypes
     {
         if (double.IsNaN(value) || double.IsInfinity(value) || Math.Abs(value) * Math.Pow(10, digits) >= 7.9e27)
             return value;
-        var exact = (decimal)double.Parse(value.ToString("G15", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        var exact = BinaryFloatToDecimal.FromDouble(double.Parse(value.ToString("G15", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture));
         var scale = 1m;
         for (var i = 0; i < digits; i++)
             scale *= 10;

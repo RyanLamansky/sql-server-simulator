@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Globalization;
 
 namespace SqlServerSimulator.Storage;
 
@@ -73,7 +72,7 @@ internal sealed class DecimalSqlType(byte precision, byte scale) : SqlType(SqlTy
         if (raw is Decimal38 wide)
             return SqlValue.FromDecimal(wide.Scale <= this.scale ? this : Get(Decimal38.MaxPrecision, wide.Scale), wide);
 
-        var value = Convert.ToDecimal(raw, CultureInfo.InvariantCulture);
+        var value = BinaryFloatToDecimal.FromParameter(raw);
         // The .NET decimal carries its own scale in the high bits of its
         // flags word — preserve it in the bound SqlValue so a parameter of
         // <c>123.45m</c> doesn't lose its fractional part to a default

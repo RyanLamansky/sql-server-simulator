@@ -122,6 +122,9 @@ partial class Simulation
             return null;
         }
         if (arguments.Count < 4 || !IsGivenText(arguments[2]) || !IsGivenText(arguments[3])
+            // Hour 24 is refused ahead of the BCL, which reads it as the next
+            // day's midnight from .NET 11.
+            || arguments[3].Value.AsString is [_, _, _, _, '-', _, _, '-', _, _, 'T', '2', '4', ..]
             || !DateTime.TryParseExact(arguments[3].Value.AsString, ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var before))
         {
             return invalid;

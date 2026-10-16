@@ -53,7 +53,7 @@ internal static class SpatialEllipsoid
 {
     /// <summary>
     /// Degrees to radians as real converts a coordinate: one multiplication by
-    /// the precomputed ratio. <c>double.DegreesToRadians</c> multiplies by π
+    /// the precomputed ratio. <see cref="MultiplyDivideRadians"/> multiplies by π
     /// and then divides, which rounds differently in the last place — and the
     /// last place shows wherever real writes a coordinate back through a unit
     /// vector (probed 2026-09-29 against SQL Server 2025).
@@ -62,6 +62,19 @@ internal static class SpatialEllipsoid
 
     /// <summary>Radians to degrees as real converts them; see <see cref="RadiansPerDegree"/>.</summary>
     public const double DegreesPerRadian = 180 / Math.PI;
+
+    /// <summary>
+    /// Radians to degrees as a multiplication by 180 and then a division by π,
+    /// the form .NET 10's <c>double.RadiansToDegrees</c> computes — written out
+    /// because .NET 11's rounds differently in the last place
+    /// (<c>-2.129301687433082</c> is <c>-122</c> on .NET 10 and
+    /// <c>-121.99999999999999</c> on .NET 11), and the results its callers
+    /// write were matched to real through this rounding.
+    /// </summary>
+    public static double MultiplyDivideDegrees(double radians) => radians * 180 / Math.PI;
+
+    /// <summary>The inverse of <see cref="MultiplyDivideDegrees"/>: a multiplication by π, then a division by 180.</summary>
+    public static double MultiplyDivideRadians(double degrees) => degrees * Math.PI / 180;
 
     /// <summary>The ellipsoid a measurement on this thread has entered, or null for WGS 84.</summary>
     [ThreadStatic]

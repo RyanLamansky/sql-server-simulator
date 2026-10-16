@@ -455,10 +455,10 @@ public class SqlDataRecord : IDataRecord
             SqlDbType.Char or SqlDbType.NChar or SqlDbType.VarChar or SqlDbType.NVarChar or SqlDbType.Text or SqlDbType.NText
                 => value is null ? SqlString.Null : new SqlString((string)value),
             SqlDbType.DateTime or SqlDbType.SmallDateTime => value is null ? SqlDateTime.Null : new SqlDateTime((DateTime)value),
-            SqlDbType.Decimal => value is null ? SqlDecimal.Null : new SqlDecimal(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
+            SqlDbType.Decimal => value is null ? SqlDecimal.Null : new SqlDecimal(SqlServerSimulator.Storage.BinaryFloatToDecimal.FromParameter(value)),
             SqlDbType.Float => value is null ? SqlDouble.Null : new SqlDouble(Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture)),
             SqlDbType.Int => value is null ? SqlInt32.Null : new SqlInt32(Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture)),
-            SqlDbType.Money or SqlDbType.SmallMoney => value is null ? SqlMoney.Null : new SqlMoney(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
+            SqlDbType.Money or SqlDbType.SmallMoney => value is null ? SqlMoney.Null : new SqlMoney(SqlServerSimulator.Storage.BinaryFloatToDecimal.FromParameter(value)),
             SqlDbType.Real => value is null ? SqlSingle.Null : new SqlSingle(Convert.ToSingle(value, System.Globalization.CultureInfo.InvariantCulture)),
             SqlDbType.SmallInt => value is null ? SqlInt16.Null : new SqlInt16(Convert.ToInt16(value, System.Globalization.CultureInfo.InvariantCulture)),
             SqlDbType.TinyInt => value is null ? SqlByte.Null : new SqlByte(Convert.ToByte(value, System.Globalization.CultureInfo.InvariantCulture)),

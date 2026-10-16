@@ -700,7 +700,8 @@ Over 165 random pairs (2026-09-28) 118 match exactly, 43 within 1e-9 and 4 are t
 `geography`'s runs between the points where the least great elliptic distance is reached.
 A foot on an edge is found where the distance's slope along the edge crosses zero, not where the distance is least: a minimum is flat, so a search on the value stalls at the square root of its rounding — metres of foot — where the slope's zero is sharp.
 Real writes both ends through a unit vector and back, reading latitude as a spherical angle and converting by one multiplication with `π/180` and `180/π` each way, so an input vertex comes back with its last digit disturbed: `POINT (1 1)` ends a line as `0.99999999999999978 1` (probed 2026-09-29).
-`double.DegreesToRadians` multiplies by π and then divides, which rounds differently in the last place, so the conversion is spelled out.
+`double.DegreesToRadians` multiplies by π and then divides on .NET 10, which rounds differently in the last place, so the conversion is spelled out.
+The envelope and constructive paths that were matched to real through that multiply-then-divide form spell it out too (`SpatialEllipsoid.MultiplyDivideDegrees` / `MultiplyDivideRadians`), because .NET 11's `double.RadiansToDegrees` / `DegreesToRadians` round differently again (`-2.129301687433082` rad is `-122`° on .NET 10, `-121.99999999999999`° on .NET 11), so a BCL angle helper is never called directly.
 
 `Filter(other)` is `STIntersects` for both types, which is Microsoft's documented contract when no spatial index serves the query.
 

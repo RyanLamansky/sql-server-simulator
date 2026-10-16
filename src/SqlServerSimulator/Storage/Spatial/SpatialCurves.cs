@@ -578,7 +578,7 @@ internal static class SpatialCurves
         if (relative)
         {
             var angle = SpatialEnvelope.Angle(ForOperations(shape, isGeography: true)) ?? 0;
-            tolerance *= double.DegreesToRadians(angle) * SpatialEllipsoid.SemiMajor;
+            tolerance *= SpatialEllipsoid.MultiplyDivideRadians(angle) * SpatialEllipsoid.SemiMajor;
         }
         return WithoutZM(Linearize(shape, Geodetic((start, mid, end) =>
         {

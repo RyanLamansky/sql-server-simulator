@@ -92,6 +92,8 @@ internal sealed class ParseFunction : Expression
         if (target == SqlType.Real) return SqlValue.FromSingle(float.Parse(input, NumberStyles.Float | NumberStyles.AllowThousands, culture));
         if (target is DecimalSqlType d) return SqlValue.FromDecimal(d, ParseExactNumeric(input, d, culture));
         if (target == SqlType.Money || target == SqlType.SmallMoney) return SqlValue.FromMoney(target, decimal.Parse(input, NumberStyles.Currency | NumberStyles.Number, culture));
+        if (NamesHour24(input, culture.DateTimeFormat.TimeSeparator))
+            throw new FormatException($"'{input}' names hour 24.");
         if (target == SqlType.Date) return SqlValue.FromDate(DateOnly.Parse(input, culture));
         if (target == SqlType.DateTime) return SqlValue.FromDateTime(DateTime.Parse(input, culture));
         if (target == SqlType.SmallDateTime) return SqlValue.FromSmallDateTime(DateTime.Parse(input, culture));
@@ -102,6 +104,42 @@ internal sealed class ParseFunction : Expression
         return target is DateTimeOffsetSqlType
             ? SqlValue.FromDateTimeOffset(target, DateTimeOffset.Parse(input, culture))
             : throw new InvalidOperationException($"PARSE admits no {target} target.");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="input"/> holds a <c>24:00</c> clock reading —
+    /// the number 24, a time separator (<c>:</c> or the culture's own) and
+    /// zeros. Real's .NET Framework parse refuses it in every culture (Msg 9819,
+    /// probed 2026-10-16 against SQL Server 2025), as .NET 10's does, while
+    /// .NET 11's reads it as the next day's midnight, so it is refused here
+    /// before the runtime's parse sees it. Any other hour past 23 every runtime
+    /// refuses on its own.
+    /// </summary>
+    private static bool NamesHour24(ReadOnlySpan<char> input, string timeSeparator)
+    {
+        for (var at = input.IndexOf("24", StringComparison.Ordinal); at >= 0; at = NextAt(input, at))
+        {
+            if (at > 0 && char.IsAsciiDigit(input[at - 1]))
+                continue;
+            var rest = input[(at + 2)..].TrimStart();
+            if (rest.StartsWith(":", StringComparison.Ordinal))
+                rest = rest[1..];
+            else if (timeSeparator.Length > 0 && rest.StartsWith(timeSeparator, StringComparison.Ordinal))
+                rest = rest[timeSeparator.Length..];
+            else
+                continue;
+            rest = rest.TrimStart();
+            var zeros = rest.IndexOfAnyExcept('0');
+            if (zeros != 0 && (zeros < 0 || !char.IsAsciiDigit(rest[zeros])))
+                return true;
+        }
+        return false;
+
+        static int NextAt(ReadOnlySpan<char> input, int at)
+        {
+            var next = input[(at + 1)..].IndexOf("24", StringComparison.Ordinal);
+            return next < 0 ? -1 : at + 1 + next;
+        }
     }
 
     /// <summary>

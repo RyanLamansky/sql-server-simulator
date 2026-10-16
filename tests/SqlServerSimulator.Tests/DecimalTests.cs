@@ -37,13 +37,13 @@ public sealed class DecimalTests
     }
 
     [TestMethod]
-    [DataRow("'+12.34'", 12.34)]
-    [DataRow("' 12.34 '", 12.34)]
-    [DataRow("'.5'", 0.5)]
-    [DataRow("'5.'", 5.0)]
-    [DataRow("'-.5'", -0.5)]
-    public void Cast_StringToDecimal_AcceptsCommonForms(string literal, double expectedRaw) =>
-        AreEqual((decimal)expectedRaw, ExecuteScalar<decimal>($"select cast({literal} as decimal(10, 2))"));
+    [DataRow("'+12.34'", "12.34")]
+    [DataRow("' 12.34 '", "12.34")]
+    [DataRow("'.5'", "0.5")]
+    [DataRow("'5.'", "5.0")]
+    [DataRow("'-.5'", "-0.5")]
+    public void Cast_StringToDecimal_AcceptsCommonForms(string literal, string expected) =>
+        AreEqual(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), ExecuteScalar<decimal>($"select cast({literal} as decimal(10, 2))"));
 
     [TestMethod]
     [DataRow("'abc'")]

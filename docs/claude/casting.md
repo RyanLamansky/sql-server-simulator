@@ -65,6 +65,10 @@ The guard is on the binary exponent rather than a `>= 1e38` magnitude test, sinc
 
 Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment.
 
+A few paths still go through a .NET `decimal`: `float` / `real` → `datetime` / `smalldatetime` (as fractional days), an in-process `double` / `float` parameter value bound as `decimal` or `money`, the XQuery evaluator's exact-number rendering, and a SQLCLR `SqlDataRecord`'s decimal column.
+They read the value at 15 (`double`) or 7 (`float`) significant digits, the rounding .NET 10's cast performs, through `BinaryFloatToDecimal` — that cast's algorithm written out, bit-exact against it — because .NET 11's cast converts exactly (`(decimal)12.34` is `12.339999999999999857891452848` there).
+`Math.Round(double, digits)` changed between the two runtimes too, so the engine rounds to digits through `DoubleDigitRounding`, and SSS019 keeps the BCL forms out of the engine; it can't see a `double` reaching `Convert.ToDecimal(object)`, which the parameter sites route through `BinaryFloatToDecimal.FromParameter`.
+
 ## Which message an unreadable string reports
 
 The target picks the message (probed 2026-09-25 against SQL Server 2025): `tinyint` / `smallint` / `int` / `bit` report Msg 245 naming the value, `bigint` — like `decimal` / `numeric` / `float` / `real`, each named as itself — Msg 8114 naming only the types, `money` Msg 235 and `smallmoney` a message of its own, Msg 293.
@@ -354,7 +358,8 @@ Style 0 is the permissive default: mdy at either width, and the only non-ISO sty
 So `CONVERT(date, '2026-05-13', 101)` raises Msg 241 where `CONVERT(datetime, …)` succeeds — a different grammar, not a leniency difference.
 The modern family also accepts an unambiguous ISO **date-with-`T`** under every style (`CONVERT(date, '1999-01-02T10:00:00', 3)` parses) independently of that style's numeric grammar.
 
-A time after the date reads its minutes and seconds at one digit or two under every style, as the unstyled grammar does (`CONVERT(datetime, '2026-10-16 0:0:5', 120)`), and a clock reading whose field is out of range (`0:60:0`, `24:0:0`) is the legacy targets' Msg 242, as an impossible day is, its wording naming the source's own string type (probed 2026-10-16 against SQL Server 2025).
+A time after the date reads its minutes and seconds at one digit or two under every style, as the unstyled grammar does (`CONVERT(datetime, '2026-10-16 0:0:5', 120)`), and a clock reading whose field is out of range (`0:60:0`, `24:0:0`, `0:60:0.000`, `0:60:0:000`) is the legacy targets' Msg 242 after any date form, compact and month-name included, as an impossible day is, its wording naming the source's own string type; an eighth fractional digit or a fourth colon-millisecond one is Msg 241 instead (probed 2026-10-16 against SQL Server 2025).
+The styled forms read the clock through `DateTime.TryParseExact`, so the engine refuses an hour past 23 itself before the BCL sees it: from .NET 11 the BCL reads `24:00` (with zero minutes, seconds and fraction) as the next day's midnight, where SQL Server refuses hour 24 in every styled form and in `PARSE` (Msg 9819, every culture).
 `msdb.dbo.agent_datetime` reads Agent's integers through exactly this shape.
 
 **`T` separator**: legacy reserves it for 0 / 126 / 127; modern accepts it everywhere.

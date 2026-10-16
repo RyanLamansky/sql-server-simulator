@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Globalization;
 
 namespace SqlServerSimulator.Storage;
 
@@ -40,7 +39,7 @@ internal sealed class MoneySqlType() : SqlType(SqlTypeCategory.Money, TypePairCl
         => SqlValue.FromMoneyScaledUnits(this, BinaryPrimitives.ReadInt64LittleEndian(source));
 
     public override SqlValue ConvertParameter(object raw) =>
-        SqlValue.FromMoney(this, Convert.ToDecimal(raw, CultureInfo.InvariantCulture));
+        SqlValue.FromMoney(this, BinaryFloatToDecimal.FromParameter(raw));
 
     public override string ToString() => "money";
 }
@@ -69,7 +68,7 @@ internal sealed class SmallMoneySqlType() : SqlType(SqlTypeCategory.Money, TypeP
         => SqlValue.FromMoneyScaledUnits(this, BinaryPrimitives.ReadInt32LittleEndian(source));
 
     public override SqlValue ConvertParameter(object raw) =>
-        SqlValue.FromMoney(SqlType.Money, Convert.ToDecimal(raw, CultureInfo.InvariantCulture)).CoerceTo(this);
+        SqlValue.FromMoney(SqlType.Money, BinaryFloatToDecimal.FromParameter(raw)).CoerceTo(this);
 
     public override string ToString() => "smallmoney";
 }

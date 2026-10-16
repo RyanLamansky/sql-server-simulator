@@ -420,7 +420,7 @@ internal sealed class MaskingFunction
                 var step = Math.Pow(10, -scale);
                 var steps = (long)Math.Floor((highDouble - lowDouble) / step);
                 var value = lowDouble + (random.NextInt64(0, steps + 1) * step);
-                return SqlValue.FromDouble(Math.Round(Math.Min(value, highDouble), scale)).CoerceTo(type);
+                return SqlValue.FromDouble(DoubleDigitRounding.Round(Math.Min(value, highDouble), scale, MidpointRounding.ToEven)).CoerceTo(type);
             default:
                 var floor = this.low.CoerceTo(SqlType.Float).AsDouble;
                 var ceiling = this.high.CoerceTo(SqlType.Float).AsDouble;

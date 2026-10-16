@@ -450,8 +450,8 @@ internal readonly partial struct SqlValue
         VarbinarySqlType or BinarySqlType => FromDateTime(DecodeLegacyDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.DateTime)),
-        _ when this.Type == SqlType.Float => CoerceFractionalDaysToDateTime((decimal)this.AsDouble),
-        _ when this.Type == SqlType.Real => CoerceFractionalDaysToDateTime((decimal)this.AsSingle),
+        _ when this.Type == SqlType.Float => CoerceFractionalDaysToDateTime(BinaryFloatToDecimal.FromDouble(this.AsDouble)),
+        _ when this.Type == SqlType.Real => CoerceFractionalDaysToDateTime(BinaryFloatToDecimal.FromSingle(this.AsSingle)),
         _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToDateTime(this.AsMoney),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {SqlType.DateTime}."),
     };
@@ -467,8 +467,8 @@ internal readonly partial struct SqlValue
         VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes, fromRowVersion: false)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToSmallDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.SmallDateTime)),
-        _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime((decimal)this.AsDouble),
-        _ when this.Type == SqlType.Real => CoerceFractionalDaysToSmallDateTime((decimal)this.AsSingle),
+        _ when this.Type == SqlType.Float => CoerceFractionalDaysToSmallDateTime(BinaryFloatToDecimal.FromDouble(this.AsDouble)),
+        _ when this.Type == SqlType.Real => CoerceFractionalDaysToSmallDateTime(BinaryFloatToDecimal.FromSingle(this.AsSingle)),
         _ when SqlType.IsMoneyCategory(this.Type) => CoerceFractionalDaysToSmallDateTime(this.AsMoney),
         _ => throw new NotSupportedException($"No coercion implemented from {this.Type} to {SqlType.SmallDateTime}."),
     };
@@ -784,8 +784,10 @@ internal readonly partial struct SqlValue
             throw Fail(grammar.Order != DatePartOrder.None && grammar.FourDigitYear);
         }
 
-        if (TryParseSharedForm(grammar, datePart, timePart, allowsZoneSuffix, out var shared))
+        if (TryParseSharedForm(grammar, datePart, timePart, allowsZoneSuffix, out var shared, out var sharedOutOfRange))
             return FromDateTime2(SqlType.GetDateTime2(7), shared).CoerceTo(target);
+        if (sharedOutOfRange)
+            throw Fail(outOfRange: true);
 
         // An unambiguous ISO 8601 date-with-`T` is accepted under every style
         // in the modern family, independent of that style's numeric grammar —
@@ -917,15 +919,29 @@ internal readonly partial struct SqlValue
 
     /// <summary>
     /// Whether <paramref name="timePart"/> is a plain clock reading — two or
-    /// three colon-separated numbers of at most two digits — whose failure to
-    /// parse is a field out of range (<c>0:60:0</c>, <c>24:0:0</c>), which the
-    /// legacy targets report as Msg 242 (probed 2026-10-16 against SQL Server
-    /// 2025).
+    /// three colon-separated numbers of at most two digits, the seconds
+    /// optionally carrying a fraction of up to seven digits or colon
+    /// milliseconds of up to three — whose failure to parse is a field out of
+    /// range (<c>0:60:0</c>, <c>24:0:0</c>, <c>0:60:0.000</c>), which the
+    /// legacy targets report as Msg 242; an eighth fractional digit or a fourth
+    /// millisecond one is a format failure instead (probed 2026-10-16 against
+    /// SQL Server 2025).
     /// </summary>
     private static bool IsClockShape(string timePart)
     {
-        var parts = timePart.Trim().Split(':');
-        return parts.Length is 2 or 3 && parts.All(part => part.Length is 1 or 2 && part.All(char.IsAsciiDigit));
+        var text = timePart.Trim();
+        var point = text.IndexOf('.', StringComparison.Ordinal);
+        if (point >= 0)
+        {
+            var fraction = text[(point + 1)..];
+            if (fraction.Length is < 1 or > 7 || !fraction.All(char.IsAsciiDigit))
+                return false;
+            text = text[..point];
+        }
+        var parts = text.Split(':');
+        return (parts.Length is 2 or 3 || (parts.Length == 4 && point < 0 && parts[3].Length is >= 1 and <= 3 && parts[3].All(char.IsAsciiDigit)))
+            && (point < 0 || parts.Length == 3)
+            && parts.Take(3).All(part => part.Length is 1 or 2 && part.All(char.IsAsciiDigit));
     }
 
     private static readonly string[] MonthNameFormats =
@@ -936,13 +952,43 @@ internal readonly partial struct SqlValue
 
     private static bool TryParseBareTime(string input, out DateTime result)
     {
-        if (DateTime.TryParseExact(input, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var time))
+        if (TryParseClock(input, out var time))
         {
-            result = DateTimeSqlType.BaseDate.Add(time.TimeOfDay);
+            result = DateTimeSqlType.BaseDate.Add(time);
             return true;
         }
         result = default;
         return false;
+    }
+
+    /// <summary>
+    /// Reads <paramref name="text"/> against <see cref="BareTimeFormats"/>,
+    /// refusing an hour past 23 before the BCL sees it: SQL Server refuses
+    /// <c>24:00</c> in every styled form (probed 2026-10-16 against SQL Server
+    /// 2025), and from .NET 11 <c>DateTime.TryParseExact</c>
+    /// reads it as the next day's midnight. A minute or second of 60 stays the
+    /// BCL's to refuse, on both runtimes.
+    /// </summary>
+    private static bool TryParseClock(string text, out TimeSpan timeOfDay)
+    {
+        timeOfDay = default;
+        if (HasHourPast23(text) || !DateTime.TryParseExact(text, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var time))
+            return false;
+        timeOfDay = time.TimeOfDay;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether the leading number of <paramref name="clock"/>, its hour, is
+    /// past 23 — or longer than the two digits <c>H</c> and <c>h</c> read.
+    /// </summary>
+    private static bool HasHourPast23(ReadOnlySpan<char> clock)
+    {
+        clock = clock.TrimStart();
+        var digits = clock.IndexOfAnyExceptInRange('0', '9');
+        if (digits < 0)
+            digits = clock.Length;
+        return digits > 2 || (digits == 2 && (clock[0] > '2' || (clock[0] == '2' && clock[1] >= '4')));
     }
 
     /// <summary>
@@ -966,7 +1012,7 @@ internal readonly partial struct SqlValue
             // Only a genuine clock reading ends the date half. An AM/PM marker
             // is part of the time, so keep widening left past it.
             if (tail.Contains(':', StringComparison.Ordinal)
-                && (IsClockShape(tail) || DateTime.TryParseExact(tail, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out _)))
+                && (IsClockShape(tail) || TryParseClock(tail, out _)))
             {
                 return (input[..i].TrimEnd(' '), tail, ' ');
             }
@@ -977,18 +1023,31 @@ internal readonly partial struct SqlValue
     /// <summary>
     /// The forms accepted regardless of a style's numeric grammar:
     /// separatorless <c>yyyyMMdd</c> / <c>yyMMdd</c> and the English
-    /// month-name spellings.
+    /// month-name spellings. <paramref name="outOfRange"/> reports a date that
+    /// read whose clock reading has a field out of range
+    /// (<c>Oct 16 2026 24:00</c>), Msg 242 on the legacy targets (probed
+    /// 2026-10-16 against SQL Server 2025).
     /// </summary>
-    private static bool TryParseSharedForm(StyleDateGrammar grammar, string datePart, string timePart, bool allowsZoneSuffix, out DateTime result)
+    private static bool TryParseSharedForm(StyleDateGrammar grammar, string datePart, string timePart, bool allowsZoneSuffix, out DateTime result, out bool outOfRange)
     {
         result = default;
-        return grammar.AllowsSharedForms
-            && (datePart.Length is 8 or 6 && datePart.All(char.IsAsciiDigit)
-                ? DateTime.TryParseExact(datePart, datePart.Length == 8 ? "yyyyMMdd" : "yyMMdd", UsCulture, DateTimeStyles.None, out var compact)
-                    && TryAttachTime(compact, timePart, allowsZoneSuffix, out result)
-                : grammar.AllowsMonthNames
-                    && DateTime.TryParseExact(datePart, MonthNameFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var named)
-                    && TryAttachTime(named, timePart, allowsZoneSuffix, out result));
+        outOfRange = false;
+        if (!grammar.AllowsSharedForms)
+            return false;
+        DateTime date;
+        if (datePart.Length is 8 or 6 && datePart.All(char.IsAsciiDigit))
+        {
+            if (!DateTime.TryParseExact(datePart, datePart.Length == 8 ? "yyyyMMdd" : "yyMMdd", UsCulture, DateTimeStyles.None, out date))
+                return false;
+        }
+        else if (!grammar.AllowsMonthNames || !DateTime.TryParseExact(datePart, MonthNameFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out date))
+        {
+            return false;
+        }
+        if (TryAttachTime(date, timePart, allowsZoneSuffix, out result))
+            return true;
+        outOfRange = IsClockShape(timePart);
+        return false;
     }
 
     /// <summary>
@@ -1102,12 +1161,12 @@ internal readonly partial struct SqlValue
         // The wall-clock reading is what SQL Server keeps for a `Z` suffix, so
         // strip it rather than shifting.
         var trimmed = allowsZoneSuffix ? timePart.Trim().TrimEnd('Z', 'z') : timePart.Trim();
-        if (!DateTime.TryParseExact(trimmed, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out var time))
+        if (!TryParseClock(trimmed, out var time))
         {
             result = default;
             return false;
         }
-        result = date.Add(time.TimeOfDay);
+        result = date.Add(time);
         return true;
     }
 

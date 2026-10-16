@@ -31,6 +31,29 @@ public sealed class ParseAndDateAdjustmentTests
     public void Parse_InvalidInt_RaisesError()
         => new Simulation().AssertSqlError("select parse('abc' as int)", 9819);
 
+    /// <summary>
+    /// Real's .NET Framework parse refuses hour 24 in every culture rather
+    /// than reading the next day's midnight (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'2026-10-16 24:00' as datetime2")]
+    [DataRow("'2026-10-16 24:00' as datetime")]
+    [DataRow("'24:00' as time")]
+    [DataRow("'2026-10-16 24:00:00' as datetimeoffset")]
+    [DataRow("'16.10.2026 24.00' as datetime2 using 'fi-FI'")]
+    [DataRow("'16.10.2026 24:00' as datetime2 using 'de-DE'")]
+    public void Parse_Hour24_RaisesError(string arguments)
+        => _ = new Simulation().AssertSqlError($"select parse({arguments})", 9819);
+
+    [TestMethod]
+    public void TryParse_Hour24_ReturnsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select try_parse('2026-10-16 24:00' as datetime2)"));
+
+    [TestMethod]
+    public void Parse_Hour24DigitsElsewhere_StillRead()
+        => AreEqual(new DateTime(2024, 10, 24, 0, 0, 0), new Simulation().ExecuteScalar("select parse('24.10.2024 0.00' as datetime2 using 'fi-FI')"));
+
     [TestMethod]
     public void DateTrunc_Day_Works()
         => AreEqual(new DateTime(2024, 5, 15), new Simulation().ExecuteScalar("select datetrunc(day, cast('2024-05-15T13:45:30' as datetime2))"));

@@ -121,8 +121,8 @@ internal sealed class SpatialGeodeticConstructive
         if (this.originals.TryGetValue((point.X, point.Y), out var original))
             return original;
         var direction = this.center + (this.east * point.Y) + (this.north * -point.X);
-        var longitude = double.RadiansToDegrees(Math.Atan2(direction.Y, direction.X));
-        var latitude = double.RadiansToDegrees(SpatialEllipsoid.GeodeticLatitude(direction));
+        var longitude = SpatialEllipsoid.MultiplyDivideDegrees(Math.Atan2(direction.Y, direction.X));
+        var latitude = SpatialEllipsoid.MultiplyDivideDegrees(SpatialEllipsoid.GeodeticLatitude(direction));
         return new SpatialCoordinate(longitude, latitude);
     }
 
