@@ -151,7 +151,7 @@ partial class Simulation
                     case 1: userName = CatalogStringArg(arg); break;
                     case 2: grantorName = CatalogStringArg(arg); break;
                     case 3: permissionArea = HelpProtectAreaArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_helprotect");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_helprotect"));
                 }
 
                 continue;
@@ -163,7 +163,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "username"): userName = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "grantorname"): grantorName = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "permissionarea"): permissionArea = HelpProtectAreaArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_helprotect");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_helprotect"));
             }
         }
 

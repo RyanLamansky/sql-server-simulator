@@ -230,7 +230,7 @@ partial class Simulation
                 var n when BuiltInToken.Equals(n, "column_name") => 3,
                 var n when BuiltInToken.Equals(n, "ODBCVer") => 4,
                 var n when BuiltInToken.Equals(n, "fUsePattern") => 5,
-                _ => throw SimulatedSqlException.InvalidProcedureParameters(procedureName),
+                _ => throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name!, procedureName)),
             };
             switch (slot)
             {
@@ -240,7 +240,7 @@ partial class Simulation
                 case 3: column = CatalogStringArg(arg); break;
                 case 4: odbcVer = CatalogOdbcVer(arg); break;
                 case 5: usePattern = arg.Value.IsNull || arg.Value.CoerceTo(SqlType.Int32).AsInt32 != 0; break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedureName));
             }
         }
         return (name, owner, qualifier, column, classic ? (odbcVer == 3 ? 3 : 2) : odbcVer < 3 ? 2 : 3, usePattern);

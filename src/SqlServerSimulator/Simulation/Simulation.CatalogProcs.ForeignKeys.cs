@@ -163,7 +163,11 @@ partial class Simulation
                 _ => -1,
             };
             if (slot is < 0 or > 5)
-                throw SimulatedSqlException.InvalidProcedureParameters("sp_fkeys");
+            {
+                throw CatalogBindingError(arg.Name is { } unknown
+                    ? SimulatedSqlException.NotAParameterForProcedure(unknown, "sp_fkeys")
+                    : SimulatedSqlException.TooManyArgumentsToFunction("sp_fkeys"));
+            }
             values[slot] = CatalogStringArg(arg);
         }
 

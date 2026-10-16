@@ -90,7 +90,7 @@ The paths are string literals kept as written (`$` without `FOR`), each well-for
 
 ## Catalog surfaces
 
-`sys.types` / `systypes` carry the json row; `sys.columns` / `sys.parameters` report 244 / 244 / -1 / 0 / 0 with no collation; `TYPE_ID('json')` and `TYPE_NAME(244)` resolve unqualified; `COL_LENGTH` and `COLUMNPROPERTY` Precision are -1; `INFORMATION_SCHEMA.COLUMNS` reports `json` / -1 / -1; `sp_help` reports Length -1 (a parameter's Prec 0); `sp_columns` lists no row for a json column; the describe surfaces report `json`, 244, max length -1.
+`sys.types` / `systypes` carry the json row; `sys.columns` / `sys.parameters` report 244 / 244 / -1 / 0 / 0 with no collation; `TYPE_ID('json')` and `TYPE_NAME(244)` resolve unqualified; `COL_LENGTH` and `COLUMNPROPERTY` Precision are -1; `INFORMATION_SCHEMA.COLUMNS` reports `json` / -1 / -1; `sp_help` reports Length -1 (a parameter's Prec 0); `sp_columns` lists no row for a json column (`sp_columns_170` lists one under ODBC 3); the describe surfaces report `json`, 244, max length -1.
 
 ## Client surface
 

@@ -343,7 +343,7 @@ partial class Simulation
                 {
                     case 0: dataType = DatatypeInfoDataTypeArg(arg); break;
                     case 1: odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedureName));
                 }
 
                 continue;
@@ -353,7 +353,7 @@ partial class Simulation
             {
                 case var n when BuiltInToken.Equals(n, "data_type"): dataType = DatatypeInfoDataTypeArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, procedureName));
             }
         }
 

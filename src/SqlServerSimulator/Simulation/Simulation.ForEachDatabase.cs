@@ -122,7 +122,7 @@ partial class Simulation
                     case 3: command3 = CatalogStringArg(arg); break;
                     case 4: preCommand = CatalogStringArg(arg); break;
                     case 5: postCommand = CatalogStringArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_MSforeachdb");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_MSforeachdb"));
                 }
 
                 continue;
@@ -136,7 +136,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "command3"): command3 = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "precommand"): preCommand = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "postcommand"): postCommand = CatalogStringArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_MSforeachdb");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_MSforeachdb"));
             }
         }
 

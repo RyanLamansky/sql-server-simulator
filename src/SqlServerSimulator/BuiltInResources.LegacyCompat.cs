@@ -304,7 +304,9 @@ internal static partial class BuiltInResources
         // type table, these project the current database's schema objects.
         "sp_tables",
         "sp_columns",
+        "sp_columns_90",
         "sp_columns_100",
+        "sp_columns_170",
         // sp_pkeys / sp_statistics_100 / sp_stored_procedures: the ODBC
         // SQLPrimaryKeys / SQLStatistics / SQLProcedures backing procs — JDBC's
         // DatabaseMetaData.getPrimaryKeys / getIndexInfo / getProcedures call

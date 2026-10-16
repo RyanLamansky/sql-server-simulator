@@ -195,6 +195,8 @@ partial class BuiltInResources
             ["sp_resetstatus"] = [new("@DBName", 256, 256, 0, 0)],
             ["sp_sqlexec"] = [new("@p1", 35, 16, 0, 0)],
             ["sp_srvrolepermission"] = [new("@srvrolename", 256, 256, 0, 0)],
+            ["sp_columns_170"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@NameScope", 56, 4, 10, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_columns_90"] = [new("@table_name", 231, 768, 0, 0), new("@table_owner", 231, 768, 0, 0), new("@table_qualifier", 256, 256, 0, 0), new("@column_name", 231, 768, 0, 0), new("@ODBCVer", 56, 4, 10, 0), new("@fUsePattern", 104, 1, 1, 0)],
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>One row of <see cref="SystemProcedureParameters"/>.</summary>

@@ -54,7 +54,7 @@ The results are **bit-exact** to real's, which took reverse-engineering its SIMD
 ## Catalog surfaces
 
 `sys.types` / `systypes` carry the vector row; `sys.columns` / `sys.all_columns` / `sys.parameters` fill `vector_dimensions`, `vector_base_type` (0, or 1 for float16) and `vector_base_type_desc` (`float32` / `float16`).
-`TYPE_ID('vector')` is NULL while `TYPE_ID('sys.vector')` is 255, `TYPE_NAME(165)` stays `varbinary`, `COLUMNPROPERTY` Precision is the storage length, `sp_help` reports the column as varbinary-like (`TrimTrailingBlanks` no, `FixedLenNullInSource` yes), `sp_columns` / `sp_columns_100` list no row for a vector column, and the describe surfaces report `vector(n)` with user type 255 and TDS type 245.
+`TYPE_ID('vector')` is NULL while `TYPE_ID('sys.vector')` is 255, `TYPE_NAME(165)` stays `varbinary`, `COLUMNPROPERTY` Precision is the storage length, `sp_help` reports the column as varbinary-like (`TrimTrailingBlanks` no, `FixedLenNullInSource` yes), `sp_columns` / `sp_columns_100` list no row for a vector column (`sp_columns_170` lists one under ODBC 3, see [`catalog-views.md`](catalog-views.md)), and the describe surfaces report `vector(n)` with user type 255 and TDS type 245.
 
 ## Client surface
 

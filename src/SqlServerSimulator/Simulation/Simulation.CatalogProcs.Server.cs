@@ -70,8 +70,10 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        if (arguments.Count > 1 || (arguments is [{ Name: { } parameterName }] && !BuiltInToken.Equals(parameterName, "attribute_id")))
-            throw SimulatedSqlException.InvalidProcedureParameters("sp_server_info");
+        if (arguments.Find(static argument => argument.Name is { } name && !BuiltInToken.Equals(name, "attribute_id")) is { Name: { } unknown })
+            throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(unknown, "sp_server_info"));
+        if (arguments.Count > 1)
+            throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_server_info"));
         int? attributeId = arguments is [{ IsDefault: false, Value.IsNull: false } arg]
             ? ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Int32)
             : null;
@@ -128,7 +130,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         if (arguments.Count > 0)
-            throw SimulatedSqlException.InvalidProcedureParameters("sp_databases");
+            throw CatalogBindingError(SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("sp_databases", state: 2));
 
         var simulation = batch.Connection.Simulation;
         var rows = new List<SqlValue[]>();

@@ -170,7 +170,7 @@ partial class Simulation
                     case 4: whereAnd = CatalogStringArg(arg); break;
                     case 5: preCommand = CatalogStringArg(arg); break;
                     case 6: postCommand = CatalogStringArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_MSforeachtable");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_MSforeachtable"));
                 }
 
                 continue;
@@ -185,7 +185,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "whereand"): whereAnd = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "precommand"): preCommand = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "postcommand"): postCommand = CatalogStringArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_MSforeachtable");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_MSforeachtable"));
             }
         }
 

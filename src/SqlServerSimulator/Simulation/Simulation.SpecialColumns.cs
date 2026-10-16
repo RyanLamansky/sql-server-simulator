@@ -58,7 +58,7 @@ partial class Simulation
                 var n when BuiltInToken.Equals(n, "scope") => 4,
                 var n when BuiltInToken.Equals(n, "nullable") => 5,
                 var n when BuiltInToken.Equals(n, "ODBCVer") => 6,
-                _ => throw SimulatedSqlException.InvalidProcedureParameters(procedureName),
+                _ => throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name!, procedureName)),
             };
             switch (slot)
             {
@@ -69,7 +69,7 @@ partial class Simulation
                 case 4: scope = arg.IsDefault ? "T" : CatalogChar1Arg(arg); break;
                 case 5: nullable = arg.IsDefault ? "U" : CatalogChar1Arg(arg); break;
                 case 6: odbcVer = CatalogOdbcVer(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedureName));
             }
         }
 

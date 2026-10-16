@@ -57,7 +57,7 @@ partial class Simulation
     /// invalidates for itself.
     /// </summary>
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
-        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
+        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_90" or "sp_columns_100" or "sp_columns_170" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_estimate_data_compression_savings" or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
@@ -320,8 +320,10 @@ partial class Simulation
             "sp_bindrule" => InvokeSpBind(batch, CalledName(procName), isRule: true),
             "sp_changedbowner" => InvokeSpChangeDbOwner(batch),
             "sp_column_privileges" => InvokeSpColumnPrivileges(batch),
-            "sp_columns" => InvokeSpColumns(batch, classic: true),
-            "sp_columns_100" => InvokeSpColumns(batch, classic: false),
+            "sp_columns" => InvokeSpColumns(batch, systemProcName, SpColumnsVersion.Classic),
+            "sp_columns_90" => InvokeSpColumns(batch, systemProcName, SpColumnsVersion.V90),
+            "sp_columns_100" => InvokeSpColumns(batch, systemProcName, SpColumnsVersion.V100),
+            "sp_columns_170" => InvokeSpColumns(batch, systemProcName, SpColumnsVersion.V170),
             "sp_clean_db_file_free_space" => InvokeSpCleanDbFreeSpace(batch, systemProcName, calledAs, oneFile: true),
             "sp_clean_db_free_space" => InvokeSpCleanDbFreeSpace(batch, systemProcName, calledAs, oneFile: false),
             "sp_flush_log" => InvokeSpFlushLog(batch, returnCodeVar),

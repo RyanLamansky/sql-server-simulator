@@ -291,7 +291,7 @@ partial class Simulation
                     case 2: qualifier = CatalogStringArg(arg); break;
                     case 3: type = CatalogStringArg(arg); break;
                     case 4: break; // @fUsePattern — pattern mode is always on
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_tables");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_tables"));
                 }
 
                 continue;
@@ -304,30 +304,46 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_type"): type = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "fUsePattern"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_tables");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_tables"));
             }
         }
 
         return (name, owner, qualifier, type);
     }
 
+    /// <summary>The ODBC driver generation an <c>sp_columns</c> version answers for.</summary>
+    private enum SpColumnsVersion
+    {
+        Classic,
+        V90,
+        V100,
+        V170,
+    }
+
     /// <summary>
     /// Handles <c>EXEC sp_columns_100 [@table_name] [, @table_owner]
-    /// [, @table_qualifier] [, @column_name] [, @ODBCVer]</c> — the proc ODBC's
-    /// <c>SQLColumns</c> / JDBC's <c>getColumns</c> call. One row per column of
-    /// every matching table / view, in ORDINAL_POSITION order.
-    /// <c>@table_name</c> / <c>@table_owner</c> / <c>@column_name</c> are LIKE
-    /// patterns; <c>@ODBCVer</c> (&lt; 3 → 2) selects the temporal DATA_TYPE
-    /// codes / float-real precision the same way sp_datatype_info_100 does.
+    /// [, @table_qualifier] [, @column_name] [, @NameScope] [, @ODBCVer]</c> —
+    /// the proc ODBC's <c>SQLColumns</c> / JDBC's <c>getColumns</c> call — and
+    /// its versions. One row per column of every matching table / view, in
+    /// ORDINAL_POSITION order. <c>@table_name</c> / <c>@table_owner</c> /
+    /// <c>@column_name</c> are LIKE patterns; <c>@ODBCVer</c> (&lt; 3 → 2)
+    /// selects the temporal DATA_TYPE codes / float-real precision the same way
+    /// sp_datatype_info_100 does, and defaults to 3 for <c>_170</c> alone.
+    /// <c>@NameScope</c> (<c>_100</c> and <c>_170</c>) is the ODBC driver's
+    /// name scope: 0 lists a column set in place of its sparse columns, 2
+    /// every column, 3 the sparse columns alone, and any other value nothing;
+    /// <c>_170</c> lists the <c>json</c> and <c>vector</c> columns the others
+    /// leave out, under ODBC 3 (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpColumns(BatchContext batch, bool classic)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpColumns(BatchContext batch, string procedure, SpColumnsVersion version)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        RequireFirstParameter(arguments, classic ? "sp_columns" : "sp_columns_100", "table_name");
-        var (tableName, tableOwner, tableQualifier, columnName, odbcVer) = ParseSpColumnsArgs(arguments, classic ? "sp_columns" : "sp_columns_100");
+        var classic = version == SpColumnsVersion.Classic;
+        RequireFirstParameter(arguments, procedure, "table_name");
+        var (tableName, tableOwner, tableQualifier, columnName, nameScope, odbcVer) = ParseSpColumnsArgs(arguments, procedure, version);
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
         var byName = (odbcVer >= 3 ? SpDatatypeInfoByNameV3 : SpDatatypeInfoByNameV2).Value;
@@ -342,9 +358,9 @@ partial class Simulation
         if (database.Name == TempdbDatabaseName && tableName is ['#', ..] && !tableName.StartsWith("##", StringComparison.Ordinal)
             && batch.TryResolveTable(new MultiPartName(tableName), out var tempTable) && Matches(ownerPattern, Database.DefaultSchemaName))
         {
-            AppendColumnRows(rows, qualifier, SqlValue.FromSystemName(Database.DefaultSchemaName), tempTable.CatalogName, tempTable.Columns, byName, columnPattern, classic);
+            AppendColumnRows(rows, qualifier, SqlValue.FromSystemName(Database.DefaultSchemaName), tempTable.CatalogName, tempTable.Columns, byName, columnPattern, version, nameScope, odbcVer);
         }
-        if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
+        if (nameScope is 0 or 2 or 3 && (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name)))
         {
             foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
             {
@@ -354,13 +370,13 @@ partial class Simulation
                 foreach (var table in schema.HeapTables.EnumerateValues().OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, table.Name) && visible?.Invoke(table) != false)
-                        AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, classic);
+                        AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, version, nameScope, odbcVer);
                 }
 
                 foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, view.Name) && visible?.Invoke(view) != false)
-                        AppendColumnRows(rows, qualifier, owner, view.Name, view.CatalogColumns(), byName, columnPattern, classic);
+                        AppendColumnRows(rows, qualifier, owner, view.Name, view.CatalogColumns(), byName, columnPattern, version, nameScope, odbcVer);
                 }
 
                 // The schema's catalog views list their columns too (probed
@@ -368,34 +384,111 @@ partial class Simulation
                 foreach (var (systemView, schemaId) in BuiltInResources.SystemViews.Value.OrderBy(v => v.View.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (schemaId == schema.SchemaId && Matches(namePattern, systemView.Name))
-                        AppendColumnRows(rows, qualifier, owner, systemView.Name, systemView.Columns, byName, columnPattern, classic);
+                        AppendColumnRows(rows, qualifier, owner, systemView.Name, systemView.Columns, byName, columnPattern, version, nameScope, odbcVer);
                 }
             }
         }
 
-        yield return classic
-            ? new SimulatedSqlResultSet(ClassicSpColumnsSchema, ClassicSpColumnsColumnNames, rows)
-            : new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows);
+        yield return version switch
+        {
+            SpColumnsVersion.Classic => new SimulatedSqlResultSet(ClassicSpColumnsSchema, ClassicSpColumnsColumnNames, rows),
+            SpColumnsVersion.V90 => new SimulatedSqlResultSet(SpColumns90Schema, SpColumns90ColumnNames, rows),
+            _ => new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows) { ColumnNullability = SpColumnsNullability },
+        };
     }
 
     private static void AppendColumnRows(
         List<SqlValue[]> rows, SqlValue qualifier, SqlValue owner, string tableName,
-        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern, bool classic)
+        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern, SpColumnsVersion version, int? nameScope, int odbcVer)
     {
         var tableNameValue = SqlValue.FromSystemName(tableName);
         var hasColumnSet = Array.Exists(columns, static column => column.IsColumnSet);
+        // Real lists a vector or json column only from _170 under ODBC 3:
+        // the older versions' sp_datatype_info has no entry for either for
+        // the join to find (probed 2026-09-26 and 2026-10-16 against SQL
+        // Server 2025).
+        var listsNewTypes = version == SpColumnsVersion.V170 && odbcVer >= 3;
         for (var i = 0; i < columns.Length; i++)
         {
             var col = columns[i];
-            // Real lists no row for a vector or json column: sp_datatype_info
-            // has no entry for either for the join to find (probed 2026-09-26
-            // against SQL Server 2025). A sparse column set stands in for its
-            // sparse columns (probed 2026-10-06).
-            if (!Matches(columnPattern, col.Name) || col.Type is VectorSqlType or JsonSqlType || (hasColumnSet && col.IsSparse))
+            // A sparse column set stands in for its sparse columns (probed
+            // 2026-10-06), unless the name scope asks for them.
+            var inScope = nameScope switch
+            {
+                2 => true,
+                3 => col.IsSparse,
+                _ => !(hasColumnSet && col.IsSparse),
+            };
+            if (!inScope || !Matches(columnPattern, col.Name) || (col.Type is VectorSqlType or JsonSqlType && !listsNewTypes))
                 continue;
-            var row = BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName);
-            rows.Add(classic ? ClassicSpColumnsRow(row, col) : row);
+            var row = col.Type is VectorSqlType or JsonSqlType
+                ? NewTypeSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1)
+                : BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName);
+            rows.Add(version switch
+            {
+                SpColumnsVersion.Classic => ClassicSpColumnsRow(row, col),
+                SpColumnsVersion.V90 => SpColumns90Row(row, col),
+                _ => row,
+            });
         }
+    }
+
+    /// <summary>
+    /// A <c>json</c> or <c>vector</c> column as <c>sp_columns_170</c> reports
+    /// it: <c>SQL_SS_JSON</c> (-157) of length 0, or <c>SQL_SS_VECTOR</c>
+    /// (-156) of its byte length and scale 0, with its own type id as
+    /// <c>SS_DATA_TYPE</c> (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue[] NewTypeSpColumnsRow(SqlValue qualifier, SqlValue owner, SqlValue tableName, HeapColumn col, int ordinal)
+    {
+        var (code, typeName, length, ssDataType) = col.Type is VectorSqlType vector ? ((short)-156, "vector", vector.ByteLength, (byte)245) : ((short)-157, "json", 0, (byte)244);
+        var nullSmall = SqlValue.Null(SqlType.SmallInt);
+        var zero = SqlValue.FromInt16(0);
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        return
+        [
+            qualifier, owner, tableName, SqlValue.FromSystemName(col.Name), SqlValue.FromInt16(code), SqlValue.FromSystemName(typeName),
+            code == -157 ? SqlValue.FromInt32(0) : SqlValue.Null(SqlType.Int32), SqlValue.FromInt32(length),
+            code == -156 ? zero : nullSmall, nullSmall, SqlValue.FromInt16(col.Nullable ? (short)1 : (short)0), SqlValue.Null(CatalogVarchar254),
+            SpColumnDefault(col), SqlValue.FromInt16(code), nullSmall, SqlValue.FromInt32(length), SqlValue.FromInt32(ordinal),
+            SqlValue.FromString(CatalogVarchar254, col.Nullable ? "YES" : "NO"), SqlValue.FromInt16(col.IsSparse ? (short)1 : (short)0), zero,
+            SqlValue.FromInt16(col.Computed is not null ? (short)1 : (short)0), zero, nullName, nullName, SqlValue.Null(CatalogNVarchar4000),
+            nullName, nullName, nullName, SqlValue.FromByte(ssDataType),
+        ];
+    }
+
+    // DATA_TYPE and SQL_DATA_TYPE go out NOT NULL from _100 on (probed
+    // 2026-10-16 against SQL Server 2025).
+    private static readonly bool[] SpColumnsNullability = [.. Enumerable.Range(0, 29).Select(static i => i is not (4 or 13))];
+
+    // sp_columns_90's 25 columns: sp_columns_100's without the four SS_IS_*
+    // flags.
+    private static readonly SqlType[] SpColumns90Schema = [.. SpColumnsSchema[..18], .. SpColumnsSchema[22..]];
+
+    private static readonly string[] SpColumns90ColumnNames = [.. SpColumnsColumnNames[..18], .. SpColumnsColumnNames[22..]];
+
+    /// <summary>
+    /// An <c>sp_columns_100</c> row as <c>sp_columns_90</c> reports it (probed
+    /// 2026-10-16 against SQL Server 2025): the date and time types after
+    /// <c>datetime</c> read as the older <c>sp_columns</c> reads them, an
+    /// <c>nvarchar</c> (-9) of their literal's length, and a spatial type as a
+    /// <c>varbinary</c> (-3) of length -1; the MAX types, <c>xml</c> and the
+    /// other CLR types keep their <c>_100</c> values.
+    /// </summary>
+    private static SqlValue[] SpColumns90Row(SqlValue[] row, HeapColumn col)
+    {
+        SqlValue[] downlevel = [.. row[..18], .. row[22..]];
+        switch (col.Type)
+        {
+            case DateSqlType or TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType:
+                Array.Copy(ClassicSpColumnsRow(row, col), downlevel, 18);
+                break;
+            case SpatialSqlType:
+                downlevel[4] = downlevel[13] = SqlValue.FromInt16(-3);
+                downlevel[7] = SqlValue.FromInt32(-1);
+                break;
+        }
+        return downlevel;
     }
 
     // The older sp_columns' 19 columns: sp_columns_100's first 18 plus its
@@ -687,13 +780,17 @@ partial class Simulation
     }
 
     // The older sp_columns takes no @fUsePattern, and reads any @ODBCVer but 3
-    // as 2 where sp_columns_100 reads any value from 3 up as 3.
-    private static (string? Name, string? Owner, string? Qualifier, string? Column, int OdbcVer) ParseSpColumnsArgs(
-        List<ProcArgument> arguments, string procedureName)
+    // as 2 where the later versions read any value from 3 up as 3; _100 and
+    // _170 take @NameScope ahead of @ODBCVer (probed 2026-10-16 against SQL
+    // Server 2025).
+    private static (string? Name, string? Owner, string? Qualifier, string? Column, int? NameScope, int OdbcVer) ParseSpColumnsArgs(
+        List<ProcArgument> arguments, string procedureName, SpColumnsVersion version)
     {
-        var classic = procedureName == "sp_columns";
+        var classic = version == SpColumnsVersion.Classic;
+        var scoped = version is SpColumnsVersion.V100 or SpColumnsVersion.V170;
         string? name = null, owner = null, qualifier = null, column = null;
-        var odbcVer = 2;
+        int? nameScope = 0;
+        var odbcVer = version == SpColumnsVersion.V170 ? 3 : 2;
         var positional = 0;
         foreach (var arg in arguments)
         {
@@ -705,9 +802,12 @@ partial class Simulation
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
                     case 3: column = CatalogStringArg(arg); break;
+                    case 4 when scoped: nameScope = CatalogNameScope(arg); break;
                     case 4: odbcVer = CatalogOdbcVer(arg); break;
+                    case 5 when scoped: odbcVer = CatalogOdbcVer(arg); break;
                     case 5 when !classic: break; // @fUsePattern — pattern mode is always on
-                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                    case 6 when scoped: break;
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedureName));
                 }
 
                 continue;
@@ -719,14 +819,29 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "column_name"): column = CatalogStringArg(arg); break;
+                case var n when scoped && BuiltInToken.Equals(n, "NameScope"): nameScope = CatalogNameScope(arg); break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = CatalogOdbcVer(arg); break;
                 case var n when !classic && BuiltInToken.Equals(n, "fUsePattern"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, procedureName));
             }
         }
 
-        return (name, owner, qualifier, column, classic ? (odbcVer == 3 ? 3 : 2) : odbcVer < 3 ? 2 : 3);
+        return (name, owner, qualifier, column, nameScope, classic ? (odbcVer == 3 ? 3 : 2) : odbcVer < 3 ? 2 : 3);
     }
+
+    // A surplus argument (Msg 8144), an unknown name (Msg 8145) or an argument
+    // to a procedure taking none (Msg 8146) is the parameter binder's refusal
+    // to the catalog procedures, at line 0 (probed 2026-10-16 against SQL
+    // Server 2025).
+    private static SimulatedSqlException CatalogBindingError(SimulatedSqlException refusal)
+    {
+        refusal.SystemProcedureBindingError = true;
+        return refusal;
+    }
+
+    // A NULL @NameScope lists nothing.
+    private static int? CatalogNameScope(ProcArgument arg) =>
+        arg.IsDefault ? 0 : arg.Value.IsNull ? null : ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Int32);
 
     /// <summary>
     /// Handles <c>EXEC sp_pkeys @table_name [, @table_owner]
@@ -822,7 +937,7 @@ partial class Simulation
                     case 0: name = CatalogStringArg(arg); break;
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_pkeys");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_pkeys"));
                 }
 
                 continue;
@@ -833,7 +948,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_name"): name = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_pkeys");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_pkeys"));
             }
         }
 
@@ -1017,7 +1132,7 @@ partial class Simulation
                     case 4: uniqueOnly = CatalogIsUnique(arg); break;
                     case 5: break; // @accuracy — no live statistics to tune
                     case 6: break; // @ODBCVer — result shape is version-invariant
-                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedureName));
                 }
 
                 continue;
@@ -1032,7 +1147,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "is_unique"): uniqueOnly = CatalogIsUnique(arg); break;
                 case var n when BuiltInToken.Equals(n, "accuracy"): break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, procedureName));
             }
         }
 
@@ -1143,7 +1258,7 @@ partial class Simulation
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
                     case 3: break; // @fUsePattern — pattern mode is always on
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_stored_procedures");
+                    default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_stored_procedures"));
                 }
 
                 continue;
@@ -1155,7 +1270,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "sp_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "sp_qualifier"): qualifier = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "fUsePattern"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_stored_procedures");
+                default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_stored_procedures"));
             }
         }
 

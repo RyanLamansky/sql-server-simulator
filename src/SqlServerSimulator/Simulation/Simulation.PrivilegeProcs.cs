@@ -58,7 +58,7 @@ partial class Simulation
                 var n when BuiltInToken.Equals(n, "table_owner") => 1,
                 var n when BuiltInToken.Equals(n, "table_qualifier") => 2,
                 var n when BuiltInToken.Equals(n, "fUsePattern") => 3,
-                _ => throw SimulatedSqlException.InvalidProcedureParameters("sp_table_privileges"),
+                _ => throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name!, "sp_table_privileges")),
             };
             switch (slot)
             {
@@ -66,7 +66,7 @@ partial class Simulation
                 case 1: owner = CatalogStringArg(arg); break;
                 case 2: qualifier = CatalogStringArg(arg); break;
                 case 3: usePattern = arg.Value.IsNull || arg.Value.CoerceTo(SqlType.Int32).AsInt32 != 0; break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_table_privileges");
+                default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_table_privileges"));
             }
         }
 
@@ -145,7 +145,7 @@ partial class Simulation
                 var n when BuiltInToken.Equals(n, "table_owner") => 1,
                 var n when BuiltInToken.Equals(n, "table_qualifier") => 2,
                 var n when BuiltInToken.Equals(n, "column_name") => 3,
-                _ => throw SimulatedSqlException.InvalidProcedureParameters("sp_column_privileges"),
+                _ => throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name!, "sp_column_privileges")),
             };
             switch (slot)
             {
@@ -153,7 +153,7 @@ partial class Simulation
                 case 1: owner = CatalogStringArg(arg); break;
                 case 2: qualifier = CatalogStringArg(arg); break;
                 case 3: column = CatalogStringArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_column_privileges");
+                default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_column_privileges"));
             }
         }
 
