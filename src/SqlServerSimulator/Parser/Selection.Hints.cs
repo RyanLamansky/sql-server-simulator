@@ -519,7 +519,7 @@ internal sealed partial class Selection
             if (context.Token is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
-                ValidateHintCombinations(info);
+                ValidateHintCombinations(context, info);
                 return;
             }
             // Real takes a hint written straight after another without the
@@ -542,11 +542,12 @@ internal sealed partial class Selection
     /// <c>REPEATABLEREAD</c>, <c>SERIALIZABLE</c> / <c>HOLDLOCK</c>,
     /// <c>SNAPSHOT</c>), two granularities (<c>ROWLOCK</c>, <c>PAGLOCK</c>,
     /// <c>TABLOCK</c>, <c>TABLOCKX</c>), <c>UPDLOCK</c> beside <c>XLOCK</c>,
-    /// and a dirty read beside any lock it can't take; Msg 650 refuses
-    /// <c>READPAST</c> beside a dirty read or <c>SERIALIZABLE</c> (the whole
-    /// pair matrix probed 2026-10-05 against SQL Server 2025).
+    /// and a dirty read beside any lock it can't take (the whole pair matrix
+    /// probed 2026-10-05 against SQL Server 2025); <c>READPAST</c> beside a
+    /// dirty read or <c>SERIALIZABLE</c> is Msg 650 as the statement runs,
+    /// not as the batch compiles (probed 2026-10-16).
     /// </summary>
-    private static void ValidateHintCombinations(TableHintInfo info)
+    private static void ValidateHintCombinations(ParserContext context, TableHintInfo info)
     {
         if (info.ForceSeek && info.ForceScan)
             throw SimulatedSqlException.ForceScanWithForceSeek();
@@ -564,7 +565,7 @@ internal sealed partial class Selection
         {
             throw SimulatedSqlException.ConflictingLockingHints();
         }
-        if (info.ReadPast && (info.NoLock || info.Serializable))
+        if (info.ReadPast && (info.NoLock || info.Serializable) && !context.Batch.IsSkipping)
             throw SimulatedSqlException.ReadPastOutsideReadCommitted();
     }
 
@@ -670,6 +671,14 @@ internal sealed partial class Selection
             }
             if (table.XmlIndexes.Exists(index => collation.Equals(index.Name, name)))
                 throw SimulatedSqlException.XmlIndexInHint(name, qualifiedTableName);
+            // A spatial index is a hint's to name, though FORCESEEK can't seek
+            // its key columns (probed 2026-10-16 against SQL Server 2025).
+            if (table.SpatialIndexes.Exists(index => collation.Equals(index.Name, name)))
+            {
+                if (info.ForceSeekColumns is not null)
+                    throw SimulatedSqlException.ForceSeekOnExtendedIndex(table.Name, name);
+                continue;
+            }
             throw SimulatedSqlException.IndexHintNameNotFound(name, qualifiedTableName);
         }
     }
@@ -698,17 +707,18 @@ internal sealed partial class Selection
                 _ => table.HeapAllowPageLocks,
             };
             if (!allowed)
-                throw SimulatedSqlException.PageLockHintInhibited(IndexHintTableName(writtenName, table));
+                throw SimulatedSqlException.PageLockHintInhibited($"{writtenName.ImmediateQualifier ?? Database.DefaultSchemaName}.{table.Name}");
         }
     }
 
     /// <summary>
-    /// The table name the index-hint errors give: schema-qualified as the
-    /// query wrote or defaulted it, a temporary table by its name alone
-    /// (probed 2026-10-05 against SQL Server 2025).
+    /// The table name the index-hint errors give: the object name as the
+    /// query wrote it, a temporary table by its name alone (probed 2026-10-05
+    /// and 2026-10-16 against SQL Server 2025: <c>t</c>, <c>dbo.t</c> and
+    /// <c>db..t</c> are each named so). Msg 651 qualifies it instead.
     /// </summary>
     internal static string IndexHintTableName(MultiPartName writtenName, HeapTable table) =>
-        table.Name.StartsWith('#') ? table.Name : $"{writtenName.ImmediateQualifier ?? Database.DefaultSchemaName}.{table.Name}";
+        table.Name.StartsWith('#') ? table.Name : writtenName.ToString();
 
     /// <summary>
     /// The name, lower-cased, Msg 10794 gives a table hint a memory-optimized

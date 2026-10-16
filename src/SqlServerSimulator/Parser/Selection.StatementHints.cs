@@ -418,7 +418,7 @@ partial class Selection
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        ValidateHintCombinations(info);
+        ValidateHintCombinations(context, info);
         var objectName = written.ToString();
         clause.TableHints ??= [];
         if (clause.TableHints.Exists(earlier => context.Batch.CurrentDatabase.Collation.Equals(earlier.Written, objectName)))

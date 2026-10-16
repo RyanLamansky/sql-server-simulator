@@ -364,6 +364,13 @@ internal sealed class FromSource(
     public (Schemas.InlineTableValuedFunction Function, Expression?[] Arguments, MultiPartName Name)? InlineCall;
 
     /// <summary>
+    /// For an indexed view read <c>WITH (NOEXPAND, FORCESEEK)</c>, the hints,
+    /// which its own indexes have to honor as a table's would; null for every
+    /// other source.
+    /// </summary>
+    public Selection.TableHintInfo? ForcedViewIndexSeek;
+
+    /// <summary>
     /// For a multi-statement or CLR function's call in a writing statement's
     /// <c>FROM</c> clause, the function's name as written, which a joined write
     /// aliasing it refuses with Msg 270 (probed 2026-10-06 against SQL Server

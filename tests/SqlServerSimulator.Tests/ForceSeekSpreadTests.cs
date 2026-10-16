@@ -64,8 +64,7 @@ public sealed class ForceSeekSpreadTests
     private static Simulation Prepared()
     {
         var simulation = new Simulation();
-        foreach (var batch in Setup)
-            _ = simulation.ExecuteNonQuery(batch);
+        simulation.ExecuteBatches(Setup);
         return simulation;
     }
 

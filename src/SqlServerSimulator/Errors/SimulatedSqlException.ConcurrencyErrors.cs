@@ -276,6 +276,13 @@ partial class SimulatedSqlException
         new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, state);
 
     /// <summary>
+    /// Msg 363 — a <c>FORCESEEK</c> naming seek columns of a spatial index
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekOnExtendedIndex(string tableName, string indexName) =>
+        new($"The query processor could not produce a query plan because the FORCESEEK hint on table or view '{tableName}' cannot be used with the EXTENDED INDEX specified by index '{indexName}'.", 363, 16, 1);
+
+    /// <summary>
     /// Msg 364 — a <c>FORCESEEK</c> naming an index and its seek columns on a
     /// view read without <c>NOEXPAND</c>, whose index it can't name (probed
     /// 2026-10-07 against SQL Server 2025). Raised while the batch compiles,
@@ -315,10 +322,12 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 650 — <c>READPAST</c> under a level other than READ COMMITTED or
     /// REPEATABLE READ, whether a hint beside it or the session sets it
-    /// (probed 2026-10-05 against SQL Server 2025).
+    /// (probed 2026-10-05 against SQL Server 2025). It acts as under
+    /// <c>XACT_ABORT</c>: uncaught it ends the batch and rolls the
+    /// transaction back (probed 2026-10-16).
     /// </summary>
     internal static SimulatedSqlException ReadPastOutsideReadCommitted() =>
-        new("You can only specify the READPAST lock in the READ COMMITTED or REPEATABLE READ isolation levels.", 650, 16, 1);
+        new("You can only specify the READPAST lock in the READ COMMITTED or REPEATABLE READ isolation levels.", 650, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 651 — <c>PAGLOCK</c> on a table whose index disallows page locks

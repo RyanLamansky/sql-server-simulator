@@ -73,6 +73,26 @@ partial class Selection
                 (seekers ??= []).Add(i);
                 continue;
             }
+            if (sources[i] is { ForcedViewIndexSeek: { } viewHints, BackingView: { } indexedView })
+            {
+                // NOEXPAND reads the view's own index, which seeks as a
+                // table's does (probed 2026-10-16 against SQL Server 2025).
+                conjuncts ??= CollectConjuncts(excluders, joins);
+                var viewLeads = new HashSet<int>();
+                foreach (var index in indexedView.Indexes)
+                {
+                    if (!index.IsDisabled && index.KeyStorageOrdinals.Length != 0 && NamedByIndexHint(batch, viewHints, index.Name, index.IndexId))
+                        _ = viewLeads.Add(index.KeyStorageOrdinals[0]);
+                }
+                var viewProbe = new ForceSeekProbe(batch, sources[i], i, sources, viewLeads);
+                if (viewLeads.Count == 0 || !conjuncts.Exists(conjunct => conjunct.OffersSeek(viewProbe, negated: false)))
+                {
+                    if (defers)
+                        return true;
+                    throw SimulatedSqlException.ForceSeekPlanInfeasible();
+                }
+                continue;
+            }
             if (sources[i] is { LateralIsQueryBody: true, LateralPlan.ForceSeekDeferred: true } && !IsApplyBody(joins, i))
             {
                 conjuncts ??= CollectConjuncts(excluders, joins);

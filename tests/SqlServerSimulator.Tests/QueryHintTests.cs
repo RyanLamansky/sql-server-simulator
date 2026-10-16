@@ -149,7 +149,7 @@ public sealed class QueryHintTests
             create table t (id int primary key);
             insert t values (1);
             select * from t with (index(IX_does_not_exist))
-            """, 308, "Index 'IX_does_not_exist' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            """, 308, "Index 'IX_does_not_exist' on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void Select_IndexHint_PkConstraintName_ReturnsRows()
@@ -190,7 +190,7 @@ public sealed class QueryHintTests
             create table t (id int primary key);
             insert t values (1);
             select * from t with (index = nope)
-            """, 308, "Index 'nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            """, 308, "Index 'nope' on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void Select_IndexHint_BadIdOnPkTable_RaisesMsg307()
@@ -198,7 +198,7 @@ public sealed class QueryHintTests
             create table t (id int primary key);
             insert t values (1);
             select * from t with (index(99))
-            """, 307, "Index ID 99 on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            """, 307, "Index ID 99 on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void Select_IndexHint_Id1OnHeapTable_RaisesMsg307()
@@ -206,7 +206,7 @@ public sealed class QueryHintTests
             create table t (id int, v int);
             insert t values (1, 10);
             select * from t with (index(1))
-            """, 307, "Index ID 1 on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            """, 307, "Index ID 1 on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void Select_IndexHint_Id0OnHeapTable_ReturnsRows()
@@ -222,7 +222,7 @@ public sealed class QueryHintTests
             create table t (id int constraint pk_t primary key);
             insert t values (1);
             select * from t with (index(nope, pk_t))
-            """, 308, "Index 'nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            """, 308, "Index 'nope' on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void Select_IndexHint_MultipleKnown_ReturnsRows()
@@ -796,7 +796,7 @@ public sealed class QueryHintTests
         => new Simulation().AssertSqlError(
             $"{SeekTable} select * from t with (forceseek(ix_nope(a)))",
             308,
-            "Index 'ix_nope' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+            "Index 'ix_nope' on table 't' (specified in the FROM clause) does not exist.");
 
     [TestMethod]
     public void ForceSeek_NonKeyColumn_ReportsMsg362()
@@ -1117,4 +1117,77 @@ public sealed class QueryHintTests
     public void TableHintClause_MatchingTheExposedName_IsTaken()
         => AreEqual(1, new Simulation().ExecuteScalar(
             $"{HintTable} select count(*) from dbo.t x with (nolock) where x.a = 10 option (table hint(x, nolock, forceseek))"));
+
+    /// <summary>
+    /// The index-hint messages name the table as the query wrote it (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from t with (index(nope))", "Index 'nope' on table 't' (specified in the FROM clause) does not exist.")]
+    [DataRow("select * from dbo.t with (index(nope))", "Index 'nope' on table 'dbo.t' (specified in the FROM clause) does not exist.")]
+    [DataRow("select * from t a with (index(nope))", "Index 'nope' on table 't' (specified in the FROM clause) does not exist.")]
+    public void IndexHintMessages_NameTheTableAsWritten(string query, string message)
+        => new Simulation().AssertSqlError($"create table t (id int primary key); {query}", 308, message);
+
+    /// <summary>
+    /// A statement the batch's compile deferred meets its index hint's
+    /// refusal as it runs, and the batch ends there as at a compile error
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ADeferredIndexHintRefusal_EndsTheBatch()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("create table t (id int primary key); select * from t with (index(nope)); create table ran (a int)", 308);
+        _ = IsInstanceOfType<DBNull>(simulation.ExecuteScalar("select object_id('ran')"));
+    }
+
+    /// <summary>
+    /// READPAST in a SERIALIZABLE read is refused as the statement runs, and
+    /// acts as under XACT_ABORT (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from t with (readpast, serializable)")]
+    [DataRow("set transaction isolation level serializable; select * from t with (readpast)")]
+    public void ReadPastOutsideReadCommitted_RollsTheTransactionBack(string read)
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (id int primary key); create table ran (a int)").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"begin tran; insert ran values (1); {read}; insert ran values (2)").ExecuteNonQuery());
+        AreEqual(650, ex.Number);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select count(*) from ran").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// An INDEX hint may name a spatial index; FORCESEEK can't seek its
+    /// columns (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ASpatialIndex_IsAHintsToName()
+    {
+        const string setup = "create table s (id int primary key, g geometry); create spatial index sx on s(g) with (bounding_box = (0, 0, 10, 10)); ";
+        _ = new Simulation().ExecuteNonQuery(setup + "select * from s with (index(sx)) where g.STIntersects(geometry::Point(1, 1, 0)) = 1");
+        new Simulation().AssertSqlError(
+            setup + "select * from s with (forceseek(sx(g))) where g.STIntersects(geometry::Point(1, 1, 0)) = 1",
+            363,
+            "The query processor could not produce a query plan because the FORCESEEK hint on table or view 's' cannot be used with the EXTENDED INDEX specified by index 'sx'.");
+    }
+
+    /// <summary>
+    /// NOEXPAND reads an indexed view's own index, which FORCESEEK has to
+    /// seek (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ForceSeekOnANoExpandView_NeedsAPredicateOnItsKey()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key, v int)");
+        _ = simulation.ExecuteNonQuery("create view vi with schemabinding as select id, v from dbo.t");
+        _ = simulation.ExecuteNonQuery("create unique clustered index cvi on vi(id)");
+        _ = simulation.ExecuteNonQuery("select * from vi with (noexpand, forceseek) where id = 1");
+        _ = simulation.AssertSqlError("select * from vi with (noexpand, forceseek)", 8622);
+        _ = simulation.AssertSqlError("select * from vi with (noexpand, forceseek) where v = 1", 8622);
+    }
 }

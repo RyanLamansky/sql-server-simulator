@@ -4200,10 +4200,10 @@ partial class SimulatedSqlException
         new($"{verb} failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.", 1934, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
-    /// <see cref="IncorrectSetOptions"/> refusing an XML method, which behaves
-    /// as under <c>XACT_ABORT</c>: uncaught it ends the batch — a procedure's
-    /// caller's too — and rolls the transaction back, caught it dooms it
-    /// (probed 2026-10-16 against SQL Server 2025).
+    /// <see cref="IncorrectSetOptions"/> refusing an XML method or an XML
+    /// index's creation, which behaves as under <c>XACT_ABORT</c>: uncaught it
+    /// ends the batch — a procedure's caller's too — and rolls the transaction
+    /// back, caught it dooms it (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException IncorrectSetOptionsForXmlMethod(string verb, string options) =>
         new($"{verb} failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.", 1934, 16, 1) { AbortsAsUnderXactAbort = true };

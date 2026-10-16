@@ -1611,6 +1611,7 @@ internal sealed partial class Selection
                         BrowseBody = viewFlattens ? viewBody : null,
                         BodySeekShape = viewBody?.SeekShape,
                         ForcedSeekThrough = viewHints is { ForceSeek: true, NoExpand: false } ? viewHints : null,
+                        ForcedViewIndexSeek = viewHints is { ForceSeek: true, NoExpand: true } ? viewHints : null,
                     };
                     if (viewSource.BodySeekShape is not null)
                         (context.BodySeekShapeHolders ??= []).Add(viewSource);

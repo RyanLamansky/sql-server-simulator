@@ -213,7 +213,7 @@ public sealed class OverPermissiveClosureTests
         sim.AssertSqlError(
             "select * from fs with (forceseek (nosuchindex (a)))",
             308,
-            "Index 'nosuchindex' on table 'dbo.fs' (specified in the FROM clause) does not exist.");
+            "Index 'nosuchindex' on table 'fs' (specified in the FROM clause) does not exist.");
     }
 
     /// <summary>

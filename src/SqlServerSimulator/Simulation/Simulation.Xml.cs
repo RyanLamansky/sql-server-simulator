@@ -452,7 +452,7 @@ partial class Simulation
         // Msg 1934 echoes the statement as written, so the primary and
         // secondary forms report different verbs (probe-confirmed).
         if (IncorrectSetOptionNames(context) is { } setOptions)
-            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", setOptions);
+            throw SimulatedSqlException.IncorrectSetOptionsForXmlMethod(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", setOptions);
 
         if (!isPrimary && !table.XmlIndexes.Exists(existing => existing.IsPrimary && collation.Equals(existing.Name, usingPrimaryName!)))
             throw SimulatedSqlException.UsingPrimaryXmlIndexNotFound(usingPrimaryName!, writtenTable).AbortingAsUnderXactAbort();
