@@ -686,6 +686,7 @@ A **nested** query — a derived table, CTE, subquery, `EXISTS` body, or a view 
 So `SELECT COUNT(*) FROM (SELECT concat(a, b) x …) d` answers, `SELECT x FROM (…) d` is Msg 451 at the outer select list, `WHERE d.x = 'q'` is Msg 4191, and an `INSERT` or `SET @v = (SELECT …)` reading it is Msg 456.
 `QueryScope.NamesOutputCollation` carries the rule.
 `SELECT … INTO` is not an assignment in that sense: it has to materialize a column of its own, so it raises.
+A column `SELECT … INTO` makes keeps its expression's collation at implicit coercibility, an explicit `COLLATE` included, so a later `col + N'x' COLLATE DATABASE_DEFAULT` binds (probed 2026-10-16 against SQL Server 2025).
 Like every other site the check binds at compile time, so an empty rowset and a `CREATE PROCEDURE` whose body carries the conflict both raise, the latter attributed to the module.
 
 ### Msg 4191 — the consuming operation reports

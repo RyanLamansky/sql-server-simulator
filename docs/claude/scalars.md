@@ -722,7 +722,7 @@ Constants whose values don't carry real session/server identity in the simulator
   sqlcmd's own fresh session reads 5176, differing only in `QUOTED_IDENTIFIER`.
 - **`@@MAX_PRECISION`** — constant 38.
 - **`@@MAX_CONNECTIONS`** — constant 32767.
-- **`@@SERVERNAME`** — `"SIMULATED"`.
+- **`@@SERVERNAME`** — `"SIMULATED"`, an `nvarchar(128)` as `@@SERVICENAME` and `@@REMSERVER` are, where `@@VERSION` is `nvarchar(300)` (probed 2026-10-16 against SQL Server 2025).
 - **`@@SERVICENAME`** — `"MSSQLSERVER"`.
 - **`@@LANGID`** — session state: the `langid` of the session's `SET LANGUAGE` as `smallint`, 0 for the `us_english` default.
 - **`@@LANGUAGE`** — session state: the *official* name of that language (the alias never reads back) — see [`SET LANGUAGE and the DATEFIRST it moves`](#set-language-and-the-datefirst-it-moves).

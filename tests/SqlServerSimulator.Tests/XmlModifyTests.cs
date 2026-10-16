@@ -690,4 +690,14 @@ public sealed class XmlModifyTests
         _ = sim.ExecuteNonQuery("update dbo.typed set body.modify('insert <undeclared/> into (/r)[1]')");
         AreEqual("<r><a>1</a><undeclared /></r>", sim.ExecuteScalar("select body from dbo.typed"));
     }
+
+    [TestMethod]
+    public void ATargetPath_ReadsSqlVariable()
+        => AreEqual("<r><a id=\"7\"><b n=\"7\"/></a></r>", new Simulation().ExecuteScalar("""
+            declare @x xml = '<r><a id="1"/><a id="2"/></r>', @id int = 2, @v int = 7;
+            set @x.modify('delete /r/a[@id = sql:variable("@id")]');
+            set @x.modify('insert <b n="{sql:variable("@v")}"/> into (/r/a[@id = sql:variable("@id") - 1])[1]');
+            set @x.modify('replace value of (/r/a[@id = sql:variable("@id") - 1]/@id)[1] with sql:variable("@v")');
+            select cast(@x as nvarchar(max))
+            """));
 }

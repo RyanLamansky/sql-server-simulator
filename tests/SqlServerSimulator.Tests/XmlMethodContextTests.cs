@@ -56,4 +56,23 @@ public sealed class XmlMethodContextTests
     [TestMethod]
     public void DuplicateColumnReportsFirst()
         => _ = new Simulation().AssertSqlError("create table t (x xml, i as x.value('(/a)[1]', 'int'), k int, k int)", 2705);
+
+    [TestMethod]
+    public void AJoinedUpdatesWhere_BindsSqlColumnToItsFromAlias()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table #dp (id nvarchar(10), g xml, v bit);
+            insert #dp values (N'p1', '<d><v id="p1"/></d>', 0), (N'p2', '<d/>', 0);
+            update dp set dp.v = 1 from #dp as dp where dp.g.exist('d/v[@id = sql:column("dp.id")]') = 1;
+            select count(*) from #dp where v = 1
+            """));
+
+    [TestMethod]
+    public void AnXmlMethodUnderQuotedIdentifierOff_EndsTheBatchAndItsTransaction()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("set quoted_identifier off", "create procedure p as declare @x xml = '<a/>'; select @x.exist('/a'); select 'after'", "set quoted_identifier on");
+        _ = sim.AssertSqlError("create table t (a int); begin tran; insert t values (1); exec p; select 'reached'", 1934);
+        AreEqual(0, sim.ExecuteScalar("select @@trancount"));
+        AreEqual(1934, sim.ExecuteScalar("begin try exec p end try begin catch select error_number() end catch"));
+    }
 }

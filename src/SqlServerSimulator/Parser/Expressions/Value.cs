@@ -86,6 +86,13 @@ internal sealed class Value : Expression
         this.IsLiteral = true;
     }
 
+    /// <summary>
+    /// The <c>nvarchar</c> a string-valued <c>@@</c> keyword carries: 128 for
+    /// the names, 300 for <c>@@VERSION</c> (probed 2026-10-16 against SQL
+    /// Server 2025, through <c>SELECT … INTO</c>).
+    /// </summary>
+    private static NVarcharSqlType AtAtText(int length) => NVarcharSqlType.Get(length, SqlType.NVarchar.Collation, SqlType.NVarchar.Coercibility);
+
     /// <summary>True when the constant stands in for a constant-valued <c>@@</c> keyword.</summary>
     private readonly bool isAtAtKeyword;
 
@@ -105,7 +112,7 @@ internal sealed class Value : Expression
         switch (doubleAtPrefixedString.Parse())
         {
             case AtAtKeyword.Version:
-                this.Constant = SqlValue.FromNVarchar(ReferenceBuild.Banner);
+                this.Constant = SqlValue.FromNVarchar(AtAtText(300), ReferenceBuild.Banner);
                 return;
             case AtAtKeyword.MicrosoftVersion:
                 this.Constant = SqlValue.FromInt32(ReferenceBuild.MicrosoftVersion);
@@ -117,13 +124,13 @@ internal sealed class Value : Expression
                 this.Constant = SqlValue.FromInt32(32767);
                 return;
             case AtAtKeyword.ServiceName:
-                this.Constant = SqlValue.FromNVarchar("MSSQLSERVER");
+                this.Constant = SqlValue.FromNVarchar(AtAtText(128), "MSSQLSERVER");
                 return;
             case AtAtKeyword.ServerName:
-                this.Constant = SqlValue.FromNVarchar("SIMULATED");
+                this.Constant = SqlValue.FromNVarchar(AtAtText(128), "SIMULATED");
                 return;
             case AtAtKeyword.RemServer:
-                this.Constant = SqlValue.Null(SqlType.NVarchar);
+                this.Constant = SqlValue.Null(AtAtText(128));
                 return;
             // System statistical counters (all int, probe-confirmed
             // 2026-07-19 against SQL Server 2025). The in-process simulator

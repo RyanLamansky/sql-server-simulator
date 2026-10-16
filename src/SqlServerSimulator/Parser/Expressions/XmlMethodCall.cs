@@ -160,7 +160,7 @@ internal sealed class XmlMethodCall : Expression
         if (!context.Batch.CreateTimeBinding && method != XmlMethod.Nodes
             && Simulation.IncorrectSetOptionNames(context) is { } setOptions)
         {
-            throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
+            throw SimulatedSqlException.IncorrectSetOptionsForXmlMethod(context.Batch.CurrentStatement.StatementVerb, setOptions);
         }
 
         _ = context.IndexedViewShapeCollector?.UsesXmlMethod = true;

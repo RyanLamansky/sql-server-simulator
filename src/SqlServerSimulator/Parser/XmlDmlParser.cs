@@ -447,12 +447,17 @@ internal sealed class XmlDmlParser(
             analyzed = analyzed[1..close].Trim();
         }
 
-        var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify", this.Typing);
+        // A predicate may read the row through sql:variable / sql:column
+        // (probed 2026-10-16 against SQL Server 2025:
+        // `delete //r[@id = sql:variable("@id")]`).
+        var accessors = new XmlSqlAccessorScope(this.ResolveContentAccessor);
+        var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify", accessors, this.Typing);
+        this.ResolveAccessorNames(accessors);
         if (analyzed == ".")
-            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton: true);
+            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton: true, [.. accessors.Accessors]);
 
         var (kind, name) = ClassifyStep(LastStep(analyzed));
-        return new XmlDmlPath(body, compiled, kind, name, singleton);
+        return new XmlDmlPath(body, compiled, kind, name, singleton, [.. accessors.Accessors]);
     }
 
     /// <summary>Index of the <c>)</c> closing the parenthesis at position 0, or -1.</summary>

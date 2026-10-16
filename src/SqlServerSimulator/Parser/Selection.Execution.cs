@@ -973,6 +973,9 @@ internal sealed partial class Selection
         BooleanExpression predicate;
         // A joined UPDATE / DELETE's WHERE takes a MATCH over its FROM sources.
         using (ParserScope.Enter(ref context.MatchScope, matchSources is null ? null : new MatchScope { Sources = matchSources, Joins = matchJoins }))
+        // Its FROM sources are the scope a sql:column in an XML method there
+        // binds against (probed 2026-10-16 against SQL Server 2025).
+        using (ParserScope.Enter(ref context.ScopeSources, matchSources ?? context.ScopeSources))
         using (ParserScope.Enter(ref context.OuterTypeResolver, resolveColumnType))
         // A DML WHERE is one of the eight clauses real's Msg 11720 names, and
         // it says so for an UPDATE / DELETE / MERGE as readily as for a SELECT

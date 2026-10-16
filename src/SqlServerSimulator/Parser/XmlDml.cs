@@ -119,8 +119,11 @@ internal sealed class XmlDmlItem(XmlDmlTerm term)
 /// the instance holds exactly one matching node, while
 /// <c>(/r/a/text())[1]</c> is <c>text ?</c> and accepted.
 /// </summary>
-internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNodeKind kind, string name, bool singleton)
+internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNodeKind kind, string name, bool singleton, XmlSqlAccessorRef[] accessors)
 {
+    /// <summary>The <c>sql:variable</c> / <c>sql:column</c> slots the path's predicates read, filled per row.</summary>
+    public readonly XmlSqlAccessorRef[] Accessors = accessors;
+
     /// <summary>The path body as written, with the prolog already stripped.</summary>
     public readonly string Body = body;
 
@@ -308,7 +311,8 @@ internal sealed class XmlDml
         var container = XmlInstance.CreateMutableContainer(xmlText);
         var navigator = container.CreateNavigator();
         var selected = new List<XObject>();
-        foreach (var item in XmlQueryEngine.Select(navigator, this.Target.Compiled))
+        var targetScope = BuildAccessorScope(this.Target.Accessors, runtime);
+        foreach (var item in targetScope is null ? XmlQueryEngine.Select(navigator, this.Target.Compiled) : XmlQueryEngine.Select(navigator, this.Target.Compiled, targetScope))
         {
             if (item is XPathNavigator node && node.UnderlyingObject is XObject matched)
                 selected.Add(matched);

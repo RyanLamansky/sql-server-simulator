@@ -119,6 +119,12 @@ partial class Selection
             var columnType = outputSchema[i] is NVarcharSqlType { jsonText: true } jsonText
                 ? NVarcharSqlType.Get(jsonText.length, jsonText.Collation, jsonText.Coercibility)
                 : outputSchema[i];
+            // A stored column's collation is implicit, whatever an explicit
+            // COLLATE in the expression gave it (probed 2026-10-16 against SQL
+            // Server 2025: `col + N'x' COLLATE DATABASE_DEFAULT` over a column
+            // SELECT INTO took from `expr COLLATE Latin1_General_BIN2` binds).
+            if (columnType is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType && columnType.Collation is { } stored)
+                columnType = columnType.WithCollation(stored, Coercibility.Implicit);
             destColumns[i] = new HeapColumn(
                 colName,
                 columnType,

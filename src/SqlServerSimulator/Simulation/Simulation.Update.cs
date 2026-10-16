@@ -89,10 +89,12 @@ partial class Simulation
         // (probed 2026-10-04 against SQL Server 2025).
         if (targetHints.NoExpand)
             throw SimulatedSqlException.NoExpandHintInvalid(leadingIdent.ToString(), state: 1);
-        // A target the FROM clause names — an alias, or a view written through
-        // in a join — is read from that clause ahead of the SET list, whose
-        // values bind against its sources.
-        var preParsedFrom = context.Token is ReservedKeyword { Keyword: Keyword.Set } && (leadingTable is null || leadingView is not null)
+        // A FROM clause is read ahead of the SET list, whose values bind
+        // against its sources — the target's alias there included, when the
+        // statement names the target by its table (probed 2026-10-16 against
+        // SQL Server 2025: `UPDATE t SET d = (SELECT … WHERE s.id = a.id)
+        // FROM t a` binds a).
+        var preParsedFrom = context.Token is ReservedKeyword { Keyword: Keyword.Set } && (leadingTable is null || leadingView is not null || remoteWrite is null)
             ? Selection.PreParseMutationFrom(context)
             : null;
         var joinedView = leadingView is not null && preParsedFrom is not null;
@@ -135,6 +137,8 @@ partial class Simulation
         if (leadingTable is { } scopeTable && !joinedView)
         {
             context.OuterTypeResolver = UpdateTargetTypeResolver(context.CurrentDatabase, leadingIdent, scopeTable, savedOuterTypeResolver);
+            if (preParsedFrom is { } tableFrom)
+                context.OuterTypeResolver = Selection.ColumnTypeResolverFor([.. tableFrom.Sources], context.OuterTypeResolver);
         }
         else if (preParsedFrom is { } preFrom)
         {

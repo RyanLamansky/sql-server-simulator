@@ -126,4 +126,11 @@ public sealed class AtAtKeywordExpansionTests
         using var again = second.CreateCommand(Text);
         AreEqual("52|1|1|us_english|0|100|5", again.ExecuteScalar());
     }
+
+    [TestMethod]
+    public void TheStringKeywords_CarryRealsLengths()
+        => AreEqual("256|256|600|256", new Simulation().ExecuteScalar("""
+            select @@servername a, @@servicename b, @@version c, @@remserver d into #x;
+            select string_agg(cast(max_length as varchar(5)), '|') within group (order by column_id) from tempdb.sys.columns where object_id = object_id('tempdb..#x')
+            """));
 }

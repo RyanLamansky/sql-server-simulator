@@ -567,4 +567,15 @@ public sealed class UpdateTests
         _ = simulation.AssertSqlError($"create table t (a int); insert t values (1); {update}", number);
         AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t"));
     }
+
+    [TestMethod]
+    public void ASetSubquery_ReadsTheFromClausesAliasOfATargetNamedByItsTable()
+        => AreEqual("5", new Simulation().ExecuteScalar("""
+            create table r (id int, d varchar(10));
+            insert r values (1, 'x');
+            create table s (id int, v int);
+            insert s values (1, 5);
+            update r set d = cast((select max(v) from s where s.id = a.id) as varchar(10)) from r a;
+            select d from r
+            """));
 }

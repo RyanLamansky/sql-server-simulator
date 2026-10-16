@@ -540,6 +540,7 @@ Everywhere else:
 | the instance is NULL — an unassigned variable or a NULL cell in an updated row | **Msg 5302** — `Mutator 'modify()' on '@x' cannot be called on a null value.` (the name as written, `@` included for a variable); it ends the batch and rolls the transaction back as under `SET XACT_ABORT ON`, and dooms it inside `TRY` (probed 2026-10-02) |
 
 Real reaches Msg 8137 before the SET-option gate, so `.modify()` in a select list reports it even from a session holding `QUOTED_IDENTIFIER` the wrong way; the mutator positions take the gate (**Msg 1934**) like every other XML method, naming the statement's own verb — `SELECT` for `SET @x.modify(…)`, `UPDATE` for the UPDATE form.
+Every XML method's Msg 1934 behaves as under `XACT_ABORT`: uncaught it ends the batch, a procedure's caller's included, and rolls the transaction back, while a `TRY` catches it (probed 2026-10-16 against SQL Server 2025, a procedure created under `QUOTED_IDENTIFIER OFF`).
 
 ### The three statements
 
@@ -551,6 +552,7 @@ replace value of <target> with <value>
 
 **`insert`** — the content is an **XQuery expression** like any other, compiled through the read methods' engine and evaluated against the instance as it stands before the edit: the [node constructors](#node-constructors), a path copying nodes out of the instance (`insert /r/b into (/r)[1]` doubles the `b`, `insert (/r/b)[1] before (/r/b)[1]` too), a FLWOR or conditional producing nodes, and enclosed expressions of any shape inside a constructor (`<a>{count(/r/b)}</a>`, `<a x="{/r/b}"/>`) — all probed 2026-09-28 against SQL Server 2025.
 A selected attribute lands on the target element as a computed one does.
+A target path's predicates read the row through the accessors too (`delete /r/a[@id = sql:variable("@id")]`, probed 2026-10-16 against SQL Server 2025).
 The one form of its own is a bare `sql:variable("@v")` / `sql:column("c")` (or a parenthesized list of them) carrying `xml`, the only place an `xml` accessor is legal; it brings its own namespace scope.
 A constructor resolves its **name through the prolog** exactly as a path step does — `declare default element namespace "urn:d"; insert <b/>` builds a `urn:d` element, and `declare namespace p="urn:x"; insert <p:b/>` a `urn:x` one — and a binding it took from the prolog is dropped again wherever the insertion point already makes it, while one the constructor wrote itself (`<p:b xmlns:p="urn:x"/>`) stays (probe-confirmed).
 The serializer re-declares whatever the insertion point doesn't already bind, so an unqualified constructed element landing under a namespaced parent comes back as `<b xmlns=""/>`, byte-identical to real.

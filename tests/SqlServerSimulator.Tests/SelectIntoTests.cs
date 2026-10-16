@@ -483,4 +483,11 @@ public sealed class SelectIntoTests
         _ = sim.ExecuteNonQuery(selectInto);
         _ = sim.AssertSqlError("insert t values ('abcd')", 2628);
     }
+
+    [TestMethod]
+    public void AnExplicitCollation_StoresAsTheColumnsImplicitOne()
+        => AreEqual("x!", new Simulation().ExecuteScalar("""
+            select n = cast(N'x' as nvarchar(10)) collate Latin1_General_BIN2 into #t;
+            select n + N'!' collate database_default from #t
+            """));
 }
