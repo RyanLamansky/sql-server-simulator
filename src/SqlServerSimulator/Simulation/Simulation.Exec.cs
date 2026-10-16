@@ -72,7 +72,7 @@ partial class Simulation
         or "sp_prepare" or "sp_prepexec" or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
         or "sp_server_diagnostics" or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_90" or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_90" or "sp_sproc_columns_100" or "sp_statistics"
-        or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations" or "sp_tablecollations_90" or "sp_tablecollations_100"
+        or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_table_type_columns_100" or "sp_table_type_pkeys" or "sp_table_types" or "sp_tablecollations" or "sp_tablecollations_90" or "sp_tablecollations_100"
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
         or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
         or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
@@ -429,6 +429,9 @@ partial class Simulation
             "sp_MSforeachtable" => Uncounted(this.InvokeSpMsForEachTable(batch)),
             "sp_password" => this.InvokeSpPassword(batch, calledAs),
             "sp_pkeys" => InvokeSpPkeys(batch),
+            "sp_table_type_columns_100" => InvokeSpTableTypeColumns(batch, calledAs),
+            "sp_table_type_pkeys" => InvokeSpTableTypePkeys(batch, calledAs),
+            "sp_table_types" => InvokeSpTableTypes(batch, calledAs),
             "sp_query_store_clear_hints" => InvokeSpQueryStoreHints(batch, set: false),
             "sp_query_store_clear_message_queues" => InvokeSpQueryStoreClearMessageQueues(batch),
             "sp_query_store_consistency_check" => InvokeSpQueryStoreConsistencyCheck(batch),

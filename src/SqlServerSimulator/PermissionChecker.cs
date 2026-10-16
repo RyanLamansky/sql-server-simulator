@@ -1951,18 +1951,36 @@ internal static class PermissionChecker
         return narrowed;
     }
 
-    /// <summary>Whether a restricted principal sees a user-defined type: its owner, or a holder of any permission on it.</summary>
-    internal static bool CanViewTypeMetadata(Database database, int principalId, int userTypeId, int schemaId, int ownerId, ServerLoginRights server)
+    /// <summary>
+    /// Whether a restricted principal sees a user-defined type: its owner, or a
+    /// holder of any permission on it — <c>ALTER</c> on its schema included
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static bool CanViewTypeMetadata(Database database, int principalId, int userTypeId, int schemaId, int ownerId, ServerLoginRights server) =>
+        CanViewTypeMetadata(database, principalId, userTypeId, schemaId, ownerId, server, ["CONTROL", "EXECUTE", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"], schemaAlter: true);
+
+    /// <summary>
+    /// Whether a restricted principal sees a table type's columns in
+    /// <c>sp_table_type_columns_100_rowset</c>: its owner, or a holder of
+    /// <c>CONTROL</c> or <c>VIEW DEFINITION</c> on it or its schema, where
+    /// <c>EXECUTE</c>, <c>REFERENCES</c> and <c>TAKE OWNERSHIP</c>, which show
+    /// the type itself, show none (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static bool CanViewTypeDefinition(Database database, int principalId, int userTypeId, int schemaId, int ownerId, ServerLoginRights server) =>
+        CanViewTypeMetadata(database, principalId, userTypeId, schemaId, ownerId, server, ["CONTROL", "VIEW DEFINITION"], schemaAlter: false);
+
+    private static bool CanViewTypeMetadata(Database database, int principalId, int userTypeId, int schemaId, int ownerId, ServerLoginRights server, string[] permissions, bool schemaAlter)
     {
         var closure = BuildClosure(database, principalId);
         if (closure.Contains(ownerId))
             return true;
-        foreach (var name in (string[])["CONTROL", "EXECUTE", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"])
+        foreach (var name in permissions)
         {
             if (IsGrantedInClosure(database, closure, name, ClassType, userTypeId, schemaId, server, Permission.Resolve(name)))
                 return true;
         }
-        return false;
+        // A type has no ALTER of its own, so its schema's is asked directly.
+        return schemaAlter && IsGrantedInClosure(database, closure, "ALTER", ClassSchema, schemaId, schemaId, server, Permission.Resolve("ALTER"));
     }
 
     /// <summary>

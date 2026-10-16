@@ -105,6 +105,9 @@ internal static partial class BuiltInResources
         "sp_table_privileges_rowset",
         "sp_table_privileges_rowset2",
         "sp_table_statistics2_rowset",
+        "sp_table_type_columns_100_rowset",
+        "sp_table_type_primary_keys_rowset",
+        "sp_table_types_rowset",
         "sp_table_statistics_rowset",
         "sp_tables_info_90_rowset",
         "sp_tables_info_90_rowset2",
@@ -342,6 +345,10 @@ internal static partial class BuiltInResources
         // them to enumerate the current database's keys, indexes, and stored
         // procedures.
         "sp_pkeys",
+        // The ODBC catalog procedures over user-defined table types.
+        "sp_table_types",
+        "sp_table_type_columns_100",
+        "sp_table_type_pkeys",
         // sp_fkeys: SQLForeignKeys — JDBC's getImportedKeys / getExportedKeys.
         "sp_fkeys",
         "sp_statistics",
