@@ -151,6 +151,71 @@ public sealed class PlanGuideTests
             select @r
             """));
 
+    /// <summary>
+    /// A NULL argument's Msg 214 is raised inside the procedure's own
+    /// transaction and ends only its statement: uncaught, the procedure closes
+    /// the transaction on its way out, while a CATCH finds it open and
+    /// committable, and it stays open after (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_create_plan_guide NULL, N'select * from t', N'SQL'")]
+    [DataRow("exec sp_create_plan_guide N'g', N'select * from t', NULL")]
+    [DataRow("exec sp_control_plan_guide NULL, N'g'")]
+    [DataRow("exec sp_control_plan_guide N'DROP'")]
+    public void NullArgument_LeavesItsTransactionOpenOnlyToACatch(string call)
+    {
+        var simulation = WithTable();
+        using var connection = simulation.CreateOpenConnection();
+        AreEqual("214:1:1|1", connection.CreateCommand($"""
+            declare @r varchar(30);
+            begin try {call}; end try
+            begin catch set @r = concat(error_number(), ':', @@trancount, ':', xact_state()); end catch
+            select concat(@r, '|', @@trancount)
+            """).ExecuteScalar());
+        AreEqual(1, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand(call).ExecuteNonQuery());
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual("1:1", connection.CreateCommand($"""
+            begin tran;
+            declare @r int;
+            begin try {call}; end try begin catch set @r = @@trancount; end catch
+            select concat(@r - 1, ':', xact_state())
+            """).ExecuteScalar());
+    }
+
+    /// <summary>
+    /// The ids a refused guide spends: a SQL or TEMPLATE guide's compile spends
+    /// one, which a refusal past it leaves spent, a name in use spends what the
+    /// guide would have, and a refusal ahead of the compile — an argument, a
+    /// module, a statement another guide covers — none (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_create_plan_guide NULL, N'select b from t', N'SQL'", 65539)]
+    [DataRow("exec sp_create_plan_guide N'#x', N'select b from t', N'SQL'", 65539)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select b from t', N'OBJECT', N'dbo.nosuch'", 65539)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select * from t', N'SQL', NULL, NULL, N'OPTION (MAXDOP 2)'", 65539)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select c from t', N'OBJECT', N'dbo.p'", 65539)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select b from t where', N'SQL'", 65540)]
+    [DataRow("exec sp_create_plan_guide N'x', N'print 1', N'SQL'", 65540)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select 1', N'SQL'", 65540)]
+    [DataRow("exec sp_create_plan_guide N'x', N'select b from t', N'SQL', NULL, NULL, N'OPTION (MAXDOPX 1)'", 65540)]
+    [DataRow("exec sp_create_plan_guide N'g0', N'select b from t', N'SQL'", 65541)]
+    [DataRow("exec sp_create_plan_guide N'g0', N'select * from t where a = @0', N'TEMPLATE', NULL, N'@0 int', N'OPTION (PARAMETERIZATION FORCED)'", 65541)]
+    [DataRow("exec sp_create_plan_guide N'g0', N'select * from t where a = 1 option (maxdop 2)', N'OBJECT', N'dbo.p'", 65540)]
+    public void RefusedGuide_SpendsTheIdsRealsDoes(string refused, int next)
+    {
+        var simulation = WithTable();
+        _ = simulation.ExecuteNonQuery("exec sp_create_plan_guide N'g0', N'select * from t', N'SQL', NULL, NULL, N'OPTION (MAXDOP 1)'");
+        _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(refused));
+        AreEqual(next, simulation.ExecuteScalar("""
+            exec sp_create_plan_guide N'g2', N'select a from t', N'SQL', NULL, NULL, N'OPTION (MAXDOP 1)';
+            select plan_guide_id from sys.plan_guides where name = 'g2'
+            """));
+    }
+
     [TestMethod]
     public void CreatePlanGuide_RollsBackWithTheTransaction()
         => AreEqual(0, WithTable().ExecuteScalar("""

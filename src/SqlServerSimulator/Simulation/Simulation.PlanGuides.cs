@@ -49,10 +49,11 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         var values = BindPlanGuideArguments("sp_create_plan_guide", calledAs, arguments, CreatePlanGuideParameters);
+        BeginProcedureTransaction(batch, calledAs, 9);
         if (values[0].IsNull)
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureExpectsParameterOfType("@name", "nvarchar(128)", state: 100), 20);
+            throw NullArgument(batch, AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureExpectsParameterOfType("@name", "nvarchar(128)", state: 100), 20));
         if (values[2].IsNull)
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureExpectsParameterOfType("@type", "nvarchar(60)", state: 102), 20);
+            throw NullArgument(batch, AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureExpectsParameterOfType("@type", "nvarchar(60)", state: 102), 20));
 
         var name = values[0].AsString;
         var type = values[2].AsString;
@@ -67,7 +68,6 @@ partial class Simulation
         var line = scope == PlanGuideScope.Object ? 15 : 20;
         var database = batch.CurrentDatabase;
 
-        BeginProcedureTransaction(batch, calledAs, 9);
         if (stmt is null)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideParameterRequired(name, "@stmt", "nvarchar(max)", state: 4), line);
         if (name.Length == 0)
@@ -82,6 +82,10 @@ partial class Simulation
         if (database.PlanGuides.TryGetValue(name, out var named)
             && !(named.Scope == kind && string.Equals(named.Parameters, parameters, StringComparison.Ordinal) && SameStatement(named.QueryText, stmt, database)))
         {
+            // Refused as the guide is stored, past its compile, so it spends
+            // every id a stored guide would (probed 2026-10-16 against SQL
+            // Server 2025).
+            database.LastPlanGuideId += kind == PlanGuideScope.Object ? 1 : 2;
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideNameExists(name), line);
         }
         var typeWord = kind == PlanGuideScope.Object ? "object" : kind == PlanGuideScope.Sql ? "sql" : "template";
@@ -110,6 +114,13 @@ partial class Simulation
                 throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideCreatePermissionDenied(name), line);
             if (kind == PlanGuideScope.Template && FindPlanGuide(database, guide => guide.Scope == PlanGuideScope.Template && database.Collation.Equals(guide.QueryText, stmt)) is { } template)
                 throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideTemplateExists(name, template.Name), line);
+            if (kind == PlanGuideScope.Sql)
+                RefuseMatchingGuide(database, kind, null, moduleOrBatch ?? stmt, parameters, stmt, name, null);
+            // The compile spends an id of its own, which a refusal from here on
+            // leaves spent: a SQL or TEMPLATE guide steps the id by two, and
+            // one refused past this point by one (probed 2026-10-16 against
+            // SQL Server 2025).
+            database.LastPlanGuideId++;
             var scopeText = kind == PlanGuideScope.Sql ? moduleOrBatch ?? stmt : stmt;
             if (this.CompileWithDeclarations(batch, scopeText, parameters, out _) is { } batchError)
                 throw PlanGuideReport(batch, batchError, AtSystemProcedureLine(calledAs, SimulatedSqlException.PlanGuideBatchDoesNotCompile(name), line));
@@ -166,15 +177,10 @@ partial class Simulation
             PlanGuideScope.Template => stmt,
             _ => null,
         };
-        if (kind != PlanGuideScope.Template
-            && FindPlanGuide(database, guide => guide.Scope == kind && guide.ScopeObjectId == module?.ObjectId
-                && string.Equals(guide.ScopeBatch, scopeBatch, StringComparison.Ordinal) && string.Equals(guide.Parameters, parameters, StringComparison.Ordinal)
-                && SameStatement(guide.QueryText, stmt, database)) is { } existing)
-        {
-            throw AtPlanGuideStatementLine(SimulatedSqlException.PlanGuideMatchesExisting(name, existing.Name), moduleAttribution);
-        }
+        if (kind == PlanGuideScope.Object)
+            RefuseMatchingGuide(database, kind, module?.ObjectId, scopeBatch, parameters, stmt, name, moduleAttribution);
 
-        var id = database.LastPlanGuideId += kind == PlanGuideScope.Object ? 1 : 2;
+        var id = ++database.LastPlanGuideId;
         var created = new PlanGuide(id, name, kind, stmt, module?.ObjectId, scopeBatch, parameters, hints, batch.CurrentStatement.UtcNow);
         database.PlanGuides[name] = created;
         RecordDdlUndo(batch, () => _ = database.PlanGuides.TryRemove(name, out _));
@@ -202,8 +208,9 @@ partial class Simulation
             yield break;
         var values = BindPlanGuideArguments("sp_control_plan_guide", calledAs, arguments, ControlPlanGuideParameters);
         const string Internal = "sys.sp_control_plan_guide_int";
+        BeginProcedureTransaction(batch, calledAs, 5);
         if (values[0].IsNull)
-            throw AtProcedureLine(SimulatedSqlException.ProcedureExpectsParameterOfType("@operation", "nvarchar(60)"), Internal, 1);
+            throw NullArgument(batch, AtProcedureLine(SimulatedSqlException.ProcedureExpectsParameterOfType("@operation", "nvarchar(60)"), Internal, 1));
         var operation = values[0].AsString;
         var (verb, all) = DeviceNamesEqual(operation, "DROP") ? ("drop", false)
             : DeviceNamesEqual(operation, "DISABLE") ? ("disable", false)
@@ -213,9 +220,8 @@ partial class Simulation
             : DeviceNamesEqual(operation, "ENABLE ALL") ? ("enable", true)
             : (null, false);
         if (verb is not null && !all && values[1].IsNull)
-            throw AtProcedureLine(SimulatedSqlException.ProcedureExpectsParameterOfType("@name", "nvarchar(128)"), Internal, 1);
+            throw NullArgument(batch, AtProcedureLine(SimulatedSqlException.ProcedureExpectsParameterOfType("@name", "nvarchar(128)"), Internal, 1));
 
-        BeginProcedureTransaction(batch, calledAs, 5);
         if (verb is null)
             throw AtProcedureLine(SimulatedSqlException.PlanGuideOperationNotAllowed(operation), Internal, 1);
         var database = batch.CurrentDatabase;
@@ -406,6 +412,37 @@ partial class Simulation
             existing.TranCount++;
         else
             connection.CurrentTransaction = new SimulatedDbTransaction(connection.Simulation, connection, System.Data.IsolationLevel.Unspecified);
+    }
+
+    /// <summary>
+    /// A NULL argument's Msg 214, which real's procedure raises inside the
+    /// transaction it opened and which ends only its statement: uncaught, the
+    /// procedure closes that transaction on its way out, while a <c>CATCH</c>
+    /// takes control before it can, so the transaction stays open, committable,
+    /// <c>@@TRANCOUNT</c> one higher (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SimulatedSqlException NullArgument(BatchContext batch, SimulatedSqlException refusal)
+    {
+        if (batch.Connection.OpenTryFrames == 0)
+            CommitProcedureTransaction(batch);
+        return refusal;
+    }
+
+    /// <summary>
+    /// Msg 10502 for a guide over the scope, <c>@params</c> and statement of
+    /// one the database holds — for a <c>SQL</c> guide checked ahead of its
+    /// compile, since it spends no id (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void RefuseMatchingGuide(Database database, PlanGuideScope kind, int? moduleId, string? scopeBatch, string? parameters, string stmt, string name, string? moduleAttribution)
+    {
+        if (FindPlanGuide(database, guide => guide.Scope == kind && guide.ScopeObjectId == moduleId
+                && string.Equals(guide.ScopeBatch, scopeBatch, StringComparison.Ordinal) && string.Equals(guide.Parameters, parameters, StringComparison.Ordinal)
+                && SameStatement(guide.QueryText, stmt, database)) is { } existing)
+        {
+            throw AtPlanGuideStatementLine(SimulatedSqlException.PlanGuideMatchesExisting(name, existing.Name), moduleAttribution);
+        }
     }
 
     /// <summary>Commits the transaction <see cref="BeginProcedureTransaction"/> opened.</summary>

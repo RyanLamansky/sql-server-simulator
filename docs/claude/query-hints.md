@@ -239,9 +239,11 @@ A guide is stored in `Database.PlanGuides`, listed, enabled, disabled, validated
 - **Every refusal of both procedures ends the batch as under `XACT_ABORT`**, because real's procedures run in a transaction of their own: uncaught the caller's transaction rolls back too, and a `CATCH` finds the procedure's transaction open and doomed, `@@TRANCOUNT` one higher.
   A compile's errors and the refusal after them are one report whose first entry a `CATCH` and `@@ERROR` read.
   The exceptions: the binder's Msg 201 and the NULL-argument Msg 214, which end only their statement — though Msg 8144 ends the batch.
+  The Msg 214 is raised inside the procedure's transaction: uncaught, the procedure closes it on its way out, but a `CATCH` takes control first, so the transaction stays open and committable, `@@TRANCOUNT` one higher, past the `CATCH` and the batch (probed 2026-10-16 against SQL Server 2025).
 - **Identity.**
   Names compare under the database's collation, and a guide over the scope, `@params` and statement (collation-compared) of another is **Msg 10502**, a second `TEMPLATE` guide over one statement **Msg 10529**.
   `plan_guide_id` steps by two for a `SQL` or `TEMPLATE` guide and by one for an `OBJECT` guide from 65535, so a database's first guide is 65537 or 65536.
+  A `SQL` or `TEMPLATE` guide's compile spends the first of its two, so a refusal past it — the compile's Msg 10516, the statement checks, the hints — leaves one spent, and a name in use (Msg 10510), refused as the guide is stored, spends all a guide would; a refusal ahead of the compile spends none, a statement another guide covers (Msg 10502) among them, and an `OBJECT` guide's refusals spend none (probed 2026-10-16 against SQL Server 2025).
 - **Control.**
   `DROP`, `ENABLE` and `DISABLE` take a guide's name (an identifier, brackets stripped) and the `ALL` forms ignore it; an unknown operation is **Msg 10503** and a missing guide **Msg 10508** (state 1 / 2 / 3 for drop / enable / disable), both from `sys.sp_control_plan_guide_int` at line 1.
   `ENABLE` and `DISABLE` move `modify_date`.
@@ -252,8 +254,6 @@ A guide is stored in `Database.PlanGuides`, listed, enabled, disabled, validated
 
 ### Divergences
 
-- A refused guide takes no id here, where real's failures past its argument checks consume one or two.
-- A `CATCH` around a NULL-argument Msg 214 finds no open transaction here; real's procedure had already opened its own.
 - The `@stmt` match reads the scope's tokens, not its parse, so a statement real's parser wouldn't count — a CTE's final `SELECT`, an `IF`'s condition — may match here.
 
 ### Not modeled yet
