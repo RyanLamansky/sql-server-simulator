@@ -187,7 +187,7 @@ partial class Simulation
             SqlValue.FromBoolean(false),
             SqlValue.FromBoolean(set.BeginsLogChain),
             SqlValue.FromBoolean(false),
-            SqlValue.FromBoolean(false),
+            SqlValue.FromBoolean(set.IsForceOffline),
             SqlValue.FromBoolean(set.IsCopyOnly),
             SqlValue.FromGuid(set.RecoveryForkGuid),
             SqlValue.Null(Lsn25Type),

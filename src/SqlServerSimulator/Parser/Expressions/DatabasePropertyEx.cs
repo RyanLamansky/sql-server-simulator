@@ -99,12 +99,12 @@ internal sealed class DatabasePropertyEx : Expression
             // Undocumented, but answered: tinyint 1 while the database tracks changes.
             "ISCHANGETRACKINGENABLED" => SqlValue.FromByte(db.ChangeTracking is null ? (byte)0 : (byte)1),
             // The clone and snapshot-backup states read tinyint, and the
-            // replication, standby and memory-optimized ones int — all off.
+            // replication, standby and memory-optimized ones int.
             "ISCLONE" or "ISDATABASESUSPENDEDFORSNAPSHOTBACKUP" or "ISVERIFIEDCLONE" => SqlValue.FromByte(0),
             "ISCLOSECURSORSONCOMMITENABLED" => Switch(DatabaseSwitches.CursorCloseOnCommit),
             "ISFULLTEXTENABLED" => SqlValue.FromInt32(BuiltInResources.ReportsFullTextEnabled(db) ? 1 : 0),
-            "ISINSTANDBY" or "ISMERGEPUBLISHED" or "ISPUBLISHED" or "ISSUBSCRIBED"
-                or "ISSYNCWITHBACKUP" => SqlValue.FromInt32(0),
+            "ISINSTANDBY" => SqlValue.FromInt32(db.IsInStandby ? 1 : 0),
+            "ISMERGEPUBLISHED" or "ISPUBLISHED" or "ISSUBSCRIBED" or "ISSYNCWITHBACKUP" => SqlValue.FromInt32(0),
             "ISLOCALCURSORSDEFAULT" => Switch(DatabaseSwitches.LocalCursorDefault),
             "ISMEMORYOPTIMIZEDELEVATETOSNAPSHOTENABLED" => Switch(DatabaseSwitches.MemoryOptimizedElevateToSnapshot),
             "ISNULLCONCAT" => Switch(DatabaseSwitches.ConcatNullYieldsNull),

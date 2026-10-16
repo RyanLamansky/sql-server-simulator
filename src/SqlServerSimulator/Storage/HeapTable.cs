@@ -85,7 +85,7 @@ internal sealed class HeapTable : SchemaObject
         this.IsTableVariable = isTableVariable;
         this.IsTableValuedParameter = isTableValuedParameter;
         // A table variable is one session's (see Heap's constructor).
-        this.Heap = new(sessionPrivate: isTableVariable);
+        this.Heap = new(sessionPrivate: isTableVariable) { Owner = isTableVariable ? null : this };
         this.RowLocks = isTableVariable ? new(concurrencyLevel: 1, capacity: 0) : new();
         this.SupersededKeyImages = isTableVariable ? new(concurrencyLevel: 1, capacity: 0) : new();
         this.KeyLockGroups = isTableVariable ? new(concurrencyLevel: 1, capacity: 0, ReferenceEqualityComparer.Instance) : new(ReferenceEqualityComparer.Instance);

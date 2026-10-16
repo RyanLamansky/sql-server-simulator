@@ -64,6 +64,10 @@ partial class Simulation
             "software_vendor_id int null", "MTF_major_version tinyint null", "mirror_count tinyint null",
             "is_password_protected bit null", "is_compressed bit null", "is_encrypted bit null",
         ]),
+        ("logmarkhistory", [
+            "database_name nvarchar(128)", "mark_name nvarchar(128)", "description nvarchar(255) null", "user_name nvarchar(128)",
+            "lsn numeric(25,0)", "mark_time datetime",
+        ]),
         ("log_shipping_primary_databases", [
             "primary_id uniqueidentifier", "primary_database sysname", "backup_directory nvarchar(500)",
             "backup_share nvarchar(500)", "backup_retention_period int", "backup_job_id uniqueidentifier", "monitor_server sysname",

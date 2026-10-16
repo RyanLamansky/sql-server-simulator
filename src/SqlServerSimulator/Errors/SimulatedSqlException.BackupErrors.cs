@@ -103,6 +103,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException RestoreTailOfLogNotBackedUp(string databaseName, string verb) =>
         FollowedByBackupTerminating(new($"The tail of the log for the database \"{databaseName}\" has not been backed up. Use BACKUP LOG WITH NORECOVERY to backup the log if it contains work you do not want to lose. Use the WITH REPLACE or WITH STOPAT clause of the RESTORE statement to just overwrite the contents of the log.", 3159, 16, 1), verb);
 
+    /// <summary>
+    /// Mimics SQL Server error 3173: a full restore without <c>REPLACE</c>
+    /// whose <c>STOPAT</c> lies past the last log backup, which only the
+    /// tail of the log reaches.
+    /// </summary>
+    internal static SimulatedSqlException RestoreStopAtNeedsTailOfLog(string databaseName, string verb) =>
+        FollowedByBackupTerminating(new($"The STOPAT clause provided with this RESTORE statement indicates that the tail of the log contains changes that must be backed up to reach the target point in time. The tail of the log for the database \"{databaseName}\" has not been backed up. Use BACKUP LOG WITH NORECOVERY to back up the log, or use the WITH REPLACE clause in your RESTORE statement to overwrite the tail of the log.", 3173, 16, 1), verb);
+
     /// <summary>Mimics SQL Server error 3154: a restore without <c>REPLACE</c> over another database.</summary>
     internal static SimulatedSqlException RestoreOverOtherDatabase(string databaseName, string verb) =>
         FollowedByBackupTerminating(new($"The backup set holds a backup of a database other than the existing '{databaseName}' database.", 3154, 16, 4), verb);
@@ -232,9 +240,78 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SingleUserDatabaseInUse(string databaseName) =>
         FollowedByAlterDatabaseFailed(new($"Changes to the state or options of database '{databaseName}' cannot be made at this time. The database is in single-user mode, and a user is currently connected to it.", 5064, 16, 1));
 
-    /// <summary>Mimics SQL Server error 927: a database another session is restoring.</summary>
-    internal static SimulatedSqlException DatabaseIsRestoring(string databaseName) =>
-        new($"Database '{databaseName}' cannot be opened. It is in the middle of a restore.", 927, 14, 2);
+    /// <summary>
+    /// Mimics SQL Server error 927: a database in the middle of a restore —
+    /// state 2, or 4 for a <c>BACKUP LOG … WITH NO_TRUNCATE</c> of it (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseIsRestoring(string databaseName, byte state = 2) =>
+        new($"Database '{databaseName}' cannot be opened. It is in the middle of a restore.", 927, 14, state);
+
+    /// <summary>Mimics SQL Server error 3117: a differential or log set restored onto a database no restore sequence holds.</summary>
+    internal static SimulatedSqlException RestoreNothingToRollForward(string verb) =>
+        FollowedByBackupTerminating(new("The log or differential backup cannot be restored because no files are ready to rollforward.", 3117, 16, 1), verb);
+
+    /// <summary>
+    /// Mimics SQL Server error 4305: a log set beginning past the LSN the
+    /// database's restore sequence needs next.
+    /// </summary>
+    internal static SimulatedSqlException RestoreLogTooRecent(decimal first, decimal needed, string verb) =>
+        FollowedByBackupTerminating(new(string.Create(CultureInfo.InvariantCulture,
+            $"The log in this backup set begins at LSN {first:0}, which is too recent to apply to the database. An earlier log backup that includes LSN {needed:0} can be restored."), 4305, 16, 1), verb);
+
+    /// <summary>Mimics SQL Server error 4326: a log set ending before the LSN the restore sequence needs next.</summary>
+    internal static SimulatedSqlException RestoreLogTooEarly(decimal last, decimal needed, string verb) =>
+        FollowedByBackupTerminating(new(string.Create(CultureInfo.InvariantCulture,
+            $"The log in this backup set terminates at LSN {last:0}, which is too early to apply to the database. A more recent log backup that includes LSN {needed:0} can be restored."), 4326, 16, 1), verb);
+
+    /// <summary>
+    /// Mimics SQL Server error 3136: a differential whose base isn't the full
+    /// backup the sequence began from (state 1), or one older than the logs
+    /// already restored (state 3).
+    /// </summary>
+    internal static SimulatedSqlException RestoreDifferentialOutOfSequence(byte state, string verb) =>
+        FollowedByBackupTerminating(new("This differential backup cannot be restored because the database has not been restored to the correct earlier state.", 3136, 16, state), verb);
+
+    /// <summary>Mimics SQL Server error 4335: a <c>STOPAT</c> earlier than the point a log set's restore sequence already stands past.</summary>
+    internal static SimulatedSqlException RestoreStopAtTooEarly(string verb) =>
+        FollowedByBackupTerminating(new("The specified STOPAT time is too early. All or part of the database is already rolled forward beyond that point.", 4335, 16, 1), verb);
+
+    /// <summary>Mimics SQL Server error 4338: a full or differential restore whose <c>STOPAT</c> is earlier than the backup.</summary>
+    internal static SimulatedSqlException RestoreStopAtBeforeBackup(string verb) =>
+        FollowedByBackupTerminating(new("The STOPAT clause specifies a point too early to allow this backup set to be restored. Choose a different stop point or use RESTORE DATABASE WITH RECOVERY to recover at the current point.", 4338, 16, 1), verb);
+
+    /// <summary>
+    /// Mimics SQL Server error 3217: a <c>STOPAT</c> that names no time — state
+    /// 1 for a string that isn't one, 2 for NULL or an empty string.
+    /// </summary>
+    internal static SimulatedSqlException RestoreInvalidStopAt(string option, string verb, byte state = 1) =>
+        FollowedByBackupTerminating(new($"Invalid value specified for {option} parameter.", 3217, 16, state), verb);
+
+    /// <summary>
+    /// Mimics SQL Server's lone Msg 3013 for a full or differential restore
+    /// whose <c>STOPAT</c> lies past the backup, which the restore follows
+    /// with Msg 4322 state 2 (<see cref="RestoreStopAtPastSetMessage"/>),
+    /// leaving the database restoring for a log to reach the point.
+    /// </summary>
+    internal static SimulatedSqlException RestoreStopAtPastDatabaseBackup(string verb) =>
+        new($"{verb} is terminating abnormally.", 3013, 16, 1);
+
+    /// <summary>
+    /// Msg 4322: a set ending before its <c>STOPAT</c>, which leaves the
+    /// database restoring — state 1 for a log set, 2 for a full or
+    /// differential one, which then ends in Msg 3013.
+    /// </summary>
+    internal static SimulatedError RestoreStopAtPastSetMessage(BatchContext batch, byte state) =>
+        batch.InfoMessage(@class: 0, state: state, number: 4322, "This backup set contains records that were logged before the designated point in time. The database is being left in the restoring state so that more roll forward can be performed.");
+
+    /// <summary>Msg 4329: a log set without the mark its <c>STOPATMARK</c> / <c>STOPBEFOREMARK</c> names, which leaves the database restoring.</summary>
+    internal static SimulatedError RestoreMarkNotReachedMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 4329, "This log file contains records logged before the designated mark. The database is being left in the Restoring state so you can apply another log file.");
+
+    /// <summary>Mimics SQL Server error 5052, which Msg 5069 follows: <c>ALTER DATABASE</c> of a restoring database.</summary>
+    internal static SimulatedSqlException AlterDatabaseWhileRestoring() =>
+        new("ALTER DATABASE is not permitted while a database is in the Restoring state.", 5052, 16, 1);
 
     /// <summary>Msg 3211: one <c>STATS</c> progress step.</summary>
     internal static SimulatedError BackupPercentProcessedMessage(BatchContext batch, int percent) =>

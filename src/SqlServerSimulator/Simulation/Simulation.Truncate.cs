@@ -131,6 +131,10 @@ partial class Simulation
             return;
         }
 
+        // A logging database records the truncation as the deletes of every row it removes.
+        if (table.OwningDatabase is { KeepsLog: true } loggingDatabase)
+            LogTruncation(context.Connection.CurrentTransaction, loggingDatabase, table);
+
         var identitySnapshots = new List<(IdentityState State, Int128? HighWaterMark)>();
         foreach (var column in table.Columns)
         {
@@ -180,5 +184,31 @@ partial class Simulation
             else
                 tracking.Reset(database.ChangeTrackingVersion);
         }
+    }
+
+    /// <summary>
+    /// Records a whole-table truncation in <paramref name="database"/>'s log
+    /// as the delete of each row: in the transaction's undo log, or as a
+    /// commit of its own outside one, its identity positions reset.
+    /// </summary>
+    private static void LogTruncation(SimulatedDbTransaction? transaction, Database database, HeapTable table)
+    {
+        var commit = transaction is null ? new Storage.Backup.LoggedCommit { CommitUtc = DateTime.UtcNow } : null;
+        foreach (var row in table.Heap.EnumerateRows())
+        {
+            var change = new Storage.Backup.LoggedRowChange(table.ObjectId, Storage.Backup.LogReplay.Image(table, row), null);
+            if (commit is null)
+                transaction!.UndoLog.RecordLoggedRow(database, table, change);
+            else
+                commit.Rows.Add(change);
+        }
+        if (commit is null)
+            return;
+        for (var c = 0; c < table.Columns.Length; c++)
+        {
+            if (table.Columns[c].Identity is not null)
+                commit.Identities.Add((table.ObjectId, c, null, null));
+        }
+        database.AppendToLog(commit);
     }
 }

@@ -104,7 +104,7 @@ partial class Simulation
         {
             target = ResolveAlterDatabaseTarget(context, afterDatabase);
         }
-        catch (SimulatedSqlException ex) when (ex.Number == 5011)
+        catch (SimulatedSqlException ex) when (ex.Number is 5011 or 5052)
         {
             refusal = ex;
             target = context.CurrentDatabase;
@@ -171,7 +171,7 @@ partial class Simulation
     /// <see cref="Simulation"/> doesn't host raises Msg 5011 (state 5), and a
     /// principal without ALTER on the database it did find raises the same
     /// number at state 9 — probe-confirmed, so a restricted caller can't tell
-    /// the two apart. The caller follows the refusal with Msg 5069 once the
+    /// the two apart — and a database in the middle of a restore Msg 5052. The caller follows the refusal with Msg 5069 once the
     /// statement has parsed. Resolution is suppressed in skip mode, where the
     /// statement parses but doesn't run.
     /// </summary>
@@ -183,9 +183,10 @@ partial class Simulation
             : context.Connection.Simulation.Databases.TryGetValue(named.Value, out var named_) ? named_
             : context.Batch.IsSkipping ? context.CurrentDatabase
             : throw SimulatedSqlException.CannotAlterDatabase(named.Value);
-        return context.Batch.IsSkipping || PermissionEnforcement.HasDatabasePermission(context.Batch, target, Permission.Alter)
-            ? target
-            : throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
+        if (!context.Batch.IsSkipping && !PermissionEnforcement.HasDatabasePermission(context.Batch, target, Permission.Alter))
+            throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
+        // A database in the middle of a restore takes no ALTER DATABASE (probed 2026-10-16 against SQL Server 2025).
+        return !context.Batch.IsSkipping && target.State == DatabaseState.Restoring ? throw SimulatedSqlException.AlterDatabaseWhileRestoring() : target;
     }
 
     /// <summary>
@@ -468,7 +469,10 @@ partial class Simulation
         // the chain; a full or differential backup starts the next (probed
         // 2026-10-16 against SQL Server 2025).
         if (model == RecoveryModel.Simple)
+        {
             target.BackupChain.BreakLogChain();
+            target.ResetLog(target.Log.CurrentSequence());
+        }
         LogDatabaseOption(context.Batch, target, "RECOVERY", model.Value switch
         {
             RecoveryModel.Simple => "SIMPLE",

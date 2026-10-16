@@ -140,6 +140,27 @@ partial class Simulation
         public bool RestrictedUser;
         public bool LoadHistory;
         public bool? Broker;
+
+        /// <summary><c>NORECOVERY</c>: a restore leaves the database restoring, a log backup takes the tail and does the same.</summary>
+        public bool NoRecovery;
+
+        /// <summary><c>NO_TRUNCATE</c> on a log backup.</summary>
+        public bool NoTruncate;
+
+        /// <summary><c>STANDBY = file</c>: the restored database opens read-only, ready for the next restore.</summary>
+        public string? Standby;
+
+        /// <summary><c>STOPAT</c>'s value as written or held, settled into a time as the statement runs (<see cref="ResolveStopAt"/>).</summary>
+        public SqlValue? StopAt;
+
+        /// <summary><c>STOPATMARK</c> / <c>STOPBEFOREMARK</c>'s mark name, with <see cref="StopBeforeMark"/> telling which.</summary>
+        public string? StopMark;
+
+        public bool StopBeforeMark;
+
+        /// <summary>A mark option's <c>AFTER datetime</c>, as written or held.</summary>
+        public SqlValue? StopMarkAfter;
+
         public readonly List<(string LogicalName, string Path)> Moves = [];
 
         /// <summary>Each flag option named, upper-cased, for the conflict check.</summary>
@@ -167,6 +188,8 @@ partial class Simulation
         context.RejectTrailingToken();
         if (batch.IsSkipping)
             return true;
+        if (!isLog && (options.NoRecovery || options.NoTruncate))
+            throw new NotSupportedException($"BACKUP DATABASE … WITH {(options.NoRecovery ? "NORECOVERY" : "NO_TRUNCATE")} isn't modeled by the simulator; only BACKUP LOG takes it.");
 
         var connection = batch.Connection;
         if (connection.CurrentTransaction is not null)
@@ -223,6 +246,9 @@ partial class Simulation
             throw SimulatedSqlException.BackupDatabaseDoesNotExist(databaseName, verb);
         if (!database.WaitForSingleUserSlot(connection))
             throw SimulatedSqlException.FollowedByBackupTerminating(SimulatedSqlException.DatabaseInSingleUserUse(database.Name), verb);
+        // NO_TRUNCATE reaches a restoring database at another state (probed 2026-10-16 against SQL Server 2025).
+        if (database.State == DatabaseState.Restoring)
+            throw SimulatedSqlException.FollowedByBackupTerminating(SimulatedSqlException.DatabaseIsRestoring(database.Name, options.NoTruncate ? (byte)4 : (byte)2), verb);
         database.RejectWhenOffline(connection);
         var chain = database.BackupChain;
         if (type == BackupSet.LogType)
@@ -249,6 +275,13 @@ partial class Simulation
         var device = SingleDevice(devices, verb);
         var path = device.Path;
         var start = batch.CurrentStatement.UtcNow;
+        // A tail-log backup leaves the database restoring, so it needs the database to itself.
+        if (options.NoRecovery
+            && (ReferenceEquals(connection.CurrentDatabase, database)
+                || !WaitForOtherSessionsToLeave(batch, database, TimeSpan.FromMilliseconds(this.RestoreExclusiveAccessWaitMillis), singleUserToo: true)))
+        {
+            throw SimulatedSqlException.RestoreExclusiveAccess(verb);
+        }
 
         BackupMedia media;
         if (options.Init || options.Format)
@@ -296,6 +329,16 @@ partial class Simulation
             // differential or log backup restores to that state just as a
             // full one does.
             image = DatabaseImage.Capture(database);
+            if (type == BackupSet.LogType)
+            {
+                var (commits, sequence, unrecordedSince) = database.Log.TakeForBackup();
+                set.LogSequence = sequence;
+                set.LogPayload = DatabaseLog.ToPayload(commits, unrecordedSince);
+            }
+            else
+            {
+                set.LogSequence = database.Log.CurrentSequence();
+            }
             this.DrawBackupLsns(set, chain);
             AddFilePages(set, database, tables);
         }
@@ -315,7 +358,20 @@ partial class Simulation
             throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
         }
 
-        AdvanceBackupChain(database, set, options.CopyOnly);
+        AdvanceBackupChain(database, set, set.IsCopyOnly);
+        if (options.NoRecovery)
+        {
+            database.State = DatabaseState.Restoring;
+            database.PendingRestore = new RestoreSequence
+            {
+                RedoBlock = set.LastLsnBlock,
+                LogSequence = set.LogSequence,
+                PointUtc = set.FinishUtc,
+                BaseGuid = chain.DifferentialBaseGuid,
+                LastSet = set,
+            };
+            this.NoteDatabaseAdmissionChanged();
+        }
         this.RecordBackupHistory(batch, media, set, device.Display, media.Sets.Count);
         this.CatalogRows.Invalidate();
 
@@ -346,7 +402,9 @@ partial class Simulation
             BackupSetGuid = Guid.NewGuid(),
             StartUtc = start,
             Type = type,
-            IsCopyOnly = options.CopyOnly,
+            // NO_TRUNCATE of an online database backs its log up as COPY_ONLY does (probed 2026-10-16 against SQL Server 2025).
+            IsCopyOnly = options.CopyOnly || options.NoTruncate,
+            IsForceOffline = options.NoRecovery,
             HasChecksums = options.Checksum,
             UserName = batch.Connection.Security.Effective.LoginName,
             RecoveryModel = database.RecoveryModel switch
@@ -434,6 +492,7 @@ partial class Simulation
         var chain = database.BackupChain;
         if (set.Type == BackupSet.LogType)
         {
+            database.Log.TruncateThrough(set.LogSequence);
             chain.LastLogBackupBlock = set.LastLsnBlock;
             chain.LastLogBackupUtc = set.FinishUtc;
             chain.LogChainContinued = true;
@@ -448,6 +507,8 @@ partial class Simulation
         }
         if (database.RecoveryModel != RecoveryModel.Simple && chain.LastLogBackupBlock is null)
         {
+            // The log's first span starts from the set's image.
+            database.ResetLog(set.LogSequence);
             chain.LastLogBackupBlock = set.FirstLsnBlock;
             chain.LastLogBackupUtc = set.StartUtc;
             chain.LogChainContinued = false;
@@ -556,164 +617,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>RESTORE DATABASE name FROM DISK = path [WITH …]</c>, entered on
-    /// <c>RESTORE</c>.
-    /// </summary>
-    private bool ParseRestore(ParserContext context, BatchContext batch)
-    {
-        RefuseUnbuiltStatement(context, verb: null);
-        var kind = context.GetNextRequired();
-        var isLog = kind is Name { Value: var log } && BuiltInToken.Equals(log, "LOG");
-        if (kind is not ReservedKeyword { Keyword: Keyword.Database } && !isLog)
-        {
-            if (kind is Name { Value: var form } && BuiltInToken.Equals(form, "REWINDONLY"))
-                throw new NotSupportedException($"RESTORE {form.ToUpperInvariant()} isn't modeled by the simulator.");
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        var verb = isLog ? "RESTORE LOG" : "RESTORE DATABASE";
-        context.MoveNextRequired();
-        var databaseName = ParseBackupOperand(context, batch);
-        List<BackupDeviceTarget>? devices = null;
-        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.From })
-        {
-            devices = ParseBackupDevices(context, batch, verb);
-        }
-        else if (context.Token is not null && context.Token is not ReservedKeyword { Keyword: Keyword.With } && !IsStatementBoundary(context.Token))
-        {
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        var options = ParseBackupOptions(context, batch, "RESTORE", verb);
-        context.RejectTrailingToken();
-        if (batch.IsSkipping)
-            return true;
-
-        var connection = batch.Connection;
-        if (connection.CurrentTransaction is not null)
-            throw SimulatedSqlException.BackupInTransaction(verb);
-        if (BuiltInToken.Equals(databaseName, TempdbDatabaseName))
-            throw SimulatedSqlException.BackupOfTempdb(verb);
-        if (BuiltInToken.Equals(databaseName, MasterDatabaseName))
-            throw SimulatedSqlException.RestoreMasterOutsideSingleUserMode(verb);
-        if (BuiltInToken.EqualsAny(databaseName, ModelDatabaseName, MsdbDatabaseName))
-            throw new NotSupportedException($"RESTORE of the system database '{databaseName}' isn't modeled by the simulator.");
-        _ = this.Databases.TryGetValue(databaseName, out var existing);
-        if (devices is null)
-        {
-            if (existing is { State: not DatabaseState.Restoring })
-                throw SimulatedSqlException.RestoreAlreadyRecovered(verb);
-            throw new NotSupportedException("RESTORE DATABASE without FROM isn't modeled by the simulator, which restores no database WITH NORECOVERY.");
-        }
-        if (existing is not null)
-        {
-            if (!PermissionEnforcement.HasDatabaseDdlAuthority(batch, Permission.CreateAnyDatabase)
-                && !(this.Logins.TryGetValue(connection.Security.Effective.LoginName, out var login) && BuiltInToken.Equals(login.Name, existing.OwnerLoginName)))
-            {
-                throw SimulatedSqlException.RestorePermissionDenied(existing.Name, verb);
-            }
-        }
-        else if (!PermissionEnforcement.HasDatabaseDdlAuthority(batch, Permission.CreateAnyDatabase))
-        {
-            throw SimulatedSqlException.BackupPermissionDenied("CREATE DATABASE", MasterDatabaseName, verb);
-        }
-
-        var device = SingleDevice(devices, verb);
-        var media = this.ReadMediaForRestore(batch, device, verb);
-        if (options.File > media.Sets.Count)
-            throw SimulatedSqlException.BackupFileIdIncorrectlyFormed(options.File, device.Display, verb);
-        var set = media.Sets[options.File - 1];
-        if (options.Checksum && !set.HasChecksums)
-            throw SimulatedSqlException.RestoreChecksumUnavailable(verb);
-        // Only a full backup creates a database; applying a differential or
-        // log backup to a restoring one isn't built.
-        if (isLog || set.Type != BackupSet.FullType)
-        {
-            if (existing is null)
-                throw SimulatedSqlException.RestoreCannotCreateDatabase(databaseName, verb);
-            throw new NotSupportedException($"{verb} of a {(set.Type == BackupSet.LogType ? "log" : set.Type == BackupSet.DifferentialType ? "differential" : "full")} backup set onto an existing database isn't modeled by the simulator; only a full backup restores.");
-        }
-        DatabaseImage image;
-        try
-        {
-            image = DatabaseImage.FromPayload(set.Payload);
-        }
-        catch (InvalidDataException)
-        {
-            throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb);
-        }
-
-        if (existing is not null)
-        {
-            if (ReferenceEquals(connection.CurrentDatabase, existing))
-                throw SimulatedSqlException.RestoreDatabaseInUseBySession(existing.Name, verb);
-            if (!WaitForOtherSessionsToLeave(batch, existing, TimeSpan.FromMilliseconds(this.RestoreExclusiveAccessWaitMillis), singleUserToo: true))
-                throw SimulatedSqlException.RestoreExclusiveAccess(verb);
-            if (!options.Replace && existing.State != DatabaseState.Restoring)
-            {
-                if (existing.DatabaseGuid != image.DatabaseGuid)
-                    throw SimulatedSqlException.RestoreOverOtherDatabase(existing.Name, verb);
-                if (existing.RecoveryModel != RecoveryModel.Simple)
-                    throw SimulatedSqlException.RestoreTailOfLogNotBackedUp(existing.Name, verb);
-            }
-        }
-        var targetName = existing?.Name ?? databaseName;
-        var physicalNames = this.PlanRestoreFiles(image, options, existing, targetName, verb);
-
-        var stopwatch = Stopwatch.StartNew();
-        if (existing is null || !this.TryRestoreInPlace(image, existing, physicalNames))
-            this.RestoreAsNewDatabase(image, existing, targetName, physicalNames);
-        if (this.Databases.TryGetValue(targetName, out var restored))
-        {
-            if (options.RestrictedUser)
-                restored.UserAccess = 2;
-            if (options.Broker is { } broker)
-                restored.BrokerEnabled = broker;
-            ContinueBackupChainFrom(restored, set, batch.CurrentStatement.UtcNow);
-        }
-        this.RecordRestoreHistory(batch, media, set, device.Display, options.File, targetName, 'D', options.Replace, physicalNames);
-        this.CatalogRows.Invalidate();
-        // The restore brings back the backed-up access mode.
-        this.NoteDatabaseAdmissionChanged();
-        var completed = ReportBackupMessages(batch, options.Stats, targetName, set, options.File, verb, stopwatch.Elapsed.TotalSeconds);
-        // The database starts up restoring, then again once recovered (probed 2026-10-16 against SQL Server 2025).
-        LogSessionLine(batch, $"Starting up database '{targetName}'.");
-        LogDatabaseNotRecovered(batch, restored!, "RESTORING");
-        LogDatabaseStartup(batch, restored!);
-        var at = batch.CurrentStatement.UtcNow;
-        this.ErrorLog.Write(at, BackupProcess, $"Restore is complete on database '{targetName}'.  The database is now available.");
-        this.ErrorLog.Write(at, BackupProcess, string.Create(CultureInfo.InvariantCulture,
-            $"Database was restored: Database: {targetName}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, number of dump devices: 1, device information: (FILE={options.File}, TYPE=DISK: {{'{device.Logged}'}}). Informational message. No user action required."));
-        this.ErrorLog.Write(at, BackupProcess, completed);
-        connection.LastStatementRowCount = 0;
-        return true;
-    }
-
-    /// <summary>
-    /// The backup chain a database restored from <paramref name="set"/> goes
-    /// on with: the set is its differential base, and outside <c>SIMPLE</c>
-    /// recovery the next log backup continues from the set's last LSN, as if
-    /// one ran as the restore finished (probed 2026-10-16 against SQL Server
-    /// 2025).
-    /// </summary>
-    private static void ContinueBackupChainFrom(Database database, BackupSet set, DateTime restoredUtc)
-    {
-        var chain = database.BackupChain;
-        chain.DifferentialBaseBlock = set.CheckpointLsnBlock;
-        chain.DifferentialBaseGuid = set.BackupSetGuid;
-        chain.DifferentialBaseUtc = set.StartUtc;
-        chain.LogBlock = Math.Max(chain.LogBlock, set.LastLsnBlock);
-        chain.LastCheckpointBlock = set.CheckpointLsnBlock;
-        chain.TakeBaseGenerations(UserTables(database));
-        if (database.RecoveryModel == RecoveryModel.Simple)
-        {
-            chain.BreakLogChain();
-            return;
-        }
-        chain.LastLogBackupBlock = set.LastLsnBlock;
-        chain.LastLogBackupUtc = restoredUtc;
-        chain.LogChainContinued = true;
-    }
-
-    /// <summary>
     /// Each file's path once <c>MOVE</c> applies, by logical name, refusing a
     /// logical name the set lacks (Msg 3234) and a path another database's file
     /// holds (Msgs 1834 / 3156, then 3119).
@@ -754,7 +657,7 @@ partial class Simulation
     /// in <paramref name="existing"/>'s place (and under its <c>database_id</c>)
     /// in the RESTORING state for the length of the rebuild.
     /// </summary>
-    private void RestoreAsNewDatabase(DatabaseImage image, Database? existing, string targetName, Dictionary<string, string> physicalNames)
+    private void RestoreAsNewDatabase(DatabaseImage image, Database? existing, string targetName, Dictionary<string, string> physicalNames, DatabaseState finalState)
     {
         var database = image.CreateShell(targetName, physicalNames);
         database.State = DatabaseState.Restoring;
@@ -786,7 +689,7 @@ partial class Simulation
             // Left RESTORING, as real leaves a database whose restore failed.
             throw new NotSupportedException($"RESTORE DATABASE couldn't rebuild '{targetName}' from its backup set: {ex.Message}", ex);
         }
-        database.State = DatabaseState.Online;
+        database.State = finalState;
         this.BumpSchemaVersion();
         this.CatalogRows.Invalidate();
     }
@@ -798,10 +701,11 @@ partial class Simulation
     /// value the image carries without rebuilding a single object. False when
     /// anything differs, which the full rebuild then handles.
     /// </summary>
-    private bool TryRestoreInPlace(DatabaseImage image, Database existing, Dictionary<string, string> physicalNames)
+    private bool TryRestoreInPlace(DatabaseImage image, Database existing, Dictionary<string, string> physicalNames, DatabaseState finalState)
     {
-        if (existing.State != DatabaseState.Online)
+        if (existing.State is not (DatabaseState.Online or DatabaseState.Restoring))
             return false;
+        var priorState = existing.State;
         existing.State = DatabaseState.Restoring;
         bool restored;
         try
@@ -813,7 +717,7 @@ partial class Simulation
             // Left RESTORING, as real leaves a database whose restore failed.
             throw new NotSupportedException($"RESTORE DATABASE couldn't restore '{existing.Name}' from its backup set: {ex.Message}", ex);
         }
-        existing.State = DatabaseState.Online;
+        existing.State = restored ? finalState : priorState;
         if (restored)
         {
             this.BumpSchemaVersion();
@@ -1005,7 +909,42 @@ partial class Simulation
                     options.Init = name == "INIT";
                     _ = options.Flags.Add(name);
                     break;
-                case "KEEP_CDC" or "KEEP_REPLICATION" or "RECOVERY" when restore:
+                case "KEEP_CDC" or "KEEP_REPLICATION" when restore:
+                    break;
+                case "RECOVERY" when restore:
+                    _ = options.Flags.Add(name);
+                    break;
+                case "NORECOVERY":
+                    options.NoRecovery = true;
+                    _ = options.Flags.Add(name);
+                    break;
+                case "NO_TRUNCATE" when !restore:
+                    options.NoTruncate = true;
+                    break;
+                case "STANDBY" when restore:
+                    ExpectEquals(context);
+                    options.Standby = ParseBackupStringValue(context, batch);
+                    _ = options.Flags.Add(name);
+                    break;
+                case "STOPAT" when restore:
+                    ExpectEquals(context);
+                    options.StopAt = ParseStopPointValue(context, batch);
+                    _ = options.Flags.Add(name);
+                    break;
+                case "STOPATMARK" or "STOPBEFOREMARK" when restore:
+                    ExpectEquals(context);
+                    options.StopMark = ParseBackupStringValue(context, batch);
+                    options.StopBeforeMark = name == "STOPBEFOREMARK";
+                    _ = options.Flags.Add(name);
+                    if (context.GetNextOptional() is Name { Value: var after } && BuiltInToken.Equals(after, "AFTER"))
+                    {
+                        context.MoveNextRequired();
+                        options.StopMarkAfter = ParseStopPointValue(context, batch);
+                    }
+                    else
+                    {
+                        advanced = true;
+                    }
                     break;
                 case "LOADHISTORY" when restore:
                     options.LoadHistory = true;
@@ -1054,7 +993,7 @@ partial class Simulation
                         stats = null;
                     }
                     break;
-                case "ENCRYPTION" or "CREDENTIAL" or "EXPIREDATE" or "RETAINDAYS" or "METADATA_ONLY" or "FILE_SNAPSHOT" or "NORECOVERY" or "STANDBY"
+                case "ENCRYPTION" or "CREDENTIAL" or "EXPIREDATE" or "RETAINDAYS" or "METADATA_ONLY" or "FILE_SNAPSHOT" or "STANDBY"
                     or "NO_TRUNCATE" or "PARTIAL" or "PASSWORD" or "MEDIAPASSWORD" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" or "RESTART" or "FILESTREAM":
                     throw new NotSupportedException($"{statement} … WITH {name} isn't modeled by the simulator.");
                 default:
@@ -1102,7 +1041,24 @@ partial class Simulation
         ("INIT", "NOINIT", "init", "noinit"), ("FORMAT", "NOFORMAT", "format", "noformat"), ("SKIP", "NOSKIP", "skip", "noskip"),
         ("REWIND", "NOREWIND", "rewind", "norewind"), ("UNLOAD", "NOUNLOAD", "unload", "nounload"), ("CHECKSUM", "NO_CHECKSUM", "checksum", "no_checksum"),
         ("COMPRESSION", "NO_COMPRESSION", "compression", "no_compression"), ("CONTINUE_AFTER_ERROR", "STOP_ON_ERROR", "continue_after_error", "stop_on_error"),
+        // How real names the recovery and stop-point pairs, whichever is written first (probed 2026-10-16 against SQL Server 2025).
+        ("NORECOVERY", "RECOVERY", "norecovery", "recovery"), ("NORECOVERY", "STANDBY", "norecovery", "standby"), ("RECOVERY", "STANDBY", "recovery", "standby"),
+        ("STOPAT", "STOPATMARK", "stopat", "stopatmark"), ("STOPAT", "STOPBEFOREMARK", "stopat", "stopbeforemark"),
+        ("STOPATMARK", "STOPBEFOREMARK", "stopatmark", "stopbeforemark, stopbeforemark"),
     ];
+
+    /// <summary>
+    /// A <c>STOPAT</c> or <c>AFTER</c> value, the cursor on it: a string, or a
+    /// variable whose value is settled as the statement runs; a number is
+    /// real's Msg 206 (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue ParseStopPointValue(ParserContext context, BatchContext batch) => context.Token switch
+    {
+        Literal { Value: var value } when value.IsNull || value.Type.Category == SqlTypeCategory.String => value,
+        AtPrefixedString variable => batch.IsSkipping ? SqlValue.Null(SqlType.DateTime) : batch.GetVariableSlot(variable.Value).Value,
+        Numeric or Literal => throw SimulatedSqlException.OperandTypeClash("int", "datetime"),
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+    };
 
     /// <summary>A <c>NAME</c> / <c>MEDIANAME</c> value: a string, a variable or a bare identifier, the cursor on it.</summary>
     private static string ParseBackupNameValue(ParserContext context, BatchContext batch) =>

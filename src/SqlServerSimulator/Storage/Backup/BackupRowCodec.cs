@@ -45,6 +45,14 @@ internal static class BackupRowCodec
         }
     }
 
+    /// <summary>One row in this form, alone.</summary>
+    public static byte[] Portable(HeapColumn[] columns, SqlValue[] values)
+    {
+        using var output = new MemoryStream();
+        WriteRow(columns, values, output);
+        return output.ToArray();
+    }
+
     /// <summary>Reads the row at <paramref name="offset"/> into <paramref name="values"/>, advancing past it.</summary>
     public static void ReadRow(HeapColumn[] columns, byte[] rows, ref int offset, SqlValue[] values)
     {

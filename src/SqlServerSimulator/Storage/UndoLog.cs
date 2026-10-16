@@ -235,6 +235,91 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     }
 
     /// <summary>
+    /// Records a row write to a table whose database keeps a log
+    /// (<see cref="Database.KeepsLog"/>), published as part of its
+    /// transaction's <see cref="Backup.LoggedCommit"/> when the log commits
+    /// and dropped when the write rolls back.
+    /// </summary>
+    public void RecordLoggedRow(Database database, HeapTable table, Backup.LoggedRowChange change)
+    {
+        this.recordsLog = true;
+        this.entries.Add(new LoggedRow(database, table, change));
+    }
+
+    // Set by the first logged row, so a commit that wrote none in a logging
+    // database skips the publishing pass.
+    private bool recordsLog;
+
+    /// <summary>
+    /// Appends one <see cref="Backup.LoggedCommit"/> to each logging database
+    /// this transaction wrote rows in, its rows in write order and each written table's identity positions as the commit
+    /// leaves them.
+    /// </summary>
+    private void PublishLog(LogCommitDetails details)
+    {
+        var commits = new List<(Database Database, Backup.LoggedCommit Commit, List<HeapTable> Tables)>(1);
+        var now = DateTime.UtcNow;
+        foreach (var entry in this.entries)
+        {
+            if (entry is LoggedRow row)
+            {
+                var (_, commit, tables) = CommitFor(row.Database);
+                commit.Rows.Add(row.Change);
+                if (!tables.Contains(row.Table))
+                    tables.Add(row.Table);
+            }
+        }
+        foreach (var (database, commit, tables) in commits)
+        {
+            foreach (var table in tables)
+            {
+                for (var c = 0; c < table.Columns.Length; c++)
+                {
+                    if (table.Columns[c].Identity is { } identity)
+                    {
+                        var (highWaterMark, reseededStart) = identity.ReseedSnapshot();
+                        commit.Identities.Add((table.ObjectId, c, highWaterMark, reseededStart));
+                    }
+                }
+            }
+            database.AppendToLog(commit);
+        }
+
+        (Database Database, Backup.LoggedCommit Commit, List<HeapTable> Tables) CommitFor(Database database)
+        {
+            foreach (var held in commits)
+            {
+                if (held.Database == database)
+                    return held;
+            }
+            var added = (database, new Backup.LoggedCommit
+            {
+                CommitUtc = now,
+                MarkName = details.MarkName,
+                MarkDescription = details.MarkDescription,
+                MarkUtc = details.MarkUtc,
+            }, new List<HeapTable>());
+            commits.Add(added);
+            return added;
+        }
+    }
+
+    /// <summary>
+    /// The databases whose tables this log changed rows of, in first-write
+    /// order: where a marked transaction's mark goes.
+    /// </summary>
+    public List<Database> WrittenDatabases()
+    {
+        var databases = new List<Database>(1);
+        foreach (var entry in this.entries)
+        {
+            if (entry.AffectedHeap?.Owner?.OwningDatabase is { } database && !databases.Contains(database))
+                databases.Add(database);
+        }
+        return databases;
+    }
+
+    /// <summary>
     /// Records a truncation of a change-tracked table, which on commit forgets
     /// the table's history and raises its minimum valid version.
     /// </summary>
@@ -376,12 +461,17 @@ internal sealed class UndoLog(LobReclamation? reclamation)
     /// <see cref="Rollback"/> / <see cref="RollbackTo"/>, which never call
     /// <see cref="UndoEntry.Commit"/>.
     /// </summary>
-    public void Commit()
+    public void Commit(LogCommitDetails details = default)
     {
         if (this.recordsChangeTracking)
         {
             PublishChangeTracking();
             this.recordsChangeTracking = false;
+        }
+        if (this.recordsLog)
+        {
+            this.PublishLog(details);
+            this.recordsLog = false;
         }
         for (var i = 0; i < this.entries.Count; i++)
             this.entries[i].Commit(reclamation);
@@ -681,6 +771,19 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         public override void Undo(LobReclamation? reclamation) => this.Connection.ReinstateTempTable(this.Table);
     }
 
+    // A logged row has nothing to undo either: dropping the entry is the
+    // rollback, which takes the row out of its transaction's commit.
+    private sealed class LoggedRow(Database database, HeapTable table, Backup.LoggedRowChange change) : UndoEntry
+    {
+        public readonly Database Database = database;
+        public readonly HeapTable Table = table;
+        public readonly Backup.LoggedRowChange Change = change;
+
+        public override void Undo(LobReclamation? reclamation)
+        {
+        }
+    }
+
     // Neither change tracking entry has anything to undo: dropping the entry
     // is the rollback.
     private sealed class ChangeTrackingRow(PendingRowChange change) : UndoEntry
@@ -757,4 +860,17 @@ internal sealed class UndoLog(LobReclamation? reclamation)
                 identitySnapshots[i].State.Restore(identitySnapshots[i].HighWaterMark);
         }
     }
+}
+
+/// <summary>
+/// What a committing transaction tells its <see cref="UndoLog"/> for the
+/// databases' logs (<see cref="Backup.DatabaseLog"/>): the mark a <c>BEGIN
+/// TRAN name WITH MARK</c> placed. The default is an auto-commit
+/// statement's, which places none.
+/// </summary>
+internal readonly struct LogCommitDetails(string? markName, string? markDescription, DateTime markUtc)
+{
+    public readonly string? MarkName = markName;
+    public readonly string? MarkDescription = markDescription;
+    public readonly DateTime MarkUtc = markUtc;
 }

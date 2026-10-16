@@ -368,7 +368,6 @@ public sealed class BackupRestoreTests
     [TestMethod]
     [DataRow("backup database d to disk = N'a.bak', disk = N'b.bak'")]
     [DataRow("backup database d to url = N'https://x/y.bak'")]
-    [DataRow("restore database d from disk = N'x.bak' with norecovery")]
     [DataRow("restore rewindonly from disk = N'x.bak'")]
     public void UnmodeledForm_IsNotSupported(string sql) =>
         _ = Throws<NotSupportedException>(() => WithDatabase().ExecuteNonQuery(sql));

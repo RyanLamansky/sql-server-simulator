@@ -122,12 +122,22 @@ public sealed class SimulatedDbTransaction : DbTransaction
 
     /// <summary>
     /// Set once a <c>BEGIN TRAN &lt;name&gt; WITH MARK</c> has placed a mark on
-    /// this transaction. The mark itself is a log artifact with no home here —
-    /// nothing reads it back — but a second <c>WITH MARK</c> under the same
-    /// transaction earns real's severity-10 Msg 3920, and this is what makes
-    /// that reachable.
+    /// this transaction, named <see cref="MarkName"/>: at commit the mark goes
+    /// to each written database's log, where <c>RESTORE LOG … WITH
+    /// STOPATMARK</c> finds it, and to <c>msdb.dbo.logmarkhistory</c>. A
+    /// second <c>WITH MARK</c> under the same transaction earns real's
+    /// severity-10 Msg 3920.
     /// </summary>
     internal bool IsMarked;
+
+    /// <summary>The name the marking <c>BEGIN TRAN</c> gave, which the mark carries.</summary>
+    internal string? MarkName;
+
+    /// <summary>The marking <c>BEGIN TRAN … WITH MARK 'description'</c>'s description, or null.</summary>
+    internal string? MarkDescription;
+
+    /// <summary>When the mark was placed: <c>logmarkhistory.mark_time</c>.</summary>
+    internal DateTime MarkUtc;
 
     /// <summary>
     /// Set by <c>BEGIN DISTRIBUTED TRANSACTION</c>, at any nesting level: a
@@ -522,7 +532,9 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // unversioned case; under SNAPSHOT/RCSI those chains are pinned by the
         // history entries FinalizePendingEntries just stamped and are reclaimed
         // instead by RunGarbageCollection below once no snapshot needs them.
-        this.UndoLog.Commit();
+        if (this.IsMarked)
+            this.simulation.RecordLogMarks(this);
+        this.UndoLog.Commit(new(this.IsMarked ? this.MarkName : null, this.MarkDescription, this.MarkUtc));
         this.TranCount = 0;
         this.CloseCursorsOnEnd();
         ReleaseAllLocks();

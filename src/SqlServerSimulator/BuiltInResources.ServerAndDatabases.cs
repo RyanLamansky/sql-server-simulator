@@ -1284,7 +1284,7 @@ internal static partial class BuiltInResources
                     DatabaseState.Restoring => restoring,
                     _ => online,
                 },
-                falseBit,
+                SqlValue.FromBoolean(db.IsInStandby), // is_in_standby
                 falseBit,
                 Switch(DatabaseSwitches.SupplementalLogging),
                 SqlValue.FromByte((byte)(snapshotOn ? 1 : 0)),

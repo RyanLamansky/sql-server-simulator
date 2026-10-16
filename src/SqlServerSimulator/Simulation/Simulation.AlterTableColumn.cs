@@ -606,7 +606,7 @@ partial class Simulation
         }
 
         var oldHeap = table.Heap;
-        var newHeap = new Heap();
+        var newHeap = new Heap { Owner = table };
         var newStoredColumns = table.StoredColumns;
         // A PERSISTED computed column added over existing rows stores its
         // expression's value for each, read off the row's other columns.
@@ -1567,7 +1567,7 @@ partial class Simulation
         // up front, and IsStored is true for everything else).
 
         var oldHeap = table.Heap;
-        var newHeap = new Heap();
+        var newHeap = new Heap { Owner = table };
         // One encoded-row buffer for the rebuild — Insert copies into the page.
         byte[]? encoded = null;
         foreach (var oldBytes in oldHeap.EnumerateRows())
@@ -1675,7 +1675,7 @@ partial class Simulation
         }
 
         var oldHeap = table.Heap;
-        var newHeap = new Heap();
+        var newHeap = new Heap { Owner = table };
         // One encoded-row buffer for the rebuild — Insert copies into the page.
         byte[]? encoded = null;
         foreach (var oldBytes in oldHeap.EnumerateRows())
@@ -1894,7 +1894,7 @@ partial class Simulation
         try
         {
             var oldHeap = table.Heap;
-            var newHeap = new Heap();
+            var newHeap = new Heap { Owner = table };
             var newStoredColumns = table.StoredColumns;
             var full = new SqlValue[newColumns.Length];
             byte[]? encoded = null;

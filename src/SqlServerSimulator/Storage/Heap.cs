@@ -47,6 +47,30 @@ internal sealed class Heap(bool sessionPrivate = false)
     /// </remarks>
     public const int MaxRowSize = 8060;
 
+    /// <summary>
+    /// The table this heap stores, whose visible row writes its database's
+    /// log keeps while a log backup chain runs (<see cref="LogWrite"/>); null
+    /// for a heap no database logs — a table variable's, a trigger's
+    /// pseudo-table's. Set wherever a table's heap is created or replaced.
+    /// </summary>
+    internal HeapTable? Owner;
+
+    /// <summary>
+    /// Records one visible row write in <paramref name="undoLog"/> for the
+    /// owning database's <see cref="Backup.DatabaseLog"/>: the row the slot
+    /// held before (read when <paramref name="readsBefore"/>) and
+    /// <paramref name="after"/> (when <paramref name="hasAfter"/>), each as
+    /// <see cref="Backup.LogReplay.Image"/> keeps it apart from this heap's
+    /// LOB chains. Costs nothing but the test while the database keeps no log.
+    /// </summary>
+    private void LogWrite(UndoLog undoLog, int pageIndex, int slotIndex, bool readsBefore, ReadOnlySpan<byte> after, bool hasAfter)
+    {
+        if (this.Owner is not { OwningDatabase: { KeepsLog: true } database } table)
+            return;
+        var before = readsBefore && this.ReadSlotBytes(pageIndex, slotIndex) is { } image ? Backup.LogReplay.Image(table, image) : null;
+        undoLog.RecordLoggedRow(database, table, new(table.ObjectId, before, hasAfter ? Backup.LogReplay.Image(table, after) : null));
+    }
+
     /// <summary>Pages in this heap, in allocation order. Index <c>i</c> is reachable via prev/next links.</summary>
     public readonly HeapPageList Pages = [];
 
@@ -650,6 +674,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         if (undoLog is not null)
         {
+            if (journalEvent && this.Owner is not null)
+                this.LogWrite(undoLog, pageIndex, slotIndex, readsBefore: false, row, hasAfter: true);
             if (journalEvent)
                 undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), before: null, undoLog.Position);
             undoLog.RecordInsert(this, pageIndex, slotIndex);
@@ -1043,6 +1069,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         using var latch = this.EnterLatch();
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         _ = this.RootedNullLobCells?.TryRemove((pageIndex, slotIndex), out _);
+        if (undoLog is not null && this.Owner is not null)
+            this.LogWrite(undoLog, pageIndex, slotIndex, readsBefore: true, default, hasAfter: false);
         var firstUndoEntry = undoLog?.Position ?? 0;
         if (undoLog?.ImageWatchers is not null)
             undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), this.ReadSlotBytes(pageIndex, slotIndex), firstUndoEntry);
@@ -1167,6 +1195,8 @@ internal sealed class Heap(bool sessionPrivate = false)
         // Insert / old-target Delete the relocating paths run are NOT journaled.
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         var oldImage = this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
+        if (undoLog is not null && this.Owner is not null)
+            this.LogWrite(undoLog, pageIndex, slotIndex, readsBefore: true, newRow, hasAfter: true);
         var firstUndoEntry = undoLog?.Position ?? 0;
         if (undoLog?.ImageWatchers is not null)
             undoLog.NoteVisibleWrite(this, (pageIndex, slotIndex), oldImage ?? this.ReadSlotBytes(pageIndex, slotIndex), firstUndoEntry);

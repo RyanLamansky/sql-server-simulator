@@ -82,6 +82,13 @@ internal sealed class DatabaseBackupChain
     }
 
     /// <summary>
+    /// Moves the log's end past one logged commit's records, so a log backup
+    /// after writes spans more of the log than the full backup before it, as
+    /// real's does.
+    /// </summary>
+    public void AdvanceForCommit() => _ = Interlocked.Add(ref this.LogBlock, 8);
+
+    /// <summary>
     /// Draws the log position a backup starts at, past both the last one and
     /// the server's transaction counter, so a database written to since its
     /// last backup reports a later LSN.

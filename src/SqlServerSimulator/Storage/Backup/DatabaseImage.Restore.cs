@@ -218,7 +218,7 @@ partial class DatabaseImage
     /// chains and the locks interned over its old rows, none of which any
     /// session holds.
     /// </summary>
-    private static void ClearRows(HeapTable table)
+    internal static void ClearRows(HeapTable table)
     {
         var heap = table.Heap;
         using (heap.EnterLatch())

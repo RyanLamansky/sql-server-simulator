@@ -1340,6 +1340,12 @@ public sealed partial class Simulation
     {
         _ = Interlocked.Increment(ref this.SchemaVersion);
         this.CatalogRows.Invalidate();
+        // A logging database whose definitions moved records the change, which no row replay crosses.
+        foreach (var (_, database) in this.Databases)
+        {
+            if (database.KeepsLog)
+                database.LogDefinitionChange();
+        }
     }
 
     /// <summary>
@@ -4807,6 +4813,7 @@ public sealed partial class Simulation
         }
 
         var marked = false;
+        string? markDescription = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
             if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Mark })
@@ -4814,7 +4821,15 @@ public sealed partial class Simulation
             marked = true;
             // The description is optional and may be a literal or a variable.
             if (context.MoveNext() && context.Token is Literal or AtPrefixedString)
+            {
+                markDescription = context.Token switch
+                {
+                    Literal { Value: { IsNull: false } value } => value.CoerceTo(SqlType.NVarchar).AsString,
+                    AtPrefixedString variable when !context.Batch.IsSkipping && context.Batch.GetVariableSlot(variable.Value).Value is { IsNull: false } held => held.CoerceTo(SqlType.NVarchar).AsString,
+                    _ => null,
+                };
                 context.MoveNextOptional();
+            }
         }
 
         if (context.Batch.IsSkipping)
@@ -4842,6 +4857,12 @@ public sealed partial class Simulation
             }
 
             existing.TranCount++;
+            if (marked && !existing.IsMarked)
+            {
+                existing.MarkName = nameVariable is null ? literalName : TransactionNameFromVariable(context.Batch, nameVariable);
+                existing.MarkDescription = markDescription;
+                existing.MarkUtc = context.Batch.CurrentStatement.UtcNow;
+            }
             existing.IsMarked |= marked;
             existing.IsDistributed |= distributed;
         }
@@ -4854,6 +4875,9 @@ public sealed partial class Simulation
                 context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified)
             {
                 IsMarked = marked,
+                MarkName = marked ? name : null,
+                MarkDescription = markDescription,
+                MarkUtc = context.Batch.CurrentStatement.UtcNow,
                 Name = name,
                 IsDistributed = distributed,
             };

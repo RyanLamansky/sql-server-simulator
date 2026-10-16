@@ -67,8 +67,9 @@ partial class Simulation
             row["collation_name"] = SqlValue.FromNVarchar(set.Collation);
             row["is_password_protected"] = SqlValue.FromBoolean(false);
             row["recovery_model"] = SqlValue.FromNVarchar(set.RecoveryModel);
-            foreach (var column in (ReadOnlySpan<string>)["has_bulk_logged_data", "is_snapshot", "is_damaged", "has_incomplete_metadata", "is_force_offline"])
+            foreach (var column in (ReadOnlySpan<string>)["has_bulk_logged_data", "is_snapshot", "is_damaged", "has_incomplete_metadata"])
                 row[column] = SqlValue.FromBoolean(false);
+            row["is_force_offline"] = SqlValue.FromBoolean(set.IsForceOffline);
             row["is_readonly"] = SqlValue.FromBoolean(set.IsReadOnly);
             row["is_single_user"] = SqlValue.FromBoolean(set.IsSingleUser);
             row["has_backup_checksums"] = SqlValue.FromBoolean(set.HasChecksums);
@@ -192,7 +193,8 @@ partial class Simulation
     /// L for a log, V for a <c>VERIFYONLY … LOADHISTORY</c> — with the set's
     /// own history when msdb holds none of it yet.
     /// </summary>
-    private void RecordRestoreHistory(BatchContext batch, BackupMedia media, BackupSet set, string devicePath, int position, string? databaseName, char type, bool replace, Dictionary<string, string>? physicalNames)
+    private void RecordRestoreHistory(BatchContext batch, BackupMedia media, BackupSet set, string devicePath, int position, string? databaseName, char type, bool replace, Dictionary<string, string>? physicalNames,
+        bool recovered = true, DateTime? stopAt = null, string? markName = null, bool? stopBefore = null)
     {
         var backupSetId = this.BackupSetHistoryId(set.BackupSetGuid);
         if (backupSetId < 0)
@@ -208,9 +210,15 @@ partial class Simulation
             row["backup_set_id"] = SqlValue.FromInt32(backupSetId);
             row["restore_type"] = SqlValue.FromString(CharSqlType.Get(1, Collation.Baseline, Coercibility.Implicit), type.ToString());
             row["replace"] = SqlValue.FromBoolean(replace);
-            row["recovery"] = SqlValue.FromBoolean(true);
+            row["recovery"] = SqlValue.FromBoolean(recovered);
             row["restart"] = SqlValue.FromBoolean(false);
             row["device_count"] = SqlValue.FromByte(1);
+            if (stopAt is { } at)
+                row["stop_at"] = SqlValue.FromDateTime(at);
+            if (markName is not null)
+                row["stop_at_mark_name"] = SqlValue.FromNVarchar(markName);
+            if (stopBefore is { } before)
+                row["stop_before"] = SqlValue.FromBoolean(before);
         });
         if (type == 'V')
             return;
@@ -267,6 +275,41 @@ partial class Simulation
     private int InsertMsdbRow(BatchContext batch, string tableName, Action<MsdbRow> fill)
     {
         var table = this.MsdbTable(tableName);
+        var (values, identity) = MsdbRowValues(table, fill);
+        _ = InsertRow(batch, table, RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap), undoLog: null);
+        return identity;
+    }
+
+    /// <summary>
+    /// A committing marked transaction's <c>logmarkhistory</c> row for each
+    /// database it wrote to, written as the commit lands — outside any
+    /// statement, so straight into the heap (probed 2026-10-16 against SQL
+    /// Server 2025: a mark whose transaction rolled back or wrote nothing
+    /// leaves no row).
+    /// </summary>
+    internal void RecordLogMarks(SimulatedDbTransaction transaction)
+    {
+        var table = this.MsdbTable("logmarkhistory");
+        foreach (var database in transaction.UndoLog.WrittenDatabases())
+        {
+            if (BuiltInToken.EqualsAny(database.Name, TempdbDatabaseName, MsdbDatabaseName))
+                continue;
+            var (values, _) = MsdbRowValues(table, row =>
+            {
+                row["database_name"] = SqlValue.FromNVarchar(database.Name);
+                row["mark_name"] = SqlValue.FromNVarchar(transaction.MarkName ?? "");
+                row["description"] = Text(transaction.MarkDescription);
+                row["user_name"] = SqlValue.FromNVarchar(transaction.Owner.Security.Effective.LoginName);
+                row["lsn"] = Lsn(database.BackupChain.LogBlock + 1);
+                row["mark_time"] = SqlValue.FromDateTime(transaction.MarkUtc);
+            });
+            _ = table.Heap.Insert(RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap));
+        }
+    }
+
+    /// <summary>The stored values of a row <paramref name="fill"/> names cells of, with the identity it drew (0 for none).</summary>
+    private static (SqlValue[] Values, int Identity) MsdbRowValues(HeapTable table, Action<MsdbRow> fill)
+    {
         var row = new MsdbRow(table);
         fill(row);
         var identity = 0;
@@ -284,8 +327,7 @@ partial class Simulation
                 values[i] = row.Values[i] is { } value ? value.CoerceTo(column.Type) : SqlValue.Null(column.Type);
             }
         }
-        _ = InsertRow(batch, table, RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap), undoLog: null);
-        return identity;
+        return (values, identity);
     }
 
     /// <summary>The cells of one msdb row an <see cref="InsertMsdbRow"/> fills, by column name.</summary>

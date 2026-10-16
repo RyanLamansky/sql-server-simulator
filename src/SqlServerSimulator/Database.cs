@@ -537,6 +537,96 @@ internal sealed partial class Database
     public readonly Storage.Backup.DatabaseBackupChain BackupChain = new();
 
     /// <summary>
+    /// The committed transactions since the last log backup, which the next
+    /// one carries so a restore can stop between them; recorded only while
+    /// <see cref="KeepsLog"/>.
+    /// </summary>
+    public readonly Storage.Backup.DatabaseLog Log = new();
+
+    /// <summary>
+    /// Whether this database's committed writes go to <see cref="Log"/>: a
+    /// log backup chain runs, which takes a full or differential backup
+    /// outside <c>SIMPLE</c> recovery to start — until the log fills its
+    /// capacity, when recording stops until the next log backup. A database
+    /// that never takes one pays only this test per write.
+    /// </summary>
+    public bool KeepsLog => this.RecoveryModel != RecoveryModel.Simple && this.BackupChain.LastLogBackupBlock is not null && this.Log.UnrecordedSinceUtc is null;
+
+    /// <summary>
+    /// Starts <see cref="Log"/>'s next span at <paramref name="sequence"/>,
+    /// noting the definitions it starts from (<see cref="DefinitionFingerprint"/>):
+    /// as a log chain starts, and as a restore leaves the database.
+    /// </summary>
+    internal void ResetLog(long sequence) => this.Log.Reset(sequence, this.DefinitionFingerprint());
+
+    /// <summary>Appends a committed transaction to <see cref="Log"/>, whose records move the log's end the next backup's LSNs reach.</summary>
+    internal void AppendToLog(Storage.Backup.LoggedCommit commit)
+    {
+        this.Log.Append(commit);
+        this.BackupChain.AdvanceForCommit();
+    }
+
+    /// <summary>
+    /// Records a definition change in <see cref="Log"/> when this database's
+    /// definitions differ from those its last commit stood on: a change made
+    /// in any database, by any statement, reaches the log of the one it
+    /// changed. A change a transaction rolls back records one too, which only
+    /// refuses a stop point a row replay would have reached.
+    /// </summary>
+    internal void LogDefinitionChange()
+    {
+        var fingerprint = this.DefinitionFingerprint();
+        if (this.Log.NoteDefinitions(fingerprint))
+            this.AppendToLog(new() { CommitUtc = DateTime.UtcNow, ChangedDefinitions = true });
+    }
+
+    /// <summary>
+    /// A hash of every schema object's identity and last modification, and of
+    /// each table's shape: what a definition change moves.
+    /// </summary>
+    private long DefinitionFingerprint()
+    {
+        var hash = new HashCode();
+        foreach (var (name, schema) in this.Schemas)
+        {
+            hash.Add(name);
+            foreach (var item in schema.SchemaObjects())
+            {
+                hash.Add(item.ObjectId);
+                hash.Add(item.ModifyDate.Ticks);
+                if (item is HeapTable table)
+                {
+                    hash.Add(table.Columns.Length);
+                    hash.Add(table.MaxColumnIdUsed);
+                    hash.Add(table.Indexes.Count);
+                    hash.Add(table.KeyConstraints.Count);
+                    hash.Add(table.CheckConstraints.Count);
+                }
+            }
+        }
+        return hash.ToHashCode();
+    }
+
+    /// <summary>
+    /// The restore sequence this database stands in while it can take a
+    /// differential or log backup set — <c>RESTORING</c> after a restore
+    /// <c>WITH NORECOVERY</c> or a tail-log backup, or online read-only
+    /// <c>WITH STANDBY</c> — and null once recovered.
+    /// </summary>
+    internal Storage.Backup.RestoreSequence? PendingRestore;
+
+    /// <summary><c>sys.databases.is_in_standby</c>: restored <c>WITH STANDBY</c>, read-only until the next restore.</summary>
+    public bool IsInStandby;
+
+    /// <summary>
+    /// Where this database's recovery forked from its family, set by a
+    /// point-in-time recovery: the fork it left and the LSN block it left it
+    /// at, which <c>sys.database_recovery_status</c> reports; null for a
+    /// database recovered at the end of its log.
+    /// </summary>
+    internal (Guid FirstFork, long Block)? ForkPoint;
+
+    /// <summary>
     /// <c>sys.databases.user_access</c>: 0 MULTI_USER, 1 SINGLE_USER,
     /// 2 RESTRICTED_USER. A single-user database admits only
     /// <see cref="SingleUserHolder"/>; <c>RESTRICTED_USER</c> is recorded only.

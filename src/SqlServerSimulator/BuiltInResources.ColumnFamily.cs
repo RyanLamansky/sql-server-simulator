@@ -143,8 +143,9 @@ internal static partial class BuiltInResources
 
         // sys.database_recovery_status: one row per database, a never-restored
         // database's family and recovery fork one GUID (probed 2026-09-30
-        // against SQL Server 2025), and the LSN the next log backup starts
-        // from while a log chain runs. SMO's
+        // against SQL Server 2025), the LSN the next log backup starts
+        // from while a log chain runs (none while restoring), and the fork a
+        // point-in-time recovery left (probed 2026-10-16). SMO's
         // database-properties preamble LEFT JOINs it by database_id for
         // DatabaseGuid / RecoveryForkGuid / HasFullBackup.
         Sys("database_recovery_status",
@@ -162,13 +163,15 @@ internal static partial class BuiltInResources
                 {
                     SqlValue.FromInt32(entry.Id),
                     SqlValue.FromGuid(entry.Database.DatabaseGuid),
-                    SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
-                    entry.Database.BackupChain.LastLogBackupBlock is { } logBackup
+                    SqlValue.FromGuid(entry.Database.ForkPoint?.FirstFork ?? entry.Database.RecoveryForkGuid),
+                    entry.Database.BackupChain.LastLogBackupBlock is { } logBackup && entry.Database.State != DatabaseState.Restoring
                         ? SqlValue.FromDecimal(SqlType.GetDecimal(25, 0), Storage.Backup.DatabaseBackupChain.Lsn(logBackup))
                         : SqlValue.Null(SqlType.GetDecimal(25, 0)),
                     SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
-                    SqlValue.Null(SqlType.UniqueIdentifier),
-                    SqlValue.Null(SqlType.GetDecimal(25, 0)),
+                    entry.Database.ForkPoint is { } fork ? SqlValue.FromGuid(fork.FirstFork) : SqlValue.Null(SqlType.UniqueIdentifier),
+                    entry.Database.ForkPoint is { } forkPoint
+                        ? SqlValue.FromDecimal(SqlType.GetDecimal(25, 0), Storage.Backup.DatabaseBackupChain.Lsn(forkPoint.Block))
+                        : SqlValue.Null(SqlType.GetDecimal(25, 0)),
                 }));
 
 

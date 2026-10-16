@@ -21,7 +21,7 @@ internal sealed class BackupMedia
     private static readonly byte[] Magic = "SQLSIMBK"u8.ToArray();
 
     /// <summary>Bumped whenever the layout below or <see cref="DatabaseImage"/>'s changes.</summary>
-    private const int FormatVersion = 3;
+    private const int FormatVersion = 4;
 
     /// <summary>
     /// What a media family shorter than this holds is reported as an empty
@@ -206,8 +206,26 @@ internal sealed class BackupSet
     /// <summary>The database's files as the backup found them, which <c>FILELISTONLY</c> lists.</summary>
     public readonly List<BackupSetFile> Files = [];
 
-    /// <summary><c>backupset.flags</c> / <c>HEADERONLY</c>'s <c>Flags</c>: 512, plus 16 for checksums, 1024 for <c>COPY_ONLY</c> and 2048 for a differential.</summary>
-    public int Flags => 512 | (this.HasChecksums ? 16 : 0) | (this.IsCopyOnly ? 1024 : 0) | (this.Type == DifferentialType ? 2048 : 0);
+    /// <summary>A tail-log backup <c>WITH NORECOVERY</c>, which left the database restoring.</summary>
+    public bool IsForceOffline;
+
+    /// <summary>
+    /// The <see cref="DatabaseLog"/> sequence the set's image stands at: a
+    /// log set's commits past the sequence a restore stands at are the ones
+    /// it applies.
+    /// </summary>
+    public long LogSequence;
+
+    /// <summary>A log set's commits since the log backup before it (<see cref="DatabaseLog.ToPayload"/>), empty on every other set.</summary>
+    public byte[] LogPayload = [];
+
+    /// <summary>
+    /// <c>backupset.flags</c> / <c>HEADERONLY</c>'s <c>Flags</c>: 512, plus 16
+    /// for checksums, 256 for a tail-log backup that left the database
+    /// restoring, 1024 for <c>COPY_ONLY</c> and 2048 for a differential
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    public int Flags => 512 | (this.HasChecksums ? 16 : 0) | (this.IsForceOffline ? 256 : 0) | (this.IsCopyOnly ? 1024 : 0) | (this.Type == DifferentialType ? 2048 : 0);
 
     /// <summary>The set's size in bytes: its pages and nine of header and trailer, as real's full backup counts it.</summary>
     public long BackupSize
@@ -259,6 +277,10 @@ internal sealed class BackupSet
         writer.Write(this.Files.Count);
         foreach (var file in this.Files)
             file.Write(writer);
+        writer.Write(this.IsForceOffline);
+        writer.Write(this.LogSequence);
+        writer.Write(this.LogPayload.Length);
+        writer.Write(this.LogPayload);
         writer.Write(this.Payload.Length);
         writer.Write(this.Payload);
     }
@@ -311,6 +333,12 @@ internal sealed class BackupSet
         var files = reader.ReadInt32();
         for (var i = 0; i < files; i++)
             set.Files.Add(BackupSetFile.Read(reader));
+        set.IsForceOffline = reader.ReadBoolean();
+        set.LogSequence = reader.ReadInt64();
+        var logLength = reader.ReadInt32();
+        set.LogPayload = reader.ReadBytes(logLength);
+        if (set.LogPayload.Length != logLength)
+            throw new EndOfStreamException();
         var length = reader.ReadInt32();
         set.Payload = reader.ReadBytes(length);
         if (set.Payload.Length != length)
