@@ -90,7 +90,7 @@ partial class Simulation
             throw SimulatedSqlException.ChangeTrackingOnTemporalHistoryTable(QualifyTableName(table, database));
         if (!table.KeyConstraints.Exists(key => key.Kind == KeyConstraintKind.PrimaryKey))
             throw SimulatedSqlException.ChangeTrackingRequiresPrimaryKey(table.Name);
-        table.ChangeTracking = new TableChangeTracking(trackColumnsUpdated, database.ChangeTrackingVersion);
+        table.ChangeTracking = new TableChangeTracking(trackColumnsUpdated, database.ChangeTrackingVersion, database.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow);
         return true;
     }
 

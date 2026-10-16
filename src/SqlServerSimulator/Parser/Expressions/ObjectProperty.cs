@@ -46,8 +46,63 @@ internal sealed class ObjectProperty : Expression
                     ? EvaluateTableTypeProperty(database, tableType, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
                     ? EvaluateSystemObjectProperty(system, prop)
+                : BuiltInResources.TryResolveSystemTable(database, id, out var systemTable)
+                    ? SystemTableVisible(runtime.Batch, database, systemTable) ? EvaluateSystemTableProperty(database, systemTable, prop) : null
                     : null;
         return result is int value ? SqlValue.FromInt32(value) : SqlValue.Null(SqlType.Int32);
+    }
+
+    /// <summary>Whether the session's principal may see <paramref name="table"/>'s metadata, which a user without permissions may not (probed 2026-10-16 against SQL Server 2025).</summary>
+    internal static bool SystemTableVisible(BatchContext batch, Database database, SystemTableObject table) =>
+        PermissionEnforcement.MetadataVisibilityPrincipal(batch, database) is not { } principalId
+        || PermissionChecker.CanViewMetadata(database, principalId, table.ObjectId, Database.SysSchemaId, ServerLoginRights.For(batch.Connection));
+
+    /// <summary>
+    /// The properties a system base table or internal table answers (probed
+    /// 2026-10-16 against SQL Server 2025): both are shipped tables of the
+    /// <c>sys</c> schema, owned by it but for an internal table that serves a
+    /// queue or a table, which that object's owner owns; only a system base
+    /// table is a system table, and only
+    /// it answers the index, trigger and <c>Table*</c> members and the two
+    /// <c>SET</c>-option ones, an internal table NULL.
+    /// </summary>
+    internal static int? EvaluateSystemTableProperty(Database database, SystemTableObject table, string property)
+    {
+        Span<char> upper = stackalloc char[property.Length];
+        var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        int? shared = name switch
+        {
+            "ISCHECKCNST" or "ISCONSTRAINT" or "ISDEFAULT" or "ISDEFAULTCNST" or "ISEXECUTED" or "ISEXTENDEDPROC" or "ISFOREIGNKEY"
+                or "ISINLINEFUNCTION" or "ISPRIMARYKEY" or "ISPROCEDURE" or "ISQUEUE" or "ISREPLPROC" or "ISRULE" or "ISSCALARFUNCTION"
+                or "ISTABLEFUNCTION" or "ISTRIGGER" or "ISUNIQUECNST" or "ISUSERTABLE" or "ISVIEW" => 0,
+            "ISMSSHIPPED" or "ISTABLE" => 1,
+            "ISSYSTEMTABLE" => Flag(!table.IsInternal),
+            "OWNERID" => table.ParentObjectId == 0 ? Database.SysSchemaId
+                : FindObject(database, table.ParentObjectId) is { } parent ? Ownership.EffectiveOwnerId(database, parent)
+                : Database.DboPrincipalId,
+            "SCHEMAID" => Database.SysSchemaId,
+            _ => null,
+        };
+        if (shared is not null || table.IsInternal)
+            return shared;
+        var indexes = table.Definition.Indexes;
+        return name switch
+        {
+            "HASAFTERTRIGGER" or "HASDELETETRIGGER" or "HASINSERTTRIGGER" or "HASINSTEADOFTRIGGER" or "HASUPDATETRIGGER" or "ISINDEXABLE"
+                or "TABLEDELETETRIGGER" or "TABLEDELETETRIGGERCOUNT" or "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCATALOGID"
+                or "TABLEFULLTEXTCHANGETRACKINGON" or "TABLEFULLTEXTKEYCOLUMN" or "TABLEFULLTEXTMERGESTATUS" or "TABLEFULLTEXTPOPULATESTATUS"
+                or "TABLEHASACTIVEFULLTEXTINDEX" or "TABLEHASCHECKCNST" or "TABLEHASCOLUMNSET" or "TABLEHASDEFAULTCNST" or "TABLEHASDELETETRIGGER"
+                or "TABLEHASFOREIGNKEY" or "TABLEHASFOREIGNREF" or "TABLEHASIDENTITY" or "TABLEHASINSERTTRIGGER" or "TABLEHASPRIMARYKEY"
+                or "TABLEHASROWGUIDCOL" or "TABLEHASTEXTIMAGE" or "TABLEHASTIMESTAMP" or "TABLEHASUNIQUECNST" or "TABLEHASUPDATETRIGGER"
+                or "TABLEHASVARDECIMALSTORAGEFORMAT" or "TABLEINSERTTRIGGER" or "TABLEINSERTTRIGGERCOUNT" or "TABLEISFAKE" or "TABLEISLOCKEDONBULKLOAD"
+                or "TABLEISMEMORYOPTIMIZED" or "TABLEISPINNED" or "TABLETEMPORALTYPE" or "TABLETEXTINROWLIMIT" or "TABLEUPDATETRIGGER"
+                or "TABLEUPDATETRIGGERCOUNT" => 0,
+            "ISANSINULLSON" or "ISQUOTEDIDENTON" => 1,
+            "ISINDEXED" or "TABLEHASINDEX" => Flag(Array.Exists(indexes, static index => index.Id > 0)),
+            "TABLEHASCLUSTINDEX" => Flag(Array.Exists(indexes, static index => index.Type == 1)),
+            "TABLEHASNONCLUSTINDEX" => Flag(Array.Exists(indexes, static index => index.Type == 2)),
+            _ => null,
+        };
     }
 
     /// <summary>

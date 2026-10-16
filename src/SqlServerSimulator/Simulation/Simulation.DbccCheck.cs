@@ -93,8 +93,8 @@ partial class Simulation
             }
             if (!physicalOnly)
             {
-                foreach (var (table, display) in tables)
-                    rows.Add(CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display), databaseId, table.ObjectId, table.HasClusteredIndex() ? 1 : 0, locatesRow: true));
+                foreach (var entry in CheckedObjects(batch, database, filegroupId, tables))
+                    rows.Add(CheckResultRow(2593, SimulatedSqlException.RowsInPagesText(entry.Rows, entry.Pages, entry.Display), databaseId, entry.ObjectId, entry.IndexId, locatesRow: true));
             }
             rows.Add(CheckResultRow(8989, SimulatedSqlException.CheckFoundErrorsText(command, database.Name), databaseId, objectId: 0, indexId: 0, locatesRow: false));
             var outcomes = DbccRows(batch, CheckResultSchema(batch), CheckResultColumnNames, rows);
@@ -115,10 +115,10 @@ partial class Simulation
                 foreach (var text in SimulatedSqlException.ServiceBrokerCheckTexts)
                     Info(batch, SimulatedSqlException.ServiceBrokerCheckMessage(batch, text));
             }
-            foreach (var (table, display) in tables)
+            foreach (var entry in CheckedObjects(batch, database, filegroupId, tables))
             {
-                Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, display));
-                Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), display));
+                Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, entry.Display));
+                Info(batch, SimulatedSqlException.RowsInPagesMessage(batch, entry.Rows, entry.Pages, entry.Display));
             }
         }
         Info(batch, SimulatedSqlException.CheckFoundErrorsMessage(batch, command, database.Name));
@@ -772,6 +772,51 @@ partial class Simulation
         }
         tables.Sort(static (a, b) => a.Item1.ObjectId.CompareTo(b.Item1.ObjectId));
         return tables;
+    }
+
+    /// <summary>One table a database check reports on: its name, rows and data pages, and the index a <c>TABLERESULTS</c> row names.</summary>
+    private readonly struct CheckedObject(int objectId, string display, long rows, long pages, int indexId)
+    {
+        public readonly int ObjectId = objectId;
+        public readonly string Display = display;
+        public readonly long Rows = rows;
+        public readonly long Pages = pages;
+        public readonly int IndexId = indexId;
+    }
+
+    /// <summary>
+    /// The tables a database or filegroup check reports on, in object-id
+    /// order: the user tables, and on <c>PRIMARY</c> the system base tables and
+    /// internal tables too, each named in its <c>sys</c> schema with the rows
+    /// and data pages of its heap or clustered index (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static List<CheckedObject> CheckedObjects(BatchContext batch, Database database, int? filegroupId, List<(HeapTable Table, string Display)> tables)
+    {
+        var entries = new List<CheckedObject>(tables.Count);
+        foreach (var (table, display) in tables)
+            entries.Add(new CheckedObject(table.ObjectId, display, table.Heap.CountLiveRows(), BuiltInResources.BaseDataPages(batch, table), table.HasClusteredIndex() ? 1 : 0));
+        if (filegroupId is null or Database.PrimaryFilegroupId)
+        {
+            foreach (var systemTable in BuiltInResources.SystemTableObjects(database))
+            {
+                foreach (var rowset in systemTable.Rowsets)
+                {
+                    if (rowset.IndexId > 1)
+                        continue;
+                    long pages = 0;
+                    foreach (var unit in rowset.Units)
+                    {
+                        if (unit.Type == 1)
+                            pages = unit.DataPages;
+                    }
+                    entries.Add(new CheckedObject(systemTable.ObjectId, "sys." + systemTable.Name, BuiltInResources.SystemRowsetRows(batch, database, systemTable, rowset), pages, rowset.IndexId));
+                    break;
+                }
+            }
+        }
+        entries.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+        return entries;
     }
 
     private static long TotalPages(List<(HeapTable Table, string Display)> tables)

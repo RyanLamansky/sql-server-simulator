@@ -321,6 +321,8 @@ internal static class CatalogViewObjectIds
         ["sys.sysprocesses"] = -210,
         ["sys.sysservers"] = -212,
         ["sys.system_columns"] = -392,
+        ["sys.system_internals_allocation_units"] = -488,
+        ["sys.system_internals_partitions"] = -486,
         ["sys.system_objects"] = -389,
         ["sys.system_sql_modules"] = -489,
         ["sys.system_views"] = -390,

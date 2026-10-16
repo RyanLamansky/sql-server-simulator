@@ -87,6 +87,16 @@ internal sealed class ObjectPropertyEx : Expression
                     ? SqlValue.FromVariant(SqlValue.FromInt32(tableTypeResult))
                     : SqlValue.Null(SqlType.SqlVariant);
         }
+        if (BuiltInResources.TryResolveSystemTable(database, id, out var systemTable))
+        {
+            if (!ObjectProperty.SystemTableVisible(runtime.Batch, database, systemTable))
+                return SqlValue.Null(SqlType.SqlVariant);
+            return IsBaseType(prop) ? TypeCodeVariant(systemTable.TypeCode, database)
+                : BuiltInToken.Equals(prop, "Cardinality") ? SqlValue.FromVariant(SqlValue.FromInt64(BuiltInResources.SystemTableCardinality(runtime.Batch, database, systemTable)))
+                : ObjectProperty.EvaluateSystemTableProperty(database, systemTable, prop) is int systemTableResult
+                    ? SqlValue.FromVariant(SqlValue.FromInt32(systemTableResult))
+                    : SqlValue.Null(SqlType.SqlVariant);
+        }
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
         {
             return IsBaseType(prop) ? TypeCodeVariant(system.Type, database)

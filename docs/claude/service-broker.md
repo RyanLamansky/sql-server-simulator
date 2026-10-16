@@ -149,7 +149,6 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 - A query notification's dialog is begun as it fires, where real begins it as the query subscribes (its `STARTED_OUTBOUND` endpoint visible meanwhile).
 - The DONE token a conversation statement closes with: real's own codes aren't captured, so `RECEIVE` closes as a `SELECT` and the rest send none.
 
-- **The shipped queues aren't in `sys.objects`**, nor are any queue's `queue_messages_<id>` internal tables, which real lists beside its 72 system base tables (see [`catalog-views.md`](catalog-views.md)); `sys.service_queues`, `OBJECT_ID` and `SELECT` reach the shipped queues all the same.
 - **Ids are spent only on success**: real spends one on a `CREATE` that fails after allocating it (a duplicate contract, a missing message type), so a later object's id can run ahead of the simulator's.
 
 ## Not modeled yet

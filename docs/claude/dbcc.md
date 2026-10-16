@@ -81,11 +81,11 @@ The rows violating the `FOREIGN KEY` and `CHECK` constraints, modeled exactly be
 
 A simulated database is always consistent, so each check reports a healthy one:
 
-- `CHECKDB [( database [, NOINDEX] )]`: Msg 2536 heading the database, Msg 7966 when `NOINDEX` is given, the eight Service Broker lines (Msg 8997) for the metadata every database carries, Msg 2536 and 2593 for each user table (`schema.table` outside `dbo`), and Msg 8989.
+- `CHECKDB [( database [, NOINDEX] )]`: Msg 2536 heading the database, Msg 7966 when `NOINDEX` is given, the eight Service Broker lines (Msg 8997) for the metadata every database carries, Msg 2536 and 2593 for each table by object id — a user table (`schema.table` outside `dbo`) or one of the [system base and internal tables](catalog-views.md#system-base-tables-and-internal-tables) (`sys.name`, the rows and data pages of its heap or clustered index) — and Msg 8989.
   `PHYSICAL_ONLY` keeps only the heading and summary, and with `DATA_PURITY` is Msg 2532 state 2, with `EXTENDED_LOGICAL_CHECKS` state 5 (probed 2026-10-04).
   `TABLERESULTS` returns the Msg 8997, 2593 and 8989 lines as rows of real's 23-column shape.
   `WITH TABLOCK` skips the catalog and Service Broker checks: Msg 5232 follows the heading (and the `NOINDEX` warning) in place of the Msg 8997 lines, as a row under `TABLERESULTS` (probed 2026-10-06).
-- `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, without the Service Broker lines; an unknown filegroup name is Msg 3027 and an unknown id Msg 8932 state 0 (probed 2026-10-04).
+- `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, the system tables on `PRIMARY`, without the Service Broker lines; an unknown filegroup name is Msg 3027 and an unknown id Msg 8932 state 0 (probed 2026-10-04).
 - `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name; an index id the table has no index under is Msg 7999 state 7 naming the number (probed 2026-10-04).
   Under a database-scoped identity — `EXECUTE AS USER`, `dbo` included — it is Msg 916 state 2 after the permission check, naming the server principal as a refused `USE` does (a login, or a `WITHOUT LOGIN` user's `S-1-9-3-…` SID string), and the batch ends unless a `TRY` catches it: real's check reads an internal snapshot of the database, which that identity can't reach, while `WITH TABLOCK` takes locks instead and runs.
   The other checks run under the same identity (probed 2026-09-28 against SQL Server 2025, with real's SID-derived name there where the simulator's is its own deterministic one).
@@ -113,7 +113,7 @@ The database's name, id, compatibility level, collation id, creation date, famil
 
 `UPDATEUSAGE`, `CLEANTABLE` and `DBREINDEX` only validate and report — a `DBREINDEX` fill factor outside 0 .. 100 is Msg 129 state 2 (probed 2026-10-04) — the simulator's counts never going stale, its dropped columns reclaimed as they drop and its indexes never fragmenting; an index name the table lacks is Msg 7999 (state 4 from `DBREINDEX`, 8 from the others).
 `INDEXDEFRAG` returns the pages scanned and none moved or removed — for the named index, or one row per index (the heap's with a NULL name) — and is Msg 8920 inside a user transaction.
-Ola Hallengren's `DatabaseIntegrityCheck` (version 2026-09-12 15:02:38) runs its `CHECKDB`, `CHECKALLOC`, `CHECKTABLE`, `CHECKCATALOG` and `CHECKFILEGROUP` (`PHYSICAL_ONLY`, `NOINDEX`, `EXTENDED_LOGICAL_CHECKS`) commands here with real's text and `CommandLog` rows (probed 2026-10-16 against SQL Server 2025); the per-object messages differ only where real lists its own system tables and allocation units and counts pages its storage decides, a LOB column's in-row pages among them.
+Ola Hallengren's `DatabaseIntegrityCheck` (version 2026-09-12 15:02:38) runs its `CHECKDB`, `CHECKALLOC`, `CHECKTABLE`, `CHECKCATALOG` and `CHECKFILEGROUP` (`PHYSICAL_ONLY`, `NOINDEX`, `EXTENDED_LOGICAL_CHECKS`) commands here with real's text and `CommandLog` rows (probed 2026-10-16 against SQL Server 2025); the per-object messages differ only where real lists its allocation units and counts pages its storage decides, a LOB column's in-row pages among them.
 
 ## `SHOWFILESTATS [(file_id)]`
 
@@ -123,7 +123,7 @@ A caller outside `db_owner` is Msg 7983 state 36 and a non-integer argument Msg 
 ## Divergences
 
 - Values that describe real's physical storage are read off the simulator's own: a table's page count is its heap's data pages, `CHECKALLOC`'s totals are the user tables' pages in whole uniform extents, `WITH ESTIMATEONLY` adds those pages to what a fresh database reports (2435 KB for `CHECKDB`, 351 for `CHECKALLOC`), `SQLPERF(LOGSPACE)` reports a fixed 54 pages of log in use, `LOGINFO`'s active file and every `OPENTRAN` LSN carry sequence number 34, and the system databases' logs are the size of any other.
-- `CHECKDB`, `CHECKFILEGROUP` and `CHECKALLOC` list no system base tables and no per-allocation-unit lines, which real prints for its catalog (over a hundred objects in a fresh database).
+- `CHECKALLOC` prints no per-allocation-unit lines and its totals leave the system tables' pages out, where real reports both for its catalog (over a hundred objects in a fresh database).
 - Real leaves `@@ROWCOUNT` after the consistency checks at a count its internal queries leave behind; the simulator leaves 0.
 - Real's Query Store opens a transaction of its own in each user database, which `OPENTRAN` reports as the oldest (`QDS batch nested transaction`) — and as written to a user transaction that has only read, where the simulator, keeping no such transaction, reports none (probed 2026-10-04 against SQL Server 2025).
 - Messages other than Msg 2528, which follows `SET LANGUAGE` (`Language.DbccCompletedMessage`, the texts real's `sys.messages` holds), stay in English, as the engine's other messages do.

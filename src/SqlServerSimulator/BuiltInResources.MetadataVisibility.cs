@@ -33,6 +33,7 @@ internal static partial class BuiltInResources
         "sys.identity_columns",
         "sys.index_columns",
         "sys.indexes",
+        "sys.internal_tables",
         "sys.key_constraints",
         "sys.numbered_procedure_parameters",
         "sys.numbered_procedures",
@@ -44,9 +45,11 @@ internal static partial class BuiltInResources
         "sys.sequences",
         "sys.sql_modules",
         "sys.synonyms",
+        "sys.sysobjects",
         "sys.tables",
         "sys.triggers",
         "sys.views",
+        "sysobjects",
     ];
 
     // Name-keyed INFORMATION_SCHEMA object views: the row carries the owning
@@ -146,7 +149,8 @@ internal static partial class BuiltInResources
             if (BuiltInToken.Equals(view.Columns[i].Name, "object_id"))
                 return i;
         }
-        return OrdinalOf(view, "parent_object_id");
+        // sysobjects keys its rows by id.
+        return view.Columns.Length > 0 && BuiltInToken.Equals(view.Columns[1].Name, "id") ? 1 : OrdinalOf(view, "parent_object_id");
     }
 
     private static int OrdinalOf(CatalogView view, string columnName)

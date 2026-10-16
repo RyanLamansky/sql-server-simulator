@@ -739,6 +739,12 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// The first page id the buffer pool numbers a database's pages from: past
+    /// the pages real's file header, allocation maps and boot page take.
+    /// </summary>
+    internal const int FirstBufferedPageId = 16;
+
+    /// <summary>
     /// <c>sys.dm_os_buffer_descriptors</c>: every page of every database's
     /// tables is in memory, so the buffer pool lists each page in use in the
     /// allocation units <c>sys.allocation_units</c> reports, under its unit —
@@ -763,13 +769,11 @@ internal static partial class BuiltInResources
         foreach (var (database, id) in DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
             var databaseId = SqlValue.FromInt32(id);
-            // Past the pages real's file header, allocation maps and boot
-            // page take.
-            var pageId = 16;
-            foreach (var (containerId, type, _, usedPages, dataPages, _) in EnumerateAllocationUnitData(batch, database))
+            var pageId = FirstBufferedPageId;
+            foreach (var (_, allocationUnitId, indexId, type, _, usedPages, dataPages, _) in EnumerateAllocationUnitData(batch, database))
             {
-                var unit = SqlValue.FromInt64(PartitionCensus.AllocationUnitId(containerId, type));
-                var leafType = (containerId & 0xFFFF) <= 1 ? dataPage : indexPage;
+                var unit = SqlValue.FromInt64(allocationUnitId);
+                var leafType = indexId <= 1 ? dataPage : indexPage;
                 for (long i = 0; i < usedPages; i++)
                 {
                     var pageType = i == 0 ? iamPage : type != 1 ? textPage : i <= dataPages ? leafType : indexPage;

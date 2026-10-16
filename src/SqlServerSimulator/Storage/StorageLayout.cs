@@ -65,7 +65,7 @@ internal sealed class StorageLayout
 
     private readonly bool versioned;
 
-    private readonly ConcurrentDictionary<int, (PartitionPlacement? Placement, RowsetFigures[] Figures)> rowsets = new();
+    private readonly ConcurrentDictionary<int, (PartitionPlacement? Placement, SqlValue[]? Boundaries, RowsetFigures[] Figures)> rowsets = new();
 
     private StorageLayout(HeapTable table)
     {
@@ -98,10 +98,13 @@ internal sealed class StorageLayout
             layout = new StorageLayout(table);
             kept.AddOrUpdate(table, layout);
         }
-        if (layout.rowsets.TryGetValue(identity.IndexId, out var found) && ReferenceEquals(found.Placement, placement))
+        // A split or merge of the partition function moves the rows between
+        // partitions without changing the table.
+        var boundaries = placement?.Scheme.Function.Boundaries;
+        if (layout.rowsets.TryGetValue(identity.IndexId, out var found) && ReferenceEquals(found.Placement, placement) && ReferenceEquals(found.Boundaries, boundaries))
             return found.Figures;
         var figures = Compute(batch, table, identity, placement);
-        layout.rowsets[identity.IndexId] = (placement, figures);
+        layout.rowsets[identity.IndexId] = (placement, boundaries, figures);
         return figures;
     }
 

@@ -334,7 +334,7 @@ public sealed class CatalogPushdownTests
     [TestMethod]
     public void NoEligibleConjunct_ReadsTheWholeView()
     {
-        var (trace, rows) = Run("select name from sys.columns where is_nullable = 1 order by name");
+        var (trace, rows) = Run("select name from sys.columns where is_nullable = 1 and objectproperty(object_id, 'IsMSShipped') = 0 order by name");
         DoesNotContain("Seek(", string.Join(",", trace));
         CollectionAssert.AreEqual(new object?[] { "b", "d", "e" }, rows);
     }

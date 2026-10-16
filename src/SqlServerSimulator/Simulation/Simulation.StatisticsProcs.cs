@@ -5,10 +5,7 @@ using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
-// sp_updatestats / sp_autostats / sp_createstats. Real walks its own internal
-// tables too (sys.plan_persist_*, the agent's job tables, the ledger's) and
-// reports each; the simulator carries none of them, so the reports cover user
-// tables only.
+// sp_updatestats / sp_autostats / sp_createstats.
 partial class Simulation
 {
     private static readonly SystemProcedureParameter[] UpdateStatsParameters =
@@ -108,8 +105,44 @@ partial class Simulation
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InvalidUpdateStatsOption(option.PadRight(8)), 27);
 
         var collation = batch.CurrentDatabase.Collation;
+        // The internal tables are walked among the user tables, by object id,
+        // each index statistic never needing an update, but for the persistent
+        // version store's pair, which leave only the blank line (probed
+        // 2026-10-16 against SQL Server 2025); the system base tables aren't.
+        var internalTables = new List<SystemTableObject>();
+        foreach (var systemTable in BuiltInResources.SystemTableObjects(batch.CurrentDatabase))
+        {
+            if (systemTable.IsInternal)
+                internalTables.Add(systemTable);
+        }
+        internalTables.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+        var nextInternal = 0;
+        IEnumerable<SimulatedStatementOutcome> InternalTablesBefore(int objectId)
+        {
+            for (; nextInternal < internalTables.Count && internalTables[nextInternal].ObjectId < objectId; nextInternal++)
+            {
+                var internalTable = internalTables[nextInternal];
+                if (!internalTable.Name.StartsWith("persistent_version_store", StringComparison.Ordinal))
+                {
+                    yield return ProcedureMessage(batch, calledAs, 94, 15650, $"Updating [sys].{QuoteIdentifier(internalTable.Name)}");
+                    var count = 0;
+                    foreach (var index in internalTable.Definition.Indexes)
+                    {
+                        if (index.Name is not { } indexName)
+                            continue;
+                        count++;
+                        yield return ProcedureMessage(batch, calledAs, 179, 15653, $"    {QuoteIdentifier(indexName)}, update is not necessary...");
+                    }
+                    yield return ProcedureMessage(batch, calledAs, count == 0 ? 128 : 185, 15651,
+                        $"    0 index(es)/statistic(s) have been updated, {count} did not require update.");
+                }
+                yield return new SimulatedInfoOutcome(SimulatedSqlException.HelpBlankLineMessage(batch, calledAs, 190));
+            }
+        }
         foreach (var (table, schemaName) in UserTablesByObjectId(batch))
         {
+            foreach (var outcome in InternalTablesBefore(table.ObjectId))
+                yield return outcome;
             yield return ProcedureMessage(batch, calledAs, 94, 15650, $"Updating {QuoteIdentifier(schemaName)}.{QuoteIdentifier(table.Name)}");
             var statistics = StatisticsOf(table.IndexIdentities(), table.UserStatistics);
             int updated = 0, current = 0;
@@ -132,6 +165,8 @@ partial class Simulation
                 $"    {updated} index(es)/statistic(s) have been updated, {current} did not require update.");
             yield return new SimulatedInfoOutcome(SimulatedSqlException.HelpBlankLineMessage(batch, calledAs, 190));
         }
+        foreach (var outcome in InternalTablesBefore(int.MaxValue))
+            yield return outcome;
         yield return ProcedureMessage(batch, calledAs, 193, 15005, "Statistics for all tables have been updated.");
     }
 

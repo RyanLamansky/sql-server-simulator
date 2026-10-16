@@ -208,7 +208,7 @@ public sealed class DacFxExportCatalogTests
             "select count(*) from sys.stats_columns sc " +
             "join sys.index_columns ic on ic.object_id = sc.object_id and ic.index_id = sc.stats_id " +
             "and ic.index_column_id = sc.stats_column_id and ic.column_id = sc.column_id " +
-            "where ic.is_included_column = 0");
+            "where ic.is_included_column = 0 and sc.object_id = object_id('dbo.t')");
         AreEqual(statsColumnsCount, joined);
     }
 

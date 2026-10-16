@@ -350,11 +350,8 @@ internal static partial class BuiltInResources
         // column's own marker, which is metadata here — the row encoder already
         // omits a NULL from the row, so there is no storage difference to make.
         // SMO's Object-Explorer HasSparseColumn probe reads it off
-        // sys.all_columns.
-        // sys.all_columns is user-object-parity with sys.columns here: real
-        // SQL Server also surfaces system objects' negative-object_id columns,
-        // but SMO correlates only on user tables' object_ids so the identical
-        // user-column row set suffices. See docs/claude/catalog-views.md.
+        // sys.all_columns, which adds the catalog views' columns to
+        // sys.columns' (the system tables' among them).
         HeapColumn[] ColumnsShape() =>
         [
             new("object_id", SqlType.Int32, null, false),
@@ -463,7 +460,7 @@ internal static partial class BuiltInResources
             new("last_value", SqlType.SqlVariant, null, true),
             new("is_not_for_replication", SqlType.Bit, null, true)), "is_computed", "is_sparse", "is_column_set", "is_hidden"),
             (batch, database) => UserColumnRows(batch, database)
-                .Where(static entry => (entry.Host is ColumnHost.Table or ColumnHost.ReturnTable or ColumnHost.TableType && entry.Column.Identity is not null)
+                .Where(static entry => (entry.Host is ColumnHost.Table or ColumnHost.ReturnTable or ColumnHost.TableType or ColumnHost.SystemTable && entry.Column.Identity is not null)
                     || (entry.Host == ColumnHost.Projection && entry.Column.IdentitySource is not null))
                 .Select(SqlValue[] (entry) =>
                 {
@@ -478,7 +475,9 @@ internal static partial class BuiltInResources
                         .. familyOrdinals.Select(i => entry.Row[i]),
                         IdentityVariant(identity.Seed, entry.Column.Type),
                         IdentityVariant(identity.Increment, entry.Column.Type),
-                        entry.Host != ColumnHost.TableType && identity.Snapshot() is { } last ? IdentityVariant(last, entry.Column.Type) : SqlValue.Null(SqlType.SqlVariant),
+                        entry.Host == ColumnHost.SystemTable
+                            ? SystemIdentityLastValue(database, entry.Row[0].AsInt32, entry.Column.ColumnId) is { } systemLast ? IdentityVariant(systemLast, entry.Column.Type) : SqlValue.Null(SqlType.SqlVariant)
+                            : entry.Host != ColumnHost.TableType && identity.Snapshot() is { } last ? IdentityVariant(last, entry.Column.Type) : SqlValue.Null(SqlType.SqlVariant),
                         SqlValue.FromBoolean(entry.Host != ColumnHost.TableType && identity.NotForReplication),
                     ];
                 }));
@@ -530,6 +529,7 @@ internal static partial class BuiltInResources
         TableType,
         Projection,
         System,
+        SystemTable,
     }
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
@@ -746,6 +746,18 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < tt.Columns.Length; i++)
                     yield return (Row(typeObjectId, tt.Columns[i], i + 1, declared: true), tt.Columns[i], ColumnHost.TableType);
             }
+        }
+
+        // The system base tables' and internal tables' columns list as a
+        // table's do (probed 2026-10-16 against SQL Server 2025).
+        var serverCollation = batch.Connection.Simulation.ServerCollationName;
+        foreach (var table in SystemTableObjects(database))
+        {
+            if (hasIdFilter && table.ObjectId != wantObjectId)
+                continue;
+            var objectId = SqlValue.FromInt32(table.ObjectId);
+            foreach (var col in table.Definition.HeapColumns(serverCollation))
+                yield return (Row(objectId, col, col.ColumnId, declared: true), col, ColumnHost.SystemTable);
         }
     }
 
@@ -1042,6 +1054,9 @@ internal static partial class BuiltInResources
                 }
             }
         }
+
+        foreach (var row in SystemTableObjectRows(database, msShipped, notPublished))
+            yield return row;
 
         // One table's constraint rows — keys, then defaults, then CHECKs, then
         // foreign keys, real's own object-id order for one CREATE TABLE.

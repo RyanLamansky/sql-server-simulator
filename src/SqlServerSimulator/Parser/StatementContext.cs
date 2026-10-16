@@ -127,6 +127,14 @@ internal sealed class StatementContext
     /// </summary>
     public Dictionary<(Schemas.CatalogView View, Database Database), byte[][]>? CatalogViewRows;
 
+    /// <summary>
+    /// The rows each user database's catalog base tables hold for what its
+    /// user made, counted once per run for the system tables' rowsets
+    /// (<c>BuiltInResources.UserCatalogRows</c>); cleared with the statement's
+    /// other per-run caches.
+    /// </summary>
+    public Dictionary<Database, long[]>? UserCatalogRowCounts;
+
 #if DEBUG
     /// <summary>
     /// The cached catalog rowsets this statement has already checked against a
@@ -683,6 +691,7 @@ internal sealed class StatementContext
         this.AutoOpenedKeys = null;
         this.RowAddresses = null;
         this.CatalogViewRows = null;
+        this.UserCatalogRowCounts = null;
 #if DEBUG
         this.AuditedCatalogRowSets = null;
 #endif

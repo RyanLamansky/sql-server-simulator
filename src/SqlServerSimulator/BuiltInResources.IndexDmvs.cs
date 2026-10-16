@@ -159,7 +159,9 @@ internal static partial class BuiltInResources
     /// columns as its own; <c>rowmodctr</c> is the leading column's
     /// modification count since the statistic was built. <c>dpages</c>,
     /// <c>reserved</c> and <c>used</c> are the rowset's leaf, reserved and
-    /// used pages over its partitions (<see cref="StorageLayout"/>).
+    /// used pages over its partitions (<see cref="StorageLayout"/>), the heap's
+    /// or clustered index's row reserving and using every rowset's of its
+    /// table. The system tables' rowsets follow.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysindexes(Parser.BatchContext batch, Database database)
     {
@@ -176,6 +178,20 @@ internal static partial class BuiltInResources
             {
                 var rows = table.Heap.CountLiveRows();
                 var statistics = Simulation.StatisticsOn(table);
+                // The heap's or clustered index's row counts every rowset's
+                // reserved and used pages (probed 2026-10-16 against SQL
+                // Server 2025).
+                long tableReserved = 0, tableUsed = 0;
+                foreach (var identity in table.IndexIdentities())
+                {
+                    if (!HoldsStorage(identity))
+                        continue;
+                    foreach (var figures in StorageLayout.Of(batch, table, identity, Simulation.PlacementOf(table, identity)))
+                    {
+                        tableReserved += figures.ReservedPageCount;
+                        tableUsed += figures.UsedPageCount;
+                    }
+                }
                 foreach (var identity in table.IndexIdentities())
                 {
                     if (identity.Index is { IsColumnstore: true })
@@ -199,6 +215,8 @@ internal static partial class BuiltInResources
                             used += figures.UsedPageCount;
                         }
                     }
+                    if (identity.IndexId <= 1)
+                        (reserved, used) = (tableReserved, tableUsed);
                     yield return SysindexesRow(table, identity.IndexId, status, keyCount, 1, (data, reserved, used), rows,
                         statistic.State is null ? 0 : ModificationsSince(table, statistic), fillFactor, identity.Name);
                 }
@@ -211,15 +229,63 @@ internal static partial class BuiltInResources
                 }
             }
         }
+        // A system table's rowsets, its keys counting a nonclustered index's
+        // clustered-key columns, a column in both twice, and minlen its
+        // shortest leaf record (probed 2026-10-16 against SQL Server 2025).
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var indexes = systemTable.Definition.Indexes;
+            var clustered = Array.Find(indexes, static index => index.Type == 1);
+            long tableReserved = 0, tableUsed = 0;
+            foreach (var rowset in systemTable.Rowsets)
+            {
+                foreach (var unit in rowset.Units)
+                {
+                    tableReserved += unit.TotalPages;
+                    tableUsed += unit.UsedPages;
+                }
+            }
+            foreach (var rowset in systemTable.Rowsets)
+            {
+                var index = Array.Find(indexes, candidate => candidate.Id == rowset.IndexId);
+                if (index is null)
+                    continue;
+                var keyCount = 0;
+                foreach (var key in index.Keys)
+                {
+                    if (!key.Included)
+                        keyCount++;
+                }
+                if (index.Type == 2 && clustered is not null)
+                    keyCount += clustered.Keys.Length;
+                long data = 0, reserved = 0, used = 0;
+                foreach (var unit in rowset.Units)
+                {
+                    data += unit.DataPages;
+                    reserved += unit.TotalPages;
+                    used += unit.UsedPages;
+                }
+                if (rowset.IndexId <= 1)
+                    (reserved, used) = (tableReserved, tableUsed);
+                var rows = SystemRowsetRows(batch, database, systemTable, rowset);
+                var row = SysindexesRowFor(systemTable.ObjectId, rowset.IndexId, (index.Unique ? 2 : 0) | (index.Type == 1 ? 16 : 0), keyCount, 1, (data, reserved, used), rows, 0, 0, index.Name, rowset.MinLeafLength);
+                if (!index.AllowPageLocks)
+                    row[22] = SqlValue.FromInt16(2);
+                yield return row;
+            }
+        }
 
         SqlValue[] SysindexesRow(HeapTable table, int indid, int status, int keyCount, short groupId, (long Data, long Reserved, long Used) pages, long rows, long modifications, byte fillFactor, string? name) =>
+            SysindexesRowFor(table.ObjectId, indid, status, keyCount, groupId, pages, rows, modifications, fillFactor, name, 0);
+
+        SqlValue[] SysindexesRowFor(int objectId, int indid, int status, int keyCount, short groupId, (long Data, long Reserved, long Used) pages, long rows, long modifications, byte fillFactor, string? name, short minimumLength) =>
         [
-            SqlValue.FromInt32(table.ObjectId),
+            SqlValue.FromInt32(objectId),
             SqlValue.FromInt32(status),
             nullBinary,
             SqlValue.FromInt16((short)indid),
             nullBinary,
-            zeroSmall,
+            SqlValue.FromInt16(minimumLength),
             SqlValue.FromInt16((short)keyCount),
             SqlValue.FromInt16(groupId),
             SqlValue.FromInt32((int)Math.Min(int.MaxValue, pages.Data)),
@@ -279,6 +345,18 @@ internal static partial class BuiltInResources
                     for (var i = 0; i < keys.Length; i++)
                         yield return [objectId, indid, SqlValue.FromInt16((short)table.Columns[keys[i]].ColumnId), SqlValue.FromInt16((short)(i + 1))];
                 }
+            }
+        }
+        // A system table's index columns, each at its key ordinal (probed
+        // 2026-10-16 against SQL Server 2025).
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var objectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var index in systemTable.Definition.Indexes)
+            {
+                var indid = SqlValue.FromInt16((short)index.Id);
+                foreach (var key in index.Keys)
+                    yield return [objectId, indid, SqlValue.FromInt16((short)key.ColumnId), SqlValue.FromInt16((short)key.KeyOrdinal)];
             }
         }
     }

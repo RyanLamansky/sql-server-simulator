@@ -162,12 +162,11 @@ internal static partial class BuiltInResources
         // (index_id = 1) plus every nonclustered index — one row per
         // partition for an index on a partition scheme. rows carries the
         // table's live row count (HeapTable.Heap.RowCount), or a partition's
-        // share of it, so it tracks INSERT/DELETE within the same batch. partition_id / hobt_id are synthetic-deterministic
+        // share of it, so it tracks INSERT/DELETE within the same batch. A
+        // user rowset's partition_id / hobt_id are synthetic-deterministic
         // (distinct per object_id/index_id, not byte-matching SQL Server's
-        // allocation-unit ids). Compression isn't modeled, so
-        // data_compression = 0 (NONE) / xml_compression = 0 (OFF) always —
-        // a divergence from compression-enabled bacpacs (e.g. WWI-Full's
-        // PAGE compression). See docs/claude/catalog-views.md.
+        // allocation-unit ids), a system table's real's. Rows are
+        // EnumerateSysPartitions'. See docs/claude/catalog-views.md.
         var varchar3Catalog = VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit);
         Sys("partitions",
         [
@@ -198,6 +197,54 @@ internal static partial class BuiltInResources
             new("used_pages", SqlType.BigInt, null, false),
             new("data_pages", SqlType.BigInt, null, false),
         ], EnumerateSysAllocationUnits);
+
+        // sys.system_internals_partitions / sys.system_internals_allocation_units:
+        // sys.partitions' and sys.allocation_units' rows with the row-format
+        // figures and page addresses real keeps beside them (probe-confirmed
+        // shapes, SQL Server 2025, 2026-10-16).
+        Sys("system_internals_partitions",
+        [
+            new("partition_id", SqlType.BigInt, null, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, false),
+            new("partition_number", SqlType.Int32, null, false),
+            new("rows", SqlType.BigInt, null, false),
+            new("filestream_filegroup_id", SqlType.SmallInt, null, false),
+            new("is_orphaned", SqlType.Bit, null, true),
+            new("dropped_lob_column_state", SqlType.TinyInt, null, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("is_replicated", SqlType.Bit, null, true),
+            new("is_logged_for_replication", SqlType.Bit, null, true),
+            new("is_sereplicated", SqlType.Bit, null, false),
+            new("max_null_bit_used", SqlType.SmallInt, null, false),
+            new("max_leaf_length", SqlType.Int32, null, false),
+            new("min_leaf_length", SqlType.SmallInt, null, false),
+            new("max_internal_length", SqlType.SmallInt, null, false),
+            new("min_internal_length", SqlType.SmallInt, null, false),
+            new("allows_nullable_keys", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("is_data_row_format", SqlType.Bit, null, true),
+            new("is_not_versioned", SqlType.Bit, null, true),
+            new("filestream_guid", SqlType.UniqueIdentifier, null, true),
+            new("ownertype", SqlType.TinyInt, null, false),
+            new("is_columnstore", SqlType.Bit, null, true),
+            new("optimize_for_sequential_key", SqlType.Bit, null, true),
+        ], EnumerateSystemInternalsPartitions);
+        Sys("system_internals_allocation_units",
+        [
+            new("allocation_unit_id", SqlType.BigInt, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("container_id", SqlType.BigInt, null, false),
+            new("filegroup_id", SqlType.SmallInt, null, false),
+            new("total_pages", SqlType.BigInt, null, false),
+            new("used_pages", SqlType.BigInt, null, false),
+            new("data_pages", SqlType.BigInt, null, false),
+            new("first_page", BinarySqlType.Get(6), 6, false),
+            new("root_page", BinarySqlType.Get(6), 6, false),
+            new("first_iam_page", BinarySqlType.Get(6), 6, false),
+        ], EnumerateSystemInternalsAllocationUnits);
 
         // sys.dm_db_partition_stats: probe-confirmed 14-column shape against
         // SQL Server 2025 (2026-07-16), its rows EnumerateSysDmDbPartitionStats'.
@@ -282,16 +329,8 @@ internal static partial class BuiltInResources
             new("column_id", SqlType.Int32, null, true),
         ], EnumerateSysStatsColumns);
 
-        // sys.internal_tables / sys.json_indexes /
-        // sys.index_resumable_operations / sys.selective_xml_index_paths /
-        // sys.filetable_system_defined_objects: features the simulator doesn't
-        // model (system internal tables, JSON indexes, resumable index builds,
-        // selective XML indexes, FileTables).
-        // Each ships as an empty view with the probe-confirmed full column
-        // shape (SQL Server 2025, 2026-07-15) so that SMO's index-enumeration
-        // mega-query — which LEFT JOINs all six and reads specific columns —
-        // resolves every reference without Msg 207 and returns the correct
-        // rows. The AlwaysOn-DMV precedent (full shape, zero rows).
+        // sys.internal_tables: the database's internal tables (probe-confirmed
+        // shape, SQL Server 2025, 2026-07-15), EnumerateInternalTables'.
         Sys("internal_tables",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -312,7 +351,7 @@ internal static partial class BuiltInResources
             new("parent_minor_id", SqlType.Int32, null, true),
             new("lob_data_space_id", SqlType.Int32, null, false),
             new("filestream_data_space_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateInternalTables);
         Sys("json_indexes",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -363,6 +402,11 @@ internal static partial class BuiltInResources
             new("distance_metric", nvarchar60Catalog, 60, true),
             new("build_parameters", VectorIndexBuildParametersType, 4000, true),
         ], EnumerateSysVectorIndexes);
+        // sys.index_resumable_operations / sys.selective_xml_index_paths /
+        // sys.filetable_system_defined_objects: resumable index builds,
+        // selective XML indexes and FileTables aren't modeled, so each ships
+        // its probe-confirmed shape (SQL Server 2025, 2026-07-15) and no rows,
+        // which SMO's index-enumeration query LEFT JOINs.
         Sys("index_resumable_operations",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -787,6 +831,23 @@ internal static partial class BuiltInResources
                     yield return RowForIdentity(viewObjectId, identity, placement: null, Database.PrimaryFilegroupId);
             }
         }
+        // The system tables' indexes, every one on PRIMARY with the default
+        // options but the page locks a queue's secondary index refuses (probed
+        // 2026-10-16 against SQL Server 2025).
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            if (hasIdFilter && systemTable.ObjectId != wantObjectId)
+                continue;
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var index in systemTable.Definition.Indexes)
+            {
+                yield return BuildIndexRow(
+                    index.Name is { } indexName ? SqlValue.FromSystemName(indexName) : nullName, systemObjectId, SqlValue.FromInt32(index.Id), SqlValue.FromByte(index.Type),
+                    index.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc }, index.Unique ? trueBit : falseBit, primaryDataSpace,
+                    falseBit, falseBit, falseBit, nullFilter, falseBit, falseBit, falseBit, trueBit, index.AllowPageLocks ? trueBit : falseBit,
+                    SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
+            }
+        }
 
         SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement, int filegroupId, HeapTable? heapOwner = null)
         {
@@ -1088,6 +1149,27 @@ internal static partial class BuiltInResources
                 rows += figures.Rows;
             }
         }
+        // The database's totals take in its system tables (probed 2026-10-16
+        // against SQL Server 2025: a fresh database reserves the 411 pages its
+        // system tables' allocation units do).
+        if (only is null)
+        {
+            foreach (var systemTable in SystemTableObjects(database))
+            {
+                foreach (var rowset in systemTable.Rowsets)
+                {
+                    foreach (var unit in rowset.Units)
+                    {
+                        reserved += unit.TotalPages;
+                        used += unit.UsedPages;
+                        if (rowset.IndexId < 2)
+                            data += unit.Type == 1 ? unit.DataPages : unit.UsedPages;
+                    }
+                    if (rowset.IndexId < 2)
+                        rows += SystemRowsetRows(batch, database, systemTable, rowset);
+                }
+            }
+        }
 
         return (reserved, used, data, rows);
     }
@@ -1151,6 +1233,27 @@ internal static partial class BuiltInResources
                 ];
             }
         }
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var rowset in systemTable.Rowsets)
+            {
+                var partitionIdValue = SqlValue.FromInt64(rowset.PartitionId);
+                yield return
+                [
+                    partitionIdValue,
+                    systemObjectId,
+                    SqlValue.FromInt32(rowset.IndexId),
+                    partitionNumber,
+                    partitionIdValue,
+                    SqlValue.FromInt64(SystemRowsetRows(batch, database, systemTable, rowset)),
+                    filestreamFg,
+                    .. rowset.Compression == 2 ? pageCompression : noneCompression,
+                    xmlOff,
+                    xmlOffDesc,
+                ];
+            }
+        }
     }
 
     // A filtered index's rows are the ones its filter admits (probed 2026-10-16
@@ -1189,7 +1292,7 @@ internal static partial class BuiltInResources
     /// <c>used_pages</c> every page in use and the IAM page,
     /// <c>data_pages</c> the in-row leaf (data) pages, 0 for the other units.
     /// </summary>
-    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Parser.BatchContext? batch, Database database)
+    private static IEnumerable<(long ContainerId, long AllocationUnitId, int IndexId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Parser.BatchContext? batch, Database database)
     {
         var census = new PartitionCensus();
         foreach (var (table, identity, placement) in EnumerateStorageIdentities(database, batch))
@@ -1203,11 +1306,21 @@ internal static partial class BuiltInResources
                 // on TEXTIMAGE_ON's (probed 2026-09-28).
                 var dataSpaceId = placement is null ? Simulation.FilegroupOf(table, identity) : placement.Scheme.Destinations[unit.Number - 1];
                 var rowset = figures[unit.Number - 1];
-                yield return (unit.PartitionId, 1, rowset.InRowReserved, rowset.InRowUsedPages, rowset.InRowDataPages, dataSpaceId);
+                var id = unit.PartitionId;
+                yield return (id, PartitionCensus.AllocationUnitId(id, 1), identity.IndexId, 1, rowset.InRowReserved, rowset.InRowUsedPages, rowset.InRowDataPages, dataSpaceId);
                 if (rowset.HasLobUnit)
-                    yield return (unit.PartitionId, 2, RowsetFigures.ReservedPages(rowset.Lob), RowsetFigures.UsedPages(rowset.Lob), 0, placement is null ? table.LobFilegroupId : dataSpaceId);
+                    yield return (id, PartitionCensus.AllocationUnitId(id, 2), identity.IndexId, 2, RowsetFigures.ReservedPages(rowset.Lob), RowsetFigures.UsedPages(rowset.Lob), 0, placement is null ? table.LobFilegroupId : dataSpaceId);
                 if (rowset.HasOverflowUnit)
-                    yield return (unit.PartitionId, 3, RowsetFigures.ReservedPages(rowset.Overflow), RowsetFigures.UsedPages(rowset.Overflow), 0, dataSpaceId);
+                    yield return (id, PartitionCensus.AllocationUnitId(id, 3), identity.IndexId, 3, RowsetFigures.ReservedPages(rowset.Overflow), RowsetFigures.UsedPages(rowset.Overflow), 0, dataSpaceId);
+            }
+        }
+        // The system tables' units, every one on PRIMARY.
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            foreach (var rowset in systemTable.Rowsets)
+            {
+                foreach (var unit in rowset.Units)
+                    yield return (rowset.PartitionId, unit.Id, rowset.IndexId, unit.Type, unit.TotalPages, unit.UsedPages, unit.DataPages, Database.PrimaryFilegroupId);
             }
         }
     }
@@ -1224,11 +1337,11 @@ internal static partial class BuiltInResources
         var inRowDesc = SqlValue.FromNVarchar("IN_ROW_DATA");
         var lobDesc = SqlValue.FromNVarchar("LOB_DATA");
         var overflowDesc = SqlValue.FromNVarchar("ROW_OVERFLOW_DATA");
-        foreach (var (containerId, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(batch, database))
+        foreach (var (containerId, allocationUnitId, _, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(batch, database))
         {
             yield return
             [
-                SqlValue.FromInt64(PartitionCensus.AllocationUnitId(containerId, type)),
+                SqlValue.FromInt64(allocationUnitId),
                 SqlValue.FromByte(type),
                 type switch { 2 => lobDesc, 3 => overflowDesc, _ => inRowDesc },
                 SqlValue.FromInt64(containerId),
@@ -1281,6 +1394,50 @@ internal static partial class BuiltInResources
                 ];
             }
         }
+        // The system tables' rowsets, but for an internal table's heap, which
+        // the view leaves out (probed 2026-10-16 against SQL Server 2025).
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var rowset in systemTable.Rowsets)
+            {
+                if (systemTable.IsInternal && rowset.IndexId == 0)
+                    continue;
+                long inRowData = 0, inRowUsed = 0, inRowReserved = 0, lobUsed = 0, lobReserved = 0, overflowUsed = 0, overflowReserved = 0;
+                foreach (var unit in rowset.Units)
+                {
+                    switch (unit.Type)
+                    {
+                        case 1:
+                            (inRowData, inRowUsed, inRowReserved) = (unit.DataPages, unit.UsedPages, unit.TotalPages);
+                            break;
+                        case 2:
+                            (lobUsed, lobReserved) = (unit.UsedPages, unit.TotalPages);
+                            break;
+                        default:
+                            (overflowUsed, overflowReserved) = (unit.UsedPages, unit.TotalPages);
+                            break;
+                    }
+                }
+                yield return
+                [
+                    SqlValue.FromInt64(rowset.PartitionId),
+                    systemObjectId,
+                    SqlValue.FromInt32(rowset.IndexId),
+                    partitionNumber,
+                    SqlValue.FromInt64(inRowData),
+                    SqlValue.FromInt64(inRowUsed),
+                    SqlValue.FromInt64(inRowReserved),
+                    SqlValue.FromInt64(lobUsed),
+                    SqlValue.FromInt64(lobReserved),
+                    SqlValue.FromInt64(overflowUsed),
+                    SqlValue.FromInt64(overflowReserved),
+                    SqlValue.FromInt64(inRowUsed + lobUsed + overflowUsed),
+                    SqlValue.FromInt64(inRowReserved + lobReserved + overflowReserved),
+                    SqlValue.FromInt64(SystemRowsetRows(batch, database, systemTable, rowset)),
+                ];
+            }
+        }
     }
 
     /// <summary>
@@ -1297,7 +1454,7 @@ internal static partial class BuiltInResources
     internal static long SumDataFilePages(Database database, Parser.BatchContext? batch = null)
     {
         long total = 0;
-        foreach (var (_, _, totalPages, _, _, _) in EnumerateAllocationUnitData(batch, database))
+        foreach (var (_, _, _, _, totalPages, _, _, _) in EnumerateAllocationUnitData(batch, database))
             total += totalPages;
         return total;
     }
@@ -1310,7 +1467,7 @@ internal static partial class BuiltInResources
     internal static long SumBufferedPages(Database database, Parser.BatchContext? batch)
     {
         long total = 0;
-        foreach (var (_, _, _, usedPages, _, _) in EnumerateAllocationUnitData(batch, database))
+        foreach (var (_, _, _, _, _, usedPages, _, _) in EnumerateAllocationUnitData(batch, database))
             total += usedPages;
         return total;
     }
@@ -1434,11 +1591,12 @@ internal static partial class BuiltInResources
     /// <summary>
     /// The size every file surface reports for <paramref name="file"/>: its
     /// declared size, except that the primary data file — where every row
-    /// lands — reports at least <see cref="ComputeDataFileSizePages"/>, so a
-    /// file never reports less than its data occupies.
+    /// lands — grows to <see cref="ComputeDataFileSizePages"/> once its
+    /// allocation no longer fits the declared size, so a file never reports
+    /// less than its data occupies.
     /// </summary>
     internal static int FileSizePages(Database database, DatabaseFile file) =>
-        file.FileId == 1 ? Math.Max(file.SizePages, ComputeDataFileSizePages(database)) : file.SizePages;
+        file.FileId != 1 || SumDataFilePages(database) < file.SizePages ? file.SizePages : Math.Max(file.SizePages, ComputeDataFileSizePages(database));
 
     /// <summary>Σ <see cref="FileSizePages"/> over the database's files, data and log — the database size the size-reporting procedures print.</summary>
     internal static long TotalFileSizePages(Database database)
@@ -1585,6 +1743,37 @@ internal static partial class BuiltInResources
                 }
             }
         }
+        // A system table's index statistics; the column statistics real
+        // creates on them as its own queries run aren't listed.
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var index in systemTable.Definition.Indexes)
+            {
+                if (index.Id == 0)
+                    continue;
+                yield return
+                [
+                    systemObjectId,
+                    SqlValue.FromSystemName(index.Name!),
+                    SqlValue.FromInt32(index.Id),
+                    falseBit, // auto_created
+                    falseBit, // user_created
+                    falseBit, // no_recompute
+                    falseBit, // has_filter
+                    nullFilter,
+                    falseBit, // is_temporary
+                    falseBit, // is_incremental
+                    falseBit, // has_persisted_sample
+                    zeroInt,  // stats_generation_method
+                    methodDesc,
+                    falseBit, // auto_drop
+                    primaryRole,
+                    primaryRoleDesc,
+                    nullName, // replica_name
+                ];
+            }
+        }
         // XML-index statistics live on the owning primary's internal node
         // table (sys.objects type IT), one per index, stats_id sequential
         // within that node table (probe-confirmed). DacFx's XML-index export
@@ -1729,6 +1918,21 @@ internal static partial class BuiltInResources
                 {
                     foreach (var row in EmitStatsColumns(viewObjectId, SqlValue.FromInt32(identity.IndexId), IndexKeyColumnIds(identity.Index!, table: null), identity.Type == 1))
                         yield return row;
+                }
+            }
+        }
+        // A system table's index statistic lists the index's key columns at
+        // their index_column_id (probed 2026-10-16 against SQL Server 2025).
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var index in systemTable.Definition.Indexes)
+            {
+                var statsId = SqlValue.FromInt32(index.Id);
+                for (var i = 0; i < index.Keys.Length; i++)
+                {
+                    if (!index.Keys[i].Included)
+                        yield return [systemObjectId, statsId, SqlValue.FromInt32(i + 1), SqlValue.FromInt32(index.Keys[i].ColumnId)];
                 }
             }
         }
@@ -1889,6 +2093,32 @@ internal static partial class BuiltInResources
                 {
                     foreach (var row in IndexColumnRows(viewObjectId, SqlValue.FromInt32(identity.IndexId), identity.Index!, table: null, identity.Type == 1))
                         yield return row;
+                }
+            }
+        }
+        foreach (var systemTable in SystemTableObjects(database))
+        {
+            if (hasIdFilter && systemTable.ObjectId != wantObjectId)
+                continue;
+            var systemObjectId = SqlValue.FromInt32(systemTable.ObjectId);
+            foreach (var index in systemTable.Definition.Indexes)
+            {
+                var indexIdValue = SqlValue.FromInt32(index.Id);
+                for (var i = 0; i < index.Keys.Length; i++)
+                {
+                    var key = index.Keys[i];
+                    yield return [
+                        systemObjectId,
+                        indexIdValue,
+                        SqlValue.FromInt32(i + 1),
+                        SqlValue.FromInt32(key.ColumnId),
+                        SqlValue.FromByte((byte)key.KeyOrdinal),
+                        zeroByte,
+                        key.Descending ? trueBit : falseBit,
+                        key.Included ? trueBit : falseBit,
+                        zeroByte,
+                        zeroByte,
+                    ];
                 }
             }
         }

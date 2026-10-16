@@ -757,7 +757,6 @@ What the views read off the replay:
 - **`sp_tableoption` applies to every value**, where real moves an existing value only when it is next written.
 - **`SAMPLED` reads every page**, where real samples past 10,000.
 - **A columnstore index holds no pages**: real reports a clustered one as one `CLUSTERED INDEX` row of no pages — a nonclustered one as three, one per delete buffer — with its segments in a LOB unit (five pages used and 25 reserved for 5,000 rows of two `int`s), where one row and no LOB unit are reported here.
-- **Real lists its Service Broker queues' internal tables** (`EventNotificationErrorsQueue` and its siblings) in every database; they aren't modeled.
 - `DBCC SHOWCONTIG` is unbuilt (see [`dbcc.md`](dbcc.md#not-modeled-yet)), and a `PAGE` or `ROW` compressed rowset reports its uncompressed pages.
 
 ## EF Migrations integration

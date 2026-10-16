@@ -103,6 +103,18 @@ internal sealed class ObjectName : Expression
         // A system object's negative id names it in every database.
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
             return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), system.Name);
+        // So does a system base table's, internal table's or shipped queue's id
+        // in its own database, to a principal that may see it (probed
+        // 2026-10-16 against SQL Server 2025).
+        var systemName = BuiltInResources.TryResolveSystemTable(targetDb, id, out var systemTable) ? systemTable.Name
+            : BuiltInResources.ShippedQueue(targetDb, id) is { } shippedQueue ? shippedQueue.Name
+            : null;
+        if (systemName is not null)
+        {
+            return principalId is { } systemFilter && !PermissionChecker.CanViewMetadata(targetDb, systemFilter, id, Database.SysSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
+                ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), systemName);
+        }
         // A constraint id reads back its own name, visibility following the
         // table it hangs off (constraints aren't SchemaObjects, so the walk
         // above can't reach one).

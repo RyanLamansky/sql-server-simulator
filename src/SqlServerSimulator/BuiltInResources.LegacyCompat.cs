@@ -848,7 +848,7 @@ internal static partial class BuiltInResources
         var checkType = SqlValue.FromChar(charTwo, "C ");
         var fkType = SqlValue.FromChar(charTwo, "F ");
 
-        SqlValue[] Row(string name, int id, SqlValue typeCode, int schemaId, int parentObj, DateTime crdate, DateTime refdate) =>
+        SqlValue[] Row(string name, int id, SqlValue typeCode, int schemaId, int parentObj, DateTime crdate, DateTime refdate, short status = 0, int category = 0) =>
         [
             SqlValue.FromSystemName(name),
             SqlValue.FromInt32(id),
@@ -864,8 +864,8 @@ internal static partial class BuiltInResources
             zeroInt,
             zeroInt,
             typeCode,
-            zeroSmall,
-            zeroSmall,
+            SqlValue.FromInt16(status),
+            SqlValue.FromInt16(status),
             zeroSmall,
             SqlValue.FromDateTime(refdate),
             zeroInt,
@@ -873,7 +873,7 @@ internal static partial class BuiltInResources
             zeroInt,
             zeroInt,
             zeroInt,
-            zeroInt,
+            SqlValue.FromInt32(category),
             zeroSmall,
         ];
 
@@ -893,6 +893,18 @@ internal static partial class BuiltInResources
                     yield return Row(fk.Name, fk.ObjectId, fkType, t.SchemaId, t.ObjectId, t.CreateDate, t.ModifyDate);
             }
         }
+        // The system tables and shipped queues, category 2 and a system base
+        // table's userstat / sysstat 1, refdate their creation (probed
+        // 2026-10-16 against SQL Server 2025).
+        foreach (var table in SystemTableObjects(database))
+        {
+            var created = table.CreateDate ?? SysDatabasesCreateDate;
+            yield return Row(table.Name, table.ObjectId, SqlValue.FromChar(charTwo, table.TypeCode), Database.SysSchemaId, table.ParentObjectId, created, created,
+                table.IsInternal ? (short)0 : (short)1, 2);
+        }
+        var queueType = SqlValue.FromChar(charTwo, "SQ");
+        foreach (var queue in database.ServiceBroker.SystemQueues)
+            yield return Row(queue.Name, queue.ObjectId, queueType, queue.SchemaId, 0, queue.CreateDate, queue.CreateDate, 0, 2);
     }
 
     /// <summary>

@@ -93,6 +93,17 @@ internal sealed class ObjectSchemaName : Expression
         // A system object's negative id answers its sys / INFORMATION_SCHEMA schema.
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
             return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), system.SchemaId == Database.InformationSchemaId ? "INFORMATION_SCHEMA" : "sys");
+        // A system base table or internal table lives in sys, a shipped queue
+        // in dbo (probed 2026-10-16 against SQL Server 2025).
+        var systemSchema = BuiltInResources.TryResolveSystemTable(database, id, out _) ? "sys"
+            : BuiltInResources.ShippedQueue(database, id) is not null ? Database.DefaultSchemaName
+            : null;
+        if (systemSchema is not null)
+        {
+            return principalId is { } systemFilter && !PermissionChecker.CanViewMetadata(database, systemFilter, id, Database.SysSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
+                ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), systemSchema);
+        }
         // A constraint id answers the schema of the table that owns it, whose
         // visibility it also follows.
         return ConstraintLookup.TryResolveById(database, id, out var constraint)

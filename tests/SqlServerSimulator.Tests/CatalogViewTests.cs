@@ -187,7 +187,7 @@ public sealed class CatalogViewTests
     {
         using var reader = new Simulation().ExecuteReader("""
             create table foo (id int primary key);
-            select type, type_desc, parent_object_id from sys.objects where schema_id = 1 order by type
+            select type, type_desc, parent_object_id from sys.objects where schema_id = 1 and is_ms_shipped = 0 order by type
             """);
         var rows = new List<(string Type, string Desc, int Parent)>();
         while (reader.Read())

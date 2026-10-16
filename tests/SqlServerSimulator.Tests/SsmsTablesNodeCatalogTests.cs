@@ -596,9 +596,9 @@ public sealed class SsmsTablesNodeCatalogTests
     }
 
     /// <summary>
-    /// The index-feature views for capabilities the simulator doesn't model
-    /// resolve (no Msg 208) and return zero rows, so SMO's index-scripting
-    /// mega-query LEFT JOINs them without incident.
+    /// The index-feature views SMO's index-scripting mega-query LEFT JOINs
+    /// resolve (no Msg 208) and hold nothing for a fresh database's own
+    /// objects.
     /// </summary>
     [TestMethod]
     public void UnmodeledIndexFeatureViews_ResolveEmpty()
@@ -606,7 +606,7 @@ public sealed class SsmsTablesNodeCatalogTests
         var sim = new Simulation();
         foreach (var view in new[]
         {
-            "internal_tables", "hash_indexes", "json_indexes", "index_resumable_operations",
+            "hash_indexes", "json_indexes", "index_resumable_operations",
             "selective_xml_index_paths", "filetable_system_defined_objects",
         })
         {

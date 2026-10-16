@@ -416,7 +416,7 @@ public sealed class DbccCommandTests
                 "8989: CHECKDB found 0 allocation errors and 0 consistency errors in database 'simulated'.",
                 "2528: " + Completed,
             },
-            messages.Skip(9).ToArray());
+            messages.Skip(9).Where(static m => !m.Contains("'sys.", StringComparison.Ordinal) && !m.Contains("\"sys.", StringComparison.Ordinal)).ToArray());
     }
 
     [TestMethod]
@@ -440,6 +440,7 @@ public sealed class DbccCommandTests
     public void CheckDb_TableResultsReturnTheLinesAsRows()
     {
         var (messages, rows) = Run("create table t (id int primary key); insert t values (1); dbcc checkdb with tableresults");
+        rows = [.. rows.Where(static row => !row.Contains("\"sys.", StringComparison.Ordinal))];
         HasCount(11, rows);
         StartsWith("8997 | 10 | 1 | Service Broker Msg 9675, State 1: Message Types analyzed: 14. | NULL | 0 | ", rows[1]);
         StartsWith("2593 | 10 | 1 | There are 1 rows in 1 pages for object \"t\". | NULL | 0 | ", rows[9]);
@@ -496,7 +497,7 @@ public sealed class DbccCommandTests
                 "8989: CHECKFILEGROUP found 0 allocation errors and 0 consistency errors in database 'simulated'.",
                 "2528: " + Completed,
             },
-            Run("create table t (id int primary key); insert t values (1); dbcc checkfilegroup('PRIMARY')").Messages);
+            Run("create table t (id int primary key); insert t values (1); dbcc checkfilegroup('PRIMARY')").Messages.Where(static m => !m.Contains("'sys.", StringComparison.Ordinal) && !m.Contains("\"sys.", StringComparison.Ordinal)).ToArray());
         AreEqual("The filegroup \"nosuch\" is not part of database \"simulated\".", new Simulation().AssertSqlError("dbcc checkfilegroup('nosuch')", 3027).Errors[0].Message);
     }
 

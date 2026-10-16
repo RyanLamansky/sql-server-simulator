@@ -50,8 +50,17 @@ internal sealed class DatabaseChangeTracking
 /// when their transaction commits (see <see cref="PendingRowChange"/>); the
 /// store is shared by every session, so each touch takes its lock.
 /// </remarks>
-internal sealed class TableChangeTracking(bool trackColumnsUpdated, long minValidVersion)
+internal sealed class TableChangeTracking(bool trackColumnsUpdated, long minValidVersion, int internalTableId, DateTime enabledAt)
 {
+    /// <summary>The <c>object_id</c> of the table's internal change table, <c>change_tracking_&lt;object_id&gt;</c>.</summary>
+    public readonly int InternalTableId = internalTableId;
+
+    /// <summary>When tracking was enabled: the internal change table's creation date.</summary>
+    public readonly DateTime EnabledAt = enabledAt;
+
+    /// <summary>The internal change table's shape, built on first read; the table's key can't change while it is tracked.</summary>
+    public Schemas.SystemTableDefinition? InternalTableDefinition;
+
     /// <summary><c>TRACK_COLUMNS_UPDATED</c>: whether an update records the columns it set.</summary>
     public readonly bool TrackColumnsUpdated = trackColumnsUpdated;
 
@@ -80,6 +89,21 @@ internal sealed class TableChangeTracking(bool trackColumnsUpdated, long minVali
                 history[^1].Merge(change);
             else
                 history.Add(new CommittedRowChange(version, change));
+        }
+    }
+
+    /// <summary>The committed changes held, one per row per transaction that changed it — the internal change table's rows.</summary>
+    public long ChangeCount
+    {
+        get
+        {
+            long count = 0;
+            lock (this.rows)
+            {
+                foreach (var (_, history) in this.rows)
+                    count += history.Count;
+            }
+            return count;
         }
     }
 

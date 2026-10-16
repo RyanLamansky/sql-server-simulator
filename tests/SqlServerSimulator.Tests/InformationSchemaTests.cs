@@ -16,9 +16,11 @@ public sealed class InformationSchemaTests
 {
     // ---- sys.columns ----
 
+    // A fresh database lists only its system tables' columns (probed
+    // 2026-10-16 against SQL Server 2025).
     [TestMethod]
-    public void SysColumns_EmptyByDefault()
-        => AreEqual(0, new Simulation().ExecuteScalar("select count(*) from sys.columns"));
+    public void SysColumns_FreshDatabaseListsOnlySystemTables()
+        => AreEqual(0, new Simulation().ExecuteScalar("select count(*) from sys.columns c join sys.objects o on o.object_id = c.object_id where o.is_ms_shipped = 0"));
 
     [TestMethod]
     public void SysColumns_AfterCreateTable_HasOneRowPerColumn()
@@ -192,7 +194,7 @@ public sealed class InformationSchemaTests
         => AreEqual(0, new Simulation().ExecuteScalar("""
             create table foo (id int, name nvarchar(50));
             drop table foo;
-            select count(*) from sys.columns where name in ('id', 'name')
+            select count(*) from sys.columns where name in ('id', 'name') and objectproperty(object_id, 'IsMSShipped') = 0
             """));
 
     [TestMethod]
@@ -514,7 +516,7 @@ public sealed class InformationSchemaTests
     [TestMethod]
     public void Sys_CaseInsensitiveQualifier()
         => AreEqual(0, new Simulation().ExecuteScalar(
-            "select count(*) from SYS.COLUMNS"));
+            "select count(*) from SYS.TABLES"));
 
     [TestMethod]
     public void InformationSchema_UnknownView_Msg208()

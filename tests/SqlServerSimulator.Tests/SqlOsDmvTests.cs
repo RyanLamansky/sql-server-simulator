@@ -159,10 +159,16 @@ public sealed class SqlOsDmvTests
         var pages = sim.ExecuteScalar<int>("select cast(sum(used_pages) as int) from sys.allocation_units");
         AreEqual("IAM_PAGE:1 DATA_PAGE:10", sim.ExecuteScalar("""
             select string_agg(concat(page_type, ':', n), ' ') within group (order by page_type desc)
-            from (select page_type, count(*) n from sys.dm_os_buffer_descriptors where database_id = db_id() group by page_type) d
+            from (select page_type, count(*) n from sys.dm_os_buffer_descriptors b
+                join sys.allocation_units a on a.allocation_unit_id = b.allocation_unit_id
+                join sys.partitions p on p.hobt_id = a.container_id
+                where b.database_id = db_id() and p.object_id = object_id('t') group by page_type) d
             """));
         AreEqual(pages, sim.ExecuteScalar<int>("select count(*) from sys.dm_os_buffer_descriptors where database_id = db_id()"));
-        AreEqual(sim.ExecuteScalar<int>("select count(*) from sys.dm_os_buffer_descriptors where database_id = db_id()"), sim.ExecuteScalar<int>("""
+        AreEqual(sim.ExecuteScalar<int>("""
+            select cast(sum(a.used_pages) as int) from sys.allocation_units a join sys.partitions p on p.partition_id = a.container_id
+            where p.object_id = object_id('t')
+            """), sim.ExecuteScalar<int>("""
             select count(*) from sys.dm_os_buffer_descriptors b
             join sys.allocation_units a on a.allocation_unit_id = b.allocation_unit_id
             join sys.partitions p on p.hobt_id = a.container_id

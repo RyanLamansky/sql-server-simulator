@@ -336,6 +336,33 @@ internal sealed class ObjectId : Expression
             }
         }
 
+        // A system base table or internal table answers under its sys schema,
+        // a shipped queue under dbo, in the database the name names, to a
+        // principal that may see it (probed 2026-10-16 against SQL Server
+        // 2025: OBJECT_ID('sys.sysschobjs') and
+        // OBJECT_ID('sys.plan_persist_query', 'IT') are ids,
+        // OBJECT_ID('sysschobjs') and OBJECT_ID('dbo.sysschobjs') NULL, and
+        // every one NULL to a user without permissions).
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Unrecognized
+            && (parsed.Count < 3 ? runtime.Batch.CurrentDatabase : runtime.Batch.Connection.Simulation.Databases.GetValueOrDefault(parsed[0])) is { } systemDatabase)
+        {
+            if (parsed.Count >= 2 && BuiltInToken.Equals(parsed.ImmediateQualifier, "sys")
+                && BuiltInResources.TryResolveSystemTable(systemDatabase, parsed.Leaf, out var systemTable)
+                && (typeFilter is null || BuiltInToken.Equals(systemTable.TypeCode.TrimEnd(), typeFilter)))
+            {
+                return GateAs(systemDatabase, systemTable.ObjectId, systemTable.ObjectId, Database.SysSchemaId);
+            }
+            if ((parsed.Count == 1 || BuiltInToken.Equals(parsed.ImmediateQualifier, Database.DefaultSchemaName))
+                && (typeFilter is null || BuiltInToken.Equals(typeFilter, "SQ")))
+            {
+                foreach (var queue in systemDatabase.ServiceBroker.SystemQueues)
+                {
+                    if (systemDatabase.Collation.Equals(queue.Name, parsed.Leaf))
+                        return GateAs(systemDatabase, queue.ObjectId, queue.ObjectId, queue.SchemaId);
+                }
+            }
+        }
+
         // Every other schema-scoped kind — a sequence, a multi-statement or CLR
         // function under its own code, a CREATE DEFAULT / CREATE RULE object —
         // answers when the filter is absent or names its sys.objects type

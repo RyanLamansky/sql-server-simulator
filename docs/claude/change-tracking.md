@@ -85,6 +85,5 @@ It is recorded on `StatementContext`, so a trigger's own statements don't inheri
 ## Not modeled yet
 
 - How `SNAPSHOT` isolation shapes `CHANGETABLE` hasn't been probed; the simulator reads the latest committed history under every isolation level.
-- `sys.internal_tables`' `change_tracking_<object_id>` row per tracked table.
 - BACPAC import of the database's and tables' change tracking settings.
 - `TRUNCATE TABLE … WITH (PARTITIONS …)` and `ALTER TABLE … SWITCH` on a tracked table: neither records changes nor moves the minimum valid version.
