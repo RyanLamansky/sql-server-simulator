@@ -40,10 +40,14 @@ public sealed class StreamedResultTests
 
     private static short Spid(DbConnection connection) => (short)connection.CreateCommand("select @@spid").ExecuteScalar()!;
 
-    /// <summary>The locks <paramref name="spid"/> holds beside its database lock, as <c>TYPE mode×count</c>.</summary>
-    private static string Locks(DbConnection observer, short spid) => string.Join(", ", Extensions.FirstColumn(observer, $"""
+    /// <summary>
+    /// The locks <paramref name="spid"/> holds beside its database lock, as
+    /// <c>TYPE mode×count</c>; without the page locks when not
+    /// <paramref name="pages"/>.
+    /// </summary>
+    private static string Locks(DbConnection observer, short spid, bool pages = true) => string.Join(", ", Extensions.FirstColumn(observer, $"""
         select concat(resource_type, ' ', request_mode, iif(count(*) > 1, concat('x', count(*)), ''))
-        from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'
+        from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'{(pages ? "" : " and resource_type <> 'PAGE'")}
         group by resource_type, request_mode order by resource_type, request_mode
         """));
 
@@ -101,7 +105,7 @@ public sealed class StreamedResultTests
 
         using (var rows = ReadTwo(reader, "select * from big"))
         {
-            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY S, OBJECT IS, PAGE IS", Locks(other, spid));
             AreEqual("suspended ASYNC_NETWORK_IO SELECT", Request(other, spid));
             AreEqual(1222, Attempt(other, "alter table big add c int"));
             AreEqual(0, Attempt(other, "update big set v = v where k = 1"));
@@ -125,7 +129,7 @@ public sealed class StreamedResultTests
 
         using (var rows = ReadTwo(reader, "select * from big", transaction))
         {
-            AreEqual("KEY Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY Sx20, OBJECT IS, PAGE ISx5", Locks(other, spid));
             AreEqual(1222, Attempt(other, "update big set v = v where k = 1"));
             AreEqual(1222, Attempt(other, "update big set v = v where k = 20"));
             AreEqual(0, Attempt(other, "update big set v = v where k = 21"));
@@ -137,7 +141,7 @@ public sealed class StreamedResultTests
     }
 
     [TestMethod]
-    public void RepeatableRead_Heap_HoldsRowLocks() => AreEqual("OBJECT IS, RID Sx20", HeldWhileSuspended(Big(), "select * from heap", IsolationLevel.RepeatableRead, "heap"));
+    public void RepeatableRead_Heap_HoldsRowLocks() => AreEqual("OBJECT IS, PAGE ISx5, RID Sx20", HeldWhileSuspended(Big(), "select * from heap", IsolationLevel.RepeatableRead, "heap"));
 
     [TestMethod]
     public void NoLock_HoldsSchemaStabilityAlone() => AreEqual("OBJECT Sch-S", HeldWhileSuspended(Big(), "select * from big with (nolock)", IsolationLevel.ReadCommitted));
@@ -156,7 +160,7 @@ public sealed class StreamedResultTests
     /// </summary>
     [TestMethod]
     [DataRow(IsolationLevel.ReadCommitted, "OBJECT IS")]
-    [DataRow(IsolationLevel.RepeatableRead, "KEY Sx2000, OBJECT IS")]
+    [DataRow(IsolationLevel.RepeatableRead, "KEY Sx2000, OBJECT IS, PAGE ISx500")]
     public void Sort_ReadsItsInputBeforeItsFirstRow(IsolationLevel level, string held) =>
         AreEqual(held, HeldWhileSuspended(Big(), "select * from big order by checksum(k)", level));
 
@@ -209,7 +213,8 @@ public sealed class StreamedResultTests
             var keys = (int)other.CreateCommand($"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'KEY' and request_mode = '{keyMode}'").ExecuteScalar()!;
             IsGreaterThan(2, keys);
             IsLessThan(EscalatingRows / 4, keys);
-            AreEqual($"KEY {keyMode}x{keys}, OBJECT IS", Locks(other, spid));
+            // Seventy rows of char(100) to a page.
+            AreEqual($"KEY {keyMode}x{keys}, OBJECT IS, PAGE ISx{(keys + 69) / 70}", Locks(other, spid));
             AreEqual(1222, Attempt(other, order.EndsWith("desc", StringComparison.Ordinal) ? $"update big set v = v where k = {EscalatingRows}" : "update big set v = v where k = 1"));
             AreEqual(0, Attempt(other, $"update big set v = v where k = {EscalatingRows / 2}"));
             AreEqual(EscalatingRows, ReadRest(rows));
@@ -240,9 +245,10 @@ public sealed class StreamedResultTests
     /// A table hint decides what the suspended reader holds through the same
     /// resolution a statement's locks take, so each hint's footprint is real's
     /// own as of the reader's position (probed 2026-10-08 against SQL Server
-    /// 2025 over a MARS connection), less the page intent locks and the
-    /// sixteen partitions of an object lock real takes on its host, neither of
-    /// which the simulator models — a scan that locks rows holds the S of the
+    /// 2025 over a MARS connection, and the page intent locks beside the row
+    /// locks again 2026-10-16), less the sixteen partitions of an object lock
+    /// real takes on its host, which the simulator doesn't model — a scan that
+    /// locks rows holds the S of the
     /// row it stands on, as real's does over a table this size, and
     /// <c>PAGLOCK</c>'s the page's, its pages under <c>REPEATABLE READ</c>
     /// (probed 2026-10-09): <paramref name="rowOne"/> is what an update of
@@ -257,21 +263,21 @@ public sealed class StreamedResultTests
     [DataRow(IsolationLevel.RepeatableRead, "", "tablock", "OBJECT S", 1222, 1222)]
     [DataRow(IsolationLevel.Serializable, "", "tablock", "OBJECT S", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "tablockx", "OBJECT X", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "holdlock", "KEY RangeS-Sx20, OBJECT IS", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "serializable", "KEY RangeS-Sx20, OBJECT IS", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "repeatableread", "KEY Sx20, OBJECT IS", 1222, 1222)]
-    [DataRow(IsolationLevel.RepeatableRead, "", "readcommitted", "KEY S, OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.Serializable, "", "readcommitted", "KEY S, OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.RepeatableRead, "", "readcommittedlock", "KEY S, OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "updlock", "KEY Ux20, OBJECT IX", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "xlock", "KEY Xx20, OBJECT IX", 1222, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "holdlock", "KEY RangeS-Sx20, OBJECT IS, PAGE ISx5", 1222, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "serializable", "KEY RangeS-Sx20, OBJECT IS, PAGE ISx5", 1222, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "repeatableread", "KEY Sx20, OBJECT IS, PAGE ISx5", 1222, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "readcommitted", "KEY S, OBJECT IS, PAGE IS", 0, 1222)]
+    [DataRow(IsolationLevel.Serializable, "", "readcommitted", "KEY S, OBJECT IS, PAGE IS", 0, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "readcommittedlock", "KEY S, OBJECT IS, PAGE IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "updlock", "KEY Ux20, OBJECT IX, PAGE IUx5", 1222, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "xlock", "KEY Xx20, OBJECT IX, PAGE IXx5", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "", "paglock", "OBJECT IS, PAGE S", 0, 1222)]
     [DataRow(IsolationLevel.RepeatableRead, "", "paglock", "OBJECT IS, PAGE Sx5", 1222, 1222)]
-    [DataRow(IsolationLevel.ReadCommitted, "", "rowlock", "KEY S, OBJECT IS", 0, 1222)]
-    [DataRow(IsolationLevel.RepeatableRead, "", "rowlock", "KEY Sx20, OBJECT IS", 1222, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "", "rowlock", "KEY S, OBJECT IS, PAGE IS", 0, 1222)]
+    [DataRow(IsolationLevel.RepeatableRead, "", "rowlock", "KEY Sx20, OBJECT IS, PAGE ISx5", 1222, 1222)]
     [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommitted", "OBJECT Sch-S", 0, 0)]
     [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "tablock", "OBJECT Sch-S", 0, 0)]
-    [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommittedlock", "KEY S, OBJECT IS", 0, 1222)]
+    [DataRow(IsolationLevel.ReadCommitted, "alter database current set read_committed_snapshot on", "readcommittedlock", "KEY S, OBJECT IS, PAGE IS", 0, 1222)]
     public void Hint_DecidesWhatTheSuspendedReaderHolds(IsolationLevel level, string database, string hint, string held, int rowOne, int tableX)
     {
         var sim = Big(database);
@@ -342,7 +348,7 @@ public sealed class StreamedResultTests
         using var transaction = reader.BeginTransaction(IsolationLevel.Serializable);
         using (var rows = ReadTwo(reader, "select * from big", transaction))
         {
-            AreEqual("KEY RangeS-Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY RangeS-Sx20, OBJECT IS, PAGE ISx5", Locks(other, spid));
             AreEqual(1222, Attempt(other, "insert big values (5, 'y')"));
             _ = other.CreateCommand($"insert big values (3001, 'y'), ({(Rows * 2) + 7}, 'y')").ExecuteNonQuery();
             AreEqual(Rows + 2, ReadRest(rows));
@@ -363,11 +369,11 @@ public sealed class StreamedResultTests
     /// one row in three).
     /// </summary>
     [TestMethod]
-    [DataRow("", "where v like 'x%'", "RangeS-S", 20, "IS")]
-    [DataRow("", "where k % 6 = 0", "RangeS-S", 60, "IS")]
-    [DataRow(", updlock", "", "RangeS-U", 20, "IX")]
-    [DataRow(", xlock", "", "RangeX-X", 20, "IX")]
-    public void Serializable_FilteredOrUpdatingScan_LocksKeysAsItReachesThem(string hint, string where, string mode, int keys, string objectMode)
+    [DataRow("", "where v like 'x%'", "RangeS-S", 20, "IS", "IS")]
+    [DataRow("", "where k % 6 = 0", "RangeS-S", 60, "IS", "IS")]
+    [DataRow(", updlock", "", "RangeS-U", 20, "IX", "IU")]
+    [DataRow(", xlock", "", "RangeX-X", 20, "IX", "IX")]
+    public void Serializable_FilteredOrUpdatingScan_LocksKeysAsItReachesThem(string hint, string where, string mode, int keys, string objectMode, string pageMode)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery($"create table big (k int primary key, v char(2000) not null); insert big select value * 2, 'x' from generate_series(1, {Rows})");
@@ -377,7 +383,8 @@ public sealed class StreamedResultTests
         using var transaction = reader.BeginTransaction();
         using (var rows = ReadTwo(reader, $"select * from big with (serializable{hint}) {where}", transaction))
         {
-            AreEqual($"KEY {mode}x{keys}, OBJECT {objectMode}", Locks(other, spid));
+            // Four rows of char(2000) to a page.
+            AreEqual($"KEY {mode}x{keys}, OBJECT {objectMode}, PAGE {pageMode}x{keys / 4}", Locks(other, spid));
             AreEqual(1222, Attempt(other, "insert big values (5, 'y')"));
             AreEqual(0, Attempt(other, $"insert big values ({Rows + 1}, 'y')"));
             AreEqual(0, Attempt(other, $"update big set v = 'y' where k = {Rows}"));
@@ -397,17 +404,17 @@ public sealed class StreamedResultTests
     /// against SQL Server 2025, every row).
     /// </summary>
     [TestMethod]
-    [DataRow("where k between 400 and 3600", "KEY RangeS-Sx20, OBJECT IS", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
-    [DataRow("where k between 400 and 3600 order by k desc", "KEY RangeS-Sx20, OBJECT IS", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
-    [DataRow("where k between 400 and 3601 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (3601, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1604, OBJECT IS")]
-    [DataRow("where k > 400 and k < 3600 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1600, "KEY RangeS-Sx1602, OBJECT IS")]
-    [DataRow("where k between 400 and 9000 order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (4001, 'y')", "insert big values (401, 'y')", 1802, "KEY RangeS-Sx1804, OBJECT IS")]
-    [DataRow("order by k desc", "KEY RangeS-Sx21, OBJECT IS", "insert big values (4001, 'y')", "insert big values (3, 'y')", 2001, "KEY RangeS-Sx2002, OBJECT IS")]
-    [DataRow("where k > 400 order by k", "KEY RangeS-Sx20, OBJECT IS", "insert big values (401, 'y')", "insert big values (4001, 'y')", 1801, "KEY RangeS-Sx1802, OBJECT IS")]
-    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k", "KEY Sx20, OBJECT IS", "update big set v = 'y' where k = 80", "update big set v = 'y' where k = 1000", 25, "KEY Sx25, OBJECT IS")]
-    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k desc", "KEY Sx20, OBJECT IS", "update big set v = 'y' where k = 1000", "update big set v = 'y' where k = 40", 25, "KEY Sx25, OBJECT IS")]
-    [DataRow("with (updlock) where k between 400 and 3600", "KEY RangeS-Ux20, OBJECT IX", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Ux1603, OBJECT IX")]
-    [DataRow("with (xlock) where k between 400 and 3600 order by k desc", "KEY RangeX-Xx20, OBJECT IX", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeX-Xx1603, OBJECT IX")]
+    [DataRow("where k between 400 and 3600", "KEY RangeS-Sx20, OBJECT IS, PAGE ISx6", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
+    [DataRow("where k between 400 and 3600 order by k desc", "KEY RangeS-Sx20, OBJECT IS, PAGE ISx5", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeS-Sx1603, OBJECT IS")]
+    [DataRow("where k between 400 and 3601 order by k desc", "KEY RangeS-Sx21, OBJECT IS, PAGE ISx6", "insert big values (3601, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Sx1604, OBJECT IS")]
+    [DataRow("where k > 400 and k < 3600 order by k desc", "KEY RangeS-Sx21, OBJECT IS, PAGE ISx6", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1600, "KEY RangeS-Sx1602, OBJECT IS")]
+    [DataRow("where k between 400 and 9000 order by k desc", "KEY RangeS-Sx21, OBJECT IS, PAGE ISx5", "insert big values (4001, 'y')", "insert big values (401, 'y')", 1802, "KEY RangeS-Sx1804, OBJECT IS")]
+    [DataRow("order by k desc", "KEY RangeS-Sx21, OBJECT IS, PAGE ISx5", "insert big values (4001, 'y')", "insert big values (3, 'y')", 2001, "KEY RangeS-Sx2002, OBJECT IS")]
+    [DataRow("where k > 400 order by k", "KEY RangeS-Sx20, OBJECT IS, PAGE ISx6", "insert big values (401, 'y')", "insert big values (4001, 'y')", 1801, "KEY RangeS-Sx1802, OBJECT IS")]
+    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k", "KEY Sx20, OBJECT IS, PAGE ISx20", "update big set v = 'y' where k = 80", "update big set v = 'y' where k = 1000", 25, "KEY Sx25, OBJECT IS")]
+    [DataRow("where k in (40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000) order by k desc", "KEY Sx20, OBJECT IS, PAGE ISx20", "update big set v = 'y' where k = 1000", "update big set v = 'y' where k = 40", 25, "KEY Sx25, OBJECT IS")]
+    [DataRow("with (updlock) where k between 400 and 3600", "KEY RangeS-Ux20, OBJECT IX, PAGE IUx6", "insert big values (401, 'y')", "insert big values (3001, 'y')", 1602, "KEY RangeS-Ux1603, OBJECT IX")]
+    [DataRow("with (xlock) where k between 400 and 3600 order by k desc", "KEY RangeX-Xx20, OBJECT IX, PAGE IXx5", "insert big values (3599, 'y')", "insert big values (401, 'y')", 1602, "KEY RangeX-Xx1603, OBJECT IX")]
     public void Serializable_SeekLocksKeysAsItReachesThem(string query, string held, string blocked, string free, int read, string heldAtEnd)
     {
         var sim = new Simulation();
@@ -423,7 +430,8 @@ public sealed class StreamedResultTests
             _ = other.CreateCommand(free).ExecuteNonQuery();
             AreEqual(read, ReadRest(rows));
         }
-        AreEqual(heldAtEnd, Locks(other, spid));
+        // The insert split a page on real, whose pages the layout doesn't follow.
+        AreEqual(heldAtEnd, Locks(other, spid, pages: false));
         transaction.Rollback();
     }
 
@@ -451,21 +459,22 @@ public sealed class StreamedResultTests
         using var transaction = reader.BeginTransaction(IsolationLevel.Serializable);
         using (var rows = ReadTwo(reader, "select * from c where a = 5 order by a, b", transaction))
         {
-            AreEqual("KEY RangeS-Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY RangeS-Sx20, OBJECT IS, PAGE ISx6", Locks(other, spid));
             AreEqual(1222, Attempt(other, "insert c (a, b) values (5, 3)"));
             AreEqual(1222, Attempt(other, "insert c (a, b) values (4, 601)"));
             _ = other.CreateCommand("insert c (a, b) values (5, 599)").ExecuteNonQuery();
             AreEqual(301, ReadRest(rows));
         }
-        AreEqual("KEY RangeS-Sx302, OBJECT IS", Locks(other, spid));
+        AreEqual("KEY RangeS-Sx302, OBJECT IS", Locks(other, spid, pages: false));
         using (var rows = ReadTwo(reader, "select * from n with (index (ixv)) where v between 400 and 7600", transaction))
         {
-            AreEqual("KEY RangeS-Sx322, KEY Sx20, OBJECT ISx2", Locks(other, spid));
+            // The insert into c split a page on real, whose pages the layout doesn't follow.
+            AreEqual("KEY RangeS-Sx322, KEY Sx20, OBJECT ISx2", Locks(other, spid, pages: false));
             AreEqual(1222, Attempt(other, "update n set pad = 'y' where k = 402"));
             AreEqual(0, Attempt(other, "update n set pad = 'y' where k = 7000"));
             AreEqual(3601, ReadRest(rows));
         }
-        AreEqual("KEY RangeS-Sx3904, KEY Sx3601, OBJECT ISx2", Locks(other, spid));
+        AreEqual("KEY RangeS-Sx3904, KEY Sx3601, OBJECT ISx2", Locks(other, spid, pages: false));
         transaction.Rollback();
     }
 
@@ -493,7 +502,7 @@ public sealed class StreamedResultTests
         {
             IsTrue(rows.Read());
             IsTrue(rows.Read());
-            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY S, OBJECT IS, PAGE IS", Locks(other, spid));
             AreEqual(0, Attempt(other, "drop procedure p"));
             AreEqual(Rows, ReadRest(rows));
         }
@@ -862,7 +871,7 @@ public sealed class StreamedResultTests
         for (var run = 0; run < 3; run++)
         {
             using var rows = ReadTwo(reader, "select * from big");
-            AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY S, OBJECT IS, PAGE IS", Locks(other, spid));
             AreEqual(Rows, ReadRest(rows));
         }
     }
@@ -985,7 +994,7 @@ public sealed class StreamedResultTests
         using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
         using (var rows = ReadTwo(reader, exec, transaction))
         {
-            AreEqual("KEY Sx20, OBJECT IS", Locks(other, spid));
+            AreEqual("KEY Sx20, OBJECT IS, PAGE ISx5", Locks(other, spid));
             AreEqual("suspended ASYNC_NETWORK_IO SELECT", Request(other, spid));
             AreEqual(typeof(long), rows.GetFieldType(0));
             AreEqual(0, Attempt(other, "update big set v = v where k = 21"));
@@ -1008,7 +1017,7 @@ public sealed class StreamedResultTests
         var spid = Spid(reader);
         using var transaction = reader.BeginTransaction(IsolationLevel.RepeatableRead);
         using var rows = ReadTwo(reader, "exec p with result sets ((k int, n int, v char(2000)))", transaction);
-        AreEqual("KEY Sx20, OBJECT IS", Locks(other, spid));
+        AreEqual("KEY Sx20, OBJECT IS, PAGE ISx5", Locks(other, spid));
         var read = 2;
         var error = Throws<SimulatedSqlException>(() =>
         {
@@ -1028,10 +1037,10 @@ public sealed class StreamedResultTests
     /// stands on the row the outer scan does.
     /// </summary>
     [TestMethod]
-    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1", "KEY Sx2, OBJECT ISx2", 1222)]
-    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1 and exists (select 1 from w where w.k = big.k)", "KEY Sx3, OBJECT ISx3", 1222)]
-    [DataRow("select * from big cross apply (select top (1) n from u where u.k = big.k) x", "KEY Sx2, OBJECT ISx2", 1222)]
-    [DataRow("select * from big where (select count(*) from big b where b.k = big.k) = 1", "KEY S, OBJECT IS", 0)]
+    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1", "KEY Sx2, OBJECT ISx2, PAGE ISx2", 1222)]
+    [DataRow("select * from big where (select count(*) from u where u.k = big.k) = 1 and exists (select 1 from w where w.k = big.k)", "KEY Sx3, OBJECT ISx3, PAGE ISx3", 1222)]
+    [DataRow("select * from big cross apply (select top (1) n from u where u.k = big.k) x", "KEY Sx2, OBJECT ISx2, PAGE ISx2", 1222)]
+    [DataRow("select * from big where (select count(*) from big b where b.k = big.k) = 1", "KEY S, OBJECT IS, PAGE IS", 0)]
     public void ReadCommitted_EachScanOfTheLastRowHoldsItsPosition(string query, string held, int innerRowWaits)
     {
         var sim = Big("""

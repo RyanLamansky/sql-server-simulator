@@ -229,6 +229,7 @@ partial class Simulation
             {
                 "DATABASE" => "DB",
                 "OBJECT" => "TAB",
+                "PAGE" => "PAG",
                 "APPLICATION" => "APP",
                 var other => other,
             };

@@ -8,7 +8,8 @@ namespace SqlServerSimulator;
 /// Each case runs the holder's statement in an open transaction, then the
 /// probe under <c>SET LOCK_TIMEOUT 0</c> so a block reads as Msg 1222 rather
 /// than a wait. Every expectation was probed 2026-09-28 against SQL Server
-/// 2025 with the same two-session shape.
+/// 2025 with the same two-session shape, and the page intent locks beside the
+/// key locks again 2026-10-16.
 /// </summary>
 [TestClass]
 public sealed class KeyLockAnchorTests
@@ -78,7 +79,7 @@ public sealed class KeyLockAnchorTests
 
     [TestMethod]
     public void Between_ReportsOneKeyLockPerKey()
-        => AreEqual("KEY RangeS-S x2, OBJECT IS x1", Locks(Keys, Serializable + "select * from t where k between 15 and 25"));
+        => AreEqual("KEY RangeS-S x2, OBJECT IS x1, PAGE IS x1", Locks(Keys, Serializable + "select * from t where k between 15 and 25"));
 
     /// <summary>An equality miss locks the next key, fencing the whole gap it sits in.</summary>
     [TestMethod]
@@ -101,7 +102,7 @@ public sealed class KeyLockAnchorTests
 
     [TestMethod]
     public void UniqueEqualityHit_ReportsKeyS()
-        => AreEqual("KEY S x1, OBJECT IS x1", Locks(Keys, Serializable + "select * from t where k = 20"));
+        => AreEqual("KEY S x1, OBJECT IS x1, PAGE IS x1", Locks(Keys, Serializable + "select * from t where k = 20"));
 
     /// <summary>
     /// An IN list locks per value — hits take plain key locks, a miss its next
@@ -150,7 +151,7 @@ public sealed class KeyLockAnchorTests
         AreEqual(1222, Probe(Keys, Serializable + read, "update t set v = 9 where k = 30"));
         AreEqual(0, Probe(Keys, Serializable + read, "update t set v = 9 where k = 35"));
         AreEqual(0, Probe(Keys, Serializable + read, "select * from t with (updlock) where k = 40"));
-        AreEqual("KEY RangeS-S x5, OBJECT IS x1", Locks(Keys, Serializable + read));
+        AreEqual("KEY RangeS-S x5, OBJECT IS x1, PAGE IS x1", Locks(Keys, Serializable + read));
     }
 
     /// <summary>A heap has no key to walk, so its scan takes the table S, with no IS beside it.</summary>
@@ -228,11 +229,11 @@ public sealed class KeyLockAnchorTests
 
     [TestMethod]
     public void SerializableUpdate_ReportsRangeXXOnEachKey_TheRowLocksFolded()
-        => AreEqual("KEY RangeX-X x2, OBJECT IX x1", Locks(Keys, Serializable + "update t set v = v + 1 where k between 15 and 25"));
+        => AreEqual("KEY RangeX-X x2, OBJECT IX x1, PAGE IX x1", Locks(Keys, Serializable + "update t set v = v + 1 where k between 15 and 25"));
 
     [TestMethod]
     public void SerializableUpdateThatScans_ReportsRangeSUAndTheUpdatedKeyAsRangeXX()
-        => AreEqual("KEY RangeS-U x4, KEY RangeX-X x1, OBJECT IX x1", Locks(Keys, Serializable + "update t set v = v + 1 where v = 3"));
+        => AreEqual("KEY RangeS-U x4, KEY RangeX-X x1, OBJECT IX x1, PAGE IX x1", Locks(Keys, Serializable + "update t set v = v + 1 where v = 3"));
 
     /// <summary>A SERIALIZABLE write that hits a unique key takes its row X and no range.</summary>
     [TestMethod]
@@ -253,7 +254,7 @@ public sealed class KeyLockAnchorTests
         const string merge = "begin tran; merge t with (holdlock) using (select 25 k) s on t.k = s.k when matched then update set v = 1 when not matched then insert values (s.k, 0);";
         AreEqual(1222, Probe(Keys, merge, "insert t values (22, 0)"));
         AreEqual(0, Probe(Keys, merge, "insert t values (35, 0)"));
-        AreEqual("KEY RangeS-U x1, KEY RangeX-X x1, OBJECT IX x1", Locks(Keys, merge));
+        AreEqual("KEY RangeS-U x1, KEY RangeX-X x1, OBJECT IX x1, PAGE IX x1", Locks(Keys, merge));
     }
 
     /// <summary>A HOLDLOCK MERGE that finds its unique key takes only the row X, as a writer does.</summary>
@@ -262,7 +263,7 @@ public sealed class KeyLockAnchorTests
     {
         const string merge = "begin tran; merge t with (holdlock) using (select 20 k) s on t.k = s.k when matched then update set v = 1 when not matched then insert values (s.k, 0);";
         AreEqual(0, Probe(Keys, merge, "insert t values (15, 0)"));
-        AreEqual("KEY X x1, OBJECT IX x1", Locks(Keys, merge));
+        AreEqual("KEY X x1, OBJECT IX x1, PAGE IX x1", Locks(Keys, merge));
     }
 
     /// <summary>
@@ -270,10 +271,10 @@ public sealed class KeyLockAnchorTests
     /// takes it to read each row and lets it go on one that doesn't qualify.
     /// </summary>
     [TestMethod]
-    [DataRow("begin tran; select * from t with (updlock) where k = 20", "KEY U x1, OBJECT IX x1")]
-    [DataRow("begin tran; select * from t with (updlock) where v = 2", "KEY U x1, OBJECT IX x1")]
-    [DataRow("set transaction isolation level repeatable read; begin tran; select * from t where v = 2", "KEY S x1, OBJECT IS x1")]
-    [DataRow("begin tran; select * from t with (xlock) where k = 20", "KEY X x1, OBJECT IX x1")]
+    [DataRow("begin tran; select * from t with (updlock) where k = 20", "KEY U x1, OBJECT IX x1, PAGE IU x1")]
+    [DataRow("begin tran; select * from t with (updlock) where v = 2", "KEY U x1, OBJECT IX x1, PAGE IU x1")]
+    [DataRow("set transaction isolation level repeatable read; begin tran; select * from t where v = 2", "KEY S x1, OBJECT IS x1, PAGE IS x1")]
+    [DataRow("begin tran; select * from t with (xlock) where k = 20", "KEY X x1, OBJECT IX x1, PAGE IX x1")]
     public void TxScopedRowLocks_KeepOnlyTheQualifyingRows(string holder, string expected)
         => AreEqual(expected, Locks(Keys, holder));
 
@@ -288,17 +289,17 @@ public sealed class KeyLockAnchorTests
     /// </summary>
     [TestMethod]
     [DataRow(6300, "set transaction isolation level serializable; begin tran; select count(*) from t", "OBJECT S x1")]
-    [DataRow(6200, "set transaction isolation level serializable; begin tran; select count(*) from t", "KEY RangeS-S x6201, OBJECT IS x1")]
+    [DataRow(6200, "set transaction isolation level serializable; begin tran; select count(*) from t", "KEY RangeS-S x6201, OBJECT IS x1, PAGE IS x14")]
     [DataRow(7000, "set transaction isolation level serializable; begin tran; select count(*) from t with (updlock)", "OBJECT X x1")]
     [DataRow(6300, "set transaction isolation level repeatable read; begin tran; select count(*) from t", "OBJECT S x1")]
-    [DataRow(8000, "set transaction isolation level serializable; begin tran; select count(*) from t where k <= 40000; select count(*) from t where k > 40000", "KEY RangeS-S x8001, OBJECT IS x1")]
+    [DataRow(8000, "set transaction isolation level serializable; begin tran; select count(*) from t where k <= 40000; select count(*) from t where k > 40000", "KEY RangeS-S x8001, OBJECT IS x1, PAGE IS x17")]
     public void Escalation_FollowsRealsThresholdAndMode(int rows, string holder, string expected)
         => AreEqual(expected, Locks($"create table t (k int primary key, v int); insert t select value * 10, 0 from generate_series(1, {rows})", holder));
 
     /// <summary>A row lock of a clustered table is its key, which real reports as KEY.</summary>
     [TestMethod]
     public void ClusteredRowLock_ReportsAsKey()
-        => AreEqual("KEY X x1, OBJECT IX x1", Locks(Keys, "begin tran; update t set v = 0 where k = 10"));
+        => AreEqual("KEY X x1, OBJECT IX x1, PAGE IX x1", Locks(Keys, "begin tran; update t set v = 0 where k = 10"));
 
     /// <summary>A NOWAIT on an INSERT target zeroes the wait on a held range too.</summary>
     [TestMethod]

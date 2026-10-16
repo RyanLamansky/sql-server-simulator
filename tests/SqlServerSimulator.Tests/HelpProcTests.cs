@@ -1028,7 +1028,7 @@ public sealed class HelpProcTests
         using (var reader = connection.CreateCommand("exec sp_lock @@spid").ExecuteReader())
         {
             var rows = reader.EnumerateRecords().Select(r => $"{r.GetString(4)}:{r.GetString(5).Length}").ToList();
-            CollectionAssert.AreEqual(new[] { "DB:32", "TAB:32", "KEY:32", "KEY:32" }, rows);
+            CollectionAssert.AreEqual(new[] { "DB:32", "TAB:32", "PAG:32", "KEY:32", "KEY:32" }, rows);
         }
         _ = connection.CreateCommand("rollback; use master").ExecuteNonQuery();
         using var inMaster = connection.CreateCommand("exec sp_lock @@spid").ExecuteReader();

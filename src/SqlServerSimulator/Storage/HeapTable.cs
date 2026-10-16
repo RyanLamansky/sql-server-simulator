@@ -877,6 +877,12 @@ internal sealed class HeapTable : SchemaObject
         this.PageLocks.GetOrAdd(page, static (ordinal, t) => new LockResource { PageOfTable = t, PageOrdinal = ordinal }, this);
 
     /// <summary>
+    /// The runs of rows row-locking reads let go of (<see cref="PageVisit.RowRun"/>),
+    /// one per scan, each leaving with the final release of its hold.
+    /// </summary>
+    public readonly ConcurrentDictionary<LockResource, byte> RowVisits = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>
     /// Returns the <see cref="LockResource"/> for <paramref name="pageIndex"/>
     /// / <paramref name="slotIndex"/>, allocating one (back-referenced to this
     /// table) on first reference.

@@ -21,6 +21,7 @@ User-visible behaviors:
 - `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED` makes every read behave like `WITH (NOLOCK)` (dirty reads).
 - A transaction's `CREATE`, `ALTER`, `DROP` or rename of an object holds the object and its name to the transaction's end, so another session's call, `OBJECT_ID`, catalog read or change of the same name waits for it — see [Definition changes across transactions](#definition-changes-across-transactions).
 - A statement taking past real's escalation point on one table trades its row and key locks for a table S or X — see [Escalation](#escalation).
+- Every row and key lock stands under an intent lock on the page its row is on, and a row-locking read holds one on each page it read — see [Page intent locks](#page-intent-locks).
 
 ## Lock modes
 
@@ -553,16 +554,16 @@ Probed 2026-10-08 against SQL Server 2025 over a MARS connection, a reader two r
 
 | Read | Real holds | Here |
 | ---- | ---------- | ---- |
-| `READ COMMITTED` | `OBJECT IS`, the current page's `PAGE S` — over 2,000 rows, `KEY S` on the row it stands on, `PAGE IS` | `KEY S` on the row it stands on, `OBJECT IS` |
-| `REPEATABLE READ`, the `REPEATABLEREAD` hint | `KEY S` on the 20 rows produced, `PAGE IS` on their 5 pages, `OBJECT IS` | the 20 `KEY S`, `OBJECT IS` |
-| `SERIALIZABLE`, `HOLDLOCK` / `SERIALIZABLE` hints, a scan | `KEY RangeS-S` on the 20 rows, `PAGE IS`, `OBJECT IS` — an insert past the last key goes ahead | the 20 `RangeS-S`, `OBJECT IS` |
+| `READ COMMITTED` | `OBJECT IS`, the current page's `PAGE S` — over 2,000 rows, `KEY S` on the row it stands on, `PAGE IS` | `KEY S` on the row it stands on, its `PAGE IS`, `OBJECT IS` |
+| `REPEATABLE READ`, the `REPEATABLEREAD` hint | `KEY S` on the 20 rows produced, `PAGE IS` on their 5 pages, `OBJECT IS` | the same |
+| `SERIALIZABLE`, `HOLDLOCK` / `SERIALIZABLE` hints, a scan | `KEY RangeS-S` on the 20 rows, `PAGE IS`, `OBJECT IS` — an insert past the last key goes ahead | the same |
 | `READ_COMMITTED_SNAPSHOT`, `SNAPSHOT`, and under RCSI the `READCOMMITTED` and `TABLOCK` hints | `OBJECT Sch-S` alone — a `TABLOCKX` update goes ahead | the same |
 | `NOLOCK` / `READUNCOMMITTED` | `OBJECT Sch-S` | the same |
 | `TABLOCK` at any level | `OBJECT S` | the same |
 | `TABLOCKX` | `OBJECT X` | the same |
-| `UPDLOCK` / `XLOCK` | `KEY U` / `KEY X` on the 20 rows, `PAGE IU` / `IX`, `OBJECT IX` | the 20 `KEY U` / `X`, `OBJECT IX` |
-| `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `KEY S` on the row it stands on, `OBJECT IS` |
-| `ROWLOCK` | as the level's, row locks, `PAGE IS` | as the level's |
+| `UPDLOCK` / `XLOCK` | `KEY U` / `KEY X` on the 20 rows, `PAGE IU` / `IX`, `OBJECT IX` | the same |
+| `READCOMMITTED` / `READCOMMITTEDLOCK` under a `REPEATABLE READ` or `SERIALIZABLE` session, `READCOMMITTEDLOCK` under RCSI | `OBJECT IS`, `PAGE S` — the hint reads the table at READ COMMITTED | `KEY S` on the row it stands on, its `PAGE IS`, `OBJECT IS` |
+| `ROWLOCK` | as the level's, row locks, `PAGE IS` | the same |
 | `PAGLOCK` | `PAGE S` on the current page (READ COMMITTED) or the pages produced (REPEATABLE READ) | the same |
 
 How the read came to its level doesn't matter — `SET TRANSACTION ISOLATION LEVEL` with a transaction begun in SQL, one the API began at the level, or a table hint — and neither does an `ORDER BY` the clustered key satisfies: a row-locking read (`REPEATABLE READ`, `UPDLOCK`, `XLOCK`) takes the ordered scan and locks each row as it reaches it, letting go a row its own `WHERE` rejects (below), and a plain `SERIALIZABLE` read in ascending key order is the table's own scan above.
@@ -593,7 +594,7 @@ A seek through a nonclustered index locks its entries in the range mode and take
   Probed 2026-10-09 against SQL Server 2025 with readers two rows into tables of various widths: the choice between `KEY S` and `PAGE S` turned on both the row count and the row width — `KEY S` through 7,500 rows of 2,000-byte rows and `PAGE S` from 7,700, `KEY S` through 8,000 rows of 100 bytes and `PAGE S` at 9,000, `KEY S` at 10,000 rows of 10 bytes and `PAGE S` at 20,000 — and identical runs held no position lock at all on some passes (100-byte rows at 8,000 rows, 2,000-byte rows at 200, 10-byte rows at 7,500), as the scan happened to stop between rows or pages when its client's window filled.
   The pages themselves were predictable — rows inserted in key order filled them 4, 19, 69 and 299 to a page by width, and the page held was the position's — but a client can't rely on which lock the position holds, so neither is a contract to match.
 - **A `PAGLOCK` read's pages are the ones a load in key order leaves** ([Page locks](#page-locks-paglock)).
-- **The page intent locks above row locks aren't listed**, which only `sys.dm_tran_locks` shows (and through it `sp_lock` and sp_WhoIsActive's lock XML), and a page is locked only under `PAGLOCK` — so a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
+- **A page is locked whole only under `PAGLOCK`**, so a READ COMMITTED `READPAST` read passes a locked row real's page-locked scan waits on (probed: real passes it once `ROWLOCK` is added, as here).
 - **An object S or X lock is one lock here**, where real's host takes it on each of its 16 lock partitions (`OBJECT S` ×16 in `sys.dm_tran_locks`).
   Real partitions object and database locks on a server with 16 or more schedulers — an intent or Sch-S mode on its session's scheduler's partition, any other mode on every partition from 0 up, the later ones counting no reference and carrying `request_lifetime` 0x20000000 (probed 2026-10-16 against SQL Server 2025) — while the view here lists each such lock once on partition 0, as a smaller server does, so its row counts don't follow the host's CPUs.
 - **`request_reference_count` is 1 for every lock**, where real's reads 0 on some of a clustered write's key and page locks.
@@ -613,6 +614,7 @@ A seek through a nonclustered index locks its entries in the range mode and take
   A uniqueness or foreign-key check waiting on the row that carries a unique key reports its wait on that key (`SessionToken.WaitingOnKey`), as real waits on the key's own lock.
   Real's nineteen columns (probed 2026-10-16 against SQL Server 2025): `resource_type` (`OBJECT` / `PAGE` / `RID` / `KEY` / `APPLICATION` / `DATABASE`), `resource_subtype` (empty for every one), `resource_associated_entity_id` — the object for an `OBJECT` lock, the rowset's `hobt_id` as `sys.partitions` reports it for a `KEY`, `RID` or `PAGE` one (a partitioned index's first partition's), 0 otherwise — `resource_lock_partition` (0 for an object or database lock, NULL otherwise), `request_type` `LOCK`, `request_reference_count` 1, `request_lifetime` 33554432 for a lock the holder's open transaction keeps to its end (`LockDmvs.TransactionLifetime`: every one but a Sch-S while the session sits between statements, and while it runs one, the locks a read-committed read wouldn't let go of) and 0 for a statement's own, a database's and an application lock, `request_exec_context_id` / `request_request_id` 0, `request_owner_type` (`TRANSACTION`, `SHARED_TRANSACTION_WORKSPACE` for a database lock, `SESSION` for a session-owned application lock) with `request_owner_id` the holder's transaction id, and stand-ins for `request_owner_lockspace_id` and `lock_owner_address`.
   A `RID` reads `file:page:slot`, its page the one real's layout puts the row on (`RealPageLayout`), as a `PAGE` lock's `file:page` does.
+  The `PAGE` rows are the page locks and the intents of [Page intent locks](#page-intent-locks), one per session per page, which `sp_lock` lists as `PAG` with the page's index as its `IndId`.
   `sp_lock` reports a key lock's `IndId` as its index's (probed 2026-10-16 against SQL Server 2025).
   Every row's `resource_description` is blank-padded to the column's 256 characters, as real's are, an OBJECT row's empty one included — the object is `resource_associated_entity_id` — and `resource_database_id` is the database's own id (probed 2026-09-30 and 2026-10-07 against SQL Server 2025).
   A `DATABASE` row is real's shared lock of a session's workspace, an `S` with entity 0 (probed 2026-10-07 against SQL Server 2025): one on its current database, master and tempdb excepted; one on the database of each execution context it is nested in — a dynamic batch's `USE`, a procedure in another database — beside the enclosing ones (`SimulatedDbConnection.EnclosingDatabases`); one on each database it holds or awaits a lock in; and, in a transaction, one on each database whose tables the transaction locked anything in, kept to its end (`SimulatedDbTransaction.TouchedDatabases`).
@@ -807,13 +809,44 @@ Divergences:
 - `UPDLOCK` and `XLOCK` hold `PAGE U` and `PAGE X`;
 - a write takes `PAGE X` on each page it writes a row of, which `sys.dm_tran_locks` shows in place of its rows' X;
 - a versioned read stays versioned.
-A page lock's timeout is Msg 1222 state 52.
+A page lock's timeout is Msg 1222 state 52, a heap's 45 (probed 2026-10-16 against SQL Server 2025).
+A seek holding its pages also locks the page it lands on and, once it has read its rows, the one holding the key past its range, as real's does (`BatchContext.LockSeekPage`; probed 2026-10-16: `id BETWEEN 1 AND 4` held the S of the page holding key 5).
 Which page a row is on comes from `RealPageLayout`: the table's rows in clustered-key order — a heap's in insertion order — filling pages of 8,096 bytes with real's record format and a two-byte slot each, the versioning tag of a database with `ALLOW_SNAPSHOT_ISOLATION` or `READ_COMMITTED_SNAPSHOT` on included, which takes four rows of `int` and `char(2000)` to a page down to three; it reproduces real's page fill for a table loaded in key order exactly (`RealPageLayoutTests`, twenty shapes against `%%physloc%%`).
-A row lock meets a page lock through its page's intent, IS for an S, IU for a U, IX for an X, which `BatchContext.LockRowPage` takes only while some session holds a page lock on the table (`HeapTable.ActivePageLocks`), and a `READ COMMITTED` read tests its row's page the same way; those intents stay out of `sys.dm_tran_locks`, as every other row lock's page intent does.
+A row lock meets a page lock through its page's intent, IS for an S, IU for a U, IX for an X, which `BatchContext.LockRowPage` takes only while some session holds a page lock on the table (`HeapTable.ActivePageLocks`), and a `READ COMMITTED` read tests its row's page the same way.
+A page lock meets the row locks taken before it — whose intents nobody took — by waiting on each row lock of its page in its own mode (`BatchContext.AwaitRowsOnPage`), which passes exactly the holders the intent would: an S passes an S or U row lock, a U an S, an X nothing; a row-locking read's intent on a page whose rows it let go is waited on through the hold that stands for it, and the wait is reported on the page (`SessionToken.WaitingOnPage`).
+Probed 2026-10-16 against SQL Server 2025, all reproduced: a `PAGLOCK` read waits `LCK_M_S` on the page another session's update of a second row of it holds in IX, a `PAGLOCK` update `LCK_M_X` on an IX or an IS, a `PAGLOCK` `UPDLOCK` read `LCK_M_U` on an IU, while a `PAGLOCK` read of a page another session's `UPDLOCK` read holds in IU goes ahead.
 
 **Divergences**:
 - A table loaded out of key order, or changed since, has the pages its splits left on real, which follow its history; the layout here is a rebuild's in key order.
 - An insert past a full last page locks that page's X alone, where real's also locks the page it allocates.
+
+## Page intent locks
+
+Real takes an intent lock on the page a row or key lock's row is on before it takes the row or key lock — IS for an S, IU for a U, IX for an X, a range mode's alike — and lets it go with them (probed 2026-10-16 against SQL Server 2025 over clustered tables, heaps and nonclustered indexes at every isolation level and hint):
+- an index key's is on that index's leaf page, so an update moving a nonclustered key holds `PAGE IX` on its base page and on the index's;
+- a waiting row or key lock holds its page's intent granted;
+- a session's page lock and the intents under it are one lock, in the mode real converts them to — IS and IU under IX read IX, an S beside an IX `SIX`, beside an IU `SIU`, a U beside an IX `UIX`;
+- a row-locking read (`REPEATABLE READ`, `SERIALIZABLE`, `UPDLOCK`, `XLOCK`) keeps the intent of every page it read, its predicate's rejected rows' pages included, the page its seek lands on — the page of the last key at or below its lower bound, so `id > 8` holds the page of key 8 — and the page of the key past its range, which it reads to find its end, a read a `TOP` stops short of never reaching it;
+- a write keeps the intents of the pages of the rows it wrote, giving back those of the rows its walk passed, and an insert of a key beginning a page of an index that of the page before, which it tried first and found full — not a heap's, whose insert goes to a page with room;
+- an empty table has no page, and a read of it holds none;
+- an escalation's table lock takes the place of the intents with the row locks they stood under.
+
+The simulator takes none of these as locks: a row's page is the one `RealPageLayout`'s rebuild in key order puts it on, which moves as rows are inserted ahead of it, so a lock taken on it would name a page the row has left, and laying the table out on every write would cost a scan of the table per statement.
+Instead the lock DMVs derive each session's page rows from its row and key locks as they read them (`LockDmvs.PageRows`), placing each on its page through one layout of the table per view (`LockPageMap`): the base rowset's pages from `RealPageLayout`'s fill, each nonclustered index's leaf pages filled the same way with real's leaf record — a status byte, the key, row locator and `INCLUDE` columns, a heap's eight-byte RID, the NULL bitmap the record always carries and the variable-length block (probed with `%%physloc%%` through the index: 578 rows of an `int` key over an `int` clustered key to a page, 449 over a `bigint` one or a heap, 337 of a ten-character `varchar`, 71 beside a `char(100)` `INCLUDE`) — and a row an open transaction deleted or rewrote kept where it stood, as real's ghost record keeps its place.
+A view lays a table out once per change of its rows or indexes.
+The pages a row-locking read reached without keeping a row there are holds of their own (`PageVisit`): one per scan for the rows it let go of, extended as it lets go of more, and one on each seek bound's position in the key order, in the intent modes, which pass one another and count in none of the table's counts, so nothing ever waits on them save a page lock (see [Page locks](#page-locks-paglock)).
+They are taken and released as the row locks are, so a transaction's end, a statement's for a read outside one, and an escalation release them.
+
+Page locks are numbered from `1:8`, the base rowset's pages first and then each nonclustered index's in index order, where real's ids are wherever its allocation put the pages; the order of a rowset's pages is real's.
+
+**Divergences**:
+- The intents aren't counted in the `SQLServer:Locks` counters' `Page` instance, which counts the page locks and one request per scan's run of let-go rows or seek bound, where real counts a request per page intent taken (probed: a 10-row update of three pages counted 9).
+- A table changed since it was loaded in key order has, on real, the pages its splits left: an insert into a full page splits it, where the layout here moves every later row a slot along, so a page count across such an insert can differ by a page or two (probed: a reader holding 1,603 keys across an insert into its range held `PAGE IS` on 403 pages, 402 here).
+- A read whose `WHERE` is an `IN` list or an `OR` scans here under `REPEATABLE READ` or a row lock hint, so it keeps the intents of every page, where real seeks each value and keeps those of the values' pages alone.
+- A descending seek's landing page and the page past its lower end aren't held unless a key lock is on them.
+- A `REPEATABLE READ` read through a nonclustered index locks the base row rather than the index key, so its intent is on the base page where real's is on the index's (probed 2026-10-16: real held `KEY S` and `PAGE IS` on the index alone for a covered count).
+- A 2,000-row `INSERT … SELECT … OUTPUT` into an empty table streaming to its client held, on real, `PAGE X` on the pages it allocated and `KEY X` on five rows (probed 2026-10-16), the plan choosing page locks for the rows it estimates; here it locks its rows, under their pages' IX, as real does for a smaller insert.
+- A page lock of a key position a seek landed on doesn't meet a `PAGLOCK` request, which waits only on row locks and on scans' runs of let-go rows.
 
 ## Granularity approximations
 

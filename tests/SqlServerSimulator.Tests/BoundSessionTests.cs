@@ -303,11 +303,11 @@ public class BoundSessionTests
         var ownerSpid = (short)Scalar(owner, "select @@spid")!;
         var boundSpid = (short)Scalar(bound, "select @@spid")!;
         const string Holders = "select string_agg(concat(request_session_id, ' ', resource_type), ',') within group (order by resource_type) from sys.dm_tran_locks where resource_database_id = db_id('simulated') and resource_type <> 'DATABASE'";
-        AreEqual($"{boundSpid} KEY,{boundSpid} OBJECT", Scalar(observer, Holders));
+        AreEqual($"{boundSpid} KEY,{boundSpid} OBJECT,{boundSpid} PAGE", Scalar(observer, Holders));
         _ = Scalar(owner, "select 1");
-        AreEqual($"{ownerSpid} KEY,{ownerSpid} OBJECT", Scalar(observer, Holders));
+        AreEqual($"{ownerSpid} KEY,{ownerSpid} OBJECT,{ownerSpid} PAGE", Scalar(observer, Holders));
         _ = Scalar(bound, "select 1");
-        AreEqual($"{boundSpid} KEY,{boundSpid} OBJECT", Scalar(observer, Holders));
+        AreEqual($"{boundSpid} KEY,{boundSpid} OBJECT,{boundSpid} PAGE", Scalar(observer, Holders));
         // The bound session's database lock is the shared workspace's, listed
         // under the session that began the transaction.
         AreEqual(

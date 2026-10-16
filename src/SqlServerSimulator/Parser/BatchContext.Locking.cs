@@ -1145,19 +1145,117 @@ internal sealed partial class BatchContext
     /// <paramref name="countedForEscalation"/> false for an acquisition that
     /// didn't count toward escalation, as a target read's U doesn't.
     /// </summary>
-    public void ReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool countedForEscalation = true)
+    public void ReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool countedForEscalation = true) =>
+        _ = this.TryReleaseRowLockAcquisition(table, pageIndex, slotIndex, mode, countedForEscalation);
+
+    // ReleaseRowLockAcquisition, reporting whether there was one to give back.
+    private bool TryReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool countedForEscalation = true)
     {
         if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
-            return;
+            return false;
         var connection = this.Connection;
         var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
         var index = held.LastIndexOf((resource, mode, connection.LockOwner));
         if (index < 0)
-            return;
+            return false;
         held.RemoveAt(index);
         connection.Simulation.LockManager.Release(resource, mode, connection.LockOwner);
         if (countedForEscalation && this.CurrentStatement.LockTallies is { } tallies && tallies.TryGetValue(table, out var tally) && !tally.RowsKeyLocked)
             tally.Count--;
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="ReleaseRowLockAcquisition"/> for a row-locking read whose
+    /// predicate rejected the row: the row's lock goes, and the intent real's
+    /// read took on the row's page before it stays, as long as the row's lock
+    /// would have (see <see cref="Storage.PageVisit"/>). One scan's rejected
+    /// rows share one <paramref name="run"/>, which it passes back each time,
+    /// so a page visit costs a lock-manager acquisition once per scan, not per
+    /// row.
+    /// </summary>
+    public void ReleaseRejectedRow(HeapTable table, int pageIndex, int slotIndex, LockMode mode, ref LockResource? run)
+    {
+        if (!this.TryReleaseRowLockAcquisition(table, pageIndex, slotIndex, mode))
+            return;
+        if (run?.Visit is { } extended)
+        {
+            extended.Extend((pageIndex, slotIndex));
+            return;
+        }
+        run = new LockResource { Visit = Storage.PageVisit.RowRun(table, (pageIndex, slotIndex)) };
+        _ = table.RowVisits.TryAdd(run, 0);
+        this.HoldPageVisit(run, mode);
+    }
+
+    /// <summary>
+    /// Holds the page an ascending seek of <paramref name="group"/>'s keys in a
+    /// row-locking read lands on for its lower bound <paramref name="lower"/> —
+    /// the page of the last entry at or below it, as real's navigation finds
+    /// it, which the rows the read keeps needn't be on — as long as the read's
+    /// <paramref name="mode"/> row locks are kept (see <see cref="Storage.PageVisit"/>).
+    /// </summary>
+    public void NoteSeekLanding(HeapTable table, KeyLockGroup group, SqlValueKey lower, bool lowerInclusive, LockMode mode)
+    {
+        if (this.EscalatedModeOf(table) is null)
+            this.HoldPageVisit(group.GetOrCreateVisit(lower, lowerInclusive && lower.ComponentCount < group.Ordinals.Length ? Storage.PageVisitBound.Below : Storage.PageVisitBound.AtOrBelow), mode);
+    }
+
+    /// <summary>
+    /// Holds the page of the entry past an ascending seek's upper bound
+    /// <paramref name="upper"/>, which the seek reads to find its end once it
+    /// has read its rows, as <see cref="NoteSeekLanding"/> holds its first.
+    /// </summary>
+    public void NoteSeekEnd(HeapTable table, KeyLockGroup group, SqlValueKey upper, bool upperInclusive, LockMode mode)
+    {
+        if (this.EscalatedModeOf(table) is null)
+            this.HoldPageVisit(group.GetOrCreateVisit(upper, upperInclusive ? Storage.PageVisitBound.Above : Storage.PageVisitBound.AtOrAbove), mode);
+    }
+
+    /// <summary>
+    /// <see cref="NoteSeekLanding"/> and <see cref="NoteSeekEnd"/> for a
+    /// <c>PAGLOCK</c> read holding its pages, which locks the page itself (probed
+    /// 2026-10-16 against SQL Server 2025: a <c>REPEATABLE READ</c>
+    /// <c>PAGLOCK</c> read of <c>id BETWEEN 1 AND 4</c> held <c>PAGE S</c> on the
+    /// page of key 5 as well as on the one of keys 1 to 4): the page of the row
+    /// whose key <paramref name="bound"/> names beside the seek's bound.
+    /// </summary>
+    internal void LockSeekPage(HeapTable table, in DataLockPlan plan, KeyLockGroup group, SqlValueKey bound, bool inclusive, bool upper)
+    {
+        if (plan.Pages is not { Held: true } pages || this.EscalatedModeOf(table) is not null)
+            return;
+        var heap = table.Heap;
+        var schema = table.StoredColumns;
+        var cache = HeapSeekCache.For(heap);
+        SqlValueKey? key;
+        if (!upper)
+            key = cache.PreviousKeyBelow(heap, schema, heap, group.Ordinals, group.Commons, bound, inclusive);
+        else if (!inclusive && cache.AnyRowMatches(heap, schema, group.Ordinals, group.Commons, bound))
+            key = bound;
+        else
+            key = cache.NextKeyAbove(heap, schema, heap, group.Ordinals, group.Commons, bound);
+        if (key is not { } found)
+            return;
+        foreach (var (pageIndex, slotIndex, _) in cache.MatchingRows(heap, schema, group.Ordinals, group.Commons, found))
+        {
+            this.TouchPage(table, pageIndex, slotIndex, pages);
+            return;
+        }
+    }
+
+    // Holds a page visit in the intent a row lock in `mode` takes on its page,
+    // as long as that row lock would be held.
+    private void HoldPageVisit(LockResource visit, LockMode mode)
+    {
+        if (Storage.LockDmvs.IntentOf(mode) is not { } intent)
+            return;
+        var connection = this.Connection;
+        var owner = connection.LockOwner;
+        var manager = connection.Simulation.LockManager;
+        if (manager.IsHeldBy(visit, intent, owner))
+            return;
+        manager.Acquire(visit, intent, owner, 0);
+        (connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks).Add((visit, intent, owner));
     }
 
     /// <summary>
@@ -1654,8 +1752,9 @@ internal sealed partial class BatchContext
                 continue;
             var covered = ReferenceEquals(resource, table.TableDataLock)
                 ? heldMode == LockMode.IntentShared || (exclusive && heldMode == LockMode.IntentExclusive)
-                : ReferenceEquals(resource.OwningTable, table)
-                    && (exclusive || heldMode is LockMode.Shared or LockMode.RangeSharedShared);
+                : ReferenceEquals(resource.Visit?.Table, table)
+                    || (ReferenceEquals(resource.OwningTable, table)
+                        && (exclusive || heldMode is LockMode.Shared or LockMode.RangeSharedShared));
             if (!covered)
                 continue;
             manager.Release(resource, heldMode, session);
@@ -2705,7 +2804,8 @@ internal sealed partial class BatchContext
     {
         if (this.EscalatedModeOf(table) is not null)
             return;
-        var page = RealPageLayout.For(table).PageOf((pageIndex, slotIndex));
+        var layout = RealPageLayout.For(table);
+        var page = layout.PageOf((pageIndex, slotIndex));
         if (page == pages.Page)
             return;
         pages.Page = page;
@@ -2714,10 +2814,12 @@ internal sealed partial class BatchContext
         {
             if (this.Connection.Simulation.LockManager.IsHeldBy(resource, pages.Mode, this.Connection.LockOwner))
                 return;
+            this.AwaitRowsOnPage(table, layout, page, pages.Mode);
             this.AcquireTransactionLock(resource, pages.Mode, this.NamedNoWait(table));
             this.CountLocksForEscalation(table, 1, exclusive: pages.Mode != LockMode.Shared);
             return;
         }
+        this.AwaitRowsOnPage(table, layout, page, LockMode.Shared);
         this.AcquireStatementLock(resource, LockMode.Shared, this.NamedNoWait(table));
         if (pages.Standing is { } left)
             this.ReleaseStatementLock(left, LockMode.Shared);
@@ -2754,9 +2856,78 @@ internal sealed partial class BatchContext
         var connection = this.Connection;
         if (connection.Simulation.LockManager.IsHeldBy(resource, mode, connection.LockOwner))
             return;
+        if (mode == LockMode.Exclusive)
+            this.AwaitRowsOnPage(table, layout, page, mode);
         this.AcquireTransactionLock(resource, mode, this.NamedNoWait(table));
         if (mode == LockMode.Exclusive)
             this.CountLocksForEscalation(table, 1, exclusive: true);
+    }
+
+    /// <summary>
+    /// Waits out the row and key locks other sessions hold on the rows of
+    /// <paramref name="page"/> that a page lock in <paramref name="pageMode"/>
+    /// can't pass. Real's row lock holds an intent on its page, which a page
+    /// lock meets (probed 2026-10-16 against SQL Server 2025: a
+    /// <c>PAGLOCK</c> read of a row waited <c>LCK_M_S</c> on the page another
+    /// session's update of a second row of it held in IX, and timed out with
+    /// Msg 1222 state 52); the simulator's row locks take no intent while no
+    /// session locks the table's pages whole, so the page lock waits on the
+    /// row locks themselves, in its own mode — which meets exactly the holders
+    /// whose intent it would meet: an S passes a row's S and U and an IS or
+    /// IU, a U passes an S, an X nothing. The wait is reported on the page
+    /// (<see cref="SessionToken.WaitingOnPage"/>).
+    /// </summary>
+    private void AwaitRowsOnPage(HeapTable table, RealPageLayout layout, int page, LockMode pageMode)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var owner = connection.LockOwner;
+        var rowGroup = Volatile.Read(ref table.ActiveKeyRangeLocks) != 0 ? KeyLockGroup.RowGroupOf(table) : null;
+        // A row-locking read's intent on a page it read past (PageVisit) is
+        // met the same way, on the hold that stands for it.
+        if (!table.RowVisits.IsEmptyLockFree())
+        {
+            foreach (var (visit, _) in table.RowVisits)
+            {
+                var (first, last) = visit.Visit!.Rows;
+                var (from, to) = (layout.PageOf(first), layout.PageOf(last));
+                if (page >= Math.Min(from, to) && page <= Math.Max(from, to) && manager.HasIncompatibleHolderOtherThan(visit, pageMode, owner))
+                    this.AwaitOnBehalfOfPage(table, visit, page, pageMode);
+            }
+        }
+        if (table.RowLocks.IsEmptyLockFree() && rowGroup is null)
+            return;
+        foreach (var (rowPage, slot) in layout.RowsOn(page))
+        {
+            if (table.RowLocks.TryGetValue((rowPage, slot), out var rowLock) && manager.HasIncompatibleHolderOtherThan(rowLock, pageMode, owner))
+                this.AwaitOnBehalfOfPage(table, rowLock, page, pageMode);
+            if (rowGroup is not null && table.Heap.ReadSlotBytes(rowPage, slot) is { } image && rowGroup.TryReadKey(image, out var key)
+                && rowGroup.Find(key) is { } anchor && manager.HasIncompatibleHolderOtherThan(anchor, pageMode, owner))
+            {
+                this.AwaitOnBehalfOfPage(table, anchor, page, pageMode);
+            }
+        }
+    }
+
+    // One wait of AwaitRowsOnPage: an instant lock on the row's, timing out
+    // as a page lock does.
+    private void AwaitOnBehalfOfPage(HeapTable table, LockResource resource, int page, LockMode mode)
+    {
+        var session = this.Connection.LockOwner;
+        session.WaitingOnPage = page;
+        try
+        {
+            this.AcquireOnTable(table, resource, mode, session);
+        }
+        catch (SimulatedSqlException timeout) when (timeout.Number == 1222 && !table.IsMemoryOptimized)
+        {
+            throw SimulatedSqlException.LockRequestTimeOutExceeded(table.HasClusteredIndex() ? (byte)52 : (byte)45);
+        }
+        finally
+        {
+            session.WaitingOnPage = -1;
+        }
+        this.Connection.Simulation.LockManager.Release(resource, mode, session);
     }
 
     /// <summary>

@@ -837,7 +837,60 @@ internal sealed partial class Selection
                 table,
                 () => AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds),
                 () => TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var current) ? current : []));
+        if (snapshotXid is null && (plan is { RowTxScoped: true, RowMode: not null } or { Pages.Held: true })
+            && RangeSeekBounds(source, table, batch, outerResolver, bounds) is var (group, lower, lowerInclusive, upper, upperInclusive))
+        {
+            if (lower is { } landing)
+                NoteSeekPage(table, plan, batch, group, landing, lowerInclusive, upper: false);
+            if (upper is { } end)
+                seekRows = ThenNoteSeekEnd(seekRows, table, plan, batch, group, end, upperInclusive);
+        }
         return true;
+    }
+
+    // A row-locking range seek of the clustered key reads the page it lands on
+    // and, once it has read its rows, the entry past its range, whose pages
+    // keep its intent (BatchContext.NoteSeekLanding) — or, under PAGLOCK, the
+    // pages' own lock (BatchContext.LockSeekPage). Null for a seek of any
+    // other index, or bounds that don't evaluate.
+    private static (KeyLockGroup Group, SqlValueKey? Lower, bool LowerInclusive, SqlValueKey? Upper, bool UpperInclusive)? RangeSeekBounds(
+        FromSource source, HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, RangeBoundExprs> bounds)
+    {
+        if (FindRangeLeadingKey(table, bounds, out var clustered) is not { } key || !clustered
+            || KeyLockGroup.RowGroupOf(table) is not { } group || group.Ordinals[0] != key[0])
+        {
+            return null;
+        }
+        var bound = bounds[key[0]];
+        return EvaluateRangeBounds(bound, source.StoredSchema[key[0]].Type, batch, outerResolver,
+            out _, out var hasLower, out var lower, out var hasUpper, out var upper) != BoundEval.Value
+            ? null
+            : (group, hasLower ? new SqlValueKey([lower]) : null, bound.LowerInclusive, hasUpper ? new SqlValueKey([upper]) : null, bound.UpperInclusive);
+    }
+
+    private static void NoteSeekPage(HeapTable table, DataLockPlan plan, BatchContext batch, KeyLockGroup group, SqlValueKey bound, bool inclusive, bool upper)
+    {
+        if (plan.RowMode is { } rowMode && plan.RowTxScoped)
+        {
+            if (upper)
+                batch.NoteSeekEnd(table, group, bound, inclusive, rowMode);
+            else
+                batch.NoteSeekLanding(table, group, bound, inclusive, rowMode);
+        }
+        else
+        {
+            batch.LockSeekPage(table, plan, group, bound, inclusive, upper);
+        }
+    }
+
+    // The seek's rows, then the page of the entry past its range, which the
+    // seek reads only once it has read them all: one a TOP or a reader
+    // stopping early never reaches.
+    private static IEnumerable<byte[]> ThenNoteSeekEnd(IEnumerable<byte[]> rows, HeapTable table, DataLockPlan plan, BatchContext batch, KeyLockGroup group, SqlValueKey upper, bool inclusive)
+    {
+        foreach (var row in rows)
+            yield return row;
+        NoteSeekPage(table, plan, batch, group, upper, inclusive, upper: true);
     }
 
     // The range seek's counterpart of AwaitUncommittedDeletesMatching: waits
@@ -3747,6 +3800,7 @@ internal sealed partial class Selection
         // Hoisted per-row scaffolding for the qualifier, as the prefilter's.
         var tuple = new byte[]?[1];
         var qualifying = qualifier is not null && plan.RowMode is not null;
+        LockResource? rejected = null;
         RuntimeContext runtime = default;
         if (qualifying)
         {
@@ -3840,7 +3894,7 @@ internal sealed partial class Selection
                     tuple[0] = bytes;
                     if (!Qualifies(qualifier!.Conjuncts, runtime))
                     {
-                        batch.ReleaseRowLockAcquisition(table, page, slot, plan.RowMode!.Value);
+                        batch.ReleaseRejectedRow(table, page, slot, plan.RowMode!.Value, ref rejected);
                         continue;
                     }
                 }

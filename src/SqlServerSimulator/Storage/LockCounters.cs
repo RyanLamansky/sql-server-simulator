@@ -41,7 +41,7 @@ internal sealed class LockCounters
     {
         { KeyGroup: not null } => Kind.Key,
         { Definition: not null } => Kind.Metadata,
-        { PageOfTable: not null } => Kind.Page,
+        { PageOfTable: not null } or { Visit: not null } => Kind.Page,
         { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? Kind.Key : Kind.Rid,
         { IsApplicationLock: true } => Kind.Application,
         _ => Kind.Object,

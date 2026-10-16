@@ -97,9 +97,9 @@ public sealed class StreamedResultWireTests
         {
             var waited = System.Diagnostics.Stopwatch.StartNew();
             object? held;
-            while (!Equals(held = await locks.ExecuteScalarAsync(TestContext.CancellationToken), "OBJECT IS, KEY S") && waited.ElapsedMilliseconds < 10_000)
+            while (!Equals(held = await locks.ExecuteScalarAsync(TestContext.CancellationToken), "OBJECT IS, PAGE IS, KEY S") && waited.ElapsedMilliseconds < 10_000)
                 await Task.Delay(10, TestContext.CancellationToken);
-            AreEqual("OBJECT IS, KEY S", held);
+            AreEqual("OBJECT IS, PAGE IS, KEY S", held);
         }
         AreEqual(1222, await this.AttemptAsync(other, "alter table big add c int"));
         AreEqual(0, await this.AttemptAsync(other, "update big set v = v where k = 1"));

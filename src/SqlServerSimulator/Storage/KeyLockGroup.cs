@@ -84,6 +84,16 @@ internal sealed class KeyLockGroup
     public readonly LockResource Infinity;
 
     /// <summary>
+    /// The page visits of seeks of this key's order (<see cref="PageVisit"/>),
+    /// per bound, interned on first use and leaking as <see cref="Anchors"/> do.
+    /// </summary>
+    public readonly ConcurrentDictionary<(SqlValueKey Key, PageVisitBound Bound), LockResource> Visits = new();
+
+    /// <summary>The page visit of <paramref name="bound"/> beside <paramref name="key"/>, interned on first use.</summary>
+    public LockResource GetOrCreateVisit(SqlValueKey key, PageVisitBound bound) =>
+        this.Visits.GetOrAdd((key, bound), static (position, group) => new LockResource { Visit = new PageVisit(group.Table, group, position.Key, position.Bound) }, this);
+
+    /// <summary>
     /// Holds live across this group's anchors, maintained by
     /// <see cref="LockManager"/> under its gate, so a writer tests only the
     /// groups somebody holds a lock in.

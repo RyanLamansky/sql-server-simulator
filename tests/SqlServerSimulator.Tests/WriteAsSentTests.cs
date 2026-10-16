@@ -99,7 +99,7 @@ public sealed class WriteAsSentTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "update t set v = v + 1 output inserted.id, inserted.v, inserted.pad");
-        AreEqual($"KEY Xx{Window}, OBJECT IX", Locks(other, spid));
+        AreEqual($"KEY Xx{Window}, OBJECT IX, PAGE IXx{Window / 4}", Locks(other, spid));
         AreEqual(Window, Scalar(other, "select count(*) from t with (nolock) where v = 1"));
         AreEqual(1222, Attempt(other, "select v from t where id = 1"));
         // A row ahead is free, and another session's write to it is read as
@@ -155,7 +155,7 @@ public sealed class WriteAsSentTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "update h set v = v + 1 output inserted.id, inserted.v, inserted.pad");
-        AreEqual($"OBJECT IX, RID Xx{Window}", Locks(other, spid));
+        AreEqual($"OBJECT IX, PAGE IXx{Window / 4}, RID Xx{Window}", Locks(other, spid));
         AreEqual(Window, Scalar(other, "select count(*) from h with (nolock) where v = 1"));
         AreEqual(Rows, ReadRest(rows));
     }
@@ -166,8 +166,8 @@ public sealed class WriteAsSentTests
     /// every row sent is gone.
     /// </summary>
     [TestMethod]
-    [DataRow("", Rows - Window + 1, "KEY Xx20, OBJECT IX")]
-    [DataRow("create index ixv on t (v)", Rows - Window, "KEY Xx40, OBJECT IX")]
+    [DataRow("", Rows - Window + 1, "KEY Xx20, OBJECT IX, PAGE IXx5")]
+    [DataRow("create index ixv on t (v)", Rows - Window, "KEY Xx40, OBJECT IX, PAGE IXx6")]
     public void Delete_WritesTheRowsItSends(string index, int remaining, string locks)
     {
         var sim = Big(index);
@@ -201,7 +201,7 @@ public sealed class WriteAsSentTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "insert t2 output inserted.id, inserted.v, inserted.pad select id, v, pad from t");
-        AreEqual($"KEY Xx{Window}, OBJECT IS, OBJECT IX", Locks(other, spid));
+        AreEqual($"KEY Xx{Window}, OBJECT IS, OBJECT IX, PAGE IXx{Window / 4}", Locks(other, spid));
         AreEqual(Window, Scalar(other, "select count(*) from t2 with (nolock)"));
         AreEqual(Rows, ReadRest(rows));
         AreEqual(Rows, rows.RecordsAffected);
@@ -303,10 +303,10 @@ public sealed class WriteAsSentTests
     /// subquery in the statement, or a join reading the target again.
     /// </summary>
     [TestMethod]
-    [DataRow("create index ixv on t (v)", "update t set v = v + 1 output inserted.id, inserted.v, inserted.pad", "KEY Ux1980, KEY Xx60, OBJECT IX")]
-    [DataRow("", "update t set v = (select max(v) from t) + 1 output inserted.id, inserted.v, inserted.pad", "KEY Ux1980, KEY Xx20, OBJECT IX")]
-    [DataRow("", "update a set v = b.v + 1 output inserted.id, inserted.v, inserted.pad from t a join t b on b.id = a.id", "KEY Ux1980, KEY Xx20, OBJECT IX")]
-    [DataRow("", "delete t output deleted.id, deleted.v, deleted.pad where id in (select id from t where v = 0)", "KEY Ux1980, KEY Xx20, OBJECT IX")]
+    [DataRow("create index ixv on t (v)", "update t set v = v + 1 output inserted.id, inserted.v, inserted.pad", "KEY Ux1980, KEY Xx60, OBJECT IX, PAGE IUx495, PAGE IXx7")]
+    [DataRow("", "update t set v = (select max(v) from t) + 1 output inserted.id, inserted.v, inserted.pad", "KEY Ux1980, KEY Xx20, OBJECT IX, PAGE IUx495, PAGE IXx5")]
+    [DataRow("", "update a set v = b.v + 1 output inserted.id, inserted.v, inserted.pad from t a join t b on b.id = a.id", "KEY Ux1980, KEY Xx20, OBJECT IX, PAGE IUx495, PAGE IXx5")]
+    [DataRow("", "delete t output deleted.id, deleted.v, deleted.pad where id in (select id from t where v = 0)", "KEY Ux1980, KEY Xx20, OBJECT IX, PAGE IUx495, PAGE IXx5")]
     public void ReadFirst_HoldsTheRowsAheadInU(string setup, string sql, string locks)
     {
         var sim = Big(setup);
@@ -345,7 +345,7 @@ public sealed class WriteAsSentTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "update t set v = w.w output inserted.id, inserted.v, inserted.pad from t join w on w.k = t.id");
-        AreEqual($"KEY Xx{Window}, OBJECT IS, OBJECT IX", Locks(other, spid));
+        AreEqual($"KEY Xx{Window}, OBJECT IS, OBJECT IX, PAGE IXx{Window / 4}", Locks(other, spid));
         AreEqual(Window, Scalar(other, "select count(*) from t with (nolock) where v = 3"));
         AreEqual(Rows, ReadRest(rows));
     }
@@ -356,8 +356,8 @@ public sealed class WriteAsSentTests
     /// held in U until each is written.
     /// </summary>
     [TestMethod]
-    [DataRow("", "merge t2 using (select id, pad from t) as i on 1 = 0 when not matched then insert (id, v, pad) values (i.id, 5, i.pad) output inserted.id, inserted.pad;", "KEY Xx20, OBJECT IS, OBJECT IX", 20)]
-    [DataRow("insert t2 select id, v, pad from t where id % 2 = 0", "merge t2 using t on t2.id = t.id when matched then update set v = t2.v + 1 when not matched then insert (id, v, pad) values (t.id, 5, t.pad) output inserted.id, $action, inserted.pad;", "KEY Ux990, KEY Xx20, OBJECT IS, OBJECT IX", 1010)]
+    [DataRow("", "merge t2 using (select id, pad from t) as i on 1 = 0 when not matched then insert (id, v, pad) values (i.id, 5, i.pad) output inserted.id, inserted.pad;", "KEY Xx20, OBJECT IS, OBJECT IX, PAGE IXx5", 20)]
+    [DataRow("insert t2 select id, v, pad from t where id % 2 = 0", "merge t2 using t on t2.id = t.id when matched then update set v = t2.v + 1 when not matched then insert (id, v, pad) values (t.id, 5, t.pad) output inserted.id, $action, inserted.pad;", "KEY Ux990, KEY Xx20, OBJECT IS, OBJECT IX, PAGE IUx248, PAGE IXx5", 1010)]
     public void Merge_WritesTheActionsItSends(string setup, string sql, string locks, int seen)
     {
         var sim = Big("create table t2 (id int primary key, v int not null, pad char(2000) not null); " + setup);

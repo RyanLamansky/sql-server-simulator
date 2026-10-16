@@ -162,12 +162,13 @@ internal sealed class RowSecurity
 
         IEnumerable<byte[]> ReleasingRejected()
         {
+            LockResource? rejected = null;
             foreach (var row in rows)
             {
                 if (runner.AdmitsStored(row))
                     yield return row;
                 else if (addresses.TryGet(row, out var address))
-                    batch.ReleaseRowLockAcquisition(table, address.Page, address.Slot, mode);
+                    batch.ReleaseRejectedRow(table, address.Page, address.Slot, mode, ref rejected);
             }
         }
     }

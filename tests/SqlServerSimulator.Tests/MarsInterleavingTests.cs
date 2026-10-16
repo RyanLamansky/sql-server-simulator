@@ -86,9 +86,9 @@ public sealed class MarsInterleavingTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "select * from big", 2);
-        AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+        AreEqual("KEY S, OBJECT IS, PAGE IS", Locks(other, spid));
         AreEqual(Rows, connection.CreateCommand("select count(*) from big").ExecuteScalar());
-        AreEqual("KEY S, OBJECT IS", Locks(other, spid));
+        AreEqual("KEY S, OBJECT IS, PAGE IS", Locks(other, spid));
         HasCount(Rows - 2, Rest(rows));
         AreEqual("", Locks(other, spid));
     }
@@ -103,7 +103,7 @@ public sealed class MarsInterleavingTests
         var spid = Spid(connection);
         using var first = Read(connection, "select * from big", 2);
         using var second = Read(connection, "select * from heap", 2);
-        AreEqual("KEY S, OBJECT ISx2, RID S", Locks(other, spid));
+        AreEqual("KEY S, OBJECT ISx2, PAGE ISx2, RID S", Locks(other, spid));
         for (var read = 0; read < 100; read++)
             IsTrue(second.Read());
         HasCount(Rows - 2, Rest(first));
@@ -285,7 +285,7 @@ public sealed class MarsInterleavingTests
         AreEqual(20, ReaderLocks(other, spid));
         AreEqual(0, Attempt(connection, "update big set v = 'u' where k = 1", transaction));
         AreEqual(19, ReaderLocks(other, spid));
-        AreEqual("KEY Sx19, KEY X, OBJECT IX", Locks(other, spid));
+        AreEqual("KEY Sx19, KEY X, OBJECT IX, PAGE ISx4, PAGE IX", Locks(other, spid));
         rows.Dispose();
         transaction.Rollback();
     }

@@ -73,7 +73,7 @@ public sealed class TriggerStreamingTests
         using (var rows = ReadTwo(connection))
         {
             AreEqual("before", string.Join(",", messages));
-            AreEqual("KEY S, KEY X, OBJECT IS, OBJECT IX", Locks(other, spid));
+            AreEqual("KEY S, KEY X, OBJECT IS, OBJECT IX, PAGE IS, PAGE IX", Locks(other, spid));
             AreEqual("suspended ASYNC_NETWORK_IO SELECT", string.Join(", ", Extensions.FirstColumn(other, $"select concat(status, ' ', wait_type, ' ', command) from sys.dm_exec_requests where session_id = {spid}")));
             AreEqual(0, Scalar(other, "select count(*) from l with (nolock)"));
             AreEqual(Rows, ReadRest(rows));
@@ -95,7 +95,7 @@ public sealed class TriggerStreamingTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = ReadTwo(connection, "set transaction isolation level repeatable read; update t set v = v + 1 where id = 1");
-        AreEqual("KEY Sx20, KEY X, OBJECT IS, OBJECT IX", Locks(other, spid));
+        AreEqual("KEY Sx20, KEY X, OBJECT IS, OBJECT IX, PAGE ISx5, PAGE IX", Locks(other, spid));
         AreEqual(Rows, ReadRest(rows));
     }
 
@@ -247,8 +247,8 @@ public sealed class TriggerStreamingTests
     /// (probed 2026-10-09 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow("insert a values (1)", "OBJECT IXx3, RID Xx3", 3)]
-    [DataRow("insert other.dbo.x values (1)", "OBJECT IXx2, RID Xx2", 2)]
+    [DataRow("insert a values (1)", "OBJECT IXx3, PAGE ISx5, PAGE IXx3, RID Xx3", 3)]
+    [DataRow("insert other.dbo.x values (1)", "OBJECT IXx2, PAGE ISx5, PAGE IXx2, RID Xx2", 2)]
     public void NestedOrOtherDatabasesTriggerRows_GoOutAsRead(string sql, string writes, int logged)
     {
         var sim = WithTrigger();

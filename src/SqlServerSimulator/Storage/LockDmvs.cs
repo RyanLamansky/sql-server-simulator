@@ -33,6 +33,8 @@ internal static class LockDmvs
         LockMode.IntentExclusive => "IX",
         LockMode.IntentUpdate => "IU",
         LockMode.SharedIntentExclusive => "SIX",
+        LockMode.SharedIntentUpdate => "SIU",
+        LockMode.UpdateIntentExclusive => "UIX",
         LockMode.Shared => "S",
         LockMode.Update => "U",
         LockMode.Exclusive => "X",
@@ -137,38 +139,191 @@ internal static class LockDmvs
 
     /// <summary>
     /// The lock rows of <paramref name="table"/>: its object lock — the schema
-    /// and data locks are one resource, real's object lock — then its row and
-    /// key locks.
+    /// and data locks are one resource, real's object lock — then its page
+    /// locks, then its row and key locks. Real holds an intent lock on the page
+    /// each row or key lock's row is on, which the simulator takes only while a
+    /// session locks the table's pages whole, so the page rows report those
+    /// intents from the row and key locks themselves (<see cref="PageRows"/>).
     /// </summary>
-    private static IEnumerable<LockRow> EmitTableLocks(
-        BatchContext batch, HeapTable table, int dbId,
-        Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits)
+    private static IEnumerable<LockRow> EmitTableLocks(BatchContext batch, HeapTable table, int dbId, Waits waits)
     {
         var locks = batch.Connection.Simulation.LockManager;
-        foreach (var row in EmitRowsForResource(locks, "OBJECT", dbId, string.Empty, table.ObjectId, table.ObjectId, 0, table.TableDataLock, waitsByResource, FoldObjectModes(locks, table.TableDataLock)))
+        foreach (var row in EmitRowsForResource(locks, "OBJECT", dbId, string.Empty, table.ObjectId, table.ObjectId, 0, table.TableDataLock, waits.ByResource, FoldObjectModes(locks, table.TableDataLock)))
             yield return row;
+        // A key or page lock names its index by id, which the catalog settles
+        // when it first lists the table's indexes.
+        table.SettleIndexIds();
+        var pages = new LockPageMap(batch, table);
         Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? pagesFolded = null;
         if (!table.PageLocks.IsEmptyLockFree())
-        {
-            foreach (var row in EmitPageLocks(locks, table, dbId, waitsByResource))
-                yield return row;
             pagesFolded = FoldRowLocksUnderPageLocks(locks, table);
-        }
         var keyFolded = FoldRowLocksIntoKeyLocks(locks, table);
         var folded = FoldConvertedRowLocks(locks, table, pagesFolded is null ? keyFolded : keyFolded is null ? pagesFolded : Merged(keyFolded, pagesFolded));
-        foreach (var row in EmitRowLocks(batch, table, dbId, waitsByResource, keyWaits, folded))
-            yield return row;
+        var rows = new List<(LockRow Row, int Page)>();
+        var insertedPast = new List<(SessionToken Owner, int Spid, int IndexId, int Page)>();
+        rows.AddRange(EmitRowLocks(batch, table, dbId, waits, folded, pages, insertedPast));
         foreach (var (_, group) in table.KeyLockGroups)
         {
             var hobt = HobtOf(table, group.IndexId);
-            foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(null), hobt, table.ObjectId, group.IndexId, group.Infinity, waitsByResource, folded))
-                yield return row;
+            foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(null), hobt, table.ObjectId, group.IndexId, group.Infinity, waits.ByResource, folded))
+                rows.Add((row, pages.PageOfAnchor(group, null)));
             foreach (var kv in group.Anchors)
             {
-                foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(kv.Key), hobt, table.ObjectId, group.IndexId, kv.Value, waitsByResource, folded))
-                    yield return row;
+                foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(kv.Key), hobt, table.ObjectId, group.IndexId, kv.Value, waits.ByResource, folded))
+                    rows.Add((row, pages.PageOfAnchor(group, kv.Key)));
             }
         }
+        foreach (var row in PageRows(locks, table, dbId, waits, rows, pages, insertedPast))
+            yield return row;
+        foreach (var (row, _) in rows)
+            yield return row;
+    }
+
+    /// <summary>
+    /// The page rows of <paramref name="table"/>: per session and page, the one
+    /// lock real converts its holds there into — the <c>PAGLOCK</c> S, U or X it
+    /// holds and the intent of each row and key lock it holds or awaits on a
+    /// row of the page, an IS for an S, an IU for a U and an IX for an X, in
+    /// any range mode too — and the page locks still waited for (probed
+    /// 2026-10-16 against SQL Server 2025: <c>PAGE IS</c> beside each page's
+    /// <c>KEY S</c>, <c>IU</c> beside <c>KEY U</c>, <c>IX</c> beside
+    /// <c>KEY X</c> and <c>RID X</c>, a nonclustered key's on its index's leaf
+    /// page, an <c>IU</c> and an <c>IX</c> on one page reading <c>IX</c>, a
+    /// <c>PAGLOCK</c> read's S over an update's IX <c>SIX</c>, over an
+    /// <c>UPDLOCK</c> read's IU <c>SIU</c>, its U over an IX <c>UIX</c>, and a
+    /// waiting key lock's page intent granted). <paramref name="insertedPast"/>
+    /// adds the IX of each page an insert of a key beginning the next page
+    /// tested first and found full.
+    /// </summary>
+    private static IEnumerable<LockRow> PageRows(
+        LockManager locks, HeapTable table, int dbId, Waits waits, List<(LockRow Row, int Page)> rows, LockPageMap pages,
+        List<(SessionToken Owner, int Spid, int IndexId, int Page)> insertedPast)
+    {
+        var holds = new Dictionary<(SessionToken Owner, int IndexId, int Page), (int Spid, int Modes, LockResource? Resource)>();
+        foreach (var (row, page) in rows)
+        {
+            if (page >= 0 && row.Owner is { } owner && IntentOf(row.Mode) is { } intent)
+                Note(holds, owner, row.IndexId, page, row.Spid, intent, null);
+        }
+        foreach (var (owner, spid, indexId, page) in insertedPast)
+            Note(holds, owner, indexId, page, spid, LockMode.IntentExclusive, null);
+        var baseIndex = BaseIndexIdOf(table);
+        // The pages a row-locking read kept its intent on past the rows it
+        // let go and the bounds of its seeks.
+        if (!table.RowVisits.IsEmptyLockFree())
+        {
+            foreach (var (visit, _) in table.RowVisits)
+            {
+                if (visit.Holders.Count == 0)
+                    continue;
+                var (first, last) = visit.Visit!.Rows;
+                var (from, to) = (pages.PageOfRow(first), pages.PageOfRow(last));
+                foreach (var hold in locks.HoldersOf(visit))
+                {
+                    for (var page = Math.Min(from, to); page <= Math.Max(from, to); page++)
+                        Note(holds, hold.Owner, baseIndex, page, hold.Owner.Acting.Spid, hold.Mode, null);
+                }
+            }
+        }
+        foreach (var (_, group) in table.KeyLockGroups)
+        {
+            if (group.Visits.IsEmptyLockFree())
+                continue;
+            foreach (var (_, visit) in group.Visits)
+            {
+                if (visit.Holders.Count == 0 || pages.PageOfVisit(visit.Visit!) is not { } page)
+                    continue;
+                foreach (var hold in locks.HoldersOf(visit))
+                    Note(holds, hold.Owner, group.IndexId, page, hold.Owner.Acting.Spid, hold.Mode, null);
+            }
+        }
+        List<(LockRow Row, int Page)>? waiting = null;
+        if (!table.PageLocks.IsEmptyLockFree())
+        {
+            foreach (var (ordinal, resource) in table.PageLocks)
+            {
+                if (resource.Holders.Count == 0 && !waits.ByResource.ContainsKey(resource))
+                    continue;
+                var page = LockPageMap.PageIdOf(ordinal);
+                foreach (var hold in locks.HoldersOf(resource))
+                    Note(holds, hold.Owner, baseIndex, page, hold.Owner.Acting.Spid, hold.Mode, resource);
+                if (waits.ByResource.TryGetValue(resource, out var waiters))
+                {
+                    foreach (var waiter in waiters)
+                    {
+                        if (waiter.WaitingForMode is { } waitMode)
+                            (waiting ??= []).Add((PageRow(table, dbId, baseIndex, page, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource), page));
+                    }
+                }
+            }
+        }
+        if (waits.OnPages is { } pageWaits)
+        {
+            foreach (var (waiter, resource, ordinal) in pageWaits)
+            {
+                if (ReferenceEquals(resource.OwningTable ?? resource.Visit?.Table, table) && waiter.WaitingForMode is { } waitMode)
+                {
+                    var page = LockPageMap.PageIdOf(ordinal);
+                    (waiting ??= []).Add((PageRow(table, dbId, baseIndex, page, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource), page));
+                }
+            }
+        }
+
+        var granted = new List<((SessionToken Owner, int IndexId, int Page) Key, (int Spid, int Modes, LockResource? Resource) Hold)>(holds.Count);
+        foreach (var (key, hold) in holds)
+            granted.Add((key, hold));
+        granted.Sort(static (a, b) => a.Key.IndexId != b.Key.IndexId ? a.Key.IndexId.CompareTo(b.Key.IndexId)
+            : a.Key.Page != b.Key.Page ? a.Key.Page.CompareTo(b.Key.Page) : a.Hold.Spid.CompareTo(b.Hold.Spid));
+        foreach (var ((owner, indexId, page), (spid, modes, resource)) in granted)
+        {
+            if (Converted(modes) is { } mode)
+                yield return PageRow(table, dbId, indexId, page, mode, waiting: false, spid, owner, resource ?? (indexId == baseIndex && table.PageLocks.TryGetValue(page - LockPageMap.FirstPageId, out var pageLock) ? pageLock : null));
+        }
+        if (waiting is null)
+            yield break;
+        waiting.Sort(static (a, b) => a.Page != b.Page ? a.Page.CompareTo(b.Page) : a.Row.Spid.CompareTo(b.Row.Spid));
+        foreach (var (row, _) in waiting)
+            yield return row;
+
+        static void Note(Dictionary<(SessionToken, int, int), (int Spid, int Modes, LockResource? Resource)> holds, SessionToken owner, int indexId, int page, int spid, LockMode mode, LockResource? resource)
+        {
+            var key = (owner, indexId, page);
+            var held = holds.TryGetValue(key, out var existing) ? existing : (spid, 0, null);
+            holds[key] = (held.Spid, held.Modes | (1 << (int)mode), held.Resource ?? resource);
+        }
+    }
+
+    private static LockRow PageRow(HeapTable table, int dbId, int indexId, int page, LockMode mode, bool waiting, int spid, SessionToken owner, LockResource? resource) =>
+        new("PAGE", dbId, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{page}"), HobtOf(table, indexId), table.ObjectId, indexId, mode, waiting, spid, owner, resource);
+
+    /// <summary>The intent a row or key lock in <paramref name="mode"/> takes on its page, or null for a mode no row lock is held in.</summary>
+    internal static LockMode? IntentOf(LockMode mode) => mode switch
+    {
+        LockMode.Shared or LockMode.RangeSharedShared => LockMode.IntentShared,
+        LockMode.Update or LockMode.RangeSharedUpdate => LockMode.IntentUpdate,
+        LockMode.Exclusive or LockMode.RangeExclusiveExclusive or LockMode.RangeInsertNull => LockMode.IntentExclusive,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The one page lock real converts the set of <paramref name="modes"/> (a
+    /// bit per <see cref="LockMode"/>) one session holds on a page into.
+    /// </summary>
+    private static LockMode? Converted(int modes)
+    {
+        static bool Has(int set, LockMode mode) => (set & (1 << (int)mode)) != 0;
+        if (Has(modes, LockMode.Exclusive))
+            return LockMode.Exclusive;
+        var exclusiveIntent = Has(modes, LockMode.IntentExclusive) || Has(modes, LockMode.SharedIntentExclusive);
+        if (Has(modes, LockMode.Update))
+            return exclusiveIntent ? LockMode.UpdateIntentExclusive : LockMode.Update;
+        if (Has(modes, LockMode.Shared) || Has(modes, LockMode.SharedIntentExclusive))
+            return exclusiveIntent ? LockMode.SharedIntentExclusive : Has(modes, LockMode.IntentUpdate) ? LockMode.SharedIntentUpdate : LockMode.Shared;
+        if (exclusiveIntent)
+            return LockMode.IntentExclusive;
+        if (Has(modes, LockMode.IntentUpdate))
+            return LockMode.IntentUpdate;
+        return Has(modes, LockMode.IntentShared) ? LockMode.IntentShared : null;
     }
 
     /// <summary>
@@ -190,20 +345,20 @@ internal static class LockDmvs
     private static IEnumerable<LockRow> EnumerateTempTableLocks(BatchContext batch, Database tempdb, SimulatedDbConnection[] connections)
     {
         var dbId = tempdb.Id;
-        var waitsByResource = SnapshotWaiters(batch.Connection.Simulation, out var keyWaits);
+        var waits = SnapshotWaiters(batch.Connection.Simulation);
         foreach (var connection in connections)
         {
             if (connection.State != System.Data.ConnectionState.Open)
                 continue;
             foreach (var (_, table) in connection.TempTables)
             {
-                foreach (var row in EmitTableLocks(batch, table, dbId, waitsByResource, keyWaits))
+                foreach (var row in EmitTableLocks(batch, table, dbId, waits))
                     yield return row;
             }
         }
         foreach (var (_, table) in batch.Connection.Simulation.GlobalTempTables)
         {
-            foreach (var row in EmitTableLocks(batch, table, dbId, waitsByResource, keyWaits))
+            foreach (var row in EmitTableLocks(batch, table, dbId, waits))
                 yield return row;
         }
     }
@@ -215,13 +370,14 @@ internal static class LockDmvs
         var locks = sim.LockManager;
         var dbId = database.Id;
 
-        var waitsByResource = SnapshotWaiters(sim, out var keyWaits);
+        var waits = SnapshotWaiters(sim);
+        var waitsByResource = waits.ByResource;
 
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                foreach (var row in EmitTableLocks(batch, t, dbId, waitsByResource, keyWaits))
+                foreach (var row in EmitTableLocks(batch, t, dbId, waits))
                     yield return row;
             }
             foreach (var (_, v) in schema.Views)
@@ -423,7 +579,10 @@ internal static class LockDmvs
     /// </summary>
     private static byte[] LockOwnerAddress(LockRow row)
     {
-        var resourceHash = row.Resource is { } resource ? (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(resource) : (uint)row.DatabaseId;
+        // A page of a nonclustered index has no resource of its own here.
+        var resourceHash = row.Resource is { } resource ? (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(resource)
+            : row.Type == "PAGE" ? (uint)HashCode.Combine(row.Description, row.EntityId)
+            : (uint)row.DatabaseId;
         var address = new byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(address, 0x0000070000000000L
             + ((long)(resourceHash & 0xFFFFF) << 20) + ((row.Spid & 0x3FF) << 10) + (((int)row.Mode & 0xF) << 1) + (row.Waiting ? 1 : 0));
@@ -504,7 +663,11 @@ internal static class LockDmvs
     {
         if (WaitedLock(batch, waiter) is not { } row)
             return null;
-        var blocking = waiter.WaitingOnResource is { } resource && FindFirstBlockingHold(resource, waiter) is var (_, blockingMode) ? ModeAbbreviation(blockingMode) : ModeAbbreviation(row.Mode);
+        // A page lock waiting on the row locks under the page meets their
+        // intents on it there.
+        var blocking = waiter.WaitingOnResource is { } resource && FindFirstBlockingHold(resource, waiter) is var (_, blockingMode)
+            ? ModeAbbreviation(waiter.WaitRecord is { WaitingOnPage: >= 0 } && IntentOf(blockingMode) is { } intent ? intent : blockingMode)
+            : ModeAbbreviation(row.Mode);
         var id = LockBlockId(row.Resource);
         var invariant = System.Globalization.CultureInfo.InvariantCulture;
         switch (row.Type)
@@ -540,31 +703,57 @@ internal static class LockDmvs
         WaitedLock(batch, waiter) is { } row ? LockOwnerAddress(row) : null;
 
     /// <summary>
+    /// The waits <see cref="EnumerateDmTranLocks"/> lists as WAIT rows, read
+    /// once per enumeration (<see cref="SnapshotWaiters"/>).
+    /// </summary>
+    private sealed class Waits
+    {
+        /// <summary>The connections waiting on each resource, reported on it.</summary>
+        public readonly Dictionary<LockResource, List<SimulatedDbConnection>> ByResource = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>
+        /// The waits for a key another row carries
+        /// (<see cref="SessionToken.WaitingOnKey"/>), reported on the key.
+        /// </summary>
+        public List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? OnKeys;
+
+        /// <summary>
+        /// The waits of a page lock on the row locks under it
+        /// (<see cref="SessionToken.WaitingOnPage"/>), reported on the page, by
+        /// its ordinal in <see cref="RealPageLayout"/>.
+        /// </summary>
+        public List<(SimulatedDbConnection Waiter, LockResource Resource, int Page)>? OnPages;
+    }
+
+    /// <summary>
     /// Reverse-lookup map: for each connection currently waiting, find
     /// the resource it's blocked on. Used by
     /// <see cref="EnumerateDmTranLocks"/> to emit WAIT rows alongside the
-    /// GRANT rows for that same resource. A wait for a key another row
-    /// carries (<see cref="SessionToken.WaitingOnKey"/>) goes to
-    /// <paramref name="keyWaits"/> instead, reported on the key.
+    /// GRANT rows for that same resource, or on the key or page the wait
+    /// stands for.
     /// </summary>
-    private static Dictionary<LockResource, List<SimulatedDbConnection>> SnapshotWaiters(Simulation sim, out List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits)
+    private static Waits SnapshotWaiters(Simulation sim)
     {
-        var map = new Dictionary<LockResource, List<SimulatedDbConnection>>(ReferenceEqualityComparer.Instance);
-        keyWaits = null;
+        var waits = new Waits();
         foreach (var conn in sim.SnapshotConnections())
         {
             if (conn.WaitingOnResource is not { } resource)
                 continue;
             if (conn.WaitRecord is { WaitingOnKey: { } key } record)
             {
-                (keyWaits ??= []).Add((conn, resource, key, record.WaitingOnKeyIndexId));
+                (waits.OnKeys ??= []).Add((conn, resource, key, record.WaitingOnKeyIndexId));
                 continue;
             }
-            if (!map.TryGetValue(resource, out var list))
-                map[resource] = list = [];
+            if (conn.WaitRecord is { WaitingOnPage: >= 0 } paged)
+            {
+                (waits.OnPages ??= []).Add((conn, resource, paged.WaitingOnPage));
+                continue;
+            }
+            if (!waits.ByResource.TryGetValue(resource, out var list))
+                waits.ByResource[resource] = list = [];
             list.Add(conn);
         }
-        return map;
+        return waits;
     }
 
     /// <summary>
@@ -586,14 +775,16 @@ internal static class LockDmvs
     /// the row-lock dictionary with its slot and is found through
     /// <see cref="HeapTable.SupersededKeyImages"/>.
     /// </summary>
-    private static IEnumerable<LockRow> EmitRowLocks(
+    private static IEnumerable<(LockRow Row, int Page)> EmitRowLocks(
         BatchContext batch,
         HeapTable table,
         int dbId,
-        Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource,
-        List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits,
-        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded)
+        Waits waits,
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded,
+        LockPageMap pages,
+        List<(SessionToken Owner, int Spid, int IndexId, int Page)> insertedPast)
     {
+        var waitersByResource = waits.ByResource;
         // A row of a clustered table is its clustered key, which is what real
         // locks and reports as KEY; only a heap's row is a RID.
         var locks = batch.Connection.Simulation.LockManager;
@@ -632,33 +823,60 @@ internal static class LockDmvs
             var live = table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex);
             var description = rowGroup is not null && (live ?? PreImageOf(table, address, holders)) is { } image
                 ? DescribeImageKey(table, rowGroup, image)
-                : RidDescription(table, address);
+                : RidDescription(pages, address);
+            var page = pages.PageOfRow(address);
             foreach (var row in EmitRowsForResource(locks, rowType, dbId, description, rowHobt, table.ObjectId, rowIndexId, resource, waitersByResource, folded))
             {
                 if (rowGroup is null || shown.Add((rowGroup, description, row.Spid, ModeAbbreviation(row.Mode), row.Waiting)))
-                    yield return row;
+                    yield return (row, page);
             }
+            if (rowGroup is not null && resource.InsertedBy is { } inserter && pages.PageInsertPassed(address) is { } passed)
+                insertedPast.Add((inserter, inserter.Acting.Spid, rowIndexId, passed));
             foreach (var hold in holders)
             {
                 if (hold.Mode != LockMode.Exclusive)
                     continue;
-                foreach (var (group, key) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
+                foreach (var (group, key, keyImage) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
                 {
                     if (!shown.Add((group, key, hold.Owner.Acting.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
                         continue;
-                    yield return new LockRow("KEY", dbId, key, HobtOf(table, group.IndexId), table.ObjectId, group.IndexId, LockMode.Exclusive, waiting: false, hold.Owner.Acting.Spid, hold.Owner, resource);
+                    yield return (new LockRow("KEY", dbId, key, HobtOf(table, group.IndexId), table.ObjectId, group.IndexId, LockMode.Exclusive, waiting: false, hold.Owner.Acting.Spid, hold.Owner, resource),
+                        pages.PageOfImage(group, keyImage));
+                    if (ReferenceEquals(resource.InsertedBy, hold.Owner) && pages.PageInsertPassed(group, keyImage) is { } keyPassed)
+                        insertedPast.Add((hold.Owner, hold.Owner.Acting.Spid, group.IndexId, keyPassed));
                 }
             }
         }
 
-        if (keyWaits is null)
+        if (waits.OnKeys is not { } keyWaits)
             yield break;
         foreach (var (waiter, resource, key, keyIndexId) in keyWaits)
         {
             if (!ReferenceEquals(resource.OwningTable, table) || waiter.WaitingForMode is not { } waitMode)
                 continue;
-            yield return new LockRow("KEY", dbId, key, HobtOf(table, keyIndexId), table.ObjectId, keyIndexId, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource);
+            yield return (new LockRow("KEY", dbId, key, HobtOf(table, keyIndexId), table.ObjectId, keyIndexId, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource),
+                KeyWaitPage(table, pages, resource, keyIndexId));
         }
+    }
+
+    /// <summary>
+    /// The page of the key a uniqueness or foreign-key check waits on, which
+    /// it waits for through the lock of the row carrying it: the row's own
+    /// page for its table's base rowset, its entry's in a nonclustered index.
+    /// </summary>
+    private static int KeyWaitPage(HeapTable table, LockPageMap pages, LockResource rowLock, int indexId)
+    {
+        if (rowLock.RowAddress is not { } address)
+            return LockPageMap.FirstPageId;
+        if (indexId != BaseIndexIdOf(table) && table.Heap.ReadSlotBytes(address.PageIndex, address.SlotIndex) is { } image)
+        {
+            foreach (var (_, group) in table.KeyLockGroups)
+            {
+                if (group.IndexId == indexId)
+                    return pages.PageOfImage(group, image);
+            }
+        }
+        return pages.PageOfRow(address);
     }
 
     // The image a holder of the row's lock superseded, for a row whose slot no
@@ -680,10 +898,10 @@ internal static class LockDmvs
     /// <see cref="EmitRowLocks"/>). A key the session holds a key lock on
     /// already is reported by that lock's own row.
     /// </summary>
-    private static List<(KeyLockGroup Group, string Description)> IndexKeysWritten(
+    private static List<(KeyLockGroup Group, string Description, byte[] Image)> IndexKeysWritten(
         BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live)
     {
-        var keys = new List<(KeyLockGroup Group, string Description)>();
+        var keys = new List<(KeyLockGroup Group, string Description, byte[] Image)>();
         var locks = batch.Connection.Simulation.LockManager;
         var pre = table.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryGetValue(address, out var entry) ? entry.Image : null;
         var inserted = ReferenceEquals(resource.InsertedBy, owner);
@@ -733,8 +951,12 @@ internal static class LockDmvs
                         return;
                 }
             }
-            if (!keys.Contains((group, description)))
-                keys.Add((group, description));
+            foreach (var (listed, listedDescription, _) in keys)
+            {
+                if (ReferenceEquals(listed, group) && listedDescription == description)
+                    return;
+            }
+            keys.Add((group, description, image));
         }
     }
 
@@ -864,45 +1086,13 @@ internal static class LockDmvs
     }
 
     /// <summary>
-    /// The page locks of <paramref name="table"/>, a <c>PAGLOCK</c> read's or
-    /// write's S, U and X, in page order, described as real describes a page,
-    /// <c>file:page</c>. The intent locks a row lock takes on its page while
-    /// such a lock is held stay out, as every other row lock's page intent
-    /// does here (see <c>docs/claude/locking.md</c>).
-    /// </summary>
-    private static IEnumerable<LockRow> EmitPageLocks(
-        LockManager locks, HeapTable table, int dbId, Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource)
-    {
-        var pages = table.PageLocks.ToArray();
-        Array.Sort(pages, static (a, b) => a.Key.CompareTo(b.Key));
-        var indexId = BaseIndexIdOf(table);
-        var hobt = HobtOf(table, indexId);
-        foreach (var (page, resource) in pages)
-        {
-            if (resource.Holders.Count == 0 && !waitsByResource.ContainsKey(resource))
-                continue;
-            Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? intents = null;
-            foreach (var hold in locks.HoldersOf(resource))
-            {
-                if (hold.Mode is LockMode.IntentShared or LockMode.IntentUpdate or LockMode.IntentExclusive)
-                    (intents ??= [])[(resource, hold.Owner, hold.Mode)] = null;
-            }
-            foreach (var row in EmitRowsForResource(locks, "PAGE", dbId, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + page}"), hobt, table.ObjectId, indexId, resource, waitsByResource, intents))
-                yield return row;
-        }
-    }
-
-    /// <summary>
     /// A heap row's <c>RID</c> description, <c>file:page:slot</c>, on the
     /// page real's layout puts it on, numbered as the <c>PAGE</c> locks
     /// number theirs (probed 2026-10-16 against SQL Server 2025:
     /// <c>1:552:1</c> beside its page's <c>1:552</c>).
     /// </summary>
-    private static string RidDescription(HeapTable table, (int PageIndex, int SlotIndex) address) =>
-        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + RealPageLayout.For(table).PageOf(address)}:{address.SlotIndex}");
-
-    /// <summary>The page id the first page of a table's layout is described by.</summary>
-    private const int FirstPageId = 8;
+    private static string RidDescription(LockPageMap pages, (int PageIndex, int SlotIndex) address) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{pages.PageOfRow(address)}:{address.SlotIndex}");
 
     /// <summary>
     /// A <c>PAGLOCK</c> write's row X under its own X on the row's page, which

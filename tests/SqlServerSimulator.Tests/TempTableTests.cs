@@ -645,7 +645,7 @@ public sealed class TempTableTests
 
     /// <summary>
     /// <c>sys.dm_tran_locks</c> lists a temp table's locks in tempdb: a
-    /// global one's row and key locks as any table's, a local one's object
+    /// global one's row, key and page locks as any table's, a local one's object
     /// lock, which a write holds in X to the transaction's end (probed
     /// 2026-10-09 against SQL Server 2025).
     /// </summary>
@@ -659,7 +659,7 @@ public sealed class TempTableTests
         var spid = writer.CreateCommand("select @@spid").ExecuteScalar();
         Exec(writer, "begin tran; update ##g set v = 1 where k = 1; update #l set v = 1");
         CollectionAssert.AreEqual(
-            new[] { "2 KEY X", "2 OBJECT IX", "2 OBJECT X" },
+            new[] { "2 KEY X", "2 OBJECT IX", "2 OBJECT X", "2 PAGE IX" },
             observer.CreateCommand($"""
                 select string_agg(concat(resource_database_id, ' ', resource_type, ' ', request_mode), '|') within group (order by resource_type, request_mode)
                 from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'

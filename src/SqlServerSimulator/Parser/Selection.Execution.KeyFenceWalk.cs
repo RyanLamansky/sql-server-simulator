@@ -56,6 +56,7 @@ partial class Selection
         var lastPage = -1;
         var addresses = batch.CurrentStatement.RowAddresses;
         var tuple = new byte[]?[1];
+        LockResource? rejected = null;
         var qualifying = qualifier is not null && plan.RowMode is not null;
         RuntimeContext runtime = default;
         if (qualifying)
@@ -107,6 +108,10 @@ partial class Selection
                 // miss, the next key's range — is had before its row is read.
                 batch.AcquireKeyFence(table, group, commons, [interval], mode, KeyFenceKind.Read, lookupRows: false);
             }
+            // The page the seek lands on, which the key past the interval's
+            // lock doesn't name.
+            if (!descending && interval.Lower is { } landing)
+                batch.NoteSeekLanding(table, group, landing, interval.LowerInclusive, mode);
             var past = keys[^1].Key;
             keys.RemoveAt(keys.Count - 1);
             if (descending && !point)
@@ -224,7 +229,7 @@ partial class Selection
                         tuple[0] = bytes;
                         if (!Qualifies(qualifier!.Conjuncts, runtime))
                         {
-                            batch.ReleaseRowLockAcquisition(table, page, slot, plan.RowMode!.Value);
+                            batch.ReleaseRejectedRow(table, page, slot, plan.RowMode!.Value, ref rejected);
                             continue;
                         }
                     }

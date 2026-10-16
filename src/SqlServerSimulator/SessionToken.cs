@@ -161,6 +161,15 @@ internal sealed class SessionToken(int spid)
     public int WaitingOnKeyIndexId;
 
     /// <summary>
+    /// The page a <c>PAGLOCK</c> lock waits for while it waits on
+    /// <see cref="WaitingOnResource"/>, the lock of a row on the page: real's
+    /// page lock waits on the intent the row's holder took on the page, which
+    /// the simulator doesn't take, so the lock DMVs report the wait on the
+    /// page, by its ordinal in <see cref="Storage.RealPageLayout"/>. -1 otherwise.
+    /// </summary>
+    public int WaitingOnPage = -1;
+
+    /// <summary>
     /// <c>Environment.TickCount64</c> when the session's current wait began —
     /// a blocked lock acquisition or a <c>WAITFOR</c> — read as
     /// <c>sys.dm_exec_requests.wait_time</c>. Meaningful only while waiting.

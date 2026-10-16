@@ -64,6 +64,25 @@ internal sealed class RealPageLayout
     public int PageOf((int Page, int Slot) address) =>
         this.pageOf.TryGetValue(address, out var page) ? page : Math.Max(this.PageCount - 1, 0);
 
+    /// <summary>The rows on each page, by address, built when first asked for.</summary>
+    private List<(int Page, int Slot)>[]? rowsByPage;
+
+    /// <summary>The rows on <paramref name="page"/>, by address.</summary>
+    public List<(int Page, int Slot)> RowsOn(int page)
+    {
+        var byPage = Volatile.Read(ref this.rowsByPage);
+        if (byPage is null)
+        {
+            byPage = new List<(int, int)>[this.PageCount];
+            for (var i = 0; i < byPage.Length; i++)
+                byPage[i] = [];
+            foreach (var (address, on) in this.pageOf)
+                byPage[on].Add(address);
+            Volatile.Write(ref this.rowsByPage, byPage);
+        }
+        return (uint)page < (uint)byPage.Length ? byPage[page] : [];
+    }
+
     /// <summary><paramref name="table"/>'s layout as its rows stand, computed again once the heap has changed.</summary>
     public static RealPageLayout For(HeapTable table)
     {

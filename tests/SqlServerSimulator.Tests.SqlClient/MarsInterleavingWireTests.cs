@@ -88,7 +88,7 @@ public sealed class MarsInterleavingWireTests
         await using var rows = await this.ReadAsync(connection, "select k, v from big", 2);
         // Another request of the session runs once the reader has suspended.
         AreEqual(1222, await this.AttemptAsync(connection, "alter table big add c int"));
-        AreEqual("KEY S, OBJECT IS", await this.LocksAsync(observer, spid));
+        AreEqual("KEY S, OBJECT IS, PAGE IS", await this.LocksAsync(observer, spid));
         AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'b' where k = 1"));
         AreEqual(0, await this.AttemptAsync(connection, "update big set v = 'u' where k = 1500"));
         AreEqual(0, await this.AttemptAsync(connection, "delete big where k = 1700"));

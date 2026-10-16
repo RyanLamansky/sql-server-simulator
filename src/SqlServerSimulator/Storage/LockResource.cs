@@ -73,6 +73,20 @@ internal enum LockMode
     /// them.
     /// </summary>
     RangeInsertNull,
+
+    /// <summary>
+    /// Shared with intent update (SIU) — the one lock real converts a page's S
+    /// and the IU of a row lock under it into; reported by the lock DMVs
+    /// (<see cref="LockDmvs"/>), never requested.
+    /// </summary>
+    SharedIntentUpdate,
+
+    /// <summary>
+    /// Update with intent exclusive (UIX) — the one lock real converts a page's
+    /// U and the IX of a row lock under it into; reported by the lock DMVs,
+    /// never requested.
+    /// </summary>
+    UpdateIntentExclusive,
 }
 
 /// <summary>
@@ -130,6 +144,12 @@ internal sealed class LockResource
 
     /// <inheritdoc cref="PageOfTable"/>
     public int PageOrdinal;
+
+    /// <summary>
+    /// The page a row-locking read reached without keeping a lock there, for a
+    /// page visit's resource (<see cref="Storage.PageVisit"/>); <c>null</c> otherwise.
+    /// </summary>
+    public PageVisit? Visit;
 
     /// <summary>
     /// The row this resource locks, for a row lock; <c>null</c> otherwise.
@@ -388,8 +408,9 @@ internal sealed class LockManager
     /// a key lock — a row of a table with a clustered index is one — 45 for a
     /// heap's row, 56 for a table or schema lock (probed 2026-09-28 against
     /// SQL Server 2025), 48 for an insert's test of a fenced gap (probed
-    /// 2026-10-03) and 52 for a page lock (probed 2026-10-09). A uniqueness
-    /// check's wait reports 47 (<c>Simulation.AwaitUncommittedKeyWriters</c>).
+    /// 2026-10-03) and 52 for a page lock, 45 for a heap's (probed 2026-10-09
+    /// and 2026-10-16). A uniqueness check's wait reports 47
+    /// (<c>Simulation.AwaitUncommittedKeyWriters</c>).
     /// A name's lock is real's key lock on its catalog row, 51 (probed
     /// 2026-10-10), save where a definition statement waits on it
     /// (<c>BatchContext.LockDefinitionName</c>).
@@ -398,7 +419,7 @@ internal sealed class LockManager
     {
         _ when mode == LockMode.RangeInsertNull => 48,
         { KeyGroup: not null } or { Definition: not null } => 51,
-        { PageOfTable: not null } => 52,
+        { PageOfTable: { } paged } => paged.HasClusteredIndex() ? (byte)52 : (byte)45,
         { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? (byte)51 : (byte)45,
         _ => 56,
     };
@@ -670,6 +691,9 @@ internal sealed class LockManager
                         this.CountBlockingHold(owner, mode, -1);
                         if (resource.PageOfTable is { } paged && mode is LockMode.Shared or LockMode.Update or LockMode.Exclusive)
                             _ = Interlocked.Decrement(ref paged.ActivePageLocks);
+                        // A scan's run of rows let go of goes with its hold.
+                        if (resource.Visit is { IsRowRun: true } run && resource.Holders.Count == 0)
+                            _ = run.Table.RowVisits.TryRemove(resource, out _);
                         if (resource.OwningTable is { } table)
                         {
                             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
