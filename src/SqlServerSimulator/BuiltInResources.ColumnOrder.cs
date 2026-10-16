@@ -50,10 +50,6 @@ internal static partial class BuiltInResources
             "is_data_deletion_filter_column", "ledger_view_column_type", "ledger_view_column_type_desc", "is_dropped_ledger_column", "vector_dimensions", "vector_base_type",
             "vector_base_type_desc",
         ],
-        ["sys.dm_os_waiting_tasks"] =
-        [
-            "session_id", "wait_type", "blocking_session_id", "resource_description",
-        ],
         ["sys.database_files"] =
         [
             "file_id", "file_guid", "type", "type_desc", "data_space_id", "name", "physical_name", "state", "state_desc", "size",

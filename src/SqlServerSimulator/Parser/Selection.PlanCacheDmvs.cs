@@ -146,20 +146,7 @@ partial class Selection
         if (!(start == 0 && end == -1))
             statements = [.. statements.Where(statement => statement.StartOffset == start && (end == -1 || statement.EndOffset == end)).Take(1)];
 
-        string? document = null;
-        if (statements.Length > 0 && plan.Text is { } planText)
-        {
-            var xml = Simulation.OpenShowPlan();
-            for (var i = 0; i < statements.Length; i++)
-            {
-                var statement = statements[i];
-                var from = Math.Min(statement.StartOffset / 2, planText.Length);
-                var through = Math.Min((statement.EndOffset / 2) + 1, planText.Length);
-                _ = Simulation.AppendShowPlanStatement(xml, planText[from..Math.Max(from, through)], i + 1, statement.Shape, statement.StatementSqlHandle,
-                    statement.ContextSettingsId, plan.Module?.ObjectId ?? 0, statement.ParameterizationType, retrievedFromCache: true, plan.CompatibilityLevel, plan.Key.SetOptions);
-            }
-            document = xml.Append(Simulation.ShowPlanClose).ToString();
-        }
+        var document = ShowPlanOf(plan, statements);
         var planValue = document is null
             ? SqlValue.Null(text ? TextQueryPlanSchema[4] : SqlType.Xml)
             : text ? SqlValue.FromNVarchar((NVarcharSqlType)TextQueryPlanSchema[4], document) : SqlValue.FromXml(document);
@@ -177,6 +164,87 @@ partial class Selection
 
         static int OffsetArgument(Expression? argument, RuntimeContext runtime, int byDefault) =>
             argument?.Run(runtime) is { IsNull: false } value ? value.CoerceTo(SqlType.Int32).AsInt32 : byDefault;
+    }
+
+    /// <summary>The ShowPlan XML document of <paramref name="statements"/> of <paramref name="plan"/>, null for none.</summary>
+    private static string? ShowPlanOf(CachedPlan plan, CachedStatementStats[] statements)
+    {
+        if (statements.Length == 0 || plan.Text is not { } planText)
+            return null;
+        var xml = Simulation.OpenShowPlan();
+        for (var i = 0; i < statements.Length; i++)
+        {
+            var statement = statements[i];
+            var from = Math.Min(statement.StartOffset / 2, planText.Length);
+            var through = Math.Min((statement.EndOffset / 2) + 1, planText.Length);
+            _ = Simulation.AppendShowPlanStatement(xml, planText[from..Math.Max(from, through)], i + 1, statement.Shape, statement.StatementSqlHandle,
+                statement.ContextSettingsId, plan.Module?.ObjectId ?? 0, statement.ParameterizationType, retrievedFromCache: true, plan.CompatibilityLevel, plan.Key.SetOptions);
+        }
+        return xml.Append(Simulation.ShowPlanClose).ToString();
+    }
+
+    private static readonly SqlType[] QueryStatisticsXmlSchema =
+    [
+        SqlType.SmallInt, SqlType.Int32, VarbinarySqlType.Get(64), VarbinarySqlType.Get(64), SqlType.Xml, SqlType.Int32, SqlType.Int32,
+    ];
+
+    private static readonly string[] QueryStatisticsXmlColumnNames =
+        ["session_id", "request_id", "sql_handle", "plan_handle", "query_plan", "statement_start_offset", "statement_end_offset"];
+
+    private static readonly bool[] QueryStatisticsXmlNullability = [false, false, true, true, true, false, false];
+
+    /// <summary>
+    /// Built-in system TVF <c>sys.dm_exec_query_statistics_xml(session_id)</c>:
+    /// a row per request the session is running a query in, with the
+    /// request's handles and statement offsets as <c>sys.dm_exec_requests</c>
+    /// reports them and the live ShowPlan XML of the statement
+    /// (<c>Simulation.LiveQueryPlan</c>). A request in a statement with no
+    /// query plan, a session running nothing, and a NULL id answer no rows
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    public static Selection ParseQueryStatisticsXml(ParserContext context, string functionName)
+    {
+        var arguments = ParseSystemFunctionArguments(context, functionName, 1);
+        return new Selection(QueryStatisticsXmlSchema, QueryStatisticsXmlColumnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            (batch, outerResolver) => EnumerateQueryStatisticsXml(arguments[0], batch, outerResolver))
+        {
+            ColumnNullability = QueryStatisticsXmlNullability,
+        };
+    }
+
+    private static List<byte[]> EnumerateQueryStatisticsXml(Expression sessionExpr, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        BuiltInResources.DemandServerPerformanceState(batch, policyWording: false);
+        var value = sessionExpr.Run(new RuntimeContext(outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n)), batch));
+        if (value.IsNull)
+            return [];
+        var sessionId = value.CoerceTo(SqlType.Int32).AsInt32;
+        var simulation = batch.Connection.Simulation;
+        SimulatedDbConnection? session = null;
+        foreach (var connection in simulation.SnapshotConnections())
+        {
+            if (connection.Spid == sessionId)
+                session = connection;
+        }
+        var rows = new List<byte[]>();
+        if (session?.Session.BatchText is not { } batchText)
+            return rows;
+        foreach (var request in BuiltInResources.RequestRows(batch))
+        {
+            if (request[0].AsInt16 != sessionId || request[3].AsString is "sleeping")
+                continue;
+            if (simulation.LiveQueryPlan(session, batchText, session.Session.StatementStartIndex, session.CurrentDatabase) is not { } document)
+                continue;
+            rows.Add(RowEncoder.EncodeRow(QueryStatisticsXmlSchema,
+            [
+                request[0], request[1], request[5], request[8], SqlValue.FromXml(document),
+                request[6].IsNull ? SqlValue.FromInt32(0) : request[6], request[7].IsNull ? SqlValue.FromInt32(-1) : request[7],
+            ]));
+            break;
+        }
+        return rows;
     }
 
     /// <summary>

@@ -225,18 +225,17 @@ partial class Simulation
         var blankResource = SqlValue.FromNVarchar(new string(' ', 32));
         foreach (var row in LockDmvs.EnumerateDmTranLocks(batch, batch.CurrentDatabase))
         {
-            var type = row[0].AsString switch
+            var type = row.Type switch
             {
                 "DATABASE" => "DB",
                 "OBJECT" => "TAB",
                 "APPLICATION" => "APP",
                 var other => other,
             };
-            var spid = row[6].AsInt32;
-            var entity = row[3].IsNull ? 0 : (int)row[3].AsInt64;
-            rows.Add((spid, row[1].AsInt32, entity, [
-                SqlValue.FromInt16((short)spid), SqlValue.FromInt16((short)row[1].AsInt32), SqlValue.FromInt32(entity), SqlValue.FromInt16(0),
-                SqlValue.FromNVarchar(type), type is "TAB" or "DB" ? blankResource : SqlValue.FromNVarchar(row[2].AsString.TrimEnd().PadRight(32)), SqlValue.FromNVarchar(row[4].AsString), SqlValue.FromNVarchar(row[5].AsString),
+            rows.Add((row.Spid, row.DatabaseId, row.ObjectId, [
+                SqlValue.FromInt16((short)row.Spid), SqlValue.FromInt16((short)row.DatabaseId), SqlValue.FromInt32(row.ObjectId), SqlValue.FromInt16((short)row.IndexId),
+                SqlValue.FromNVarchar(type), type is "TAB" or "DB" ? blankResource : SqlValue.FromNVarchar(row.Description.PadRight(32)),
+                SqlValue.FromNVarchar(LockDmvs.ModeAbbreviation(row.Mode)), SqlValue.FromNVarchar(row.Waiting ? "WAIT" : "GRANT"),
             ]));
         }
         var first = values[0].IsNull ? (int?)null : values[0].AsInt32;

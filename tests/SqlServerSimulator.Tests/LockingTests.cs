@@ -615,15 +615,17 @@ public sealed class LockingTests
         _ = sim.ExecuteNonQuery("create table t (id int)");
         using var conn = sim.CreateOpenConnection();
         _ = conn.CreateCommand("begin tran; insert t values (1)").ExecuteNonQuery();
-        var count = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where resource_associated_entity_id = object_id('t') and request_status = 'GRANT'").ExecuteScalar()!;
+        // The object lock names the table, the row lock the heap's hobt_id.
+        const string OfT = "resource_associated_entity_id in (object_id('t'), (select hobt_id from sys.partitions where object_id = object_id('t')))";
+        var count = (int)conn.CreateCommand($"select count(*) from sys.dm_tran_locks where {OfT} and request_status = 'GRANT'").ExecuteScalar()!;
         IsGreaterThanOrEqualTo(2, count);
         // At least one IX entry (table-level) and at least one X entry (row-level).
-        var hasIx = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode = 'IX' and resource_associated_entity_id = object_id('t')").ExecuteScalar()! > 0;
-        var hasX = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode = 'X' and resource_associated_entity_id = object_id('t')").ExecuteScalar()! > 0;
+        var hasIx = (int)conn.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode = 'IX' and resource_type = 'OBJECT' and resource_associated_entity_id = object_id('t')").ExecuteScalar()! > 0;
+        var hasX = (int)conn.CreateCommand($"select count(*) from sys.dm_tran_locks where request_mode = 'X' and resource_type = 'RID' and {OfT}").ExecuteScalar()! > 0;
         IsTrue(hasIx);
         IsTrue(hasX);
         _ = conn.CreateCommand("rollback").ExecuteNonQuery();
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_tran_locks where resource_associated_entity_id = object_id('t')"));
+        AreEqual(0, sim.ExecuteScalar($"select count(*) from sys.dm_tran_locks where {OfT}"));
     }
 
     [TestMethod]

@@ -60,7 +60,7 @@ static class Extensions
         var running = Task.Run(() => FirstColumn(connection, sql), cancellationToken);
         using var observer = simulation.CreateOpenConnection();
         var waited = System.Diagnostics.Stopwatch.StartNew();
-        while ((int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {spid}").ExecuteScalar()! == 0)
+        while ((int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {spid} and wait_type like 'LCK[_]%'").ExecuteScalar()! == 0)
         {
             if (running.IsCompleted)
                 Assert.Fail($"expected `{sql}` to wait; it finished: {(running.IsFaulted ? running.Exception!.InnerException!.Message : "ok")}");

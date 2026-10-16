@@ -981,6 +981,47 @@ internal static partial class BuiltInResources
     });
 
     /// <summary>
+    /// The system functions the simulator models beside the catalog views —
+    /// the dynamic-management and catalog table-valued functions a <c>FROM</c>
+    /// clause reads and the two scalar <c>fn_varbinto…</c> ones — under real's
+    /// object ids and types, inline (<c>IF</c>), multi-statement (<c>TF</c>)
+    /// or scalar (<c>FN</c>), read from SQL Server 2025's
+    /// <c>sys.system_objects</c> (2026-10-16). <c>fn_helpcollations</c> and
+    /// <c>fn_validate_plan_guide</c> list as the catalog views they are
+    /// registered as.
+    /// </summary>
+    private static readonly (string Name, int ObjectId, string Type)[] SystemFunctions =
+    [
+        ("dm_db_incremental_stats_properties", -280166929, "IF"),
+        ("dm_db_index_operational_stats", -500638940, "IF"),
+        ("dm_db_index_physical_stats", -333557461, "IF"),
+        ("dm_db_log_info", -526971907, "IF"),
+        ("dm_db_log_stats", -914610379, "IF"),
+        ("dm_db_missing_index_columns", -963369315, "IF"),
+        ("dm_db_stats_histogram", -223773163, "IF"),
+        ("dm_db_stats_properties", -644579219, "IF"),
+        ("dm_exec_cursors", -838405656, "IF"),
+        ("dm_exec_describe_first_result_set", -442122219, "IF"),
+        ("dm_exec_input_buffer", -757872378, "IF"),
+        ("dm_exec_plan_attributes", -69842288, "IF"),
+        ("dm_exec_query_plan", -430121581, "IF"),
+        ("dm_exec_query_statistics_xml", -523604714, "IF"),
+        ("dm_exec_sql_text", -245973352, "IF"),
+        ("dm_exec_text_query_plan", -759672739, "IF"),
+        ("dm_fts_parser", -970703799, "IF"),
+        ("dm_io_virtual_file_stats", -806439612, "IF"),
+        ("dm_os_volume_stats", -638989397, "IF"),
+        ("dm_sql_referenced_entities", -481970182, "IF"),
+        ("dm_sql_referencing_entities", -686951493, "IF"),
+        ("fn_builtin_permissions", -413116802, "IF"),
+        ("fn_listextendedproperty", -572068538, "TF"),
+        ("fn_my_permissions", -462384620, "TF"),
+        ("fn_varbintohexstr", -565035985, "FN"),
+        ("fn_varbintohexsubstring", -403477184, "FN"),
+        ("fn_virtualfilestats", -337551382, "TF"),
+    ];
+
+    /// <summary>
     /// Every system object in object-id listing order, built once: the
     /// <c>sys.system_objects</c> rows, the system half of <c>sys.all_objects</c>,
     /// and what <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> read a negative
@@ -1008,6 +1049,15 @@ internal static partial class BuiltInResources
             objects.Add(IsInlineFunction(view)
                 ? new SystemObject(view.ObjectId, view.Name, schemaId, "IF", "SQL_INLINE_TABLE_VALUED_FUNCTION")
                 : new SystemObject(view.ObjectId, view.Name, schemaId, "V ", "VIEW"));
+        }
+        foreach (var (name, objectId, type) in SystemFunctions)
+        {
+            objects.Add(new SystemObject(objectId, name, Database.SysSchemaId, type, type switch
+            {
+                "FN" => "SQL_SCALAR_FUNCTION",
+                "IF" => "SQL_INLINE_TABLE_VALUED_FUNCTION",
+                _ => "SQL_TABLE_VALUED_FUNCTION",
+            }));
         }
         foreach (var proc in SystemProcedureNames)
         {

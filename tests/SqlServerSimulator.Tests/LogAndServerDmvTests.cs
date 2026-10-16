@@ -82,8 +82,10 @@ public sealed class LogAndServerDmvTests
         AreEqual("0:::", Read(State));
         _ = Read("select * from t with (holdlock)");
         AreEqual("1:3:0:0", Read(State));
+        // The log records are the transaction's begin and one per row written
+        // (probed 2026-10-16 against SQL Server 2025).
         _ = Read("update t set a = 2; insert t values (3)");
-        AreEqual("1:4:2:1", Read(State));
+        AreEqual("1:4:3:1", Read(State));
         _ = Read("rollback");
         AreEqual("0:::", Read(State));
     }

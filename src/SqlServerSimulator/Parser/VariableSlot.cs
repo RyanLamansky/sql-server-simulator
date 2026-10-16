@@ -15,7 +15,16 @@ namespace SqlServerSimulator.Parser;
 /// </summary>
 internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength, SqlValue value, DbParameter? parameter)
 {
-    public readonly SqlType DeclaredType = declaredType;
+    /// <summary>
+    /// The variable's type. A <c>sysname</c> declaration holds the
+    /// <c>nvarchar(128)</c> it aliases at a variable's coercible-default
+    /// rank, since <see cref="SystemNameSqlType"/> carries a column's
+    /// implicit one: a <c>sysname</c> variable compared with a catalog
+    /// column in another collation takes the column's (probed 2026-10-16
+    /// against SQL Server 2025: <c>sys.objects.type_desc LIKE @sysname</c>
+    /// runs where an implicit-against-implicit pair is Msg 468).
+    /// </summary>
+    public readonly SqlType DeclaredType = declaredType is SystemNameSqlType ? SysnameVariable : declaredType;
 
     /// <summary>
     /// Declared max length for variable-length string / binary types (e.g.
@@ -25,7 +34,9 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
 
-    public SqlValue Value = value;
+    public SqlValue Value = value.IsNull && declaredType is SystemNameSqlType ? SqlValue.Null(SysnameVariable) : value;
+
+    private static readonly NVarcharSqlType SysnameVariable = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
 
     public readonly DbParameter? Parameter = parameter;
 

@@ -19,6 +19,9 @@ internal sealed class Login7Request
     public readonly string AppName;
     public readonly string Database;
 
+    /// <summary>The client's process id, LOGIN7's <c>ClientPID</c>.</summary>
+    public readonly int ClientProcessId;
+
     /// <summary>
     /// The JSON support version the client's feature extension asked for
     /// (<c>FEATUREEXT_JSONSUPPORT</c>, 0x0D), 0 when it asked for none.
@@ -31,9 +34,10 @@ internal sealed class Login7Request
     /// </summary>
     public byte VectorSupportVersion;
 
-    private Login7Request(uint tdsVersion, int packetSize, string hostName, string userName, string password, string appName, string database)
+    private Login7Request(uint tdsVersion, int packetSize, int clientProcessId, string hostName, string userName, string password, string appName, string database)
     {
         this.TdsVersion = tdsVersion;
+        this.ClientProcessId = clientProcessId;
         this.PacketSize = packetSize;
         this.HostName = hostName;
         this.UserName = userName;
@@ -57,6 +61,7 @@ internal sealed class Login7Request
 
         var tdsVersion = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
         var packetSize = BinaryPrimitives.ReadInt32LittleEndian(payload[8..]);
+        var clientProcessId = BinaryPrimitives.ReadInt32LittleEndian(payload[16..]);
 
         var hostName = ReadField(payload, 36);
         var userName = ReadField(payload, 40);
@@ -64,7 +69,7 @@ internal sealed class Login7Request
         var appName = ReadField(payload, 48);
         var database = ReadField(payload, 68);
 
-        var request = new Login7Request(tdsVersion, packetSize, hostName, userName, password, appName, database);
+        var request = new Login7Request(tdsVersion, packetSize, clientProcessId, hostName, userName, password, appName, database);
         ReadFeatureExtension(payload, request);
         return request;
     }

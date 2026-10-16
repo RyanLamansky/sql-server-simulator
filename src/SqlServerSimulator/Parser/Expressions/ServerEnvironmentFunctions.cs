@@ -37,8 +37,9 @@ internal sealed class CurrentTimeZone : Expression
 /// <summary>
 /// SQL <c>HOST_ID()</c>: the client's process id as <c>char(10)</c>, padded,
 /// never NULL — the value <c>sys.dm_exec_sessions.host_process_id</c> and
-/// <c>sysprocesses.hostprocess</c> report for the session, which is the host
-/// process for every session here (probed 2026-10-15 against SQL Server 2025).
+/// <c>sysprocesses.hostprocess</c> report for the session: the process id a
+/// TDS client's login sent, and the host process for an in-process session
+/// (probed 2026-10-15 against SQL Server 2025).
 /// </summary>
 internal sealed class HostId : Expression
 {
@@ -48,8 +49,11 @@ internal sealed class HostId : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("host_id", 0);
     }
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromChar(ResultType(runtime.Batch), Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture).PadRight(10));
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var processId = runtime.Batch.Connection.ClientProcessId;
+        return SqlValue.FromChar(ResultType(runtime.Batch), processId.ToString(System.Globalization.CultureInfo.InvariantCulture).PadRight(10));
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType(batch);
 

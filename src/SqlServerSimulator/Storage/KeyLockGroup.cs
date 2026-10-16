@@ -35,6 +35,14 @@ internal sealed class KeyLockGroup
     /// <summary>The <see cref="KeyConstraint"/> or <see cref="Index"/> the key belongs to.</summary>
     public readonly object Owner;
 
+    /// <summary>The index id of <see cref="Owner"/>, as <c>sys.indexes</c> numbers it.</summary>
+    public int IndexId => this.Owner switch
+    {
+        KeyConstraint key => key.IndexId,
+        Index index => index.IndexId,
+        _ => 0,
+    };
+
     /// <summary>
     /// Storage ordinals of the anchor tuple: the index key, followed for a
     /// non-unique nonclustered index by the clustered key columns it doesn't

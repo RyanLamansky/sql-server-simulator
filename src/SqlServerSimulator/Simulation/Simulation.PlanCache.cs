@@ -481,6 +481,11 @@ public sealed partial class Simulation
                 batch.CurrentStatement.DispatchSerial++;
                 batch.CurrentStatement.StartLine = entry.Spans[statement].Line;
                 batch.CurrentStatement.AutocommitTransactionId = 0;
+                if (batch.Connection.NestingLevel == 0)
+                {
+                    batch.Connection.Session.StatementStartIndex = entry.Spans[statement].Start;
+                    Volatile.Write(ref batch.Connection.Session.StatementTransactionId, 0);
+                }
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.RowAddresses = null;

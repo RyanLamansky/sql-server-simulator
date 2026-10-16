@@ -33,6 +33,24 @@ internal static partial class BuiltInResources
             ];
         }
 
+        // Another session's statement reading or writing data outside a user
+        // transaction runs in an autocommit one of its own, named for the
+        // statement (probed 2026-10-16 against SQL Server 2025: a blocked
+        // SELECT's is read-only, begun as the statement began).
+        foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
+        {
+            if (ReferenceEquals(connection, batch.Connection) || !RunsAutocommitTransaction(connection))
+                continue;
+            var verb = connection.Session.CurrentCommand;
+            yield return [
+                SqlValue.FromInt64(connection.RunningStatementTransactionId()),
+                SqlValue.FromNVarchar(verb),
+                SqlValue.FromDateTime(LastRequestStartUtc(connection)),
+                SqlValue.FromInt32(verb == "SELECT" ? 2 : 1),
+                nullGuid, active, zero, zero, zero, zero, zero, nullBinary,
+            ];
+        }
+
         if (batch.Connection.CurrentTransaction is null)
         {
             var verb = batch.CurrentStatement.StatementVerb;
@@ -45,6 +63,15 @@ internal static partial class BuiltInResources
             ];
         }
     }
+
+    /// <summary>
+    /// Whether another session's running statement is in an autocommit
+    /// transaction the transaction views list: it has no user transaction and
+    /// holds or awaits a data lock.
+    /// </summary>
+    internal static bool RunsAutocommitTransaction(SimulatedDbConnection connection) =>
+        connection.CurrentTransaction is null && connection.State == System.Data.ConnectionState.Open
+        && (connection.WaitingOnResource is not null || Volatile.Read(ref connection.LockOwner.BlockingHolds) > 0);
 
     /// <summary>
     /// Rows for <c>sys.dm_tran_session_transactions</c>: one per session with

@@ -71,7 +71,7 @@ internal static class LockDmvs
     /// transaction share one lock workspace, whose database locks real lists
     /// once each, under the first session still in it.
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch, Database database)
+    internal static IEnumerable<LockRow> EnumerateDmTranLocks(BatchContext batch, Database database)
     {
         _ = database;
         var sim = batch.Connection.Simulation;
@@ -102,7 +102,7 @@ internal static class LockDmvs
         {
             foreach (var row in EnumerateDatabaseLocks(batch, each))
             {
-                if (row[6].AsInt32 is var spid && workspaces.TryGetValue(spid, out var workspace))
+                if (workspaces.TryGetValue(row.Spid, out var workspace))
                     AddDatabaseLock(databaseLocks, workspace, each);
                 yield return row;
             }
@@ -113,31 +113,14 @@ internal static class LockDmvs
             }
         }
 
-        var databaseType = SqlValue.FromNVarchar("DATABASE");
-        var shared = SqlValue.FromNVarchar(ModeAbbreviation(LockMode.Shared));
-        var grant = SqlValue.FromNVarchar("GRANT");
-        var noEntity = SqlValue.FromInt64(0);
         foreach (var (spid, databaseId) in databaseLocks)
-            yield return [databaseType, SqlValue.FromInt32(databaseId), Description(""), noEntity, shared, grant, SqlValue.FromInt32(spid)];
+            yield return new LockRow("DATABASE", databaseId, "", 0, 0, 0, LockMode.Shared, waiting: false, spid, owner: null, resource: null);
 
         static void AddDatabaseLock(SortedSet<(int, int)> locks, int spid, Database held)
         {
             if (held.Name is not (Simulation.MasterDatabaseName or Simulation.TempdbDatabaseName))
                 _ = locks.Add((spid, held.Id));
         }
-    }
-
-    /// <summary>
-    /// The rows of <c>sys.dm_tran_locks</c> itself: <see cref="EnumerateDmTranLocks"/>'s,
-    /// with the <c>resource_subtype</c> column real carries second, empty for
-    /// every resource the simulator locks (probed 2026-10-07 against SQL Server
-    /// 2025, a <c>DATABASE</c> row's included).
-    /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocksView(BatchContext batch, Database database)
-    {
-        var noSubtype = SqlValue.FromNVarchar("");
-        foreach (var row in EnumerateDmTranLocks(batch, database))
-            yield return [row[0], noSubtype, row[1], row[2], row[3], row[4], row[5], row[6]];
     }
 
     /// <summary>
@@ -157,48 +140,56 @@ internal static class LockDmvs
     /// and data locks are one resource, real's object lock — then its row and
     /// key locks.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EmitTableLocks(
-        BatchContext batch, HeapTable table, SqlValue dbId,
-        Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits)
+    private static IEnumerable<LockRow> EmitTableLocks(
+        BatchContext batch, HeapTable table, int dbId,
+        Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits)
     {
         var locks = batch.Connection.Simulation.LockManager;
-        var grantStatus = SqlValue.FromNVarchar("GRANT");
-        var waitStatus = SqlValue.FromNVarchar("WAIT");
-        // Real reports a key lock as resource_type KEY described by a hash of
-        // the index key (KeyLockGroup.Describe).
-        var keyType = SqlValue.FromNVarchar("KEY");
-        foreach (var row in EmitRowsForResource(locks, SqlValue.FromNVarchar("OBJECT"), dbId, string.Empty, table.ObjectId, table.TableDataLock, waitsByResource, grantStatus, waitStatus, FoldObjectModes(locks, table.TableDataLock)))
+        foreach (var row in EmitRowsForResource(locks, "OBJECT", dbId, string.Empty, table.ObjectId, table.ObjectId, 0, table.TableDataLock, waitsByResource, FoldObjectModes(locks, table.TableDataLock)))
             yield return row;
         Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? pagesFolded = null;
         if (!table.PageLocks.IsEmptyLockFree())
         {
-            foreach (var row in EmitPageLocks(locks, table, dbId, waitsByResource, grantStatus, waitStatus))
+            foreach (var row in EmitPageLocks(locks, table, dbId, waitsByResource))
                 yield return row;
             pagesFolded = FoldRowLocksUnderPageLocks(locks, table);
         }
         var keyFolded = FoldRowLocksIntoKeyLocks(locks, table);
         var folded = FoldConvertedRowLocks(locks, table, pagesFolded is null ? keyFolded : keyFolded is null ? pagesFolded : Merged(keyFolded, pagesFolded));
-        foreach (var row in EmitRowLocks(batch, table, SqlValue.FromNVarchar("RID"), keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
+        foreach (var row in EmitRowLocks(batch, table, dbId, waitsByResource, keyWaits, folded))
             yield return row;
         foreach (var (_, group) in table.KeyLockGroups)
         {
-            foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(null), table.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
+            var hobt = HobtOf(table, group.IndexId);
+            foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(null), hobt, table.ObjectId, group.IndexId, group.Infinity, waitsByResource, folded))
                 yield return row;
             foreach (var kv in group.Anchors)
             {
-                foreach (var row in EmitRowsForResource(locks, keyType, dbId, group.Describe(kv.Key), table.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
+                foreach (var row in EmitRowsForResource(locks, "KEY", dbId, group.Describe(kv.Key), hobt, table.ObjectId, group.IndexId, kv.Value, waitsByResource, folded))
                     yield return row;
             }
         }
     }
 
     /// <summary>
+    /// The <c>hobt_id</c> of one of <paramref name="table"/>'s rowsets — the
+    /// heap's for index 0 — which a <c>KEY</c>, <c>RID</c> or <c>PAGE</c>
+    /// lock names as its <c>resource_associated_entity_id</c>, as
+    /// <c>sys.partitions</c> reports it (probed 2026-10-16 against SQL Server
+    /// 2025). A partitioned index's rows report its first partition's.
+    /// </summary>
+    private static long HobtOf(HeapTable table, int indexId) => PartitionCensus.UnpartitionedId(table, indexId);
+
+    /// <summary>The index id of <paramref name="table"/>'s base rowset: its clustered index's, or the heap's 0.</summary>
+    private static int BaseIndexIdOf(HeapTable table) => KeyLockGroup.RowGroupOf(table) is { } rows ? rows.IndexId : 0;
+
+    /// <summary>
     /// The lock rows of the temp tables, which real lists in tempdb: every
     /// open session's local ones and the global ones.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateTempTableLocks(BatchContext batch, Database tempdb, SimulatedDbConnection[] connections)
+    private static IEnumerable<LockRow> EnumerateTempTableLocks(BatchContext batch, Database tempdb, SimulatedDbConnection[] connections)
     {
-        var dbId = SqlValue.FromInt32(tempdb.Id);
+        var dbId = tempdb.Id;
         var waitsByResource = SnapshotWaiters(batch.Connection.Simulation, out var keyWaits);
         foreach (var connection in connections)
         {
@@ -218,18 +209,11 @@ internal static class LockDmvs
     }
 
     /// <summary>The lock rows of <paramref name="database"/>'s resources.</summary>
-    private static IEnumerable<SqlValue[]> EnumerateDatabaseLocks(BatchContext batch, Database database)
+    private static IEnumerable<LockRow> EnumerateDatabaseLocks(BatchContext batch, Database database)
     {
         var sim = batch.Connection.Simulation;
         var locks = sim.LockManager;
-        var dbId = SqlValue.FromInt32(database.Id);
-        // Real describes an OBJECT resource by no text at all, not by name —
-        // the object is resource_associated_entity_id (probed 2026-09-30
-        // against SQL Server 2025).
-        var objectDescription = string.Empty;
-        var grantStatus = SqlValue.FromNVarchar("GRANT");
-        var waitStatus = SqlValue.FromNVarchar("WAIT");
-        var objectType = SqlValue.FromNVarchar("OBJECT");
+        var dbId = database.Id;
 
         var waitsByResource = SnapshotWaiters(sim, out var keyWaits);
 
@@ -242,41 +226,37 @@ internal static class LockDmvs
             }
             foreach (var (_, v) in schema.Views)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitObjectLocks(locks, dbId, v, waitsByResource))
                     yield return row;
             }
             foreach (var (_, f) in schema.Functions)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitObjectLocks(locks, dbId, f, waitsByResource))
                     yield return row;
             }
             foreach (var (_, p) in schema.Procedures)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitObjectLocks(locks, dbId, p, waitsByResource))
                     yield return row;
             }
             foreach (var (_, s) in schema.Sequences)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitObjectLocks(locks, dbId, s, waitsByResource))
                     yield return row;
             }
             foreach (var (_, tt) in schema.TableTypes)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, "OBJECT", dbId, string.Empty, tt.ObjectId, tt.ObjectId, 0, tt.SchemaLock, waitsByResource))
                     yield return row;
             }
             foreach (var (_, tr) in schema.Triggers)
             {
-                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitObjectLocks(locks, dbId, tr, waitsByResource))
                     yield return row;
             }
         }
 
-        // Application locks (sp_getapplock family). resource_description
-        // follows the probe-confirmed shape `<principal-id>:[<name>]:(<hash>)`;
-        // the 8-hex hash is FNV-1a over the name here, so it won't byte-match
-        // real SQL Server's undocumented hash — the id and bracketed name do.
-        var applicationType = SqlValue.FromNVarchar("APPLICATION");
+        // Application locks (sp_getapplock family).
         List<((int PrincipalId, string Resource) Key, LockResource Resource)> appLocks;
         lock (database.ApplicationLocks)
         {
@@ -287,18 +267,172 @@ internal static class LockDmvs
 
         foreach (var (key, resource) in appLocks)
         {
-            var description = $"{key.PrincipalId}:[{key.Resource}]:({Fnv1a32(key.Resource):x8})";
-            foreach (var row in EmitRowsForResource(locks, applicationType, dbId, description, entityId: 0, resource, waitsByResource, grantStatus, waitStatus))
+            foreach (var row in EmitRowsForResource(locks, "APPLICATION", dbId, ApplicationDescription(key.PrincipalId, key.Resource), entityId: 0, objectId: 0, indexId: 0, resource, waitsByResource))
                 yield return row;
         }
     }
 
+    // Real describes an OBJECT resource by no text at all, not by name — the
+    // object is resource_associated_entity_id (probed 2026-09-30 against SQL
+    // Server 2025).
+    private static IEnumerable<LockRow> EmitObjectLocks(LockManager locks, int dbId, Schemas.SchemaObject module, Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource) =>
+        EmitRowsForResource(locks, "OBJECT", dbId, string.Empty, module.ObjectId, module.ObjectId, 0, module.SchemaLock, waitsByResource);
+
     /// <summary>
-    /// A <c>resource_description</c> value as real's view holds it: blank-padded
-    /// to the column's 256 characters whatever the resource type (probed
-    /// 2026-10-07 against SQL Server 2025, every row's <c>DATALENGTH</c> 512).
+    /// An application lock's <c>resource_description</c>,
+    /// <c>&lt;principal-id&gt;:[&lt;name&gt;]:(&lt;hash&gt;)</c>; the hash is FNV-1a
+    /// over the name here, so it won't byte-match real's undocumented hash —
+    /// the id and bracketed name do.
     /// </summary>
-    private static SqlValue Description(string text) => SqlValue.FromNVarchar(text.PadRight(256));
+    private static string ApplicationDescription(int principalId, string name) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{principalId}:[{name}]:({Fnv1a32(name):x8})");
+
+    /// <summary>
+    /// One lock <see cref="EnumerateDmTranLocks"/> lists: a granted hold or a
+    /// waiting request on one resource.
+    /// </summary>
+    internal readonly struct LockRow(string type, int databaseId, string description, long entityId, int objectId, int indexId, LockMode mode, bool waiting, int spid, SessionToken? owner, LockResource? resource)
+    {
+        /// <summary>The <c>resource_type</c>: <c>OBJECT</c>, <c>PAGE</c>, <c>RID</c>, <c>KEY</c>, <c>APPLICATION</c> or <c>DATABASE</c>.</summary>
+        public readonly string Type = type;
+
+        public readonly int DatabaseId = databaseId;
+
+        /// <summary>The <c>resource_description</c>, unpadded.</summary>
+        public readonly string Description = description;
+
+        /// <summary>The <c>resource_associated_entity_id</c>: an object's id, a rowset's <c>hobt_id</c>, or 0.</summary>
+        public readonly long EntityId = entityId;
+
+        /// <summary>The object the resource belongs to, 0 for none; <c>sp_lock</c>'s <c>ObjId</c>.</summary>
+        public readonly int ObjectId = objectId;
+
+        /// <summary>The index of <see cref="ObjectId"/> the resource belongs to; <c>sp_lock</c>'s <c>IndId</c>.</summary>
+        public readonly int IndexId = indexId;
+
+        public readonly LockMode Mode = mode;
+
+        /// <summary>A request still waiting (<c>WAIT</c>) rather than a granted hold (<c>GRANT</c>).</summary>
+        public readonly bool Waiting = waiting;
+
+        public readonly int Spid = spid;
+
+        /// <summary>The token holding or requesting the lock; null for a <c>DATABASE</c> lock.</summary>
+        public readonly SessionToken? Owner = owner;
+
+        /// <summary>The lock manager's resource; null for a <c>DATABASE</c> lock.</summary>
+        public readonly LockResource? Resource = resource;
+    }
+
+    /// <summary>
+    /// The rows of <c>sys.dm_tran_locks</c> itself: each of
+    /// <see cref="EnumerateDmTranLocks"/>'s locks in real's nineteen columns.
+    /// The owner columns name the holder's transaction, a <c>DATABASE</c>
+    /// lock's shared workspace, and a session-owned application lock's
+    /// session; <c>request_lifetime</c> marks a lock its transaction holds to
+    /// its end (probed 2026-10-16 against SQL Server 2025). An object or
+    /// database lock lists once, on lock partition 0, as on a server with
+    /// fewer than 16 schedulers, whose locks real doesn't partition. The
+    /// address columns are stand-ins, consistent with
+    /// <c>sys.dm_os_waiting_tasks.resource_address</c>.
+    /// </summary>
+    internal static IEnumerable<SqlValue[]> EnumerateDmTranLocksView(BatchContext batch, Database database)
+    {
+        var sim = batch.Connection.Simulation;
+        var connections = new Dictionary<int, SimulatedDbConnection>();
+        foreach (var connection in sim.SnapshotConnections())
+            connections[connection.Spid] = connection;
+        var noSubtype = SqlValue.FromNVarchar("");
+        var lockType = SqlValue.FromNVarchar("LOCK");
+        var grant = SqlValue.FromNVarchar("GRANT");
+        var wait = SqlValue.FromNVarchar("WAIT");
+        var noPartition = SqlValue.Null(SqlType.Int32);
+        var zero = SqlValue.FromInt32(0);
+        var one = SqlValue.FromInt16(1);
+        var noGuid = SqlValue.FromGuid(Guid.Empty);
+        foreach (var row in EnumerateDmTranLocks(batch, database))
+        {
+            _ = connections.TryGetValue(row.Spid, out var holder);
+            var (ownerType, ownerId, lockspace) = OwnerOf(row, holder);
+            yield return
+            [
+                SqlValue.FromNVarchar(row.Type), noSubtype, SqlValue.FromInt32(row.DatabaseId), SqlValue.FromNVarchar(row.Description.PadRight(256)),
+                SqlValue.FromInt64(row.EntityId), row.Type is "OBJECT" or "DATABASE" ? zero : noPartition, SqlValue.FromNVarchar(ModeAbbreviation(row.Mode)),
+                lockType, row.Waiting ? wait : grant, one, SqlValue.FromInt32(row.Waiting ? 0 : TransactionLifetime(row, holder)),
+                SqlValue.FromInt32(row.Spid), zero, zero, SqlValue.FromNVarchar(ownerType), SqlValue.FromInt64(ownerId), noGuid,
+                SqlValue.FromNVarchar(lockspace), SqlValue.FromVarbinary(LockOwnerAddress(row)),
+            ];
+        }
+    }
+
+    /// <summary>The <c>request_lifetime</c> of a lock its transaction holds to its end (probed 2026-10-16 against SQL Server 2025).</summary>
+    private const int TransactionLifetimeFlag = 0x2000000;
+
+    /// <summary>
+    /// <see cref="TransactionLifetimeFlag"/> for a lock its holder's open
+    /// transaction keeps to its end — every lock but a schema-stability one
+    /// while the session sits between statements, and while it runs one, the
+    /// locks a read-committed read wouldn't let go of at once — else 0, as a
+    /// statement's own locks, a database's shared workspace lock and an
+    /// application lock read on real.
+    /// </summary>
+    private static int TransactionLifetime(LockRow row, SimulatedDbConnection? holder)
+    {
+        if (holder is null || holder.OpenTransactionCount == 0 || row.Type is "DATABASE" or "APPLICATION" || row.Mode == LockMode.SchemaStability)
+            return 0;
+        var running = holder.Session.CurrentExecutingThreadId is not null || holder.WaitingOnResource is not null;
+        if (!running)
+            return TransactionLifetimeFlag;
+        var keepsReads = holder.SessionIsolationLevel is System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable;
+        return keepsReads || row.Mode is not (LockMode.IntentShared or LockMode.Shared) ? TransactionLifetimeFlag : 0;
+    }
+
+    /// <summary>
+    /// The <c>request_owner_type</c>, <c>request_owner_id</c> and
+    /// <c>request_owner_lockspace_id</c> of <paramref name="row"/>: a database
+    /// lock's shared transaction workspace, a session-owned application lock's
+    /// session, and otherwise the holder's transaction, by its id — a running
+    /// statement's autocommit one outside a user transaction.
+    /// </summary>
+    private static (string Type, long Id, string Lockspace) OwnerOf(LockRow row, SimulatedDbConnection? holder)
+    {
+        var workspace = LockspaceAddress(row.Spid);
+        if (row.Type == "DATABASE")
+            return ("SHARED_TRANSACTION_WORKSPACE", 0, workspace + ":0:0");
+        if (row.Type == "APPLICATION" && holder is not null && row.Resource is { } resource)
+        {
+            foreach (var hold in holder.SessionAppLocks.ToArray())
+            {
+                if (ReferenceEquals(hold.LockResource, resource))
+                    return ("SESSION", 0, workspace + ":0:0");
+            }
+        }
+        var transactionId = holder?.CurrentTransaction?.TransactionId
+            ?? (holder is not null && BuiltInResources.RunsAutocommitTransaction(holder) ? holder.RunningStatementTransactionId() : 0);
+        return ("TRANSACTION", transactionId, workspace + ":1:1");
+    }
+
+    /// <summary>A stand-in <c>request_owner_lockspace_id</c> address for a session's lock workspace.</summary>
+    private static string LockspaceAddress(int spid) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"0x{0x0000060000000000L + (spid * 0x10000L):X16}");
+
+    /// <summary>
+    /// A stand-in <c>lock_owner_address</c>, distinct per resource, session
+    /// and mode, and the same as the waiting task's
+    /// <c>resource_address</c> for a request still waiting.
+    /// </summary>
+    private static byte[] LockOwnerAddress(LockRow row)
+    {
+        var resourceHash = row.Resource is { } resource ? (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(resource) : (uint)row.DatabaseId;
+        var address = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(address, 0x0000070000000000L
+            + ((long)(resourceHash & 0xFFFFF) << 20) + ((row.Spid & 0x3FF) << 10) + (((int)row.Mode & 0xF) << 1) + (row.Waiting ? 1 : 0));
+        return address;
+    }
+
+    /// <summary>A stand-in for the address of a lock resource's block, which real's wait descriptions name as <c>id=lock…</c>.</summary>
+    private static string LockBlockId(LockResource? resource) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"lock{0xC00000000L + (((resource is null ? 0u : (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(resource)) & 0xFFFFFFF) * 0x40):x}");
 
     // 32-bit FNV-1a over the resource name's UTF-16 code units, for the
     // hash slot of an APPLICATION resource_description.
@@ -315,31 +449,95 @@ internal static class LockDmvs
     }
 
     /// <summary>
-    /// Yields one row per currently-waiting connection.
-    /// <c>blocking_session_id</c> picks one of the conflicting holders'
-    /// SPIDs (real SQL Server may show multiple rows when many holders
-    /// block one waiter; the simulator collapses to one for clarity).
-    /// <c>wait_type</c> is <c>LCK_M_&lt;mode&gt;</c> matching SQL Server's
-    /// convention.
+    /// The lock <paramref name="waiter"/> waits for, as <see cref="EnumerateDmTranLocks"/>
+    /// lists it; null when it waits for none
+    /// (or was granted while the view looked).
     /// </summary>
-    internal static IEnumerable<SqlValue[]> EnumerateDmOsWaitingTasks(BatchContext batch, Database database)
+    private static LockRow? WaitedLock(BatchContext batch, SimulatedDbConnection waiter)
     {
-        _ = database;
-        var sim = batch.Connection.Simulation;
-        foreach (var conn in sim.SnapshotConnections())
+        if (waiter.WaitingOnResource is not { } resource)
+            return null;
+        foreach (var row in EnumerateDmTranLocks(batch, batch.CurrentDatabase))
         {
-            if (conn.WaitingOnResource is not { } resource || conn.WaitingForMode is not { } mode)
-                continue;
-            var blockerSpid = FindFirstBlocker(resource, conn);
-            yield return new SqlValue[]
-            {
-                SqlValue.FromInt16((short)conn.Spid),
-                SqlValue.FromNVarchar(WaitType(mode)),
-                SqlValue.FromNVarchar(conn.WaitRecord?.WaitingOnKey is { } key && resource.OwningTable is { } keyed ? $"KEY: {keyed.Name} {key}" : DescribeResource(sim, resource)),
-                blockerSpid is int bSpid ? SqlValue.FromInt16((short)bSpid) : SqlValue.Null(SqlType.SmallInt),
-            };
+            if (row.Waiting && row.Spid == waiter.Spid && ReferenceEquals(row.Resource, resource))
+                return row;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The <c>wait_resource</c> of a request waiting on a lock, as
+    /// <c>sys.dm_exec_requests</c> reports it — or, with
+    /// <paramref name="sysprocesses"/>, as <c>sysprocesses.waitresource</c>
+    /// abbreviates it: <c>KEY: db:hobt (hash)</c>, <c>RID: db:file:page:slot</c>,
+    /// <c>PAGE: db:file:page </c> (<c>PAG:</c>), <c>OBJECT: db:object:partition </c>
+    /// (<c>TAB:</c>) and <c>APPLICATION: db:principal:[name]:(hash)</c>
+    /// (<c>APP:</c>), the page and object forms with real's trailing space in
+    /// the request view (probed 2026-10-16 against SQL Server 2025). Empty
+    /// when the request waits on no lock.
+    /// </summary>
+    internal static string WaitResource(BatchContext batch, SimulatedDbConnection waiter, bool sysprocesses = false)
+    {
+        if (WaitedLock(batch, waiter) is not { } row)
+            return "";
+        var trail = sysprocesses ? "" : " ";
+        return row.Type switch
+        {
+            "APPLICATION" => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(sysprocesses ? "APP" : "APPLICATION")}: {row.DatabaseId}:{row.Description}"),
+            "KEY" => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"KEY: {row.DatabaseId}:{row.EntityId} {row.Description}"),
+            "OBJECT" => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(sysprocesses ? "TAB" : "OBJECT")}: {row.DatabaseId}:{row.EntityId}:0{trail}"),
+            "PAGE" => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(sysprocesses ? "PAG" : "PAGE")}: {row.DatabaseId}:{row.Description}{trail}"),
+            "RID" => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"RID: {row.DatabaseId}:{row.Description}"),
+            _ => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{row.Type}: {row.DatabaseId}:{row.Description}"),
+        };
+    }
+
+    /// <summary>
+    /// The <c>resource_description</c> <c>sys.dm_os_waiting_tasks</c> gives a
+    /// lock wait, in real's own words (probed 2026-10-16 against SQL Server
+    /// 2025): <c>keylock hobtid=… dbid=… id=lock… mode=X associatedObjectId=…</c>,
+    /// and the <c>ridlock</c>, <c>pagelock</c>, <c>objectlock</c> and
+    /// <c>applicationlock</c> forms beside it, <c>mode</c> naming the blocking
+    /// hold's mode. Null when the waiter waits on no lock.
+    /// </summary>
+    internal static string? WaitingTaskDescription(BatchContext batch, SimulatedDbConnection waiter)
+    {
+        if (WaitedLock(batch, waiter) is not { } row)
+            return null;
+        var blocking = waiter.WaitingOnResource is { } resource && FindFirstBlockingHold(resource, waiter) is var (_, blockingMode) ? ModeAbbreviation(blockingMode) : ModeAbbreviation(row.Mode);
+        var id = LockBlockId(row.Resource);
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        switch (row.Type)
+        {
+            case "APPLICATION":
+                // <principal>:[<name>]:(<hash>) reads as hash=<name><hash>.
+                var colon = row.Description.IndexOf(':', StringComparison.Ordinal);
+                var close = row.Description.LastIndexOf("]:(", StringComparison.Ordinal);
+                var name = row.Description[(colon + 2)..close];
+                var hash = row.Description[(close + 3)..^1];
+                return string.Create(invariant, $"applicationlock hash={name}{hash} databasePrincipalId={row.Description[..colon]} dbid={row.DatabaseId} id={id} mode={blocking}");
+            case "KEY":
+                return string.Create(invariant, $"keylock hobtid={row.EntityId} dbid={row.DatabaseId} id={id} mode={blocking} associatedObjectId={row.EntityId}");
+            case "OBJECT":
+                return string.Create(invariant, $"objectlock lockPartition=0 objid={row.EntityId} subresource=FULL dbid={row.DatabaseId} id={id} mode={blocking} associatedObjectId={row.EntityId}");
+            case "PAGE":
+                var page = row.Description.Split(':');
+                return string.Create(invariant, $"pagelock fileid={page[0]} pageid={page[1]} dbid={row.DatabaseId} subresource=FULL id={id} mode={blocking} associatedObjectId={row.EntityId}");
+            case "RID":
+                var rid = row.Description.Split(':');
+                return string.Create(invariant, $"ridlock fileid={rid[0]} pageid={rid[1]} dbid={row.DatabaseId} id={id} mode={blocking} associatedObjectId={row.EntityId}");
+            default:
+                return null;
         }
     }
+
+    /// <summary>
+    /// The <c>resource_address</c> <c>sys.dm_os_waiting_tasks</c> gives a lock
+    /// wait: the waiting request's own <c>lock_owner_address</c> in
+    /// <c>sys.dm_tran_locks</c>. Null when the waiter waits on no lock.
+    /// </summary>
+    internal static byte[]? WaitingTaskResourceAddress(BatchContext batch, SimulatedDbConnection waiter) =>
+        WaitedLock(batch, waiter) is { } row ? LockOwnerAddress(row) : null;
 
     /// <summary>
     /// Reverse-lookup map: for each connection currently waiting, find
@@ -349,7 +547,7 @@ internal static class LockDmvs
     /// carries (<see cref="SessionToken.WaitingOnKey"/>) goes to
     /// <paramref name="keyWaits"/> instead, reported on the key.
     /// </summary>
-    private static Dictionary<LockResource, List<SimulatedDbConnection>> SnapshotWaiters(Simulation sim, out List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits)
+    private static Dictionary<LockResource, List<SimulatedDbConnection>> SnapshotWaiters(Simulation sim, out List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits)
     {
         var map = new Dictionary<LockResource, List<SimulatedDbConnection>>(ReferenceEqualityComparer.Instance);
         keyWaits = null;
@@ -357,9 +555,9 @@ internal static class LockDmvs
         {
             if (conn.WaitingOnResource is not { } resource)
                 continue;
-            if (conn.WaitRecord?.WaitingOnKey is { } key)
+            if (conn.WaitRecord is { WaitingOnKey: { } key } record)
             {
-                (keyWaits ??= []).Add((conn, resource, key));
+                (keyWaits ??= []).Add((conn, resource, key, record.WaitingOnKeyIndexId));
                 continue;
             }
             if (!map.TryGetValue(resource, out var list))
@@ -388,23 +586,21 @@ internal static class LockDmvs
     /// the row-lock dictionary with its slot and is found through
     /// <see cref="HeapTable.SupersededKeyImages"/>.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EmitRowLocks(
+    private static IEnumerable<LockRow> EmitRowLocks(
         BatchContext batch,
         HeapTable table,
-        SqlValue ridType,
-        SqlValue keyType,
-        SqlValue dbIdVal,
+        int dbId,
         Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource,
-        List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits,
-        SqlValue grantStatus,
-        SqlValue waitStatus,
+        List<(SimulatedDbConnection Waiter, LockResource Resource, string Key, int IndexId)>? keyWaits,
         Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded)
     {
         // A row of a clustered table is its clustered key, which is what real
         // locks and reports as KEY; only a heap's row is a RID.
         var locks = batch.Connection.Simulation.LockManager;
         var rowGroup = KeyLockGroup.RowGroupOf(table);
-        var rowType = rowGroup is null ? ridType : keyType;
+        var rowType = rowGroup is null ? "RID" : "KEY";
+        var rowIndexId = rowGroup?.IndexId ?? 0;
+        var rowHobt = HobtOf(table, rowIndexId);
         var rows = new List<((int PageIndex, int SlotIndex) Address, LockResource Lock)>();
         foreach (var kv in table.RowLocks)
             rows.Add((kv.Key, kv.Value));
@@ -436,51 +632,32 @@ internal static class LockDmvs
             var live = table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex);
             var description = rowGroup is not null && (live ?? PreImageOf(table, address, holders)) is { } image
                 ? DescribeImageKey(table, rowGroup, image)
-                : $"{address.PageIndex}:{address.SlotIndex}";
-            foreach (var row in EmitRowsForResource(locks, rowType, dbIdVal, description, table.ObjectId, resource, waitersByResource, grantStatus, waitStatus, folded))
+                : RidDescription(table, address);
+            foreach (var row in EmitRowsForResource(locks, rowType, dbId, description, rowHobt, table.ObjectId, rowIndexId, resource, waitersByResource, folded))
             {
-                if (rowGroup is null || shown.Add((rowGroup, description, row[6].AsInt32, row[4].AsString, row[5].AsString == "WAIT")))
+                if (rowGroup is null || shown.Add((rowGroup, description, row.Spid, ModeAbbreviation(row.Mode), row.Waiting)))
                     yield return row;
             }
             foreach (var hold in holders)
             {
                 if (hold.Mode != LockMode.Exclusive)
                     continue;
-                var spid = SqlValue.FromInt32(hold.Owner.Acting.Spid);
                 foreach (var (group, key) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
                 {
                     if (!shown.Add((group, key, hold.Owner.Acting.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
                         continue;
-                    yield return
-                    [
-                        keyType,
-                        dbIdVal,
-                        Description(key),
-                        SqlValue.FromInt64(table.ObjectId),
-                        SqlValue.FromNVarchar(ModeAbbreviation(LockMode.Exclusive)),
-                        grantStatus,
-                        spid,
-                    ];
+                    yield return new LockRow("KEY", dbId, key, HobtOf(table, group.IndexId), table.ObjectId, group.IndexId, LockMode.Exclusive, waiting: false, hold.Owner.Acting.Spid, hold.Owner, resource);
                 }
             }
         }
 
         if (keyWaits is null)
             yield break;
-        foreach (var (waiter, resource, key) in keyWaits)
+        foreach (var (waiter, resource, key, keyIndexId) in keyWaits)
         {
             if (!ReferenceEquals(resource.OwningTable, table) || waiter.WaitingForMode is not { } waitMode)
                 continue;
-            yield return
-            [
-                keyType,
-                dbIdVal,
-                Description(key),
-                SqlValue.FromInt64(table.ObjectId),
-                SqlValue.FromNVarchar(ModeAbbreviation(waitMode)),
-                waitStatus,
-                SqlValue.FromInt32(waiter.Spid),
-            ];
+            yield return new LockRow("KEY", dbId, key, HobtOf(table, keyIndexId), table.ObjectId, keyIndexId, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource);
         }
     }
 
@@ -571,23 +748,21 @@ internal static class LockDmvs
         return group.Describe(new Parser.SqlValueKey(components));
     }
 
-    private static IEnumerable<SqlValue[]> EmitRowsForResource(
+    private static IEnumerable<LockRow> EmitRowsForResource(
         LockManager locks,
-        SqlValue typeVal,
-        SqlValue dbIdVal,
+        string type,
+        int dbId,
         string description,
-        int entityId,
+        long entityId,
+        int objectId,
+        int indexId,
         LockResource resource,
         Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource,
-        SqlValue grantStatus,
-        SqlValue waitStatus,
         Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null)
     {
         // Empty-resource fast path: nothing held or waiting → no rows.
         if (resource.Holders.Count == 0 && !waitersByResource.ContainsKey(resource))
             yield break;
-        var descVal = Description(description);
-        var entityVal = SqlValue.FromInt64(entityId);
         // GRANT rows from current holders. A U its holder has since taken X
         // over is real's lock converted, reported as the X alone.
         var holders = locks.HoldersOf(resource);
@@ -608,16 +783,7 @@ internal static class LockDmvs
                     continue;
                 mode = shown;
             }
-            yield return new SqlValue[]
-            {
-                typeVal,
-                dbIdVal,
-                descVal,
-                entityVal,
-                SqlValue.FromNVarchar(ModeAbbreviation(mode)),
-                grantStatus,
-                SqlValue.FromInt32(hold.Owner.Acting.Spid),
-            };
+            yield return new LockRow(type, dbId, description, entityId, objectId, indexId, mode, waiting: false, hold.Owner.Acting.Spid, hold.Owner, resource);
         }
         // WAIT rows from connections blocked on this resource.
         if (waitersByResource.TryGetValue(resource, out var waiters))
@@ -626,16 +792,7 @@ internal static class LockDmvs
             {
                 if (waiter.WaitingForMode is not { } waitMode)
                     continue;
-                yield return new SqlValue[]
-                {
-                    typeVal,
-                    dbIdVal,
-                    descVal,
-                    entityVal,
-                    SqlValue.FromNVarchar(ModeAbbreviation(waitMode)),
-                    waitStatus,
-                    SqlValue.FromInt32(waiter.Spid),
-                };
+                yield return new LockRow(type, dbId, description, entityId, objectId, indexId, waitMode, waiting: true, waiter.Spid, waiter.LockOwner, resource);
             }
         }
     }
@@ -678,7 +835,14 @@ internal static class LockDmvs
     /// 2026-10-07 against SQL Server 2025). Returns <c>null</c> when nothing
     /// blocks (a race against grant — the waiter's about to unblock).
     /// </summary>
-    internal static int? FindFirstBlocker(LockResource resource, SimulatedDbConnection waiter)
+    internal static int? FindFirstBlocker(LockResource resource, SimulatedDbConnection waiter) =>
+        FindFirstBlockingHold(resource, waiter) is var (spid, _) ? spid : null;
+
+    /// <summary>
+    /// <see cref="FindFirstBlocker"/>'s session with the mode of the hold or
+    /// queued request that blocks, which real's wait description names.
+    /// </summary>
+    internal static (int Spid, LockMode Mode)? FindFirstBlockingHold(LockResource resource, SimulatedDbConnection waiter)
     {
         if (waiter.WaitingForMode is not { } mode)
             return null;
@@ -689,12 +853,12 @@ internal static class LockDmvs
                 continue;
             if (LockManager.IsCompatible(hold.Mode, mode))
                 continue;
-            return hold.Owner.Acting.Spid;
+            return (hold.Owner.Acting.Spid, hold.Mode);
         }
         foreach (var (owner, waiting) in locks.QueuedAheadOf(resource, waiter.LockOwner))
         {
             if (!LockManager.IsCompatible(waiting, mode))
-                return owner.Acting.Spid;
+                return (owner.Acting.Spid, waiting);
         }
         return null;
     }
@@ -706,12 +870,13 @@ internal static class LockDmvs
     /// such a lock is held stay out, as every other row lock's page intent
     /// does here (see <c>docs/claude/locking.md</c>).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EmitPageLocks(
-        LockManager locks, HeapTable table, SqlValue dbId, Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource, SqlValue grantStatus, SqlValue waitStatus)
+    private static IEnumerable<LockRow> EmitPageLocks(
+        LockManager locks, HeapTable table, int dbId, Dictionary<LockResource, List<SimulatedDbConnection>> waitsByResource)
     {
-        var pageType = SqlValue.FromNVarchar("PAGE");
         var pages = table.PageLocks.ToArray();
         Array.Sort(pages, static (a, b) => a.Key.CompareTo(b.Key));
+        var indexId = BaseIndexIdOf(table);
+        var hobt = HobtOf(table, indexId);
         foreach (var (page, resource) in pages)
         {
             if (resource.Holders.Count == 0 && !waitsByResource.ContainsKey(resource))
@@ -722,10 +887,19 @@ internal static class LockDmvs
                 if (hold.Mode is LockMode.IntentShared or LockMode.IntentUpdate or LockMode.IntentExclusive)
                     (intents ??= [])[(resource, hold.Owner, hold.Mode)] = null;
             }
-            foreach (var row in EmitRowsForResource(locks, pageType, dbId, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + page}"), table.ObjectId, resource, waitsByResource, grantStatus, waitStatus, intents))
+            foreach (var row in EmitRowsForResource(locks, "PAGE", dbId, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + page}"), hobt, table.ObjectId, indexId, resource, waitsByResource, intents))
                 yield return row;
         }
     }
+
+    /// <summary>
+    /// A heap row's <c>RID</c> description, <c>file:page:slot</c>, on the
+    /// page real's layout puts it on, numbered as the <c>PAGE</c> locks
+    /// number theirs (probed 2026-10-16 against SQL Server 2025:
+    /// <c>1:552:1</c> beside its page's <c>1:552</c>).
+    /// </summary>
+    private static string RidDescription(HeapTable table, (int PageIndex, int SlotIndex) address) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"1:{FirstPageId + RealPageLayout.For(table).PageOf(address)}:{address.SlotIndex}");
 
     /// <summary>The page id the first page of a table's layout is described by.</summary>
     private const int FirstPageId = 8;
@@ -957,47 +1131,5 @@ internal static class LockDmvs
             }
         }
         return folded;
-    }
-
-    /// <summary>
-    /// Walks all schemas + heap tables to find the object / RID associated
-    /// with <paramref name="resource"/>; falls back to a generic
-    /// description when no association matches (rare — the resource is
-    /// usually a SchemaLock or a HeapTable's row-lock dict entry).
-    /// </summary>
-    internal static string DescribeResource(Simulation sim, LockResource resource)
-    {
-        // A name's lock is real's key lock on the name's catalog row.
-        if (resource.Definition is { } definition)
-            return $"KEY: {definition.Name}";
-        foreach (var (_, db) in sim.Databases)
-        {
-            foreach (var (_, schema) in db.Schemas)
-            {
-                foreach (var (_, t) in schema.HeapTables)
-                {
-                    if (ReferenceEquals(t.TableDataLock, resource))
-                        return $"OBJECT: {t.Name}";
-                    if (resource.RowAddress is { } address && ReferenceEquals(resource.OwningTable, t))
-                    {
-                        // A clustered table's row lock is real's lock on its key.
-                        return KeyLockGroup.RowGroupOf(t) is { } rowGroup
-                            && (t.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex) ?? PreImageOf(t, address, sim.LockManager.HoldersOf(resource))) is { } image
-                            ? $"KEY: {t.Name} {DescribeImageKey(t, rowGroup, image)}"
-                            : $"RID: {t.Name} {address.PageIndex}:{address.SlotIndex}";
-                    }
-                    if (resource.KeyGroup is { } group && ReferenceEquals(group.Table, t))
-                    {
-                        return $"KEY: {t.Name} {group.Describe(resource.AnchorKey)}";
-                    }
-                }
-                foreach (var other in schema.SchemaObjects())
-                {
-                    if (ReferenceEquals(other.SchemaLock, resource))
-                        return $"OBJECT: {other.Name}";
-                }
-            }
-        }
-        return "(unknown)";
     }
 }

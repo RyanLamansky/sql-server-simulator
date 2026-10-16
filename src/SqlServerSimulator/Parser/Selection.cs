@@ -1535,8 +1535,12 @@ internal sealed partial class Selection
         // type, which is why `TOP (@rows)` over an `int` parameter creates while
         // the `nvarchar` and `decimal(5, 2)` spellings are refused at CREATE.
         // A written constant keeps the ordinary value check, since real refuses
-        // `TOP (NULL)` and `TOP (1.5)` at CREATE too (probe-confirmed).
-        if (batch.CreateTimeBinding && !expression.IsWrittenConstant)
+        // `TOP (NULL)` and `TOP (1.5)` at CREATE too (probe-confirmed). A
+        // statement the batch walks past without running — an untaken IF
+        // branch, the walk ahead of the run — reads no variable's value
+        // either: real compiles `TOP (LEN(@unset) - 1)` there and never
+        // evaluates it (probed 2026-10-16 against SQL Server 2025).
+        if ((batch.CreateTimeBinding || batch.IsSkipping) && !expression.IsWrittenConstant)
         {
             var declared = expression.GetSqlType(batch, name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
             return IsRowCountType(declared, expression) ? null

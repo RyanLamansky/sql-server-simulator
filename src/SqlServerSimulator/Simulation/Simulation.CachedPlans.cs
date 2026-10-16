@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
@@ -12,6 +13,34 @@ partial class Simulation
 {
     /// <summary>The plans real would hold, which the plan-cache DMVs read.</summary>
     internal readonly CachedPlanRegistry CachedPlans = new();
+
+    /// <summary>
+    /// Per batch text the compile walked, where each of its statements' text
+    /// ends: by the index its first token starts at, the index of the
+    /// character before the next statement's first token — its terminator and
+    /// the white space after it included — or -1 for the batch's last
+    /// statement, as real's <c>statement_end_offset</c> places a running
+    /// statement's end (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private readonly ConcurrentDictionary<string, Dictionary<int, int>> statementEnds = new(StringComparer.Ordinal);
+
+    /// <summary>How many texts <see cref="statementEnds"/> holds, counted as the other compile memos are.</summary>
+    private int statementEndsCount;
+
+    /// <summary>Remembers where the statements of a batch the compile walked end.</summary>
+    internal void NoteStatementEnds(string batchText, Dictionary<int, int> ends)
+    {
+        if (ends.Count != 0 && Volatile.Read(ref this.statementEndsCount) < PlanCacheCapacity && this.statementEnds.TryAdd(batchText, ends))
+            _ = Interlocked.Increment(ref this.statementEndsCount);
+    }
+
+    /// <summary>
+    /// Where the statement of <paramref name="batchText"/> starting at
+    /// <paramref name="startIndex"/> ends, as <see cref="statementEnds"/> holds
+    /// it; -1 when the batch's walk didn't record it.
+    /// </summary>
+    internal int StatementEndIndex(string batchText, int startIndex) =>
+        this.statementEnds.TryGetValue(batchText, out var ends) && ends.TryGetValue(startIndex, out var end) ? end : -1;
 
     /// <summary>
     /// The cached plan the statements of <paramref name="batch"/>, a client's
@@ -39,6 +68,7 @@ partial class Simulation
         {
             _ = Interlocked.Increment(ref memo.UseCount);
             batch.CachedPlan = memo;
+            NoteRunningPlan(batch, memo);
             return memo;
         }
 
@@ -69,7 +99,50 @@ partial class Simulation
         batch.CachedPlanCompiled = created;
         if (batch.CachedPlanMemo is { } memoSlot)
             memoSlot.Value = plan;
+        NoteRunningPlan(batch, plan);
         return plan;
+    }
+
+    /// <summary>
+    /// What <c>sys.dm_exec_requests</c> reports of a session's running
+    /// statement: the text its <c>sql_handle</c> names — the batch's, or, for
+    /// a statement simple parameterization rewrites, the prepared text real
+    /// runs it under — the statement's offsets in that text, the end one -1
+    /// for a batch's last statement, and the handle of the plan it runs under,
+    /// the one real would cache when none is cached yet (probed 2026-10-16
+    /// against SQL Server 2025: a blocked <c>select * from t where id = 2</c>
+    /// reports <c>(@1 tinyint)SELECT * FROM [t] WHERE [id]=@1</c> from offset
+    /// 24 to its last character, and every running request a plan handle).
+    /// </summary>
+    internal RunningStatement ReportedStatement(SimulatedDbConnection connection, string batchText, int statementStart, Database database)
+    {
+        var start = Math.Clamp(statementStart, 0, batchText.Length);
+        var end = this.StatementEndIndex(batchText, start);
+        var through = end < 0 ? batchText.Length : Math.Min(end + 1, batchText.Length);
+        var statement = batchText.AsSpan(start, through - start).TrimEnd().TrimEnd(';').TrimEnd();
+        if (connection.NestingLevel == 0 && statement.Length != 0
+            && this.QueryStoreShapeOf(statement, database, parser: null, tokensFrom: null) is { PreparedText: { } prepared } shape)
+        {
+            return new RunningStatement(prepared, 2 * shape.ParameterizedPrefixLength, 2 * (prepared.Length - 1),
+                BuiltInResources.SqlHandleOf(prepared), PlanHandleFor(connection, CachedPlanKind.Prepared, prepared, database));
+        }
+        return new RunningStatement(batchText, 2 * start, end < 0 ? -1 : 2 * end, BuiltInResources.SqlHandleOf(batchText),
+            connection.Session.RunningPlanHandle ?? PlanHandleFor(connection, CachedPlanKind.Adhoc, batchText, database));
+    }
+
+    /// <summary>The handle of the batch plan of <paramref name="text"/> the session's settings compile, cached or not.</summary>
+    private static byte[] PlanHandleFor(SimulatedDbConnection connection, CachedPlanKind kind, string text, Database database)
+    {
+        var key = new CachedPlanKey(kind, database.Id, 0, text, null, SetOptionsOf(connection, connection.QuotedIdentifiers),
+            connection.Language.LangId, DateFormatCode(connection.DateFormat), connection.DateFirst);
+        return CachedPlan.PlanHandleOf(key, BuiltInResources.AdHocObjectIdOf(text));
+    }
+
+    /// <summary>A client's batch runs under <paramref name="plan"/>, the plan its request reports.</summary>
+    private static void NoteRunningPlan(BatchContext batch, CachedPlan plan)
+    {
+        if (batch.CachedPlanOrigin == CachedPlanOrigin.ClientBatch)
+            batch.Connection.Session.RunningPlanHandle = plan.PlanHandle;
     }
 
     /// <summary>Whether the session's plan-affecting settings are the ones <paramref name="key"/> was compiled under.</summary>

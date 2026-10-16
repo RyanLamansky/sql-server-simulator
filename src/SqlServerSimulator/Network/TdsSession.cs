@@ -477,6 +477,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // sys.dm_exec_sessions and the sp_who family.
         opened.ClientHostName = login.HostName;
         opened.ClientApplicationName = login.AppName;
+        opened.ClientProcessId = login.ClientProcessId;
         opened.OriginalDatabaseName = requestedDatabase;
         var target = opened.CurrentDatabase;
         if (requestedDatabase.Length > 0)

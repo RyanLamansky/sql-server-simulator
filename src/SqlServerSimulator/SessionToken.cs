@@ -157,6 +157,9 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public string? WaitingOnKey;
 
+    /// <summary>The id of the index whose key <see cref="WaitingOnKey"/> is.</summary>
+    public int WaitingOnKeyIndexId;
+
     /// <summary>
     /// <c>Environment.TickCount64</c> when the session's current wait began —
     /// a blocked lock acquisition or a <c>WAITFOR</c> — read as
@@ -216,6 +219,24 @@ internal sealed class SessionToken(int spid)
 
     /// <summary>When the session's in-flight command began, which <c>sys.dm_exec_requests.start_time</c> reports.</summary>
     public DateTime RequestStartUtc;
+
+    /// <summary>
+    /// The autocommit transaction of the session's running top-level
+    /// statement, drawn when the statement or another session's DMV read
+    /// first asks for it, 0 before either does; see
+    /// <c>SimulatedDbConnection.RunningStatementTransactionId</c>.
+    /// </summary>
+    public long StatementTransactionId;
+
+    /// <summary>When the session's last command finished, which <c>sys.dm_exec_sessions.last_request_end_time</c> reports.</summary>
+    public DateTime RequestEndUtc;
+
+    /// <summary>
+    /// The handle of the cached plan the session's running client batch runs
+    /// under, which <c>sys.dm_exec_requests.plan_handle</c> reports; null until
+    /// the batch reaches a statement real keeps a plan for.
+    /// </summary>
+    public byte[]? RunningPlanHandle;
 
     /// <summary>
     /// The text of the session's current or most recent command, which its

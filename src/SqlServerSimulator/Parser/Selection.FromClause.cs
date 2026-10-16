@@ -1214,6 +1214,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseQueryPlan(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_text_query_plan"))
                         return BuiltInRowsetSource(context, ParseTextQueryPlan(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_query_statistics_xml"))
+                        return BuiltInRowsetSource(context, ParseQueryStatisticsXml(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
                         return BuiltInRowsetSource(context, ParseInputBuffer(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_cursors"))
@@ -2061,7 +2063,7 @@ internal sealed partial class Selection
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         name.Count == 2
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     /// <summary>
     /// A <c>WITH</c> right after a rowset function's call, no alias between,

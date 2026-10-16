@@ -113,9 +113,18 @@ internal static class StringScalars
     /// a predicate — and applies <see cref="RejectLegacyLobType"/> to it.
     /// Returns the resolved type so the caller can derive its result from it.
     /// </summary>
-    public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false, bool propagatesUnresolvedCollation = false)
+    public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false, bool propagatesUnresolvedCollation = false) =>
+        BindArgumentType(argument.GetSqlType(batch, resolveColumnType), functionLowerName, argumentIndex, allowAnsiText, propagatesUnresolvedCollation);
+
+    /// <summary>
+    /// <see cref="BindArgument"/> over a type the caller already resolved, for
+    /// a built-in that inspects its arguments' types before binding them: each
+    /// argument's <see cref="Expression.GetSqlType"/> runs once, which keeps a
+    /// deeply nested chain (thirty-odd <c>REPLACE</c>s around one value)
+    /// linear rather than doubling per level.
+    /// </summary>
+    public static SqlType BindArgumentType(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false, bool propagatesUnresolvedCollation = false)
     {
-        var type = argument.GetSqlType(batch, resolveColumnType);
         // A vector converts to no string implicitly (probed 2026-09-26 against
         // SQL Server 2025, LEN / LEFT / CHARINDEX).
         VectorArguments.RejectVector(type, functionLowerName, argumentIndex, 1);

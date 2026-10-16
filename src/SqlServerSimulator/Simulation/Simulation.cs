@@ -1317,6 +1317,7 @@ public sealed partial class Simulation
             {
                 var session = running.Session;
                 session.RequestStartUtc = DateTime.UtcNow;
+                session.RunningPlanHandle = null;
                 session.BatchText = command.CommandText;
                 session.StatementStartIndex = 0;
             }
@@ -1478,7 +1479,10 @@ public sealed partial class Simulation
             }
             _ = Interlocked.Decrement(ref this.statementsInFlight);
             if (command.Connection is { } finished)
+            {
+                finished.Session.RequestEndUtc = DateTime.UtcNow;
                 finished.EndCommand();
+            }
             // An error that ends the session closes the connection once the
             // command has delivered it.
             if (command.Connection is { SessionEnding: true } ended)

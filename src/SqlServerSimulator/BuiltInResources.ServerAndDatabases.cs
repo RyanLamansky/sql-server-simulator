@@ -1523,6 +1523,9 @@ internal static partial class BuiltInResources
     private static SqlValue SqlHandleValue(string? text) =>
         text is null ? SqlValue.Null(SqlType.Varbinary) : SqlValue.FromVarbinary(SqlHandleOf(text));
 
+    /// <summary>The rows of <c>sys.dm_exec_requests</c>, for the views built over it.</summary>
+    internal static IEnumerable<SqlValue[]> RequestRows(Parser.BatchContext batch) => EnumerateSysDmExecRequests(batch, batch.CurrentDatabase);
+
     /// <summary>
     /// Rows for <c>sys.dm_exec_requests</c> — the querying session's, then each
     /// other session mid-statement or blocked, in session order, each with its
@@ -1571,7 +1574,7 @@ internal static partial class BuiltInResources
                     isSelf ? "running" : waitType is not null ? "suspended" : "runnable",
                     session.CurrentCommand, session.BatchText, session.StatementStartIndex,
                     waitType, waitMillis, blocker,
-                    lockWait is var (describedResource, _) ? LockDmvs.DescribeResource(simulation, describedResource) : "",
+                    lockWait is not null ? LockDmvs.WaitResource(batch, connection) : "",
                     SessionSettings.Capture(connection), connection.OpenTransactionCount, connection.NestingLevel);
             }
             for (; next < parked.Length; next++)
@@ -1612,16 +1615,18 @@ internal static partial class BuiltInResources
         var nullBinary = SqlValue.Null(SqlType.Varbinary);
         var nullInt = SqlValue.Null(SqlType.Int32);
         var options = settings.Options;
+        var reported = batchText is null ? (RunningStatement?)null
+            : simulation.ReportedStatement(connection, batchText, statementStart, settings.Database);
         return [
             SqlValue.FromInt16((short)connection.Spid),
             SqlValue.FromInt32(requestId),
             SqlValue.FromDateTime(start),
             SqlValue.FromNVarchar(status),
             SqlValue.FromNVarchar(command),
-            SqlHandleValue(batchText),
-            batchText is null ? nullInt : SqlValue.FromInt32(statementStart * 2),
-            batchText is null ? nullInt : SqlValue.FromInt32(-1),
-            nullBinary,
+            reported is { } handles ? SqlValue.FromVarbinary(handles.SqlHandle) : nullBinary,
+            reported is { } offsets ? SqlValue.FromInt32(offsets.StartOffset) : nullInt,
+            reported is { } ends ? SqlValue.FromInt32(ends.EndOffset) : nullInt,
+            reported is { } plan ? SqlValue.FromVarbinary(plan.PlanHandle) : nullBinary,
             SqlValue.FromInt16(SessionDatabaseId(simulation, settings.Database)),
             SqlValue.FromInt32(connection.Security.Effective.DatabasePrincipalId),
             SqlValue.FromGuid(connection.Transport.ConnectionId),
@@ -1632,7 +1637,8 @@ internal static partial class BuiltInResources
             SqlValue.FromNVarchar(waitResource),
             SqlValue.FromInt32(tranCount),
             SqlValue.FromInt32(1),
-            zeroBig,
+            SqlValue.FromInt64(connection.CurrentTransaction?.TransactionId
+                ?? (RunsAutocommitTransaction(connection) || status == "running" ? connection.RunningStatementTransactionId() : 0)),
             SqlValue.FromVarbinary(settings.ContextInfo ?? []),
             SqlValue.FromSingle(0),
             zeroBig,
@@ -1709,6 +1715,16 @@ internal static partial class BuiltInResources
         && options.CursorCloseOnCommit && options.ImplicitTransactions && quotedIdentifiers;
 
     /// <summary>
+    /// Whether another session has a request under way — mid-statement,
+    /// blocked, in a <c>WAITFOR</c>, or waiting on its client — which
+    /// <c>sys.dm_exec_sessions</c> reports <c>running</c> (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool HasRunningRequest(SimulatedDbConnection connection) =>
+        connection.Session.CurrentExecutingThreadId is not null || connection.WaitingOnResource is not null
+        || connection.Session.InWaitFor || connection.Session.AwaitingClientRequest >= 0 || connection.ParkedRequests().Length != 0;
+
+    /// <summary>
     /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
     /// simulation, snapshotted under the registry lock. Session-backed
     /// columns read the connection's real state; the rest are the
@@ -1748,22 +1764,22 @@ internal static partial class BuiltInResources
                 loginTime,
                 connection.ClientHostName.Length == 0 ? emptyName : SqlValue.FromNVarchar(connection.ClientHostName),
                 connection.ClientApplicationName.Length == 0 ? emptyName : SqlValue.FromNVarchar(connection.ClientApplicationName),
-                SqlValue.FromInt32(Environment.ProcessId),
+                SqlValue.FromInt32(connection.ClientProcessId),
                 SqlValue.FromInt32(7),
                 SqlValue.FromNVarchar("SqlServerSimulator"),
                 SqlValue.FromVarbinary(DeriveLoginSid(effectiveLogin)),
                 SqlValue.FromNVarchar(effectiveLogin),
                 nullName,
                 nullName,
-                SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), connection.RunningLogonTriggers ? "preconnect" : ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
+                SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), connection.RunningLogonTriggers ? "preconnect" : ReferenceEquals(connection, batch.Connection) || HasRunningRequest(connection) ? "running" : "sleeping"),
                 SqlValue.FromVarbinary((published is null ? connection.ReportedContextInfo : published.ContextInfo) ?? []),
                 zero,
                 zero,
                 zero,
                 zero,
                 SqlValue.FromInt32(4),
-                loginTime,
-                loginTime,
+                SqlValue.FromDateTime(LastRequestStartUtc(connection)),
+                SqlValue.FromDateTime(LastRequestEndUtc(connection)),
                 zeroBig,
                 zeroBig,
                 zeroBig,

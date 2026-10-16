@@ -37,6 +37,21 @@ internal enum CachedPlanOrigin : byte
     Module,
 }
 
+/// <summary>
+/// What <c>sys.dm_exec_requests</c> reports of a running statement — see
+/// <c>Simulation.ReportedStatement</c>.
+/// </summary>
+internal readonly struct RunningStatement(string text, int startOffset, int endOffset, byte[] sqlHandle, byte[] planHandle)
+{
+    /// <summary>The text <see cref="SqlHandle"/> names, which the offsets index.</summary>
+    public readonly string Text = text;
+
+    public readonly int StartOffset = startOffset;
+    public readonly int EndOffset = endOffset;
+    public readonly byte[] SqlHandle = sqlHandle;
+    public readonly byte[] PlanHandle = planHandle;
+}
+
 /// <summary>What a batch's top-level statements have been, for the plan cache's settings-only rule.</summary>
 internal enum CachedPlanStatements : byte
 {
@@ -213,7 +228,7 @@ internal sealed class CachedPlan
     /// probes (2026-10-15 against SQL Server 2025), whose middle bytes aren't
     /// otherwise reproduced.
     /// </summary>
-    private static byte[] PlanHandleOf(in CachedPlanKey key, int objectId)
+    internal static byte[] PlanHandleOf(in CachedPlanKey key, int objectId)
     {
         var handle = new byte[BuiltInResources.SqlHandleLength];
         handle[0] = key.Kind is CachedPlanKind.Adhoc or CachedPlanKind.Prepared ? (byte)6 : (byte)5;

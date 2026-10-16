@@ -722,7 +722,7 @@ public sealed class StreamedResultTests
         _ = writer.CreateCommand("begin tran; update big set v = 'z' where k = 1500").ExecuteNonQuery();
 
         var waiting = await sim.StartBlocked(reader, "select v from big", TestContext.CancellationToken);
-        AreEqual("LCK_M_S", observer.CreateCommand($"select wait_type from sys.dm_os_waiting_tasks where session_id = {spid}").ExecuteScalar());
+        AreEqual("LCK_M_S", observer.CreateCommand($"select wait_type from sys.dm_os_waiting_tasks where session_id = {spid} and wait_type like 'LCK%'").ExecuteScalar());
         _ = writer.CreateCommand("commit").ExecuteNonQuery();
         var values = await waiting;
         HasCount(Rows, values);

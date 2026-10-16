@@ -1071,7 +1071,7 @@ internal sealed partial class BatchContext
             || table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex) is not { } live
             || throughIndex.RowChanges(priorImage, live))
         {
-            return this.AwaitRowWriters(table, resource, mode, throughIndex.Describe(key));
+            return this.AwaitRowWriters(table, resource, mode, (throughIndex.Describe(key), throughIndex.IndexId));
         }
         var session = this.Connection.LockOwner;
         var indexKey = throughIndex.GetOrCreate(key);
@@ -1494,13 +1494,25 @@ internal sealed partial class BatchContext
         && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
         && this.AwaitRowWriters(table, resource, LockMode.Exclusive);
 
-    // A unique key's lock description, as its own index's key lock reads.
-    private static string DescribeUniqueKey(HeapTable table, int[] storageOrdinals, SqlValueKey probe)
+    // A unique key's lock description, as its own index's key lock reads, and
+    // the id of the index whose key it is.
+    private static (string Description, int IndexId) DescribeUniqueKey(HeapTable table, int[] storageOrdinals, SqlValueKey probe)
     {
         var types = new SqlType[storageOrdinals.Length];
         for (var i = 0; i < types.Length; i++)
             types[i] = table.StoredColumns[storageOrdinals[i]].Type;
-        return KeyLockHash.Describe(probe, types, KeyLockUniquifier.None);
+        var indexId = 0;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.AsSpan().SequenceEqual(storageOrdinals))
+                indexId = key.IndexId;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (indexId == 0 && index.IsUnique && index.KeyStorageOrdinals.AsSpan().SequenceEqual(storageOrdinals))
+                indexId = index.IndexId;
+        }
+        return (KeyLockHash.Describe(probe, types, KeyLockUniquifier.None), indexId);
     }
 
     /// <summary>
@@ -1512,14 +1524,15 @@ internal sealed partial class BatchContext
 
     // True when there was someone to wait for. A wait for a key some row
     // carries names the key, for the lock DMVs.
-    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared, string? waitingOnKey = null)
+    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared, (string Description, int IndexId)? waitingOnKey = null)
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
         if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.LockOwner))
             return false;
         var session = connection.LockOwner;
-        session.WaitingOnKey = waitingOnKey;
+        session.WaitingOnKey = waitingOnKey?.Description;
+        session.WaitingOnKeyIndexId = waitingOnKey?.IndexId ?? 0;
         try
         {
             this.AcquireOnTable(table, resource, mode, session);

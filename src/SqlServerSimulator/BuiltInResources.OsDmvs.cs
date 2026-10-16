@@ -86,6 +86,23 @@ internal static partial class BuiltInResources
             ("worker_address", SqlValue.FromVarbinary(WorkerAddress(task.Spid, task.RequestId))),
         ])));
 
+        // One row per request waiting — on a lock, in a WAITFOR, or on its
+        // client to read what it sent — as dm_exec_requests reports it (the
+        // simulator has no system tasks, whose waits real lists beside them).
+        Sys("dm_os_waiting_tasks",
+        [
+            new("waiting_task_address", SqlType.Varbinary, 8, false),
+            new("session_id", SqlType.SmallInt, null, true),
+            new("exec_context_id", SqlType.Int32, null, true),
+            new("wait_duration_ms", SqlType.BigInt, null, true),
+            new("wait_type", SqlType.NVarchar, 60, true),
+            new("resource_address", SqlType.Varbinary, 8, true),
+            new("blocking_task_address", SqlType.Varbinary, 8, true),
+            new("blocking_session_id", SqlType.SmallInt, null, true),
+            new("blocking_exec_context_id", SqlType.Int32, null, true),
+            new("resource_description", SqlType.NVarchar, 3072, true),
+        ], WaitingTaskRows);
+
         HeapColumn[] workers =
         [
             new("worker_address", SqlType.Varbinary, 8, false),
@@ -369,7 +386,7 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>One request <c>sys.dm_exec_requests</c> lists, as the task views see it.</summary>
-    private readonly struct RequestTask(short spid, int requestId, string state, string? waitType, int threadId, DateTime loginTimeUtc)
+    private readonly struct RequestTask(short spid, int requestId, string state, string? waitType, int waitMillis, int threadId, DateTime loginTimeUtc)
     {
         public readonly short Spid = spid;
         public readonly int RequestId = requestId;
@@ -378,6 +395,9 @@ internal static partial class BuiltInResources
         public readonly string State = state;
 
         public readonly string? WaitType = waitType;
+
+        /// <summary>How long the request has waited, its <c>wait_time</c>.</summary>
+        public readonly int WaitMillis = waitMillis;
         public readonly int ThreadId = threadId;
         public readonly DateTime LoginTimeUtc = loginTimeUtc;
     }
@@ -409,10 +429,66 @@ internal static partial class BuiltInResources
                     _ => "SUSPENDED",
                 },
                 row[13].IsNull ? null : row[13].AsString,
+                row[14].AsInt32,
                 connection?.Session.CurrentExecutingThreadId ?? 0,
                 connection?.LoginTimeUtc ?? batch.Connection.Simulation.SeedDate));
         }
         return tasks;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.dm_os_waiting_tasks</c>: each suspended request's task
+    /// and what it waits on. A lock wait names its waiting request's
+    /// <c>lock_owner_address</c> as <c>resource_address</c>, its blocker's task
+    /// while the blocker runs a request (none for an idle session holding the
+    /// lock in an open transaction) and real's description of the lock; a
+    /// <c>WAITFOR</c> or a client wait names nothing (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> WaitingTaskRows(Parser.BatchContext batch, Database database)
+    {
+        var bySpid = new Dictionary<int, SimulatedDbConnection>();
+        foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
+            bySpid[connection.Spid] = connection;
+        var tasks = RequestTasks(batch, database);
+        var nullAddress = SqlValue.Null(SqlType.Varbinary);
+        var zero = SqlValue.FromInt32(0);
+        var nullContext = SqlValue.Null(SqlType.Int32);
+        foreach (var task in tasks)
+        {
+            if (task.State != "SUSPENDED" || task.WaitType is not { } waitType)
+                continue;
+            _ = bySpid.TryGetValue(task.Spid, out var connection);
+            var lockWait = connection is not null && connection.WaitingOnResource is not null && waitType.StartsWith("LCK_M_", StringComparison.Ordinal);
+            var blocker = lockWait && LockDmvs.FindFirstBlocker(connection!.WaitingOnResource!, connection) is { } spid ? spid : (int?)null;
+            byte[]? blockingTask = null;
+            if (blocker is { } blockingSpid)
+            {
+                foreach (var other in tasks)
+                {
+                    if (other.Spid == blockingSpid)
+                    {
+                        blockingTask = TaskAddress(other.Spid, other.RequestId);
+                        break;
+                    }
+                }
+            }
+            var resourceAddress = lockWait ? LockDmvs.WaitingTaskResourceAddress(batch, connection!) : null;
+            var description = lockWait ? LockDmvs.WaitingTaskDescription(batch, connection!) : null;
+            yield return
+            [
+                SqlValue.FromVarbinary(TaskAddress(task.Spid, task.RequestId)),
+                SqlValue.FromInt16(task.Spid),
+                zero,
+                SqlValue.FromInt64(task.WaitMillis),
+                SqlValue.FromNVarchar(waitType),
+                resourceAddress is null ? nullAddress : SqlValue.FromVarbinary(resourceAddress),
+                blockingTask is null ? nullAddress : SqlValue.FromVarbinary(blockingTask),
+                blocker is { } b ? SqlValue.FromInt16((short)b) : SqlValue.Null(SqlType.SmallInt),
+                nullContext,
+                description is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(description),
+            ];
+        }
     }
 
     /// <summary>

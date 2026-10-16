@@ -19,9 +19,8 @@ internal static partial class BuiltInResources
         // SchemaLock (a table's is its TableDataLock), and every per-row
         // entry in HeapTable.RowLocks. GRANT entries come from
         // LockResource.Holders; WAIT entries from connection registry's
-        // WaitingOnResource / WaitingForMode. Shipped column subset is
-        // the most commonly read eight fields; the full real-SQL-Server
-        // shape has ~18 columns most apps never touch.
+        // WaitingOnResource / WaitingForMode. SQL Server 2025's nineteen
+        // columns (probed 2026-10-16).
         Sys("dm_tran_locks",
         [
             new("resource_type", SqlType.NVarchar, 60, false),
@@ -29,22 +28,21 @@ internal static partial class BuiltInResources
             new("resource_database_id", SqlType.Int32, null, false),
             new("resource_description", SqlType.NVarchar, 256, false),
             new("resource_associated_entity_id", SqlType.BigInt, null, true),
+            new("resource_lock_partition", SqlType.Int32, null, true),
             new("request_mode", SqlType.NVarchar, 60, false),
+            new("request_type", SqlType.NVarchar, 60, false),
             new("request_status", SqlType.NVarchar, 60, false),
+            new("request_reference_count", SqlType.SmallInt, null, false),
+            new("request_lifetime", SqlType.Int32, null, false),
             new("request_session_id", SqlType.Int32, null, false),
+            new("request_exec_context_id", SqlType.Int32, null, false),
+            new("request_request_id", SqlType.Int32, null, false),
+            new("request_owner_type", SqlType.NVarchar, 60, false),
+            new("request_owner_id", SqlType.BigInt, null, true),
+            new("request_owner_guid", SqlType.UniqueIdentifier, null, true),
+            new("request_owner_lockspace_id", SqlType.NVarchar, 32, false),
+            new("lock_owner_address", SqlType.Varbinary, 8, false),
         ], LockDmvs.EnumerateDmTranLocksView);
-
-        // sys.dm_os_waiting_tasks: one row per currently-waiting
-        // connection. session_id / blocking_session_id are smallint
-        // matching real SQL Server; wait_type is `LCK_M_<mode>` per
-        // SQL Server's convention.
-        Sys("dm_os_waiting_tasks",
-        [
-            new("session_id", SqlType.SmallInt, null, true),
-            new("wait_type", SqlType.NVarchar, 60, true),
-            new("resource_description", SqlType.NVarchar, 3072, true),
-            new("blocking_session_id", SqlType.SmallInt, null, true),
-        ], LockDmvs.EnumerateDmOsWaitingTasks);
 
         // sys.dm_tran_version_store: one row per finalized HistoricalVersion
         // across every per-table chain. Pending HVs (Xmax = PendingXmax)

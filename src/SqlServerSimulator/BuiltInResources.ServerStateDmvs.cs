@@ -167,12 +167,15 @@ internal static partial class BuiltInResources
         var connections = simulation.SnapshotConnections();
         var transactions = new List<(SimulatedDbConnection Connection, SimulatedDbTransaction Transaction)>();
         var listed = new HashSet<long>();
+        var autocommit = new List<SimulatedDbConnection>();
         foreach (var connection in connections)
         {
             if (connection.CurrentTransaction is { } transaction && listed.Add(transaction.TransactionId))
                 transactions.Add((connection, transaction));
+            else if (!ReferenceEquals(connection, batch.Connection) && RunsAutocommitTransaction(connection))
+                autocommit.Add(connection);
         }
-        if (transactions.Count == 0)
+        if (transactions.Count == 0 && autocommit.Count == 0)
             yield break;
         transactions.Sort(static (a, b) =>
         {
@@ -204,7 +207,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(begun ? 4 : 3),
                     SqlValue.FromInt32(begun ? 1 : 256),
                     SqlValue.FromInt32(begun ? 256 : 0),
-                    SqlValue.FromInt64(changes),
+                    SqlValue.FromInt64(begun ? changes + 1 : 0),
                     zero,
                     zeroBig,
                     zeroBig,
@@ -212,6 +215,37 @@ internal static partial class BuiltInResources
                     zero,
                     lsn,
                     lsn,
+                    noLsn,
+                    noLsn,
+                    noLsn,
+                    noLsn,
+                    noLsn,
+                ];
+            }
+
+            // Another session's autocommit statement holding a lock in the
+            // database, read-only for a SELECT, not yet begun there.
+            foreach (var connection in autocommit)
+            {
+                if (!tables.Holds(connection.LockOwner, writeOnly: false))
+                    continue;
+                yield return
+                [
+                    SqlValue.FromInt64(connection.RunningStatementTransactionId()),
+                    SqlValue.FromInt32(id),
+                    SqlValue.Null(SqlType.DateTime),
+                    SqlValue.FromInt32(connection.Session.CurrentCommand == "SELECT" ? 2 : 1),
+                    SqlValue.FromInt32(3),
+                    SqlValue.FromInt32(256),
+                    zero,
+                    zeroBig,
+                    zero,
+                    zeroBig,
+                    zeroBig,
+                    zero,
+                    zero,
+                    noLsn,
+                    noLsn,
                     noLsn,
                     noLsn,
                     noLsn,

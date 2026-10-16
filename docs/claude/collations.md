@@ -12,6 +12,7 @@ New `Get(length, collation, coercibility)` overloads return the column-pinned va
 The `varchar` / `char` pair intern under `Collation.ForVarcharStorage()`, so a type built from a database or column collation always carries the collation's non-Unicode sort body — a `CHAR(n)` result once compared through the default collation's Unicode weights, ignoring `CHAR(0)` where real's varchar sort doesn't.
 
 `SystemNameSqlType` / `TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Baseline` at `Implicit` rank — sysname/text/ntext don't accept per-column COLLATE in the simulator (sysname rejects per grammar; text/ntext deferred as deprecated).
+A `sysname` variable or parameter is the `nvarchar(128)` it aliases at a variable's coercible-default rank instead (`VariableSlot.DeclaredType`), so `catalog_column LIKE @sysname` takes the column's collation rather than raising Msg 468 (probed 2026-10-16 against SQL Server 2025).
 
 `SqlType.WithCollation(Collation, Coercibility)` is the virtual that rewraps a string type with new metadata; non-string types and the sysname/text/ntext singletons return `this`.
 Used by `CollateExpression` for the postfix override and by CREATE TABLE / ALTER COLUMN for the column declaration.

@@ -9,6 +9,80 @@ namespace SqlServerSimulator;
 // 2026-10-15 against SQL Server 2025.
 internal static partial class BuiltInResources
 {
+    /// <summary>
+    /// The two workload groups of an unconfigured Resource Governor, as SQL
+    /// Server 2025 lists them (probed 2026-10-16).
+    /// </summary>
+    private static readonly SqlValue[][] WorkloadGroupRows =
+    [
+        WorkloadGroup(1, "internal"),
+        WorkloadGroup(2, "default"),
+    ];
+
+    private static SqlValue[] WorkloadGroup(int id, string name) =>
+    [
+        SqlValue.FromInt32(id), SqlValue.FromSystemName(name), SqlValue.FromSystemName("Medium"), SqlValue.FromInt32(25),
+        SqlValue.FromInt32(0), SqlValue.FromInt32(0), SqlValue.FromInt32(0), SqlValue.FromInt32(0), SqlValue.FromInt32(id),
+        SqlValue.FromInt32(2), SqlValue.FromDouble(25), SqlValue.Null(SqlType.Float), SqlValue.Null(SqlType.Float),
+    ];
+
+    /// <summary>The internal and default resource pools, unlimited (probed 2026-10-16 against SQL Server 2025).</summary>
+    private static readonly SqlValue[][] ResourcePoolRows =
+    [
+        ResourcePool(1, "internal"),
+        ResourcePool(2, "default"),
+    ];
+
+    private static SqlValue[] ResourcePool(int id, string name) =>
+    [
+        SqlValue.FromInt32(id), SqlValue.FromSystemName(name), SqlValue.FromInt32(0), SqlValue.FromInt32(100),
+        SqlValue.FromInt32(0), SqlValue.FromInt32(100), SqlValue.FromInt32(100), SqlValue.FromInt32(0), SqlValue.FromInt32(0),
+    ];
+
+    /// <summary>
+    /// A Resource Governor catalog view's rows, which a login without
+    /// <c>VIEW ANY DEFINITION</c> reads none of (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static SqlValue[][] ResourceGovernorRows(Parser.BatchContext batch, SqlValue[][] rows)
+    {
+        var security = batch.Connection.Security;
+        return security.EffectiveIsDbo || batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewAnyDefinition)
+            ? rows
+            : EmptyCatalogRows;
+    }
+
+    /// <summary>
+    /// The rows of <c>sys.dm_exec_query_resource_semaphores</c>: per pool, the
+    /// regular semaphore and the small-query one, which has no maximum target
+    /// or error counts. Nothing is granted, so all of a semaphore's memory is
+    /// available; the sizes are stand-ins in the shares of the host's memory
+    /// real gives them (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue[][] ResourceSemaphoreRows()
+    {
+        var memoryKb = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 1024;
+        return
+        [
+            Semaphore(0, memoryKb * 48 / 100, memoryKb * 72 / 100, 1),
+            Semaphore(1, memoryKb * 25 / 1000, null, 1),
+            Semaphore(0, memoryKb * 64 / 100, memoryKb * 71 / 100, 2),
+            Semaphore(1, memoryKb * 33 / 1000, null, 2),
+        ];
+
+        static SqlValue[] Semaphore(short id, long target, long? maxTarget, int pool)
+        {
+            var zero = SqlValue.FromInt64(0);
+            var none = SqlValue.Null(SqlType.BigInt);
+            return
+            [
+                SqlValue.FromInt16(id), SqlValue.FromInt64(target), maxTarget is { } max ? SqlValue.FromInt64(max) : none,
+                SqlValue.FromInt64(target), SqlValue.FromInt64(target), zero, zero, SqlValue.FromInt32(0), SqlValue.FromInt32(0),
+                maxTarget is null ? none : zero, maxTarget is null ? none : zero, SqlValue.FromInt32(pool),
+            ];
+        }
+    }
+
     private static void RegisterServerExtras(Dictionary<string, CatalogView> views)
     {
         void Sys(string name, HeapColumn[] columns, Func<Parser.BatchContext, Database, IEnumerable<SqlValue[]>> rows) =>
@@ -44,6 +118,65 @@ internal static partial class BuiltInResources
             new("internal_objects_alloc_page_count", SqlType.BigInt, null, true),
             new("internal_objects_dealloc_page_count", SqlType.BigInt, null, true),
         ], static (batch, _) => SessionSpaceRows(batch, task: true));
+
+        // Resource Governor as an instance that never configured it holds it:
+        // the internal and default workload groups, each in its own pool,
+        // visible only to a login that may view any definition.
+        Sys("resource_governor_workload_groups",
+        [
+            new("group_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("importance", SqlType.SystemName, 128, false),
+            new("request_max_memory_grant_percent", SqlType.Int32, null, false),
+            new("request_max_cpu_time_sec", SqlType.Int32, null, false),
+            new("request_memory_grant_timeout_sec", SqlType.Int32, null, false),
+            new("max_dop", SqlType.Int32, null, false),
+            new("group_max_requests", SqlType.Int32, null, false),
+            new("pool_id", SqlType.Int32, null, false),
+            new("external_pool_id", SqlType.Int32, null, false),
+            new("request_max_memory_grant_percent_numeric", SqlType.Float, null, false),
+            new("group_max_tempdb_data_percent", SqlType.Float, null, true),
+            new("group_max_tempdb_data_mb", SqlType.Float, null, true),
+        ], static (batch, _) => ResourceGovernorRows(batch, WorkloadGroupRows));
+        Sys("resource_governor_resource_pools",
+        [
+            new("pool_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("min_cpu_percent", SqlType.Int32, null, false),
+            new("max_cpu_percent", SqlType.Int32, null, false),
+            new("min_memory_percent", SqlType.Int32, null, false),
+            new("max_memory_percent", SqlType.Int32, null, false),
+            new("cap_cpu_percent", SqlType.Int32, null, false),
+            new("min_iops_per_volume", SqlType.Int32, null, false),
+            new("max_iops_per_volume", SqlType.Int32, null, false),
+        ], static (batch, _) => ResourceGovernorRows(batch, ResourcePoolRows));
+
+        // Each pool's two semaphores, the regular one and the small-query one.
+        Sys("dm_exec_query_resource_semaphores",
+        [
+            new("resource_semaphore_id", SqlType.SmallInt, null, true),
+            new("target_memory_kb", SqlType.BigInt, null, true),
+            new("max_target_memory_kb", SqlType.BigInt, null, true),
+            new("total_memory_kb", SqlType.BigInt, null, true),
+            new("available_memory_kb", SqlType.BigInt, null, true),
+            new("granted_memory_kb", SqlType.BigInt, null, true),
+            new("used_memory_kb", SqlType.BigInt, null, true),
+            new("grantee_count", SqlType.Int32, null, true),
+            new("waiter_count", SqlType.Int32, null, true),
+            new("timeout_error_count", SqlType.BigInt, null, true),
+            new("forced_grant_count", SqlType.BigInt, null, true),
+            new("pool_id", SqlType.Int32, null, true),
+        ], static (_, _) => ResourceSemaphoreRows());
+
+        // Service Broker activates no stored procedure here.
+        Sys("dm_broker_activated_tasks",
+        [
+            new("spid", SqlType.Int32, null, true),
+            new("database_id", SqlType.SmallInt, null, true),
+            new("queue_id", SqlType.Int32, null, true),
+            new("procedure_name", SqlType.NVarchar, 325, true),
+            new("execute_as", SqlType.Int32, null, true),
+        ], static (_, _) => EmptyCatalogRows);
 
         // A query is granted memory while it runs a memory-consuming operator,
         // which no query the simulator runs reports, so the view is empty.

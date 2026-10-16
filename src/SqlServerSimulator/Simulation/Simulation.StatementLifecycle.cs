@@ -285,7 +285,10 @@ partial class Simulation
                 // statement moves them; a module or dynamic-SQL body runs inside
                 // the statement that called it.
                 if (batch.Connection.NestingLevel == 0)
+                {
                     session.StatementStartIndex = batch.Parser.Token!.StartIndex;
+                    Volatile.Write(ref session.StatementTransactionId, 0);
+                }
             }
             // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
             // clearing here ensures the next statement allocates a new Xid on its
@@ -365,6 +368,11 @@ partial class Simulation
         private readonly void Leave(BatchContext batch)
         {
             var connection = batch.Connection;
+            if (batch.StatementEnds is { } ends && this.StatementStart.Token is { } statementToken)
+            {
+                var next = NextStatementStart(batch.Parser);
+                ends[statementToken.StartIndex] = next >= batch.Parser.Command.CommandText.Length ? -1 : next - 1;
+            }
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
             if (this.announcedReader)

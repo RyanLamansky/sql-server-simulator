@@ -13,6 +13,9 @@ partial class Selection
 
     private static readonly string[] SqlTextColumnNames = ["dbid", "objectid", "number", "encrypted", "text"];
 
+    // Only encrypted is NOT NULL (probed 2026-10-16 against SQL Server 2025).
+    private static readonly bool[] SqlTextNullability = [true, true, true, false, true];
+
     internal static readonly SqlType[] InputBufferSchema =
     [
         NVarcharSqlType.Get(256, Collation.Baseline, Coercibility.Implicit), SqlType.SmallInt, SqlType.NVarcharMax,
@@ -92,7 +95,10 @@ partial class Selection
         return new Selection(SqlTextSchema, SqlTextColumnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateSqlText(arguments[0], batch, outerResolver));
+            (batch, outerResolver) => EnumerateSqlText(arguments[0], batch, outerResolver))
+        {
+            ColumnNullability = SqlTextNullability,
+        };
     }
 
     private static List<byte[]> EnumerateSqlText(Expression handleExpr, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
@@ -102,6 +108,8 @@ partial class Selection
         if (value.IsNull)
             return [];
         var handle = value.CoerceTo(SqlType.VarbinaryMax).AsBytes;
+        if (handle.Length == LegacySqlHandleLength && handle[0] == 1)
+            return LegacySqlTextRow(batch.Connection.Simulation, handle);
         if (handle.Length < BuiltInResources.SqlHandleLength)
             throw SimulatedSqlException.InvalidSqlTextHandle();
         switch (handle[0])
@@ -134,10 +142,19 @@ partial class Selection
                 throw SimulatedSqlException.InvalidSqlTextHandle();
         }
 
-        foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
+        var simulation = batch.Connection.Simulation;
+        foreach (var connection in simulation.SnapshotConnections())
         {
             if (Matches(connection.Session.BatchText, handle))
                 return SqlTextRow(connection.Session.BatchText!);
+            // A running statement simple parameterization rewrote names its
+            // prepared text.
+            if (connection.Session.BatchText is { } running
+                && simulation.ReportedStatement(connection, running, connection.Session.StatementStartIndex, connection.CurrentDatabase) is var reported
+                && !ReferenceEquals(reported.Text, running) && Matches(reported.Text, handle))
+            {
+                return SqlTextRow(reported.Text);
+            }
             // A MARS request parked between its statements is running too.
             foreach (var parked in connection.ParkedRequests())
             {
@@ -160,6 +177,54 @@ partial class Selection
                 SqlValue.Null(SqlType.SmallInt), SqlValue.Null(SqlType.Int32), SqlValue.Null(SqlType.SmallInt),
                 SqlValue.FromBoolean(false), SqlValue.FromNVarchar(text),
             ])];
+    }
+
+    /// <summary>The length of the batch handle <c>sysprocesses.sql_handle</c> carries.</summary>
+    private const int LegacySqlHandleLength = 20;
+
+    /// <summary>
+    /// The <c>sys.dm_exec_sql_text</c> row of a twenty-byte batch handle, as
+    /// <c>sysprocesses.sql_handle</c> carries one: the batch whose object id
+    /// it holds, among the live sessions' commands and the cached batches,
+    /// reported in the database the handle names (probed 2026-10-16 against
+    /// SQL Server 2025, where the 64-byte handle reports none).
+    /// </summary>
+    private static List<byte[]> LegacySqlTextRow(Simulation simulation, byte[] handle)
+    {
+        var databaseId = System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(handle.AsSpan(2));
+        var objectId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(handle.AsSpan(4));
+        string? found = null;
+        foreach (var connection in simulation.SnapshotConnections())
+        {
+            if (connection.Session.BatchText is not { } text)
+                continue;
+            var reported = simulation.ReportedStatement(connection, text, connection.Session.StatementStartIndex, connection.CurrentDatabase).Text;
+            if (BuiltInResources.AdHocObjectIdOf(reported) == objectId)
+            {
+                found = reported;
+                break;
+            }
+            if (BuiltInResources.AdHocObjectIdOf(text) == objectId)
+            {
+                found = text;
+                break;
+            }
+        }
+        if (found is null)
+        {
+            foreach (var plan in simulation.LiveCachedPlans())
+            {
+                if (plan.IsBatch && plan.Text is { } text && BuiltInResources.AdHocObjectIdOf(text) == objectId)
+                {
+                    found = text;
+                    break;
+                }
+            }
+        }
+        return found is null ? [] : [RowEncoder.EncodeRow(SqlTextSchema, [
+            SqlValue.FromInt16(databaseId), SqlValue.Null(SqlType.Int32), SqlValue.Null(SqlType.SmallInt),
+            SqlValue.FromBoolean(false), SqlValue.FromNVarchar(found),
+        ])];
     }
 
     /// <summary>

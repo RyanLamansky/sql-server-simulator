@@ -636,6 +636,35 @@ partial class Simulation
             .ToString();
     }
 
+    /// <summary>
+    /// The live ShowPlan document of the statement a session runs, which
+    /// <c>sys.dm_exec_query_statistics_xml</c> reports: one statement element
+    /// for the text <see cref="ReportedStatement"/> names, null for a
+    /// statement real compiles no query plan for — a <c>WAITFOR</c>, a
+    /// <c>SET</c>, a transaction statement — which leaves the request out of
+    /// that view (probed 2026-10-16 against SQL Server 2025). Real's document
+    /// carries the operator tree and its runtime counters.
+    /// </summary>
+    internal string? LiveQueryPlan(SimulatedDbConnection connection, string batchText, int statementStart, Database database)
+    {
+        var reported = this.ReportedStatement(connection, batchText, statementStart, database);
+        var from = Math.Min(reported.StartOffset / 2, reported.Text.Length);
+        var through = reported.EndOffset < 0 ? reported.Text.Length : Math.Clamp((reported.EndOffset / 2) + 1, from, reported.Text.Length);
+        var text = reported.Text[from..through];
+        var statement = text.AsSpan().TrimEnd().TrimEnd(';').TrimEnd();
+        if (statement.Length == 0)
+            return null;
+        var shape = this.QueryStoreShapeOf(statement, database, parser: null, tokensFrom: null);
+        if (!shape.Captured)
+            return null;
+        var parameterized = !ReferenceEquals(reported.Text, batchText);
+        var xml = OpenShowPlan();
+        _ = AppendShowPlanStatement(xml, parameterized ? reported.Text : text, 1, shape, StatementSqlHandleOf(shape.Parameterized ?? shape.Text),
+            contextSettingsId: null, parentObjectId: 0, parameterized ? (byte)2 : (byte)0, retrievedFromCache: false,
+            (short)database.CompatibilityLevel, SetOptionsOf(connection, connection.QuotedIdentifiers));
+        return xml.Append(ShowPlanClose).ToString();
+    }
+
     /// <summary>A ShowPlan XML document's opening, up to its first statement.</summary>
     internal static StringBuilder OpenShowPlan() =>
         new StringBuilder()
@@ -706,12 +735,12 @@ partial class Simulation
     /// cache or read now. The database supplies the tokenizer's collation and
     /// compatibility level.
     /// </summary>
-    private QueryStoreShape QueryStoreShapeOf(ReadOnlySpan<char> text, Database database, ParserContext parser, ParserContext.Checkpoint? tokensFrom)
+    private QueryStoreShape QueryStoreShapeOf(ReadOnlySpan<char> text, Database database, ParserContext? parser, ParserContext.Checkpoint? tokensFrom)
     {
         var lookup = this.queryStoreShapes.GetAlternateLookup<ReadOnlySpan<char>>();
         if (lookup.TryGetValue(text, out var cached))
             return cached;
-        var shape = QueryStoreShape.Read(new string(text), tokensFrom is { } start ? parser.StatementTokens(start) : null, database);
+        var shape = QueryStoreShape.Read(new string(text), tokensFrom is { } start && parser is not null ? parser.StatementTokens(start) : null, database);
         if (Volatile.Read(ref this.queryStoreShapeCount) < PlanCacheCapacity * 4 && this.queryStoreShapes.TryAdd(shape.Text, shape))
             _ = Interlocked.Increment(ref this.queryStoreShapeCount);
         return shape;

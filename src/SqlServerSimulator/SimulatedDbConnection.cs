@@ -1711,6 +1711,31 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal string ClientHostName = "";
 
+    /// <summary>
+    /// The client process this session reported: LOGIN7's <c>ClientPID</c>
+    /// over the TDS endpoint, the host process in-process. Surfaces as
+    /// <c>HOST_ID()</c>, <c>sys.dm_exec_sessions.host_process_id</c> and
+    /// <c>sysprocesses.hostprocess</c>.
+    /// </summary>
+    internal int ClientProcessId = Environment.ProcessId;
+
+    /// <summary>
+    /// The autocommit transaction of the session's running top-level
+    /// statement, drawn on first ask — by the statement itself or by another
+    /// session's view of it — so <c>sys.dm_exec_requests.transaction_id</c>,
+    /// <c>sys.dm_tran_active_transactions</c> and the statement's own
+    /// <c>CURRENT_TRANSACTION_ID()</c> agree.
+    /// </summary>
+    internal long RunningStatementTransactionId()
+    {
+        var session = this.Session;
+        var drawn = Volatile.Read(ref session.StatementTransactionId);
+        if (drawn != 0)
+            return drawn;
+        var allocated = this.Simulation.AllocateTransactionId();
+        return Interlocked.CompareExchange(ref session.StatementTransactionId, allocated, 0) is var raced and not 0 ? raced : allocated;
+    }
+
     /// <summary>Set on a pooled session a reset replaces, whose end is no logout.</summary>
     internal bool ReplacedByReset;
 

@@ -75,6 +75,8 @@ partial class Simulation
         compileBatch.InlinedCalls = inlined;
         compileBatch.CurrentStatement.UtcNow = DateTime.UtcNow;
         compileBatch.CompilingForRun = true;
+        if (dynamicKey is null)
+            compileBatch.StatementEnds = [];
         // A USE the walk meets switches the database it binds in.
         var connection = compileBatch.Connection;
         var enteredDatabase = connection.CurrentDatabase;
@@ -150,6 +152,8 @@ partial class Simulation
                 }
             }
         }
+        if (compileBatch.StatementEnds is { } ends)
+            this.NoteStatementEnds(compileBatch.Parser.Command.CommandText, ends);
         if (remembered is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))

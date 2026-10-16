@@ -501,6 +501,13 @@ internal sealed partial class BatchContext
     public HashSet<int>? JoinOrderWarnedStatements;
 
     /// <summary>
+    /// On a top-level batch's compile walk, where each statement it walks
+    /// ends, by its start (see <c>Simulation.NoteStatementEnds</c>); null on
+    /// every other context.
+    /// </summary>
+    public Dictionary<int, int>? StatementEnds;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the
@@ -1592,7 +1599,11 @@ internal sealed partial class BatchContext
             return transaction.TransactionId;
         var statement = this.CurrentStatement;
         if (statement.AutocommitTransactionId == 0)
-            statement.AutocommitTransactionId = this.Connection.Simulation.AllocateTransactionId();
+        {
+            statement.AutocommitTransactionId = this.Connection.NestingLevel == 0
+                ? this.Connection.RunningStatementTransactionId()
+                : this.Connection.Simulation.AllocateTransactionId();
+        }
         return statement.AutocommitTransactionId;
     }
 

@@ -710,7 +710,7 @@ Constants whose values don't carry real session/server identity in the simulator
   The same value `sys.dm_exec_sessions.host_name` and `sp_who` / `sp_who2`'s `HostName` project.
 - **`APP_NAME()`** — the client application name, from the connection string's `Application Name` / `App` keyword or LOGIN7's `AppName`, `''` when neither supplied one.
   The same value `sys.dm_exec_sessions.program_name` and `sp_who2`'s `ProgramName` project.
-- **`HOST_ID()`** — the client process id as a padded `char(10)`, never NULL: the host process here for every session, the value `sys.dm_exec_sessions.host_process_id` and `sysprocesses.hostprocess` report (type probed 2026-10-15 against SQL Server 2025).
+- **`HOST_ID()`** — the client process id as a padded `char(10)`, never NULL: the process id a TDS client's LOGIN7 sent, the host process for an in-process session, the value `sys.dm_exec_sessions.host_process_id` and `sysprocesses.hostprocess` report (type probed 2026-10-15 against SQL Server 2025).
 - **`PUBLISHINGSERVERNAME()`** — `@@SERVERNAME` as `nvarchar(256)`, a database that isn't replicated publishing from its own server (probed 2026-10-15).
 - **`ORIGINAL_DB_NAME()`** — the database the login asked for (the connection string's `Initial Catalog`, LOGIN7's database), or the empty string when it named none, whatever `USE` has done since (probed 2026-09-28 against SQL Server 2025).
 - **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
