@@ -79,6 +79,14 @@ Its rowset is fifteen columns, `status` through `message_enqueue_time`.
 - Every error and message the procedure raises goes to the error log as real writes it: `The activated proc '[dbo].[p]' running on queue 'db.dbo.q' output the following:  '…'` under process `spidNNs`.
 - `sys.dm_broker_activated_tasks` lists each running reader (spid, database, queue, procedure, principal) and `sys.dm_broker_queue_monitors` reports `RECEIVES_OCCURRING` while one runs, `NOTIFIED`, or `INACTIVE`.
 
+## Query notifications
+
+The server side of `SqlDependency` and `SqlNotificationRequest`, over the TDS endpoint only (the request rides ALL_HEADERS type 1, read into `SimulatedDbConnection.PendingQueryNotification` once a connection reset has been served).
+- Each `SELECT` the request runs subscribes (`Simulation.SubscribeQuery`): a query real won't watch — a `*`, a table not named `schema.table`, `TOP`, `DISTINCT`, a subquery, an outer join, a set operator, an aggregate without `GROUP BY`, `COUNT` (where `COUNT_BIG` belongs), a nondeterministic function, a temporary table — gets the `subscribe` / `statement` / `invalid` notification at once, id 0; any other is a `sys.dm_qn_subscriptions` row.
+- The first committed write to a watched table (`insert`, `update`, `delete`, `truncate`, hooked at `IndexUsageAccounting.NoteWrite` and `TRUNCATE`) sends the `change` / `data` notification naming the subscription and ends it.
+- A notification is real's `<qn:QueryNotification … id type source info database_id sid><qn:Message>…</qn:Message></qn:QueryNotification>` in UTF-16 behind a byte order mark, on a dialog of its own from the database's `QueryNotificationService` under `PostQueryNotification`, to the service the request names (`service="…";local database=…`, the quotes `SqlDependency` writes taken off).
+- `SqlDependency.Start`'s queue, service and activation procedure, and its listener's timer-and-`WAITFOR (RECEIVE …)` loop, run unchanged.
+
 ## Catalog views
 
 `sys.service_message_types`, `sys.service_contracts`, `sys.service_contract_message_usages`, `sys.message_type_xml_schema_collection_usages`, `sys.services`, `sys.service_contract_usages`, `sys.service_queue_usages`, `sys.service_queues`, `sys.routes`, `sys.remote_service_bindings`, `sys.conversation_priorities`, `sys.conversation_endpoints`, `sys.conversation_groups`, `sys.transmission_queue` and `sys.dm_broker_queue_monitors` (one `INACTIVE` row per queue with an activation procedure).
@@ -93,6 +101,7 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 - `far_broker_instance` is the simulator's fixed `service_broker_guid`, and a target's `principal_id` is always dbo.
 - **A reader that failed is not retried**: real's queue monitor starts it again every five seconds while messages wait (an `EXECUTE` denied, say), where here it stays `NOTIFIED` until a `RECEIVE` or an `ALTER QUEUE`.
 - Inside an activated procedure real reports `@@TRANCOUNT` one higher than its own transactions account for, and `@@SPID` as 1; here both read as an ordinary session's.
+- A query notification's dialog is begun as it fires, where real begins it as the query subscribes (its `STARTED_OUTBOUND` endpoint visible meanwhile).
 - The DONE token a conversation statement closes with: real's own codes aren't captured, so `RECEIVE` closes as a `SELECT` and the rest send none.
 
 - **The shipped queues aren't in `sys.objects`**, nor are any queue's `queue_messages_<id>` internal tables, which real lists beside its 72 system base tables (see [`catalog-views.md`](catalog-views.md)); `sys.service_queues`, `OBJECT_ID` and `SELECT` reach the shipped queues all the same.
@@ -105,3 +114,5 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 - Event notifications (`CREATE EVENT NOTIFICATION`), `sys.event_notifications` rows, and the broker's own event notifications such as `BROKER_QUEUE_DISABLED`.
 - Remote delivery: a route to another server's address holds its messages for ever, and `sys.dm_broker_connections` / `sys.dm_broker_forwarded_messages` aren't registered.
 - The permission a sender needs on the target service (`SEND`), which local delivery here never checks.
+- A query notification's timeout: a subscription lives until its table changes, and real's `timeout` notification is never sent; the query rules are read off the statement's tokens, so a shape between the listed ones (a comma-joined `FROM`, a view) is judged loosely.
+- Query notifications in-process: the ADO.NET surface has no `Notification` property.

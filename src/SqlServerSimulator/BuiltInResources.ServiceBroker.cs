@@ -251,6 +251,17 @@ internal static partial class BuiltInResources
             new("priority", SqlType.TinyInt, null, false),
         ], static (batch, database) => EnumerateTransmissionQueue(batch, database));
 
+        Sys("dm_qn_subscriptions",
+        [
+            new("id", SqlType.Int32, null, false),
+            new("database_id", SqlType.Int32, null, false),
+            new("sid", SqlType.Varbinary, 85, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("created", SqlType.DateTime, null, false),
+            new("timeout", SqlType.Int32, null, false),
+            new("status", SqlType.Int32, null, false),
+        ], static (batch, _) => QuerySubscriptionRows(batch.Connection.Simulation));
+
         var defaultName = NVarcharSqlType.Get(32, Collation.Baseline, Coercibility.Implicit);
         Sys("dm_broker_queue_monitors",
         [
@@ -423,6 +434,33 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(settings.PoisonMessageHandling),
             ];
         }
+    }
+
+    /// <summary>
+    /// <c>sys.dm_qn_subscriptions</c>: one row per live query notification
+    /// subscription, naming the first table it watches; <c>status</c> is the
+    /// constant real reports for a live one (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static List<SqlValue[]> QuerySubscriptionRows(Simulation simulation)
+    {
+        var rows = new List<SqlValue[]>();
+        lock (simulation.QuerySubscriptions)
+        {
+            foreach (var subscription in simulation.QuerySubscriptions)
+            {
+                rows.Add([
+                    SqlValue.FromInt32(subscription.Id),
+                    SqlValue.FromInt32(subscription.Database.Id),
+                    SqlValue.FromVarbinary(subscription.Sid),
+                    SqlValue.FromInt32(subscription.Tables[0].ObjectId),
+                    SqlValue.FromDateTime(subscription.Created),
+                    SqlValue.FromInt32(subscription.Request.Timeout),
+                    SqlValue.FromInt32(199168),
+                ]);
+            }
+        }
+        return rows;
     }
 
     /// <summary><c>sys.dm_broker_activated_tasks</c>: each activation procedure running.</summary>

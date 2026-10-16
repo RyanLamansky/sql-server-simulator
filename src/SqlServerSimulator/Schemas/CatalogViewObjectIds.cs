@@ -47,6 +47,7 @@ internal static class CatalogViewObjectIds
         ["sys.dm_db_missing_index_group_stats_query"] = -850131167,
         ["sys.dm_db_missing_index_groups"] = -663312131,
         ["sys.dm_exec_query_resource_semaphores"] = -189437573,
+        ["sys.dm_qn_subscriptions"] = -948333171,
         ["sys.dm_resource_governor_resource_pools"] = -641734695,
         ["sys.dm_resource_governor_workload_groups"] = -237633642,
         ["sys.module_assembly_usages"] = -484,

@@ -827,6 +827,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // Test-only: force an exception the typed catches below don't handle, to
         // exercise the terminal crash boundary. No-op in production (hook null).
         simulation.NetworkBatchCrashHookForTesting?.Invoke();
+        // A query notification request rides the request's ALL_HEADERS.
+        this.connection!.PendingQueryNotification = QueryNotificationRequest.FromAllHeaders(message.Payload);
         await this.ExecuteBatchTextAsync(ExtractBatchText(message.Payload), writer, cancellationToken).ConfigureAwait(false);
     }
 

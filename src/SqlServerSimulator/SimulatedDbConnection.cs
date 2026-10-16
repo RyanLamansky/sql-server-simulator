@@ -1505,6 +1505,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool ExecutionTimedOut =>
         Volatile.Read(ref this.executionCancellation).IsCancellationRequested && !this.executionCancelledByUser && this.ExecutingRequest is not { CancelledByUser: true };
 
+    /// <summary>
+    /// The query notification request the TDS request running carried, which
+    /// each query it runs subscribes under (see <see cref="QueryNotificationRequest"/>);
+    /// null for a request without one.
+    /// </summary>
+    internal QueryNotificationRequest? PendingQueryNotification;
+
     /// <summary>The current execution's cancellation token; the engine's safe-point poll target.</summary>
     internal CancellationToken ExecutionCancellationToken => Volatile.Read(ref this.executionCancellation).Token;
 

@@ -173,6 +173,8 @@ partial class Simulation
 
         if (context.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTruncation(table.Heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, [.. identitySnapshots]);
+        if (context.Connection.Simulation.QuerySubscriptionCount != 0)
+            context.Connection.Simulation.NoteSubscribedWrite(batch, table, "truncate");
 
         // A tracked table forgets its change history and restarts it at the
         // current version, which the truncation itself doesn't advance (probed

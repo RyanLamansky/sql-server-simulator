@@ -3576,7 +3576,11 @@ public sealed partial class Simulation
             // too, `(SELECT 1) UNION (SELECT 2)` (probed 2026-09-26).
             case ReservedKeyword { Keyword: Keyword.Select }:
             case Operator { Character: '(' }:
+                var selectStart = context.Token.StartIndex;
                 outcome = this.RunSelectStatement(batch, out var cutShort);
+                // A query run under a query notification request subscribes.
+                if (connection.PendingQueryNotification is { } notification && !batch.IsSkipping && cutShort is null)
+                    this.SubscribeQuery(batch, notification, context.Command.CommandText[selectStart..(context.Token?.StartIndex ?? context.Command.CommandText.Length)]);
                 if (outcome is not null)
                     yield return outcome;
                 if (cutShort is not null)

@@ -162,6 +162,9 @@ internal static class IndexUsageAccounting
     {
         if (table.OwningDatabase is null || batch.IsSkipping)
             return;
+        // A query notification subscription over the table fires on the write's commit.
+        if (batch.Connection.Simulation.QuerySubscriptionCount != 0)
+            batch.Connection.Simulation.NoteSubscribedWrite(batch, table, kind switch { WriteKind.Insert => "insert", WriteKind.Delete => "delete", _ => "update" });
         var statement = batch.CurrentStatement;
         var plan = statement.IndexWrites;
         if (plan is null || !ReferenceEquals(plan.Table, table) || plan.Kind != kind || !ReferenceEquals(plan.UpdatedOrdinals, updatedOrdinals))

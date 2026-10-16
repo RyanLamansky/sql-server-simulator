@@ -20,6 +20,7 @@ internal sealed partial class TdsSession
                 return;
             writer.WriteResetConnectionAck();
         }
+        this.connection!.PendingQueryNotification = QueryNotificationRequest.FromAllHeaders(message.Payload);
 
         List<TdsRpcRequest> requests;
         try
