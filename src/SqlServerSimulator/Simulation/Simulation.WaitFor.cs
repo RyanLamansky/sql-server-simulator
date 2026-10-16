@@ -158,7 +158,7 @@ partial class Simulation
     /// abort the batch. Without an active cancellation scope (a bare
     /// engine-only path) it falls back to a plain sleep.
     /// </summary>
-    private static void WaitInterruptibly(BatchContext batch, TimeSpan delay)
+    private static void WaitInterruptibly(BatchContext batch, TimeSpan delay, string waitType = "WAITFOR")
     {
         var token = batch.Connection.ExecutionCancellationToken;
         var session = batch.Connection.Session;
@@ -177,7 +177,7 @@ partial class Simulation
             session.InWaitFor = false;
             var waited = System.Diagnostics.Stopwatch.GetElapsedTime(started);
             batch.Connection.WaitedTicks += waited.Ticks;
-            batch.Connection.Simulation.RecordWait(session, "WAITFOR", (long)waited.TotalMilliseconds);
+            batch.Connection.Simulation.RecordWait(session, waitType, (long)waited.TotalMilliseconds);
             if (ExtendedEvents.XeEvents.Takes(batch.Connection.Simulation, ExtendedEvents.XeEventKind.WaitInfo)
                 || ExtendedEvents.XeEvents.Takes(batch.Connection.Simulation, ExtendedEvents.XeEventKind.WaitCompleted))
             {

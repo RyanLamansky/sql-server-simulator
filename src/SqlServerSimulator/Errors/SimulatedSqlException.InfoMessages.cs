@@ -194,6 +194,10 @@ partial class SimulatedSqlException
     internal static SimulatedError SystemProcedureMessage(BatchContext batch, string procedure, int line, int number, string text, byte @class = 0) =>
         new(@class: @class, lineNumber: line, message: text, number: number, procedure: procedure, server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1);
 
+    /// <summary>The message of one space, state 0 and no procedure, that follows each <c>sp_server_diagnostics</c> report (probed 2026-10-16 against SQL Server 2025).</summary>
+    internal static SimulatedError ServerDiagnosticsReportEndMessage(BatchContext batch) =>
+        new(@class: 0, lineNumber: 0, message: " ", number: 0, procedure: "", server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 0);
+
     /// <summary>The blank line (<c>PRINT ''</c>, one space) the help procedures print between their sections.</summary>
     internal static SimulatedError HelpBlankLineMessage(BatchContext batch, string procedure, int line) =>
         SystemProcedureMessage(batch, procedure, line, 0, " ");

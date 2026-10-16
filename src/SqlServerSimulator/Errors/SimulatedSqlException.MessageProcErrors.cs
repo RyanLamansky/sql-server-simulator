@@ -147,6 +147,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CompressionParametersBothNull() =>
         new("Either datacompression, or xmlcompression, or both must have a value. These parameters cannot be both set to NULL.", 23118, 16, 1);
 
+    /// <summary>Msg 3217 state 10: an <c>sp_server_diagnostics</c> interval that is negative or under five seconds.</summary>
+    internal static SimulatedSqlException RepeatIntervalInvalid() =>
+        new("Invalid value specified for @repeat_interval parameter.", 3217, 16, 10);
+
     /// <summary>Msg 3217: a <c>@data_compression</c> other than NONE, ROW, PAGE, COLUMNSTORE or COLUMNSTORE_ARCHIVE.</summary>
     internal static SimulatedSqlException InvalidDataCompressionParameter() =>
         new("Invalid value specified for datacompression parameter.", 3217, 16, 1);

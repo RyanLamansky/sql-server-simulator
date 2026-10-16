@@ -633,6 +633,7 @@ internal static class CatalogViewObjectIds
         ["sp_cursorprepare"] = -59502547,
         ["sp_cursorprepexec"] = -345271340,
         ["sp_cursorunprepare"] = -201578248,
+        ["sp_server_diagnostics"] = -967464903,
         ["sp_estimate_data_compression_savings"] = -84473125,
         ["sp_create_plan_guide"] = -760493501,
         ["sp_control_plan_guide"] = -748561791,

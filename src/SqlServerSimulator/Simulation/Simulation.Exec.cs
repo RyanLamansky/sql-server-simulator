@@ -39,7 +39,7 @@ partial class Simulation
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
         "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_cursor" or "sp_cursorclose" or "sp_cursorexecute" or "sp_cursorfetch" or "sp_cursoropen" or "sp_cursoroption" or "sp_cursorprepare" or "sp_cursorprepexec" or "sp_cursorunprepare" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
-        or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
+        or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_server_diagnostics" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus"
@@ -70,7 +70,7 @@ partial class Simulation
         or "sp_query_store_clear_message_queues" or "sp_query_store_consistency_check" or "sp_query_store_flush_db" or "sp_query_store_force_plan"
         or "sp_query_store_remove_plan" or "sp_query_store_remove_plan_feedback" or "sp_query_store_remove_query" or "sp_query_store_reset_exec_stats"
         or "sp_prepare" or "sp_prepexec" or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
-        or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
+        or "sp_server_diagnostics" or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_90" or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_90" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations" or "sp_tablecollations_90" or "sp_tablecollations_100"
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
@@ -448,6 +448,7 @@ partial class Simulation
             "sp_rename" => this.InvokeSpRename(batch, CalledName(procName)),
             "sp_setapprole" => InvokeSpSetAppRole(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
+            "sp_server_diagnostics" => this.InvokeSpServerDiagnostics(batch, returnCodeVar),
             "sp_server_info" => InvokeSpServerInfo(batch),
             "sp_sequence_get_range" => InvokeSpSequenceGetRange(batch, calledAs, returnCodeVar),
             "sp_serveroption" => InvokeSpServerOption(batch),
