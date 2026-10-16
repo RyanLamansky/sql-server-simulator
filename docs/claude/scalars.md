@@ -342,6 +342,8 @@ The table is real's own behavior read off a sweep of every built-in over zero to
 What the sweep found that a simpler rule would miss:
 - The count is refused while parsing, so it outranks every bind error in the statement and fires in a dead `IF` branch.
 - The list's own syntax error still comes first — an empty argument, an aggregate's `DISTINCT`, a top-level `FROM` — and the counter steps aside for those.
+  The grammar's errors the counter raises itself (probed 2026-10-16 against SQL Server 2025): a comma where an argument belongs is Msg 102 near it, one closing the list Msg 102 near the `)`, and two operands with no comma between them (`ISNULL(1 'x')`) Msg 102 near the second.
+  A first argument written `expr AS type`, the `CAST` shape, is Msg 156 near `AS` in capitals at state 10 when it closes the list, Msg 195 state 10 naming an aggregate as written, Msg 102 near a comma after it, and Msg 102 near anything but a type name after the `AS`; `LEFT` and `RIGHT`, keywords with a grammar of their own, refuse the `AS` itself, as every built-in does after a later argument.
 - Too few and too many can be refused by different messages (`TRIM`, `OBJECT_DEFINITION`), and the state varies by function and side (`JSON_VALUE`'s 2 and 3).
 - A few built-ins refuse an empty list as a syntax error instead (`LEFT()`, `RIGHT()`).
 - A built-in with an argument grammar of its own — `CAST` / `PARSE`'s `AS`, `JSON_OBJECT` / `JSON_OBJECTAGG`'s key-value pairs, a datepart — has no row, since a comma count doesn't describe its call.

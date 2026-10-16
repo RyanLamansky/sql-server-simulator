@@ -424,10 +424,14 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'IsReadCommittedSnapshotOn')"));
     }
 
+    /// <summary>
+    /// Two arguments with no comma between them are the grammar's Msg 102 near
+    /// the second, ahead of the count (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void DatabasePropertyEx_MissingComma_RaisesMsg174()
-        => _ = new Simulation().AssertSqlError(
-            "SELECT DATABASEPROPERTYEX('simulated' 'Status')", 174);
+    public void DatabasePropertyEx_MissingComma_RaisesMsg102()
+        => AreEqual("Incorrect syntax near 'Status'.", new Simulation().AssertSqlError(
+            "SELECT DATABASEPROPERTYEX('simulated' 'Status')", 102).Message);
 
     [TestMethod]
     public void DatabasePropertyEx_MissingCloseParen_RaisesSyntaxError()

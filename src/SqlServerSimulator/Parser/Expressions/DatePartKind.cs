@@ -77,6 +77,10 @@ internal static class DatePartKinds
                 }
                 context.RestoreCheckpoint(checkpoint);
                 return ResolveOrThrow(keywordText, functionName);
+            // A missing datepart is the grammar's own error (probed 2026-10-16
+            // against SQL Server 2025: `DATEADD(, 1, 2)` is near ',').
+            case Tokens.Operator { Character: ',' }:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             default:
                 throw SimulatedSqlException.InvalidParameterSpecifiedFor(1, functionName);
         }

@@ -53,6 +53,43 @@ public sealed class BuiltInArityTests
     public void TheListsOwnSyntaxError_ComesFirst(string sql, string message)
         => new Simulation().AssertSqlError(sql, 102, message);
 
+    /// <summary>
+    /// The grammar's own errors in a malformed list come ahead of its count: a
+    /// typed first argument (<c>expr AS type</c>, a CAST shape), a comma where
+    /// an argument belongs, two operands with no comma between them (probed
+    /// 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select sql_variant_property(1 as sql_variant, 'BaseType')", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select sql_variant_property(1 as sql_variant)", 156, 10, "Incorrect syntax near the keyword 'AS'.")]
+    [DataRow("select sql_variant_property(1, 'BaseType',)", 102, 1, "Incorrect syntax near ')'.")]
+    [DataRow("select sql_variant_property(1 'BaseType')", 102, 1, "Incorrect syntax near 'BaseType'.")]
+    [DataRow("select isnull(1 as int, 2)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select abs(1 as int, 2)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select abs(1 as varchar(10))", 156, 10, "Incorrect syntax near the keyword 'AS'.")]
+    [DataRow("select upper('a' as x) + 'b'", 156, 10, "Incorrect syntax near the keyword 'AS'.")]
+    [DataRow("select abs(1 as 5)", 102, 1, "Incorrect syntax near '5'.")]
+    [DataRow("select abs(1 as)", 102, 1, "Incorrect syntax near ')'.")]
+    [DataRow("select isnull(1, 2 as int)", 156, 1, "Incorrect syntax near the keyword 'as'.")]
+    [DataRow("select left('abc' as x)", 156, 1, "Incorrect syntax near the keyword 'as'.")]
+    [DataRow("select COUNT(1 as int)", 195, 10, "'COUNT' is not a recognized built-in function name.")]
+    [DataRow("select avg(1 as int)", 195, 10, "'avg' is not a recognized built-in function name.")]
+    [DataRow("select abs(1,)", 102, 1, "Incorrect syntax near ')'.")]
+    [DataRow("select abs(,)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select getdate(,)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select count(*, 1)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select isnull(1 'x')", 102, 1, "Incorrect syntax near 'x'.")]
+    [DataRow("select left('abc' 1)", 102, 1, "Incorrect syntax near '1'.")]
+    [DataRow("select replace('a', 'b' 'c')", 102, 1, "Incorrect syntax near 'c'.")]
+    [DataRow("select datediff(, 1, 2)", 102, 1, "Incorrect syntax near ','.")]
+    [DataRow("select dateadd(, 1, 2)", 102, 1, "Incorrect syntax near ','.")]
+    public void MalformedList_RaisesTheGrammarsError(string sql, int number, int state, string message)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+    }
+
     [TestMethod]
     public void TheCount_OutranksABindError()
         => new Simulation().AssertSqlError("create table t (a int); select nosuch, left(a) from t", 174);

@@ -2032,7 +2032,7 @@ internal abstract class Expression : ExpressionNode
             context.Batch.CurrentStatement.MarkOpensTransaction();
         if (BlocksSimpleParameterization(uppercaseName))
             context.SimpleParameterizationBlocked = true;
-        BuiltInArity.Check(uppercaseName, context);
+        BuiltInArity.Check(uppercaseName, name, context);
         BuiltInArity.CheckWindowClauses(uppercaseName, context);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
             return ResolveBuiltInCore(uppercaseName, name, context);

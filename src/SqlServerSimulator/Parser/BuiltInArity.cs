@@ -53,9 +53,10 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
     /// <paramref name="uppercaseName"/> accepts, leaving the cursor where it
     /// was either way. An empty list some built-ins leave to their own parser,
     /// where real's refusal is a Msg 102 at the closing parenthesis
-    /// (<c>LEFT()</c>).
+    /// (<c>LEFT()</c>). The list's own syntax errors come first, as real's
+    /// grammar reads them before any count (see <see cref="ScanArguments"/>).
     /// </summary>
-    public static void Check(ReadOnlySpan<char> uppercaseName, ParserContext context)
+    public static void Check(ReadOnlySpan<char> uppercaseName, string writtenName, ParserContext context)
     {
         if (uppercaseName is "VECTOR_DISTANCE")
         {
@@ -66,14 +67,153 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             return;
 
         var checkpoint = context.SaveCheckpoint();
-        var count = CountArguments(context);
+        var count = ScanArguments(context, uppercaseName, writtenName);
         context.RestoreCheckpoint(checkpoint);
         if (count < 0 || (count == 0 && arity.emptyListParses))
             return;
-        if (count < arity.min)
-            throw arity.belowMin.ToException();
-        if (count > arity.max)
-            throw arity.aboveMax.ToException();
+        if (count >= arity.min && count <= arity.max)
+            return;
+        RefuseAdjacentOperands(context);
+        context.RestoreCheckpoint(checkpoint);
+        throw count < arity.min ? arity.belowMin.ToException() : arity.aboveMax.ToException();
+    }
+
+    /// <summary>
+    /// <see cref="CountArguments"/>, raising on the way the syntax errors
+    /// real's grammar raises in a built-in's argument list ahead of its count
+    /// (probed 2026-10-16 against SQL Server 2025). Its
+    /// first argument may carry a type, <c>expr AS type</c>, which only
+    /// <c>CAST</c>-shaped functions take: one written so and closing the list
+    /// is Msg 156 near <c>AS</c> in capitals at state 10
+    /// (<c>ABS(1 AS int)</c>) — an aggregate's Msg 195 naming it as written —
+    /// a comma after it Msg 102 near that comma
+    /// (<c>ISNULL(1 AS int, 2)</c>), and anything but a type name after the
+    /// <c>AS</c> Msg 102 near it — save <c>LEFT</c> and <c>RIGHT</c>, whose
+    /// keyword grammar refuses the <c>AS</c> itself as a later argument's is.
+    /// A comma where an argument belongs is Msg 102 near it, one closing the
+    /// list near the parenthesis, as is a comma after a <c>*</c> argument.
+    /// </summary>
+    private static int ScanArguments(ParserContext context, ReadOnlySpan<char> uppercaseName, string writtenName)
+    {
+        var count = 0;
+        var depth = 0;
+        var expectArgument = true;
+        var afterStar = false;
+        do
+        {
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' } when depth == 0:
+                    return expectArgument && count > 0 ? throw SimulatedSqlException.SyntaxErrorNear(context.Token) : count;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case Operator { Character: ',' } when depth == 0:
+                    if (expectArgument || afterStar)
+                        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+                    expectArgument = true;
+                    continue;
+                case Operator { Character: '*' } when depth == 0 && expectArgument:
+                    count++;
+                    expectArgument = false;
+                    afterStar = true;
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.All or Keyword.Distinct or Keyword.From } when depth == 0:
+                    return -1;
+                case ReservedKeyword { Keyword: Keyword.Order } when depth == 0:
+                    return expectArgument ? -1 : count;
+                case ReservedKeyword { Keyword: Keyword.As } when depth == 0 && count == 1 && uppercaseName is not ("LEFT" or "RIGHT"):
+                    RefuseTypedArgument(context, IsAggregate(uppercaseName) ? writtenName : null);
+                    break;
+            }
+            if (expectArgument)
+            {
+                count++;
+                expectArgument = false;
+            }
+            afterStar = false;
+        }
+        while (context.MoveNext());
+        return -1;
+    }
+
+    /// <summary>The aggregates whose typed first argument is Msg 195 rather than Msg 156.</summary>
+    private static bool IsAggregate(ReadOnlySpan<char> uppercaseName) => uppercaseName switch
+    {
+        "APPROX_COUNT_DISTINCT" or "AVG" or "CHECKSUM_AGG" or "COUNT" or "COUNT_BIG" or "GROUPING" or "GROUPING_ID" or "MAX" or "MIN" or "STDEV" or "STDEVP" or "SUM" or "VAR" or "VARP" => true,
+        _ => false,
+    };
+
+    /// <summary>
+    /// <see cref="ScanArguments"/>'s typed first argument, from its
+    /// <c>AS</c> on; <paramref name="aggregateName"/> is the aggregate's name as
+    /// written, or null for a scalar.
+    /// </summary>
+    private static void RefuseTypedArgument(ParserContext context, string? aggregateName)
+    {
+        var asKeyword = context.Token;
+        if (context.GetNextOptional() is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextOptional() is Operator { Character: '(' })
+        {
+            var depth = 0;
+            do
+            {
+                if (context.Token is Operator { Character: '(' })
+                    depth++;
+                else if (context.Token is Operator { Character: ')' } && --depth == 0)
+                    break;
+            }
+            while (context.MoveNext());
+            context.MoveNextOptional();
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var refusal = aggregateName is null
+            ? SimulatedSqlException.SyntaxErrorNearKeyword("AS", state: 10)
+            : SimulatedSqlException.UnrecognizedBuiltInFunction(aggregateName);
+        refusal.Errors[0].LineNumber = asKeyword!.LineNumber;
+        throw refusal;
+    }
+
+    /// <summary>
+    /// A list whose count is wrong because two of its operands stand side by
+    /// side with no comma between them is Msg 102 near the second, which
+    /// real's grammar meets before any count (probed 2026-10-16 against SQL
+    /// Server 2025: <c>ISNULL(1 'x')</c> is near <c>'x'</c>, not Msg 174). Read
+    /// by parsing each argument in turn; a list whose arguments raise anything
+    /// else is left to the count.
+    /// </summary>
+    private static void RefuseAdjacentOperands(ParserContext context)
+    {
+        Token? stray;
+        try
+        {
+            while (true)
+            {
+                _ = Expression.Parse(context);
+                if (context.Token is Operator { Character: ',' })
+                {
+                    context.MoveNextRequired();
+                    continue;
+                }
+                stray = context.Token is Operator { Character: ')' } ? null : context.Token;
+                break;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            return;
+        }
+        catch (NotSupportedException)
+        {
+            return;
+        }
+        if (stray is not null)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>
