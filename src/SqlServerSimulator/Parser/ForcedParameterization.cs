@@ -44,26 +44,52 @@ namespace SqlServerSimulator.Parser;
 /// </remarks>
 internal static class ForcedParameterization
 {
-    /// <summary>A statement's template and the parameters its literals became, in number order.</summary>
-    internal sealed class Template(string text, List<(int Number, string Type, bool AfterWhere)> parameters, bool isUpdate)
+    /// <summary>
+    /// A statement's template and the parameters its literals became, in
+    /// number order, each with the <c>IN</c> list holding it (its opening
+    /// parenthesis's position, -1 for none).
+    /// </summary>
+    internal sealed class Template(string text, List<(int Number, string Type, bool AfterWhere, int InList)> parameters, bool isUpdate)
     {
         public readonly string Text = text;
-        public readonly List<(int Number, string Type, bool AfterWhere)> Parameters = parameters;
+        public readonly List<(int Number, string Type, bool AfterWhere, int InList)> Parameters = parameters;
         private readonly bool isUpdate = isUpdate;
 
         /// <summary>The parameters as <c>sp_get_query_template</c> declares them, in number order.</summary>
-        public string Declaration => Declare(this.Parameters.Select(static parameter => parameter));
+        public string Declaration => Declare(this.Parameters);
 
         /// <summary>
         /// The parameters as Query Store's stored text declares them: an
         /// <c>UPDATE</c>'s <c>WHERE</c> clause's ahead of the rest, as
-        /// <c>(@1 int,@0 int)update t set a = @0 where c = @1</c>.
+        /// <c>(@1 int,@0 int)update t set a = @0 where c = @1</c>, and each
+        /// <c>IN</c> list's in reverse where they stand, as
+        /// <c>(@0 int,@2 int,@1 int)… where a = @0 and b in ( @1 , @2 )</c>
+        /// (probed 2026-10-16 against SQL Server 2025); a <c>VALUES</c> row's
+        /// keep their order.
         /// </summary>
-        public string StoredDeclaration => this.isUpdate
-            ? Declare(this.Parameters.Where(static parameter => parameter.AfterWhere).Concat(this.Parameters.Where(static parameter => !parameter.AfterWhere)))
-            : this.Declaration;
+        public string StoredDeclaration
+        {
+            get
+            {
+                var ordered = this.isUpdate
+                    ? [.. this.Parameters.Where(static parameter => parameter.AfterWhere), .. this.Parameters.Where(static parameter => !parameter.AfterWhere)]
+                    : new List<(int Number, string Type, bool AfterWhere, int InList)>(this.Parameters);
+                for (var start = 0; start < ordered.Count;)
+                {
+                    var end = start + 1;
+                    if (ordered[start].InList >= 0)
+                    {
+                        while (end < ordered.Count && ordered[end].InList == ordered[start].InList)
+                            end++;
+                        ordered.Reverse(start, end - start);
+                    }
+                    start = end;
+                }
+                return Declare(ordered);
+            }
+        }
 
-        private static string Declare(IEnumerable<(int Number, string Type, bool AfterWhere)> parameters) =>
+        private static string Declare(List<(int Number, string Type, bool AfterWhere, int InList)> parameters) =>
             string.Join(',', parameters.Select(static parameter => string.Create(CultureInfo.InvariantCulture, $"@{parameter.Number} {parameter.Type}")));
     }
 
@@ -77,13 +103,17 @@ internal static class ForcedParameterization
         Kept,
     }
 
-    /// <summary>One parenthesized level of the statement.</summary>
-    private sealed class Frame(bool kept, bool convertStyle, bool odbc)
+    /// <summary>
+    /// One parenthesized level of the statement; <paramref name="inList"/> is
+    /// the position of the <c>IN</c> list's parenthesis holding it, -1 for none.
+    /// </summary>
+    private sealed class Frame(bool kept, bool convertStyle, bool odbc, int inList)
     {
         public Clause Clause;
         public readonly bool Kept = kept;
         public readonly bool IsConvert = convertStyle;
         public readonly bool IsOdbc = odbc;
+        public readonly int InList = inList;
         public int Commas;
         public bool InLikePattern;
     }
@@ -121,9 +151,9 @@ internal static class ForcedParameterization
         }
 
         var parts = new List<string>(end - start);
-        var parameters = new List<(int Number, string Type, bool AfterWhere)>();
+        var parameters = new List<(int Number, string Type, bool AfterWhere, int InList)>();
         var frames = new Stack<Frame>();
-        frames.Push(new Frame(kept: false, convertStyle: false, odbc: false));
+        frames.Push(new Frame(kept: false, convertStyle: false, odbc: false, inList: -1));
         var numbered = 0;
         var afterTopLevelWhere = false;
         for (var i = start; i < end; i++)
@@ -141,7 +171,10 @@ internal static class ForcedParameterization
                     var typeArguments = open.Character == '(' && previous is Name && i - 2 >= start
                         && (tokens[i - 2] is ReservedKeyword { Keyword: Keyword.As } || (frame.IsConvert && frame.Commas == 0));
                     var tableHints = open.Character == '(' && previous is ReservedKeyword { Keyword: Keyword.With };
-                    frames.Push(new Frame(typeArguments || tableHints || frame.Kept || frame.Clause == Clause.Kept || frame.InLikePattern, convert, open.Character == '{' || frame.IsOdbc));
+                    var inList = frame.InList >= 0 ? frame.InList
+                        : open.Character == '(' && previous is ReservedKeyword { Keyword: Keyword.In } && (i + 1 >= end || tokens[i + 1] is not ReservedKeyword { Keyword: Keyword.Select or Keyword.With }) ? i
+                        : -1;
+                    frames.Push(new Frame(typeArguments || tableHints || frame.Kept || frame.Clause == Clause.Kept || frame.InLikePattern, convert, open.Character == '{' || frame.IsOdbc, inList));
                     parts.Add(Text(open));
                     continue;
                 case Operator { Character: ')' or '}' } close:
@@ -206,7 +239,7 @@ internal static class ForcedParameterization
                 AppendAsWritten(parts, tokens, literalStart, i + 1);
                 continue;
             }
-            parameters.Add((number, type, afterTopLevelWhere));
+            parameters.Add((number, type, afterTopLevelWhere, frame.InList));
             parts.Add(string.Create(CultureInfo.InvariantCulture, $"@{number}"));
         }
 

@@ -143,4 +143,35 @@ public sealed class QueryTemplateTests
                 where qt.query_sql_text like '%t %'
                 """));
     }
+
+    /// <summary>
+    /// Query Store's stored form declares each <c>IN</c> list's parameters in
+    /// reverse where they stand, a value nested in the list's items included,
+    /// while <c>sp_get_query_template</c> and a <c>VALUES</c> row keep number
+    /// order (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from t where b = 7 and a in (1, 2, 3)", "(@0 int,@3 int,@2 int,@1 int)select * from t where b = @0 and a in ( @1 , @2 , @3 )")]
+    [DataRow("select * from t where a in (1, 2) and b in (5, 6)", "(@1 int,@0 int,@3 int,@2 int)select * from t where a in ( @0 , @1 ) and b in ( @2 , @3 )")]
+    [DataRow("select * from t where a in (1, abs(2), 3)", "(@2 int,@1 int,@0 int)select * from t where a in ( @0 , abs ( @1 ) , @2 )")]
+    [DataRow("select * from t where a in (1, null, 3)", "(@1 int,@0 int)select * from t where a in ( @0 , null , @1 )")]
+    [DataRow("select * from t where a in (1, 'x')", "(@1 varchar(8000),@0 int)select * from t where a in ( @0 , @1 )")]
+    [DataRow("update t set b = 3, c = 'q' where a in (1, 2) and b = 4", "(@3 int,@2 int,@4 int,@0 int,@1 varchar(8000))update t set b = @0 , c = @1 where a in ( @2 , @3 ) and b = @4")]
+    [DataRow("insert t (a, b) values (1, 2), (3, 4)", "(@0 int,@1 int,@2 int,@3 int)insert t ( a , b ) values ( @0 , @1 ) , ( @2 , @3 )")]
+    public void QueryStore_DeclaresAnInListsParametersInReverse(string statement, string stored)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create database d",
+            "alter database d set parameterization forced",
+            "alter database d set query_store = on (query_capture_mode = all)",
+            "use d; create table t (a int, b int, c varchar(10))",
+            "use d; " + statement);
+        AreEqual(stored, simulation.ExecuteScalar("use d; select query_sql_text from sys.query_store_query_text where query_sql_text like '(@%'"));
+        AreEqual("@0 int,@1 int,@2 int,@3 int", simulation.ExecuteScalar("""
+            declare @t nvarchar(max), @p nvarchar(max);
+            exec sp_get_query_template N'select * from t where b = 7 and a in (1, 2, 3)', @t output, @p output;
+            select @p
+            """));
+    }
 }
