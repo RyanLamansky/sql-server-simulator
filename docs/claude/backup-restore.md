@@ -49,6 +49,10 @@ When that statement ended any session, it first holds the database in transition
 
 A restore brings back the backed-up recovery model and user access mode, as real does — a harness that sets `SINGLE_USER` and `RECOVERY SIMPLE` before restoring finds the database `MULTI_USER` and in `FULL` recovery after it.
 
+## The error log
+
+A backup, a restore and their refusals write real's lines to the error log, the LSNs and page counts standing in for real's as [the error log](catalog-views.md#the-sql-server-error-log) records; the backup set keeps its stand-in first LSN and the database's last good `CHECKDB` time, which a restore brings back (probed 2026-10-16 against SQL Server 2025).
+
 ## Divergences
 
 - **A backup takes a shared lock on every table while it reads.**

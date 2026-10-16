@@ -21,7 +21,7 @@ internal sealed class BackupMedia
     private static readonly byte[] Magic = "SQLSIMBK"u8.ToArray();
 
     /// <summary>Bumped whenever the layout below or <see cref="DatabaseImage"/>'s changes.</summary>
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
 
     /// <summary>
     /// What a media family shorter than this holds is reported as an empty
@@ -132,6 +132,9 @@ internal sealed class BackupSet
     public DateTime FinishUtc;
     public bool IsCopyOnly;
 
+    /// <summary>The block of the set's first LSN, the server's last transaction id as the backup began; its last LSN is 24 blocks on, as a full backup's is on real.</summary>
+    public long FirstLsnBlock;
+
     /// <summary>Written <c>WITH CHECKSUM</c>, which a <c>RESTORE WITH CHECKSUM</c> requires.</summary>
     public bool HasChecksums;
 
@@ -150,6 +153,7 @@ internal sealed class BackupSet
         writer.Write(this.StartUtc.Ticks);
         writer.Write(this.FinishUtc.Ticks);
         writer.Write(this.IsCopyOnly);
+        writer.Write(this.FirstLsnBlock);
         writer.Write(this.HasChecksums);
         writer.Write(this.FilePages.Count);
         foreach (var (name, pages) in this.FilePages)
@@ -172,6 +176,7 @@ internal sealed class BackupSet
             StartUtc = new DateTime(reader.ReadInt64(), DateTimeKind.Utc),
             FinishUtc = new DateTime(reader.ReadInt64(), DateTimeKind.Utc),
             IsCopyOnly = reader.ReadBoolean(),
+            FirstLsnBlock = reader.ReadInt64(),
             HasChecksums = reader.ReadBoolean(),
         };
         var files = reader.ReadInt32();

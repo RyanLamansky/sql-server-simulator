@@ -22,12 +22,15 @@ partial class SimulatedSqlException
     /// denied; state 1 for <c>BACKUP</c>, 2 for <c>RESTORE</c>.
     /// </summary>
     internal static SimulatedSqlException CannotOpenBackupDevice(string path, int osError, string verb) =>
-        FollowedByBackupTerminating(new(string.Create(CultureInfo.InvariantCulture, $"Cannot open backup device '{path}'. Operating system error {osError}({osError switch
-        {
-            2 => "The system cannot find the file specified.",
-            3 => "The system cannot find the path specified.",
-            _ => "Access is denied.",
-        }})."), 3201, 16, verb.StartsWith("BACKUP", StringComparison.Ordinal) ? (byte)1 : (byte)2), verb);
+        FollowedByBackupTerminating(new($"Cannot open backup device '{path}'. Operating system error {OperatingSystemErrorText(osError)}.", 3201, 16, verb.StartsWith("BACKUP", StringComparison.Ordinal) ? (byte)1 : (byte)2), verb);
+
+    /// <summary>An operating-system error as real's backup messages spell it: <c>2(The system cannot find the file specified.)</c>.</summary>
+    internal static string OperatingSystemErrorText(int osError) => string.Create(CultureInfo.InvariantCulture, $"{osError}({osError switch
+    {
+        2 => "The system cannot find the file specified.",
+        3 => "The system cannot find the path specified.",
+        _ => "Access is denied.",
+    }})");
 
     /// <summary>
     /// Mimics SQL Server error 3201 for a tape device (state 5) or a virtual

@@ -40,6 +40,9 @@ internal sealed partial class DatabaseImage
     public byte UserAccess;
     public int Switches;
     public int TargetRecoveryTimeSeconds;
+
+    /// <summary>The ticks of the last good <c>DBCC CHECKDB</c>, 0 for none: real keeps it on the boot page a backup carries.</summary>
+    public long LastGoodCheckDbTicks;
     public int DefaultFilegroupId;
     public int MemoryOptimizedFilegroupId;
     public string? FileStreamDirectoryName;
@@ -111,6 +114,7 @@ internal sealed partial class DatabaseImage
         w.Write(this.UserAccess);
         w.Write(this.Switches);
         w.Write(this.TargetRecoveryTimeSeconds);
+        w.Write(this.LastGoodCheckDbTicks);
         w.Write(this.DefaultFilegroupId);
         w.Write(this.MemoryOptimizedFilegroupId);
         BackupBinary.WriteNullable(w, this.FileStreamDirectoryName);
@@ -252,6 +256,7 @@ internal sealed partial class DatabaseImage
             UserAccess = r.ReadByte(),
             Switches = r.ReadInt32(),
             TargetRecoveryTimeSeconds = r.ReadInt32(),
+            LastGoodCheckDbTicks = r.ReadInt64(),
             DefaultFilegroupId = r.ReadInt32(),
             MemoryOptimizedFilegroupId = r.ReadInt32(),
             FileStreamDirectoryName = BackupBinary.ReadNullable(r),

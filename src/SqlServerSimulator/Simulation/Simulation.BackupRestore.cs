@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -154,6 +155,44 @@ partial class Simulation
             throw SimulatedSqlException.BackupInTransaction(verb);
         if (BuiltInToken.Equals(databaseName, TempdbDatabaseName))
             throw SimulatedSqlException.BackupOfTempdb(verb);
+        try
+        {
+            this.RunBackup(batch, databaseName, isLog, verb, devices, options);
+        }
+        catch (SimulatedSqlException)
+        {
+            // Past those two checks every refusal is real's backup failure (probed 2026-10-16 against SQL Server 2025).
+            this.ErrorLog.WriteError(batch.CurrentStatement.UtcNow, BackupProcess, 3041, 16, 1,
+                $"BACKUP failed to complete the command {verb} {databaseName}. Check the backup application log for detailed messages.");
+            throw;
+        }
+        return true;
+    }
+
+    /// <summary>The process column of the lines real's backup and restore machinery writes to the error log.</summary>
+    private const string BackupProcess = "Backup";
+
+    /// <summary>
+    /// A database's creation time as the error log's backup lines spell it,
+    /// <c>2025/01/01(00:00:00)</c> — the <c>create_date</c>
+    /// <c>sys.databases</c> reports.
+    /// </summary>
+    private static string BackupCreationDate() =>
+        BuiltInResources.SysDatabasesCreateDate.ToString("yyyy/MM/dd(HH:mm:ss)", CultureInfo.InvariantCulture);
+
+    /// <summary>A backup set's LSN as the error log spells it, in the active virtual log file <c>DBCC LOGINFO</c> reports.</summary>
+    private static string BackupLsn(long block) => string.Create(CultureInfo.InvariantCulture, $"{ActiveLogSequence}:{block}:1");
+
+    /// <summary>Writes real's Msg 18204 for a backup device that couldn't be opened or created, under the session.</summary>
+    private void LogBackupMediaFailure(BatchContext batch, string path, int osError, bool create) =>
+        this.ErrorLog.WriteError(batch.CurrentStatement.UtcNow, ErrorLog.SessionProcess(batch.Connection.Spid), 18204, 16, 1, create
+            ? $"BackupDiskFile::CreateMedia: Backup device '{path}' failed to create. Operating system error {SimulatedSqlException.OperatingSystemErrorText(osError)}."
+            : $"BackupDiskFile::OpenMedia: Backup device '{path}' failed to open. Operating system error {SimulatedSqlException.OperatingSystemErrorText(osError)}.");
+
+    /// <summary>The backup itself, once the statement may run: every refusal from here is logged as a failed backup.</summary>
+    private void RunBackup(BatchContext batch, string databaseName, bool isLog, string verb, List<BackupDeviceTarget> devices, BackupOptions options)
+    {
+        var connection = batch.Connection;
         if (!this.Databases.TryGetValue(databaseName, out var database))
             throw SimulatedSqlException.BackupDatabaseDoesNotExist(databaseName, verb);
         if (!database.WaitForSingleUserSlot(connection))
@@ -212,6 +251,7 @@ partial class Simulation
             StartUtc = start,
             IsCopyOnly = options.CopyOnly,
             HasChecksums = options.Checksum,
+            FirstLsnBlock = this.LastAllocatedTransactionId,
         };
         DatabaseImage image;
         var tables = UserTables(database);
@@ -232,11 +272,26 @@ partial class Simulation
         if (options.Init || options.Format)
             media.Sets.RemoveRange(0, media.Sets.Count - 1);
         if (this.WriteBackupDevice(path, media.ToBytes()) is var osError and not 0)
+        {
+            this.LogBackupMediaFailure(batch, path, osError, create: true);
             throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
+        }
 
-        ReportBackupMessages(batch, options.Stats, database.Name, set, media.Sets.Count, verb, stopwatch.Elapsed.TotalSeconds);
+        var completed = ReportBackupMessages(batch, options.Stats, database.Name, set, media.Sets.Count, verb, stopwatch.Elapsed.TotalSeconds);
+        // Real's own count adds the nine pages of the set's header and trailer.
+        this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, string.Create(CultureInfo.InvariantCulture,
+            $"Database backed up. Database: {database.Name}, creation date(time): {BackupCreationDate()}, pages dumped: {TotalPages(set) + 9}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.FirstLsnBlock + 24)}, number of dump devices: 1, device information: (FILE={media.Sets.Count}, TYPE=DISK: {{'{device.Logged}'}}). This is an informational message only. No user action is required."));
+        this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, completed);
         connection.LastStatementRowCount = 0;
-        return true;
+    }
+
+    /// <summary>Every page a backup set's files report.</summary>
+    private static long TotalPages(BackupSet set)
+    {
+        long pages = 0;
+        foreach (var (_, filePages) in set.FilePages)
+            pages += filePages;
+        return pages;
     }
 
     /// <summary>Every user table of <paramref name="database"/>, in object-id order.</summary>
@@ -301,8 +356,8 @@ partial class Simulation
         }
     }
 
-    /// <summary>The <c>STATS</c> progress, each file's pages, then the summary.</summary>
-    private static void ReportBackupMessages(BatchContext batch, int? stats, string databaseName, BackupSet set, int position, string verb, double seconds)
+    /// <summary>The <c>STATS</c> progress, each file's pages, then the summary, whose text it returns for the error log.</summary>
+    private static string ReportBackupMessages(BatchContext batch, int? stats, string databaseName, BackupSet set, int position, string verb, double seconds)
     {
         var messages = batch.Connection.PendingMessages;
         if (stats is { } step)
@@ -317,7 +372,9 @@ partial class Simulation
             messages.Enqueue(SimulatedSqlException.BackupFileProcessedMessage(batch, filePages, databaseName, logicalName, position));
             pages += filePages;
         }
-        messages.Enqueue(SimulatedSqlException.BackupCompletedMessage(batch, verb, pages, seconds));
+        var completed = SimulatedSqlException.BackupCompletedMessage(batch, verb, pages, seconds);
+        messages.Enqueue(completed);
+        return completed.Message;
     }
 
     /// <summary>
@@ -382,8 +439,12 @@ partial class Simulation
 
         var device = SingleDevice(devices, verb);
         var path = device.Path;
-        var bytes = this.ReadBackupDevice(path, out var osError)
-            ?? throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
+        var bytes = this.ReadBackupDevice(path, out var osError);
+        if (bytes is null)
+        {
+            this.LogBackupMediaFailure(batch, path, osError, create: false);
+            throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
+        }
         var media = BackupMedia.TryRead(bytes, out var read, out var writtenBy) switch
         {
             BackupMedia.ReadOutcome.Read => read!,
@@ -435,7 +496,16 @@ partial class Simulation
         }
         // The restore brings back the backed-up access mode.
         this.NoteDatabaseAdmissionChanged();
-        ReportBackupMessages(batch, options.Stats, targetName, set, options.File, verb, stopwatch.Elapsed.TotalSeconds);
+        var completed = ReportBackupMessages(batch, options.Stats, targetName, set, options.File, verb, stopwatch.Elapsed.TotalSeconds);
+        // The database starts up restoring, then again once recovered (probed 2026-10-16 against SQL Server 2025).
+        LogSessionLine(batch, $"Starting up database '{targetName}'.");
+        LogDatabaseNotRecovered(batch, restored!, "RESTORING");
+        LogDatabaseStartup(batch, restored!);
+        var at = batch.CurrentStatement.UtcNow;
+        this.ErrorLog.Write(at, BackupProcess, $"Restore is complete on database '{targetName}'.  The database is now available.");
+        this.ErrorLog.Write(at, BackupProcess, string.Create(CultureInfo.InvariantCulture,
+            $"Database was restored: Database: {targetName}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.FirstLsnBlock + 24)}, number of dump devices: 1, device information: (FILE={options.File}, TYPE=DISK: {{'{device.Logged}'}}). Informational message. No user action required."));
+        this.ErrorLog.Write(at, BackupProcess, completed);
         connection.LastStatementRowCount = 0;
         return true;
     }
@@ -583,7 +653,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
                 var path = ParseBackupStringValue(context, batch);
-                devices.Add(new(path, path));
+                devices.Add(new(path, path, path));
             }
             else if (token is Name { Value: var deviceKind } && BuiltInToken.EqualsAny(deviceKind, "TAPE", "URL"))
             {

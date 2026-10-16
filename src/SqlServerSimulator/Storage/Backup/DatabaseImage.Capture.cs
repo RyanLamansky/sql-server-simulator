@@ -42,6 +42,7 @@ partial class DatabaseImage
             UserAccess = database.UserAccess,
             Switches = (int)database.Switches,
             TargetRecoveryTimeSeconds = database.TargetRecoveryTimeSeconds,
+            LastGoodCheckDbTicks = database.LastGoodCheckDbUtc?.Ticks ?? 0,
             DefaultFilegroupId = database.DefaultFilegroupId,
             MemoryOptimizedFilegroupId = database.MemoryOptimizedFilegroupId,
             FileStreamDirectoryName = database.FileStreamDirectoryName,

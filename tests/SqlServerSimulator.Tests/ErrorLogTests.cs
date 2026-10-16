@@ -645,6 +645,91 @@ public sealed class ErrorLogTests
             "Starting up database 'rdb'.",
             $"CHECKDB for database 'rdb' finished without errors on {lastGood} (local time). This is an informational message only; no user action is required.",
         }, LoggedTexts(simulation, "rdb''").FindAll(static text => !text.StartsWith("Setting", StringComparison.Ordinal)));
+        // A backup carries it, as real's boot page does, to the database its restore rebuilds.
+        _ = simulation.ExecuteNonQuery("alter database rdb set read_write; backup database rdb to disk = '/b/rdb.bak'; drop database rdb; restore database rdb from disk = '/b/rdb.bak'");
+        AreEqual(lastGood, simulation.ExecuteScalar("select convert(varchar(23), databasepropertyex('rdb', 'LastGoodCheckDbTime'), 121)"));
+        AreEqual($"CHECKDB for database 'rdb' finished without errors on {lastGood} (local time). This is an informational message only; no user action is required.", LoggedTexts(simulation, "rdb''")[^2]);
+    }
+
+    /// <summary>The process column and text of every entry past the startup preamble.</summary>
+    private static List<string> EngineLines(Simulation simulation) =>
+        Rows(simulation, "exec xp_readerrorlog").ConvertAll(static row => row[(row.IndexOf('|', StringComparison.Ordinal) + 1)..].TrimEnd('\r', '\n')).FindAll(static row => !row.StartsWith("Server|", StringComparison.Ordinal));
+
+    [TestMethod]
+    public void BackupAndRestore_LogTheirLines()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create database bdb; exec sp_addumpdevice 'disk', 'dev', '/backups/dev.bak'").ExecuteNonQuery();
+        var completions = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => completions.AddRange(e.Errors.Where(static error => error.Number == 3014).Select(static error => error.Message));
+        _ = connection.CreateCommand("backup database bdb to disk = '/backups/bdb.bak'").ExecuteNonQuery();
+        _ = connection.CreateCommand("backup database bdb to dev with init, copy_only").ExecuteNonQuery();
+        _ = connection.CreateCommand("restore database bdb from disk = '/backups/bdb.bak' with replace").ExecuteNonQuery();
+        var spid = connection.CreateCommand("select @@spid").ExecuteScalar();
+        var lines = EngineLines(simulation);
+        // The LSNs and page counts stand in for real's; mask them to compare the shapes.
+        var masked = lines.ConvertAll(static line => System.Text.RegularExpressions.Regex.Replace(line, "(pages dumped: |LSN: 34:)[0-9]+", "$1n"));
+        CollectionAssert.AreEqual(new[]
+        {
+            $"spid{spid}|Starting up database 'bdb'.",
+            "Backup|Database backed up. Database: bdb, creation date(time): 2025/01/01(00:00:00), pages dumped: n, first LSN: 34:n:1, last LSN: 34:n:1, number of dump devices: 1, device information: (FILE=1, TYPE=DISK: {'/backups/bdb.bak'}). This is an informational message only. No user action is required.",
+            "Backup|" + completions[0],
+            "Backup|Database backed up. Database: bdb, creation date(time): 2025/01/01(00:00:00), pages dumped: n, first LSN: 34:n:1, last LSN: 34:n:1, number of dump devices: 1, device information: (FILE=1, TYPE=DISK: {'dev'}). This is an informational message only. No user action is required.",
+            "Backup|" + completions[1],
+            $"spid{spid}|Starting up database 'bdb'.",
+            $"spid{spid}|The database 'bdb' is marked RESTORING and is in a state that does not allow recovery to be run.",
+            $"spid{spid}|Starting up database 'bdb'.",
+            "Backup|Restore is complete on database 'bdb'.  The database is now available.",
+            "Backup|Database was restored: Database: bdb, creation date(time): 2025/01/01(00:00:00), first LSN: 34:n:1, last LSN: 34:n:1, number of dump devices: 1, device information: (FILE=1, TYPE=DISK: {'/backups/bdb.bak'}). Informational message. No user action required.",
+            "Backup|" + completions[2],
+        }, masked);
+        // Real's set is nine pages past the files' own, and a full backup spans 24 log blocks.
+        var pages = int.Parse(completions[0].Split(' ')[4], System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Contains($"pages dumped: {pages + 9},", lines[1]);
+        var lsns = System.Text.RegularExpressions.Regex.Matches(lines[1], "LSN: 34:([0-9]+):1");
+        AreEqual(long.Parse(lsns[0].Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) + 24, long.Parse(lsns[1].Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+        // The restore reports the set's own LSNs.
+        AreEqual(lines[1][lines[1].IndexOf("first LSN", StringComparison.Ordinal)..lines[1].IndexOf(", number", StringComparison.Ordinal)],
+            lines[9][lines[9].IndexOf("first LSN", StringComparison.Ordinal)..lines[9].IndexOf(", number", StringComparison.Ordinal)]);
+    }
+
+    [TestMethod]
+    public void BackupAndRestore_Failures_LogAsRealDoes()
+    {
+        var simulation = new Simulation { OpenBackupFile = static (path, access) => access == FileAccess.Write && path.StartsWith("/nowhere/", StringComparison.Ordinal) ? null : new MemoryStream() };
+        _ = simulation.ExecuteNonQuery("create database fdb; alter database fdb set recovery simple");
+        using var connection = simulation.CreateOpenConnection();
+        var spid = connection.CreateCommand("select @@spid").ExecuteScalar();
+        void Fails(string sql) => _ = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteNonQuery());
+        Fails("backup database nosuch to disk = '/b/x.bak'");
+        Fails("backup log fdb to disk = '/b/x.bak'");
+        Fails("backup database fdb to disk = '/nowhere/x.bak'");
+        // A transaction and tempdb are refused before the backup begins.
+        Fails("begin tran; backup database fdb to disk = '/b/x.bak'");
+        _ = connection.CreateCommand("if @@trancount > 0 rollback").ExecuteNonQuery();
+        Fails("backup database tempdb to disk = '/b/x.bak'");
+        CollectionAssert.AreEqual(new[]
+        {
+            "Backup|Error: 3041, Severity: 16, State: 1.",
+            "Backup|BACKUP failed to complete the command BACKUP DATABASE nosuch. Check the backup application log for detailed messages.",
+            "Backup|Error: 3041, Severity: 16, State: 1.",
+            "Backup|BACKUP failed to complete the command BACKUP LOG fdb. Check the backup application log for detailed messages.",
+            $"spid{spid}|Error: 18204, Severity: 16, State: 1.",
+            $"spid{spid}|BackupDiskFile::CreateMedia: Backup device '/nowhere/x.bak' failed to create. Operating system error 3(The system cannot find the path specified.).",
+            "Backup|Error: 3041, Severity: 16, State: 1.",
+            "Backup|BACKUP failed to complete the command BACKUP DATABASE fdb. Check the backup application log for detailed messages.",
+        }, EngineLines(simulation).FindAll(static line => !line.Contains("database option", StringComparison.Ordinal) && !line.Contains("Starting up", StringComparison.Ordinal)));
+        // A restore's failure to open its device is the device's line alone.
+        var restoring = new Simulation();
+        using var restorer = restoring.CreateOpenConnection();
+        var restorerSpid = restorer.CreateCommand("select @@spid").ExecuteScalar();
+        _ = Throws<SimulatedSqlException>(() => restorer.CreateCommand("restore database fdb from disk = '/b/missing.bak'").ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[]
+        {
+            $"spid{restorerSpid}|Error: 18204, Severity: 16, State: 1.",
+            $"spid{restorerSpid}|BackupDiskFile::OpenMedia: Backup device '/b/missing.bak' failed to open. Operating system error 2(The system cannot find the file specified.).",
+        }, EngineLines(restoring));
     }
 
     [TestMethod]

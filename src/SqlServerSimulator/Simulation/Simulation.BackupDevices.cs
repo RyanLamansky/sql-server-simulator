@@ -184,18 +184,20 @@ partial class Simulation
             throw SimulatedSqlException.BackupDeviceDoesNotExist(name, verb);
         if (device.Type != 2)
             throw SimulatedSqlException.CannotOpenNonDiskBackupDevice(device.Name, device.PhysicalName, device.Type == 5, verb);
-        return new(device.PhysicalName, $"{device.Name}({device.PhysicalName})");
+        return new(device.PhysicalName, $"{device.Name}({device.PhysicalName})", device.Name);
     }
 
     /// <summary>
     /// One device a <c>BACKUP</c> or <c>RESTORE</c> reads or writes: the path
-    /// handed to <see cref="OpenBackupFile"/> and the name its messages give
+    /// handed to <see cref="OpenBackupFile"/>, the name its messages give
     /// it — the path itself for <c>DISK = path</c>, <c>logical(physical)</c>
-    /// for a logical device.
+    /// for a logical device — and the name the error log gives it, a logical
+    /// device's own name alone.
     /// </summary>
-    private readonly struct BackupDeviceTarget(string path, string display)
+    private readonly struct BackupDeviceTarget(string path, string display, string logged)
     {
         public readonly string Path = path;
         public readonly string Display = display;
+        public readonly string Logged = logged;
     }
 }

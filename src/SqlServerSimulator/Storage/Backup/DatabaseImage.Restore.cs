@@ -267,6 +267,7 @@ partial class DatabaseImage
         database.UserAccess = this.UserAccess;
         database.Switches = (DatabaseSwitches)this.Switches;
         database.TargetRecoveryTimeSeconds = this.TargetRecoveryTimeSeconds;
+        database.LastGoodCheckDbUtc = this.LastGoodCheckDbTicks == 0 ? null : new DateTime(this.LastGoodCheckDbTicks, DateTimeKind.Unspecified);
         database.DefaultFilegroupId = this.DefaultFilegroupId;
         database.MemoryOptimizedFilegroupId = this.MemoryOptimizedFilegroupId;
         database.QueryStore = this.QueryStore.Copy();
