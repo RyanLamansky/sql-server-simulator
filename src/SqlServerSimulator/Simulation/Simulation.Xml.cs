@@ -237,8 +237,7 @@ partial class Simulation
 
         // The text is read as XML first, its parse errors real's own.
         _ = XmlWellFormedness.Canonical(xsdText, SqlType.IsNationalStringCategory(literalValue.Type));
-        XmlSchemaCollection.RejectUnsupportedSyntax(xsdText);
-        XmlSchemaCollection.RejectUncompilableSchema(xsdText, existing: null);
+        XmlSchemaCompiler.Reject(xsdText, existingText: null);
         var documents = XmlSchemaComponentBuilder.CountDocuments(xsdText);
         var componentCount = XmlSchemaComponentBuilder.Build(xsdText, [new(documents, 0)]).Components.Count;
         ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
@@ -299,13 +298,16 @@ partial class Simulation
         if (added.Trim().Length == 0)
             return true;
         _ = XmlWellFormedness.Canonical(added, SqlType.IsNationalStringCategory(value.Type));
-        XmlSchemaCollection.RejectUnsupportedSyntax(added);
         var previousText = collection.XsdText;
         var previousSegments = collection.Segments;
         var documents = XmlSchemaComponentBuilder.CountDocuments(added);
         int AddedComponents() =>
             XmlSchemaComponentBuilder.Build(previousText + added, [.. previousSegments, new(documents, 0)]).Components.Count
                 - collection.GetComponents().Components.Count;
+        // Every compile refusal comes ahead of a redeclared component's, and
+        // the added text's own names don't collide with the collection's
+        // (probed 2026-10-16 against SQL Server 2025).
+        XmlSchemaCompiler.Reject(added, previousText);
         try
         {
             collection.RejectRedeclaredComponents(added);
@@ -318,7 +320,6 @@ partial class Simulation
             _ = context.CurrentDatabase.AllocateXmlComponentIds(AddedComponents());
             throw;
         }
-        XmlSchemaCollection.RejectUncompilableSchema(added, collection.GetCompiledSchemas());
 
         var previousModified = collection.ModifyDate;
         // The added components' ids stay spent when the ALTER rolls back.

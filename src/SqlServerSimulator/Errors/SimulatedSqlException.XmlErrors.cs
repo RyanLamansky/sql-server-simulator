@@ -1318,7 +1318,10 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 9336: an XSD construct SQL Server's schema collections refuse — the
-    /// identity constraints <c>key</c>, <c>keyref</c> and <c>unique</c>.
+    /// identity constraints <c>key</c>, <c>keyref</c> and <c>unique</c>, and
+    /// <c>include</c> and <c>notation</c>, which real names
+    /// <c>'&lt;xsd:include&gt;'</c> whatever prefix the text writes (probed
+    /// 2026-10-16 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException XmlSchemaSyntaxNotSupported(string construct) =>
         new($"The XML Schema syntax '{construct}' is not supported.", 9336, 16, 1) { AbortsAsUnderXactAbort = true };
@@ -1390,7 +1393,11 @@ partial class SimulatedSqlException
 
     /// <summary>Msg 2312: a boolean XSD attribute whose value isn't one (probed 2026-10-07 against SQL Server 2025).</summary>
     internal static SimulatedSqlException XmlSchemaAttributeNotBoolean(string attribute, string value) =>
-        new($"The value of attribute '{attribute}' does not conform to the type definition 'http://www.w3.org/2001/XMLSchema#boolean': '{value}'.", 2312, 16, 1) { AbortsAsUnderXactAbort = true };
+        XmlSchemaAttributeNotOfType(attribute, "boolean", value);
+
+    /// <summary>Msg 2312: an XSD attribute whose value isn't of its type — a <c>name</c> or <c>id</c> that isn't an <c>NCName</c> (probed 2026-10-16 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeNotOfType(string attribute, string type, string value) =>
+        new($"The value of attribute '{attribute}' does not conform to the type definition 'http://www.w3.org/2001/XMLSchema#{type}': '{value}'.", 2312, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 2313: an enumerated XSD attribute — <c>use</c>, <c>form</c>, <c>processContents</c> … — given another value (probed 2026-10-07 against SQL Server 2025).</summary>
     internal static SimulatedSqlException XmlSchemaAttributeValueNotAllowed(string attribute, string value) =>
@@ -1436,6 +1443,269 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XmlSchemaFacetNotAllowed(string facet, string location) =>
         new($"This type may not have a '{facet}' facet. Location: '{location}'.", 2319, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    // The XSD compile refusals below were probed 2026-10-16 against SQL Server
+    // 2025; a type is named as real names it — 't' in no namespace, '{urn:x}t'
+    // in one, and an anonymous one by its path, 'xs-nun(/r/complexType())'.
+
+    /// <summary>Msg 2387: a local element or attribute with both a <c>type</c> and a <c>ref</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaTypeAndRef(string location) =>
+        new($"Cannot have both 'type' and 'ref' attributes. Location: '{location}'.", 2387, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2316: a <c>restriction</c> or <c>extension</c> without its <c>base</c> (a simple type's restriction may declare it inline instead).</summary>
+    internal static SimulatedSqlException XmlSchemaBaseMissing(string location) =>
+        new($"The required 'base' attribute is missing. Location: '{location}'.", 2316, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2393: a <c>list</c> with neither an <c>itemType</c> nor an inline type.</summary>
+    internal static SimulatedSqlException XmlSchemaListItemTypeMissing(string location) =>
+        new($"Either an itemType attribute or a simpleType child must be present. Location: '{location}'.", 2393, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2339: a <c>union</c> with neither <c>memberTypes</c> nor an inline type.</summary>
+    internal static SimulatedSqlException XmlSchemaUnionMemberTypesMissing(string location) =>
+        new($"Either a memberType attribute or a simpleType child must be present. Location: '{location}'.", 2339, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2327: a <c>simpleType</c>, <c>simpleContent</c> or <c>complexContent</c> holding no definition.</summary>
+    internal static SimulatedSqlException XmlSchemaContentMissing(string element) =>
+        new($"The content or definition of <{element}> is missing.", 2327, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2320: a restriction repeating a facet other than <c>enumeration</c> or <c>pattern</c>, located at the repeat.</summary>
+    internal static SimulatedSqlException XmlSchemaDuplicateFacet(string facet, string location) =>
+        new($"Duplicate facet '{facet}' found at location '{location}'.", 2320, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2384: a second <c>annotation</c> among an element's children.</summary>
+    internal static SimulatedSqlException XmlSchemaAnnotationRepeated(string parent) =>
+        new($"Invalid element occurrence, element 'annotation' was found multiple times in the context of element '{parent}'", 2384, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2388: an <c>annotation</c> after other children of its element.</summary>
+    internal static SimulatedSqlException XmlSchemaAnnotationNotFirst(string parent) =>
+        new($"Invalid element occurrence, element 'annotation' has to appear first in the context of '{parent}'", 2388, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2321: a facet after the attribute declarations of a simple-content restriction.</summary>
+    internal static SimulatedSqlException XmlSchemaFacetAfterAttributes(string facet, string location) =>
+        new($"Facets cannot follow attribute declarations. Found facet '{facet}' at location '{location}'.", 2321, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2358: a simple type's restriction naming a <c>base</c> and declaring one inline, located at the inline one.</summary>
+    internal static SimulatedSqlException XmlSchemaBaseAndInlineType(string location) =>
+        new($"Derivation with both a 'base' attribute and an embedded type definition is not supported in this release. Location: '{location}'.", 2358, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 572: a <c>pattern</c> facet that isn't a regular expression; the
+    /// state says what is wrong and the offset is just past where the reading
+    /// stopped.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaInvalidPattern(string pattern, int offset, byte state) =>
+        new($"Invalid regular expression \"{pattern}\" near the offset {offset}.", 572, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2398: two elements of one schema document carrying one <c>id</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaDuplicateId(string id) =>
+        new($"Duplicate id value found: '{id}'", 2398, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 9340: an <c>import</c> of the document's own target namespace, or of none in a document without one.</summary>
+    internal static SimulatedSqlException XmlSchemaImportOfTargetNamespace() =>
+        new("Explicit import of the current target namespace is invalid. References to items in the current target namespace that have already been loaded in the schema collection will be resolved implicitly.", 9340, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2383: a <c>minOccurs</c> or <c>maxOccurs</c> above <see cref="int.MaxValue"/>.</summary>
+    internal static SimulatedSqlException XmlSchemaOccursOutOfRange(string value, string attribute) =>
+        new($"Invalid value '{value}' for the {attribute} attribute. The value has to be between 0 and 2147483647.", 2383, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2229: a QName whose prefix no namespace declaration binds.</summary>
+    internal static SimulatedSqlException XmlSchemaPrefixNotDeclared(string prefix) =>
+        new($"The name \"{prefix}\" does not denote a namespace.", 2229, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 9339: <c>form</c> on a global attribute.</summary>
+    internal static SimulatedSqlException XmlSchemaFormOnGlobal(string location) =>
+        new($"The 'form' attribute cannot be specified on a global attribute or element definition. Location: '{location}'.", 9339, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 9334: <c>form</c> on a local element or attribute that references a global.</summary>
+    internal static SimulatedSqlException XmlSchemaFormOnReference(string location) =>
+        new($"The 'form' attribute cannot be specified on a local attribute or element definition that has the 'ref' attribute. Location: '{location}'.", 9334, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2384: an <c>anyAttribute</c> repeated among its element's children.</summary>
+    internal static SimulatedSqlException XmlSchemaElementRepeated(string element, string parent) =>
+        new($"Invalid element occurrence, element '{element}' was found multiple times in the context of element '{parent}'", 2384, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2367: a list whose <c>itemType</c> names a complex type, located at the list.</summary>
+    internal static SimulatedSqlException XmlSchemaListItemTypeNotSimple(string location) =>
+        new($"The item type of an XSD list type must be a simple type. Location: '{location}'.", 2367, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2317: a simple type's restriction whose base names a complex type.</summary>
+    internal static SimulatedSqlException XmlSchemaRestrictionBaseNotSimple(string type) =>
+        new($"The base type \"{type}\" defined on XSD element \"restriction\" is not a simple type.", 2317, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6977: a union member naming a complex type.</summary>
+    internal static SimulatedSqlException XmlSchemaUnionMemberNotSimple(string member, string union) =>
+        new($"Invalid member type '{member}' in union type '{union}'. Unions may not have complex member types.", 6977, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6955: an attribute whose type names a complex type.</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeTypeNotSimple(string attribute) =>
+        new($"Invalid attribute definition for attribute '{attribute}', attributes type has to be simple type", 6955, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 9337: a reference to <c>xs:NOTATION</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaTypeNotSupported(string type) =>
+        new($"The XML Schema type '{type}' is not supported.", 9337, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2237: an extension of <c>xs:anyType</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaAnyTypeExtension() =>
+        new("Derivation from anyType by extension is not supported in this release.", 2237, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2201: a restriction of <c>xs:anySimpleType</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaAnySimpleTypeRestriction() =>
+        new("Derivation from \"anySimpleType\" by restriction is not permitted, and derivation by restriction from a type derived from \"anySimpleType\" by extension is allowed only if no constraining facets are specified.", 2201, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2276: a restriction of <c>xs:QName</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaQNameRestriction() =>
+        new("Derivation from 'QName' by restriction is not supported in this release", 2276, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6978: a list whose item type is itself a list or derives from <c>ID</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaInvalidListItemType(string type) =>
+        new($"Invalid item type for list type '{type}'. The item type of a list may not itself be a list, and types derived from ID may not be used as item types in this release.", 6978, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6995: an element whose type derives from <c>ID</c> or <c>IDREF</c>
+    /// (state 1, named after the element) or a simple-content extension of
+    /// one (state 2, named after the type).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaIdTypeNotSupported(string name, byte state) =>
+        new($"Invalid definition for type '{name}'. SQL Server does not permit the built-in XML Schema types 'ID' and 'IDREF' or types derived from them to be used as the type of an element or as the basis for derivation by extension.", 6995, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6910: a restriction of a union type.</summary>
+    internal static SimulatedSqlException XmlSchemaUnionRestriction(string type) =>
+        new($"XML Validation: Invalid definition for type '{type}'. SQL Server does not currently support restriction of union types.", 6910, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6916: a content model that violates unique particle attribution.</summary>
+    internal static SimulatedSqlException XmlSchemaAmbiguousContentModel(string type) =>
+        new($"XML Validation: The content model of type or model group '{type}' is ambiguous and thus violates the unique particle attribution constraint. Consult SQL Server Books Online for more information.", 6916, 16, 2) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6920: <c>use="prohibited"</c> on an attribute its type's base doesn't declare.</summary>
+    internal static SimulatedSqlException XmlSchemaProhibitedAttributeNotInBase(string type, string attribute) =>
+        new($"Invalid definition for type '{type}'. Cannot specify use=\"prohibited\" for attribute '{attribute}' because there is no corresponding attribute in the base type.", 6920, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6932: a default or fixed value on an element or attribute of a type derived from <c>ID</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaIdValueConstraint(string name) =>
+        new($"Invalid definition for element or attribute '{name}'. Value constraints on components of type ID are not allowed.", 6932, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6941 / 6942: a type with complex content derived from one without,
+    /// or one with simple content derived from one without.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaContentKindMismatch(string type, bool complexContent) =>
+        complexContent
+            ? new($"Invalid type definition for type '{type}', types with complex content can only be derived from base types which have complex content", 6941, 16, 1) { AbortsAsUnderXactAbort = true }
+            : new($"Invalid type definition for type '{type}', types with simple content can only be derived from base types which have simple content", 6942, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6943: a derivation the base type's <c>final</c> forbids.</summary>
+    internal static SimulatedSqlException XmlSchemaDerivationFinal(string type) =>
+        new($"Invalid type definition for type '{type}', the derivation was illegal because 'final' attribute was specified on the base type", 6943, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6944: a facet loosening its base's; the state names the facet.</summary>
+    internal static SimulatedSqlException XmlSchemaFacetNotRestricting(string type, string facet, byte state) =>
+        new($"Invalid type definition for type '{type}', '{facet}' facet is not restricting the value space", 6944, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6945: a facet value its type's primitive doesn't read; the state names the facet.</summary>
+    internal static SimulatedSqlException XmlSchemaFacetValueInvalid(string facet, string type, byte state) =>
+        new($"Invalid facet value for facet '{facet}' in type definition '{type}'", 6945, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6949: a <c>length</c> above the type's <c>maxLength</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaLengthOverMaxLength(string type) =>
+        new($"Invalid type definition for type '{type}', 'Length' can not be greater than 'maxLength'", 6949, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6953: a type whose derivation leads back to itself through a complex-content base or a union member, named after the type whose reference closes the loop.</summary>
+    internal static SimulatedSqlException XmlSchemaRecursiveType(string type) =>
+        new($"Invalid type definition for type '{type}', recursive type definitions are not allowed", 6953, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6954: a group or attribute group referencing itself, named after the one whose reference closes the loop.</summary>
+    internal static SimulatedSqlException XmlSchemaRecursiveGroup(string group) =>
+        new($"Invalid group definition for group '{group}', recursive group definitions are not allowed", 6954, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6956: a facet its base fixes, given another value; the state names the facet.</summary>
+    internal static SimulatedSqlException XmlSchemaFixedFacetRedefined(string type, string facet, byte state) =>
+        new($"Invalid type definition for type '{type}', fixed facet '{facet}' can not be redefined to a different value.", 6956, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6957: a substitution group member whose type doesn't derive from its head's.</summary>
+    internal static SimulatedSqlException XmlSchemaSubstitutionNotDerived(string member, string head) =>
+        new($"Invalid element definition, element '{member}' is not valid derivation of element '{head}'", 6957, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6958: an <c>all</c> group repeated (state 2 through a group reference) or holding a repeated element, named after the type or group holding it.</summary>
+    internal static SimulatedSqlException XmlSchemaInvalidAllGroup(string type, byte state) =>
+        new($"Invalid definition for type '{type}'. An 'all' group may not appear as the child or parent of any other model group, it must have minOccurs = maxOccurs = 1, its child elements must have maxOccurs = 1", 6958, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6962: a default or fixed value on an element whose type has neither simple content nor emptiable mixed content.</summary>
+    internal static SimulatedSqlException XmlSchemaValueConstraintOnComplexType(string type) =>
+        new($"'default' and 'fixed' values are not allowed on element of this type: '{type}'", 6962, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6967: a complex-content derivation whose <c>mixed</c> differs from its base's.</summary>
+    internal static SimulatedSqlException XmlSchemaMixedMismatch(string type) =>
+        new($"Invalid type definition for type '{type}'. The base and derived types must have the same value for 'mixed' unless deriving by restriction, in which case 'false' is always permitted for the derived type.", 6967, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6968: a simple-content restriction of a simple type.</summary>
+    internal static SimulatedSqlException XmlSchemaComplexRestrictsSimple(string type) =>
+        new($"Invalid type definition for type '{type}'. Complex types cannot restrict simple types", 6968, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6970: a type with two attributes of types derived from <c>ID</c>, state 2 when an extension adds the second.</summary>
+    internal static SimulatedSqlException XmlSchemaTwoIdAttributes(string type, byte state) =>
+        new($"Invalid type definition for type '{type}'. No type may have more than one attribute of any type derived from ID.", 6970, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6971: a restriction declaring an attribute its base neither declares nor admits by a wildcard.</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeNotInBase(string type, string attribute) =>
+        new($"Invalid type definition for type '{type}'. Type contains attribute '{attribute}' which is not allowed in base type.", 6971, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6972 / 6973 / 6975 / 6976: an attribute redefined against its
+    /// base's — of a type not derived from the base's, optional where the
+    /// base's is required, not fixed to the base's fixed value, or redefined
+    /// at all by an extension.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaAttributeRedefinition(string attribute, string type, int number)
+    {
+        var rule = number switch
+        {
+            6972 => "Must be of a type which is a valid restriction of the corresponding attribute in the base type.",
+            6973 => "Must be required in the derived type if it is required in the base type.",
+            6975 => "Must be fixed to the same value as in the derived type.",
+            _ => "Derivation by extension may not redefine attributes.",
+        };
+        return new($"Invalid redefinition of attribute '{attribute}' in type '{type}'. {rule}", number, 16, 1) { AbortsAsUnderXactAbort = true };
+    }
+
+    /// <summary>
+    /// Msg 6979 / 6980 / 6981 / 6982 / 6984 / 6985 / 6990 / 6991 / 6994: a
+    /// complex-content restriction whose particle or attribute wildcard
+    /// doesn't restrict its base's — an element not matching the base's
+    /// (6979 state 1) or of a type not derived from its (state 4), an
+    /// occurrence range wider than the base's, an element nillable or unfixed
+    /// where the base's isn't, an element outside the base wildcard's
+    /// namespaces, a wildcard wider than the base's, a model group that maps
+    /// onto none (6990, state 2 for a choice), content emptier or fuller than
+    /// the base allows, and an attribute wildcard wider than the base's.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaInvalidRestriction(string type, int number, byte state = 1)
+    {
+        var rule = number switch
+        {
+            6979 => "The element in the restricted type must have the same name as and a more restrictive type than the corresponding element in the base type.",
+            6980 => "The particle in the restricted type may not have an occurrence range more permissive than that of the corresponding particle in the base type.",
+            6981 => "The element in the restricted type may not be nillable if the corresponding element in the base type is not.",
+            6982 => "The element in the restricted type must be fixed to the same value as the corresponding element in the derived type.",
+            6984 => "The element in the restricted type must be in one of the namespaces allowed by the base type's wildcard.",
+            6985 => "The Wildcard in the restricted type must be a valid subset of the corresponding wildcard in the base type, and the processContents may not be more permissive.",
+            6990 => "Invalid model group restriction.",
+            6994 => "The attribute wildcard in the restricted type must be a valid subset of the corresponding attribute wildcard in the base type, and the processContents may not be more permissive.",
+            _ => "If the base type has empty content, then the derived type must as well, and if the derived type has empty content, then the base type must be emptiable.",
+        };
+        return new($"Invalid restriction for type '{type}'. {rule}", number, 16, state) { AbortsAsUnderXactAbort = true };
+    }
+
+    /// <summary>Msg 6992: a content model holding two elements of one name that differ in type, nillability or value constraint.</summary>
+    internal static SimulatedSqlException XmlSchemaInconsistentElements(string type, string element) =>
+        new($"The content model of type '{type}' contains two elements with the same name '{element}' and different types, nullability, or value constraints.", 6992, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6996: one restriction giving both inclusive and exclusive bounds on one side.</summary>
+    internal static SimulatedSqlException XmlSchemaBothBoundKinds(string type) =>
+        new($"Invalid type definition for type '{type}'. A type may not have both 'minInclusive' and 'minExclusive' or 'maxInclusive' and 'maxExclusive' facets.", 6996, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6999: a default or fixed value on an element or attribute of a type derived from <c>QName</c> or <c>NOTATION</c>.</summary>
+    internal static SimulatedSqlException XmlSchemaQNameValueConstraint(string name) =>
+        new($"Invalid definition for element or attribute '{name}'. Value constraints on components of type QName are not supported in this release.", 6999, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6323: an assignment to a variable typed by a collection altered

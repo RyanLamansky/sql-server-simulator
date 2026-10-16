@@ -195,8 +195,8 @@ public sealed class XmlCollectionBindingTests
     [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:int"><xs:minInclusive value="10"/><xs:maxInclusive value="5"/></xs:restriction></xs:simpleType>""", 6951, "Invalid type definition for type 't', 'minInclusive' must be less than or equal to 'maxInclusive' and less than 'maxExclusive'")]
     [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:int"><xs:minExclusive value="10"/><xs:maxExclusive value="5"/></xs:restriction></xs:simpleType>""", 6952, "Invalid type definition for type 't', 'minExclusive' must be less than or equal to 'maxExclusive' and less than 'maxInclusive'")]
     [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:string"><xs:minLength value="10"/><xs:maxLength value="5"/></xs:restriction></xs:simpleType>""", 6946, "Invalid type definition for type 't', 'minLength' can not be greater than 'maxLength'")]
-    [DataRow("""<xs:notation name="n" public="p"/>""", 9336, "The XML Schema syntax '<xs:notation>' is not supported.")]
-    [DataRow("""<xs:include schemaLocation="x"/>""", 9336, "The XML Schema syntax '<xs:include>' is not supported.")]
+    [DataRow("""<xs:notation name="n" public="p"/>""", 9336, "The XML Schema syntax '<xsd:notation>' is not supported.")]
+    [DataRow("""<xs:include schemaLocation="x"/>""", 9336, "The XML Schema syntax '<xsd:include>' is not supported.")]
     [DataRow("""<xs:redefine schemaLocation="x"/>""", 2391, "Redefining XSD schemas is not supported")]
     [DataRow("""<xs:element name="r" bogus="1" type="nosuch"/>""", 2307, "Reference to an undefined name 'nosuch'")]
     public void AStructurallyInvalidSchema_IsRefused(string body, int number, string message) =>
@@ -209,7 +209,7 @@ public sealed class XmlCollectionBindingTests
     [DataRow("""<xs:simpleType name="s" abstract="true" mixed="false"><xs:restriction base="xs:string"><xs:maxLength value="5" fixed="true"/></xs:restriction></xs:simpleType>""")]
     [DataRow("""<xs:annotation><xs:documentation xml:lang="en-GB" source="x">d</xs:documentation><xs:appinfo source="y"/></xs:annotation><xs:element name="r" xml:lang="1"/>""")]
     [DataRow("""<xs:element name="r"><xs:complexType mixed="true"><xs:sequence><xs:any namespace="##other" processContents="lax" minOccurs="0"/></xs:sequence><xs:attribute name="a" type="xs:int" default="1"/><xs:attribute name="b" use="required"/><xs:anyAttribute processContents="skip"/></xs:complexType></xs:element>""")]
-    [DataRow("""<xs:group name="g" abstract="false"><xs:sequence><xs:element name="a"/></xs:sequence></xs:group><xs:element name="r"><xs:complexType><xs:choice minOccurs="0"/><xs:group ref="g" minOccurs="0"/></xs:complexType></xs:element>""")]
+    [DataRow("""<xs:group name="g" abstract="false"><xs:sequence><xs:element name="a"/></xs:sequence></xs:group><xs:element name="r"><xs:complexType><xs:sequence><xs:choice minOccurs="0"/><xs:group ref="g" minOccurs="0"/></xs:sequence></xs:complexType></xs:element>""")]
     [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:decimal"><xs:totalDigits value="5"/><xs:fractionDigits value="5"/><xs:minInclusive value="5"/><xs:maxInclusive value="5"/></xs:restriction></xs:simpleType>""")]
     public void ASchemaRealReads_IsAccepted(string body) =>
         _ = new Simulation().ExecuteNonQuery($"create xml schema collection x as N'<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">{body}</xs:schema>'");
