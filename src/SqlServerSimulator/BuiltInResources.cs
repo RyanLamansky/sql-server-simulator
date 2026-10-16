@@ -89,6 +89,7 @@ internal static partial class BuiltInResources
         RegisterIndexDmvs(views);
         RegisterSecurity(views);
         RegisterFullTextXmlSpatial(views);
+        RegisterXmlSchemaComponents(views);
         RegisterServiceBroker(views);
         RegisterServerAndDatabases(views);
         RegisterRuntimeDmvs(views);

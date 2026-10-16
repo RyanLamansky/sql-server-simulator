@@ -6,8 +6,8 @@ namespace SqlServerSimulator.Schemas;
 /// <summary>
 /// A registered XML schema collection: name + raw XSD source text. Created
 /// via <c>CREATE XML SCHEMA COLLECTION schema.name AS '&lt;xsd:schema&gt;…&lt;/xsd:schema&gt;'</c>;
-/// stored on <see cref="Schema.XmlSchemaCollections"/> (shares the type
-/// namespace with table types and alias types — Msg 219 on duplicate).
+/// stored on <see cref="Schema.XmlSchemaCollections"/>, whose names an alias
+/// or table type may share.
 /// </summary>
 /// <remarks>
 /// The source text is stored verbatim — <c>ALTER … ADD</c> appends to it —
@@ -53,6 +53,16 @@ internal sealed class XmlSchemaCollection(
     /// </summary>
     public long AlteredAt;
 
+    /// <summary>
+    /// The schema documents each <c>CREATE</c> and <c>ALTER … ADD</c> gave
+    /// the collection, and the first <c>xml_component_id</c> each drew;
+    /// reassigned beside <see cref="XsdText"/>.
+    /// </summary>
+    public XmlSchemaSegment[] Segments = [];
+
+    // The segments the components were read under and the components, in
+    // one reference so a reader on another thread never pairs them wrongly.
+    private Tuple<XmlSchemaSegment[], XmlSchemaComponentSet>? components;
     private string? namesReadFrom;
     private FrozenSet<string>? singletonElementNames;
     private string? simpleContentNamesReadFrom;
@@ -80,6 +90,24 @@ internal sealed class XmlSchemaCollection(
         }
 
         return this.staticTyping!;
+    }
+
+    /// <summary>
+    /// The collection's namespaces and components as the
+    /// <c>sys.xml_schema_*</c> views list them, numbered under
+    /// <see cref="Segments"/>.
+    /// </summary>
+    public XmlSchemaComponentSet GetComponents()
+    {
+        var segments = this.Segments;
+        var cached = Volatile.Read(ref this.components);
+        if (cached is null || !ReferenceEquals(cached.Item1, segments))
+        {
+            cached = Tuple.Create(segments, XmlSchemaComponentBuilder.Build(this.XsdText, segments));
+            Volatile.Write(ref this.components, cached);
+        }
+
+        return cached.Item2;
     }
 
     /// <summary>

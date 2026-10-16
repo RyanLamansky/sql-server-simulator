@@ -1902,6 +1902,26 @@ internal static class PermissionChecker
     }
 
     /// <summary>
+    /// Whether a restricted principal sees an XML schema collection's
+    /// catalog rows: as its owner, with full metadata visibility, or holding
+    /// <c>ALTER</c>, <c>CONTROL</c>, <c>REFERENCES</c>, <c>TAKE OWNERSHIP</c>
+    /// or <c>VIEW DEFINITION</c> on it or its schema — <c>EXECUTE</c> reveals
+    /// nothing (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static bool CanViewXmlSchemaCollectionMetadata(Database database, int principalId, int collectionId, int schemaId, int ownerId, ServerLoginRights server)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (closure.Contains(ownerId) || HasFullMetadataVisibility(database, closure, server))
+            return true;
+        foreach (var name in (string[])["ALTER", "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"])
+        {
+            if (IsGrantedInClosure(database, closure, name, ClassXmlSchemaCollection, collectionId, schemaId, server, Permission.Resolve(name)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Whether a restricted principal sees a full-text catalog's
     /// <c>sys.fulltext_catalogs</c> row: as its owner, with full metadata
     /// visibility, or holding any permission on the catalog.

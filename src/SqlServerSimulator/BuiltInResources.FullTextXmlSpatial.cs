@@ -564,14 +564,26 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.xml_schema_collections</c>. One row per
-    /// <see cref="XmlSchemaCollection"/> across every schema. The
-    /// principal_id surfaces as NULL — the simulator's CREATE XML SCHEMA
-    /// COLLECTION grammar doesn't support an AUTHORIZATION clause and
-    /// every collection's principal_id field is left null at construction.
+    /// Rows for <c>sys.xml_schema_collections</c>: the built-in <c>sys</c>
+    /// collection every database lists first, then one row per
+    /// <see cref="XmlSchemaCollection"/> across every schema.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysXmlSchemaCollections(Parser.BatchContext batch, Database database)
     {
+        // Real dates the sys collection 2009-04-13 12:59:13.390, master's
+        // 12:59:08.860, and modifies it at its own install, for which the
+        // simulator reports the SQL Server 2025 release date (probed
+        // 2026-10-16).
+        yield return [
+            SqlValue.FromInt32(1),
+            SqlValue.FromInt32(Database.SysSchemaId),
+            SqlValue.Null(SqlType.Int32),
+            SqlValue.FromSystemName("sys"),
+            SqlValue.FromDateTime(database.Name.Equals("master", StringComparison.OrdinalIgnoreCase)
+                ? new DateTime(2009, 4, 13, 12, 59, 8, 860, DateTimeKind.Utc)
+                : new DateTime(2009, 4, 13, 12, 59, 13, 390, DateTimeKind.Utc)),
+            SqlValue.FromDateTime(new DateTime(2025, 11, 1, 0, 0, 0, DateTimeKind.Utc)),
+        ];
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var coll in schema.XmlSchemaCollections.EnumerateValues().OrderBy(c => c.Id))

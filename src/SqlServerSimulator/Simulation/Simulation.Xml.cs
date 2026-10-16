@@ -210,7 +210,7 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveCreateSchema(name, out var ownerSchema, missingDefaultState: 2))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);
+            throw SimulatedSqlException.XmlSchemaCollectionSchemaNotFound(name.ImmediateQualifier ?? Database.DefaultSchemaName);
         var schemaName = ownerSchema.Name;
 
         // Dual DDL gate — and this one runs the two halves in the opposite order
@@ -223,26 +223,32 @@ partial class Simulation
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateXmlSchemaCollection))
             throw SimulatedSqlException.DatabasePermissionDenied("CREATE XML SCHEMA COLLECTION", context.CurrentDatabase.Name);
 
-        // Type-namespace collision with existing alias type / table type /
-        // xml collection raises Msg 219 — same surface as the existing
-        // alias-vs-table-type rule.
-        if (ownerSchema.XmlSchemaCollections.ContainsKey(name.Leaf)
-            || ownerSchema.TableTypes.ContainsKey(name.Leaf)
-            || ownerSchema.AliasTypes.ContainsKey(name.Leaf))
-        {
-            throw SimulatedSqlException.TypeAlreadyExists($"{schemaName}.{name.Leaf}");
-        }
+        if (ownerSchema.XmlSchemaCollections.ContainsKey(name.Leaf))
+            throw SimulatedSqlException.XmlSchemaCollectionCannotBeCreated(name.Leaf);
+
+        // The id is drawn before the text is read, so a text real refuses
+        // still spends one, while its components draw theirs only once it is
+        // accepted; a rolled-back CREATE keeps both spent (probed 2026-10-16
+        // against SQL Server 2025). A restore's replay takes its backed-up
+        // ids instead, its components' stamped after.
+        var database = context.CurrentDatabase;
+        var restoring = database.RestoredXmlCollectionIds is { Count: > 0 };
+        var id = database.AllocateXmlCollectionId();
 
         // The text is read as XML first, its parse errors real's own.
         _ = XmlWellFormedness.Canonical(xsdText, SqlType.IsNationalStringCategory(literalValue.Type));
         XmlSchemaCollection.RejectUnsupportedSyntax(xsdText);
         XmlSchemaCollection.RejectUncompilableSchema(xsdText, existing: null);
-        var id = context.CurrentDatabase.AllocateXmlCollectionId();
+        var documents = XmlSchemaComponentBuilder.CountDocuments(xsdText);
+        var componentCount = XmlSchemaComponentBuilder.Build(xsdText, [new(documents, 0)]).Components.Count;
         ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
             id, name.Leaf, ownerSchema.SchemaId,
             principalId: null,
             xsdText: xsdText,
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow)
+        {
+            Segments = [new(documents, restoring ? 0 : database.AllocateXmlComponentIds(componentCount))],
+        };
         RecordSlotUndo<XmlSchemaCollection>(context, ownerSchema.XmlSchemaCollections, name.Leaf, null);
         RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
@@ -293,17 +299,37 @@ partial class Simulation
             return true;
         _ = XmlWellFormedness.Canonical(added, SqlType.IsNationalStringCategory(value.Type));
         XmlSchemaCollection.RejectUnsupportedSyntax(added);
-        collection.RejectRedeclaredComponents(added);
+        var previousText = collection.XsdText;
+        var previousSegments = collection.Segments;
+        var documents = XmlSchemaComponentBuilder.CountDocuments(added);
+        int AddedComponents() =>
+            XmlSchemaComponentBuilder.Build(previousText + added, [.. previousSegments, new(documents, 0)]).Components.Count
+                - collection.GetComponents().Components.Count;
+        try
+        {
+            collection.RejectRedeclaredComponents(added);
+        }
+        catch (SimulatedSqlException e) when (e.Number == 6310)
+        {
+            // Real numbers the added components up to the one it finds
+            // already declared, and those ids stay spent (probed 2026-10-16
+            // against SQL Server 2025).
+            _ = context.CurrentDatabase.AllocateXmlComponentIds(AddedComponents());
+            throw;
+        }
         XmlSchemaCollection.RejectUncompilableSchema(added, collection.GetCompiledSchemas());
 
-        var previousText = collection.XsdText;
         var previousModified = collection.ModifyDate;
+        // The added components' ids stay spent when the ALTER rolls back.
+        var firstComponentId = context.CurrentDatabase.AllocateXmlComponentIds(AddedComponents());
         collection.XsdText = previousText + added;
+        collection.Segments = [.. previousSegments, new(documents, firstComponentId)];
         collection.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         collection.AlteredAt = Interlocked.Increment(ref context.Connection.Simulation.XmlSchemaCollectionAlterations);
         RecordDdlUndo(context, () =>
         {
             collection.XsdText = previousText;
+            collection.Segments = previousSegments;
             collection.ModifyDate = previousModified;
         });
         RecordDdlEvent(context, "ALTER_XML_SCHEMA_COLLECTION", ownerSchema.Name, name.Leaf, "XML SCHEMA COLLECTION");

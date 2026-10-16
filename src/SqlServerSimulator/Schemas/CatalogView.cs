@@ -377,6 +377,12 @@ internal enum MetadataVisibilityKind : byte
 
     /// <summary>A full-text catalog, by id: the row shows to its owner and to a holder of any permission on it.</summary>
     FullTextCatalog,
+
+    /// <summary>An XML schema collection, by <c>xml_collection_id</c>; the built-in <c>sys</c> collection always shows.</summary>
+    XmlSchemaCollection,
+
+    /// <summary>An XML schema component, by <c>xml_component_id</c>: the row shows when its collection does.</summary>
+    XmlSchemaComponent,
 }
 
 /// <summary>

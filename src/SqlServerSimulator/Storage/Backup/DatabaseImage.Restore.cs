@@ -470,6 +470,11 @@ partial class DatabaseImage
                 {
                     collection.PrincipalId = collectionImage.OwnerPrincipalId;
                     collection.ModifyDate = collectionImage.ModifyDate;
+                    var pairs = collectionImage.XmlComponentSegments;
+                    var segments = new XmlSchemaSegment[pairs.Length / 2];
+                    for (var i = 0; i < segments.Length; i++)
+                        segments[i] = new(pairs[2 * i], pairs[(2 * i) + 1]);
+                    collection.Segments = segments;
                 }
             }
         }

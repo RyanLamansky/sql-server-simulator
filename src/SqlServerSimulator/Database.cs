@@ -926,6 +926,16 @@ internal sealed partial class Database
     public int AllocateXmlCollectionId() =>
         this.RestoredXmlCollectionIds is { Count: > 0 } restored ? restored.Dequeue() : Interlocked.Increment(ref this.nextXmlCollectionId);
 
+    private int nextXmlComponentId = 65535;
+
+    /// <summary>
+    /// Draws <paramref name="count"/> consecutive XML schema component ids,
+    /// answering the first: one database-wide counter from 65536 that every
+    /// collection's <c>CREATE</c> and <c>ALTER … ADD</c> draw from in turn,
+    /// never reused after a drop (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    public int AllocateXmlComponentIds(int count) => Interlocked.Add(ref this.nextXmlComponentId, count) - count + 1;
+
     /// <summary>
     /// The database's partition functions by name, compared under its
     /// collation. A partition function isn't a schema object: its name is
@@ -983,7 +993,7 @@ internal sealed partial class Database
         Volatile.Read(ref this.nextXmlCollectionId), Volatile.Read(ref this.nextPartitionFunctionId), Volatile.Read(ref this.nextPartitionSchemeId),
         Interlocked.Read(ref this.rowVersionCounter), Interlocked.Read(ref this.changeTrackingVersion),
         Volatile.Read(ref this.EncryptionKeys.LastCertificateId), Volatile.Read(ref this.EncryptionKeys.LastSymmetricKeyId),
-        Volatile.Read(ref this.EncryptionKeys.LastAsymmetricKeyId),
+        Volatile.Read(ref this.EncryptionKeys.LastAsymmetricKeyId), Volatile.Read(ref this.nextXmlComponentId),
     ];
 
     /// <summary>
@@ -1009,6 +1019,7 @@ internal sealed partial class Database
         Set(ref this.EncryptionKeys.LastCertificateId, counters[11], raiseOnly);
         Set(ref this.EncryptionKeys.LastSymmetricKeyId, counters[12], raiseOnly);
         Set(ref this.EncryptionKeys.LastAsymmetricKeyId, counters[13], raiseOnly);
+        Set(ref this.nextXmlComponentId, counters[14], raiseOnly);
     }
 }
 

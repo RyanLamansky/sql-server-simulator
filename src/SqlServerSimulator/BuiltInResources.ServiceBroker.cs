@@ -72,6 +72,11 @@ internal static partial class BuiltInResources
             new("is_sent_by_initiator", SqlType.Bit, null, false),
             new("is_sent_by_target", SqlType.Bit, null, false),
         ]);
+        Sys("message_type_xml_schema_collection_usages",
+        [
+            new("message_type_id", SqlType.Int32, null, false),
+            new("xml_collection_id", SqlType.Int32, null, false),
+        ]);
         Sys("service_message_types",
         [
             new("name", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, false),

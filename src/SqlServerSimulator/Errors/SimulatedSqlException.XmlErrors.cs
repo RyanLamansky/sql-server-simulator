@@ -1450,6 +1450,22 @@ partial class SimulatedSqlException
             TerminatesBatch = true,
         };
 
+    /// <summary>
+    /// Msg 208 state 121: <c>CREATE XML SCHEMA COLLECTION</c> naming a schema
+    /// that doesn't exist, which ends the batch and rolls back its transaction
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaCollectionSchemaNotFound(string schemaName) =>
+        new($"Invalid object name '{schemaName}'.", 208, 16, 121) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6348: <c>CREATE XML SCHEMA COLLECTION</c> naming a collection its
+    /// schema already holds — an alias or table type of that name doesn't
+    /// collide (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaCollectionCannotBeCreated(string name) =>
+        new($"Specified collection '{name}' cannot be created because it already exists or you do not have permission.", 6348, 16, 1);
+
     /// <summary>Msg 6347: <c>ALTER XML SCHEMA COLLECTION</c> naming a collection that doesn't resolve or can't be altered.</summary>
     internal static SimulatedSqlException XmlSchemaCollectionCannotBeAltered(string name) =>
         new($"Specified collection '{name}' cannot be altered because it does not exist or you do not have permission.", 6347, 16, 1);

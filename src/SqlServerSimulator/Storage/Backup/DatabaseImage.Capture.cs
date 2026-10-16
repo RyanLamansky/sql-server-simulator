@@ -224,7 +224,14 @@ partial class DatabaseImage
                 XmlCollectionIds = [collection.Id],
                 CreateDate = collection.CreateDate,
             });
-            this.Types.Add(new TypeImage { Id = collection.Id, IsXmlSchemaCollection = true, OwnerPrincipalId = collection.PrincipalId, ModifyDate = collection.ModifyDate });
+            this.Types.Add(new TypeImage
+            {
+                Id = collection.Id,
+                IsXmlSchemaCollection = true,
+                OwnerPrincipalId = collection.PrincipalId,
+                ModifyDate = collection.ModifyDate,
+                XmlComponentSegments = [.. collection.Segments.SelectMany(static segment => (int[])[segment.Documents, segment.FirstComponentId])],
+            });
         }
         foreach (var (_, sequence) in schema.Sequences)
         {

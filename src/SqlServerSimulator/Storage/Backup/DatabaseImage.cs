@@ -854,12 +854,19 @@ internal sealed class TypeImage
     public int? OwnerPrincipalId;
     public DateTime ModifyDate;
 
+    /// <summary>
+    /// A collection's segments as document count and first component id
+    /// pairs, which the replay's single <c>CREATE</c> can't recreate.
+    /// </summary>
+    public int[] XmlComponentSegments = [];
+
     public void Write(BinaryWriter w)
     {
         w.Write(this.Id);
         w.Write(this.IsXmlSchemaCollection);
         BackupBinary.WriteNullableInt(w, this.OwnerPrincipalId);
         w.Write(this.ModifyDate.Ticks);
+        BackupBinary.WriteInts(w, this.XmlComponentSegments);
     }
 
     public static TypeImage Read(BinaryReader r) => new()
@@ -868,5 +875,6 @@ internal sealed class TypeImage
         IsXmlSchemaCollection = r.ReadBoolean(),
         OwnerPrincipalId = BackupBinary.ReadNullableInt(r),
         ModifyDate = new DateTime(r.ReadInt64(), DateTimeKind.Utc),
+        XmlComponentSegments = BackupBinary.ReadInts(r),
     };
 }

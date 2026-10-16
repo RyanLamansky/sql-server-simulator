@@ -107,6 +107,20 @@ internal static partial class BuiltInResources
         // on an indexed table reveals its index row, not its catalog's).
         if (views.TryGetValue("sys.fulltext_catalogs", out var catalogs))
             catalogs.MetadataKey = new MetadataVisibilityKey(OrdinalOf(catalogs, "fulltext_catalog_id"), -1, -1, kind: MetadataVisibilityKind.FullTextCatalog);
+        // An XML schema collection shows as a full-text catalog does, EXECUTE
+        // on it revealing nothing, and every component view follows its
+        // collection's (probed 2026-10-16 against SQL Server 2025).
+        foreach (var key in (string[])["sys.xml_schema_attributes", "sys.xml_schema_collections", "sys.xml_schema_components", "sys.xml_schema_elements",
+            "sys.xml_schema_model_groups", "sys.xml_schema_namespaces", "sys.xml_schema_types", "sys.xml_schema_wildcards"])
+        {
+            var view = views[key];
+            view.MetadataKey = new MetadataVisibilityKey(OrdinalOf(view, "xml_collection_id"), -1, -1, kind: MetadataVisibilityKind.XmlSchemaCollection);
+        }
+        foreach (var key in (string[])["sys.xml_schema_component_placements", "sys.xml_schema_facets", "sys.xml_schema_wildcard_namespaces"])
+        {
+            var view = views[key];
+            view.MetadataKey = new MetadataVisibilityKey(OrdinalOf(view, "xml_component_id"), -1, -1, kind: MetadataVisibilityKind.XmlSchemaComponent);
+        }
         foreach (var key in (string[])["sys.table_types", "sys.types"])
         {
             if (views.TryGetValue(key, out var view))
@@ -180,6 +194,8 @@ internal static partial class BuiltInResources
             {
                 MetadataVisibilityKind.Type => FilterByType(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 MetadataVisibilityKind.FullTextCatalog => FilterByFullTextCatalog(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+                MetadataVisibilityKind.XmlSchemaCollection or MetadataVisibilityKind.XmlSchemaComponent =>
+                    FilterByXmlSchemaCollection(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 MetadataVisibilityKind.Definition => FilterByDefinition(rows, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 _ => key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
                     : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
@@ -217,6 +233,39 @@ internal static partial class BuiltInResources
         foreach (var row in rows)
         {
             if (visible.Contains(row[key.ObjectIdOrdinal].AsInt32))
+                yield return row;
+        }
+    }
+
+    /// <summary>
+    /// Keeps the rows of the collections <paramref name="principalId"/> may
+    /// view — keyed by collection id, or for <see cref="MetadataVisibilityKind.XmlSchemaComponent"/>
+    /// by the id of a component one of them holds — and the built-in
+    /// <c>sys</c> collection's.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> FilterByXmlSchemaCollection(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
+    {
+        var visible = new HashSet<int>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, collection) in schema.XmlSchemaCollections)
+            {
+                if (!PermissionChecker.CanViewXmlSchemaCollectionMetadata(database, principalId, collection.Id, schema.SchemaId, collection.PrincipalId ?? schema.PrincipalId, server))
+                    continue;
+                if (key.Kind == MetadataVisibilityKind.XmlSchemaCollection)
+                {
+                    _ = visible.Add(collection.Id);
+                    continue;
+                }
+                foreach (var component in collection.GetComponents().Components)
+                    _ = visible.Add(component.Id);
+            }
+        }
+        var systemLimit = key.Kind == MetadataVisibilityKind.XmlSchemaCollection ? 1 : XmlSchemaSystemCollection.LastComponentId;
+        foreach (var row in rows)
+        {
+            var id = row[key.ObjectIdOrdinal].AsInt32;
+            if (id <= systemLimit || visible.Contains(id))
                 yield return row;
         }
     }

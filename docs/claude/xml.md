@@ -54,6 +54,7 @@ CREATE XML INDEX name ON table(col)
     [WITH (…)]
 ```
 
+- A collection name its schema already holds is **Msg 6348**, while an alias or table type of that name doesn't collide, and a schema that doesn't exist is **Msg 208** state 121, ending the batch and rolling back its transaction (probed 2026-10-16 against SQL Server 2025).
 - XSD text stored verbatim; AW's 6 schema-collection payloads (with embedded namespaces, complex types, restrictions, sequences) round-trip byte-identically.
   What is read out of the text: each element declaration's occurrence and each element's and attribute's simple type, which type an XQuery expression over a bound value (see [A schema collection narrows the cardinality](#a-schema-collection-narrows-the-cardinality)), and the compiled schema set a typed write validates against (see [Typed writes](#typed-writes--validation-and-canonical-form)).
 - The identity constraints `xsd:unique`, `xsd:key` and `xsd:keyref` are real's own refusal at `CREATE` and `ADD`: **Msg 9336** `The XML Schema syntax 'unique' is not supported.`, naming the first one written (probed 2026-09-28 against SQL Server 2025).
@@ -752,7 +753,42 @@ Node ids follow real's numbering, which is not plain document order (probe-confi
 
 ## Catalog views in `BuiltInResources.cs`
 
-**`sys.xml_schema_collections`** (6-col, probe-confirmed): `xml_collection_id` / `schema_id` / `principal_id` (NULL — AUTHORIZATION clause not modeled) / `name` / `create_date` / `modify_date`.
+**`sys.xml_schema_collections`** (6-col, probe-confirmed): `xml_collection_id` / `schema_id` / `principal_id` / `name` / `create_date` / `modify_date`, led by the built-in `sys` collection (id 1, schema 4) every database lists.
+
+### The schema component views
+
+`sys.xml_schema_namespaces`, `sys.xml_schema_components` and its per-kind views (`_types`, `_elements`, `_attributes`, `_model_groups`, `_wildcards`), `sys.xml_schema_facets`, `sys.xml_schema_wildcard_namespaces` and `sys.xml_schema_component_placements` project the components the collection's text declares (`XmlSchemaComponentBuilder`), and match SQL Server 2025's rows id for id across the probed shapes and all six AdventureWorks collections, recreated from real's `XML_SCHEMA_NAMESPACE` text (2026-10-16).
+`sys.message_type_xml_schema_collection_usages` ships empty, since Service Broker isn't built.
+The `sys` collection's 100 components — the XSD built-ins, the `sqltypes` namespace and the `xml:` attributes — are real's own rows (`XmlSchemaSystemCollection`), and a reference to a built-in places that component.
+
+What the numbering rests on, all probed 2026-10-16 against SQL Server 2025:
+
+- **One database-wide counter from 65536**, drawn by each `CREATE` and `ALTER … ADD` in turn, so collections' ids interleave and a drop never rewinds it; each statement's documents are a segment (`XmlSchemaCollection.Segments`) remembering the first id it drew, which a backup carries.
+- **Within a statement, depth first in document order**: a component takes its id as it is reached, then its parts — an element's substitution head, then its type; a complex type's base, content model, attribute uses and attribute wildcard — and a reference to a global the walk hasn't reached yet numbers it, whole, right there.
+  An element, group or attribute group reference is no component of its own; it places the global it names.
+- **What stays spent**: a rolled-back `CREATE` or `ALTER` keeps both ids, a refused `CREATE` keeps its collection id but draws no component ids (the id is drawn once the name and permissions pass, before the text is read), and an `ALTER` refused with Msg 6310 keeps the ids of the components ahead of the redeclared one.
+  A duplicate name (Msg 6348) or a missing schema (Msg 208) draws nothing.
+
+The rows themselves:
+
+- **Namespaces** number per collection in document order, the absent one named `''`; an import names no new namespace.
+- **Qualification**: a global is always qualified; a local element's `is_qualified` and `must_be_qualified` both follow its effective form, but a local attribute's `is_qualified` is set only where its effective form *and* the schema's `attributeFormDefault` are both qualified.
+- **Value constraints**: an element's or attribute's `default_value` is its default or fixed value as written.
+  An attribute use's placement carries a reference's own constraint, while a local declaration's placement carries only its fixed flag; an element particle's placement carries neither.
+  A required use places 1..1, an optional one 0..1 and a prohibited one 0..0.
+- **Types**: an underived complex type restricts `anyType`, one with simple content is kind `C`, and a simple type's restriction takes its base's variety (`L` over a list, `U` over a union); a list places its item type and a union its members.
+  `block` and `final` fall back to `blockDefault` / `finalDefault` for global types and elements, `block` for local elements too, and never for anonymous types.
+- **Facets** keep document order; a value facet reads as the type's whitespace handling leaves it (`' a  b '` enumerated over `xs:token` is `'a b'`, over `xs:string` unchanged), a length or digits count is collapsed, and a pattern stays as written.
+- **Wildcards**: `##any` disallows nothing, `##other` disallows the target namespace (`''` without one), and a list allows its namespaces in ordinal order with the absent namespace last.
+
+A restricted principal sees the `sys` collection's rows and those of the collections it may view — see [`permissions.md`](permissions.md#metadata-visibility).
+The views are row-cached (see [`catalog-views.md`](catalog-views.md#cross-statement-row-cache-and-indexes)), since only collection DDL changes them.
+
+#### Divergences
+
+- **The `sys` collection's `modify_date`** is real's install time; the simulator reports the SQL Server 2025 release date, as it does for the other built-in rows that carry one.
+- **A text .NET's schema object model can't read** lists no components and draws no component ids.
+  The compile checks real runs at `CREATE` refuse most such texts first.
 
 **Internal node-table + statistics surface (for DacFx export).**
 DacFx's XML-index reverse-engineering query doesn't read `sys.xml_indexes` alone — it INNER JOINs `sys.index_columns` (one row per XML index: the indexed xml column, `index_column_id` 1, `key_ordinal` 0) *and* an internal "node table" per **primary** index (`sys.objects` type `IT` / `INTERNAL_TABLE`, named `xml_index_nodes_<tableObjectId>_<primaryIndexId>` (the index's own 256000-range `index_id`, probe-confirmed), parent = base table, `schema_id` = sys, `is_ms_shipped` = 1) joined to `sys.stats` (one row per XML index, `name` = the index name, on the node table's `object_id`; a primary owns its node table, secondaries share their primary's — `stats_id` sequential within a node table).

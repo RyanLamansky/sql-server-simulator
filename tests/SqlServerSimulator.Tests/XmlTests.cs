@@ -65,11 +65,32 @@ public sealed class XmlTests
     }
 
     [TestMethod]
-    public void CreateXmlSchemaCollection_DuplicateName_Raises219()
+    public void CreateXmlSchemaCollection_DuplicateName_Raises6348()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
-        _ = sim.AssertSqlError("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'", 219);
+        sim.AssertSqlError("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'", 6348,
+            "Specified collection 'xsc1' cannot be created because it already exists or you do not have permission.");
+    }
+
+    [TestMethod]
+    public void CreateXmlSchemaCollection_NamedAsAnAliasOrTableType_Succeeds()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create type dbo.t1 from int;
+            create type dbo.t2 as table (a int);
+            create xml schema collection dbo.t1 as N'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>';
+            create xml schema collection dbo.t2 as N'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"/>';
+            select count(*) from sys.xml_schema_collections where name in ('t1', 't2')
+            """));
+
+    [TestMethod]
+    public void CreateXmlSchemaCollection_InAMissingSchema_Raises208AndRollsBack()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "begin tran; create xml schema collection nosch.x as N'<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"/>'").ExecuteNonQuery());
+        AreEqual((208, (byte)121, "Invalid object name 'nosch'."), (ex.Number, ex.State, ex.Message));
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
     [TestMethod]
@@ -132,7 +153,7 @@ public sealed class XmlTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         _ = sim.ExecuteNonQuery("drop xml schema collection xsc1");
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.xml_schema_collections"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.xml_schema_collections where name = 'xsc1'"));
     }
 
     [TestMethod]

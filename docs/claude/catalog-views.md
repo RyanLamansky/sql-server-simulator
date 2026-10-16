@@ -764,7 +764,7 @@ The configuration and what a store captures are in [`database-options.md`](datab
 ## Cross-statement row cache and indexes
 
 Real's catalog views read indexed base tables (`sysschobjs`, `syscolpars`, `sysiscols`), so an equality or a join on a catalog column is an index seek there; the simulator projects its views from live metadata, and before this cache every execution projected every object in the database again.
-`Simulation.CatalogRows` (`Schemas/CatalogRowCache.cs`) keeps the encoded rows of the **cacheable** views (`CatalogView.Cacheable`, listed in `BuiltInResources.RowCache.cs`: the object, column, index, constraint, type, module and `INFORMATION_SCHEMA` views) per target database, in the view's own order, and builds hash indexes over them on demand.
+`Simulation.CatalogRows` (`Schemas/CatalogRowCache.cs`) keeps the encoded rows of the **cacheable** views (`CatalogView.Cacheable`, listed in `BuiltInResources.RowCache.cs`: the object, column, index, constraint, type, module, XML schema component and `INFORMATION_SCHEMA` views) per target database, in the view's own order, and builds hash indexes over them on demand.
 The rows are exactly what the generator yields, so output and order are unchanged by construction.
 
 **Where the rows go.**
