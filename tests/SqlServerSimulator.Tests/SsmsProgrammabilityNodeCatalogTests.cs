@@ -221,7 +221,7 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
 
     [TestMethod]
     [DataRow("master", "master|/var/opt/mssql/data/master.mdf|mastlog|/var/opt/mssql/data/mastlog.ldf")]
-    [DataRow("tempdb", "tempdev|/var/opt/mssql/data/tempdb.mdf|templog|/var/opt/mssql/data/templog.ldf")]
+    [DataRow("tempdb", "tempdev|/var/opt/mssql/data/tempdb.mdf|templog|/var/opt/mssql/data/templog.ldf|tempdev2|/var/opt/mssql/data/tempdb2.ndf|tempdev3|/var/opt/mssql/data/tempdb3.ndf|tempdev4|/var/opt/mssql/data/tempdb4.ndf|tempdev5|/var/opt/mssql/data/tempdb5.ndf|tempdev6|/var/opt/mssql/data/tempdb6.ndf|tempdev7|/var/opt/mssql/data/tempdb7.ndf|tempdev8|/var/opt/mssql/data/tempdb8.ndf")]
     [DataRow("model", "modeldev|/var/opt/mssql/data/model.mdf|modellog|/var/opt/mssql/data/modellog.ldf")]
     [DataRow("msdb", "MSDBData|/var/opt/mssql/data/MSDBData.mdf|MSDBLog|/var/opt/mssql/data/MSDBLog.ldf")]
     [DataRow("simulated", "simulated|/var/opt/mssql/data/simulated.mdf|simulated_log|/var/opt/mssql/data/simulated_log.ldf")]

@@ -112,6 +112,7 @@ partial class Simulation
             "OPENTRAN" => RunDbccOpenTran(batch, dbcc),
             "PAGE" => RunDbccPage(batch, dbcc),
             "PINTABLE" => RunDbccPinTable(batch, dbcc, "pintable"),
+            "SHOWFILESTATS" => RunDbccShowFileStats(batch, dbcc),
             "SQLPERF" => RunDbccSqlPerf(batch, dbcc),
             "TRACEOFF" => RunDbccTraceOnOff(batch, dbcc, on: false),
             "TRACEON" => RunDbccTraceOnOff(batch, dbcc, on: true),
@@ -168,7 +169,7 @@ partial class Simulation
     private static bool IsUnbuiltDbccCommand(ReadOnlySpan<char> upper) => upper switch
     {
         "BUFFER" or "CLONEDATABASE" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
-            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
+            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SHOWCONTIG" or "SQLMGRSTATS"
             or "STACKDUMP" or "TUPLEMOVER" or "WRITEPAGE" => true,
         _ => false,
     };
@@ -856,6 +857,45 @@ partial class Simulation
             ]);
         }
         return DbccCompleted(batch, dbcc, DbccRows(batch, schema, LogInfoColumnNames, rows));
+    }
+
+    private static readonly string[] ShowFileStatsColumnNames = ["Fileid", "FileGroup", "TotalExtents", "UsedExtents", "Name", "FileName"];
+
+    /// <summary>
+    /// <c>DBCC SHOWFILESTATS [(file_id)]</c>: one row per data file of the
+    /// current database — or the one file the argument names, none for a log
+    /// file or an id no file holds — its size and used pages in 64 KB extents
+    /// as <c>sys.dm_db_file_space_usage</c> counts them, and no result set
+    /// when no file qualifies. A caller who isn't
+    /// <c>db_owner</c> is Msg 7983 state 36, a non-integer argument Msg 2560
+    /// (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static List<SimulatedStatementOutcome> RunDbccShowFileStats(BatchContext batch, DbccInvocation dbcc)
+    {
+        dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.TableResults);
+        dbcc.RequireArgumentCount(0, 1);
+        long? wanted = dbcc.Arguments.Count == 1 ? dbcc.IntegerArgument(batch, 0) : null;
+        var database = batch.CurrentDatabase;
+        if (!IsSysadminSession(batch) && !PermissionEnforcement.IsOwner(batch, database))
+            throw SimulatedSqlException.DbccDatabasePermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "showfilestats", database.Name);
+        SqlType[] schema = [SqlType.Int32, SqlType.Int32, SqlType.BigInt, SqlType.BigInt, NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), NVarcharSqlType.Get(260, Collation.Catalog, Coercibility.Implicit)];
+        var rows = new List<SqlValue[]>();
+        foreach (var file in database.FilesInOrder())
+        {
+            if (file.IsLog || file.IsContainer || (wanted is { } id && id != file.FileId))
+                continue;
+            var used = file.FileId == 1 ? BuiltInResources.SumDataFilePages(database) : BuiltInResources.EmptyDataFileUsedPages;
+            rows.Add([
+                SqlValue.FromInt32(file.FileId),
+                SqlValue.FromInt32(file.DataSpaceId),
+                SqlValue.FromInt64(BuiltInResources.FileSizePages(database, file) / 8),
+                SqlValue.FromInt64((used + 7) / 8),
+                SqlValue.FromNVarchar(file.Name).CoerceTo(schema[4]),
+                SqlValue.FromNVarchar(file.PhysicalName).CoerceTo(schema[5]),
+            ]);
+        }
+        // With no file to report there is no result set at all.
+        return DbccCompleted(batch, dbcc, rows.Count == 0 ? [] : DbccRows(batch, schema, ShowFileStatsColumnNames, rows));
     }
 }
 

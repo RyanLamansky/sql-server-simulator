@@ -169,8 +169,11 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> FileSpaceUsageRows(Database database)
     {
         var databaseId = SqlValue.FromInt32(database.Id);
-        var unreported = SqlValue.Null(SqlType.BigInt);
         var zero = SqlValue.FromInt64(0);
+        // The version store's, user objects' and internal objects' counts are
+        // tempdb's alone, NULL elsewhere (probed 2026-10-16 against SQL Server
+        // 2025); tempdb's read 0 here, its temporary objects living off its files.
+        var unreported = database.Collation.Equals(database.Name, Simulation.TempdbDatabaseName) ? zero : SqlValue.Null(SqlType.BigInt);
         foreach (var file in database.FilesInOrder())
         {
             if (file.IsLog)

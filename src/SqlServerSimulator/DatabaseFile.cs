@@ -51,6 +51,14 @@ internal sealed class DatabaseFile(int fileId, bool isLog, string name, string p
     /// <summary>Whether <see cref="Growth"/> is a percentage.</summary>
     public bool IsPercentGrowth = isPercentGrowth;
 
+    /// <summary>
+    /// A log file whose unlimited ceiling the catalog reports as -1 rather than
+    /// as the 2 TB log cap: the install-time logs of <c>master</c>,
+    /// <c>model</c> and <c>tempdb</c> (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    public bool UnlimitedReadsMinusOne;
+
     /// <summary>The primary data file (1) or the primary log file (2), neither of which can be removed.</summary>
     public bool IsPrimary => this.FileId is 1 or 2;
 }

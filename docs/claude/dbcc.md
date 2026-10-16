@@ -114,6 +114,11 @@ The database's name, id, compatibility level, collation id, creation date, famil
 `UPDATEUSAGE`, `CLEANTABLE` and `DBREINDEX` only validate and report — a `DBREINDEX` fill factor outside 0 .. 100 is Msg 129 state 2 (probed 2026-10-04) — the simulator's counts never going stale, its dropped columns reclaimed as they drop and its indexes never fragmenting; an index name the table lacks is Msg 7999 (state 4 from `DBREINDEX`, 8 from the others).
 `INDEXDEFRAG` returns the pages scanned and none moved or removed — for the named index, or one row per index (the heap's with a NULL name) — and is Msg 8920 inside a user transaction.
 
+## `SHOWFILESTATS [(file_id)]`
+
+One row per data file of the current database — `Fileid` / `FileGroup` `int`, `TotalExtents` / `UsedExtents` `bigint`, `Name nvarchar(128)`, `FileName nvarchar(260)` — or of the one file the argument names, with no result set at all for a log file or an id no file holds; the extents are the file's size and used pages over eight, as `sys.dm_db_file_space_usage` counts them.
+A caller outside `db_owner` is Msg 7983 state 36 and a non-integer argument Msg 2560 (probed 2026-10-16 against SQL Server 2025).
+
 ## Divergences
 
 - Values that describe real's physical storage are read off the simulator's own: a table's page count is its heap's data pages, `CHECKALLOC`'s totals are the user tables' pages in whole uniform extents, `WITH ESTIMATEONLY` adds those pages to what a fresh database reports (2435 KB for `CHECKDB`, 351 for `CHECKALLOC`), `SQLPERF(LOGSPACE)` reports a fixed 54 pages of log in use, `LOGINFO`'s active file and every `OPENTRAN` LSN carry sequence number 34, and the system databases' logs are the size of any other.

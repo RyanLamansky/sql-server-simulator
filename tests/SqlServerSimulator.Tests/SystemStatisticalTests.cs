@@ -116,23 +116,26 @@ public sealed class SystemStatisticalTests
         IsTrue(reader.Read());
         AreEqual((short)1, reader.GetValue(0));
         AreEqual((short)1, reader.GetValue(1));
-        AreEqual(0L, reader.GetValue(2));
+        AreEqual(0L, reader.GetValue(3));
+        AreEqual(1024L * 8192, reader.GetValue(10));
         IsTrue(reader.GetValue(11) is byte[] { Length: 8 });
         IsFalse(reader.Read());
     }
 
     /// <summary>
-    /// master / tempdb / model / msdb + the lazily-seeded "simulated".
+    /// Every file of master / tempdb / model / msdb + the lazily-seeded
+    /// "simulated": two each, and tempdb's seven further data files.
     /// </summary>
     [TestMethod]
     public void VirtualFileStats_NullDb_WildcardsAllDatabases()
-        => AreEqual(5, new Simulation().ExecuteScalar(
+        => AreEqual(17, new Simulation().ExecuteScalar(
             "select count(*) from sys.fn_virtualfilestats(null, null)"));
 
+    /// <summary>tempdb's nine files, each on disk at its size (probed 2026-10-16 against SQL Server 2025).</summary>
     [TestMethod]
-    public void VirtualFileStats_NullFile_ReturnsModeledFileOnly()
-        => AreEqual(1, new Simulation().ExecuteScalar(
-            "select count(*) from sys.fn_virtualfilestats(2, null)"));
+    public void VirtualFileStats_NullFile_ListsEveryFile()
+        => AreEqual("1:8388608,2:8388608,3:8388608,4:8388608,5:8388608,6:8388608,7:8388608,8:8388608,9:8388608", new Simulation().ExecuteScalar(
+            "select string_agg(concat(FileId, ':', BytesOnDisk), ',') within group (order by FileId) from sys.fn_virtualfilestats(2, null)"));
 
     [TestMethod]
     public void VirtualFileStats_UnknownDatabase_ReturnsNoRows()
@@ -147,11 +150,11 @@ public sealed class SystemStatisticalTests
     [TestMethod]
     public void VirtualFileStats_NonExistentFile_ReturnsNoRows()
         => AreEqual(0, new Simulation().ExecuteScalar(
-            "select count(*) from sys.fn_virtualfilestats(1, 2)"));
+            "select count(*) from sys.fn_virtualfilestats(1, 3)"));
 
     [TestMethod]
     public void VirtualFileStats_BareForm_Resolves()
-        => AreEqual(5, new Simulation().ExecuteScalar(
+        => AreEqual(17, new Simulation().ExecuteScalar(
             "select count(*) from fn_virtualfilestats(null, null)"));
 
     [TestMethod]

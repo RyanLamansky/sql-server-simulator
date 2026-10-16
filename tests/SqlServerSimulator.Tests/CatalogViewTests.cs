@@ -751,10 +751,12 @@ public sealed class CatalogViewTests
         IsFalse(reader.Read());
     }
 
-    // Two files (data + log) for each of the five hosted databases.
+    // A data and a log file for each of the five hosted databases, and
+    // tempdb's seven further data files (probed 2026-10-16 against SQL Server
+    // 2025's Linux setup).
     [TestMethod]
-    public void SysMasterFiles_TwoFilesPerDatabase()
-        => AreEqual(10, new Simulation().ExecuteScalar(
+    public void SysMasterFiles_ListsEveryDatabasesFiles()
+        => AreEqual(17, new Simulation().ExecuteScalar(
             "select count(*) from master.sys.master_files"));
 
     // SSMS's in-memory-OLTP filegroup probe: no type-2 file exists, so the
@@ -1182,9 +1184,11 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void SysMasterFiles_GrowthAndMaxSize_AgreeWithDatabaseFiles()
-        => AreEqual(10, new Simulation().ExecuteScalar("""
+        => AreEqual(17, new Simulation().ExecuteScalar("""
             select count(*) from master.sys.master_files
-            where growth = 8192 and max_size = case when [type] = 1 then 268435456 else -1 end
+            where growth = case when database_id in (1, 4) then 10 else 8192 end
+                and is_percent_growth = case when database_id in (1, 4) then 1 else 0 end
+                and max_size = case when [type] = 1 and database_id > 3 then 268435456 else -1 end
             """));
 
     /// <summary>

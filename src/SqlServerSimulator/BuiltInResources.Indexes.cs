@@ -1364,6 +1364,45 @@ internal static partial class BuiltInResources
         : databaseName.Equals("msdb", StringComparison.OrdinalIgnoreCase) ? ("MSDBData", "MSDBLog", "MSDBData")
         : null;
 
+    /// <summary>
+    /// The files a database starts with: a data and a log file, 1024 pages
+    /// each and growing by 64 MB, as <c>CREATE DATABASE</c> without a file list
+    /// makes them. The system databases keep their install-time settings
+    /// (probed 2026-10-16 against SQL Server 2025's Linux setup): <c>master</c>
+    /// and <c>msdb</c> grow by 10 percent, the <c>master</c>, <c>model</c> and
+    /// <c>tempdb</c> logs report their unlimited ceiling as -1, and
+    /// <c>tempdb</c> carries eight data files in <c>PRIMARY</c> —
+    /// <c>tempdev</c> at <c>tempdb.mdf</c>, then <c>tempdev2</c> to
+    /// <c>tempdev8</c> at <c>tempdb2.ndf</c> to <c>tempdb8.ndf</c> as files 3
+    /// to 9, its log being file 2. The sizes are a fresh instance's, which is
+    /// what <c>sys.master_files</c> lists for <c>tempdb</c>: the size it is
+    /// recreated at on every start.
+    /// </summary>
+    internal static List<DatabaseFile> InitialFiles(string databaseName)
+    {
+        var isMaster = databaseName.Equals("master", StringComparison.OrdinalIgnoreCase);
+        var isTempdb = databaseName.Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase);
+        var percent = isMaster || databaseName.Equals("msdb", StringComparison.OrdinalIgnoreCase);
+        var growth = percent ? 10 : FileGrowthPages;
+        var logReadsMinusOne = isMaster || isTempdb || databaseName.Equals("model", StringComparison.OrdinalIgnoreCase);
+        List<DatabaseFile> files =
+        [
+            new(1, isLog: false, LogicalFileName(databaseName, isLog: false), DataFilePath(databaseName), Database.PrimaryFilegroupId,
+                NewFileSizePages, maxSizePages: -1, growth, percent),
+            new(2, isLog: true, LogicalFileName(databaseName, isLog: true), LogFilePath(databaseName), 0,
+                NewFileSizePages, logReadsMinusOne ? -1 : LogFileMaxSizePages, growth, percent) { UnlimitedReadsMinusOne = logReadsMinusOne },
+        ];
+        if (isTempdb)
+        {
+            for (var n = 2; n <= 8; n++)
+            {
+                files.Add(new(n + 1, isLog: false, $"tempdev{n}", $"/var/opt/mssql/data/tempdb{n}.ndf",
+                    Database.PrimaryFilegroupId, NewFileSizePages, maxSizePages: -1, growth, percent));
+            }
+        }
+        return files;
+    }
+
     /// <summary>Synthetic primary log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of a new log's size.</summary>
     internal const int LogFileUsedPages = 24;
 
@@ -1426,7 +1465,7 @@ internal static partial class BuiltInResources
     /// is its 2 TB cap (probed 2026-09-27).
     /// </summary>
     internal static int ReportedMaxSizePages(DatabaseFile file) =>
-        file.IsLog && file.MaxSizePages == -1 ? LogFileMaxSizePages : file.MaxSizePages;
+        file.IsLog && file.MaxSizePages == -1 && !file.UnlimitedReadsMinusOne ? LogFileMaxSizePages : file.MaxSizePages;
 
     /// <summary>
     /// Rows for <c>sys.stats</c>: one per index <see cref="EnumerateSysIndexes"/>

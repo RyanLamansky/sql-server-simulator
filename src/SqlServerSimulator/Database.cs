@@ -103,13 +103,11 @@ internal sealed partial class Database
         this.Principals = new(collation.NameKeys);
         this.FullTextCatalogs = new(collation);
         this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
-        this.Files =
-        [
-            new(1, isLog: false, BuiltInResources.LogicalFileName(name, isLog: false), BuiltInResources.DataFilePath(name), PrimaryFilegroupId,
-                BuiltInResources.NewFileSizePages, maxSizePages: -1, BuiltInResources.FileGrowthPages, isPercentGrowth: false),
-            new(2, isLog: true, BuiltInResources.LogicalFileName(name, isLog: true), BuiltInResources.LogFilePath(name), 0,
-                BuiltInResources.NewFileSizePages, BuiltInResources.LogFileMaxSizePages, BuiltInResources.FileGrowthPages, isPercentGrowth: false),
-        ];
+        this.Files = BuiltInResources.InitialFiles(name);
+        // tempdb's PRIMARY grows its files together (probed 2026-10-16 against
+        // SQL Server 2025).
+        if (name.Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase))
+            _ = this.AutogrowAllFilesFilegroups.Add(PrimaryFilegroupId);
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
         this.PlanGuides = new(collation);

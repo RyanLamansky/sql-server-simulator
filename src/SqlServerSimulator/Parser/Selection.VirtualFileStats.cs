@@ -19,12 +19,13 @@ partial class Selection
     /// BytesOnDisk bigint, FileHandle varbinary(8))</c>.
     /// </summary>
     /// <remarks>
-    /// The simulator has no physical file model, so it reports one row per
-    /// (database, <c>file_id 1</c>) with all IO counters and <c>BytesOnDisk</c>
-    /// at 0 and an all-zero <c>FileHandle</c> — the honest reading for an
-    /// in-process store that performs no disk IO. The wildcard / filter
-    /// semantics still match real so a caller enumerating files gets the right
-    /// row cardinality per database. The legacy <c>::fn_virtualfilestats(...)</c>
+    /// One row per file of each database, as <c>sys.dm_io_virtual_file_stats</c>
+    /// lists them: <c>BytesOnDisk</c> is the file's reported size and
+    /// <c>TimeStamp</c> the milliseconds since the simulation started, while
+    /// every IO counter is 0 and the <c>FileHandle</c> all zeros, the honest
+    /// reading for an in-process store that performs no disk IO (probed
+    /// 2026-10-16: real's <c>BytesOnDisk</c> is <c>size</c> × 8192 for each of
+    /// <c>tempdb</c>'s nine files). The legacy <c>::fn_virtualfilestats(...)</c>
     /// prefix reaches here as the bare name (see <c>ParseLegacyFunctionPrefix</c>).
     /// </remarks>
     public static Selection ParseVirtualFileStats(ParserContext context, string functionName)
@@ -82,32 +83,34 @@ partial class Selection
         var dbFilter = EvalNullableInt(dbExpr, runtime);
         var fileFilter = EvalNullableInt(fileExpr, runtime);
 
-        // Only file_id 1 is modeled; a non-NULL file argument naming any other
-        // file yields no rows (NULL is the all-files wildcard).
-        if (fileFilter is { } wantFile && wantFile != 1)
-            yield break;
-
-        var fileHandle = new byte[8];
-        foreach (var (_, id) in DbId.DatabasesWithIds(batch.Connection.Simulation))
+        var simulation = batch.Connection.Simulation;
+        var timeStamp = SqlValue.FromInt64(Environment.TickCount64 - simulation.StartTicks);
+        var zero = SqlValue.FromInt64(0);
+        var fileHandle = SqlValue.FromVarbinary(VarbinarySqlType.Get(8), new byte[8]);
+        foreach (var (database, id) in DbId.DatabasesWithIds(simulation))
         {
             if (dbFilter is { } wantDb && wantDb != id)
                 continue;
-
-            yield return RowEncoder.EncodeRow(schema,
-            [
-                SqlValue.FromInt16(id),
-                SqlValue.FromInt16(1),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromInt64(0),
-                SqlValue.FromVarbinary(VarbinarySqlType.Get(8), fileHandle),
-            ]);
+            foreach (var file in database.FilesInOrder())
+            {
+                if (fileFilter is { } wantFile && wantFile != file.FileId)
+                    continue;
+                yield return RowEncoder.EncodeRow(schema,
+                [
+                    SqlValue.FromInt16(id),
+                    SqlValue.FromInt16((short)file.FileId),
+                    timeStamp,
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                    zero,
+                    SqlValue.FromInt64(BuiltInResources.FileSizePages(database, file) * 8192L),
+                    fileHandle,
+                ]);
+            }
         }
     }
 

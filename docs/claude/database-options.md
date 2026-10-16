@@ -352,8 +352,13 @@ All raise Msg 102 — matching probed real SQL Server wording:
 
 ## Files and filegroups
 
-Each database carries its files as catalog state, `Database.Files` (`DatabaseFile`) — no physical file stands behind one — and every file surface reads that list: `sys.database_files`, `sys.master_files`, `FILE_ID` / `FILE_NAME` / `FILEPROPERTY`, `sp_helpfile`, and the database sizes `sp_helpdb` / `sp_databases` / `sp_spaceused` report ([`catalog-views.md`](catalog-views.md)).
+Each database carries its files as catalog state, `Database.Files` (`DatabaseFile`) — no physical file stands behind one — and every file surface reads that list: `sys.database_files`, `sys.master_files`, `sysfiles` / `sysaltfiles`, `FILE_ID` / `FILE_NAME` / `FILEPROPERTY`, `sp_helpfile`, `DBCC SHOWFILESTATS`, `sys.dm_db_file_space_usage`, `sys.dm_io_virtual_file_stats` / `fn_virtualfilestats`, the per-database file-size counters of `sys.dm_os_performance_counters`, and the database sizes `sp_helpdb` / `sp_databases` / `sp_spaceused` report ([`catalog-views.md`](catalog-views.md)).
 All of it was probed 2026-09-27 against SQL Server 2025.
+
+**The system databases' files** are their install-time ones (`BuiltInResources.InitialFiles`, probed 2026-10-16 against SQL Server 2025's Linux setup).
+`tempdb` has eight data files in a `PRIMARY` that grows them all together (`is_autogrow_all_files` 1): `tempdev` at `tempdb.mdf` as file 1, its log `templog` as file 2, then `tempdev2` to `tempdev8` at `tempdb2.ndf` to `tempdb8.ndf` as files 3 to 9, each 8 MB and growing by 64 MB — the size `sys.master_files` lists, the one `tempdb` is recreated at on every start, where `tempdb.sys.database_files` on a server that has run a while reports what it has grown to.
+`master` and `msdb` grow by 10 percent, and the `master`, `model` and `tempdb` logs report their unlimited ceiling as -1 where `msdb`'s and every created database's report the 2 TB cap.
+**Divergence**: `master`'s and `msdb`'s sizes track their contents on real (664 and 256 pages for `master`, 1968 and 128 for `msdb` on the reference); here they start at 1024 like any other file.
 
 **Sizes.**
 A size, ceiling or growth is written in `KB`, `MB` (the default), `GB` or `TB` and kept in 8 KB pages, rounded up to a whole 64 KB extent (`21001KB` is the 2632 pages `21000KB` is); a growth may be a percentage instead.
