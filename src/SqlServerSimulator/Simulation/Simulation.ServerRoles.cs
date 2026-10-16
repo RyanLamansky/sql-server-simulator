@@ -41,6 +41,9 @@ partial class Simulation
     /// <summary><c>principal_id</c> of the <c>sysadmin</c> fixed server role.</summary>
     internal const int SysadminRoleId = 3;
 
+    /// <summary><c>principal_id</c> of the <c>securityadmin</c> fixed server role — a membership that reads the error log through <c>sp_readerrorlog</c>.</summary>
+    internal const int SecurityAdminRoleId = 4;
+
     /// <summary><c>principal_id</c> of the <c>diskadmin</c> fixed server role — with <c>sysadmin</c>, the membership the backup-device procedures require.</summary>
     internal const int DiskAdminRoleId = 8;
 

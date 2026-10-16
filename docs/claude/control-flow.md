@@ -450,7 +450,7 @@ Msg 105's echo of an unclosed literal is cut the same way.
   A bare `THROW` sends every entry of an error real raised as several — `3728` then `3727` for a constraint drop, `5011` then `5069` for `ALTER DATABASE` — each as it was, the caught one last.
 
 **WITH options**: comma-separated list after the closing `)`; any other word is Msg 195 state 4 (`'bogus' is not a recognized option.`, probed 2026-10-02).
-`LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that isn't a sysadmin, and is otherwise accepted with nothing logged.
+`LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that is neither a sysadmin nor an `ALTER TRACE` holder, and otherwise writes the error log at any severity, a caught error included, as a registered message marked `@with_log` does without it → [`catalog-views.md`](catalog-views.md#the-sql-server-error-log).
 `NOWAIT` is accepted and ignored (no streaming model).
 `SETERROR` is the load-bearing option for severity ≤ 10: it forces `@@ERROR` to 50000 for the next statement to read; without it, sev ≤ 10 leaves `@@ERROR` untouched.
 
@@ -462,7 +462,7 @@ Matches real SQL Server's grammar (probe-confirmed).
 A command on the closed connection is then SqlClient's `InvalidOperationException` (`ExecuteReader requires an open and available Connection. The connection's current state is closed.`), as it is for any connection that isn't open.
 
 **Fidelity gaps** (modeled deviations):
-- `WITH LOG` writes nothing anywhere: real writes the SQL Server error log and the Windows event log.
+- `WITH LOG` writes the SQL Server error log alone: real on Windows writes the Windows event log too, which a Linux server doesn't have.
 - System-message ids registered in real SQL Server's `sys.messages` (e.g. `RAISERROR(13001, 16, 1)` surfaces the system "file name" message text) fall through to Msg 18054 here.
 - Severity ≤ 10 messages are informational and flow to `SimulatedDbConnection.InfoMessage` (verified for both `RAISERROR('m', 10, 1)` and `RAISERROR('m', 0, 1)`) rather than being raised — matching the severity table above.
   Severity 10 arrives with class 0, as every severity-10 message does on real; severities 1-9 keep their number (probed 2026-09-23).

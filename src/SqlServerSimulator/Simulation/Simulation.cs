@@ -32,6 +32,7 @@ public sealed partial class Simulation
         using var culture = CultureScope.Engine();
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
         this.LobReclamation = new(this);
+        this.ErrorLog = new(this.SeedDate);
         // The lock manager sweeps abandoned sessions before every acquisition,
         // which is what unblocks a live session waiting on a leaked one's lock.
         this.LockManager.OwningSimulation = this;

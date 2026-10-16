@@ -41,6 +41,7 @@ partial class Simulation
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread")
         && !systemProcName.StartsWith("sp_OA", StringComparison.Ordinal);
 
@@ -70,6 +71,7 @@ partial class Simulation
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
         or "sp_tables" or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         || systemProcName.StartsWith("sp_OA", StringComparison.Ordinal)
         || IsOleDbRowsetProcedure(systemProcName);
 
@@ -425,6 +427,12 @@ partial class Simulation
             "sp_xml_removedocument" => InvokeSpXmlRemoveDocument(batch, returnCodeVar),
             "sp_OACreate" or "sp_OADestroy" or "sp_OAGetErrorInfo" or "sp_OAGetProperty" or "sp_OAMethod" or "sp_OASetProperty" or "sp_OAStop" or "xp_cmdshell"
                 => this.InvokeBlockedComponentProcedure(batch, systemProcName, calledAs),
+            "sp_cycle_errorlog" => InvokeSpCycleErrorLog(batch, calledAs),
+            "sp_enumerrorlogs" => InvokeSpEnumErrorLogs(batch, calledAs, returnCodeVar),
+            "sp_readerrorlog" => InvokeSpReadErrorLog(batch, calledAs, returnCodeVar),
+            "xp_enumerrorlogs" => InvokeXpEnumErrorLogs(batch, calledAs),
+            "xp_logevent" => InvokeXpLogEvent(batch, calledAs, returnCodeVar),
+            "xp_readerrorlog" => InvokeXpReadErrorLog(batch, calledAs),
             "xp_getnetname" => InvokeXpGetNetName(batch),
             "xp_instance_regread" => InvokeXpInstanceRegread(batch, instanceMapped: true),
             "xp_msver" => InvokeXpMsver(batch),

@@ -859,6 +859,32 @@ A procedure whose real body runs an ordinary statement runs the same statement h
 - **Reports** — `sp_helplanguage` (over `sys.syslanguages`, whose month and day names are real's), `sp_helpsort`, `sp_helpserver`, `sp_monitor` (host-process figures) and `sp_lock` (over the lock DMV, its `DATABASE` rows as `DB`; real also lists the locks its own metadata reads take and a page lock beside each key lock, and reports a key lock's index id where the simulator reports 0).
   `sp_MSforeach_worker` called directly raises the four errors real's does without the cursor its callers declare.
 
+## The SQL Server error log
+
+`Simulation.ErrorLog` (`ErrorLog.cs`) holds the current log and up to six archives, readable through `xp_readerrorlog` / `sp_readerrorlog`, listed by `xp_enumerrorlogs` / `sp_enumerrorlogs` and cycled by `sp_cycle_errorlog` / `DBCC ERRORLOG` (`Simulation.ErrorLog.cs`).
+Probed 2026-10-16 against SQL Server 2025 on Linux; the XML docs on those members carry the argument rules and messages.
+
+- **What writes it**: `RAISERROR … WITH LOG` (an `ALTER TRACE` holder may, as a sysadmin may), a registered message `sp_addmessage` marked `@with_log` whoever raises it, `xp_logevent`, each refused login, each flag `DBCC TRACEON` / `TRACEOFF` names and each `sp_configure` write.
+  An error above severity 10 is two entries, `Error: n, Severity: s, State: t.` and then its message; through severity 10 the message alone.
+  A caught error is logged; `THROW` never is.
+  A session's entries carry `spidNN` as their process column, a refused login's `Logon`, and the login reason is the one real hides from the client — state 5 unknown login, 8 wrong password, 147 no `CONNECT SQL`, 38 an explicit database it couldn't open, and Msg 18470's own line for a disabled login — naming `[CLIENT: <local machine>]` in-process and the peer address over TDS.
+- **Who reads it**: the four extended procedures and `sp_cycle_errorlog` grant `public` nothing, so only a sysadmin, a `CONTROL SERVER` holder or a `master` user granted `EXECUTE` on one runs it, a database owner elsewhere meeting Msg 229 like anyone; `sp_readerrorlog` and `sp_enumerrorlogs` are signed T-SQL wrappers that check `securityadmin`, `VIEW SERVER STATE` or `VIEW ANY ERROR LOG` themselves (Msg 27219), and `sp_cycle_errorlog` checks `sysadmin` again past its grant (Msg 15247).
+  Granting `EXECUTE` on a `sys` system procedure in `master` stores the permission on the procedure's object id; outside `master` it is Msg 4629 for an `xp_` name too.
+- **The extended procedures' refusals** are one Msg 22004 at severity 12, 15 or 16 by the check that failed, with no procedure and line 0, which the batch runs on past without a `CATCH` or `@@ERROR` seeing it — return code 1, which the `sp_` wrappers swallow, answering 0.
+  `xp_logevent`'s are class-0 messages numbered 0 instead.
+- **What the reader returns** is real's file as its reader reads it: the file is UTF-8 and the reader takes a byte to a character, so `ü` reads `Ã¼`; the last entry of a log keeps the file's closing CRLF; an entry whose text passes 2,011 UTF-8 bytes is never written (the file size doesn't move), its error line with it; and `xp_enumerrorlogs`' size is 37 bytes per entry beyond its UTF-8 text, the line overhead real's sizes fit exactly.
+- **The startup preamble** is real's first lines in shape — the `@@VERSION` banner over CRLF, `UTC adjustment: 0:00`, the copyright pair, `Server process ID is` the host's process id (`SERVERPROPERTY('ProcessID')`'s), the log's own path, the startup parameters and the ready line, all under `Server` at the simulation's construction.
+  A cycle writes real's `Attempting to cycle error log…` as the old log's last line and opens the new one with the banner and `The error log has been reinitialized…` under the cycling session.
+- `sys.dm_os_server_diagnostics_log_configurations` reports real's stock row, gated on `VIEW SERVER PERFORMANCE STATE`.
+
+### Divergences
+
+- Real's preamble runs to some two hundred environmental lines — memory, CPU and NUMA, TLS, every database's recovery — which are left out; so are the system sessions' (`spidNNs`) lines, and every engine-written line not listed above (database option changes, backups and restores, `DBCC CHECKDB`, deadlocks, `KILL`).
+- A log keeps at most 20,000 entries, where real's file grows without bound: past it the oldest tenth is discarded and the reported size counts only what remains.
+- `xp_enumerrorlogs` lists the logs by number; real lists them in its log directory's order.
+- `xp_readerrorlog`'s rarer argument interactions aren't chased: a non-NULL eighth argument makes real ignore every filter, a log type of 3 with a non-string search reports `Error log location not found.`, and an `INSERT … EXEC` over a refusal is real's severe error, where here the insert takes no rows.
+- Log time is UTC, as every simulated clock is; the reference's host clock was UTC too, so a server in another zone wasn't compared.
+
 ## OLE DB schema rowsets: a real server's linked server
 
 A real server's linked server pointed at the simulator's TDS endpoint (provider MSOLEDBSQL) reads the target's catalog through system procedures rather than catalog views, so a four-part name works only once those answer as real's do (`Simulation.OleDbRowsetProcs*.cs`, `Simulation.SchemaLockProcs.cs`; probed 2026-10-11 against SQL Server 2025 with an Extended Events capture of a loopback link and the edge-probe harness).

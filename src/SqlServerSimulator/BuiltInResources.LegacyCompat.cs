@@ -268,6 +268,13 @@ internal static partial class BuiltInResources
         "sp_OASetProperty",
         "sp_OAStop",
         "xp_cmdshell",
+        // The error log: its readers, its cycle and xp_logevent's writes.
+        "sp_cycle_errorlog",
+        "sp_enumerrorlogs",
+        "sp_readerrorlog",
+        "xp_enumerrorlogs",
+        "xp_logevent",
+        "xp_readerrorlog",
         // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.

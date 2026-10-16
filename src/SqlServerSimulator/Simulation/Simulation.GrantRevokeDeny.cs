@@ -368,13 +368,28 @@ partial class Simulation
             foreach (var (permName, _) in permissions)
                 ValidatePermissionAgainstObjectKind(permName, "V ");
         }
+        else if (permClass == PermissionChecker.ClassObject
+            && BuiltInToken.Equals(database.Name, MasterDatabaseName)
+            && BuiltInToken.Equals(objectSecurableName!.Value.ImmediateQualifier ?? "", "sys")
+            && !TryResolveSecurableObject(context.Batch, objectSecurableName.Value, out _)
+            && ResolveSystemProcedureName(database.Collation, objectSecurableName.Value.Leaf) is { } systemProcedure
+            && Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(systemProcedure, out var systemProcedureId))
+        {
+            // A system procedure granted on in master keys on its object id,
+            // which the error-log procedures read (probed 2026-10-16 against
+            // SQL Server 2025).
+            permMajorId = systemProcedureId;
+            foreach (var (permName, _) in permissions)
+                ValidatePermissionAgainstObjectKind(permName, "P ");
+        }
         else if (permClass == PermissionChecker.ClassObject)
         {
             if (!TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out var obj))
             {
                 // A system procedure is granted on only in master (probed
                 // 2026-10-04 against SQL Server 2025).
-                if (BuiltInToken.Equals(objectSecurableName.Value.ImmediateQualifier ?? "", "sys") && objectSecurableName.Value.Leaf.StartsWith("sp_", StringComparison.OrdinalIgnoreCase)
+                if (BuiltInToken.Equals(objectSecurableName.Value.ImmediateQualifier ?? "", "sys")
+                    && (objectSecurableName.Value.Leaf.StartsWith("sp_", StringComparison.OrdinalIgnoreCase) || objectSecurableName.Value.Leaf.StartsWith("xp_", StringComparison.OrdinalIgnoreCase))
                     && !BuiltInToken.Equals(database.Name, MasterDatabaseName))
                 {
                     throw SimulatedSqlException.GrantOnServerScopedObjectOutsideMaster();

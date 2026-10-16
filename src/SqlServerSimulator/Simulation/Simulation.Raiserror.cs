@@ -60,8 +60,9 @@ partial class Simulation
     /// </para>
     /// <para>
     /// <c>WITH</c> option handling (probe-confirmed): <c>LOG</c> raises Msg
-    /// 2778 for a session that isn't a sysadmin, whatever the severity, and
-    /// is otherwise accepted with nothing logged; <c>NOWAIT</c> is accepted
+    /// 2778 for a session that isn't a sysadmin or <c>ALTER TRACE</c> holder,
+    /// whatever the severity, and otherwise writes the error log
+    /// (<see cref="LogRaisedError"/>); <c>NOWAIT</c> is accepted
     /// and ignored (no streaming model);
     /// <c>SETERROR</c> forces <c>@@ERROR</c> to 50000 for sev ≤ 10 (sev ≥ 11
     /// already populates <c>@@ERROR</c> through the standard error path).
@@ -196,6 +197,12 @@ partial class Simulation
         if (registered is null)
             formatted = MessageFormatter.Format(formatString, substitutions);
         formatted = CapRaisedMessage(formatted);
+
+        // WITH LOG, or a registered message sp_addmessage marked @with_log
+        // whoever raises it, writes the error log at any severity (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (withLog || registered?.UsEnglish.IsEventLogged == true)
+            LogRaisedError(batch, messageNumber, severity, state, formatted);
 
         // Severity 20 and up ends the session.
         if (severity >= 20)

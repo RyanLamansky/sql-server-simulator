@@ -37,6 +37,7 @@ internal static partial class BuiltInResources
         ("sys.dm_database_encryption_keys", DmvGateKind.ServerSecurityState),
         ("sys.dm_os_process_memory", DmvGateKind.ServerState),
         ("sys.dm_os_sys_info", DmvGateKind.ServerState),
+        ("sys.dm_os_server_diagnostics_log_configurations", DmvGateKind.ServerState),
         ("sys.dm_os_waiting_tasks", DmvGateKind.ServerState),
         ("sys.dm_tran_active_snapshot_database_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_active_transactions", DmvGateKind.ServerState),

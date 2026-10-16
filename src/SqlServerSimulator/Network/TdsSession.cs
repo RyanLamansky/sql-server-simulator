@@ -173,7 +173,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.jsonSupportVersion = Math.Min(login.JsonSupportVersion, (byte)1);
             this.vectorSupportVersion = Math.Min(login.VectorSupportVersion, (byte)1);
             writer = new TdsTokenWriter(transport) { NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
-            if (simulation.RefuseLogin(login.UserName, login.Password) is { } refusal)
+            if (simulation.RefuseLogin(login.UserName, login.Password, ClientForErrorLog(socket)) is { } refusal)
             {
                 // Probe-confirmed shape: one error at severity 14 state 1 — Msg
                 // 18456 with identical wording for a wrong password, an unknown
@@ -505,7 +505,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // double quotes) followed by Msg 18456 severity 14, then the
                 // connection closes. The engine's Msg 911 stays the shape for
                 // a mid-session USE; login gets the wrapping pair.
-                return FailLogin(writer, requestedDatabase, userName, opened);
+                return this.FailLogin(writer, requestedDatabase, userName, opened, requestedDatabase);
             }
         }
 
@@ -514,7 +514,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // master / 4060-refusal per the shared resolution). A refusal writes the
         // same 4060 + 18456 pair as a missing database.
         if (!Simulation.TryMapLoginToDatabaseUser(simulation, target, userName, out var principal))
-            return FailLogin(writer, target.Name, userName, opened);
+            return this.FailLogin(writer, target.Name, userName, opened, requestedDatabase);
         opened.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userName);
 
         opened.FramesEveryStatement = true;
@@ -553,8 +553,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
     }
 
-    private static bool FailLogin(TdsTokenWriter writer, string databaseName, string userName, SimulatedDbConnection opened)
+    /// <summary>
+    /// Refuses a login its database can't be opened for — Msg 4060 then Msg
+    /// 18456 — logging the refusal at state 38 when the login named the
+    /// database itself.
+    /// </summary>
+    private bool FailLogin(TdsTokenWriter writer, string databaseName, string userName, SimulatedDbConnection opened, string requestedDatabase)
     {
+        if (requestedDatabase.Length > 0)
+            simulation.LogLoginFailure(userName, 18456, 38, Simulation.ExplicitDatabaseReason(requestedDatabase), ClientForErrorLog(socket));
         writer.WriteErrorOrInfo(Tds.TokenError, 4060, 1, 11, $"Cannot open database \"{databaseName}\" requested by the login. The login failed.", "SIMULATED", "", 1);
         writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{userName}'.", "SIMULATED", "", 1);
         writer.WriteDone(Tds.DoneError, 0);
@@ -1568,6 +1575,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         writer.WriteDoneToken(Tds.TokenDone, Tds.DoneAttention, 0, StatementDoneKind.Batch);
     }
+
+    /// <summary>The client address the error log names for a refused login over this socket.</summary>
+    private static string ClientForErrorLog(Socket socket) =>
+        Ipv4Form(socket.RemoteEndPoint)?.Address.ToString() ?? Simulation.LocalMachineClient;
 
     /// <summary>
     /// An endpoint as <c>sys.dm_exec_connections</c> prints it: a dual-mode

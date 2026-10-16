@@ -100,6 +100,7 @@ partial class Simulation
             "CLEANTABLE" => RunDbccCleanTable(batch, dbcc),
             "DBREINDEX" => RunDbccDbReindex(batch, dbcc),
             "DROPCLEANBUFFERS" => RunDbccDropCleanBuffers(batch, dbcc),
+            "ERRORLOG" => RunDbccErrorLog(batch, dbcc),
             "FLUSHAUTHCACHE" => RunDbccFlushAuthCache(batch, dbcc),
             "FREEPROCCACHE" => RunDbccFreeProcCache(batch, dbcc),
             "FREESESSIONCACHE" => RunDbccFreeSessionCache(batch, dbcc),
@@ -429,6 +430,20 @@ partial class Simulation
     }
 
     /// <summary>
+    /// <c>DBCC ERRORLOG [WITH NO_INFOMSGS]</c>: cycles the error log as
+    /// <c>sp_cycle_errorlog</c>, which runs it, does — no argument, and
+    /// <c>sysadmin</c> only (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static List<SimulatedStatementOutcome> RunDbccErrorLog(BatchContext batch, DbccInvocation dbcc)
+    {
+        dbcc.AllowOptions(DbccOptions.NoInfoMessages);
+        dbcc.RequireArgumentCount(0, 0);
+        RequireDbccSysadmin(batch, "errorlog", 1);
+        CycleErrorLog(batch);
+        return DbccCompleted(batch, dbcc, []);
+    }
+
+    /// <summary>
     /// <c>DBCC PINTABLE ( db_id, object_id )</c> and <c>UNPINTABLE</c>: two integers, no <c>WITH</c>
     /// option, <c>sysadmin</c> only, and no look at the ids — an unknown database or object completes
     /// as quietly as a real one (probed 2026-09-30 against SQL Server 2025).
@@ -588,6 +603,9 @@ partial class Simulation
     /// the flags turn on or off for the session, or server-wide when <c>-1</c>
     /// is among them. A flag past real's range is Msg 2560 (state 17 on, 30
     /// off) and changes none of them; flag 0 is accepted and never listed.
+    /// Each other flag writes the error log, in the order named and whether
+    /// session or global, with <c>NO_INFOMSGS</c> too (probed 2026-10-16
+    /// against SQL Server 2025).
     /// </summary>
     private static List<SimulatedStatementOutcome> RunDbccTraceOnOff(BatchContext batch, DbccInvocation dbcc, bool on)
     {
@@ -611,6 +629,14 @@ partial class Simulation
         {
             foreach (var flag in flags)
                 _ = on ? target.Add(flag) : target.Remove(flag);
+        }
+        var spid = batch.Connection.Spid;
+        var process = ErrorLog.SessionProcess(spid);
+        var verb = on ? "TRACEON" : "TRACEOFF";
+        foreach (var flag in flags)
+        {
+            simulation.ErrorLog.Write(batch.CurrentStatement.UtcNow, process, string.Create(CultureInfo.InvariantCulture,
+                $"DBCC {verb} {flag}, server process ID (SPID) {spid}. This is an informational message only; no user action is required."));
         }
         return DbccCompleted(batch, dbcc, []);
     }

@@ -14,18 +14,41 @@ partial class Simulation
     /// must hold <c>CONNECT SQL</c> — from its own grant, a server role's, or
     /// <c>CONTROL SERVER</c>; a <c>sysadmin</c> member connects whatever it
     /// is denied (all probed 2026-09-29 against SQL Server 2025, whose client
-    /// sees state 1 for every 18456 cause).
+    /// sees state 1 for every 18456 cause). Each refusal writes the error log
+    /// with the state and reason the client doesn't see — 5 for an unknown
+    /// login, 8 for a wrong password, 147 for a missing <c>CONNECT SQL</c> —
+    /// naming <paramref name="client"/> (<see cref="LogLoginFailure"/>).
     /// </summary>
-    internal SimulatedSqlException? RefuseLogin(string userName, string password)
+    internal SimulatedSqlException? RefuseLogin(string userName, string password, string client)
     {
         if (this.Logins.IsEmptyLockFree())
             return null;
-        if (!this.Logins.TryGetValue(userName, out var login) || !PasswordHash.Verify(password, login.PasswordHash))
-            return SimulatedSqlException.LoginFailed(userName);
+        if (!this.Logins.TryGetValue(userName, out var login))
+            return this.LoggedLoginFailure(userName, 5, "Could not find a login matching the name provided.", client);
+        if (!PasswordHash.Verify(password, login.PasswordHash))
+            return this.LoggedLoginFailure(userName, 8, "Password did not match that for the login provided.", client);
         if (login.IsDisabled)
+        {
+            this.LogLoginFailure(userName, 18470, 1, "", client);
             return SimulatedSqlException.LoginDisabled(userName);
-        return this.HoldsServerPermission(userName, Permission.ConnectSql) ? null : SimulatedSqlException.LoginFailed(userName);
+        }
+        return this.HoldsServerPermission(userName, Permission.ConnectSql)
+            ? null
+            : this.LoggedLoginFailure(userName, 147, "Login-based server access validation failed with an infrastructure error. Login lacks Connect SQL permission.", client);
     }
+
+    /// <summary>Logs a Msg 18456 refusal at <paramref name="state"/> and returns the error the client sees, at state 1.</summary>
+    internal SimulatedSqlException LoggedLoginFailure(string userName, byte state, string reason, string client)
+    {
+        this.LogLoginFailure(userName, 18456, state, reason, client);
+        return SimulatedSqlException.LoginFailed(userName);
+    }
+
+    /// <summary>Real's error-log name for an in-process client, the one it gives a shared-memory connection.</summary>
+    internal const string LocalMachineClient = "<local machine>";
+
+    /// <summary>Real's error-log reason for a login refused the database its connection string names (state 38).</summary>
+    internal static string ExplicitDatabaseReason(string databaseName) => $"Failed to open the explicitly specified database '{databaseName}'.";
 
     /// <summary>
     /// Resolves the database user a login runs as in <paramref name="target"/>,

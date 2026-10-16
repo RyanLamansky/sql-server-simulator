@@ -145,14 +145,16 @@ partial class Simulation
             throw SimulatedSqlException.InvalidConfigurationValue(requested, option.Name);
 
         // Real reports the move from the option's staged value, and reports it
-        // even when the value doesn't change ("changed from 1 to 1").
+        // even when the value doesn't change ("changed from 1 to 1"), in the
+        // error log too (probed 2026-10-16 against SQL Server 2025).
         var previous = simulation.ServerConfiguration.TryGetValue(option.Id, out var current) ? current.Configured : option.Value;
         _ = simulation.ServerConfiguration.AddOrUpdate(
             option.Id,
             (requested, option.ValueInUse),
             (_, existing) => (requested, existing.InUse));
-        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 196, 15457,
-            $"Configuration option '{option.Name}' changed from {previous} to {requested}. Run the RECONFIGURE statement to install."));
+        var changed = $"Configuration option '{option.Name}' changed from {previous} to {requested}. Run the RECONFIGURE statement to install.";
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 196, 15457, changed));
+        simulation.ErrorLog.Write(batch.CurrentStatement.UtcNow, ErrorLog.SessionProcess(batch.Connection.Spid), changed);
     }
 
     /// <summary>

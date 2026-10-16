@@ -249,6 +249,18 @@ internal static partial class BuiltInResources
             new("host_architecture", SqlType.NVarchar, 256, false),
         ], (batch, database) => DmOsHostInfoRows);
 
+        // sys.dm_os_server_diagnostics_log_configurations: the one row of the
+        // diagnostics-log settings a stock Linux server reports (probed
+        // 2026-10-16 against SQL Server 2025), gated on VIEW SERVER
+        // PERFORMANCE STATE.
+        Sys("dm_os_server_diagnostics_log_configurations",
+        [
+            new("is_enabled", SqlType.Int32, null, true),
+            new("path", SqlType.NVarchar, 260, false),
+            new("max_size", SqlType.Int32, null, true),
+            new("max_files", SqlType.Int32, null, true),
+        ], static (_, _) => DiagnosticsLogConfigurationRows);
+
         // sys.dm_os_sys_info: single-row, server-scope DMV describing the
         // instance's host resources (probed 2026-09-25 against SQL Server
         // 2025). Like dm_os_host_info it reflects the .NET host process: the
@@ -834,6 +846,10 @@ internal static partial class BuiltInResources
     /// elsewhere are reused).
     /// </summary>
     private static readonly SqlValue[][] DmOsHostInfoRows = [BuildDmOsHostInfoRow()];
+
+    /// <summary>The single <c>sys.dm_os_server_diagnostics_log_configurations</c> row.</summary>
+    private static readonly SqlValue[][] DiagnosticsLogConfigurationRows =
+        [[SqlValue.FromInt32(1), SqlValue.FromNVarchar("/var/opt/mssql/log/"), SqlValue.FromInt32(100), SqlValue.FromInt32(10)]];
 
     /// <summary>
     /// The single <c>sys.dm_hadr_cluster</c> row — a non-clustered

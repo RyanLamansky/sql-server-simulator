@@ -2983,7 +2983,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     private void AuthenticateConnectionStringLogin(string userId, string password, string? initialCatalog)
     {
-        if (this.Simulation.RefuseLogin(userId, password) is { } refusal)
+        if (this.Simulation.RefuseLogin(userId, password, Simulation.LocalMachineClient) is { } refusal)
             throw refusal;
 
         var target = this.CurrentDatabase;
@@ -2993,12 +2993,19 @@ public sealed class SimulatedDbConnection : DbConnection
             if (this.Simulation.Databases.TryGetValue(initialCatalog, out var settling) && settling.IsInTransitionFor(this))
                 throw SimulatedSqlException.LoginFailed(userId);
             if (!this.Simulation.Databases.TryGetValue(initialCatalog, out var requested) || requested.State is DatabaseState.Offline or DatabaseState.Restoring || !requested.WaitForSingleUserSlot(this))
+            {
+                this.Simulation.LogLoginFailure(userId, 18456, 38, Simulation.ExplicitDatabaseReason(initialCatalog), Simulation.LocalMachineClient);
                 throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(initialCatalog);
+            }
             target = requested;
         }
 
         if (!Simulation.TryMapLoginToDatabaseUser(this.Simulation, target, userId, out var principal))
+        {
+            if (initialCatalog is { Length: > 0 })
+                this.Simulation.LogLoginFailure(userId, 18456, 38, Simulation.ExplicitDatabaseReason(initialCatalog), Simulation.LocalMachineClient);
             throw SimulatedSqlException.CannotOpenDatabaseRequestedByLogin(target.Name);
+        }
 
         this.CurrentDatabase = target;
         this.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userId);

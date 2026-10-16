@@ -536,7 +536,8 @@ partial class Simulation
 
     /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
     private static bool OwnsReturnCode(string systemProcName) =>
-        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv";
+        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"
+            or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent";
 
     /// <summary>
     /// Passes a system procedure's outcomes through, attributing an error it
@@ -663,6 +664,9 @@ partial class Simulation
         ("sp_bindrule", 15148) => (225, null),
         ("sp_catalogs", 7202) => (7, null),
         ("sp_configure", 15123) => (62, null),
+        ("sp_cycle_errorlog", 15247) => (5, null),
+        ("sp_enumerrorlogs", 27219) => (8, null),
+        ("sp_readerrorlog", 27219) => (11, null),
         ("sp_configure", 15247) => (105, null),
         ("sp_describe_first_result_set", 11515) => (1, null),
         ("sp_depends", 15009) => (25, null),
