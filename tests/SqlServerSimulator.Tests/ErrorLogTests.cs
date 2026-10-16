@@ -411,6 +411,155 @@ public sealed class ErrorLogTests
             Logged(simulation, "Configuration option").ConvertAll(static row => row.Split('|')[1]));
     }
 
+    /// <summary>The text of each entry <paramref name="search"/> finds in the current log.</summary>
+    private static List<string> LoggedTexts(Simulation simulation, string search) =>
+        Logged(simulation, search).ConvertAll(static row => row[(row.IndexOf('|', StringComparison.Ordinal) + 1)..]);
+
+    [TestMethod]
+    public void AlterDatabaseSet_LogsEachOptionInRealsSpelling()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create database d;
+            alter database d set recovery simple;
+            alter database d set recovery simple;
+            alter database d set ansi_nulls off, Ansi_Padding on;
+            alter database d set Target_Recovery_Time = 60 MINUTES;
+            alter database d set delayed_durability = Allowed;
+            alter database d set Accelerated_Database_Recovery = on;
+            alter database d set page_verify torn_page_detection;
+            alter database d set compatibility_level = 150;
+            alter database d set allow_snapshot_isolation on;
+            alter database d set auto_create_statistics on (incremental = on);
+            alter database d set auto_create_statistics off;
+            alter database d set auto_create_statistics on;
+            alter database d set enable_broker;
+            alter database d set single_user;
+            alter database d set multi_user;
+            alter database d set containment = none;
+            alter database d set change_tracking = on (auto_cleanup = on);
+            alter database d set change_tracking (change_retention = 5 days);
+            alter database d set change_tracking = off;
+            alter database d set automatic_tuning = auto;
+            alter database d set automatic_tuning (force_last_good_plan = off);
+            """);
+        // Real applies FILESTREAM options as their batch compiles, so its lines lead the batch's.
+        _ = simulation.ExecuteNonQuery("alter database d set filestream (non_transacted_access = read_only, directory_name = 'dir')");
+        CollectionAssert.AreEqual(new[]
+        {
+            "RECOVERY to SIMPLE",
+            "RECOVERY to SIMPLE",
+            "ANSI_NULLS to OFF",
+            "ANSI_PADDING to ON",
+            "target_recovery_time to 60",
+            "delayed_durability to allowed",
+            "accelerated_database_recovery to ON",
+            "PAGE_VERIFY to TORN_PAGE_DETECTION",
+            "COMPATIBILITY_LEVEL to 150",
+            "ALLOW_SNAPSHOT_ISOLATION to ON",
+            "INCREMENTAL to ON",
+            "AUTO_CREATE_STATISTICS to ON",
+            "AUTO_CREATE_STATISTICS to OFF",
+            "INCREMENTAL to OFF",
+            "AUTO_CREATE_STATISTICS to ON",
+            "ENABLE_BROKER to ON",
+            "SINGLE_USER to ON",
+            "MULTI_USER to ON",
+            "contained to none",
+            "change_tracking to ON",
+            "change_tracking to ON",
+            "change_tracking to OFF",
+            "automatic_tuning to auto",
+            "FILESTREAM NON_TRANSACTED_ACCESS to READ_ONLY",
+            "FILESTREAM DIRECTORY_NAME to dir",
+        }, LoggedTexts(simulation, "Setting database option").ConvertAll(static text => text["Setting database option ".Length..^" for database 'd'.".Length]));
+        IsTrue(Logged(simulation, "Setting database option").TrueForAll(static row => row.StartsWith("spid", StringComparison.Ordinal)));
+        // A refused option writes nothing.
+        var refused = new Simulation();
+        _ = refused.AssertSqlError("alter database master set read_only", 5058);
+        IsEmpty(Logged(refused, "Setting database option"));
+    }
+
+    [TestMethod]
+    public void DatabaseStartups_AreLoggedAsTheDatabaseRestarts()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create database ldb;
+            alter database ldb set read_only;
+            alter database ldb set read_only;
+            alter database ldb set read_write;
+            alter database ldb set read_committed_snapshot on;
+            alter database ldb set read_committed_snapshot on;
+            alter database ldb set offline;
+            alter database ldb set offline;
+            alter database ldb set online;
+            alter database ldb set online;
+            alter database ldb set emergency;
+            alter database ldb set online;
+            """);
+        CollectionAssert.AreEqual(new[]
+        {
+            "Starting up database 'ldb'.",
+            "Setting database option READ_ONLY to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+            "Setting database option READ_ONLY to ON for database 'ldb'.",
+            "Setting database option READ_WRITE to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+            "Setting database option READ_COMMITTED_SNAPSHOT to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+            "Setting database option READ_COMMITTED_SNAPSHOT to ON for database 'ldb'.",
+            "Setting database option OFFLINE to ON for database 'ldb'.",
+            "Setting database option OFFLINE to ON for database 'ldb'.",
+            "Setting database option ONLINE to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+            "Setting database option ONLINE to ON for database 'ldb'.",
+            "Setting database option EMERGENCY to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+            "The database 'ldb' is marked EMERGENCY_MODE and is in a state that does not allow recovery to be run.",
+            "Setting database option ONLINE to ON for database 'ldb'.",
+            "Starting up database 'ldb'.",
+        }, LoggedTexts(simulation, "ldb"));
+    }
+
+    [TestMethod]
+    public void AlterDatabaseSetQueryStore_LogsStateAlwaysAndOptionsWhenChanged()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create database d;
+            alter database d set query_store = off;
+            alter database d set query_store = on;
+            alter database d set query_store = on (max_storage_size_mb = 500);
+            alter database d set query_store (max_storage_size_mb = 500, operation_mode = read_only);
+            alter database d set query_store = on (operation_mode = read_write, data_flush_interval_seconds = 60, interval_length_minutes = 60);
+            alter database d set query_store (wait_stats_capture_mode = off, query_capture_mode = custom, size_based_cleanup_mode = off,
+                query_capture_policy = (stale_capture_policy_threshold = 1 days, execution_count = 30));
+            alter database d set query_store (query_capture_policy = (stale_capture_policy_threshold = 36 hours));
+            alter database d set query_store clear all;
+            """);
+        CollectionAssert.AreEqual(new[]
+        {
+            "query_store to off",
+            "query_store to on",
+            "query_store to on",
+            "query_store max_storage_size_mb to 500",
+            // An OPERATION_MODE beside them logs the unchanged too.
+            "query_store to read_only",
+            "query_store max_storage_size_mb to 500",
+            "query_store to read_write",
+            "query_store flush_interval_seconds to 60",
+            "query_store interval_length_minutes to 60",
+            "query_store query_capture_mode to custom",
+            "query_store size_based_cleanup_mode to off",
+            "query_store execution_count to 30",
+            "query_store stale_capture_policy_threshold to 1 day",
+            "query_store wait_stats_capture_mode to off",
+            "query_store stale_capture_policy_threshold to 36 hours",
+            "query_store to clear",
+        }, LoggedTexts(simulation, "Setting database option").ConvertAll(static text => text["Setting database option ".Length..^" for database 'd'.".Length]));
+    }
+
     [TestMethod]
     public void DiagnosticsLogConfigurations_ReportsTheStockRow()
     {

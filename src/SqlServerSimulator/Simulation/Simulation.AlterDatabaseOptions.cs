@@ -56,6 +56,8 @@ partial class Simulation
         };
         if (BuiltInToken.EqualsAny(target.Name, MasterDatabaseName, TempdbDatabaseName))
             throw SimulatedSqlException.OptionCannotBeSetInDatabase(name.ToUpperInvariant(), target.Name);
+        // Asking for the state the database is in still logs, and restarts nothing.
+        LogDatabaseOption(batch, target, name.ToUpperInvariant(), "ON");
         if (target.State == requested)
             return true;
 
@@ -80,6 +82,12 @@ partial class Simulation
         target.State = requested;
         // A cached plan read the database while it was open.
         _ = Interlocked.Increment(ref connection.Simulation.SchemaVersion);
+        if (requested != DatabaseState.Offline)
+        {
+            LogDatabaseStartup(batch, target);
+            if (requested == DatabaseState.Emergency)
+                LogDatabaseNotRecovered(batch, target, "EMERGENCY_MODE");
+        }
         if (requested == DatabaseState.Offline && ReferenceEquals(connection.CurrentDatabase, target))
         {
             SwitchDatabase(connection, MasterDatabaseName);
@@ -128,6 +136,7 @@ partial class Simulation
             target.UserAccess = access;
             Volatile.Write(ref target.SingleUserHolder, access == 1 ? connection.Session : null);
             connection.Simulation.NoteDatabaseAdmissionChanged();
+            LogDatabaseOption(batch, target, name.ToUpperInvariant(), "ON");
             return true;
         }
 
@@ -148,6 +157,7 @@ partial class Simulation
         target.UserAccess = access;
         Volatile.Write(ref target.SingleUserHolder, null);
         connection.Simulation.NoteDatabaseAdmissionChanged();
+        LogDatabaseOption(batch, target, name.ToUpperInvariant(), "ON");
         return true;
     }
 
@@ -289,7 +299,7 @@ partial class Simulation
         return upper switch
         {
             "AUTOMATIC_TUNING" => ConsumeAutomaticTuning(context, target),
-            "CONTAINMENT" => ConsumeContainment(context),
+            "CONTAINMENT" => ConsumeContainment(context, target),
             "DELAYED_DURABILITY" => ConsumeDelayedDurability(context, target),
             "ENCRYPTION" => ConsumeEncryption(context),
             "FILESTREAM" => ConsumeFileStream(context, target),
@@ -304,15 +314,18 @@ partial class Simulation
     /// — parsed and discarded, there being no plan regressions to correct.
     /// <c>INHERIT</c> and every other tuning option are Azure SQL Database's,
     /// so they are Msg 102; <c>master</c> and <c>tempdb</c> refuse tuning
-    /// with Msg 15702.
+    /// with Msg 15702. The <c>=</c> form is logged, the option list isn't
+    /// (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
     private static bool ConsumeAutomaticTuning(ParserContext context, Database target)
     {
+        string? mode = null;
         switch (context.GetNextRequired())
         {
             case Operator { Character: '=' }:
                 if (!IsBareWord(context.GetNextRequired(), "AUTO") && !IsBareWord(context.Token, "CUSTOM"))
                     return false;
+                mode = IsBareWord(context.Token, "AUTO") ? "auto" : "custom";
                 break;
             case Operator { Character: '(' }:
                 do
@@ -333,6 +346,8 @@ partial class Simulation
         }
         if (!context.Batch.IsSkipping && BuiltInToken.EqualsAny(target.Name, MasterDatabaseName, TempdbDatabaseName))
             throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.AutomaticTuningOnSystemDatabase(target.Name));
+        if (!context.Batch.IsSkipping && mode is not null)
+            LogDatabaseOption(context.Batch, target, "automatic_tuning", mode);
         return true;
     }
 
@@ -342,7 +357,7 @@ partial class Simulation
     /// authentication</c> server option (Msg 12824), past which contained
     /// databases aren't modeled.
     /// </summary>
-    private static bool ConsumeContainment(ParserContext context)
+    private static bool ConsumeContainment(ParserContext context, Database target)
     {
         if (context.GetNextRequired() is not Operator { Character: '=' })
             return false;
@@ -355,6 +370,9 @@ partial class Simulation
                 throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.ContainedDatabaseAuthenticationRequired());
             throw new NotSupportedException("The simulator does not model contained databases.");
         }
+        // Real's line names the option CONTAINED.
+        if (!context.Batch.IsSkipping)
+            LogDatabaseOption(context.Batch, target, "contained", "none");
         return true;
     }
 
@@ -368,7 +386,10 @@ partial class Simulation
         if (setting is null)
             return false;
         if (!context.Batch.IsSkipping)
+        {
             target.DelayedDurability = setting.Value;
+            LogDatabaseOption(context.Batch, target, "delayed_durability", setting.Value switch { 0 => "disabled", 1 => "allowed", _ => "forced" });
+        }
         return true;
     }
 
@@ -398,6 +419,8 @@ partial class Simulation
         byte? access = null;
         string? directory = null;
         var directoryGiven = false;
+        // Each entry as real logs it, in the order written.
+        var logged = new List<(string Option, string Value)>(2);
         do
         {
             var option = context.GetNextRequired();
@@ -412,6 +435,7 @@ partial class Simulation
                     : null;
                 if (access is null)
                     return false;
+                logged.Add(("NON_TRANSACTED_ACCESS", access switch { 0 => "OFF", 1 => "READ_ONLY", _ => "FULL" }));
             }
             else if (IsBareWord(option, "DIRECTORY_NAME"))
             {
@@ -419,6 +443,7 @@ partial class Simulation
                     return false;
                 directory = literal.AsString;
                 directoryGiven = true;
+                logged.Add(("DIRECTORY_NAME", directory));
             }
             else
             {
@@ -436,6 +461,8 @@ partial class Simulation
             target.FileStreamNonTransactedAccess = access.Value;
         if (directoryGiven)
             target.FileStreamDirectoryName = directory;
+        foreach (var (option, value) in logged)
+            LogDatabaseOption(context.Batch, target, "FILESTREAM " + option, value);
         return true;
     }
 

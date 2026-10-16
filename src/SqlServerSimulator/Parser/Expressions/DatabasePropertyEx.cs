@@ -116,9 +116,8 @@ internal sealed class DatabasePropertyEx : Expression
             "ISTORNPAGEDETECTIONENABLED" => SqlValue.FromInt32(db.PageVerify == 1 ? 1 : 0),
             "ISXTPSUPPORTED" => SqlValue.FromByte(1),
             // A database no CHECKDB has passed over reads the datetime epoch
-            // (probed 2026-10-02 against SQL Server 2025), and the simulator
-            // records no CHECKDB run.
-            "LASTGOODCHECKDBTIME" => SqlValue.FromDateTime(new DateTime(1900, 1, 1)),
+            // (probed 2026-10-02 against SQL Server 2025).
+            "LASTGOODCHECKDBTIME" => SqlValue.FromDateTime(db.LastGoodCheckDbUtc ?? new DateTime(1900, 1, 1)),
             "LCID" => SqlValue.FromInt32(hasMetrics ? metrics.Lcid : 1033),
             "RECOVERY" => SqlValue.FromNVarchar(Name128, db.RecoveryModel switch
             {

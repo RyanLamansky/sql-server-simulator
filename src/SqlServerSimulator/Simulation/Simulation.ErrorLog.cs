@@ -49,6 +49,49 @@ partial class Simulation
             log.Write(batch.CurrentStatement.UtcNow, process, message);
     }
 
+    /// <summary>Writes one line under the running session's process column.</summary>
+    internal static void LogSessionLine(BatchContext batch, string text) =>
+        batch.Connection.Simulation.ErrorLog.Write(batch.CurrentStatement.UtcNow, ErrorLog.SessionProcess(batch.Connection.Spid), text);
+
+    /// <summary>
+    /// Writes real's line for one <c>ALTER DATABASE … SET</c> option that took
+    /// effect, whether or not it changed anything: <c>Setting database option
+    /// RECOVERY to SIMPLE for database 'd'.</c> under the altering session
+    /// (probed 2026-10-16 against SQL Server 2025). Each option's spelling of
+    /// <paramref name="option"/> and <paramref name="value"/> is real's own —
+    /// upper case for most, lower case for the newer ones
+    /// (<c>target_recovery_time</c>, <c>query_store</c>, <c>delayed_durability</c>…).
+    /// </summary>
+    internal static void LogDatabaseOption(BatchContext batch, Database database, string option, string value) =>
+        LogSessionLine(batch, $"Setting database option {option} to {value} for database '{database.Name}'.");
+
+    /// <summary>
+    /// Writes the lines real writes as a database starts up — on creation, on
+    /// coming online, on a read-only or read-committed-snapshot change and in a
+    /// restore: <c>Starting up database 'd'.</c>, then, once a <c>DBCC
+    /// CHECKDB</c> has passed over it, the line recalling when (probed
+    /// 2026-10-16 against SQL Server 2025). Real's diagnostic lines between
+    /// them — the database id it locked, its feature status, parallel redo
+    /// starting and stopping — are left out.
+    /// </summary>
+    internal static void LogDatabaseStartup(BatchContext batch, Database database)
+    {
+        LogSessionLine(batch, $"Starting up database '{database.Name}'.");
+        if (database.LastGoodCheckDbUtc is { } lastGood)
+        {
+            LogSessionLine(batch, string.Create(CultureInfo.InvariantCulture,
+                $"CHECKDB for database '{database.Name}' finished without errors on {DateTimeSqlType.RoundToClientMilliseconds(lastGood):yyyy-MM-dd HH:mm:ss.fff} (local time). This is an informational message only; no user action is required."));
+        }
+    }
+
+    /// <summary>
+    /// Writes real's line for a database that started up in a state recovery
+    /// doesn't run in — <c>EMERGENCY_MODE</c>, <c>RESTORING</c> — after its
+    /// startup line.
+    /// </summary>
+    internal static void LogDatabaseNotRecovered(BatchContext batch, Database database, string state) =>
+        LogSessionLine(batch, $"The database '{database.Name}' is marked {state} and is in a state that does not allow recovery to be run.");
+
     /// <summary>
     /// The reason real's log gives a refused login, after the two lines
     /// <c>Error: 18456, Severity: 14, State: n.</c> (or Msg 18470's for a

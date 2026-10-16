@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Globalization;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -393,6 +394,7 @@ partial class Simulation
             throw SimulatedSqlException.InvalidCompatibilityLevel();
 
         target.CompatibilityLevel = (CompatibilityLevel)requested;
+        LogDatabaseOption(context.Batch, target, "COMPATIBILITY_LEVEL", requested.ToString(CultureInfo.InvariantCulture));
         return true;
     }
 
@@ -417,7 +419,12 @@ partial class Simulation
         if (BuiltInToken.EqualsAny(target.Name, MasterDatabaseName, TempdbDatabaseName))
             throw SimulatedSqlException.OptionCannotBeSetInDatabase(readOnly ? "READ_ONLY" : "READ_WRITE", target.Name);
 
+        var changed = target.IsReadOnly != readOnly;
         target.IsReadOnly = readOnly;
+        LogDatabaseOption(context.Batch, target, readOnly ? "READ_ONLY" : "READ_WRITE", "ON");
+        // The database restarts to change its access mode.
+        if (changed)
+            LogDatabaseStartup(context.Batch, target);
         return true;
     }
 
@@ -455,6 +462,12 @@ partial class Simulation
             return true;
 
         target.RecoveryModel = model.Value;
+        LogDatabaseOption(context.Batch, target, "RECOVERY", model.Value switch
+        {
+            RecoveryModel.Simple => "SIMPLE",
+            RecoveryModel.BulkLogged => "BULK_LOGGED",
+            _ => "FULL",
+        });
         return true;
     }
 
@@ -488,6 +501,8 @@ partial class Simulation
         RejectSystemDatabaseFlag(target, option);
         var value = on == Keyword.On;
         var database = target;
+        // Changing READ_COMMITTED_SNAPSHOT restarts the database.
+        var restarts = option == DatabaseBooleanOption.ReadCommittedSnapshot && database.ReadCommittedSnapshot != value;
         switch (option)
         {
             case DatabaseBooleanOption.AllowSnapshotIsolation: database.AllowSnapshotIsolation = value; break;
@@ -496,6 +511,16 @@ partial class Simulation
             case DatabaseBooleanOption.CrossDatabaseChaining: database.CrossDatabaseChaining = value; break;
             default: database.RecursiveTriggers = value; break;
         }
+        LogDatabaseOption(context.Batch, database, option switch
+        {
+            DatabaseBooleanOption.AllowSnapshotIsolation => "ALLOW_SNAPSHOT_ISOLATION",
+            DatabaseBooleanOption.ReadCommittedSnapshot => "READ_COMMITTED_SNAPSHOT",
+            DatabaseBooleanOption.Trustworthy => "TRUSTWORTHY",
+            DatabaseBooleanOption.CrossDatabaseChaining => "DB_CHAINING",
+            _ => "RECURSIVE_TRIGGERS",
+        }, value ? "ON" : "OFF");
+        if (restarts)
+            LogDatabaseStartup(context.Batch, database);
         return true;
     }
 
@@ -698,15 +723,24 @@ partial class Simulation
                     if (BuiltInToken.Equals(name, "ANSI_NULL_DEFAULT"))
                         _ = (context.Batch.CompiledAnsiNullDefaults ??= []).TryAdd(target, (target.Switches & DatabaseSwitches.AnsiNullDefault) != 0);
                     RecordDatabaseSwitch(target, name, toggle.Keyword == Keyword.On, incremental);
+                    LogDatabaseSwitch(context.Batch, target, name, toggle.Keyword == Keyword.On, incremental);
                 }
                 return true;
             case AlterDatabaseOptionKind.EqualsOnOff:
-                return ConsumeEqualsOnOff(context);
+                if (!ConsumeEqualsOnOff(context))
+                    return false;
+                if (!context.Batch.IsSkipping)
+                    LogDatabaseOption(context.Batch, target, BuiltInToken.Equals(name, "OPTIMIZED_LOCKING") ? "optimized_locking" : "accelerated_database_recovery", context.Token is ReservedKeyword { Keyword: Keyword.On } ? "ON" : "OFF");
+                return true;
             case AlterDatabaseOptionKind.EnumIdent:
                 if (context.GetNextRequired() is not (Name or ReservedKeyword))
                     return false;
                 if (!context.Batch.IsSkipping)
-                    RecordDatabaseEnumOption(target, name, context.Token!.Source.ToString());
+                {
+                    var enumValue = context.Token!.Source.ToString();
+                    RecordDatabaseEnumOption(target, name, enumValue);
+                    LogDatabaseOption(context.Batch, target, name.ToUpperInvariant(), enumValue.ToUpperInvariant());
+                }
                 return true;
             case AlterDatabaseOptionKind.IntegerWithUnit:
                 return ConsumeIntegerWithUnit(context, target);
@@ -714,7 +748,10 @@ partial class Simulation
                 return ParseQueryStoreTail(context, target);
             case AlterDatabaseOptionKind.Broker:
                 if (!context.Batch.IsSkipping)
+                {
                     target.BrokerEnabled = !BuiltInToken.Equals(name, "DISABLE_BROKER");
+                    LogDatabaseOption(context.Batch, target, name.ToUpperInvariant(), "ON");
+                }
                 return true;
             case AlterDatabaseOptionKind.State:
                 return ConsumeDatabaseStateOption(context, target, name);
@@ -725,6 +762,22 @@ partial class Simulation
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// Logs an ON / OFF switch as real does: its own line, and for
+    /// <c>AUTO_CREATE_STATISTICS</c> the incremental mode's too — ahead of it
+    /// when <c>ON (INCREMENTAL = …)</c> names one, after it when <c>OFF</c>
+    /// takes it away (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static void LogDatabaseSwitch(BatchContext batch, Database target, string name, bool on, bool? incremental)
+    {
+        var autoCreate = BuiltInToken.Equals(name, "AUTO_CREATE_STATISTICS");
+        if (autoCreate && incremental is { } named)
+            LogDatabaseOption(batch, target, "INCREMENTAL", named ? "ON" : "OFF");
+        LogDatabaseOption(batch, target, name.ToUpperInvariant(), on ? "ON" : "OFF");
+        if (autoCreate && !on)
+            LogDatabaseOption(batch, target, "INCREMENTAL", "OFF");
     }
 
     /// <summary>Records an ON / OFF option on <paramref name="target"/>'s <see cref="Database.Switches"/>.</summary>
@@ -892,6 +945,8 @@ partial class Simulation
                 target.TargetRecoveryTimeSeconds = amount.AsInt32;
             else if (BuiltInToken.Equals(unit, "MINUTES"))
                 target.TargetRecoveryTimeSeconds = amount.AsInt32 * 60;
+            // The amount as written, without its unit.
+            LogDatabaseOption(context.Batch, target, "target_recovery_time", amount.AsInt32.ToString(CultureInfo.InvariantCulture));
         }
         return true;
     }
@@ -916,6 +971,7 @@ partial class Simulation
     private static bool ParseQueryStoreTail(ParserContext context, Database target)
     {
         var pending = target.QueryStore.Copy();
+        var written = new QueryStoreWrites();
         // CLEAR / CLEAR ALL — no `=`.
         var next = context.GetNextRequired();
         if (IsBareWord(next, "CLEAR"))
@@ -926,13 +982,17 @@ partial class Simulation
                 context.RestoreCheckpoint(checkpoint);
             RejectQueryStoreOnSystemDatabase(context, target);
             if (!context.Batch.IsSkipping)
+            {
                 target.QueryStoreData.Clear();
+                LogDatabaseOption(context.Batch, target, "query_store", "clear");
+            }
             return true;
         }
+        string? stateLogged = null;
         if (next is Operator { Character: '(' })
         {
             var wasOff = pending.DesiredState == QueryStoreState.Off;
-            if (!ParseQueryStoreOptionsBlock(context, pending))
+            if (!ParseQueryStoreOptionsBlock(context, pending, written))
                 return false;
             if (wasOff)
                 pending.DesiredState = QueryStoreState.Off;
@@ -947,6 +1007,7 @@ partial class Simulation
             {
                 case ReservedKeyword { Keyword: Keyword.Off }:
                     pending.DesiredState = QueryStoreState.Off;
+                    stateLogged = "off";
                     break;
                 case ReservedKeyword { Keyword: Keyword.On }:
                     // A bare ON, and an ON carrying only unrelated sub-options,
@@ -955,7 +1016,7 @@ partial class Simulation
                     var afterOn = context.SaveCheckpoint();
                     if (context.GetNextOptional() is Operator { Character: '(' })
                     {
-                        if (!ParseQueryStoreOptionsBlock(context, pending))
+                        if (!ParseQueryStoreOptionsBlock(context, pending, written))
                             return false;
                     }
                     else
@@ -969,8 +1030,76 @@ partial class Simulation
         }
         RejectQueryStoreOnSystemDatabase(context, target);
         if (!context.Batch.IsSkipping)
+        {
+            var before = target.QueryStore;
             target.QueryStore = pending;
+            // An ON naming its OPERATION_MODE logs the mode in its place.
+            if (stateLogged is null && next is Operator { Character: '=' } && !written.OperationMode)
+                stateLogged = "on";
+            LogQueryStoreChanges(context.Batch, target, before, pending, written, stateLogged);
+        }
         return true;
+    }
+
+    /// <summary>What a QUERY_STORE clause wrote, beyond the values it leaves on the options, for its error-log lines.</summary>
+    private sealed class QueryStoreWrites
+    {
+        public bool OperationMode;
+
+        /// <summary>The top-level options the clause names, upper-cased.</summary>
+        public readonly HashSet<string> Named = new(StringComparer.Ordinal);
+        public bool ExecutionCount;
+        public bool TotalCompileCpuTimeMs;
+        public bool TotalExecutionCpuTimeMs;
+
+        /// <summary>The threshold as real logs it: the amount, then <c>day</c> / <c>days</c> / <c>hour</c> / <c>hours</c> as written.</summary>
+        public string? StaleCapturePolicyThreshold;
+    }
+
+    /// <summary>
+    /// Writes a QUERY_STORE clause's lines as real does (probed 2026-10-16
+    /// against SQL Server 2025): <c>= ON</c> / <c>= OFF</c> each time, an
+    /// <c>OPERATION_MODE</c> each time it is written (an <c>ON</c> naming one
+    /// logs only the mode), each other option when it changes the value or
+    /// an <c>OPERATION_MODE</c> is written beside it, and each capture-policy
+    /// entry each time it is written — in real's own order, whatever the
+    /// order written.
+    /// </summary>
+    private static void LogQueryStoreChanges(BatchContext batch, Database target, QueryStoreOptions before, QueryStoreOptions after, QueryStoreWrites written, string? state)
+    {
+        if (state is not null)
+            LogDatabaseOption(batch, target, "query_store", state);
+        if (written.OperationMode)
+            LogDatabaseOption(batch, target, "query_store", after.DesiredState == QueryStoreState.ReadOnly ? "read_only" : "read_write");
+        Changed("MAX_STORAGE_SIZE_MB", "max_storage_size_mb", before.MaxStorageSizeMb, after.MaxStorageSizeMb);
+        Changed("DATA_FLUSH_INTERVAL_SECONDS", "flush_interval_seconds", before.FlushIntervalSeconds, after.FlushIntervalSeconds);
+        Changed("INTERVAL_LENGTH_MINUTES", "interval_length_minutes", before.IntervalLengthMinutes, after.IntervalLengthMinutes);
+        Changed("CLEANUP_POLICY", "stale_query_threshold_days", before.StaleQueryThresholdDays, after.StaleQueryThresholdDays);
+        Changed("MAX_PLANS_PER_QUERY", "max_plans_per_query", before.MaxPlansPerQuery, after.MaxPlansPerQuery);
+        if (Logs("QUERY_CAPTURE_MODE", before.CaptureMode != after.CaptureMode))
+            Sub("query_capture_mode", after.CaptureMode switch { QueryStoreCaptureMode.All => "all", QueryStoreCaptureMode.None => "none", QueryStoreCaptureMode.Custom => "custom", _ => "auto" });
+        if (Logs("SIZE_BASED_CLEANUP_MODE", before.SizeBasedCleanupAuto != after.SizeBasedCleanupAuto))
+            Sub("size_based_cleanup_mode", after.SizeBasedCleanupAuto ? "auto" : "off");
+        if (written.ExecutionCount)
+            Sub("execution_count", after.CapturePolicyExecutionCount.ToString(CultureInfo.InvariantCulture));
+        if (written.TotalCompileCpuTimeMs)
+            Sub("total_compile_cpu_time_ms", after.CapturePolicyTotalCompileCpuTimeMs.ToString(CultureInfo.InvariantCulture));
+        if (written.TotalExecutionCpuTimeMs)
+            Sub("total_execution_cpu_time_ms", after.CapturePolicyTotalExecutionCpuTimeMs.ToString(CultureInfo.InvariantCulture));
+        if (written.StaleCapturePolicyThreshold is { } threshold)
+            Sub("stale_capture_policy_threshold", threshold);
+        if (Logs("WAIT_STATS_CAPTURE_MODE", before.WaitStatsCaptureOn != after.WaitStatsCaptureOn))
+            Sub("wait_stats_capture_mode", after.WaitStatsCaptureOn ? "on" : "off");
+
+        bool Logs(string name, bool changed) => written.Named.Contains(name) && (changed || written.OperationMode);
+
+        void Changed(string name, string option, long was, long now)
+        {
+            if (Logs(name, was != now))
+                Sub(option, now.ToString(CultureInfo.InvariantCulture));
+        }
+
+        void Sub(string option, string value) => LogDatabaseOption(batch, target, "query_store " + option, value);
     }
 
     /// <summary>
@@ -993,7 +1122,7 @@ partial class Simulation
     /// <paramref name="pending"/>. An unrecognized sub-option name raises
     /// Msg 102 at the name — real's own behavior, at both nesting levels.
     /// </summary>
-    private static bool ParseQueryStoreOptionsBlock(ParserContext context, QueryStoreOptions pending)
+    private static bool ParseQueryStoreOptionsBlock(ParserContext context, QueryStoreOptions pending, QueryStoreWrites written)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         while (true)
@@ -1005,9 +1134,10 @@ partial class Simulation
             // probed 2026-09-29 against SQL Server 2025).
             if (!seen.Add(sub.Value) && IsQueryStoreSubOption(sub.Value))
                 throw SimulatedSqlException.QueryStoreOptionRepeated(sub.Value.ToUpperInvariant());
+            _ = written.Named.Add(sub.Value.ToUpperInvariant());
             if (context.GetNextRequired() is not Operator { Character: '=' })
                 return false;
-            if (!ParseQueryStoreSubOption(context, pending, sub))
+            if (!ParseQueryStoreSubOption(context, pending, sub, written))
                 return false;
             // Comma → another entry; ) → done.
             var sep = context.GetNextRequired();
@@ -1024,7 +1154,7 @@ partial class Simulation
     /// <see cref="ParseQueryStoreCleanupPolicy"/> /
     /// <see cref="ParseQueryStoreCapturePolicy"/> handle.
     /// </summary>
-    private static bool ParseQueryStoreSubOption(ParserContext context, QueryStoreOptions pending, UnquotedString name)
+    private static bool ParseQueryStoreSubOption(ParserContext context, QueryStoreOptions pending, UnquotedString name, QueryStoreWrites written)
     {
         Span<char> upper = stackalloc char[name.Value.Length];
         _ = name.Value.AsSpan().ToUpperInvariant(upper);
@@ -1058,6 +1188,7 @@ partial class Simulation
                     pending.DesiredState = QueryStoreState.ReadWrite;
                 else
                     return RejectQueryStoreValue(operationMode);
+                written.OperationMode = true;
                 return true;
             case "QUERY_CAPTURE_MODE":
                 // ALL tokenizes as a reserved keyword; AUTO / CUSTOM / NONE as
@@ -1076,7 +1207,7 @@ partial class Simulation
                 pending.CaptureMode = mode.Value;
                 return true;
             case "QUERY_CAPTURE_POLICY":
-                return ConsumeSubBlockOpen(context) && ParseQueryStoreCapturePolicy(context, pending);
+                return ConsumeSubBlockOpen(context) && ParseQueryStoreCapturePolicy(context, pending, written);
             case "SIZE_BASED_CLEANUP_MODE":
                 // { AUTO | OFF }: AUTO is a bare identifier, OFF a reserved
                 // keyword — and ON is Msg 156 on real, not a synonym for AUTO.
@@ -1131,7 +1262,7 @@ partial class Simulation
     /// reports Msg 102 at the entry name both for a missing unit and for an
     /// unrecognized one (probed 2026-08-08), which is where the throw lands.
     /// </summary>
-    private static bool ParseQueryStoreCapturePolicy(ParserContext context, QueryStoreOptions pending)
+    private static bool ParseQueryStoreCapturePolicy(ParserContext context, QueryStoreOptions pending, QueryStoreWrites written)
     {
         while (true)
         {
@@ -1150,6 +1281,7 @@ partial class Simulation
                     if (executions < 1)
                         throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(executions, "execution_count", 1);
                     pending.CapturePolicyExecutionCount = (int)executions;
+                    written.ExecutionCount = true;
                     break;
                 case "STALE_CAPTURE_POLICY_THRESHOLD":
                     if (!TryReadInteger(context, out var threshold))
@@ -1161,18 +1293,21 @@ partial class Simulation
                     if (threshold * hoursPerUnit is < 1 or > 7 * 24)
                         throw SimulatedSqlException.QueryStoreStaleThresholdInvalid();
                     pending.CapturePolicyStaleThresholdHours = (int)threshold * hoursPerUnit;
+                    written.StaleCapturePolicyThreshold = string.Create(CultureInfo.InvariantCulture, $"{threshold} {(hoursPerUnit == 24 ? "day" : "hour")}{(threshold == 1 ? "" : "s")}");
                     break;
                 case "TOTAL_COMPILE_CPU_TIME_MS":
                     if (!TryReadInteger(context, out pending.CapturePolicyTotalCompileCpuTimeMs))
                         return false;
                     if (pending.CapturePolicyTotalCompileCpuTimeMs < 1)
                         throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(pending.CapturePolicyTotalCompileCpuTimeMs, "total_compile_cpu_time_ms", 1);
+                    written.TotalCompileCpuTimeMs = true;
                     break;
                 case "TOTAL_EXECUTION_CPU_TIME_MS":
                     if (!TryReadInteger(context, out pending.CapturePolicyTotalExecutionCpuTimeMs))
                         return false;
                     if (pending.CapturePolicyTotalExecutionCpuTimeMs < 1)
                         throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(pending.CapturePolicyTotalExecutionCpuTimeMs, "total_execution_cpu_time_ms", 2);
+                    written.TotalExecutionCpuTimeMs = true;
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(entry);

@@ -181,11 +181,12 @@ partial class Simulation
             : Collation.TryGet(collationName)
                 ?? throw new NotSupportedException($"CREATE DATABASE COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
 
+        Database database;
         lock (this.Databases)
         {
             if (this.Databases.ContainsKey(databaseName))
                 throw SimulatedSqlException.DatabaseAlreadyExists(databaseName);
-            var database = new Database(databaseName, collation)
+            database = new Database(databaseName, collation)
             {
                 Trustworthy = options.Trustworthy,
                 CrossDatabaseChaining = options.DbChaining,
@@ -201,6 +202,7 @@ partial class Simulation
                 this.RejectTakenPaths(database);
             RegisterUserDatabaseLocked(database);
         }
+        LogDatabaseStartup(context.Batch, database);
         RecordServerDdlEvent(context, "CREATE_DATABASE", databaseName, loginName: null);
         return true;
     }

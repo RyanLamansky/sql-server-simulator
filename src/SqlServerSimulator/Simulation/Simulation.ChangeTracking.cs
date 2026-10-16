@@ -181,6 +181,8 @@ partial class Simulation
                     target.ChangeTracking = pending;
                 break;
         }
+        // An options list alone logs as turning it on (probed 2026-10-16 against SQL Server 2025).
+        LogDatabaseOption(context.Batch, target, "change_tracking", turnOn == false ? "OFF" : "ON");
         return true;
     }
 

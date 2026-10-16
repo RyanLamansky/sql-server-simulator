@@ -451,6 +451,17 @@ internal sealed partial class Database
     /// </summary>
     public DatabaseState State;
 
+    /// <summary>
+    /// When the last <c>DBCC CHECKDB</c> over this database began, which
+    /// <c>DATABASEPROPERTYEX(…, 'LastGoodCheckDbTime')</c> reports and each
+    /// startup line of the error log recalls; null until one has run. Every
+    /// form that checks sets it — <c>PHYSICAL_ONLY</c>, <c>NOINDEX</c> and
+    /// <c>TABLOCK</c> too — while <c>ESTIMATEONLY</c> and the narrower checks
+    /// (<c>CHECKALLOC</c>, <c>CHECKTABLE</c>) leave it (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    public DateTime? LastGoodCheckDbUtc;
+
     /// <summary>The session <c>RESTORE DATABASE</c> rebuilds this database on while it is <see cref="DatabaseState.Restoring"/>, or null.</summary>
     internal SimulatedDbConnection? RestoringConnection;
 
