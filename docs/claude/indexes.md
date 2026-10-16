@@ -701,8 +701,23 @@ Msg 2528 follows the rows unless `NO_INFOMSGS` joins the options.
 ## Index DMVs
 
 `sys.dm_db_index_physical_stats` (a row per index and partition, its argument refusals Msg 2591 / 2561 / 2521 as real's), `sys.dm_db_stats_properties`, `sys.dm_db_stats_histogram` and the compatibility views `sysindexes` / `sysindexkeys` project from the same identities and snapshots (`BuiltInResources.IndexDmvs.cs`, `Selection.IndexDmvs.cs`).
-`sys.dm_db_index_usage_stats`, the `sys.dm_db_missing_index_*` family, `sys.dm_db_index_operational_stats` and `sys.dm_db_incremental_stats_properties` exist with real's columns and no rows: the simulator keeps no usage counters or optimizer suggestions, where real's usage view counts every seek, scan and lookup.
-Not chased: which of the three a read is, and which index it would have wanted, is real's plan choice.
+The `sys.dm_db_missing_index_*` family and `sys.dm_db_incremental_stats_properties` exist with real's columns and no rows: the simulator keeps no optimizer suggestions.
+A NULL or 0 database names every database, as real's functions read it.
+
+### Usage and operational counters
+
+`sys.dm_db_index_usage_stats` and `sys.dm_db_index_operational_stats` read the counters each table keeps per index (`Storage/IndexUsage.cs`, charged by `IndexUsageAccounting`), which follow what real counts (probed 2026-10-16 against SQL Server 2025):
+
+- **A use of each kind counts once per statement execution** (`StatementContext.CountedIndexUses`), with the time it last happened: a read through a seek is a user seek of the index leading on the seek's columns — the clustered one first, then the narrowest — and any other read a user scan of the base index; a correlated inner re-run per outer row counts one seek.
+- **A write updates every index it maintains, whether or not it changes a row**: an `INSERT`'s and `DELETE`'s every index, an `UPDATE`'s base index and each nonclustered index holding a column it sets (every one when the clustering key moves), a rolled-back or failed statement included.
+- **A foreign key's check seeks the referenced key once per statement**, a singleton lookup per row, and a parent's delete or key update seeks the child's index leading on the key's columns or scans the child; an update leaving the key's columns alone checks nothing, so a row an untrusted key let in stays writable.
+- **Per row**: an inserted entry is a leaf insert, a deleted one a leaf ghost (a heap's a leaf delete), an entry changed in place a leaf update and one whose key moved a ghost and an insert; an equality probe of a whole unique key is a singleton lookup, every other seek or scan a range scan each time it runs.
+- **An index build or `UPDATE STATISTICS` over a table holding rows** scans its base index on the engine's account (`system_scans`, and a range scan); the automatic statistics a query creates or refreshes count nothing, real loading none for a trivial plan.
+- A usage row appears with an index's first use, and an operational row exists for every index and partition from its creation, its counts on the first partition; dropping an index drops its counters, while a rebuild keeps them, as real's do.
+- A `#temp` table, a table variable and a trigger's pseudo-tables aren't counted.
+
+**Divergences**: the plan real picks decides its counts, and the simulator's access paths aren't real's plans — real scans a narrower covering index for `COUNT(*)`, scans rather than seeks-and-looks-up on a small table, and decorrelates a subquery into a second scan — so `user_lookups` stays 0, and a statement's counts can differ where real's optimizer would have chosen otherwise.
+The lock, latch, allocation, page-merge, LOB and row-overflow counters of the operational view read 0.
 The physical figures (`page_count`, `avg_fragmentation_in_percent`, record sizes) are the simulator's own flat page list's, never byte-matching real's.
 
 ## EF Migrations integration

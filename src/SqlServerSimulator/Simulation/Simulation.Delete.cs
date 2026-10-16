@@ -795,6 +795,7 @@ partial class Simulation
                 RowSecurity.EnforceBlock(context.Batch, table, BlockOperation.BeforeDelete, fullOld ?? FullImageAt(table, pageIndex, slotIndex, context.Batch));
         }
 
+        IndexUsageAccounting.NoteWrite(context.Batch, table, WriteKind.Delete, 0);
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         // System-versioned DELETE: copy each row's pre-delete state to
         // history with ROW END = UtcNow before tombstoning the current row.
@@ -871,6 +872,7 @@ partial class Simulation
         // a rollback restores the row at this address, and a session already
         // waiting on the lock then holds the row it waited for.
         table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
+        IndexUsageAccounting.NoteWrite(context.Batch, table, WriteKind.Delete, 1);
     }
 
     /// <summary>

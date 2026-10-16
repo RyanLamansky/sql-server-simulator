@@ -144,6 +144,7 @@ partial class Simulation
         // the sampling and drop options it ran under on each.
         if (table is not null)
         {
+            IndexUsageAccounting.NoteStatisticsScan(context.Batch, table);
             foreach (var statistic in StatisticsOn(table))
             {
                 if ((targets is not null && !targets.Exists(target => collation.Equals(statistic.Name, target)))

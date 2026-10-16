@@ -1424,6 +1424,8 @@ partial class Simulation
     private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch, out IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek)
     {
         seek = where is null ? null : Selection.SeekMutationTarget(table, where, batch);
+        if (seek is null && !batch.IsSkipping)
+            IndexUsageAccounting.NoteRead(batch, table, null, seek: false);
         return seek ?? ClusteredScan.RowsWithAddress(table, batch.Connection.StatementIo);
     }
 
@@ -1638,9 +1640,14 @@ partial class Simulation
             // An INSTEAD OF UPDATE trigger runs over the empty set the same
             // way (probed 2026-09-27 against SQL Server 2025).
             if (insteadOfActive)
+            {
                 FireInsteadOfUpdateTrigger(context, table, sourceView, affected, updatedColumnOrdinals);
+            }
             else
+            {
+                IndexUsageAccounting.NoteWrite(context.Batch, table, WriteKind.Update, 0, updatedColumnOrdinals);
                 FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
+            }
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0) { ColumnNullability = output.Nullability };
         }
 
@@ -1662,6 +1669,7 @@ partial class Simulation
                 : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count) { ColumnNullability = output.Nullability };
         }
 
+        IndexUsageAccounting.NoteWrite(context.Batch, table, WriteKind.Update, affected.Count, updatedColumnOrdinals);
         var keyGuard = BeginUniqueKeyGuard(context.Batch, table);
         EnforceKeysForUpdate(table, affected, context.Batch);
 
@@ -1672,7 +1680,7 @@ partial class Simulation
             var newRows = new List<SqlValue[]>(affected.Count);
             foreach (var (_, _, fullNew, _) in affected)
                 newRows.Add(fullNew);
-            EnforceOutgoingForeignKeys(table, newRows, context, "UPDATE");
+            EnforceOutgoingForeignKeys(table, newRows, context, "UPDATE", updatedOrdinals: updatedColumnOrdinals);
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -1845,7 +1853,12 @@ partial class Simulation
     {
         RejectLobOnEmptyFilegroup(batch, table, image);
         if (!IsLockableTable(table))
-            return table.Heap.Insert(image, undoLog);
+        {
+            var unlocked = table.Heap.Insert(image, undoLog);
+            if (unlocked.PageIndex >= 0)
+                IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
+            return unlocked;
+        }
         batch.ProbeKeyLocksForInsert(table, image);
         var address = table.Heap.Insert(
             image,
@@ -1861,6 +1874,7 @@ partial class Simulation
             storedValues);
         if (address.PageIndex >= 0)
         {
+            IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
             batch.NoteKeyPutBack(table, image);
             // The page the row landed on, while some read or write locks
             // pages of the table whole.

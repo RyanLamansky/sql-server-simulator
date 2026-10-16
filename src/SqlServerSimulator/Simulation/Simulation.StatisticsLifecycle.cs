@@ -95,6 +95,7 @@ partial class Simulation
     /// <summary>Builds every statistic of <paramref name="table"/> whose name <paramref name="matches"/> accepts.</summary>
     internal static void BuildStatistics(BatchContext batch, HeapTable table, Func<TableStatistic, bool> matches)
     {
+        IndexUsageAccounting.NoteStatisticsScan(batch, table);
         foreach (var statistic in StatisticsOn(table))
         {
             if (matches(statistic))

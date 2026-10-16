@@ -806,7 +806,7 @@ partial class Simulation
             affected[0] = (page, slot, newValues, oldValues);
             EnforceKeysForUpdate(table, affected, batch, onlyRow: 0);
             if (table.OutgoingForeignKeys.Count > 0)
-                EnforceOutgoingForeignKeys(table, [newValues], context, "MERGE");
+                EnforceOutgoingForeignKeys(table, [newValues], context, "MERGE", updatedOrdinals: updatedColumnOrdinals);
             if (lobColumns is not null)
                 NoteRootedLobNulls(table, lobColumns, page, slot, oldValues, newValues);
             List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
@@ -824,6 +824,7 @@ partial class Simulation
             ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (page, slot), undoLog);
             EnforceLandedRowChecks(table, newValues, batch, "MERGE");
             table.NoteColumnsUpdated(updatedColumnOrdinals, 1);
+            IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Update, 1, updatedColumnOrdinals);
             return output.ProjectRow(batch, insertedValues: newValues, deletedValues: oldValues, sourceValues: sourceValues, action: "UPDATE");
         }
 
@@ -1342,6 +1343,7 @@ partial class Simulation
             }
             tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
             destinationTable.NoteColumnsUpdated(updatedColumnOrdinals, pendingUpdates.Count);
+            IndexUsageAccounting.NoteWrite(context.Batch, destinationTable, WriteKind.Update, pendingUpdates.Count, updatedColumnOrdinals);
         }
         if (!insteadOfInsert)
         {

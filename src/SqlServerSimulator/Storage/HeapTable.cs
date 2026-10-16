@@ -574,6 +574,15 @@ internal sealed class HeapTable : SchemaObject
     public Database? OwningDatabase;
 
     /// <summary>
+    /// Each index's usage and operational counters, by index id, created as an
+    /// index is first touched (see <see cref="IndexUsage"/>).
+    /// </summary>
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<int, IndexUsage> Usage = new();
+
+    /// <summary>The counters of the index with <paramref name="indexId"/>, created on first use.</summary>
+    public IndexUsage UsageOf(int indexId) => this.Usage.GetOrAdd(indexId, static _ => new());
+
+    /// <summary>
     /// FOREIGN KEY constraints declared on this table (the referring side).
     /// Each entry's <see cref="ForeignKey.ReferencedTable"/> points at the
     /// parent table whose PK/UNIQUE the FK targets. Populated post-construction
@@ -616,6 +625,7 @@ internal sealed class HeapTable : SchemaObject
     /// <summary>Publishes <see cref="Indexes"/> without <paramref name="index"/>.</summary>
     public void RemoveIndex(Index index)
     {
+        _ = this.Usage.TryRemove(index.IndexId, out _);
         var indexes = new List<Index>(this.Indexes);
         _ = indexes.Remove(index);
         this.Indexes = indexes;

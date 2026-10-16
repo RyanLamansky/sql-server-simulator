@@ -783,6 +783,8 @@ partial class Simulation
         // rows-affected and @@ROWCOUNT alike (probe-confirmed).
         var insertedCount = 0;
         var keyGuard = insteadOfActive || sourceRows.Count == 0 ? null : BeginUniqueKeyGuard(context.Batch, destinationTable);
+        if (!insteadOfActive)
+            IndexUsageAccounting.NoteWrite(context.Batch, destinationTable, WriteKind.Insert, 0);
         // A key referencing the table itself is checked once the rows are in.
         var selfReferencingRows = !insteadOfActive && ReferencesItself(destinationTable) ? new List<SqlValue[]>() : null;
         var drawsIdentity = identityColumn is not null && !insteadOfActive && Array.IndexOf(destinationColumns, identityColumn) < 0;

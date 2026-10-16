@@ -21,16 +21,18 @@ partial class Selection
         _ = leaf.AsSpan().ToUpperInvariant(upper);
         return upper switch
         {
-            "DM_DB_INCREMENTAL_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, IncrementalStatsColumns, static (_, _) => []),
-            "DM_DB_INDEX_OPERATIONAL_STATS" => ParseSystemTvf(context, functionName, database, 4, OperationalStatsColumns, static (_, _) => []),
+            "DM_DB_INCREMENTAL_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, IncrementalStatsColumns, static (_, _) => [], notNullColumns: 2),
+            "DM_DB_INDEX_OPERATIONAL_STATS" => ParseSystemTvf(context, functionName, database, 4, OperationalStatsColumns,
+                static (batch, args) => BuiltInResources.OperationalStats(batch, IntArgument(args[0]), IntArgument(args[1]), IntArgument(args[2]), IntArgument(args[3])),
+                notNullColumns: BuiltInResources.OperationalStatsColumnCount),
             "DM_DB_INDEX_PHYSICAL_STATS" => ParseSystemTvf(context, functionName, database, 5, BuiltInResources.IndexPhysicalStatsColumns,
                 static (batch, args) => BuiltInResources.IndexPhysicalStats(batch, IntArgument(args[0]), IntArgument(args[1]), IntArgument(args[2]), IntArgument(args[3]),
                     args[4].IsNull ? null : args[4].CoerceTo(SqlType.NVarchar).AsString)),
-            "DM_DB_MISSING_INDEX_COLUMNS" => ParseSystemTvf(context, functionName, database, 1, MissingIndexColumnsColumns, static (_, _) => []),
+            "DM_DB_MISSING_INDEX_COLUMNS" => ParseSystemTvf(context, functionName, database, 1, MissingIndexColumnsColumns, static (_, _) => [], notNullColumns: 1),
             "DM_DB_STATS_HISTOGRAM" => ParseSystemTvf(context, functionName, database, 2, StatsHistogramColumns,
-                static (batch, args) => BuiltInResources.StatsHistogram(batch, IntArgument(args[0]), IntArgument(args[1]))),
+                static (batch, args) => BuiltInResources.StatsHistogram(batch, IntArgument(args[0]), IntArgument(args[1])), notNullColumns: 3),
             "DM_DB_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, StatsPropertiesColumns,
-                static (batch, args) => BuiltInResources.StatsProperties(batch, IntArgument(args[0]), IntArgument(args[1]))),
+                static (batch, args) => BuiltInResources.StatsProperties(batch, IntArgument(args[0]), IntArgument(args[1])), notNullColumns: 2),
             _ => null,
         };
     }
@@ -87,9 +89,11 @@ partial class Selection
     /// <summary>
     /// A system TVF of exactly <paramref name="arity"/> arguments, each an
     /// expression or <c>DEFAULT</c> (read as NULL), whose rows
-    /// <paramref name="rows"/> produces when it runs.
+    /// <paramref name="rows"/> produces when it runs, its leading
+    /// <paramref name="notNullColumns"/> columns declared NOT NULL as real
+    /// declares them (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
-    private static Selection ParseSystemTvf(ParserContext context, string functionName, Database? database, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows)
+    private static Selection ParseSystemTvf(ParserContext context, string functionName, Database? database, int arity, (string Name, SqlType Type)[] columns, Func<BatchContext, SqlValue[], List<SqlValue[]>> rows, int notNullColumns = 0)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -117,6 +121,9 @@ partial class Selection
         context.MoveNextOptional();
         var schema = Array.ConvertAll(columns, static column => column.Type);
         var names = Array.ConvertAll(columns, static column => column.Name);
+        var nullability = new bool[columns.Length];
+        for (var i = notNullColumns; i < nullability.Length; i++)
+            nullability[i] = true;
         return new Selection(schema, names,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
@@ -140,6 +147,9 @@ partial class Selection
                 foreach (var row in produced)
                     encoded.Add(RowEncoder.EncodeRow(schema, row));
                 return encoded;
-            });
+            })
+        {
+            ColumnNullability = nullability,
+        };
     }
 }

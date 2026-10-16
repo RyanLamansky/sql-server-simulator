@@ -259,8 +259,25 @@ internal sealed class FromSource(
     /// reads through here, since the source belongs to a plan any session may
     /// replay.
     /// </summary>
-    public IEnumerable<byte[]> RowsFor(BatchContext batch) =>
-        this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
+    public IEnumerable<byte[]> RowsFor(BatchContext batch)
+    {
+        if (this.BackingTable is { OwningDatabase: not null } table && this.LateralPlan is null && !batch.IsSkipping)
+            Storage.IndexUsageAccounting.NoteRead(batch, table, this.SeekOrdinals, this.Seeks, this.SeekIsEquality);
+        return this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
+    }
+
+    /// <summary>
+    /// Whether this base-table source reads its rows through a seek, which
+    /// the index usage counters charge to the index leading on
+    /// <see cref="SeekOrdinals"/> — or, false, a scan of the base index.
+    /// </summary>
+    public bool Seeks;
+
+    /// <summary>The storage ordinals a seeking source positioned on; null for its base index.</summary>
+    public int[]? SeekOrdinals;
+
+    /// <summary>Whether the seek probes equalities alone, which on a whole unique key is a singleton lookup.</summary>
+    public bool SeekIsEquality;
 
     /// <summary>
     /// Back-reference to the <see cref="HeapTable"/> when this source is a
@@ -525,6 +542,9 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            Seeks = this.Seeks,
+            SeekOrdinals = this.SeekOrdinals,
+            SeekIsEquality = this.SeekIsEquality,
         };
 
     /// <summary>
@@ -546,6 +566,9 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            Seeks = this.Seeks,
+            SeekOrdinals = this.SeekOrdinals,
+            SeekIsEquality = this.SeekIsEquality,
         };
 
     /// <summary>
@@ -569,6 +592,9 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            Seeks = this.Seeks,
+            SeekOrdinals = this.SeekOrdinals,
+            SeekIsEquality = this.SeekIsEquality,
         };
     }
 
@@ -591,6 +617,9 @@ internal sealed class FromSource(
         {
             BrowseBody = this.BrowseBody,
             MaterializedRows = catalogRows is null ? rows : null,
+            Seeks = this.Seeks,
+            SeekOrdinals = this.SeekOrdinals,
+            SeekIsEquality = this.SeekIsEquality,
         };
 }
 

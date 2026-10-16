@@ -648,6 +648,16 @@ internal sealed class StatementContext
     public SimulatedSqlException? CutShortWrite;
 
     /// <summary>
+    /// The index uses this run of the statement has counted, each counted
+    /// once per run (see <see cref="Storage.IndexUsageAccounting"/>); null
+    /// until the first.
+    /// </summary>
+    public HashSet<(Storage.HeapTable Table, int IndexId, Storage.IndexOperation Operation)>? CountedIndexUses;
+
+    /// <summary>The indexes the statement's last write maintains, settled once for its rows; null before its first write.</summary>
+    public Storage.IndexWritePlan? IndexWrites;
+
+    /// <summary>
     /// Freezes the current time for one run of the statement's text and
     /// clears the caches that run fills — once per run, a re-read for the
     /// statement's whole binder report included.
@@ -671,6 +681,8 @@ internal sealed class StatementContext
         this.EscalatedTables = null;
         this.RemoteWrite = null;
         this.RemoteWriteAlias = null;
+        this.CountedIndexUses = null;
+        this.IndexWrites = null;
     }
 }
 

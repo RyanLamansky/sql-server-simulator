@@ -42,7 +42,7 @@ internal static partial class BuiltInResources
             new("last_system_scan", SqlType.DateTime, null, true),
             new("last_system_lookup", SqlType.DateTime, null, true),
             new("last_system_update", SqlType.DateTime, null, true),
-        ], None);
+        ], static (batch, _) => IndexUsageRows(batch));
 
         Sys("dm_db_missing_index_details",
         [
@@ -297,8 +297,6 @@ internal static partial class BuiltInResources
         {
             if (databaseId is { } wanted && wanted > 0 && wanted != id)
                 continue;
-            if (databaseId is null or 0 && database != batch.CurrentDatabase)
-                continue;
             foreach (var (_, schema) in database.Schemas)
             {
                 foreach (var table in CatalogTables(schema, batch))
@@ -369,6 +367,108 @@ internal static partial class BuiltInResources
         }
         return rows;
     }
+
+    /// <summary>
+    /// <c>sys.dm_db_index_usage_stats</c>: every index any statement has used
+    /// since the simulation started, in every database, with its counts and
+    /// when each kind last happened (see <see cref="IndexUsage"/>); the
+    /// system columns count index builds' scans alone.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> IndexUsageRows(Parser.BatchContext batch)
+    {
+        static SqlValue When(long ticks) => ticks == 0 ? SqlValue.Null(SqlType.DateTime) : SqlValue.FromDateTime(new DateTime(ticks, DateTimeKind.Utc));
+        var zero = SqlValue.FromInt64(0);
+        var never = SqlValue.Null(SqlType.DateTime);
+        foreach (var (database, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
+        {
+            foreach (var (_, schema) in database.Schemas)
+            {
+                foreach (var table in CatalogTables(schema, batch).OrderBy(static table => table.ObjectId))
+                {
+                    if (table.Usage.IsEmptyLockFree())
+                        continue;
+                    foreach (var identity in table.IndexIdentities())
+                    {
+                        if (!table.Usage.TryGetValue(identity.IndexId, out var usage) || !usage.Used)
+                            continue;
+                        yield return
+                        [
+                            SqlValue.FromInt16(id), SqlValue.FromInt32(table.ObjectId), SqlValue.FromInt32(identity.IndexId),
+                            SqlValue.FromInt64(Interlocked.Read(ref usage.UserSeeks)), SqlValue.FromInt64(Interlocked.Read(ref usage.UserScans)),
+                            SqlValue.FromInt64(Interlocked.Read(ref usage.UserLookups)), SqlValue.FromInt64(Interlocked.Read(ref usage.UserUpdates)),
+                            When(Interlocked.Read(ref usage.LastUserSeekTicks)), When(Interlocked.Read(ref usage.LastUserScanTicks)),
+                            When(Interlocked.Read(ref usage.LastUserLookupTicks)), When(Interlocked.Read(ref usage.LastUserUpdateTicks)),
+                            zero, SqlValue.FromInt64(Interlocked.Read(ref usage.SystemScans)), zero, zero,
+                            never, When(Interlocked.Read(ref usage.LastSystemScanTicks)), never, never,
+                        ];
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>sys.dm_db_index_operational_stats(database_id, object_id, index_id,
+    /// partition_number)</c>: a row per index and partition of every table —
+    /// NULL or 0 naming every database, object, index or partition — carrying
+    /// the row-level counts <see cref="IndexUsage"/> keeps (on the first
+    /// partition of a partitioned index) and zero for the lock, latch,
+    /// allocation and page counters the simulator's storage doesn't move.
+    /// </summary>
+    internal static List<SqlValue[]> OperationalStats(Parser.BatchContext batch, int? databaseId, int? objectId, int? indexId, int? partitionNumber)
+    {
+        var simulation = batch.Connection.Simulation;
+        var rows = new List<SqlValue[]>();
+        var zero = SqlValue.FromInt64(0);
+        foreach (var (database, id) in Parser.Expressions.DbId.DatabasesWithIds(simulation))
+        {
+            if (databaseId is { } wanted && wanted > 0 && wanted != id)
+                continue;
+            foreach (var (_, schema) in database.Schemas)
+            {
+                foreach (var table in CatalogTables(schema, batch).OrderBy(static table => table.ObjectId))
+                {
+                    if (objectId is { } wantedObject && wantedObject > 0 && wantedObject != table.ObjectId)
+                        continue;
+                    var census = new PartitionCensus();
+                    foreach (var identity in table.IndexIdentities())
+                    {
+                        if (!HoldsStorage(identity) || (indexId is { } only && only > 0 && only != identity.IndexId))
+                            continue;
+                        _ = table.Usage.TryGetValue(identity.IndexId, out var usage);
+                        foreach (var unit in census.Units(table, identity.IndexId, Simulation.PlacementOf(table, identity)))
+                        {
+                            if (partitionNumber is { } wantedPartition && wantedPartition > 0 && wantedPartition != unit.Number)
+                                continue;
+                            var counts = unit.Number == 1 ? usage : null;
+                            var row = new SqlValue[OperationalStatsColumnCount];
+                            row[0] = SqlValue.FromInt16(id);
+                            row[1] = SqlValue.FromInt32(table.ObjectId);
+                            row[2] = SqlValue.FromInt32(identity.IndexId);
+                            row[3] = SqlValue.FromInt32(unit.Number);
+                            row[4] = SqlValue.FromInt64(unit.PartitionId);
+                            for (var i = 5; i < row.Length; i++)
+                                row[i] = zero;
+                            if (counts is not null)
+                            {
+                                row[5] = SqlValue.FromInt64(Interlocked.Read(ref counts.LeafInserts));
+                                row[6] = SqlValue.FromInt64(Interlocked.Read(ref counts.LeafDeletes));
+                                row[7] = SqlValue.FromInt64(Interlocked.Read(ref counts.LeafUpdates));
+                                row[8] = SqlValue.FromInt64(Interlocked.Read(ref counts.LeafGhosts));
+                                row[16] = SqlValue.FromInt64(Interlocked.Read(ref counts.RangeScans));
+                                row[17] = SqlValue.FromInt64(Interlocked.Read(ref counts.SingletonLookups));
+                            }
+                            rows.Add(row);
+                        }
+                    }
+                }
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>The width of <see cref="OperationalStats"/>' rows.</summary>
+    internal const int OperationalStatsColumnCount = 51;
 
     /// <summary>The columns of <see cref="IndexPhysicalStats"/>' rows.</summary>
     internal static readonly (string Name, SqlType Type)[] IndexPhysicalStatsColumns =

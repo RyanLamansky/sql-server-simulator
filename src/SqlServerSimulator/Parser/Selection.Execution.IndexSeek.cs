@@ -207,7 +207,7 @@ internal sealed partial class Selection
                 IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
             seekedCandidates = equalityCandidates;
             keyedOrdinals = equalityKeyed;
-            return SeekedSource(source, RowSecurity.FilterRows(table, seekRows, batch));
+            return SeekedSource(source, RowSecurity.FilterRows(table, seekRows, batch), equalityKeyed, equality: !rangeExtended);
         }
         // The equality's bucket held too much of the table to seek: the read
         // scans, as it does with nothing to seek on, rather than trying the
@@ -258,7 +258,7 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
             seekedCandidates = rangeCandidates;
             keyedOrdinals = FindRangeLeadingKey(table, bounds, out _) is { } rangeKey ? [rangeKey[0]] : null;
-            return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch));
+            return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch), keyedOrdinals);
         }
 
         if (qualifier is not null)
@@ -280,11 +280,11 @@ internal sealed partial class Selection
             batch.AwaitUncommittedDeletes(table);
             plan.Fence!.Settled = true;
             return SeekedSource(source, RowSecurity.FilterRows(table,
-                WalkKeyFence(table, batch, plan, scanned, scanned.Commons, [KeyFenceInterval.Everything], descending: false, qualifier), batch));
+                WalkKeyFence(table, batch, plan, scanned, scanned.Commons, [KeyFenceInterval.Everything], descending: false, qualifier), batch), seeks: false);
         }
         if (scanFences)
             batch.EnsureSerializableTableLock(table, plan);
-        return SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch));
+        return SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch), seeks: false);
     }
 
     /// <summary>
@@ -772,13 +772,20 @@ internal sealed partial class Selection
     }
 
     // Wraps a narrowed row stream back into a single-source array, preserving the
-    // original source's column / storage / view metadata.
-    private static FromSource[] SeekedSource(FromSource source, IEnumerable<byte[]> rows) =>
+    // original source's column / storage / view metadata, and recording for the
+    // index usage counters whether it seeks and on which storage ordinals (null:
+    // the base index) — a locking read narrowed without a seek scans.
+    private static FromSource[] SeekedSource(FromSource source, IEnumerable<byte[]> rows, int[]? seekOrdinals = null, bool seeks = true, bool equality = false) =>
     [
         new FromSource(
             source.Qualifier, source.ColumnNames, source.Columns, source.StoredSchema,
             source.StorageOrdinals, source.LobStore, rows, source.LateralPlan,
-            source.BackingTable, source.BackingView, unaliasedName: source.UnaliasedName),
+            source.BackingTable, source.BackingView, unaliasedName: source.UnaliasedName)
+        {
+            Seeks = seeks,
+            SeekOrdinals = seekOrdinals,
+            SeekIsEquality = equality,
+        },
     ];
 
     // The lower / upper bound expressions collected for one column from range
@@ -1495,7 +1502,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(pins[ord], source.StoredSchema[ord].Type, batch, outerResolver, out var pinnedValue, out var pinnedCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
                 default: commons[i] = pinnedCommon; prefixValues[i] = pinnedValue; break;
             }
         }
@@ -1511,7 +1518,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(lowerExpr, orderColumnType, batch, outerResolver, out lowerValue, out var lowerCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
                 default: commons[pinnedLength] = lowerCommon; hasLower = true; lowerInclusive = orderColumnBounds.LowerInclusive; break;
             }
         }
@@ -1520,7 +1527,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(upperExpr, commons[pinnedLength], batch, outerResolver, out upperValue, out var upperCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, []); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
                 default: commons[pinnedLength] = hasLower ? SqlType.Promote(commons[pinnedLength], upperCommon) : upperCommon; hasUpper = true; upperInclusive = orderColumnBounds.UpperInclusive; break;
             }
         }
@@ -1538,9 +1545,13 @@ internal sealed partial class Selection
         // pinned prefix plus the optional single-column range form the bounds.
         SqlValueKey? lowerKey, upperKey;
         bool lowerKeyInclusive, upperKeyInclusive;
+        // A pinned prefix, a bound or a keyset cursor makes the ordered read a
+        // seek of the index; without one it scans.
+        var orderedSeeks = pinnedLength > 0 || hasLower || hasUpper;
         if (pinnedLength == 0 && !hasLower && !hasUpper
             && TryMatchKeyset(conjuncts, source, fullPrefix, descending, batch, outerResolver, commons, out var cursor))
         {
+            orderedSeeks = true;
             IndexSeekDiagnostics.Sink?.Add($"KeysetSeek({table.Name})");
             if (descending)
                 (lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive) = (null, true, cursor, false);
@@ -1592,7 +1603,7 @@ internal sealed partial class Selection
             skipped = 0;
             IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
             orderedSources = SeekedSource(source, WalkKeyFence(table, batch, plan, rowGroup, walkCommons, walked, descending,
-                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where: true) : null));
+                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where: true) : null), fullPrefix, orderedSeeks);
             return true;
         }
         // A read keeping its row locks waits out the deletes in flight before
@@ -1633,10 +1644,10 @@ internal sealed partial class Selection
             List<(int Page, int Slot)> inOrder = [.. candidates];
             if (descending)
                 inOrder.Reverse();
-            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver, where: true), rest: rest));
+            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver, where: true), rest: rest), fullPrefix, orderedSeeks);
             return true;
         }
-        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest));
+        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest), fullPrefix, orderedSeeks);
         return true;
     }
 
@@ -4065,8 +4076,9 @@ internal sealed partial class Selection
         var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
 
         if (equalities.Count != 0
-            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _, out var eqSeeks, out _))
+            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _, out var eqSeeks, out var eqKeyed))
         {
+            IndexUsageAccounting.NoteRead(batch, table, eqKeyed, seek: true, equality: true);
             return MaterializeMutationCandidates(table, eqCandidates, batch, eqSeeks);
         }
 
@@ -4074,11 +4086,15 @@ internal sealed partial class Selection
             source, table, batch, outerResolver: null, conjuncts, allowCorrelatedColumnValue: false, planSources: null,
             out var unionCandidates, out _))
         {
+            IndexUsageAccounting.NoteRead(batch, table, null, seek: true);
             return MaterializeMutationCandidates(table, unionCandidates, batch, 1);
         }
 
         if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, bounds, out var rangeCandidates))
+        {
+            IndexUsageAccounting.NoteRead(batch, table, FindRangeLeadingKey(table, bounds, out _) is { } rangeKey ? [rangeKey[0]] : null, seek: true);
             return MaterializeMutationCandidates(table, rangeCandidates, batch, 1);
+        }
 
         // No seekable equality or range conjunct: caller keeps its full scan.
         return null;

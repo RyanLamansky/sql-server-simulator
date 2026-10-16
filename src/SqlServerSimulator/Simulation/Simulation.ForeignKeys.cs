@@ -28,7 +28,7 @@ partial class Simulation
     /// rows are written so a row may reference itself or a later row (probed
     /// 2026-10-01 against SQL Server 2025).
     /// </summary>
-    private static void EnforceOutgoingForeignKeys(HeapTable childTable, IReadOnlyList<SqlValue[]> newRows, ParserContext context, string verb, bool? selfReferencing = null)
+    private static void EnforceOutgoingForeignKeys(HeapTable childTable, IReadOnlyList<SqlValue[]> newRows, ParserContext context, string verb, bool? selfReferencing = null, IReadOnlyList<int>? updatedOrdinals = null)
     {
         if (childTable.OutgoingForeignKeys.Count == 0)
             return;
@@ -36,6 +36,24 @@ partial class Simulation
         {
             if (fk.IsDisabled || (selfReferencing is { } self && self != ReferenceEquals(fk.ReferencedTable, childTable)))
                 continue;
+            // An update leaving the key's columns alone checks nothing, so a
+            // row an untrusted key let through stays writable (probed
+            // 2026-10-16 against SQL Server 2025: no seek of the referenced
+            // key is counted) — unless a key column is computed, and so may
+            // move with what the update sets.
+            if (updatedOrdinals is not null && !Array.Exists(fk.ChildColumnOrdinals, updatedOrdinals.Contains)
+                && !Array.Exists(fk.ChildColumnOrdinals, ordinal => childTable.Columns[ordinal].Computed is not null))
+            {
+                continue;
+            }
+            var checkedRows = 0;
+            foreach (var newRow in newRows)
+            {
+                if (!FkTupleHasNull(fk.ChildColumnOrdinals, newRow))
+                    checkedRows++;
+            }
+            if (checkedRows > 0)
+                IndexUsageAccounting.NoteKeyCheck(context.Batch, fk.ReferencedTable, fk.ReferencedColumnOrdinals, checkedRows);
             foreach (var newRow in newRows)
             {
                 if (FkTupleHasNull(fk.ChildColumnOrdinals, newRow))
@@ -266,6 +284,7 @@ partial class Simulation
     private static IEnumerable<(int PageIndex, int SlotIndex, SqlValue[] ChildFull, int ParentIndex)> MatchChildRowsToParents(
         ForeignKey fk, List<SqlValue[]> parentKeyRows, BatchContext batch)
     {
+        IndexUsageAccounting.NoteKeyCheck(batch, fk.ChildTable, fk.ChildColumnOrdinals, parentKeyRows.Count);
         if (!TryMapFkColumnsToStorage(fk.ChildTable, fk.ChildColumnOrdinals, out var childStorageOrdinals, out var commons))
             throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has a child column that is not physically stored.");
 
@@ -545,6 +564,7 @@ partial class Simulation
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldRow, newRow, trackedColumns, setsKey, ref keyMoves);
             RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
+            IndexUsageAccounting.NoteWrite(context.Batch, childTable, WriteKind.Update, 1, fk.ChildColumnOrdinals);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             EnforceLandedRowChecks(childTable, newRow, context.Batch, verb);
             newPairs.Add((oldRow, newRow));

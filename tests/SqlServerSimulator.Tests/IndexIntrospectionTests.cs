@@ -485,9 +485,9 @@ public sealed class IndexIntrospectionTests
         => _ = new Simulation().AssertSqlError(DmvTable + query, number);
 
     [TestMethod]
-    [DataRow("select count(*) from sys.dm_db_index_usage_stats where object_id = object_id('t')", 0)]
+    [DataRow("select count(*) from sys.dm_db_index_usage_stats where object_id = object_id('t')", 2)]
     [DataRow("select count(*) from sys.dm_db_missing_index_details", 0)]
-    [DataRow("select count(*) from sys.dm_db_index_operational_stats(db_id(), object_id('t'), null, null)", 0)]
+    [DataRow("select count(*) from sys.dm_db_index_operational_stats(db_id(), object_id('t'), null, null)", 2)]
     [DataRow("select count(*) from sysindexes where id = object_id('t') and indid in (1, 2)", 2)]
     [DataRow("select count(*) from sysindexkeys where id = object_id('t')", 2)]
     [DataRow("select count(*) from sys.dm_db_stats_properties(object_id('t'), 3)", 1)]
