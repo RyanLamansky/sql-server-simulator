@@ -948,6 +948,10 @@ A procedure whose real body runs an ordinary statement runs the same statement h
   Real also walks internal tables in both; only user tables are listed here.
 - **Reports** — `sp_helplanguage` (over `sys.syslanguages`, whose month and day names are real's), `sp_helpsort`, `sp_helpserver`, `sp_monitor` (host-process figures) and `sp_lock` (over the lock DMV, its `DATABASE` rows as `DB` and its `PAGE` rows as `PAG`; real also lists the locks its own metadata reads take).
   `sp_MSforeach_worker` called directly raises the four errors real's does without the cursor its callers declare.
+- **The host and maintenance procedures** (`Simulation.HostProcs.cs`, probed 2026-10-16 against SQL Server 2025 on Linux) answer for the host real's Linux server presents: `xp_fixeddrives` one drive `C` with a fixed megabytes-free placeholder (an empty set to a login without `CONTROL SERVER`), `xp_loginconfig` mixed authentication, `xp_servicecontrol` a stopped `SQLServerAgent` whose every action fails and no other service; `sp_srvrolepermission` is real's static list.
+  `sp_flush_log`, `sp_resetstatus` and `sp_clean_db_free_space` / `sp_clean_db_file_free_space` have nothing to do — the log is never delayed, no database is suspect, freed bytes are never kept — and say so as real's do: `sp_flush_log` returns 1, `sp_resetstatus` sends Msg 15056 and returns 1, the cleaners send the Msg 2528 real's `DBCC` closes with, once per data file.
+  `sp_sqlexec` runs its text as dynamic SQL and returns 0 whatever it raised.
+  **Not modeled yet**: real's Linux install carries three Windows logins (`BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM`, `NT AUTHORITY\NETWORK SERVICE`) the simulator's `sys.server_principals` doesn't, which `xp_logininfo` lists and the Windows-login trio `sp_grantlogin` / `sp_denylogin` / `sp_revokelogin` act on; none of the four is built.
 
 ## The SQL Server error log
 

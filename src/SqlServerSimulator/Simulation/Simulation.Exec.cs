@@ -43,7 +43,8 @@ partial class Simulation
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
-        or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist")
+        or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
+        or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_flush_log")
         && !systemProcName.StartsWith("sp_OA", StringComparison.Ordinal);
 
     /// <summary>
@@ -71,7 +72,8 @@ partial class Simulation
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
-        or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
+        or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
@@ -320,6 +322,15 @@ partial class Simulation
             "sp_column_privileges" => InvokeSpColumnPrivileges(batch),
             "sp_columns" => InvokeSpColumns(batch, classic: true),
             "sp_columns_100" => InvokeSpColumns(batch, classic: false),
+            "sp_clean_db_file_free_space" => InvokeSpCleanDbFreeSpace(batch, systemProcName, calledAs, oneFile: true),
+            "sp_clean_db_free_space" => InvokeSpCleanDbFreeSpace(batch, systemProcName, calledAs, oneFile: false),
+            "sp_flush_log" => InvokeSpFlushLog(batch, returnCodeVar),
+            "sp_resetstatus" => InvokeSpResetStatus(batch, systemProcName, calledAs, returnCodeVar),
+            "sp_sqlexec" => this.InvokeSpSqlExec(batch, systemProcName, calledAs, returnCodeVar),
+            "sp_srvrolepermission" => InvokeSpSrvRolePermission(batch, systemProcName, calledAs),
+            "xp_fixeddrives" => InvokeXpFixedDrives(batch),
+            "xp_loginconfig" => InvokeXpLoginConfig(batch, calledAs, returnCodeVar),
+            "xp_servicecontrol" => InvokeXpServiceControl(batch, calledAs),
             "sp_columns_managed" => InvokeSpColumnsManaged(batch, systemProcName, calledAs),
             "sp_indexcolumns_managed" => InvokeSpIndexesManaged(batch, systemProcName, calledAs, columns: true),
             "sp_indexes_managed" => InvokeSpIndexesManaged(batch, systemProcName, calledAs, columns: false),

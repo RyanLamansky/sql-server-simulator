@@ -409,6 +409,7 @@ partial class Simulation
     /// <summary>The type a system procedure's parameter is declared with, from its <c>sys.system_parameters</c> row.</summary>
     private static SqlType SystemParameterType(BuiltInResources.SystemParameter parameter) => parameter.UserTypeId switch
     {
+        35 => SqlType.Text,
         48 => SqlType.TinyInt,
         52 => SqlType.SmallInt,
         56 => SqlType.Int32,

@@ -53,6 +53,13 @@ partial class Simulation
         "CHARACTER_SET_CATALOG", "CHARACTER_SET_SCHEMA", "CHARACTER_SET_NAME", "COLLATION_CATALOG", "IS_SPARSE", "IS_COLUMN_SET", "IS_FILESTREAM",
     ];
 
+    // The columns real sends NOT NULL (the rest are nullable).
+    private static readonly bool[] ManagedColumnsNullability = [.. Enumerable.Range(0, 21).Select(static i => i is not (2 or 20))];
+
+    private static readonly bool[] ManagedIndexesNullability = [true, true, true, true, true, false, true, true];
+
+    private static readonly bool[] ManagedIndexColumnsNullability = [true, true, true, true, true, false, true, true, false, true];
+
     private static readonly SqlType[] ManagedIndexesSchema =
         [ManagedName, ManagedName, ManagedName, ManagedName, ManagedName, ManagedName, ManagedName, ManagedTypeDesc];
 
@@ -385,7 +392,7 @@ partial class Simulation
             var byTable = collation.Compare(a.Table, b.Table);
             return byTable != 0 ? byTable : a.Ordinal.CompareTo(b.Ordinal);
         });
-        yield return new SimulatedSqlResultSet(ManagedColumnsSchema, ManagedColumnsNames, [.. rows.Select(static r => r.Row)]);
+        yield return new SimulatedSqlResultSet(ManagedColumnsSchema, ManagedColumnsNames, [.. rows.Select(static r => r.Row)]) { ColumnNullability = ManagedColumnsNullability };
     }
 
     private static SqlValue[] ManagedColumnRow(Database database, SqlValue catalog, SqlValue owner, SqlValue tableName, HeapColumn column, int position)
@@ -513,8 +520,8 @@ partial class Simulation
             return byIndex != 0 ? byIndex : collation.Compare(a.Column, b.Column);
         });
         yield return columns
-            ? new SimulatedSqlResultSet(ManagedIndexColumnsSchema, ManagedIndexColumnsNames, [.. rows.Select(static r => r.Row)])
-            : new SimulatedSqlResultSet(ManagedIndexesSchema, ManagedIndexesNames, [.. rows.Select(static r => r.Row)]);
+            ? new SimulatedSqlResultSet(ManagedIndexColumnsSchema, ManagedIndexColumnsNames, [.. rows.Select(static r => r.Row)]) { ColumnNullability = ManagedIndexColumnsNullability }
+            : new SimulatedSqlResultSet(ManagedIndexesSchema, ManagedIndexesNames, [.. rows.Select(static r => r.Row)]) { ColumnNullability = ManagedIndexesNullability };
     }
 
     private static int ColumnAt(CatalogView view, string name) =>

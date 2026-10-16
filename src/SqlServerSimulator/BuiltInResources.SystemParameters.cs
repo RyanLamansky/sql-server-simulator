@@ -190,6 +190,11 @@ partial class BuiltInResources
             ["sp_indexes_managed"] = [new("@Catalog", 256, 256, 0, 0), new("@Owner", 256, 256, 0, 0), new("@Table", 256, 256, 0, 0), new("@Name", 256, 256, 0, 0)],
             ["sp_procedure_params_100_managed"] = [new("@procedure_name", 256, 256, 0, 0), new("@group_number", 56, 4, 10, 0), new("@procedure_schema", 256, 256, 0, 0), new("@parameter_name", 256, 256, 0, 0)],
             ["sp_procedure_params_managed"] = [new("@procedure_name", 256, 256, 0, 0), new("@group_number", 56, 4, 10, 0), new("@procedure_schema", 256, 256, 0, 0), new("@parameter_name", 256, 256, 0, 0)],
+            ["sp_clean_db_file_free_space"] = [new("@dbname", 256, 256, 0, 0), new("@fileid", 56, 4, 10, 0), new("@cleaning_delay", 56, 4, 10, 0)],
+            ["sp_clean_db_free_space"] = [new("@dbname", 256, 256, 0, 0), new("@cleaning_delay", 56, 4, 10, 0)],
+            ["sp_resetstatus"] = [new("@DBName", 256, 256, 0, 0)],
+            ["sp_sqlexec"] = [new("@p1", 35, 16, 0, 0)],
+            ["sp_srvrolepermission"] = [new("@srvrolename", 256, 256, 0, 0)],
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>One row of <see cref="SystemProcedureParameters"/>.</summary>

@@ -545,7 +545,7 @@ partial class Simulation
     /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
     private static bool OwnsReturnCode(string systemProcName) =>
         systemProcName is "sp_executesql" or "sp_get_query_template" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"
-            or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent"
+            or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_logevent" or "xp_loginconfig" or "sp_sqlexec" or "sp_flush_log" or "sp_resetstatus"
         || IsAgentProcedure(systemProcName);
 
     /// <summary>
@@ -703,7 +703,7 @@ partial class Simulation
         ("sp_helprotect", 15300) => (80, null),
         ("sp_helprotect", 15302) => (89, null),
         ("sp_helprotect", 15330) => (291, null),
-        ("sp_dbfixedrolepermission" or "sp_helpdbfixedrole" or "sp_helpsrvrole" or "sp_helpsrvrolemember", 15412) => (10, null),
+        ("sp_dbfixedrolepermission" or "sp_helpdbfixedrole" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_srvrolepermission", 15412) => (10, null),
         ("sp_helpstats", 15009) => (31, null),
         ("sp_helpstats", 15250) => (23, null),
         ("sp_helptext", 15009) => (54, null),
