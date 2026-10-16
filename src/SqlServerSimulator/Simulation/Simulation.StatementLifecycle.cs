@@ -394,8 +394,17 @@ partial class Simulation
                 if (this.Error is null || this.resumedAtStatementEnd || (this.Ending == StatementEnding.Deferred && batch.CurrentStatement.DeferredReadToEnd))
                 {
                     var (tight, loose) = StatementEndsOf(batch.Parser, statementToken.StartIndex);
-                    if (ends.Record(statementToken.StartIndex, tight, loose) && placed is { EndRecorded: false })
-                        placed = ExtendedEvents.XeStatementEvents.Place(batch, statementToken.StartIndex) ?? placed;
+                    if (ends.Record(statementToken.StartIndex, tight, loose))
+                    {
+                        var text = batch.Parser.Command.CommandText;
+                        if (SecretStatements.MayCarry(text) && tight >= statementToken.StartIndex && tight < text.Length
+                            && SecretStatements.Label(text.AsSpan(statementToken.StartIndex, tight - statementToken.StartIndex + 1)) is { } label)
+                        {
+                            ends.RecordSecret(statementToken.StartIndex, SecretStatements.MaskEnd(text, tight, label), label);
+                        }
+                        if (placed is { EndRecorded: false })
+                            placed = ExtendedEvents.XeStatementEvents.Place(batch, statementToken.StartIndex) ?? placed;
+                    }
                 }
                 else
                 {

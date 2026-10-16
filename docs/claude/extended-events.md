@@ -135,6 +135,21 @@ Probed 2026-10-16 against SQL Server 2025 over key, RID, page and object deadloc
 - Addresses (`process…`, `XDES`, `lock…`, the 1204 owners and proxies), `logused`, `schedulerid`, `kpid`, the `clientoption` words (sqlcmd's) and the `sqlhandle` bytes stand in for real's, and `<stackFrames>` holds none of real's native frames.
 - A deadlock between two requests of one MARS session (Msg 1205 on its own thread) reports nothing.
 
+## Statements carrying a secret
+
+A statement carrying a password or secret keeps its text from every surface that reports statement or batch text (`SecretStatements`, probed 2026-10-16 against SQL Server 2025, its XML doc listing the statements and their labels).
+The batch's walk records each one with the span its mask covers (`StatementEnds`, per batch text), and the surfaces read that one record:
+
+- **Statement events** (`sql_statement_*`, `sp_statement_*`) read `-- <label>` — `-- CREATE LOGIN`, `-- SELECT WITHOUT QUERY`, `-- sp_addlogin` — at the statement's own offsets.
+- **Batch events** (`sql_batch_starting` / `_completed`) read the batch with each such statement replaced in place by `--*<label>` padded with dashes to the statement's length (cut to it when longer): through its semicolon for a DDL statement, through its last token for a `SELECT` or an `EXEC`.
+  A text the walk hasn't yet seen holds its `sql_batch_starting` back until the walk has masked it, which is before any of its statements runs.
+- **The session surfaces** show nothing of the batch: its SQL handle reads no `sys.dm_exec_sql_text` row (a running request's, a connection's `most_recent_sql_handle`, `sysprocesses.sql_handle`), `sys.dm_exec_input_buffer` and `DBCC INPUTBUFFER` report a NULL text, and a deadlock or blocked-process report's `inputbuf` reads `*password` padded with dashes to the batch's length.
+- **The plan cache** keeps a plan for a batch whose secrets are queries under its masked text, which `sys.dm_exec_sql_text` of its plan handle reads, and none for a batch carrying a login's, a key's or a credential's DDL; **Query Store** captures every statement of the batch but those.
+
+Only the statements themselves count: a word inside a string or a comment, and a dynamic batch's text an `EXEC` names, leave the batch as written, as does `CREATE PROCEDURE` over a body that carries one.
+SQL Trace's statement and batch classes and the `sql_text` action carry the events' text, so they mask alike, which wasn't probed on real.
+**Not modeled yet**: the statements a dynamic batch runs fire `sql_statement_*` here (see [Not modeled yet](#not-modeled-yet)), so a secret one an `sp_addlogin` or `EXEC('…')` runs is reported, labelled, where real reports it as an `sp_statement_*`; a module body's statement events weren't probed and read the label too; and RPC events report a procedure call's parameters as written.
+
 ## Targets
 
 - `ring_buffer` keeps the newest `max_events_limit` events (1,000 by default), its `target_data` the `RingBufferTarget` document real's has.
@@ -149,7 +164,6 @@ Probed 2026-10-16 against SQL Server 2025 over key, RID, page and object deadloc
 
 - Every other event in the catalog: a session takes it, and it never fires.
   Among the commonly captured ones: `lock_acquired` / `lock_released`, `query_post_execution_showplan`, and `wait_info_external`.
-- Real's redaction of a statement carrying a secret: its statement events read `-- CREATE LOGIN`, `-- ALTER LOGIN`, `-- CREATE MASTER KEY`, `-- OPEN SYMMETRIC KEY`, `-- CREATE CREDENTIAL` (for a database scoped one too), `-- CREATE APPLICATION ROLE` and the like at the statement's own offsets, and `sql_batch_completed`'s text puts `--*CREATE LOGIN` followed by dashes to the statement's own length in its place, a `SELECT` calling `PWDENCRYPT` reading `-- SELECT WITHOUT QUERY` (probed 2026-10-16 against SQL Server 2025); here the text reads as written.
 - A dynamic batch's statements fire `sql_statement_*` where real fires `sp_statement_*`, and `BEGIN TRY` / `BEGIN CATCH` / `END CATCH` around a `TRY` body an error left fire nothing where real reports them as statements (`begin try `, `end catch`).
 - `auto_stats` for a statistic a query merely loads (`Loading stats without updating` of one already built), and for the system tables real's own compiles load.
 - An `IF` or `WHILE` condition's own statement events (real reports `if 1=1` as a statement, a loop's condition once per evaluation), `module_start` / `module_end` for a trigger or function, `wait_info`'s `Begin`, `wait_completed`'s `wait_resource` text (empty here), and `attention` for a TDS attention, which goes no way through the command.

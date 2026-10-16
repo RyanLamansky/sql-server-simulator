@@ -93,7 +93,7 @@ internal static class BlockedProcessReport
                 _ = into.Append(" sqlhandle=\"").Append(LockReports.Hex(frame.SqlHandle)).Append("\"/>\n");
             }
             _ = into.Append("   </executionStack>\n   <stackFrames>\n      \n      </stackFrames>\n   <inputbuf>\n")
-                .Append(LockReports.Escape(process?.InputBuffer ?? blocker?.Session.BatchText ?? "")).Append("   </inputbuf>\n");
+                .Append(LockReports.Escape(process?.InputBuffer ?? (blocker is null ? "" : LockReports.InputBufferOf(blocker.Simulation, blocker.Session.BatchText)))).Append("   </inputbuf>\n");
         }
     }
 }

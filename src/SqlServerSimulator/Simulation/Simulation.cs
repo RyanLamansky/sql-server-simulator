@@ -1938,7 +1938,9 @@ public sealed partial class Simulation
             if (!this.CompiledBefore(cacheKey, Volatile.Read(ref this.SchemaVersion)))
             {
                 compileContext = CompileContextFor(batch, command);
-                if (this.CompileBatch(compileContext, cacheKey, out inliningFailures) is { } compileError)
+                var compileError = this.CompileBatch(compileContext, cacheKey, out inliningFailures);
+                ExtendedEvents.XeEvents.BatchWalked(batch.Connection);
+                if (compileError is not null)
                 {
                     if (compileError.EndsCompileSilently)
                     {

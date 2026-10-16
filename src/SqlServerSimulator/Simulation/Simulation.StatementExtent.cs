@@ -151,7 +151,7 @@ partial class Simulation
         {
             return Is(1, "TABLE") || Is(1, "INDEX") || Is(1, "VIEW") || Is(1, "PROCEDURE") || Is(1, "PROC")
                 || Is(1, "FUNCTION") || Is(1, "TRIGGER") || Is(1, "DEFAULT") || Is(1, "RULE")
-                || Is(1, "SEQUENCE") || Is(1, "SYNONYM") || Is(1, "USER")
+                || Is(1, "SEQUENCE") || Is(1, "SYNONYM") || Is(1, "USER") || Is(1, "CREDENTIAL")
                 || (Is(1, "DATABASE") && !Is(2, "SCOPED") && !Is(2, "AUDIT") && !Is(2, "ENCRYPTION"))
                 || (Is(1, "PARTITION") && Is(2, "FUNCTION"))
                 || (Is(1, "XML") && Is(2, "SCHEMA"));

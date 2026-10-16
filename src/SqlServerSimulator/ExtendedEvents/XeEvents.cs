@@ -95,7 +95,30 @@ internal static class XeEvents
                 ("data_stream", XeValue.FromBinary([]))));
             return;
         }
-        Fire(connection, XeEventKind.SqlBatchStarting, @event => Data(@event, ("batch_text", XeValue.FromUnicode(command.CommandText))));
+        // A text that may carry a secret its walk hasn't yet masked waits
+        // for the walk, which runs before any of its statements does.
+        if (!connection.Simulation.SecretsKnown(command.CommandText))
+        {
+            connection.Session.XePendingBatchStarting = command;
+            return;
+        }
+        BatchStarting(connection, command);
+    }
+
+    private static void BatchStarting(SimulatedDbConnection connection, SimulatedDbCommand command) =>
+        Fire(connection, XeEventKind.SqlBatchStarting, @event => Data(@event, ("batch_text", XeValue.FromUnicode(connection.Simulation.MaskedBatchText(command.CommandText) ?? command.CommandText))));
+
+    /// <summary>
+    /// Fires the <c>sql_batch_starting</c> <see cref="RequestStarting"/> held
+    /// back for a text that may carry a secret, once the batch's walk has
+    /// masked it — as the batch's statements begin, or as it ends unrun.
+    /// </summary>
+    public static void BatchWalked(SimulatedDbConnection connection)
+    {
+        if (connection.Session.XePendingBatchStarting is not { } command)
+            return;
+        connection.Session.XePendingBatchStarting = null;
+        BatchStarting(connection, command);
     }
 
     /// <summary>
@@ -106,6 +129,7 @@ internal static class XeEvents
     /// </summary>
     public static void RequestCompleted(SimulatedDbConnection connection, SimulatedDbCommand command, long durationMicroseconds, bool ended)
     {
+        BatchWalked(connection);
         var result = ended ? XeValue.FromMap(1, "Error") : XeValue.FromMap(0, "OK");
         if (IsRpc(command, out var objectName))
         {
@@ -121,7 +145,7 @@ internal static class XeEvents
         Fire(connection, XeEventKind.SqlBatchCompleted, @event => Data(@event,
             ("duration", XeValue.FromUnsigned((ulong)durationMicroseconds)),
             ("result", result),
-            ("batch_text", XeValue.FromUnicode(command.CommandText))));
+            ("batch_text", XeValue.FromUnicode(connection.Simulation.MaskedBatchText(command.CommandText) ?? command.CommandText))));
     }
 
     /// <summary>

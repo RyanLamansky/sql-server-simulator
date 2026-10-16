@@ -291,6 +291,13 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public string? XeSqlText;
 
+    /// <summary>
+    /// The command whose <c>sql_batch_starting</c> waits for its batch's walk
+    /// to mask the secret its text may carry (see
+    /// <c>XeEvents.BatchWalked</c>); null when none waits.
+    /// </summary>
+    public SimulatedDbCommand? XePendingBatchStarting;
+
     /// <summary>Set when an error ends the running request's batch, which its completion event reports as <c>Error</c>.</summary>
     public bool RequestEndedByError;
 

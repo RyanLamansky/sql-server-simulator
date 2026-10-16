@@ -84,7 +84,7 @@ internal sealed class ReportedProcess
         var writes = this.StatementVerb is "UPDATE" or "INSERT" or "DELETE" or "MERGE";
         this.StatementTranCount = this.OpenTransactions + (writes ? (this.OpenTransactions == 0 ? 2 : 1) : 0);
         this.Frames = LockReports.Frames(connection, out this.StatementLine);
-        this.InputBuffer = session.BatchText ?? "";
+        this.InputBuffer = LockReports.InputBufferOf(connection.Simulation, session.BatchText);
     }
 }
 
@@ -286,6 +286,15 @@ internal static class LockReports
             || word.Equals("WITH", StringComparison.OrdinalIgnoreCase)
             || (word.IsEmpty && start < text.Length && text[start] == '(');
     }
+
+    /// <summary>
+    /// A batch's text as a lock report's <c>inputbuf</c> carries it: as
+    /// written, or for a batch carrying a secret <c>*password</c> padded with
+    /// dashes to the batch's length (probed 2026-10-16 against SQL Server
+    /// 2025, a deadlock victim's partner); empty for none.
+    /// </summary>
+    public static string InputBufferOf(Simulation simulation, string? batchText) =>
+        batchText is null ? "" : simulation.HidesBatchText(batchText) ? "*password".PadRight(batchText.Length, '-') : batchText;
 
     /// <summary>Escapes text and attribute values as real's report XML does, the apostrophe included.</summary>
     public static string Escape(string text)

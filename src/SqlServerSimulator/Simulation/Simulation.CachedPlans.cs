@@ -58,6 +58,34 @@ partial class Simulation
         this.statementEnds.TryGetValue(batchText, out var ends) && ends.TryGet(startIndex, out var end) ? end : null;
 
     /// <summary>
+    /// <paramref name="batchText"/> with the statements carrying a secret
+    /// masked, as a batch event and a cached plan report it, or null for a
+    /// text carrying none (see <see cref="SecretStatements"/>) — one search
+    /// for the marker words, which nearly every text stops at.
+    /// </summary>
+    internal string? MaskedBatchText(string? batchText) =>
+        SecretStatements.MayCarry(batchText) && this.statementEnds.TryGetValue(batchText!, out var ends) ? ends.MaskedText(batchText!) : null;
+
+    /// <summary>
+    /// Whether <paramref name="batchText"/> carries a secret, which keeps it
+    /// from every session surface: no <c>sys.dm_exec_sql_text</c> row for its
+    /// handle, a NULL input buffer, an empty deadlock input buffer.
+    /// </summary>
+    internal bool HidesBatchText(string? batchText) =>
+        SecretStatements.MayCarry(batchText) && this.statementEnds.TryGetValue(batchText!, out var ends) && ends.HoldsSecret;
+
+    /// <summary>Whether every secret <paramref name="batchText"/> carries is a query's — <c>SELECT WITHOUT QUERY</c>.</summary>
+    internal bool SecretsAreQueries(string batchText) =>
+        this.statementEnds.TryGetValue(batchText, out var ends) && ends.SecretsAreQueries;
+
+    /// <summary>
+    /// Whether the secrets <paramref name="batchText"/> may carry are known —
+    /// its statements walked — so a batch event can mask them as it fires.
+    /// </summary>
+    internal bool SecretsKnown(string batchText) =>
+        !SecretStatements.MayCarry(batchText) || this.statementEnds.ContainsKey(batchText);
+
+    /// <summary>
     /// The cached plan the statements of <paramref name="batch"/>, a client's
     /// or a dynamic batch, are recorded under — looked up or added at the
     /// batch's first statement real keeps a plan for, which counts the batch's
@@ -108,7 +136,17 @@ partial class Simulation
             return null;
         }
         var kind = declaration is null ? CachedPlanKind.Adhoc : CachedPlanKind.Prepared;
-        plan = GetOrAddBatchPlan(batch, kind, command.CommandText, declaration, database, userId, out var created);
+        // A batch carrying a secret is cached under its masked text — one
+        // whose secret is a SELECT's, as real keeps none for a login's DDL
+        // (probed 2026-10-16 against SQL Server 2025).
+        var masked = batch.Connection.Simulation.MaskedBatchText(command.CommandText);
+        if (masked is not null && !batch.Connection.Simulation.SecretsAreQueries(command.CommandText))
+        {
+            batch.CachedPlanDeclined = true;
+            return null;
+        }
+        var cachedText = masked ?? command.CommandText;
+        plan = GetOrAddBatchPlan(batch, kind, cachedText, declaration, database, userId, out var created);
         _ = Interlocked.Increment(ref plan.UseCount);
         batch.CachedPlan = plan;
         batch.CachedPlanCompiled = created;

@@ -145,8 +145,9 @@ partial class Selection
         var simulation = batch.Connection.Simulation;
         foreach (var connection in simulation.SnapshotConnections())
         {
+            // A batch carrying a secret reports no text through its handle.
             if (Matches(connection.Session.BatchText, handle))
-                return SqlTextRow(connection.Session.BatchText!);
+                return simulation.HidesBatchText(connection.Session.BatchText) ? [] : SqlTextRow(connection.Session.BatchText!);
             // A running statement simple parameterization rewrote names its
             // prepared text.
             if (connection.Session.BatchText is { } running
@@ -159,7 +160,7 @@ partial class Selection
             foreach (var parked in connection.ParkedRequests())
             {
                 if (Matches(parked.BatchText, handle))
-                    return SqlTextRow(parked.BatchText!);
+                    return simulation.HidesBatchText(parked.BatchText) ? [] : SqlTextRow(parked.BatchText!);
             }
         }
         foreach (var plan in batch.Connection.Simulation.LiveCachedPlans())
@@ -196,7 +197,7 @@ partial class Selection
         string? found = null;
         foreach (var connection in simulation.SnapshotConnections())
         {
-            if (connection.Session.BatchText is not { } text)
+            if (connection.Session.BatchText is not { } text || simulation.HidesBatchText(text))
                 continue;
             var reported = simulation.ReportedStatement(connection, text, connection.Session.StatementStartIndex, connection.CurrentDatabase).Text;
             if (BuiltInResources.AdHocObjectIdOf(reported) == objectId)
@@ -280,7 +281,9 @@ partial class Selection
         var runtime = new RuntimeContext(outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n)), batch);
         var session = sessionExpr.Run(runtime);
         var request = requestExpr.Run(runtime);
-        if (session.IsNull || request.IsNull || request.CoerceTo(SqlType.Int32).AsInt32 != 0)
+        // A NULL request id reads the session's buffer as 0 does (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (session.IsNull || (!request.IsNull && request.CoerceTo(SqlType.Int32).AsInt32 != 0))
             return [];
         return InputBufferOf(batch.Connection.Simulation, session.CoerceTo(SqlType.Int32).AsInt32) is { } row
             ? [RowEncoder.EncodeRow(InputBufferSchema, row)]
@@ -302,7 +305,8 @@ partial class Selection
             [
                 SqlValue.FromNVarchar("Language Event"),
                 SqlValue.FromInt16(0),
-                connection.Session.BatchText is { } text ? SqlValue.FromNVarchar(text) : SqlValue.Null(SqlType.NVarcharMax),
+                // A batch carrying a secret leaves the input buffer NULL.
+                connection.Session.BatchText is { } text && !simulation.HidesBatchText(text) ? SqlValue.FromNVarchar(text) : SqlValue.Null(SqlType.NVarcharMax),
             ];
         }
         return null;

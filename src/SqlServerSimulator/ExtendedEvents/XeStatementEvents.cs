@@ -64,6 +64,10 @@ internal static class XeStatementEvents
         }
         if (word.Equals("CREATE", StringComparison.OrdinalIgnoreCase) && FirstWord(statement.AsSpan(6).TrimStart()).Equals("SCHEMA", StringComparison.OrdinalIgnoreCase))
             return null;
+        // A statement carrying a secret reports its label alone (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (SecretStatements.MayCarry(statement) && SecretStatements.Label(statement) is { } label)
+            statement = "-- " + label;
         var module = batch.ModuleObjectId != 0 ? batch.ModuleSchema?.Database ?? batch.CurrentDatabase : null;
         var offset = module is not null && batch.ModuleDefinitionText is not null ? batch.ModuleBodyOffset() : 0;
         return new XeStatement(statement, batch.CurrentStatement.StartLine + batch.LineOffset, 2 * (offset + start), end < 0 && module is null ? -1 : 2 * (offset + through),

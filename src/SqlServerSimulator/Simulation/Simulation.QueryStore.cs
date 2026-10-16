@@ -938,7 +938,7 @@ internal sealed class QueryStoreShape
             ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' } => hasFrom,
             ReservedKeyword { Keyword: Keyword.Set or Keyword.Declare or Keyword.Return or Keyword.If or Keyword.While } => hasFrom,
             _ => false,
-        };
+        } && !(SecretStatements.MayCarry(text) && SecretStatements.Label(text) is not null);
         var statementType = lead switch
         {
             ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",

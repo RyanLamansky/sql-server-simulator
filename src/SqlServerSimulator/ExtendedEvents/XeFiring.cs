@@ -109,7 +109,7 @@ internal static class XeContextValues
             "server_instance_name" => XeValue.FromUnicode(SimulatedDbConnection.DataSourceName),
             "server_principal_name" or "session_server_principal_name" or "username" => XeValue.FromUnicode(security.LoginName),
             "session_id" => XeValue.FromUnsigned((ulong)connection.Spid),
-            "sql_text" => connection.Session.XeSqlText is { } text ? XeValue.FromUnicode(text) : null,
+            "sql_text" => connection.Session.XeSqlText is { } text ? XeValue.FromUnicode(connection.Simulation.MaskedBatchText(text) ?? text) : null,
             "transaction_id" => XeValue.FromSigned(connection.CurrentTransaction?.TransactionId ?? 0),
             _ => null,
         };
