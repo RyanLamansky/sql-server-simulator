@@ -50,7 +50,15 @@
     <EmbeddedResource Include="Storage/LatchClasses.txt" LogicalName="SqlServerSimulator.LatchClasses.txt" />
     <EmbeddedResource Include="Storage/MemoryClerks.tsv" LogicalName="SqlServerSimulator.MemoryClerks.tsv" />
     <EmbeddedResource Include="Storage/PerformanceCounters.tsv" LogicalName="SqlServerSimulator.PerformanceCounters.tsv" />
+    <!-- The Extended Events catalog is some 3 MB of text, zipped by the target
+         below so the assembly carries a tenth of that. -->
+    <XeMetadataFile Include="ExtendedEvents/Metadata/*.tsv" />
+    <EmbeddedResource Include="$(BaseIntermediateOutputPath)XeMetadata.zip" LogicalName="SqlServerSimulator.XeMetadata.zip" />
   </ItemGroup>
+
+  <Target Name="ZipXeMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(XeMetadataFile)" Outputs="$(BaseIntermediateOutputPath)XeMetadata.zip">
+    <ZipDirectory SourceDirectory="ExtendedEvents/Metadata" DestinationFile="$(BaseIntermediateOutputPath)XeMetadata.zip" Overwrite="true" />
+  </Target>
 
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">
     <ItemGroup>

@@ -96,6 +96,7 @@ internal static partial class BuiltInResources
         RegisterOsDmvs(views);
         RegisterServerStateDmvs(views);
         RegisterPerformanceCounters(views);
+        RegisterExtendedEvents(views);
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
         RegisterCompatibilityProjections(views);
