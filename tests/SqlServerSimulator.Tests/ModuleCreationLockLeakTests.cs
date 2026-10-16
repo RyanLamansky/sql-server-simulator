@@ -227,27 +227,20 @@ public sealed class LockWaitCommandTimeoutTests
     }
 
     [TestMethod]
-    public void UnblockedStatement_IsNotDelayedByThePoll()
+    public async Task UnblockedStatement_IsNotDelayedByThePoll()
     {
         // The slice only bounds how long a cancel goes unnoticed; a release
         // still Pulses, so a lock that frees promptly is granted promptly.
+        // The commit waits for the insert to be seen waiting, so the release
+        // reaches a waiter rather than landing before it asks.
         var sim = new Simulation();
         using var holder = HolderOfTableX(sim);
 
         using var blocked = sim.CreateOpenConnection();
-        using var command = blocked.CreateCommand("insert t values (2)");
-        command.CommandTimeout = 30;
-        var release = Task.Run(
-            async () =>
-            {
-                await Task.Delay(150, this.TestContext.CancellationToken);
-                _ = holder.CreateCommand("commit").ExecuteNonQuery();
-            },
-            this.TestContext.CancellationToken);
-        var started = Stopwatch.StartNew();
-        _ = command.ExecuteNonQuery();
-        started.Stop();
-        release.GetAwaiter().GetResult();
-        IsLessThan(TimeSpan.FromSeconds(5), started.Elapsed);
+        var insert = await sim.StartBlocked(blocked, "insert t values (2)", this.TestContext.CancellationToken);
+        var released = Stopwatch.StartNew();
+        _ = holder.CreateCommand("commit").ExecuteNonQuery();
+        _ = await insert.WaitAsync(TimeSpan.FromSeconds(30), this.TestContext.CancellationToken);
+        IsLessThan(TimeSpan.FromSeconds(5), released.Elapsed);
     }
 }

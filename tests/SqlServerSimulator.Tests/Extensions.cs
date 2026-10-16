@@ -70,6 +70,26 @@ static class Extensions
         return running;
     }
 
+    /// <summary>
+    /// Returns once <c>sys.dm_exec_requests</c>, read through a session of its
+    /// own, lists a request matching <paramref name="where"/> — the other side
+    /// seen reaching its wait rather than assumed to from elapsed time. Fails
+    /// when <paramref name="running"/> finishes, or ten seconds pass, first.
+    /// </summary>
+    public static async Task AwaitRequest(this Simulation simulation, Task running, string where, CancellationToken cancellationToken)
+    {
+        using var observer = simulation.CreateOpenConnection();
+        using var probe = observer.CreateCommand($"select count(*) from sys.dm_exec_requests where {where}");
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while ((int)probe.ExecuteScalar()! == 0)
+        {
+            if (running.IsCompleted)
+                Assert.Fail($"expected a request where {where}; the batch finished: {(running.IsFaulted ? running.Exception!.InnerException!.Message : "ok")}");
+            Assert.IsLessThan(10_000, waited.ElapsedMilliseconds, $"no request where {where}");
+            await Task.Delay(5, cancellationToken);
+        }
+    }
+
     /// <summary>The first column of every row of every result set <paramref name="sql"/> returns.</summary>
     public static List<object?> FirstColumn(DbConnection connection, string sql)
     {

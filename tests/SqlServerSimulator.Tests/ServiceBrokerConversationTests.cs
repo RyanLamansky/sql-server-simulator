@@ -338,8 +338,7 @@ public sealed class ServiceBrokerConversationTests
 
         using var waiter = simulation.CreateOpenConnection();
         var received = Task.Run(() => Rows(waiter, "waitfor (receive cast(message_body as nvarchar(10)) from tq)"), TestContext.CancellationToken);
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsFalse(received.IsCompleted);
+        await simulation.AwaitRequest(received, "wait_type = 'BROKER_RECEIVE_WAITFOR'", TestContext.CancellationToken);
         _ = simulation.ExecuteNonQuery("declare @h uniqueidentifier = (select conversation_handle from sys.conversation_endpoints); send on conversation @h (N'late')");
         AreEqual("late", await received.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken));
     }

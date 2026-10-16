@@ -130,6 +130,11 @@ sim.ExecuteBatches(
 
 One ADO.NET command per element, shared open connection — equivalent to splitting into three `ExecuteNonQuery` calls but in one statement.
 
+## Waiting on another session
+
+A test whose assertion depends on another session having reached a wait — blocked on a lock, sleeping in a `WAITFOR`, an `ALTER DATABASE` waiting for sessions to leave — waits for that state, never for a fixed delay: on a loaded runner the delay elapses before the other side gets there, and the test either fails or passes without testing anything.
+`StartBlocked` (a lock wait) and `AwaitRequest` (any `sys.dm_exec_requests` condition) in `Extensions.cs` do it.
+
 ## AssemblyHooks
 
 Every test project has [`AssemblyHooks.cs`](AssemblyHooks.cs) with a `[TestClass] [AssemblyInitialize]` to warm shared initialization once before the parallel test run.

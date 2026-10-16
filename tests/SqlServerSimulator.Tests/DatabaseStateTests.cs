@@ -197,7 +197,7 @@ public sealed class DatabaseStateTests
         using var other = simulation.CreateOpenConnection();
         other.ChangeDatabase("zz");
         var change = Task.Run(() => simulation.ExecuteNonQuery("alter database zz set offline"), TestContext.CancellationToken);
-        await Task.Delay(200, TestContext.CancellationToken);
+        await simulation.AwaitRequest(change, "session_id <> @@spid", TestContext.CancellationToken);
         IsFalse(change.IsCompleted);
         other.ChangeDatabase("master");
         _ = await change.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken);
