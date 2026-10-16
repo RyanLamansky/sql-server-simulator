@@ -152,8 +152,10 @@ internal sealed partial class XmlSchemaCompiler
             var declarationSeen = false;
             foreach (var child in schema.Children)
             {
+                // An element of another namespace is no more taken than an
+                // unknown XSD one (probed 2026-10-16 against SQL Server 2025).
                 if (!child.IsXsd)
-                    continue;
+                    throw SimulatedSqlException.XmlSchemaElementNotValid(child.Local, child.Location);
                 switch (child.Local)
                 {
                     case "annotation":
@@ -233,6 +235,11 @@ internal sealed partial class XmlSchemaCompiler
                 throw SimulatedSqlException.XmlSchemaTypeAndRef(node.Location);
         }
 
+        // A facet its base doesn't take is refused ahead of its attributes'
+        // values (probed 2026-10-16 against SQL Server 2025).
+        if (IsFacet(local))
+            this.CheckFacetApplies(node);
+
         // An attribute of a complex type's content element is located at the
         // type itself (probed 2026-10-07 against SQL Server 2025).
         if (AttributeError(node, local is "complexContent" or "simpleContent" ? node.Parent.Location : node.Location) is { } attributeError)
@@ -240,7 +247,7 @@ internal sealed partial class XmlSchemaCompiler
 
         if (local is "attribute" or "element" && node.Element.Attribute("fixed") is not null && node.Element.Attribute("default") is not null)
             throw SimulatedSqlException.XmlSchemaAttributeNotValid("fixed", node.Location);
-        if (local == "attribute" && node.Element.Attribute("default") is not null && node.Element.Attribute("use")?.Value.Trim() is "required")
+        if (local == "attribute" && node.Element.Attribute("default") is not null && node.Element.Attribute("use")?.Value.Trim() is "prohibited" or "required")
             throw SimulatedSqlException.XmlSchemaAttributeNotValid("default", node.Location);
         if (local == "choice" && (node.Element.Attribute("minOccurs")?.Value.Trim() ?? "1") != "0" && !node.Children.Exists(static child => child.IsXsd && child.Local != "annotation"))
             throw SimulatedSqlException.XmlSchemaEmptyChoice(node.Location);
@@ -269,7 +276,7 @@ internal sealed partial class XmlSchemaCompiler
         }
 
         if (IsFacet(local))
-            this.CheckFacetPlacement(node);
+            CheckFacetRepetition(node);
 
         var attributeScope = local switch
         {
@@ -284,9 +291,7 @@ internal sealed partial class XmlSchemaCompiler
         var placement = new Placement(node);
         foreach (var child in node.Children)
         {
-            if (!child.IsXsd)
-                continue;
-            if (!XsdElementNames.Contains(child.Local))
+            if (!child.IsXsd || !XsdElementNames.Contains(child.Local))
                 throw SimulatedSqlException.XmlSchemaElementNotValid(child.Local, child.Location);
             placement.Admit(child);
         }
@@ -413,17 +418,22 @@ internal sealed partial class XmlSchemaCompiler
         return new XmlQualifiedName(local, ns);
     }
 
-    /// <summary>
-    /// A facet its base type doesn't take (Msg 2319, located at the facet),
-    /// then a facet its restriction repeats (Msg 2320) — <c>enumeration</c> and
-    /// <c>pattern</c> repeat freely — then a pattern that isn't a regular
-    /// expression (Msg 572).
-    /// </summary>
-    private void CheckFacetPlacement(XsdNode facet)
+    /// <summary>A facet its base type doesn't take (Msg 2319, located at the facet).</summary>
+    private void CheckFacetApplies(XsdNode facet)
     {
         var restriction = facet.Parent!;
         if (restriction.Local == "restriction" && this.FacetFamilyOfRestriction(restriction, []) is { } family && !FacetApplies(family, facet.Local))
             throw SimulatedSqlException.XmlSchemaFacetNotAllowed(facet.Local, facet.Location);
+    }
+
+    /// <summary>
+    /// A facet its restriction repeats (Msg 2320) — <c>enumeration</c> and
+    /// <c>pattern</c> repeat freely — then a pattern that isn't a regular
+    /// expression (Msg 572).
+    /// </summary>
+    private static void CheckFacetRepetition(XsdNode facet)
+    {
+        var restriction = facet.Parent!;
         if (facet.Local is not ("enumeration" or "pattern"))
         {
             foreach (var sibling in restriction.Children)
@@ -680,7 +690,7 @@ internal sealed partial class XmlSchemaCompiler
                 // A leading plus sign reads (probed 2026-10-16 against SQL Server 2025).
                 return !ulong.TryParse(trimmed.StartsWith('+') ? trimmed[1..] : trimmed, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var count)
                     ? SimulatedSqlException.XmlSchemaFacetValueNotNumber()
-                    : count == 0 && element == "totalDigits" ? SimulatedSqlException.XmlSchemaTotalDigitsOutOfRange() : null;
+                    : (count == 0 && element == "totalDigits") || count > int.MaxValue ? SimulatedSqlException.XmlSchemaFacetOutOfRange(element) : null;
             case "value" when element == "whiteSpace":
                 // Named after the facet rather than the attribute (probed
                 // 2026-10-16 against SQL Server 2025).

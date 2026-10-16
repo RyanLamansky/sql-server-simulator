@@ -342,6 +342,19 @@ internal sealed partial class XmlSchemaCompiler
         }
 
         RejectContradictions(type);
+        if (type.Variety == SimpleVariety.Atomic && PrimitiveOf(type.BuiltIn)?.TypeCode == XmlTypeCode.Decimal)
+        {
+            // Real stores a decimal in 38 digits, 10 of them fractional
+            // (probed 2026-10-16 against SQL Server 2025).
+            var hasTotal = Count(Effective(type, "totalDigits"), out var total);
+            var hasFraction = Count(Effective(type, "fractionDigits"), out var fraction);
+            if (hasTotal && total > 38)
+                throw SimulatedSqlException.XmlSchemaDigitsOutOfRange(type.Name, 1);
+            if (hasFraction && fraction > 10)
+                throw SimulatedSqlException.XmlSchemaDigitsOutOfRange(type.Name, 2);
+            if (hasTotal && hasFraction && total - fraction > 28)
+                throw SimulatedSqlException.XmlSchemaDigitsOutOfRange(type.Name, 3);
+        }
 
         var primitive = type.Variety == SimpleVariety.Atomic ? PrimitiveOf(type.BuiltIn) : null;
         foreach (var facet in type.Facets)

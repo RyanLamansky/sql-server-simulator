@@ -259,6 +259,18 @@ internal sealed partial class XmlSchemaCompiler
         for (var i = 0; i < pattern.Length; i++)
         {
             var c = pattern[i];
+            // XSD has no lazy quantifier and no quantifier missing its lower
+            // bound (probed 2026-10-16 against SQL Server 2025).
+            if (!inClass && c == '?' && i > 0 && pattern[i - 1] is '*' or '+' or '?' or '}' && (i < 2 || pattern[i - 2] != '\\'))
+            {
+                error = (i + 1, 62);
+                return null;
+            }
+            if (!inClass && c == '{' && i + 1 < pattern.Length && pattern[i + 1] == ',')
+            {
+                error = (i + 2, 80);
+                return null;
+            }
             switch (c)
             {
                 case '\\' when i + 1 < pattern.Length:
@@ -314,10 +326,13 @@ internal sealed partial class XmlSchemaCompiler
                 RegexParseError.ReversedCharacterRange => 45,
                 RegexParseError.ReversedQuantifierRange => 7,
                 RegexParseError.UnterminatedBracket => 46,
+                RegexParseError.InvalidUnicodePropertyEscape or RegexParseError.UnrecognizedUnicodeProperty => 11,
                 _ => null,
             };
+            // .NET reports an unknown property past its closing brace, real
+            // at it (probed 2026-10-16 against SQL Server 2025).
             if (state is { } known)
-                error = (Math.Clamp(e.Offset, 0, pattern.Length), known);
+                error = (Math.Clamp(known == 11 ? e.Offset - 1 : e.Offset, 0, pattern.Length), known);
             return null;
         }
     }

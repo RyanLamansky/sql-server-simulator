@@ -1415,9 +1415,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException XmlSchemaOccursOutOfOrder(string location) =>
         new($"Invalid combination of minOccurs and maxOccurs values, minOccurs has to be less than or equal to maxOccurs. Location: '{location}'.", 2382, 16, 1) { AbortsAsUnderXactAbort = true };
 
-    /// <summary>Msg 2386: a <c>totalDigits</c> facet of 0 (probed 2026-10-07 against SQL Server 2025).</summary>
-    internal static SimulatedSqlException XmlSchemaTotalDigitsOutOfRange() =>
-        new("The value of 'totalDigits' facet is outside of the allowed range", 2386, 16, 1) { AbortsAsUnderXactAbort = true };
+    /// <summary>Msg 2386: a <c>totalDigits</c> facet of 0, or a length or digits count past <see cref="int.MaxValue"/> (probed 2026-10-07 and 2026-10-16 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaFacetOutOfRange(string facet) =>
+        new($"The value of '{facet}' facet is outside of the allowed range", 2386, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6960: a decimal type's digits past what real stores — a
+    /// <c>totalDigits</c> over 38 (state 1), a <c>fractionDigits</c> over 10
+    /// (state 2), or more than 28 digits left of the point (state 3).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaDigitsOutOfRange(string type, byte state) =>
+        new($"Component '{type}' is outside of allowed range. Maximum for 'fractionDigits' is 10 and maximum number of digits for non fractional part is 28", 6960, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6946 / 6950 / 6951 / 6952: a named simple type's facets that
