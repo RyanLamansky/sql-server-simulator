@@ -774,6 +774,10 @@ internal sealed partial class Selection
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
         var unwindowedSequenceDrawsBefore = context.UnwindowedSequenceDrawsParsed;
         var inlinedCallsBefore = context.Batch.InlinedCalls?.Calls.Count ?? 0;
+        // A nested query's own bare projection — the `(SELECT NULL)` of a
+        // window's ORDER BY — describes it alone, so the flag the enclosing
+        // query spec cleared is put back as this expression ends.
+        using var enclosingBareProjection = ParserScope.Save(ref context.LastQuerySpecIsBareProjection);
         var combined = ParseUnionExceptChain(context, scope);
 
         // Msg 422 is settled against the shape of the whole statement, so the

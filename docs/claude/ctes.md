@@ -74,6 +74,7 @@ Probed against SQL Server 2025 (2026-08-05):
 | `WITH c AS (…) INSERT … / UPDATE … / DELETE … / MERGE … / SELECT … INTO …` | runs |
 
 That shape can name no CTE — it has no FROM and no subquery — so the diagnostic is settled from the statement's shape alone, at the point the outermost query expression finishes parsing.
+A nested query is bare on its own account only: the `(SELECT NULL)` of a window's `ORDER BY` inside a statement reading the CTE leaves the statement licensed, so each query expression restores the flag its enclosing query spec set as it ends.
 A stored body that parses outside the dispatch loop (a view, an inline TVF, a cursor declaration) never asks the question, which is what keeps those accepting the shape as real does; a procedure's body dispatches statements of its own, so its bare-projection statement raises at `CREATE` like real's.
 
 One divergence remains: real doesn't bind an unread CTE's body at all, so `WITH c AS (SELECT * FROM nosuchtable) SELECT 1` is Msg 422 there and Msg 208 here.

@@ -67,6 +67,14 @@ public sealed class UnusedCteTests
     public void CteReadThroughAnother_Licensed()
         => AreEqual(1, Run("with c1 as (select * from h1), c2 as (select * from c1) select * from c2"));
 
+    /// <summary>A FROM-less subquery inside a statement reading the CTE is no bare statement of its own.</summary>
+    [TestMethod]
+    [DataRow("with c as (select * from h1) select isnull((select null), a) from c")]
+    [DataRow("with c as (select * from h1) select row_number() over (order by (select null)) from c")]
+    [DataRow("with c as (select * from h1) select a from c where exists (select 1)")]
+    public void FromlessSubqueryOverCteRead_Licensed(string statement)
+        => AreEqual(1, Convert.ToInt32(Run(statement), System.Globalization.CultureInfo.InvariantCulture));
+
     [TestMethod]
     public void WhereClause_Licensed()
         => AreEqual(1, Run("with c as (select * from h1) select 1 where 1 = 1"));
