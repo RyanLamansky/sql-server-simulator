@@ -17,6 +17,9 @@ namespace SqlServerSimulator;
 /// </remarks>
 public sealed class SimulatedError
 {
+    /// <summary>Set once the message has fired <c>error_reported</c>, so a message queued again fires it once.</summary>
+    internal bool ExtendedEventReported;
+
     internal SimulatedError(byte @class, int lineNumber, string message, int number, string procedure, string server, string source, byte state)
     {
         this.Class = @class;

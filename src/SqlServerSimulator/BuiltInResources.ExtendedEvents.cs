@@ -139,7 +139,7 @@ internal static partial class BuiltInResources
         var text60 = NVarcharSqlType.Get(60, collation, Coercibility.Implicit);
         var mode = CharSqlType.Get(1, collation, Coercibility.Implicit);
         static EventSessionDefinition[] Definitions(Parser.BatchContext batch) =>
-            SeesEventSessions(batch) ? batch.Connection.Simulation.ExtendedEventsFor(batch).Definitions() : [];
+            SeesEventSessions(batch) ? batch.Connection.Simulation.ExtendedEventsFor(batch.Connection).Definitions() : [];
 
         HeapColumn[] sessions =
         [
@@ -354,11 +354,11 @@ internal static partial class BuiltInResources
     }
 
     private static RunningEventSession[] RunningXeSessions(Parser.BatchContext batch) =>
-        batch.Connection.Simulation.ExtendedEventsFor(batch).RunningSessions();
+        batch.Connection.Simulation.ExtendedEventsFor(batch.Connection).RunningSessions();
 
     private static IEnumerable<SqlValue[]> XeSessionRows(Parser.BatchContext batch, NVarcharSqlType name)
     {
-        var server = batch.Connection.Simulation.ExtendedEventsFor(batch);
+        var server = batch.Connection.Simulation.ExtendedEventsFor(batch.Connection);
         foreach (var (internalSession, running) in server.ListOrder())
         {
             if (internalSession is { } engine)
@@ -418,7 +418,7 @@ internal static partial class BuiltInResources
     /// <summary>The running sessions' targets, each session's in the reverse of the order it added them, as real lists them.</summary>
     private static IEnumerable<SqlValue[]> XeSessionTargetRows(Parser.BatchContext batch, NVarcharSqlType name)
     {
-        var server = batch.Connection.Simulation.ExtendedEventsFor(batch);
+        var server = batch.Connection.Simulation.ExtendedEventsFor(batch.Connection);
         foreach (var (internalSession, running) in server.ListOrder())
         {
             if (running is { } session)
@@ -482,7 +482,7 @@ internal static partial class BuiltInResources
     /// <summary>The running sessions' events, each session's in the reverse of its <c>event_id</c> order, as real lists them.</summary>
     private static IEnumerable<SqlValue[]> XeSessionEventRows(Parser.BatchContext batch, NVarcharSqlType name, NVarcharSqlType description)
     {
-        var server = batch.Connection.Simulation.ExtendedEventsFor(batch);
+        var server = batch.Connection.Simulation.ExtendedEventsFor(batch.Connection);
         foreach (var (internalSession, running) in server.ListOrder())
         {
             if (internalSession is { } engine)
@@ -517,7 +517,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> XeSessionObjectColumnRows(Parser.BatchContext batch, NVarcharSqlType name, NVarcharSqlType description, NVarcharSqlType objectType)
     {
-        var server = batch.Connection.Simulation.ExtendedEventsFor(batch);
+        var server = batch.Connection.Simulation.ExtendedEventsFor(batch.Connection);
         foreach (var (internalSession, running) in server.ListOrder())
         {
             if (internalSession is { } engine)

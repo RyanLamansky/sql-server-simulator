@@ -1,0 +1,249 @@
+using System.Globalization;
+using System.Text;
+
+namespace SqlServerSimulator.ExtendedEvents;
+
+/// <summary>
+/// The events the simulator fires: <c>error_reported</c> for every error and
+/// numbered message a statement raises, and <c>sql_batch_starting</c> /
+/// <c>sql_batch_completed</c> or <c>rpc_starting</c> / <c>rpc_completed</c>
+/// around each request, each with the fields SQL Server 2025 gives it
+/// (probed 2026-10-16). A firing costs one lookup when no running
+/// session takes the event.
+/// </summary>
+internal static class XeEvents
+{
+    private static class Objects
+    {
+        public static readonly XeObject ErrorReported = Event("error_reported");
+        public static readonly XeObject BatchStarting = Event("sql_batch_starting");
+        public static readonly XeObject BatchCompleted = Event("sql_batch_completed");
+        public static readonly XeObject RpcStarting = Event("rpc_starting");
+        public static readonly XeObject RpcCompleted = Event("rpc_completed");
+
+        private static XeObject Event(string name) => XeMetadata.Instance.Find("sqlserver", name, "event")!;
+    }
+
+    /// <summary>
+    /// <c>error_reported</c> for <paramref name="error"/>, intercepted when a
+    /// <c>TRY</c> frame open anywhere on the session will catch it. Category
+    /// and destination are the <c>SERVER</c> / <c>USER</c> pair every
+    /// statement error real raises reports. A message sent as class 0 was
+    /// raised at severity 10, which the event reports (probed 2026-10-16
+    /// against SQL Server 2025); <c>PRINT</c>'s unnumbered message fires none.
+    /// </summary>
+    public static void ErrorReported(SimulatedDbConnection connection, SimulatedError error, bool intercepted)
+    {
+        if (error.Number == 0)
+            return;
+        Fire(connection, "error_reported", static () => Objects.ErrorReported, @event => Data(@event,
+            ("error_number", XeValue.FromSigned(error.Number)),
+            ("severity", XeValue.FromSigned(error.Class == 0 ? 10 : error.Class)),
+            ("state", XeValue.FromSigned(error.State)),
+            ("user_defined", XeValue.FromBoolean(error.Number >= 50000)),
+            ("category", XeValue.FromMap(2, "SERVER")),
+            ("destination", XeValue.FromMap(2, "USER")),
+            ("is_intercepted", XeValue.FromBoolean(intercepted)),
+            ("message", XeValue.FromUnicode(error.Message)),
+            ("nsp", XeValue.FromUnicode(""))));
+    }
+
+    /// <summary><c>sql_batch_starting</c>, or <c>rpc_starting</c> for a parameterized or procedure command.</summary>
+    public static void RequestStarting(SimulatedDbConnection connection, SimulatedDbCommand command)
+    {
+        if (IsRpc(command, out var objectName))
+        {
+            Fire(connection, "rpc_starting", static () => Objects.RpcStarting, @event => Data(@event,
+                ("connection_reset_option", XeValue.FromMap(0, "None")),
+                ("object_name", XeValue.FromUnicode(objectName)),
+                ("statement", XeValue.FromUnicode(RpcStatement(command))),
+                ("data_stream", XeValue.FromBinary([]))));
+            return;
+        }
+        Fire(connection, "sql_batch_starting", static () => Objects.BatchStarting, @event => Data(@event, ("batch_text", XeValue.FromUnicode(command.CommandText))));
+    }
+
+    /// <summary>
+    /// <c>sql_batch_completed</c> or <c>rpc_completed</c>: <c>result</c> is
+    /// <c>Error</c> for a request an error ended and <c>OK</c> otherwise —
+    /// a statement error the batch went on past included (probed 2026-10-16
+    /// against SQL Server 2025).
+    /// </summary>
+    public static void RequestCompleted(SimulatedDbConnection connection, SimulatedDbCommand command, long durationMicroseconds, bool ended)
+    {
+        var result = ended ? XeValue.FromMap(1, "Error") : XeValue.FromMap(0, "OK");
+        if (IsRpc(command, out var objectName))
+        {
+            Fire(connection, "rpc_completed", static () => Objects.RpcCompleted, @event => Data(@event,
+                ("duration", XeValue.FromUnsigned((ulong)durationMicroseconds)),
+                ("result", result),
+                ("connection_reset_option", XeValue.FromMap(0, "None")),
+                ("object_name", XeValue.FromUnicode(objectName)),
+                ("statement", XeValue.FromUnicode(RpcStatement(command))),
+                ("data_stream", XeValue.FromBinary([]))));
+            return;
+        }
+        Fire(connection, "sql_batch_completed", static () => Objects.BatchCompleted, @event => Data(@event,
+            ("duration", XeValue.FromUnsigned((ulong)durationMicroseconds)),
+            ("result", result),
+            ("batch_text", XeValue.FromUnicode(command.CommandText))));
+    }
+
+    /// <summary>
+    /// Whether real sees <paramref name="command"/> as an RPC — a procedure
+    /// call, or a parameterized command SqlClient sends as
+    /// <c>sp_executesql</c> — with the object it calls.
+    /// </summary>
+    public static bool IsRpc(SimulatedDbCommand command, out string objectName)
+    {
+        if (command.CommandType == System.Data.CommandType.StoredProcedure)
+        {
+            var name = command.CommandText.Trim();
+            var dot = name.LastIndexOf('.');
+            objectName = name[(dot + 1)..].Trim('[', ']');
+            return true;
+        }
+        objectName = "sp_executesql";
+        return command.Parameters.Count != 0;
+    }
+
+    /// <summary>
+    /// The statement an RPC's events report, as real reconstructs it:
+    /// <c>exec dbo.p @a=1</c> for a procedure (with a trailing blank when it
+    /// takes no argument), <c>exec sp_executesql N'…',N'@p int',@p=1</c> for a
+    /// parameterized command.
+    /// </summary>
+    private static string RpcStatement(SimulatedDbCommand command)
+    {
+        var builder = new StringBuilder("exec ");
+        var parameters = command.Parameters;
+        if (command.CommandType == System.Data.CommandType.StoredProcedure)
+        {
+            _ = builder.Append(command.CommandText.Trim()).Append(' ');
+            var first = true;
+            foreach (SimulatedDbParameter parameter in parameters)
+            {
+                if (parameter.Direction == System.Data.ParameterDirection.ReturnValue)
+                    continue;
+                _ = builder.Append(first ? "" : ",").Append(ParameterName(parameter)).Append('=').Append(Literal(parameter.Value));
+                first = false;
+            }
+            return builder.ToString();
+        }
+        _ = builder.Append("sp_executesql N'").Append(command.CommandText.Replace("'", "''", StringComparison.Ordinal))
+            .Append("',N'").Append(Declaration(parameters).Replace("'", "''", StringComparison.Ordinal)).Append('\'');
+        foreach (SimulatedDbParameter parameter in parameters)
+            _ = builder.Append(',').Append(ParameterName(parameter)).Append('=').Append(Literal(parameter.Value));
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The parameters' declaration as SqlClient writes it; a parameter whose
+    /// value carries no SqlClient type — a table-valued one, a value the
+    /// simulator passes between its own sessions — is declared by name alone.
+    /// </summary>
+    private static string Declaration(SimulatedDbParameterCollection parameters)
+    {
+        try
+        {
+            return Simulation.SqlClientParameterDeclaration(parameters);
+        }
+        catch (ArgumentException)
+        {
+            return string.Join(',', parameters.Cast<SimulatedDbParameter>().Select(ParameterName));
+        }
+    }
+
+    private static string ParameterName(SimulatedDbParameter parameter) =>
+        parameter.ParameterName.StartsWith('@') ? parameter.ParameterName : "@" + parameter.ParameterName;
+
+    /// <summary>A parameter's value as SqlClient's RPC text spells it.</summary>
+    private static string Literal(object? value) => value switch
+    {
+        null or DBNull => "NULL",
+        string text => "N'" + text.Replace("'", "''", StringComparison.Ordinal) + "'",
+        bool flag => flag ? "1" : "0",
+        byte[] bytes => "0x" + Convert.ToHexString(bytes),
+        DateTime time => "'" + time.ToString("yyyy-MM-dd HH:mm:ss.fffffff", CultureInfo.InvariantCulture) + "'",
+        Guid guid => "'" + guid.ToString("D").ToUpperInvariant() + "'",
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+        _ => "N'" + value.ToString()?.Replace("'", "''", StringComparison.Ordinal) + "'",
+    };
+
+    /// <summary>The event's data values in column order, from those named; the rest read as their type's zero.</summary>
+    private static XeValue[] Data(XeObject @event, params ReadOnlySpan<(string Name, XeValue Value)> values)
+    {
+        var columns = @event.DataColumns;
+        var data = new XeValue[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            data[i] = XeContextValues.Zero(XeType.Of(columns[i].TypeName, columns[i].TypePackage));
+            foreach (var (name, value) in values)
+            {
+                if (name == columns[i].Name)
+                    data[i] = value;
+            }
+        }
+        return data;
+    }
+
+    /// <summary>
+    /// Fires the event named <paramref name="eventName"/> on every running
+    /// session that takes it. A server whose Extended Events state no
+    /// statement has made yet has only the default sessions running: an event
+    /// none of them takes costs nothing — not even the catalog's load — and
+    /// their predicates are asked before the state is made for one.
+    /// </summary>
+    private static void Fire(SimulatedDbConnection connection, string eventName, Func<XeObject> resolve, Func<XeObject, XeValue[]> data)
+    {
+        var simulation = connection.Simulation;
+        var server = simulation.ExtendedEventsIfMade;
+        if (server is null && !DefaultEventSessions.Started.Contains(eventName))
+            return;
+        var @event = resolve();
+        XeFiring? firing = null;
+        if (server is null)
+        {
+            firing = new XeFiring(@event, data(@event), connection, DateTime.UtcNow);
+            if (!DefaultsTake(connection, firing))
+                return;
+            server = simulation.ExtendedEventsFor(connection);
+        }
+        var subscribers = server.Subscribers(@event);
+        if (subscribers.Length == 0)
+            return;
+        firing ??= new XeFiring(@event, data(@event), connection, DateTime.UtcNow);
+        foreach (var (session, sessionEvent) in subscribers)
+        {
+            lock (session.Gate)
+            {
+                firing.Session = session;
+                firing.SessionEvent = sessionEvent;
+                if (sessionEvent.Predicate is { } predicate && !predicate.Evaluate(firing))
+                    continue;
+                var record = XeEventXml.Render(firing, sessionEvent);
+                foreach (var target in session.Definition.Targets)
+                {
+                    if (session.Targets.TryGetValue(target.Id, out var state))
+                        state.Accept(firing, sessionEvent, record);
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether a default session that starts with the server takes <paramref name="firing"/>.</summary>
+    private static bool DefaultsTake(SimulatedDbConnection connection, XeFiring firing)
+    {
+        foreach (var definition in DefaultEventSessions.Definitions(connection))
+        {
+            if (!definition.Options.StartupState)
+                continue;
+            foreach (var sessionEvent in definition.Events)
+            {
+                if (ReferenceEquals(sessionEvent.Event, firing.Event) && sessionEvent.Predicate?.Evaluate(firing) != false)
+                    return true;
+            }
+        }
+        return false;
+    }
+}

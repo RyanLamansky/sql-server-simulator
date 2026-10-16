@@ -149,6 +149,13 @@ public sealed partial class SimulatedSqlException : DbException
     internal SimulatedSqlException EndingBatch() => new(this.Message, [.. this.Errors]) { TerminatesBatch = true };
 
     /// <summary>
+    /// Set once the error has fired <c>error_reported</c>, so an error that
+    /// unwinds through several statement frames — a procedure's, then its
+    /// caller's — fires it once.
+    /// </summary>
+    internal bool ExtendedEventReported;
+
+    /// <summary>
     /// What <c>@@ERROR</c> reads after this error, where that isn't its
     /// number: a <c>RAISERROR</c> of an unregistered id at severity 11 and up,
     /// or <c>WITH SETERROR</c>, reports Msg 18054 and leaves <c>@@ERROR</c>

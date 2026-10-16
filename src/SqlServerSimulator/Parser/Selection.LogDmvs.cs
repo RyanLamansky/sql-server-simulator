@@ -105,13 +105,13 @@ partial class Selection
     /// expressions, each of which may be <c>DEFAULT</c> (read as NULL); too
     /// few is Msg 313, too many Msg 8144.
     /// </summary>
-    private static Expression?[] ParseIntegerTvfArguments(ParserContext context, string functionName, int count)
+    private static Expression?[] ParseIntegerTvfArguments(ParserContext context, string functionName, int count, byte insufficientState = 2)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var arguments = new Expression?[count];
         if (context.GetNextRequired() is Operator { Character: ')' })
-            throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName);
+            throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, insufficientState);
         for (var i = 0; ; i++)
         {
             Expression? argument = null;
@@ -129,7 +129,7 @@ partial class Selection
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (i < count - 1)
-                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName);
+                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, insufficientState);
             if (i >= count)
                 throw SimulatedSqlException.TooManyArgumentsToFunction(functionName);
             break;

@@ -1348,6 +1348,15 @@ public sealed partial class Simulation
                 notified.EndedUnderBinding = null;
                 yield return new SimulatedInfoOutcome(SimulatedSqlException.TransactionEndedByAnotherSessionMessage(notified));
             }
+            // The request's starting event fires once it has the session, its
+            // completed event once its outcomes are through.
+            var xeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (command.Connection is { } xeConnection)
+            {
+                xeConnection.Session.XeSqlText = ExtendedEvents.XeEvents.IsRpc(command, out _) ? null : command.CommandText;
+                xeConnection.Session.RequestEndedByError = false;
+                ExtendedEvents.XeEvents.RequestStarting(xeConnection, command);
+            }
             // A batch a WRITETEXT BULK suspended takes this request as its
             // data's, the request's own text going unread (probed 2026-10-07
             // against SQL Server 2025).
@@ -1430,6 +1439,11 @@ public sealed partial class Simulation
             }
             if (parking)
                 yield break;
+            if (command.Connection is { } xeCompleted)
+            {
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(xeStarted);
+                ExtendedEvents.XeEvents.RequestCompleted(xeCompleted, command, (long)elapsed.TotalMicroseconds, xeCompleted.Session.RequestEndedByError);
+            }
             // Another request ended the transaction this one works on, and the
             // batch's end hasn't already rolled back what it carried on in.
             SimulatedErrorOutcome? abandoned = null;

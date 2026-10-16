@@ -131,6 +131,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException XeOperatorNotDefined(string @event, string op, string type, string source) =>
         new($"The predicate on event \"{@event}\" is invalid.  Operator '{op}' is not defined for type \"{type}\", event attribute or predicate source: \"{source}\".", 25715, 16, 2);
 
+    /// <summary>Msg 25718: <c>sys.fn_xe_file_target_read_file</c> given no path, named <c>(null)</c>.</summary>
+    internal static SimulatedSqlException XeLogFileNameInvalid(string name) =>
+        new($"The log file name \"{name}\" is invalid.  Verify that the file exists and that the SQL Server service account has access to it.", 25718, 16, 3);
+
+    /// <summary>Msg 25719: <c>sys.fn_xe_file_target_read_file</c> given an initial file name without its offset, or the reverse.</summary>
+    internal static SimulatedSqlException XeInitialFileAndOffsetUnpaired() =>
+        new("Initial file name and initial offset must be specified as a pair. Please correct the parameters and retry your query.", 25719, 16, 4);
+
     /// <summary>Msg 40133: an event session <c>ON DATABASE</c>, an Azure SQL Database surface.</summary>
     internal static SimulatedSqlException DatabaseEventSessionNotSupported() =>
         new("This operation is not supported in this version of SQL Server.", 40133, 16, 13);

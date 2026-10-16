@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using SqlServerSimulator.ExtendedEvents;
 using SqlServerSimulator.Parser;
@@ -16,14 +17,14 @@ partial class Simulation
 
     /// <summary>
     /// The server's Extended Events state, made on first use with real's
-    /// default sessions in it. <paramref name="batch"/> parses the defaults'
+    /// default sessions in it. <paramref name="connection"/> parses the defaults'
     /// predicates the first time any simulation in the process needs them.
     /// </summary>
-    internal ExtendedEventsServer ExtendedEventsFor(BatchContext batch)
+    internal ExtendedEventsServer ExtendedEventsFor(SimulatedDbConnection connection)
     {
         if (Volatile.Read(ref this.extendedEvents) is { } existing)
             return existing;
-        var created = new ExtendedEventsServer(DefaultEventSessions.Definitions(batch), this.SeedDate);
+        var created = new ExtendedEventsServer(DefaultEventSessions.Definitions(connection), this.SeedDate);
         return Interlocked.CompareExchange(ref this.extendedEvents, created, null) ?? created;
     }
 
@@ -77,7 +78,7 @@ partial class Simulation
         var simulation = context.Simulation;
         if (!simulation.SessionHoldsServerPermission(context.Connection, Permission.CreateAnyEventSession))
             throw SimulatedSqlException.UserDoesNotHavePermission();
-        var server = simulation.ExtendedEventsFor(context.Batch);
+        var server = simulation.ExtendedEventsFor(context.Connection);
         var id = server.AllocateSessionId();
         if (server.Find(name) is not null)
             throw SimulatedSqlException.EventSessionAlreadyExists(name);
@@ -160,7 +161,7 @@ partial class Simulation
         if (onDatabase)
             throw SimulatedSqlException.DatabaseEventSessionNotSupported();
         var simulation = context.Simulation;
-        var server = simulation.ExtendedEventsFor(context.Batch);
+        var server = simulation.ExtendedEventsFor(context.Connection);
         var definition = server.Find(name) ?? throw SimulatedSqlException.CannotAlterOrDropEventSession("alter", name, 28);
         var running = server.IsRunning(definition.Id);
 
@@ -254,7 +255,7 @@ partial class Simulation
         if (onDatabase)
             throw SimulatedSqlException.DatabaseEventSessionNotSupported();
         var simulation = context.Simulation;
-        var server = simulation.ExtendedEventsFor(context.Batch);
+        var server = simulation.ExtendedEventsFor(context.Connection);
         var definition = server.Find(name) ?? throw SimulatedSqlException.CannotAlterOrDropEventSession("drop", name, 26);
         if (!simulation.SessionHoldsServerPermission(context.Connection, Permission.DropAnyEventSession))
             throw SimulatedSqlException.CannotAlterOrDropEventSession("drop", name, 27);
@@ -872,15 +873,31 @@ internal static class DefaultEventSessions
 {
     private static EventSessionDefinition[]? definitions;
 
-    public static EventSessionDefinition[] Definitions(BatchContext batch)
+    /// <summary>
+    /// The names of the events the sessions that start with the server take,
+    /// read off the resource without parsing a predicate, so an event none of
+    /// them takes fires on a server with no Extended Events state at no cost.
+    /// </summary>
+    public static readonly FrozenSet<string> Started = ReadStarted();
+
+    private static FrozenSet<string> ReadStarted()
     {
-        if (Volatile.Read(ref definitions) is { } parsed)
-            return parsed;
-        var built = Build(batch);
-        return Interlocked.CompareExchange(ref definitions, built, null) ?? built;
+        var started = new HashSet<string>(StringComparer.Ordinal);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in Rows())
+        {
+            if (row[0] == "S" && row[9] == "1")
+                _ = started.Add(row[1]);
+        }
+        foreach (var row in Rows())
+        {
+            if (row[0] == "E" && started.Contains(row[1]))
+                _ = names.Add(row[5]);
+        }
+        return names.ToFrozenSet(StringComparer.Ordinal);
     }
 
-    private static EventSessionDefinition[] Build(BatchContext batch)
+    private static List<string[]> Rows()
     {
         using var stream = typeof(DefaultEventSessions).Assembly.GetManifestResourceStream("SqlServerSimulator.XeDefaultSessions.tsv")
             ?? throw new InvalidOperationException("Embedded resource SqlServerSimulator.XeDefaultSessions.tsv is missing.");
@@ -891,6 +908,20 @@ internal static class DefaultEventSessions
             if (line.Length != 0)
                 rows.Add(line.Split('\t'));
         }
+        return rows;
+    }
+
+    public static EventSessionDefinition[] Definitions(SimulatedDbConnection connection)
+    {
+        if (Volatile.Read(ref definitions) is { } parsed)
+            return parsed;
+        var built = Build(connection);
+        return Interlocked.CompareExchange(ref definitions, built, null) ?? built;
+    }
+
+    private static EventSessionDefinition[] Build(SimulatedDbConnection connection)
+    {
+        var rows = Rows();
         var metadata = XeMetadata.Instance;
         XeObject Resolve(string package, string module, string name, string objectType) =>
             metadata.Objects.First(candidate => candidate.ObjectType == objectType && candidate.Name == name && candidate.Package.Name == package && candidate.Package.ModuleGuid == module);
@@ -932,7 +963,7 @@ internal static class DefaultEventSessions
                 XePredicate? predicate = null;
                 if (row[6] != "\\N")
                 {
-                    var syntax = ParsePredicate(batch, row[6]);
+                    var syntax = ParsePredicate(connection, row[6]);
                     text = syntax.Text;
                     predicate = syntax.Bind(@event);
                 }
@@ -954,9 +985,9 @@ internal static class DefaultEventSessions
     }
 
     /// <summary>Parses a stored predicate text through the session's tokenizer, outside any statement.</summary>
-    private static XePredicateSyntax ParsePredicate(BatchContext batch, string text)
+    private static XePredicateSyntax ParsePredicate(SimulatedDbConnection connection, string text)
     {
-        using var command = batch.Connection.CreateCommand();
+        using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // The text is a predicate from the assembly's own default-session resource, never user input.
         command.CommandText = text;
 #pragma warning restore CA2100

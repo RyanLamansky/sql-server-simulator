@@ -864,6 +864,7 @@ partial class Simulation
                 // statement.
                 this.Ending = StatementEnding.Continued;
                 batch.BatchAborted = true;
+                connection.Session.RequestEndedByError = true;
             }
             else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex) && !(ex.EndedCalledBatch && ReferenceEquals(ex.EndedCalledBatchIn, batch)) && !ex.EndsInsertExec)
             {
@@ -891,6 +892,18 @@ partial class Simulation
                     ex.EndedCalledBatchIn = batch;
                 }
                 this.Ending = StatementEnding.Propagated;
+            }
+
+            // Every error real raises fires error_reported, intercepted when a
+            // TRY frame anywhere on the session will catch it (probed
+            // 2026-10-16 against SQL Server 2025); a deferred name never
+            // raised one.
+            if (this.Ending != StatementEnding.Deferred && !ex.ExtendedEventReported)
+            {
+                ex.ExtendedEventReported = true;
+                var intercepted = this.Ending == StatementEnding.Caught || (connection.OpenTryFrames > 0 && !ex.AbortsTransaction && !ex.IsAttention);
+                foreach (var error in ex.Errors)
+                    ExtendedEvents.XeEvents.ErrorReported(connection, error, intercepted);
             }
         }
 

@@ -254,6 +254,17 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public string? BatchText;
 
+    /// <summary>
+    /// The text an event's <c>sqlserver.sql_text</c> action reports: the
+    /// running SQL batch's, null for an RPC — real reports none for a
+    /// parameterized or procedure call (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    public string? XeSqlText;
+
+    /// <summary>Set when an error ends the running request's batch, which its completion event reports as <c>Error</c>.</summary>
+    public bool RequestEndedByError;
+
     /// <summary>Where in <see cref="BatchText"/> the running top-level statement starts, in characters.</summary>
     public int StatementStartIndex;
 

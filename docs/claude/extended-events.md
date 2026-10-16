@@ -66,7 +66,37 @@ Each raises `CREATE_EVENT_SESSION` / `ALTER_EVENT_SESSION` / `DROP_EVENT_SESSION
 `ALTER ANY EVENT SESSION` covers them all, and `CONTROL SERVER` covers it.
 None of them opens the views: `sys.server_event_sessions` and three of its companions list nothing without `VIEW SERVER PERFORMANCE STATE`, `sys.server_event_session_events` refuses with Msg 262 then 297 as a database-state DMV does, and the five `sys.dm_xe_session*` views with Msg 297 state 13 alone.
 
+## Events
+
+`XeEvents` fires five events, each with every data field real gives it in column order and the actions after them in the reverse of their written order, as real writes them:
+
+- `error_reported` for every error a statement raises — from `StatementLifecycle.RouteError`, once per error however many frames it unwinds through, `is_intercepted` when a `TRY` frame anywhere on the session will catch it — and for every numbered message as it is queued (`PendingMessageQueue`); `PRINT`'s unnumbered message fires none, and a message sent as class 0 reports the severity 10 it was raised at.
+  Category and destination are the `SERVER` / `USER` pair every probed statement error reports.
+- `sql_batch_starting` and `sql_batch_completed` around a command sent as a batch, `rpc_starting` and `rpc_completed` around a parameterized command (SqlClient's `sp_executesql`) or a procedure call, with the statement real reconstructs (`exec sp_executesql N'…',N'@p int',@p=1`, `exec dbo.p @a=7`).
+  `result` is `Error` only for a request an error ended — a statement error the batch went on past is `OK`, as on real.
+
+An event none of the sessions that start with the server takes costs one set lookup until a statement makes the server's Extended Events state; an `error_reported` is first judged against `system_health`'s own predicate, so the state is made only for an error it would keep.
+The actions read the session (`session_id`, `client_app_name`, `client_hostname`, `client_pid`, `database_id` / `database_name`, the principal names, `transaction_id`, `sql_text` — the batch's text, none for an RPC as on real) and the session's own counters (`event_sequence`, `package0.counter`); one the simulator keeps no state for reads as its type's zero.
+A predicate evaluates over the same values, its string comparators case-insensitive and its `like` the simulator's `LIKE` matcher.
+
+## Targets
+
+- `ring_buffer` keeps the newest `max_events_limit` events (1,000 by default), its `target_data` the `RingBufferTarget` document real's has.
+- `event_counter` counts each event under its package, every package listed in `sys.dm_xe_packages`' order.
+- `histogram` buckets by an action (`source_type = 1`) or by a field of `filtering_event_name` (`0`), slots in descending count.
+- `pair_matching` keeps each `begin_event` as an orphan until an `end_event` pairs with it.
+- `event_file` writes `name_0_<FILETIME>.xel` under `/var/opt/mssql/log/` for a relative name, one file per run of the session.
+  The simulator keeps its own form of the file in memory, on the simulation's Extended Events state, so it outlives the session and its drop, and `sys.fn_xe_file_target_read_file(path, mdpath, initial_file_name, initial_offset)` reads it back: every file the path matches (`*` any run of characters, a relative path under the log directory), each event in the file's own shorter form — no `<type>` elements — with the buffer offset real reports.
+  A NULL path is Msg 25718 naming `(null)`, an initial file without its offset (or the reverse) Msg 25719, and a path matching nothing reads nothing.
+
+### Not modeled yet
+
+- The statement-level and module events (`sql_statement_starting` / `_completed`, `sp_statement_*`, `module_end`), the lock, wait and deadlock events (`lock_acquired`, `wait_info`, `xml_deadlock_report` — which `system_health` takes), the login messages real's `error_reported` sees, and every other event in the catalog: a session takes them, and they never fire.
+- The live event stream (`event_stream`, `sys.fn_MSxe_read_event_stream`), and a file target on a host disk: the event file never leaves the simulation.
+- `cpu_time`, the read and write counts and `row_count` read zero; `duration` is the request's measured time.
+
 ### Divergences
 
 - The running-session views list each session's events and actions newest first and its targets asynchronous first, then file targets, then synchronous ones, which matches every probed session's targets and the user sessions' events; real lists `system_health`'s events in an internal hash order the simulator doesn't reproduce.
 - Addresses are stand-ins numbered from the session's start, `create_time` the simulation's start for the sessions that start with it, and the counters real's engine keeps (`buffer_processed_count`, `total_bytes_generated`, `event_fire_count` and the like) read zero.
+- `event_counter` lists a package's events in the order the session added them, where real follows an internal hash; `pair_matching` pairs each end with the oldest waiting begin and drops an end no begin waits for, where real also keeps such an end as an orphan and honors the matching columns; and an event file's offsets step by a default session's buffer size whatever the session's own.

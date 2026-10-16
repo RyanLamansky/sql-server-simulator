@@ -35,6 +35,7 @@ public sealed class SimulatedDbConnection : DbConnection
     internal SimulatedDbConnection(Simulation simulation, int spid)
     {
         this.Simulation = simulation;
+        this.PendingMessages = new PendingMessageQueue(this);
         this.Session = new SessionToken(spid)
         {
             Owner = new WeakReference<SimulatedDbConnection>(this, trackResurrection: true),
@@ -2630,7 +2631,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// itself (a trigger, <c>INSERT … EXEC</c>) hands the body's messages back
     /// here so the enclosing statement places them.
     /// </summary>
-    internal readonly Queue<SimulatedError> PendingMessages = new();
+    internal readonly PendingMessageQueue PendingMessages;
 
     /// <summary>Delivers one message to <see cref="InfoMessage"/> subscribers.</summary>
     internal void RaiseInfoMessage(SimulatedError message)

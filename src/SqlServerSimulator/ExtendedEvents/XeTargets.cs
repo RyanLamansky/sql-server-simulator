@@ -26,7 +26,7 @@ internal abstract class XeTargetState(SessionTarget target)
     };
 
     /// <summary>Takes one event the session's predicate passed, already rendered as XML.</summary>
-    public abstract void Accept(XeFiring firing, SessionEvent sessionEvent, string xml);
+    public abstract void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record);
 
     /// <summary>The target's <c>target_data</c>, NULL for one that reports none.</summary>
     public abstract string? TargetData();
@@ -50,7 +50,7 @@ internal abstract class XeTargetState(SessionTarget target)
 /// <summary>A target the simulator keeps nothing for (<c>etw_classic_sync_target</c>).</summary>
 internal sealed class SilentTarget(SessionTarget target) : XeTargetState(target)
 {
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml) => this.ExecutionCount++;
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record) => this.ExecutionCount++;
 
     public override string? TargetData() => null;
 }
@@ -65,12 +65,12 @@ internal sealed class RingBufferTarget(SessionTarget target) : XeTargetState(tar
     private long processed;
     private long memoryUsed;
 
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml)
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
     {
         this.ExecutionCount++;
         this.processed++;
-        this.events.Enqueue(xml);
-        this.memoryUsed += xml.Length;
+        this.events.Enqueue(record.Xml);
+        this.memoryUsed += record.Xml.Length;
         var limit = this.Attribute("max_events_limit", 1000);
         while (limit > 0 && this.events.Count > limit)
             this.memoryUsed -= this.events.Dequeue().Length;
@@ -97,7 +97,7 @@ internal sealed class EventCounterTarget(SessionTarget target) : XeTargetState(t
 {
     private readonly Dictionary<SessionEvent, long> counts = [];
 
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml)
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
     {
         this.ExecutionCount++;
         this.counts[sessionEvent] = this.counts.GetValueOrDefault(sessionEvent) + 1;
@@ -130,7 +130,7 @@ internal sealed class HistogramTarget(SessionTarget target) : XeTargetState(targ
 {
     private readonly Dictionary<string, long> slots = new(StringComparer.Ordinal);
 
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml)
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
     {
         this.ExecutionCount++;
         var source = this.Target.FieldText("source") ?? "";
@@ -175,13 +175,13 @@ internal sealed class PairMatchingTarget(SessionTarget target) : XeTargetState(t
     private readonly List<string> orphans = [];
     private long matched;
 
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml)
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
     {
         this.ExecutionCount++;
         var name = sessionEvent.Event.Package.Name + "." + sessionEvent.Event.Name;
         if (name.Equals(this.Target.FieldText("begin_event"), StringComparison.OrdinalIgnoreCase))
         {
-            this.orphans.Add(xml);
+            this.orphans.Add(record.Xml);
         }
         else if (name.Equals(this.Target.FieldText("end_event"), StringComparison.OrdinalIgnoreCase) && this.orphans.Count != 0)
         {
@@ -223,10 +223,10 @@ internal sealed class EventFileTarget : XeTargetState
     /// <summary>Where a relative file name lands: real's Linux server's error-log directory.</summary>
     public const string LogDirectory = "/var/opt/mssql/log/";
 
-    public override void Accept(XeFiring firing, SessionEvent sessionEvent, string xml)
+    public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
     {
         this.ExecutionCount++;
-        this.File.Append(sessionEvent.Event, firing.Timestamp, xml);
+        this.File.Append(sessionEvent.Event, firing.Timestamp, record.FileXml);
     }
 
     public override string TargetData() =>
@@ -239,25 +239,33 @@ internal sealed class EventFileTarget : XeTargetState
 /// <summary>
 /// One <c>.xel</c> file an <c>event_file</c> target wrote: the events in the
 /// order written, each with the offset <c>sys.fn_xe_file_target_read_file</c>
-/// reports. The simulator keeps its own form of the file, in memory, for the
-/// life of the process's simulations that wrote it.
+/// reports — the start of the buffer it went out in, which for real is the
+/// 16 KB header's end for every event of a default session's first buffer
+/// (probed 2026-10-16 against SQL Server 2025). The simulator keeps its own
+/// form of the file, in memory, for the life of the simulation.
 /// </summary>
 internal sealed class XeEventFile(string path)
 {
+    private const long HeaderBytes = 16384;
+
+    /// <summary>A default session's buffer, rounded to its 64 KB pages, which the offsets step by.</summary>
+    private const long BufferBytes = 1_441_792;
+
     public readonly string Path = path;
 
-    private readonly Lock gate = new();
+    /// <summary>Guards the events, which a firing appends and a read copies.</summary>
+    public readonly Lock Gate = new();
 
     public readonly List<(XeObject Event, DateTime Timestamp, string Xml, long Offset)> Events = [];
 
     /// <summary>The file's size: real's 16 KB header, then each event's bytes.</summary>
-    public long Length = 16384;
+    public long Length = HeaderBytes;
 
     public void Append(XeObject @event, DateTime timestamp, string xml)
     {
-        lock (this.gate)
+        lock (this.Gate)
         {
-            this.Events.Add((@event, timestamp, xml, this.Length));
+            this.Events.Add((@event, timestamp, xml, HeaderBytes + ((this.Length - HeaderBytes) / BufferBytes * BufferBytes)));
             this.Length += Encoding.Unicode.GetByteCount(xml);
         }
     }

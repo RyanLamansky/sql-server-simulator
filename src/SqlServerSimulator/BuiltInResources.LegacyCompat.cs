@@ -1019,6 +1019,7 @@ internal static partial class BuiltInResources
         ("fn_varbintohexstr", -565035985, "FN"),
         ("fn_varbintohexsubstring", -403477184, "FN"),
         ("fn_virtualfilestats", -337551382, "TF"),
+        ("fn_xe_file_target_read_file", -944605812, "IF"),
     ];
 
     /// <summary>
