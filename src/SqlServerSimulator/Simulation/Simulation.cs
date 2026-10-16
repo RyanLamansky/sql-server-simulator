@@ -3750,6 +3750,10 @@ public sealed partial class Simulation
                 RefuseUnbuiltStatement(context, verb: null);
                 foreach (var o in ParseExec(batch, implicitExec: true))
                     yield return o;
+                // As after an EXEC, a token the argument list doesn't take is
+                // Msg 102 (or 156 at a keyword) rather than the next statement
+                // (probed 2026-10-15 against SQL Server 2025: `foo bar baz`).
+                context.RejectTrailingToken();
                 break;
 
             // A stray END is named as a plain token, where any other keyword

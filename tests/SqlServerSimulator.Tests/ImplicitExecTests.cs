@@ -80,6 +80,27 @@ public sealed class ImplicitExecTests
         _ = sim.AssertSqlError(sql, 102);
     }
 
+    /// <summary>
+    /// A token the argument list doesn't take is a syntax error at it, as after
+    /// an explicit EXEC, never the start of a statement the call runs ahead of
+    /// (probed 2026-10-15 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("foo bar baz", "Incorrect syntax near 'baz'.")]
+    [DataRow("foo bar, baz qux", "Incorrect syntax near 'qux'.")]
+    [DataRow("foo bar = 1", "Incorrect syntax near '='.")]
+    [DataRow("selct x from t", "Incorrect syntax near the keyword 'from'.")]
+    public void ImplicitExec_RejectsATrailingToken(string sql, string message)
+        => new Simulation().AssertSqlError(sql, message.Contains("keyword", StringComparison.Ordinal) ? 156 : 102, message);
+
+    /// <summary>A star in a select list takes no alias (probed 2026-10-15 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select * frm t", 102, "Incorrect syntax near 'frm'.")]
+    [DataRow("select t.* x from t", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("select * as x from t", 156, "Incorrect syntax near the keyword 'as'.")]
+    public void SelectStar_RefusesAnAlias(string sql, int number, string message)
+        => new Simulation().AssertSqlError("create table t (a int); " + sql, number, message);
+
     /// <summary>An undeclared variable opening a batch is bound as the procedure name.</summary>
     [TestMethod]
     [DataRow("@x int")]

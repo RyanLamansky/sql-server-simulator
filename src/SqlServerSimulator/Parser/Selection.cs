@@ -2399,6 +2399,12 @@ internal sealed partial class Selection
                 case UnquotedString { IsLabelDeclaration: true }:
                     goto ExitWhileTokenLoop;
 
+                // A star takes no alias (probed 2026-10-15 against SQL Server
+                // 2025: `SELECT * x FROM t` is Msg 102 at x, `SELECT * AS x`
+                // Msg 156 at AS).
+                case Name or Literal { Value.Type.Category: SqlTypeCategory.String } or ReservedKeyword { Keyword: Keyword.As } when expressions[^1] is StarProjection:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+
                 case Name name:
                     expressions[^1] = AssignColumnAlias(expressions[^1], name.Value);
                     continue;
