@@ -73,10 +73,13 @@ internal static class Ownership
 
     /// <summary>
     /// Refuses to drop a principal that still owns something, in real's order
-    /// (probed 2026-09-27 against SQL Server 2025): an object, then a type, a
-    /// schema, a role (itself included), an XML schema collection and a
-    /// full-text catalog. Only an explicit object owner counts — an object
-    /// owned through its schema answers to the schema.
+    /// (probed 2026-09-27 and, from the assembly on, 2026-10-16 against SQL
+    /// Server 2025): an object, then a type, a schema, a role (itself
+    /// included), an assembly, a message type, a contract, a service, a
+    /// remote service binding — then one naming it as its user — a route, an
+    /// XML schema collection and a full-text catalog. Only an explicit object
+    /// owner counts — an object owned through its schema answers to the
+    /// schema.
     /// </summary>
     internal static void RejectDropOfOwner(Database database, int principalId)
     {
@@ -115,6 +118,44 @@ internal static class Ownership
         {
             if (principal.TypeCode == "R" && principal.OwningPrincipalId == principalId)
                 throw SimulatedSqlException.PrincipalOwnsRole();
+        }
+        foreach (var (_, assembly) in database.Assemblies)
+        {
+            if (assembly.PrincipalId == principalId)
+                throw SimulatedSqlException.PrincipalOwnsAssembly();
+        }
+        if (database.ServiceBrokerIfUsed is { } broker)
+        {
+            foreach (var (_, messageType) in broker.MessageTypes)
+            {
+                if (messageType.PrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalOwnsA("a message type");
+            }
+            foreach (var (_, contract) in broker.Contracts)
+            {
+                if (contract.PrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalOwnsA("a contract");
+            }
+            foreach (var (_, service) in broker.Services)
+            {
+                if (service.PrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalOwnsA("a service");
+            }
+            foreach (var (_, binding) in broker.RemoteServiceBindings)
+            {
+                if (binding.PrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalOwnsA("a remote service binding");
+            }
+            foreach (var (_, binding) in broker.RemoteServiceBindings)
+            {
+                if (binding.RemotePrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalIsRemoteServiceBindingUser();
+            }
+            foreach (var (_, route) in broker.Routes)
+            {
+                if (route.PrincipalId == principalId)
+                    throw SimulatedSqlException.PrincipalOwnsA("a route");
+            }
         }
         foreach (var (_, schema) in database.Schemas)
         {

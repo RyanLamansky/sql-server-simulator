@@ -901,6 +901,26 @@ public class ClrAssemblyTests
     }
 
     [TestMethod]
+    [Description("GRANT carries the ASSEMBLY class, which gates ALTER AUTHORIZATION on the assembly itself; an owner change drops its grants, and an assembly's owner can't be dropped (probed 2026-10-16 against SQL Server 2025).")]
+    public void AssemblyClass_Grants_GateOwnership_AndKeepItsOwner()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create user u1 without login; create user u2 without login; create role r");
+        _ = sim.ExecuteNonQuery("grant take ownership on assembly::simclr to u2; grant control, alter, references, view definition on assembly::simclr to u1");
+        AreEqual("ASSEMBLY:ALTER,ASSEMBLY:CONTROL,ASSEMBLY:REFERENCES,ASSEMBLY:TAKE OWNERSHIP,ASSEMBLY:VIEW DEFINITION", sim.ExecuteScalar(
+            "select string_agg(class_desc + ':' + permission_name, ',') within group (order by permission_name) from sys.database_permissions where class = 5 and major_id = (select assembly_id from sys.assemblies where name = 'simclr')"));
+        sim.ValidateSyntaxError("grant execute on assembly::simclr to u1", "EXECUTE");
+        sim.AssertSqlError("grant control on assembly::dbo.simclr to u1", 15151, "Cannot find the assembly 'dbo.simclr', because it does not exist or you do not have permission.");
+
+        // CONTROL on the assembly covers TAKE OWNERSHIP, and the change drops every grant on it.
+        AreEqual("u1|0", sim.ExecuteScalar("execute as user = 'u1'; alter authorization on assembly::simclr to u1; revert; select concat(user_name(principal_id), '|', (select count(*) from sys.database_permissions where class = 5)) from sys.assemblies where name = 'simclr'"));
+        sim.AssertSqlError("execute as user = 'u2'; alter authorization on assembly::simclr to u2", 15151, "Cannot find the assembly 'simclr', because it does not exist or you do not have permission.");
+
+        _ = sim.AssertSqlError("alter authorization on role::r to u1; drop user u1", 15421);
+        sim.AssertSqlError("alter authorization on role::r to dbo; create message type mt authorization u1; drop user u1", 15154, "The database principal owns an assembly and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on assembly::simclr to dbo; drop user u1", 15138, "The database principal owns a message type in the database, and cannot be dropped.");
+    }
+
+    [TestMethod]
     [Description("A CLR table-valued function's ORDER clause promises an order and changes nothing a query reads.")]
     public void ClrTableFunction_OrderClause()
         => AreEqual(3, ClrFrameworkFixture.Simulation(

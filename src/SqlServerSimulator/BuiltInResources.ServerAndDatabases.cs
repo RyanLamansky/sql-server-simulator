@@ -2139,21 +2139,23 @@ internal static partial class BuiltInResources
         return (0, family, generation, 1, tier, flags);
     }
 
+    /// <summary>The server's system endpoints, each owned by <c>sa</c>: id, name, protocol and its description.</summary>
+    internal static readonly (int Id, string Name, byte Protocol, string ProtocolDesc)[] SystemEndpoints =
+    [
+        (1, "Dedicated Admin Connection", 2, "TCP"),
+        (2, "TSQL Local Machine", 4, "SHARED_MEMORY"),
+        (3, "TSQL Named Pipes", 3, "NAMED_PIPES"),
+        (4, "TSQL Default TCP", 2, "TCP"),
+        (5, "TSQL Default VIA", 5, "VIA"),
+    ];
+
     /// <summary>
     /// The system endpoints' rows — every one for <c>sys.endpoints</c>, the TCP
     /// pair with their port columns appended for <c>sys.tcp_endpoints</c>.
     /// </summary>
     private static IEnumerable<SqlValue[]> SystemEndpointRows(bool tcpOnly)
     {
-        (int Id, string Name, byte Protocol, string ProtocolDesc)[] endpoints =
-        [
-            (1, "Dedicated Admin Connection", 2, "TCP"),
-            (2, "TSQL Local Machine", 4, "SHARED_MEMORY"),
-            (3, "TSQL Named Pipes", 3, "NAMED_PIPES"),
-            (4, "TSQL Default TCP", 2, "TCP"),
-            (5, "TSQL Default VIA", 5, "VIA"),
-        ];
-        foreach (var (id, name, protocol, protocolDesc) in endpoints)
+        foreach (var (id, name, protocol, protocolDesc) in SystemEndpoints)
         {
             if (tcpOnly && protocol != 2)
                 continue;

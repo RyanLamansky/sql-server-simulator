@@ -114,6 +114,20 @@ partial class SimulatedSqlException
         new("The database principal owns a database role and cannot be dropped.", 15421, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15154: dropping a principal that owns an
+    /// assembly. Probed 2026-10-16 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException PrincipalOwnsAssembly() =>
+        new("The database principal owns an assembly and cannot be dropped.", 15154, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 33015: dropping a user a remote service binding
+    /// names in its <c>WITH USER</c>. Probed 2026-10-16 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException PrincipalIsRemoteServiceBindingUser() =>
+        new("The database principal is referenced by a remote service binding in the database, and cannot be dropped.", 33015, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15136: dropping a user that a module's
     /// <c>WITH EXECUTE AS SELF</c> or <c>WITH EXECUTE AS 'user'</c> names —
     /// raised after every ownership refusal. Probed 2026-09-27 against SQL
@@ -125,8 +139,10 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 15138 for the securables past a schema:
     /// <paramref name="what"/> is <c>a XML namespace</c> (real's words, article
-    /// included) or <c>a fulltext catalog</c>. Probed 2026-09-27 against SQL
-    /// Server 2025.
+    /// included), <c>a fulltext catalog</c> or a Service Broker object's kind
+    /// (<c>a message type</c>, <c>a contract</c>, <c>a service</c>, <c>a
+    /// remote service binding</c>, <c>a route</c>). Probed 2026-09-27 and, for
+    /// the Service Broker kinds, 2026-10-16 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException PrincipalOwnsA(string what) =>
         new($"The database principal owns {what} in the database, and cannot be dropped.", 15138, 16, 1);

@@ -1321,6 +1321,7 @@ internal static class PermissionChecker
     internal const byte ClassObject = 1;
     internal const byte ClassSchema = 3;
     internal const byte ClassDatabasePrincipal = 4;
+    internal const byte ClassAssembly = 5;
     internal const byte ClassType = 6;
     internal const byte ClassXmlSchemaCollection = 10;
     internal const byte ClassMessageType = 15;
@@ -1513,6 +1514,15 @@ internal static class PermissionChecker
                         return closure.Contains(catalog.PrincipalId);
                 }
                 return false;
+            case ClassAssembly:
+                foreach (var (_, assembly) in database.Assemblies)
+                {
+                    if (assembly.AssemblyId == majorId)
+                        return closure.Contains(assembly.PrincipalId);
+                }
+                return false;
+            case >= ClassMessageType and <= ClassRoute:
+                return BrokerObjectOwner(database, securableClass, majorId) is int brokerOwner && closure.Contains(brokerOwner);
             case ClassSymmetricKey:
                 return database.EncryptionKeys.SymmetricKeyById(majorId) is { } key && closure.Contains(key.PrincipalId);
             case ClassCertificate:
@@ -1521,6 +1531,55 @@ internal static class PermissionChecker
                 return database.EncryptionKeys.AsymmetricKeyById(majorId) is { } asymmetricKey && closure.Contains(asymmetricKey.PrincipalId);
             default:
                 return false;
+        }
+    }
+
+    /// <summary>
+    /// The owner of the Service Broker securable <paramref name="majorId"/> of
+    /// <paramref name="securableClass"/> — a message type, contract, service,
+    /// remote service binding or route — or null when there is none.
+    /// </summary>
+    private static int? BrokerObjectOwner(Database database, byte securableClass, int majorId)
+    {
+        if (database.ServiceBrokerIfUsed is not { } broker)
+            return null;
+        switch (securableClass)
+        {
+            case ClassMessageType:
+                foreach (var (_, messageType) in broker.MessageTypes)
+                {
+                    if (messageType.Id == majorId)
+                        return messageType.PrincipalId;
+                }
+                return null;
+            case ClassContract:
+                foreach (var (_, contract) in broker.Contracts)
+                {
+                    if (contract.Id == majorId)
+                        return contract.PrincipalId;
+                }
+                return null;
+            case ClassService:
+                foreach (var (_, service) in broker.Services)
+                {
+                    if (service.Id == majorId)
+                        return service.PrincipalId;
+                }
+                return null;
+            case ClassRemoteServiceBinding:
+                foreach (var (_, binding) in broker.RemoteServiceBindings)
+                {
+                    if (binding.Id == majorId)
+                        return binding.PrincipalId;
+                }
+                return null;
+            default:
+                foreach (var (_, route) in broker.Routes)
+                {
+                    if (route.Id == majorId)
+                        return route.PrincipalId;
+                }
+                return null;
         }
     }
 
@@ -2261,6 +2320,8 @@ internal static class PermissionChecker
                     }
                 }
                 return "USER";
+            case ClassAssembly:
+                return "ASSEMBLY";
             case ClassType:
                 return "TYPE";
             case ClassXmlSchemaCollection:

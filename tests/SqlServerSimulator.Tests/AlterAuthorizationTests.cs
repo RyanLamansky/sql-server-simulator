@@ -552,4 +552,120 @@ public sealed class AlterAuthorizationTests
         _ = sim.ExecuteNonQuery("execute as login = 'lc'; create database authc");
         AreEqual("lc", sim.ExecuteScalar("select suser_sname(owner_sid) from sys.databases where name = 'authc'"));
     }
+
+    private static Simulation BrokerSeeded()
+    {
+        var sim = Seeded();
+        _ = sim.ExecuteNonQuery("""
+            create message type mt validation = none;
+            create contract c (mt sent by any);
+            create queue q;
+            create service s on queue q (c);
+            create route rt with address = 'LOCAL';
+            create remote service binding rsb to service 'remote' with user = u2;
+            create table ev (x xml);
+            grant insert on ev to public
+            """);
+        _ = sim.ExecuteNonQuery("create trigger dt on database for alter_authorization_database as insert ev select eventdata()");
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("message type::mt", "sys.service_message_types", "MESSAGE TYPE")]
+    [DataRow("contract::c", "sys.service_contracts", "CONTRACT")]
+    [DataRow("service::s", "sys.services", "SERVICE")]
+    [DataRow("route::rt", "sys.routes", "ROUTE")]
+    [DataRow("remote service binding::rsb", "sys.remote_service_bindings", "REMOTE SERVICE BINDING")]
+    [DataRow("route::AutoCreatedLocal", "sys.routes", "ROUTE")]
+    [DataRow("object::q", "sys.service_queues", "SERVICE QUEUE")]
+    public void BrokerObject_TakesAnOwner(string entity, string view, string objectType)
+    {
+        var sim = BrokerSeeded();
+        var name = entity.Split(':')[^1];
+        AreEqual("u1", sim.ExecuteScalar($"alter authorization on {entity} to u1; select user_name(principal_id) from {view} where name = '{name}'"));
+        AreEqual($"{objectType}|{name}|u1|1", sim.ExecuteScalar("""
+            select concat(x.value('(/EVENT_INSTANCE/ObjectType)[1]', 'nvarchar(50)'), '|', x.value('(/EVENT_INSTANCE/ObjectName)[1]', 'nvarchar(50)'), '|',
+                x.value('(/EVENT_INSTANCE/OwnerName)[1]', 'nvarchar(50)'), '|', x.value('count(/EVENT_INSTANCE/SchemaName)', 'int')) from ev
+            """));
+    }
+
+    [TestMethod]
+    [DataRow("alter authorization on message type::nosuch to u1", 15151, "Cannot find the message type 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on contract::nosuch to u1", 15151, "Cannot find the contract 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on service::nosuch to u1", 15151, "Cannot find the service 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on route::nosuch to u1", 15151, "Cannot find the route 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on remote service binding::nosuch to u1", 15151, "Cannot find the remote service binding 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on message type::dbo.mt to u1", 15151, "Cannot find the message type 'dbo.mt', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on message type::mt to schema owner", 15151, "Cannot find the user 'SCHEMA OWNER', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on message type::mt to nosuch", 15151, "Cannot find the user 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on message type::[DEFAULT] to u1", 9663, "The system object cannot be modified.")]
+    [DataRow("alter authorization on contract::[DEFAULT] to u1", 9663, "The system object cannot be modified.")]
+    [DataRow("alter authorization on service::[http://schemas.microsoft.com/SQL/Notifications/QueryNotificationService] to u1", 9663, "The system object cannot be modified.")]
+    [DataRow("alter authorization on contract::[DEFAULT] to nosuch", 15151, "Cannot find the user 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on service::s to r1", 15345, "An entity of type service cannot be owned by a role, a group, or by principals mapped to certificates or asymmetric keys.")]
+    [DataRow("alter authorization on fulltext stoplist::nosuch to u1", 15151, "Cannot find the fulltext stoplist 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on fulltext stoplist::[system] to u1", 15151, "Cannot find the fulltext stoplist 'system', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on search property list::nosuch to u1", 15151, "Cannot find the search property list 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on availability group::nosuch to sa", 15151, "Cannot find the availability group 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on database scoped credential::nosuch to u1", 15151, "Cannot find the database scoped credential 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on endpoint::nosuch to sa", 15151, "Cannot find the endpoint 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on endpoint::[TSQL Default TCP] to nosuch", 15151, "Cannot find the principal 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on endpoint::[TSQL Default TCP] to schema owner", 15151, "Cannot find the user 'SCHEMA OWNER', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on server role::nosuch to sa", 15151, "Cannot find the server role 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on login::sa to sa", 15344, "Ownership change for login is not supported.")]
+    [DataRow("alter authorization on schema::dbo.s to u1", 15151, "Cannot find the schema 'dbo.s', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on role::dbo.r1 to dbo", 15151, "Cannot find the role 'dbo.r1', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on database::dbo.simulated to sa", 15151, "Cannot find the database 'dbo.simulated', because it does not exist or you do not have permission.")]
+    public void BrokerAndUnbuiltClass_Refusals(string sql, int number, string message) => BrokerSeeded().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    [DataRow("alter authorization on nosuch::x to dbo", "nosuch")]
+    [DataRow("alter authorization on external data source::x to dbo", "external")]
+    public void UnknownClass_IsASyntaxErrorAtItsFirstWord(string sql, string near) => Seeded().ValidateSyntaxError(sql, near);
+
+    [TestMethod]
+    public void SystemEndpoint_ToSa_ChangesNothing()
+        => AreEqual(1, new Simulation().ExecuteScalar("alter authorization on endpoint::[TSQL Default TCP] to sa; select principal_id from sys.endpoints where name = 'TSQL Default TCP'"));
+
+    [TestMethod]
+    public void BrokerOwnerChange_DropsItsGrants()
+    {
+        var sim = BrokerSeeded();
+        _ = sim.ExecuteNonQuery("grant control on message type::mt to u2; grant control on contract::c to u2; alter authorization on message type::mt to u1; alter authorization on contract::c to r1");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_permissions where class in (15, 16)"));
+    }
+
+    [TestMethod]
+    public void BrokerObject_RestrictedCaller_NeedsTakeOwnership_OrOwnership()
+    {
+        var sim = BrokerSeeded();
+        sim.AssertSqlError("execute as user = 'u2'; alter authorization on message type::mt to u2", 15151, "Cannot find the message type 'mt', because it does not exist or you do not have permission.");
+        _ = sim.ExecuteNonQuery("grant take ownership on message type::mt to u2");
+        sim.AssertSqlError("execute as user = 'u2'; alter authorization on message type::mt to u1", 15151, "Cannot find the principal 'u1', because it does not exist or you do not have permission.");
+        AreEqual("u2", sim.ExecuteScalar("execute as user = 'u2'; alter authorization on message type::mt to u2; revert; select user_name(principal_id) from sys.service_message_types where name = 'mt'"));
+
+        // A member of the owning role holds CONTROL through it.
+        _ = sim.ExecuteNonQuery("alter authorization on route::rt to r1; alter role r1 add member u1");
+        AreEqual("u1", sim.ExecuteScalar("execute as user = 'u1'; alter authorization on route::rt to u1; revert; select user_name(principal_id) from sys.routes where name = 'rt'"));
+    }
+
+    [TestMethod]
+    public void DropUser_RefusedWhileItOwnsBrokerObjects_InRealsOrder()
+    {
+        var sim = BrokerSeeded();
+        _ = sim.ExecuteNonQuery("""
+            create user o without login;
+            create remote service binding rsb2 to service 'remote2' with user = o;
+            alter authorization on message type::mt to o; alter authorization on contract::c to o; alter authorization on service::s to o;
+            alter authorization on remote service binding::rsb to o; alter authorization on route::rt to o;
+            alter authorization on xml schema collection::xc to o
+            """);
+        sim.AssertSqlError("drop user o", 15138, "The database principal owns a message type in the database, and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on message type::mt to dbo; drop user o", 15138, "The database principal owns a contract in the database, and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on contract::c to dbo; drop user o", 15138, "The database principal owns a service in the database, and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on service::s to dbo; drop user o", 15138, "The database principal owns a remote service binding in the database, and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on remote service binding::rsb to dbo; drop user o", 33015, "The database principal is referenced by a remote service binding in the database, and cannot be dropped.");
+        sim.AssertSqlError("drop remote service binding rsb2; drop user o", 15138, "The database principal owns a route in the database, and cannot be dropped.");
+        sim.AssertSqlError("alter authorization on route::rt to dbo; drop user o", 15138, "The database principal owns a XML namespace in the database, and cannot be dropped.");
+    }
 }

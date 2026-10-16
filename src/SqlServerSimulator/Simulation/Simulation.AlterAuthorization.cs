@@ -12,9 +12,13 @@ partial class Simulation
     /// {&lt;principal&gt; | SCHEMA OWNER}</c>; the cursor is on
     /// <c>AUTHORIZATION</c>. The modeled classes are <c>OBJECT</c> (the
     /// default), <c>SCHEMA</c>, <c>TYPE</c>, <c>XML SCHEMA COLLECTION</c>,
-    /// <c>FULLTEXT CATALOG</c>, <c>ROLE</c>, <c>ASSEMBLY</c> and
-    /// <c>DATABASE</c>; <c>USER</c> and <c>APPLICATION ROLE</c> carry no owner
-    /// (Msg 15344), and every other class is not modeled yet.
+    /// <c>FULLTEXT CATALOG</c>, <c>ROLE</c>, <c>ASSEMBLY</c>, the three key
+    /// classes, the five Service Broker classes and <c>DATABASE</c>;
+    /// <c>USER</c>, <c>APPLICATION ROLE</c> and <c>LOGIN</c> carry no owner
+    /// (Msg 15344), the classes with nothing to name here — a stoplist, a
+    /// search property list, an availability group, a database scoped
+    /// credential — are Msg 15151, and a class word real doesn't know is Msg
+    /// 102 near it as the batch compiles.
     /// </summary>
     /// <remarks>
     /// Real's order, probed 2026-09-27 against SQL Server 2025: the entity
@@ -31,8 +35,12 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var securableClass = ParseAuthorizationClass(context);
+        var securableClass = ParseAuthorizationClass(context, AuthorizationClasses);
         var entityName = BatchContext.ParseObjectName(context);
+        // Every class but an object, a type and an XML schema collection names
+        // its entity in one part: a dotted name is never found, and the
+        // refusal quotes it whole (probed 2026-10-16 against SQL Server 2025).
+        var entity = entityName.Count == 1 ? entityName.Leaf : entityName.ToString();
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.To })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         string? ownerName;
@@ -62,29 +70,48 @@ partial class Simulation
             case "APPLICATION ROLE":
                 throw SimulatedSqlException.OwnershipChangeNotSupported("application role");
             case "ASSEMBLY":
-                ChangeAssemblyOwner(context, entityName.Leaf, ownerName);
+                ChangeAssemblyOwner(context, entity, ownerName);
                 break;
             case "ASYMMETRIC KEY":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassAsymmetricKey);
                 break;
+            case "AVAILABILITY GROUP" or "DATABASE SCOPED CREDENTIAL" or "FULLTEXT STOPLIST" or "SEARCH PROPERTY LIST":
+                // None of these exists here — the full-text stoplists and
+                // property lists, availability groups and scoped credentials
+                // aren't built — so every name is missing, the system stoplist
+                // included, as real's is (probed 2026-10-16 against SQL Server
+                // 2025).
+                throw SimulatedSqlException.CannotFindSecurable(ClassKind(securableClass), entity);
             case "CERTIFICATE":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassCertificate);
                 break;
+            case "CONTRACT" or "MESSAGE TYPE" or "REMOTE SERVICE BINDING" or "ROUTE" or "SERVICE":
+                ChangeBrokerObjectOwner(context, securableClass, entity, ownerName);
+                break;
             case "DATABASE":
-                ChangeDatabaseOwner(context, entityName.Leaf, ownerName);
+                ChangeDatabaseOwner(context, entity, ownerName);
+                break;
+            case "ENDPOINT":
+                ChangeEndpointOwner(context, entity, ownerName);
                 break;
             case "FULLTEXT CATALOG":
-                ChangeFullTextCatalogOwner(context, entityName.Leaf, ownerName);
+                ChangeFullTextCatalogOwner(context, entity, ownerName);
                 break;
+            case "LOGIN":
+                throw SimulatedSqlException.OwnershipChangeNotSupported("login");
             case "OBJECT":
                 ChangeObjectOwner(context, entityName, ownerName);
                 break;
             case "ROLE":
-                ChangeRoleOwner(context, entityName.Leaf, ownerName);
+                ChangeRoleOwner(context, entity, ownerName);
                 break;
             case "SCHEMA":
-                ChangeSchemaOwner(context, entityName.Leaf, ownerName);
+                ChangeSchemaOwner(context, entity, ownerName);
                 break;
+            case "SERVER ROLE":
+                if (!context.Connection.Simulation.TryResolveServerRole(entity, out _, out _))
+                    throw SimulatedSqlException.CannotFindSecurable("server role", entity);
+                throw new NotSupportedException("ALTER AUTHORIZATION on a server role is not modeled: a server role's owner isn't carried.");
             case "SYMMETRIC KEY":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassSymmetricKey);
                 break;
@@ -96,8 +123,6 @@ partial class Simulation
             case "XML SCHEMA COLLECTION":
                 ChangeXmlSchemaCollectionOwner(context, entityName, ownerName);
                 break;
-            default:
-                throw new NotSupportedException($"ALTER AUTHORIZATION on the {securableClass} class is not modeled.");
         }
         return true;
     }
@@ -106,14 +131,20 @@ partial class Simulation
     /// Reads an optional <c>&lt;class&gt; ::</c> prefix — one to three words
     /// followed by two adjacent <c>:</c> operators — leaving the cursor on the
     /// entity name. Answers the upper-cased words joined by single spaces, or
-    /// <c>OBJECT</c> when there's no prefix.
+    /// <c>OBJECT</c> when there's no prefix; a class outside
+    /// <paramref name="accepted"/>, when the statement names its classes, is
+    /// Msg 102 near its first word (probed 2026-10-16 against SQL Server 2025
+    /// for <c>ALTER AUTHORIZATION</c>: <c>EXTERNAL DATA SOURCE::</c> is
+    /// refused near <c>external</c>).
     /// </summary>
-    private static string ParseAuthorizationClass(ParserContext context)
+    private static string ParseAuthorizationClass(ParserContext context, string[]? accepted = null)
     {
         var checkpoint = context.SaveCheckpoint();
         var words = new List<string>(3);
+        string? firstWord = null;
         while (words.Count < 3 && ClassWord(context.Token) is { } word)
         {
+            firstWord ??= context.Token!.ToString();
             words.Add(word);
             if (!context.MoveNext())
                 break;
@@ -122,7 +153,10 @@ partial class Simulation
                 if (context.GetNextRequired() is not Operator { Character: ':' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
-                return string.Join(' ', words);
+                var securableClass = string.Join(' ', words);
+                return accepted is null || Array.IndexOf(accepted, securableClass) >= 0
+                    ? securableClass
+                    : throw SimulatedSqlException.SyntaxErrorNearText(firstWord);
             }
         }
         context.RestoreCheckpoint(checkpoint);
@@ -135,6 +169,29 @@ partial class Simulation
             _ => null,
         };
     }
+
+    /// <summary>The class words <c>ALTER AUTHORIZATION</c>'s grammar takes before <c>::</c>.</summary>
+    private static readonly string[] AuthorizationClasses =
+    [
+        "APPLICATION ROLE", "ASSEMBLY", "ASYMMETRIC KEY", "AVAILABILITY GROUP", "CERTIFICATE", "CONTRACT", "DATABASE",
+        "DATABASE SCOPED CREDENTIAL", "ENDPOINT", "FULLTEXT CATALOG", "FULLTEXT STOPLIST", "LOGIN", "MESSAGE TYPE", "OBJECT",
+        "REMOTE SERVICE BINDING", "ROLE", "ROUTE", "SCHEMA", "SEARCH PROPERTY LIST", "SERVER ROLE", "SERVICE", "SYMMETRIC KEY",
+        "TYPE", "USER", "XML SCHEMA COLLECTION",
+    ];
+
+    /// <summary>The words a refusal names a class's entity by — its class words, lowercase.</summary>
+    private static string ClassKind(string securableClass) => securableClass switch
+    {
+        "AVAILABILITY GROUP" => "availability group",
+        "CONTRACT" => "contract",
+        "DATABASE SCOPED CREDENTIAL" => "database scoped credential",
+        "FULLTEXT STOPLIST" => "fulltext stoplist",
+        "MESSAGE TYPE" => "message type",
+        "REMOTE SERVICE BINDING" => "remote service binding",
+        "ROUTE" => "route",
+        "SEARCH PROPERTY LIST" => "search property list",
+        _ => "service",
+    };
 
     /// <summary>
     /// Resolves the new owner of a database-scoped securable to its principal
@@ -226,7 +283,8 @@ partial class Simulation
         Synonym => "SYNONYM",
         RuleObject => "RULE",
         SecurityPolicy => "SECURITY POLICY",
-        ServiceQueue => "QUEUE",
+        // Probed 2026-10-16 against SQL Server 2025, for this event and GRANT_DATABASE alike.
+        ServiceQueue => "SERVICE QUEUE",
         _ => "DEFAULT",
     };
 
@@ -383,7 +441,7 @@ partial class Simulation
         RecordDdlUndo(context, () => catalog.PrincipalId = previous);
         if (previous != newOwner)
             DropSecurablePermissions(context, database, PermissionChecker.ClassFulltextCatalog, catalog.Id);
-        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
     }
 
     /// <summary>
@@ -441,20 +499,98 @@ partial class Simulation
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, name, objectType, ownerName: ownerName);
     }
 
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON ASSEMBLY::</c>: the caller needs
+    /// <c>TAKE OWNERSHIP</c> on the assembly itself (<c>CONTROL</c> on it or
+    /// on the database covers it), and a change of owner drops the grants on
+    /// it (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
     private static void ChangeAssemblyOwner(ParserContext context, string assemblyName, string? ownerName)
     {
         var database = context.CurrentDatabase;
         if (!database.Assemblies.TryGetValue(assemblyName, out var assembly))
             throw SimulatedSqlException.CannotFindSecurable("assembly", assemblyName);
         RejectUnknownNewOwner(database, ownerName);
-        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabase, 0, 0))
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassAssembly, assembly.AssemblyId, 0))
             throw SimulatedSqlException.CannotFindSecurable("assembly", assemblyName);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
         var previous = assembly.PrincipalId;
         assembly.PrincipalId = newOwner;
         RecordDdlUndo(context, () => assembly.PrincipalId = previous);
-        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, assembly.Name, "ASSEMBLY", ownerName: ownerName);
+        if (previous != newOwner)
+            DropSecurablePermissions(context, database, PermissionChecker.ClassAssembly, assembly.AssemblyId);
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", assembly.Name, "ASSEMBLY", ownerName: ownerName);
+    }
+
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON</c> a message type, contract, service, remote
+    /// service binding or route (<paramref name="securableClass"/>, the class
+    /// words): the gate, the owner checks and the dropped grants an object's
+    /// change takes, a system object refused with Msg 9663 once the new owner
+    /// is known to exist, and a service — alone of the five — refusing a role
+    /// as its owner (Msg 15345). <c>AutoCreatedLocal</c> is no system route,
+    /// and changes hands (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private static void ChangeBrokerObjectOwner(ParserContext context, string securableClass, string name, string? ownerName)
+    {
+        var database = context.CurrentDatabase;
+        var broker = database.ServiceBroker;
+        var kind = ClassKind(securableClass);
+        (byte Class, int Id, int Owner, bool IsSystem, Action<int> SetOwner)? found = securableClass switch
+        {
+            "CONTRACT" => broker.Contracts.TryGetValue(name, out var contract)
+                ? (PermissionChecker.ClassContract, contract.Id, contract.PrincipalId, contract.IsSystem, owner => contract.PrincipalId = owner)
+                : null,
+            "MESSAGE TYPE" => broker.MessageTypes.TryGetValue(name, out var messageType)
+                ? (PermissionChecker.ClassMessageType, messageType.Id, messageType.PrincipalId, messageType.IsSystem, owner => messageType.PrincipalId = owner)
+                : null,
+            "REMOTE SERVICE BINDING" => broker.RemoteServiceBindings.TryGetValue(name, out var binding)
+                ? (PermissionChecker.ClassRemoteServiceBinding, binding.Id, binding.PrincipalId, false, owner => binding.PrincipalId = owner)
+                : null,
+            "ROUTE" => broker.Routes.TryGetValue(name, out var route)
+                ? (PermissionChecker.ClassRoute, route.Id, route.PrincipalId, false, owner => route.PrincipalId = owner)
+                : null,
+            _ => broker.Services.TryGetValue(name, out var service)
+                ? (PermissionChecker.ClassService, service.Id, service.PrincipalId, service.IsSystem, owner => service.PrincipalId = owner)
+                : null,
+        };
+        if (found is not var (securable, id, previous, isSystem, setOwner))
+            throw SimulatedSqlException.BrokerObjectNotFound("find", kind, name);
+        RejectUnknownNewOwner(database, ownerName);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, securable, id, 0))
+            throw SimulatedSqlException.BrokerObjectNotFound("find", kind, name);
+        if (isSystem)
+            throw SimulatedSqlException.SystemBrokerObjectCannotBeModified(1);
+        database.RejectWriteWhenReadOnly();
+        var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
+        if (securable == PermissionChecker.ClassService && database.Principals.TryGetValue(ownerName!, out var principal) && principal.TypeCode == "R")
+            throw SimulatedSqlException.KeyPairOwnedByRole("service");
+        setOwner(newOwner);
+        RecordDdlUndo(context, () => setOwner(previous));
+        if (previous != newOwner)
+            DropSecurablePermissions(context, database, securable, id);
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", name, securableClass, ownerName: ownerName);
+    }
+
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON ENDPOINT::</c>: the system endpoints are all
+    /// <c>sa</c>'s, and naming <c>sa</c> again changes nothing; an endpoint no
+    /// name answers is Msg 15151, as is a new owner no login answers (probed
+    /// 2026-10-16 against SQL Server 2025). Moving one to another login isn't
+    /// modeled, since an endpoint's owner isn't carried.
+    /// </summary>
+    private static void ChangeEndpointOwner(ParserContext context, string endpointName, string? loginName)
+    {
+        if (Array.FindIndex(BuiltInResources.SystemEndpoints, endpoint => Collation.Baseline.Equals(endpoint.Name, endpointName)) < 0)
+            throw SimulatedSqlException.CannotFindSecurable("endpoint", endpointName);
+        if (loginName is null)
+            throw SimulatedSqlException.CannotFindUser("SCHEMA OWNER");
+        if (BuiltInToken.Equals(loginName, "sa"))
+            return;
+        if (!context.Connection.Simulation.Logins.ContainsKey(loginName))
+            throw SimulatedSqlException.CannotFindSecurable("principal", loginName);
+        throw new NotSupportedException("ALTER AUTHORIZATION on an endpoint is not modeled: an endpoint's owner isn't carried.");
     }
 
     /// <summary>

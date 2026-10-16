@@ -110,6 +110,10 @@ partial class Simulation
                 objectColumns = ParsePermissionColumnList(context);
             switch (explicitClass)
             {
+                case "ASSEMBLY":
+                    permClass = PermissionChecker.ClassAssembly;
+                    objectSecurableName = securableName;
+                    break;
                 case "ASYMMETRIC KEY":
                     permClass = PermissionChecker.ClassAsymmetricKey;
                     objectSecurableName = securableName;
@@ -651,6 +655,7 @@ partial class Simulation
             objectName = objectSecurableName!.Value.Leaf;
             objectType = permClass switch
             {
+                PermissionChecker.ClassAssembly => "ASSEMBLY",
                 PermissionChecker.ClassType => "TYPE",
                 PermissionChecker.ClassXmlSchemaCollection => "XML SCHEMA COLLECTION",
                 PermissionChecker.ClassSymmetricKey => "SYMMETRIC KEY",
@@ -1121,8 +1126,8 @@ partial class Simulation
     /// (probed 2026-09-29 against SQL Server 2025).
     /// </summary>
     private static bool PermissionAcceptedOnDerivedClass(byte permClass, string permName) =>
-        permClass is >= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute
-            ? PermissionGraph.IsPermissionOf(BrokerClassWord(permClass), CanonicalPermissionName(permName))
+        permClass is (>= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute) or PermissionChecker.ClassAssembly
+            ? PermissionGraph.IsPermissionOf(permClass == PermissionChecker.ClassAssembly ? "ASSEMBLY" : BrokerClassWord(permClass), CanonicalPermissionName(permName))
             : BuiltInToken.EqualsAny(permName.Trim(), "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION")
         || ((permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection) && BuiltInToken.Equals(permName.Trim(), "EXECUTE"))
         || (permClass != PermissionChecker.ClassType && BuiltInToken.Equals(permName.Trim(), "ALTER"));
@@ -1143,7 +1148,7 @@ partial class Simulation
     /// </summary>
     private static bool IsDerivedSecurableClass(byte permClass) =>
         permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog
-            or (>= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute)
+            or PermissionChecker.ClassAssembly or (>= PermissionChecker.ClassMessageType and <= PermissionChecker.ClassRoute)
             or PermissionChecker.ClassSymmetricKey or PermissionChecker.ClassCertificate or PermissionChecker.ClassAsymmetricKey;
 
     /// <summary>
@@ -1158,6 +1163,11 @@ partial class Simulation
         var batch = context.Batch;
         switch (permClass)
         {
+            case PermissionChecker.ClassAssembly:
+                // Probed 2026-10-16 against SQL Server 2025.
+                return name.Count == 1 && database.Assemblies.TryGetValue(name.Leaf, out var assembly)
+                    ? assembly.AssemblyId
+                    : throw SimulatedSqlException.CannotFindSecurable("assembly", name.ToString());
             case PermissionChecker.ClassType:
                 // A built-in type is not a securable: real reads `sys.int` as a missing object.
                 if (BuiltInToken.Equals(name.ImmediateQualifier ?? "", "sys"))
