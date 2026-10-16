@@ -175,7 +175,9 @@ partial class Simulation
         finally
         {
             session.InWaitFor = false;
-            batch.Connection.WaitedTicks += System.Diagnostics.Stopwatch.GetElapsedTime(started).Ticks;
+            var waited = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            batch.Connection.WaitedTicks += waited.Ticks;
+            batch.Connection.Simulation.RecordWait(session, "WAITFOR", (long)waited.TotalMilliseconds);
         }
     }
 

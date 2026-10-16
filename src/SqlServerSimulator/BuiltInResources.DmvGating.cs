@@ -36,6 +36,19 @@ internal static partial class BuiltInResources
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
         ("sys.dm_database_encryption_keys", DmvGateKind.ServerSecurityState),
         ("sys.dm_os_process_memory", DmvGateKind.ServerState),
+        ("sys.dm_os_schedulers", DmvGateKind.ServerState),
+        ("sys.dm_os_tasks", DmvGateKind.ServerState),
+        ("sys.dm_os_workers", DmvGateKind.ServerState),
+        ("sys.dm_os_threads", DmvGateKind.ServerState),
+        ("sys.dm_os_nodes", DmvGateKind.ServerState),
+        ("sys.dm_os_memory_nodes", DmvGateKind.ServerState),
+        ("sys.dm_os_sys_memory", DmvGateKind.ServerState),
+        ("sys.dm_os_memory_clerks", DmvGateKind.ServerState),
+        ("sys.dm_os_ring_buffers", DmvGateKind.ServerState),
+        ("sys.dm_os_buffer_descriptors", DmvGateKind.ServerState),
+        ("sys.dm_os_wait_stats", DmvGateKind.ServerState),
+        ("sys.dm_os_latch_stats", DmvGateKind.ServerState),
+        ("sys.dm_exec_session_wait_stats", DmvGateKind.PerformanceSelfFilter),
         ("sys.dm_os_sys_info", DmvGateKind.ServerState),
         ("sys.dm_os_server_diagnostics_log_configurations", DmvGateKind.ServerState),
         ("sys.dm_os_waiting_tasks", DmvGateKind.ServerState),
@@ -114,6 +127,12 @@ internal static partial class BuiltInResources
                 if (!simulation.HoldsServerPermission(login, Permission.ControlServer))
                     throw SimulatedSqlException.PermissionDenied("SELECT", view.Name, "mssqlsystemresource", "sys");
                 return rows;
+            // VIEW SERVER PERFORMANCE STATE opens every session's rows
+            // (probed 2026-10-16 against SQL Server 2025).
+            case DmvGateKind.PerformanceSelfFilter:
+                return simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState)
+                    ? rows
+                    : FilterToOwnSession(batch, rows);
             default: // SessionSelfFilter
                 return simulation.HoldsServerPermission(login, Permission.ViewServerState)
                     ? rows

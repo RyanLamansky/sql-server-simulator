@@ -678,6 +678,26 @@ public sealed partial class Simulation
     /// <summary><c>Environment.TickCount64</c> at construction, <c>sys.dm_os_sys_info</c>'s <c>sqlserver_start_time_ms_ticks</c>.</summary>
     internal readonly long StartTicks = Environment.TickCount64;
 
+    /// <summary>The waits the server's sessions have finished, <c>sys.dm_os_wait_stats</c>' rows.</summary>
+    internal readonly WaitStatistics WaitStats = new();
+
+    /// <summary>
+    /// Counts a finished wait of <paramref name="milliseconds"/> on
+    /// <paramref name="waitType"/> for the server and for
+    /// <paramref name="session"/>, whose <c>sys.dm_exec_session_wait_stats</c>
+    /// rows it feeds.
+    /// </summary>
+    internal void RecordWait(SessionToken session, string waitType, long milliseconds)
+    {
+        this.WaitStats.Record(waitType, milliseconds);
+        if (session.Waits is not { } waits)
+        {
+            var created = new WaitStatistics();
+            waits = Interlocked.CompareExchange(ref session.Waits, created, null) ?? created;
+        }
+        waits.Record(waitType, milliseconds);
+    }
+
     /// <summary>
     /// Global temp tables (<c>##foo</c>) — instance-wide, visible to every
     /// connection on this <see cref="Simulation"/>. Created by any session via

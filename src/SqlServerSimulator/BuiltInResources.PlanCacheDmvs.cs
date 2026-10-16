@@ -146,7 +146,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32((int)((uint)HashCode.Combine(plan.Key) % 40009)),
                 SqlValue.FromInt32(2),
                 SqlValue.FromInt32(useCount),
-                SqlValue.FromInt32((16384 * (plan.IsBatch ? 1 : 2)) + (8192 * Math.Max(statements - 1, 0))),
+                SqlValue.FromInt32(CachedPlanSizeBytes(plan.IsBatch, statements)),
                 SqlValue.FromVarbinary(address),
                 SqlValue.FromNVarchar(planTypeName, "Compiled Plan"),
                 SqlValue.FromNVarchar(objectTypeName, plan.Key.Kind switch
@@ -161,6 +161,24 @@ internal static partial class BuiltInResources
                 SqlValue.Null(SqlType.Varbinary),
             ];
         }
+    }
+
+    /// <summary>
+    /// A cached plan's <c>size_in_bytes</c>, the simulator's stand-in: 16 KB
+    /// for a batch's plan, 32 KB for a module's, and 8 KB for each statement
+    /// past the first. The memory clerks and performance counters that size
+    /// the plan cache sum it.
+    /// </summary>
+    internal static int CachedPlanSizeBytes(bool isBatch, int statements) =>
+        (16384 * (isBatch ? 1 : 2)) + (8192 * Math.Max(statements - 1, 0));
+
+    /// <inheritdoc cref="CachedPlanSizeBytes(bool, int)"/>
+    internal static int CachedPlanSizeBytes(CachedPlan plan)
+    {
+        int statements;
+        lock (plan)
+            statements = plan.Statements.Count;
+        return CachedPlanSizeBytes(plan.IsBatch, statements);
     }
 
     /// <summary><c>sys.dm_exec_query_stats</c>: one row per statement a cached plan has run.</summary>

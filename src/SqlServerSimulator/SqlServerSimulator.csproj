@@ -46,6 +46,9 @@
     <EmbeddedResource Include="Parser/Expressions/FormatCultures.tsv" LogicalName="SqlServerSimulator.Format.Cultures.tsv" />
     <EmbeddedResource Include="Collation.CjkPrimary.txt" LogicalName="SqlServerSimulator.Collation.CjkPrimary.txt" />
     <EmbeddedResource Include="Storage/Spatial/SpatialReferenceSystems.tsv" LogicalName="SqlServerSimulator.Spatial.SpatialReferenceSystems.tsv" />
+    <EmbeddedResource Include="Storage/WaitTypes.txt" LogicalName="SqlServerSimulator.WaitTypes.txt" />
+    <EmbeddedResource Include="Storage/LatchClasses.txt" LogicalName="SqlServerSimulator.LatchClasses.txt" />
+    <EmbeddedResource Include="Storage/MemoryClerks.tsv" LogicalName="SqlServerSimulator.MemoryClerks.tsv" />
   </ItemGroup>
 
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">

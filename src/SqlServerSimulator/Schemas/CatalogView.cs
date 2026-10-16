@@ -325,6 +325,9 @@ internal enum DmvGateKind : byte
     /// <summary><c>sys.dm_exec_sessions</c> — a restricted session without <c>VIEW SERVER STATE</c> sees only its own session row (a row filter, not a hard denial).</summary>
     SessionSelfFilter,
 
+    /// <summary><c>sys.dm_exec_session_wait_stats</c> — a self-filter like <see cref="SessionSelfFilter"/> that <c>VIEW SERVER PERFORMANCE STATE</c> opens.</summary>
+    PerformanceSelfFilter,
+
     /// <summary><c>sysaltfiles</c> — needs <c>CONTROL SERVER</c>; denial raises Msg 229 naming the view in <c>mssqlsystemresource</c>.</summary>
     ControlServer,
 }

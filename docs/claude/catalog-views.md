@@ -275,7 +275,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
   `max_workers_count` and `scheduler_total_count` follow real's formulas from the CPU count; the affinity, time-source, soft-NUMA and memory-model columns carry real's defaults.
 - **DMV server-state gating**: a restricted session (non-`dbo` — a mapped user or `guest`) reading a modeled DMV is gated by the `VIEW …STATE` permissions — server-scope DMVs (`dm_tran_locks` / `dm_os_waiting_tasks` / `dm_os_sys_info` / the three `dm_tran_*_transaction(s)` views / `dm_tran_version_store*` / `dm_tran_active_snapshot_database_transactions` / `dm_hadr_cluster`, and the `dm_exec_input_buffer` TVF) raise **Msg 300** and `dm_exec_connections` and the `dm_exec_sql_text` TVF **Msg 371**, database-scope DMVs (`dm_db_partition_stats` / `dm_hadr_database_replica_states`) raise **Msg 262**, `dm_exec_sessions` and `dm_exec_requests` self-filter to the own session, and `dm_os_host_info` / `fn_helpcollations` / `dm_db_xtp_table_memory_stats` stay public.
   Msg 300 names `master` whatever database the session is in, and it and Msg 262 are each followed by **Msg 297**; an `EXECUTE AS USER` context in a database that isn't `TRUSTWORTHY` is refused with **Msg 15562** before a server-scope gate asks any permission, while the Msg 371 and database-scope gates ask theirs (probed 2026-10-15 against SQL Server 2025).
-  `dm_db_session_space_usage`, `dm_db_task_space_usage` (one row per session, all zero) and `dm_exec_query_memory_grants` (empty) take the server-scope gate, as do the plan-cache DMVs and their three plan-handle TVFs ([`plan-cache.md`](plan-cache.md#the-plan-cache-dmvs)).
+  `dm_db_session_space_usage`, `dm_db_task_space_usage` (one row per session, all zero), `dm_exec_query_memory_grants` (empty) and the [SQLOS views](#sqlos-and-monitoring-views) take the server-scope gate, as do the plan-cache DMVs and their three plan-handle TVFs ([`plan-cache.md`](plan-cache.md#the-plan-cache-dmvs)).
   `dbo` / sysadmin bypass with zero added cost (short-circuit on `EffectiveIsDbo`).
   The per-DMV gate descriptor and its checker live in `BuiltInResources.DmvGating.cs` / `ServerPermissionChecker` — see [`permissions.md`](permissions.md#dmv-server-state-gating).
 - **`INFORMATION_SCHEMA.TABLES`** (4 cols): TABLE_CATALOG / TABLE_SCHEMA / TABLE_NAME / TABLE_TYPE.
@@ -760,6 +760,30 @@ The configuration and what a store captures are in [`database-options.md`](datab
   `sys.database_query_store_internal_state` projects one zeroed row for every database, `master` included.
 
 **None of them is cacheable** in the [cross-statement row cache](#cross-statement-row-cache-and-indexes): every execution a store records changes the capture views, and `sys.database_query_store_options`' storage size with them, which no invalidation seam short of every statement would cover.
+
+## SQLOS and monitoring views
+
+The views monitoring scripts read (sp_WhoIsActive, the sp_Blitz family, SSMS's reports and Activity Monitor, Glenn Berry's diagnostic queries) carry SQL Server 2025's column shapes and object ids (probed 2026-10-16), live in `BuiltInResources.OsDmvs.cs`, and every one but `sys.dm_exec_session_wait_stats` takes the server-scope gate (Msg 300 then 297).
+Rows follow the simulator's own state where it has that state; where real's figures are environmental — cycle counts, memory addresses, latch and spinlock traffic — they are stable stand-ins: zero for a counter, NULL for what real may leave NULL, and addresses numbered from the session and request (`StandInAddress`) so the views join on them.
+
+- **Waits.**
+  `sys.dm_os_wait_stats` lists all 1,547 of real's wait types in real's order, four of them spelled with a trailing blank as real spells them.
+  The only waits the simulator finishes are a lock wait (`LCK_M_<mode>`), a `WAITFOR` and a streaming statement waiting on its client to read (`ASYNC_NETWORK_IO`), counted for the server (`Simulation.WaitStats`) and for the session (`SessionToken.Waits`) as each ends; no signal time accrues.
+  `sys.dm_exec_session_wait_stats` lists only the types a session has waited on, and a pooled reset's fresh session starts without any.
+  A restricted session reads its own session's rows, which `VIEW SERVER PERFORMANCE STATE` widens to every session's (probed 2026-10-16) — not the hard gate Microsoft's page documents for SQL Server 2022 and later.
+  `DBCC SQLPERF('sys.dm_os_wait_stats', CLEAR)` forgets the server's waits and keeps each session's, as real does (probed 2026-10-16).
+  `sys.dm_os_latch_stats` lists real's 183 latch classes, none ever waited on.
+- **Schedulers, tasks, workers and threads.**
+  `sys.dm_os_schedulers` has a `VISIBLE ONLINE` scheduler per CPU, then the hidden ones and the admin connection's (id 1048576, node 64) up to the `scheduler_total_count` `sys.dm_os_sys_info` reports.
+  Each request `sys.dm_exec_requests` lists is one task, one worker and one thread, joined by address and on the scheduler `session_id % cpu_count` places them on, which `sys.dm_exec_requests.scheduler_id` / `task_address` report too; a task's state is its request's status, and a scheduler's task counts are the tasks on it.
+  **Not modeled yet**: real's system tasks and the idle workers its pool keeps, so only user requests appear (real lists hundreds), and `os_thread_id` is the managed thread running the request, or 0 when none is.
+- **NUMA nodes and memory.**
+  `sys.dm_os_nodes` and `sys.dm_os_memory_nodes` list node 0 and the admin connection's node 64, node 0 holding the host process's memory (the reading `sys.dm_os_process_memory` makes); `sys.dm_os_sys_memory` reports the memory the runtime sees, as `sys.dm_os_sys_info` does, its page file the physical memory as on real's Linux server, and the low-memory signal below a tenth free.
+  `sys.dm_os_memory_clerks` has one clerk on node 0 for each of real's 118 clerk types, with the name and parent broker real's first clerk of the type carries: the buffer pool's holds every database's table pages, `CACHESTORE_SQLCP` and `CACHESTORE_OBJCP` the `size_in_bytes` of the batch and module plans `sys.dm_exec_cached_plans` lists, and every other holds nothing.
+- **The buffer pool.**
+  Every page is in memory, so `sys.dm_os_buffer_descriptors` lists each page `sys.allocation_units` counts, under its `allocation_unit_id` — a `DATA_PAGE` for a row page, a `TEXT_MIX_PAGE` for a LOB page — so the per-database and per-object buffer-usage queries join through it.
+  **Divergences**: page ids are numbered through each database's primary file from 16 rather than read off a page map, a page's `row_count` and `free_space_in_bytes` are NULL, no page is ever dirty, and real's own catalog and allocation pages aren't listed.
+- `sys.dm_os_ring_buffers` is empty: the simulator samples none of the scheduler, memory-broker or connectivity records real's ring buffers keep.
 
 ## Cross-statement row cache and indexes
 

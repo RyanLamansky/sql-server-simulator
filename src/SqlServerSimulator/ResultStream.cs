@@ -283,6 +283,10 @@ internal abstract class ResultStream
 
     private protected abstract void DisposeSource();
 
+    // When the statement last began waiting on its client, the start of the
+    // ASYNC_NETWORK_IO wait Resume counts.
+    private long suspendedTicks;
+
     /// <summary>
     /// Waits on the client: the session runs nothing meanwhile, so it reports
     /// no executing thread — the same-thread deadlock check and the abandoned
@@ -298,7 +302,7 @@ internal abstract class ResultStream
         batch.CurrentStatement.Suspensions++;
         this.hadThread = connection.CurrentExecutingThreadId is not null;
         connection.CurrentExecutingThreadId = null;
-        connection.Session.WaitStartedTicks = Environment.TickCount64;
+        connection.Session.WaitStartedTicks = this.suspendedTicks = Environment.TickCount64;
         this.Request = connection.ExecutingRequest;
         connection.Session.AwaitingClientRequest = connection.ExecutingRequest?.RequestId ?? 0;
         connection.PauseExecutionTimeout();
@@ -347,6 +351,7 @@ internal abstract class ResultStream
                 _ = suspended.Remove(this);
         }
         connection.Session.AwaitingClientRequest = -1;
+        connection.Simulation.RecordWait(connection.Session, "ASYNC_NETWORK_IO", Environment.TickCount64 - this.suspendedTicks);
         // Producing ahead of its client in the background, the statement is
         // timed only while its client waits on it (see AwaitBackground).
         if (this.worker is null)

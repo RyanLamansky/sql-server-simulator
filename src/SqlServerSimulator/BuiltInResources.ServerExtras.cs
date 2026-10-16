@@ -167,9 +167,7 @@ internal static partial class BuiltInResources
             var session = SqlValue.FromInt16((short)connection.Spid);
             if (task)
             {
-                var address = new byte[8];
-                System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(address, 0x0000_0200_0000_0000 + (connection.Spid * 0x1000L));
-                yield return [SqlValue.FromVarbinary(address), SqlValue.FromBoolean(false), session, SqlValue.FromInt32(0), SqlValue.FromInt32(0), tempdb, zero, zero, zero, zero];
+                yield return [SqlValue.FromVarbinary(TaskAddress(connection.Spid, 0)), SqlValue.FromBoolean(false), session, SqlValue.FromInt32(0), SqlValue.FromInt32(0), tempdb, zero, zero, zero, zero];
             }
             else
             {

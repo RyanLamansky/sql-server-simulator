@@ -53,7 +53,7 @@ The report is Msg 7968 through 7978, naming the transaction for its `BEGIN TRAN`
 
 ## `SQLPERF`, `LOGINFO`, `TRACE*`, `HELP`
 
-- `SQLPERF(LOGSPACE)` lists every database in id order with its log file's size less the header page; `SQLPERF('sys.dm_os_wait_stats' | 'sys.dm_os_latch_stats', CLEAR)` resets statistics the simulator doesn't gather.
+- `SQLPERF(LOGSPACE)` lists every database in id order with its log file's size less the header page; `SQLPERF('sys.dm_os_wait_stats', CLEAR)` forgets the server's wait statistics, each session's own kept as on real (probed 2026-10-16 against SQL Server 2025), and the `sys.dm_os_latch_stats` form resets latch statistics the simulator never gathers.
   Another keyword is Msg 2526 state 12, the wait-stats name without `CLEAR` state 15.
 - `LOGINFO` cuts the log file into four virtual log files the way real cuts a log under 64 MB — each a whole number of 64 KB units, the last taking the remainder — the first active.
 - `TRACEON` / `TRACEOFF` take flags 0 through 17798 (0 accepted and never listed; others are Msg 2560 state 17 / 30 and change nothing), `-1` among them making the change server-wide (`Simulation.GlobalTraceFlags`).

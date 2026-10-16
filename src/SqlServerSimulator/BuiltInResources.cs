@@ -93,6 +93,7 @@ internal static partial class BuiltInResources
         RegisterServiceBroker(views);
         RegisterServerAndDatabases(views);
         RegisterRuntimeDmvs(views);
+        RegisterOsDmvs(views);
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
         RegisterCompatibilityProjections(views);

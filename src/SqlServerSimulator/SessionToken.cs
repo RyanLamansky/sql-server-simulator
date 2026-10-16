@@ -172,6 +172,13 @@ internal sealed class SessionToken(int spid)
     public long LockWaitedMilliseconds;
 
     /// <summary>
+    /// The waits the session has finished, created by its first
+    /// (<c>Simulation.RecordWait</c>): <c>sys.dm_exec_session_wait_stats</c>
+    /// lists them, and a pooled reset's fresh session starts without any.
+    /// </summary>
+    public WaitStatistics? Waits;
+
+    /// <summary>
     /// Set under <c>LockManager</c>'s gate when another session's request
     /// closed a deadlock cycle and this blocked session carries the lower
     /// <c>SET DEADLOCK_PRIORITY</c>: its wait ends with Msg 1205 instead of the

@@ -710,8 +710,10 @@ partial class Simulation
     /// <c>DBCC SQLPERF ( LOGSPACE | 'sys.dm_os_wait_stats' , CLEAR | 'sys.dm_os_latch_stats' , CLEAR )
     /// [WITH NO_INFOMSGS]</c>. <c>LOGSPACE</c> lists every database in id order
     /// with its log file's size less the header page, as real reports it; the
-    /// space used is <see cref="ReportedLogBytesUsed"/>. The two <c>CLEAR</c>
-    /// forms reset statistics the simulator doesn't gather.
+    /// space used is <see cref="ReportedLogBytesUsed"/>. Clearing
+    /// <c>sys.dm_os_wait_stats</c> forgets the server's waits, its sessions'
+    /// own kept; the latch statistics the other <c>CLEAR</c> resets are
+    /// never gathered.
     /// </summary>
     private static List<SimulatedStatementOutcome> RunDbccSqlPerf(BatchContext batch, DbccInvocation dbcc)
     {
@@ -726,6 +728,8 @@ partial class Simulation
                 throw SimulatedSqlException.DbccStatementIncorrect(15);
             if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterServerState))
                 throw SimulatedSqlException.UserLacksPermissionForAction();
+            if (BuiltInToken.Equals(keyword, "sys.dm_os_wait_stats"))
+                batch.Connection.Simulation.WaitStats.Clear();
             return DbccCompleted(batch, dbcc, []);
         }
         if (!BuiltInToken.Equals(keyword, "LOGSPACE") || dbcc.Arguments.Count != 1)
