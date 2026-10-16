@@ -686,6 +686,13 @@ partial class Simulation
             if (!thrown.BindReportSettled)
                 (ex, this.resumedAtStatementEnd) = simulation.ReportEveryBindError(batch, thrown, this.StatementStart, requireSemicolonBeforeCte, atBatchStart);
 
+            // A statement that declared it owns its trailing token and then
+            // raised — while it ran, or in the re-read — never reached the
+            // dispatch tail that reads the declaration, which would otherwise
+            // reject the next statement's last token (a failed BACKUP took the
+            // ALTER DATABASE … SET after it down with Msg 102).
+            _ = batch.Parser.ConsumeRejectTrailingToken();
+
             // A statement that applied a security predicate quotes no value,
             // type or name in a conversion or truncation error, whichever row
             // raised it (probed 2026-10-04 against SQL Server 2025).

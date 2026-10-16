@@ -296,4 +296,24 @@ public sealed class BackupChainTests
                  join sys.partitions p on p.object_id = i.object_id and p.index_id = i.index_id where i.object_id = object_id('t')))
             """));
     }
+
+    /// <summary>
+    /// A statement failing as it runs leaves the next one to parse as its own:
+    /// the <c>ALTER DATABASE … SET</c> after each runs, where it once failed
+    /// with Msg 102 near its last token.
+    /// </summary>
+    [TestMethod]
+    [DataRow("backup database nope to disk = N'/b/n.bak'", new[] { 911, 3013 })]
+    [DataRow("backup database d to disk = N'/b/d.dif' with differential", new[] { 3035, 3013 })]
+    [DataRow("backup log d to disk = N'/b/d.trn'", new[] { 4214, 3013 })]
+    [DataRow("restore database nope from disk = N'/b/nope.bak'", new[] { 3201, 3013 })]
+    [DataRow("restore headeronly from disk = N'/b/nope.bak'", new[] { 3201, 3013 })]
+    [DataRow("alter database d modify name = master", new[] { 1801 })]
+    public void FailedStatement_LeavesTheNextAlterDatabaseSetToRun(string failing, int[] numbers)
+    {
+        var simulation = WithDatabase();
+        var error = simulation.AssertSqlError($"{failing}\nalter database d set recovery simple", numbers[0]);
+        CollectionAssert.AreEqual(numbers, TestHelpers.Numbers(error));
+        AreEqual("SIMPLE", simulation.ExecuteScalar("select recovery_model_desc from sys.databases where name = 'd'"));
+    }
 }
