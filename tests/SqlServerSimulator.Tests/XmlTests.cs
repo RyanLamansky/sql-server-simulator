@@ -171,6 +171,49 @@ public sealed class XmlTests
     }
 
     /// <summary>
+    /// A primary XML index needs a clustered primary key of fewer than 32
+    /// columns and 128 declared bytes — a clustered unique index doesn't
+    /// stand in — and every refusal of the statement ends the batch.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (id int primary key nonclustered, x xml); create primary xml index px on t(x)", 6332, "Table 't' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.")]
+    [DataRow("create table t (id int, x xml); create primary xml index px on t(x)", 6332, "Table 't' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.")]
+    [DataRow("create table t (id int not null, x xml); create unique clustered index cu on t(id); create primary xml index px on t(x)", 6332, "Table 't' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.")]
+    [DataRow("create table t (id int not null, k int, x xml, constraint pk primary key nonclustered (id)); create clustered index c on t(k); create primary xml index px on t(x)", 6332, "Table 't' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.")]
+    [DataRow("create table #t (id int primary key nonclustered, x xml); create primary xml index px on #t(x)", 6332, "Table '#t' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.")]
+    [DataRow("create table t (a char(129) not null primary key, x xml); create primary xml index px on t(x)", 6336, "Maximum size of primary index of table 't' is 129 bytes. CREATE XML INDEX requires that such size should be limited to 128 bytes")]
+    [DataRow("create table t (a nvarchar(65) not null primary key, x xml); create primary xml index px on t(x)", 6336, "Maximum size of primary index of table 't' is 130 bytes. CREATE XML INDEX requires that such size should be limited to 128 bytes")]
+    [DataRow("create table t (id int primary key nonclustered, x xml); create primary xml index px on t(y)", 1911, "Column name 'y' does not exist in the target table, index or view.")]
+    [DataRow("create table t (id int primary key nonclustered, x int); create primary xml index px on t(x)", 6330, "Column 'x' on table 't' is not of type XML, which is required to create an XML index on it.")]
+    [DataRow("create table t (id int primary key, x xml); create primary xml index px on t(x); create primary xml index px2 on t(x)", 6331, "Primary XML Index 'px' already exists on column 'x' on table 't', and multiple Primary XML Indexes per column are not allowed.")]
+    [DataRow("create table t (id int primary key nonclustered, x xml); create xml index sx on t(x) using xml index nope for path", 6333, "Could not find PRIMARY XML index named 'nope' on table 't'")]
+    [DataRow("create table t (id int primary key, x xml); create primary xml index px on t(x); create xml index sx on t(x) using xml index px for path; create xml index sx2 on t(x) using xml index sx for path", 6333, "Could not find PRIMARY XML index named 'sx' on table 't'")]
+    public void CreateXmlIndex_Refusals_EndTheBatch(string setup, int number, string message)
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError(setup + "; create table after_refusal (a int)", number, message);
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('after_refusal')"));
+    }
+
+    /// <summary>A primary XML index on a 31-column or 128-byte clustered key is taken, and a rolled-back one leaves no index.</summary>
+    [TestMethod]
+    public void CreatePrimaryXmlIndex_AtTheKeyLimits_AndRolledBack()
+    {
+        var sim = new Simulation();
+        var columns = string.Join(", ", Enumerable.Range(1, 31).Select(i => $"a{i.ToInvariantString()} tinyint"));
+        var key = string.Join(", ", Enumerable.Range(1, 31).Select(i => $"a{i.ToInvariantString()}"));
+        _ = sim.ExecuteNonQuery($"""
+            create table w (a char(128) not null primary key, x xml); create primary xml index px on w(x);
+            create table k ({columns}, x xml, primary key ({key})); create primary xml index px on k(x);
+            create table r (id int primary key, x xml);
+            begin tran; create primary xml index px on r(x); rollback
+            """);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.xml_indexes"));
+        _ = sim.AssertSqlError("begin tran; create primary xml index px on r(x); create primary xml index px2 on r(x)", 6331);
+        AreEqual(0, sim.ExecuteScalar("select @@trancount + (select count(*) from sys.xml_indexes where object_id = object_id('r'))"));
+    }
+
+    /// <summary>
     /// An XML index's <c>WITH</c> list: the options it takes reach the
     /// catalog, a name no index takes is the XML INDEX's own refusal, and an
     /// option the statement can't take is refused once the list has read.

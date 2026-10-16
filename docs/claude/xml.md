@@ -810,6 +810,10 @@ A new index takes one past the table's highest surviving XML id, so a dropped to
 The deprecated `DROP INDEX table.name` form is refused for XML and spatial indexes alike with Msg 3749 — while compiling, so nothing ahead of it in the batch runs, and even under `IF EXISTS`.
 While either kind is on a table its primary key can't be dropped (Msg 3734 then Msg 3727).
 A `#temp` table takes XML indexes as a permanent one does; a full-text index refuses it (Msg 208 state 48, where a missing table is state 49).
+
+`CREATE [PRIMARY] XML INDEX` checks, in real's order (probed 2026-10-16 against SQL Server 2025): the column (Msg 1911 state 201) and its type (Msg 6330), the index's name (Msg 1913, or Msg 6333 state 201 / 203 for a `DROP_EXISTING` naming nothing) and a second primary index on the column (Msg 6331), the `SET` options (Msg 1934), then a secondary's `USING XML INDEX`, which must name a primary one (Msg 6333 state 202), and a primary's clustered primary key.
+That key must be the table's `PRIMARY KEY` — a clustered unique index or a nonclustered key beside a clustered index doesn't stand in — of fewer than 32 columns (Msg 6332) whose declared lengths sum to at most 128 bytes (Msg 6336); a spatial index's limits are 31 columns and 895 bytes (Msg 12008 / 12016, see [`spatial.md`](spatial.md)).
+Each refusal ends the batch and rolls the transaction back, or dooms it under `TRY`, and a rolled-back `CREATE` leaves no index.
 Appended after them (real orders these interleaved; the simulator appends since consumers read by name): `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` (false) / `is_unique_constraint` (false) / `fill_factor` (0) / `is_padded` (false) / `is_disabled` (false) / `is_hypothetical` (false) / `is_ignored_in_optimization` (false) / `allow_row_locks` (true) / `allow_page_locks` (true) / `has_filter` (false) / `filter_definition` (NULL) / `xml_index_type` (0 primary, 1 secondary) / `xml_index_type_description` (`PRIMARY_XML` / `SECONDARY_XML`) / `path_id` (NULL — the column names the promoted path a *selective* XML index tracks, and an ordinary primary or secondary index reports NULL; probe-confirmed) / `auto_created` (false).
 Values are the fresh-index defaults.
 DacFx's XML-index reverse-engineering query reads the `fill_factor` / `is_padded` / `allow_*_locks` / `is_disabled` / `xml_index_type` / `path_id` tail.
@@ -1210,5 +1214,5 @@ The declaration is dropped, which also keeps SqlClient from refusing a value who
 - **XQuery features beyond the expression subset** the evaluator models — see [its own list](#not-modeled-yet).
   `.modify()`'s paths, content and values run through the same evaluator, so the subset bounds the mutator too.
   [`OPENXML`](#openxml) is unaffected — its patterns are XPath 1.0 and run through the DOM's own engine.
-- **`SELECTIVE XML INDEX`** variant (SQL Server 2014+).
+- **`SELECTIVE XML INDEX`** variant (SQL Server 2014+); real refuses one on a table without a clustered primary key of fewer than 32 columns with Msg 6378, the selective twin of Msg 6332 (probed 2026-10-16 against SQL Server 2025).
 - The typed-write residue under [its divergences](#divergences-1): the XSD errors outside the ones refused.

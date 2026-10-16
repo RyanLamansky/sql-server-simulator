@@ -3199,6 +3199,14 @@ partial class SimulatedSqlException
         new($"Could not find {(primary ? "PRIMARY XML" : "XML")} index named '{indexName}' on table '{writtenTableName}'", 6333, 16, primary ? (byte)201 : (byte)203);
 
     /// <summary>
+    /// Msg 6333 state 202: a secondary XML index whose <c>USING XML INDEX</c>
+    /// names no primary XML index of the table (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UsingPrimaryXmlIndexNotFound(string indexName, string writtenTableName) =>
+        new($"Could not find PRIMARY XML index named '{indexName}' on table '{writtenTableName}'", 6333, 16, 202);
+
+    /// <summary>
     /// Mimics SQL Server error 1914 state 2: <c>CREATE INDEX</c> naming a
     /// synonym, function or procedure, named as written (probed 2026-10-05
     /// against SQL Server 2025).
@@ -3987,6 +3995,27 @@ partial class SimulatedSqlException
     /// <summary>Msg 12008: a spatial index on a table without a clustered primary key.</summary>
     internal static SimulatedSqlException SpatialIndexNeedsClusteredPrimaryKey(string writtenTable) =>
         new($"Table '{writtenTable}' does not have a clustered primary key as required by the spatial index. Make sure that the primary key column exists on the table before creating a spatial index.", 12008, 16, 1);
+
+    /// <summary>Msg 6330 state 201: an XML index on a column that isn't <c>xml</c>.</summary>
+    internal static SimulatedSqlException XmlIndexOnNonXmlColumn(string columnName, string writtenTable) =>
+        new($"Column '{columnName}' on table '{writtenTable}' is not of type XML, which is required to create an XML index on it.", 6330, 16, 201);
+
+    /// <summary>Msg 6331 state 201: a second primary XML index on one column, naming the one it already has.</summary>
+    internal static SimulatedSqlException SecondPrimaryXmlIndex(string existingIndexName, string columnName, string writtenTable) =>
+        new($"Primary XML Index '{existingIndexName}' already exists on column '{columnName}' on table '{writtenTable}', and multiple Primary XML Indexes per column are not allowed.", 6331, 16, 201);
+
+    /// <summary>
+    /// Msg 6332 state 201: a primary XML index on a table whose primary key
+    /// isn't clustered or has 32 columns, or that has none — a clustered
+    /// unique index doesn't stand in for it (probed 2026-10-16 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PrimaryXmlIndexNeedsClusteredPrimaryKey(string writtenTable) =>
+        new($"Table '{writtenTable}' needs to have a clustered primary key with less than 32 columns in it in order to create a primary XML index on it.", 6332, 16, 201);
+
+    /// <summary>Msg 6336 state 201: a primary XML index over a clustered primary key past 128 bytes, its columns' declared lengths summed.</summary>
+    internal static SimulatedSqlException PrimaryXmlIndexKeyTooWide(string writtenTable, int bytes) =>
+        new($"Maximum size of primary index of table '{writtenTable}' is {bytes} bytes. CREATE XML INDEX requires that such size should be limited to 128 bytes", 6336, 16, 201);
 
     /// <summary>Msg 12016: a primary key past a spatial index's 31 columns or 895 bytes.</summary>
     internal static SimulatedSqlException SpatialIndexPrimaryKeyTooWide(string writtenTable, int columns, int bytes) =>

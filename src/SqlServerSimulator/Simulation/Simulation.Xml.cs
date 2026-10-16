@@ -419,33 +419,65 @@ partial class Simulation
                 break;
             }
         }
+        // Real checks the column, its type, the index's name and the primary
+        // index a secondary names, then the SET options, then the table's
+        // clustered primary key, each refusal ending the batch and rolling the
+        // transaction back, or dooming it under TRY (probed 2026-10-16 against
+        // SQL Server 2025).
+        var writtenTable = tableName.ToString();
         if (ordinal < 0)
-            throw SimulatedSqlException.InvalidColumnName(columnName);
+            throw SimulatedSqlException.IndexColumnMissing(columnName, state: 201).AbortingAsUnderXactAbort();
+        if (table.Columns[ordinal].Type is not XmlSqlType)
+            throw SimulatedSqlException.XmlIndexOnNonXmlColumn(table.Columns[ordinal].Name, writtenTable).AbortingAsUnderXactAbort();
 
         var replaced = table.XmlIndexes.Find(existing => context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName));
+        var collation = context.Batch.CurrentDatabase.Collation;
         if (options.DropExisting)
         {
-            // Rebuilding a primary XML index drops the secondaries built on it
-            // (probed 2026-10-07 against SQL Server 2025).
             if (replaced is null)
-                throw SimulatedSqlException.XmlIndexNotFoundToDrop(isPrimary, indexName, tableName.ToString());
-            _ = table.XmlIndexes.RemoveAll(existing => ReferenceEquals(existing, replaced)
-                || (replaced.IsPrimary && existing.UsingPrimaryIndexName is { } primaryName && context.Batch.CurrentDatabase.Collation.Equals(primaryName, replaced.Name)));
+                throw SimulatedSqlException.XmlIndexNotFoundToDrop(isPrimary, indexName, writtenTable).AbortingAsUnderXactAbort();
         }
         else if (replaced is not null)
         {
-            throw SimulatedSqlException.IndexAlreadyExists(indexName, tableName.ToString(), state: 201);
+            throw SimulatedSqlException.IndexAlreadyExists(indexName, writtenTable, state: 201).AbortingAsUnderXactAbort();
         }
+        else if (isPrimary && table.XmlIndexes.Find(existing => existing.IsPrimary && existing.ColumnOrdinal == ordinal) is { } columnPrimary)
+        {
+            throw SimulatedSqlException.SecondPrimaryXmlIndex(columnPrimary.Name, table.Columns[ordinal].Name, writtenTable).AbortingAsUnderXactAbort();
+        }
+
+        // Msg 1934 echoes the statement as written, so the primary and
+        // secondary forms report different verbs (probe-confirmed).
+        if (IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", setOptions);
+
+        if (!isPrimary && !table.XmlIndexes.Exists(existing => existing.IsPrimary && collation.Equals(existing.Name, usingPrimaryName!)))
+            throw SimulatedSqlException.UsingPrimaryXmlIndexNotFound(usingPrimaryName!, writtenTable).AbortingAsUnderXactAbort();
+        if (isPrimary)
+        {
+            // The node table's rows are keyed by the clustered primary key:
+            // fewer than 32 columns of at most 128 declared bytes together.
+            var primaryKey = table.KeyConstraints.Find(key => key.Kind == KeyConstraintKind.PrimaryKey);
+            if (primaryKey is not { IsClustered: true } || primaryKey.FullOrdinals.Length >= 32)
+                throw SimulatedSqlException.PrimaryXmlIndexNeedsClusteredPrimaryKey(writtenTable).AbortingAsUnderXactAbort();
+            var keyBytes = 0;
+            foreach (var keyOrdinal in primaryKey.FullOrdinals)
+                keyBytes += Math.Max(0, (int)BuiltInResources.GetSysColumnMetadata(table.Columns[keyOrdinal]).MaxLength);
+            if (keyBytes > 128)
+                throw SimulatedSqlException.PrimaryXmlIndexKeyTooWide(writtenTable, keyBytes).AbortingAsUnderXactAbort();
+        }
+
+        // Rebuilding a primary XML index drops the secondaries built on it
+        // (probed 2026-10-07 against SQL Server 2025).
+        var dropped = replaced is null ? [] : table.XmlIndexes.FindAll(existing => ReferenceEquals(existing, replaced)
+            || (replaced.IsPrimary && existing.UsingPrimaryIndexName is { } primaryName && collation.Equals(primaryName, replaced.Name)));
+        _ = table.XmlIndexes.RemoveAll(dropped.Contains);
 
         // A primary XML index owns an internal "node table" (sys.objects type
         // IT). Secondary indexes share their primary's node table. DacFx's
         // XML-index reverse-engineering joins through this internal table + its
         // per-index statistics, so a primary allocates an object id for it here
         // (0 for secondaries — they resolve their primary's at enumeration).
-        // Msg 1934 echoes the statement as written, so the primary and
-        // secondary forms report different verbs (probe-confirmed).
-        if (IncorrectSetOptionNames(context) is { } setOptions)
-            throw SimulatedSqlException.IncorrectSetOptions(isPrimary ? "CREATE PRIMARY XML INDEX" : "CREATE XML INDEX", setOptions);
 
         var internalTableObjectId = isPrimary ? context.CurrentDatabase.AllocateObjectId() : 0;
         // XML indexes take index ids from real's dedicated 256000+ range, one
@@ -471,6 +503,11 @@ partial class Simulation
             AllowPageLocks = options.AllowPageLocks,
         };
         table.XmlIndexes.Add(index);
+        RecordDdlUndo(context, () =>
+        {
+            _ = table.XmlIndexes.Remove(index);
+            table.XmlIndexes.AddRange(dropped);
+        });
         return true;
     }
 
