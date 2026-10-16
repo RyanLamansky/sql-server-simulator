@@ -367,12 +367,18 @@ public sealed class StreamedResultWireTests
             IsLessThan(10_000, waited.ElapsedMilliseconds, "the killed reader's locks stayed");
             await Task.Delay(10, TestContext.CancellationToken);
         }
-        _ = await ThrowsAsync<SqlException>(async () =>
+
+        // SqlClient reports the dropped transport as a SqlException or as an
+        // InvalidOperationException that the connection is closed, depending
+        // on where in its own reading it meets the close, which the server
+        // doesn't choose.
+        var failure = await ThrowsAsync<Exception>(async () =>
         {
             while (await rows.ReadAsync(TestContext.CancellationToken))
             {
             }
         });
+        IsTrue(failure is SqlException or InvalidOperationException, failure.ToString());
     }
 
     /// <summary>
