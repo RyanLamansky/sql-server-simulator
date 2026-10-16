@@ -139,7 +139,9 @@ partial class Simulation
         public bool Checksum;
         public bool RestrictedUser;
         public bool LoadHistory;
-        public bool? Broker;
+
+        /// <summary>The broker switch a restore names; one alone, though it may be written twice.</summary>
+        public BrokerSwitch? Broker;
 
         /// <summary><c>NORECOVERY</c>: a restore leaves the database restoring, a log backup takes the tail and does the same.</summary>
         public bool NoRecovery;
@@ -328,7 +330,7 @@ partial class Simulation
             // Every kind of set carries the database as it stands: a
             // differential or log backup restores to that state just as a
             // full one does.
-            image = DatabaseImage.Capture(database);
+            image = DatabaseImage.Capture(database, this.BrokerIfUsed);
             if (type == BackupSet.LogType)
             {
                 var (commits, sequence, unrecordedSince) = database.Log.TakeForBackup();
@@ -710,7 +712,7 @@ partial class Simulation
         bool restored;
         try
         {
-            restored = image.TryRestoreInPlace(existing, physicalNames);
+            restored = image.TryRestoreInPlace(this, existing, physicalNames);
         }
         catch (InvalidOperationException ex)
         {
@@ -891,12 +893,21 @@ partial class Simulation
                 case "DIFFERENTIAL" when !restore:
                     options.Differential = true;
                     break;
-                case "ENABLE_BROKER" or "NEW_BROKER" when restore:
-                    options.Broker = true;
-                    break;
-                case "ERROR_BROKER_CONVERSATIONS" when restore:
-                    options.Broker = false;
-                    break;
+                case "ENABLE_BROKER" or "NEW_BROKER" or "ERROR_BROKER_CONVERSATIONS" when restore:
+                    {
+                        var change = name switch
+                        {
+                            "ENABLE_BROKER" => BrokerSwitch.Enable,
+                            "NEW_BROKER" => BrokerSwitch.New,
+                            _ => BrokerSwitch.ErrorConversations,
+                        };
+                        // A second, different broker option is a syntax error at it (probed 2026-10-16 against SQL Server 2025).
+                        if (options.Broker is { } prior && prior != change)
+                            throw SimulatedSqlException.SyntaxErrorNear(token, 25);
+                        options.Broker = change;
+                        _ = options.Flags.Add("BROKER_OPTION");
+                        break;
+                    }
                 case "FILE" when restore:
                     ExpectEquals(context);
                     file = ParseBackupIntegerValue(context, batch);
@@ -1043,6 +1054,7 @@ partial class Simulation
         ("COMPRESSION", "NO_COMPRESSION", "compression", "no_compression"), ("CONTINUE_AFTER_ERROR", "STOP_ON_ERROR", "continue_after_error", "stop_on_error"),
         // How real names the recovery and stop-point pairs, whichever is written first (probed 2026-10-16 against SQL Server 2025).
         ("NORECOVERY", "RECOVERY", "norecovery", "recovery"), ("NORECOVERY", "STANDBY", "norecovery", "standby"), ("RECOVERY", "STANDBY", "recovery", "standby"),
+        ("NORECOVERY", "BROKER_OPTION", "norecovery", "broker_option"),
         ("STOPAT", "STOPATMARK", "stopat", "stopatmark"), ("STOPAT", "STOPBEFOREMARK", "stopat", "stopbeforemark"),
         ("STOPATMARK", "STOPBEFOREMARK", "stopatmark", "stopbeforemark, stopbeforemark"),
     ];

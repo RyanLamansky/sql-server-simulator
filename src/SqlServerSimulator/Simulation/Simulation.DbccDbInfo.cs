@@ -56,7 +56,7 @@ partial class Simulation
                 "dbi_dbid" => databaseId.ToString(CultureInfo.InvariantCulture),
                 "dbi_dbname" => database.Name,
                 "dbi_familyGUID" => family,
-                "dbi_svcBrokerGUID" => BuiltInResources.SysDatabasesBrokerGuid.ToString(),
+                "dbi_svcBrokerGUID" => database.ServiceBrokerGuid.ToString(),
                 // The recovery fork stack's first entry is the family.
                 "m_guid" when !sawForkGuid => family,
                 _ => template,

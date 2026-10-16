@@ -269,16 +269,16 @@ partial class Simulation
             {
                 group = (broker.Find(database, related, owner) ?? throw SimulatedSqlException.ConversationHandleNotFound(related, 6)).Group;
             }
-            else if (relatedGroupId is { } groupId && broker.Groups.TryGetValue(groupId, out var existing) && BrokerRuntime.Sees(existing.PendingOwner, owner))
+            else if (relatedGroupId is { } groupId && broker.Groups.TryGetValue(new(database, groupId), out var existing) && BrokerRuntime.Sees(existing.PendingOwner, owner))
             {
                 group = existing;
             }
             if (group is null)
             {
                 group = new ConversationGroup(relatedGroupId ?? broker.NewId(), database, fromService) { PendingOwner = BrokerRuntime.PendingOwnerFor(batch) };
-                broker.Groups[group.Id] = group;
+                broker.Groups[group.Key] = group;
                 var created = group;
-                broker.Log(batch, () => _ = broker.Groups.Remove(created.Id), () => created.PendingOwner = null);
+                broker.Log(batch, () => _ = broker.Groups.Remove(created.Key), () => created.PendingOwner = null);
             }
             _ = broker.LockGroup(batch, group, skipWhenHeld: false);
             endpoint = new ConversationEndpoint(broker.NewId(), Guid.NewGuid(), isInitiator: true, database, fromService, contract, group, target,
@@ -286,9 +286,9 @@ partial class Simulation
             {
                 PendingOwner = BrokerRuntime.PendingOwnerFor(batch),
             };
-            broker.Endpoints[endpoint.Handle] = endpoint;
+            broker.Endpoints[endpoint.Key] = endpoint;
             var added = endpoint;
-            broker.Log(batch, () => _ = broker.Endpoints.Remove(added.Handle), () => added.PendingOwner = null);
+            broker.Log(batch, () => _ = broker.Endpoints.Remove(added.Key), () => added.PendingOwner = null);
         }
         AssignBrokerVariable(batch, handleVariable, SqlValue.FromGuid(endpoint.Handle));
         return NoBrokerCount;
@@ -662,25 +662,25 @@ partial class Simulation
         var owner = BrokerRuntime.PendingOwnerFor(batch);
         var database = service.Queue.Schema.Database;
         var group = new ConversationGroup(broker.NewId(), database, service) { PendingOwner = owner };
-        broker.Groups[group.Id] = group;
+        broker.Groups[group.Key] = group;
         var target = new ConversationEndpoint(broker.NewId(), from.ConversationId, isInitiator: false, database, service, contract, group, from.Service.Name,
             Database.DboPrincipalId, from.Lifetime, from.Encrypted)
         {
             State = EndpointState.Conversing,
             FarPrincipalId = from.PrincipalId,
-            FarBrokerInstance = BrokerInstance,
+            FarBrokerInstance = BrokerInstanceOf(from.Database),
             Far = from,
             PendingOwner = owner,
         };
-        broker.Endpoints[target.Handle] = target;
+        broker.Endpoints[target.Key] = target;
         var (previousState, previousInstance) = (from.State, from.FarBrokerInstance);
         from.Far = target;
         from.State = EndpointState.Conversing;
-        from.FarBrokerInstance = BrokerInstance;
+        from.FarBrokerInstance = BrokerInstanceOf(database);
         broker.Log(batch, () =>
         {
-            _ = broker.Endpoints.Remove(target.Handle);
-            _ = broker.Groups.Remove(group.Id);
+            _ = broker.Endpoints.Remove(target.Key);
+            _ = broker.Groups.Remove(group.Key);
             from.Far = null;
             from.State = previousState;
             from.FarBrokerInstance = previousInstance;
@@ -693,11 +693,8 @@ partial class Simulation
         return target;
     }
 
-    /// <summary>
-    /// The <c>service_broker_guid</c> every user database reports here, as
-    /// <c>far_broker_instance</c> spells it.
-    /// </summary>
-    private static readonly string BrokerInstance = BuiltInResources.SysDatabasesBrokerGuid.ToString().ToUpperInvariant();
+    /// <summary><paramref name="database"/>'s <c>service_broker_guid</c> as <c>far_broker_instance</c> spells it.</summary>
+    internal static string BrokerInstanceOf(Database database) => database.ServiceBrokerGuid.ToString().ToUpperInvariant();
 
     /// <summary>
     /// Errors <paramref name="endpoint"/> once the sending transaction
@@ -710,7 +707,7 @@ partial class Simulation
         var body = BrokerRuntime.ErrorBody(code, description);
         broker.Log(batch, static () => { }, () =>
         {
-            if (endpoint.State == EndpointState.Closed || !broker.Endpoints.ContainsKey(endpoint.Handle))
+            if (endpoint.State == EndpointState.Closed || !broker.Endpoints.ContainsKey(endpoint.Key))
                 return;
             endpoint.State = EndpointState.Error;
             _ = broker.Enqueue(null, endpoint, endpoint.Database.ServiceBroker.ErrorType, -1, body, now);
@@ -855,7 +852,7 @@ partial class Simulation
         _ = broker.Transmission.RemoveAll(message => ReferenceEquals(message.From, endpoint));
         var (previousState, previousTimer) = (endpoint.State, endpoint.DialogTimer);
         if (removes)
-            _ = broker.Endpoints.Remove(endpoint.Handle);
+            _ = broker.Endpoints.Remove(endpoint.Key);
         else
             endpoint.State = EndpointState.Closed;
         endpoint.DialogTimer = null;
@@ -864,7 +861,7 @@ partial class Simulation
             foreach (var message in removedMessages)
                 InsertInOrder(queue.Messages, message);
             broker.Transmission.AddRange(removedHeld);
-            broker.Endpoints[endpoint.Handle] = endpoint;
+            broker.Endpoints[endpoint.Key] = endpoint;
             endpoint.State = previousState;
             endpoint.DialogTimer = previousTimer;
         }, null);
@@ -948,7 +945,7 @@ partial class Simulation
         lock (broker.Gate)
         {
             var endpoint = broker.Find(batch.CurrentDatabase, id, owner) ?? throw SimulatedSqlException.ConversationHandleNotFound(id, 2);
-            if (!broker.Groups.TryGetValue(groupId, out var group) || !BrokerRuntime.Sees(group.PendingOwner, owner) || !ReferenceEquals(group.Service, endpoint.Service))
+            if (!broker.Groups.TryGetValue(new(batch.CurrentDatabase, groupId), out var group) || !BrokerRuntime.Sees(group.PendingOwner, owner) || !ReferenceEquals(group.Service, endpoint.Service))
                 throw SimulatedSqlException.ConversationGroupInvalid(groupId);
             _ = broker.LockGroup(batch, endpoint.Group, skipWhenHeld: false);
             _ = broker.LockGroup(batch, group, skipWhenHeld: false);
@@ -1254,7 +1251,7 @@ partial class Simulation
                 continue;
             if (filterId is { } id && (byGroup ? message.ConversationGroupId : message.ConversationHandle) != id)
                 continue;
-            if (!broker.Groups.TryGetValue(message.ConversationGroupId, out var group))
+            if (!broker.Groups.TryGetValue(new(queue.Schema.Database, message.ConversationGroupId), out var group))
                 continue;
             if (group.LockedBy is { } holder && !ReferenceEquals(holder, owner))
                 continue;

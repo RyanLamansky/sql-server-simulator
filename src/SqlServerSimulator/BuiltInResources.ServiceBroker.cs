@@ -294,7 +294,7 @@ internal static partial class BuiltInResources
         lock (broker.Gate)
         {
             broker.FireDue(DateTime.UtcNow);
-            foreach (var (_, endpoint) in broker.Endpoints.OrderBy(static pair => pair.Key))
+            foreach (var (_, endpoint) in broker.Endpoints.OrderBy(static pair => pair.Value.Handle))
             {
                 if (!ReferenceEquals(endpoint.Database, database) || !BrokerRuntime.Sees(endpoint.PendingOwner, owner))
                     continue;
@@ -342,7 +342,7 @@ internal static partial class BuiltInResources
         var owner = batch.Connection.LockOwner;
         lock (broker.Gate)
         {
-            foreach (var (_, group) in broker.Groups.OrderBy(static pair => pair.Key))
+            foreach (var (_, group) in broker.Groups.OrderBy(static pair => pair.Value.Id))
             {
                 if (ReferenceEquals(group.Database, database) && BrokerRuntime.Sees(group.PendingOwner, owner))
                     rows.Add([SqlValue.FromGuid(group.Id), SqlValue.FromInt32(group.Service.Id), notMsShipped]);

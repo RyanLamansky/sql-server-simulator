@@ -1186,13 +1186,6 @@ internal static partial class BuiltInResources
     internal static readonly DateTime SysDatabasesCreateDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
     /// <summary>
-    /// Fixed <c>service_broker_guid</c> for every <c>sys.databases</c> row.
-    /// Service Broker isn't modeled; the column is non-null in real SQL
-    /// Server, so a stable constant stands in.
-    /// </summary>
-    internal static readonly Guid SysDatabasesBrokerGuid = new("00000000-0000-0000-0000-000000000001");
-
-    /// <summary>
     /// <c>is_fulltext_enabled</c> / <c>DATABASEPROPERTYEX(…, 'IsFulltextEnabled')</c>:
     /// on for every database but master, model and tempdb (probed 2026-09-30
     /// against SQL Server 2025) until <c>sp_fulltext_database 'disable'</c> turns it off.
@@ -1227,8 +1220,6 @@ internal static partial class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
         var createDate = SqlValue.FromDateTime(SysDatabasesCreateDate);
-        var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
-        var zeroGuid = SqlValue.FromGuid(Guid.Empty);
         var online = SqlValue.FromNVarchar("ONLINE");
         var emergency = SqlValue.FromNVarchar("EMERGENCY");
         var offline = SqlValue.FromNVarchar("OFFLINE");
@@ -1253,9 +1244,6 @@ internal static partial class BuiltInResources
             if (!connection.Simulation.CanSeeDatabase(connection, db))
                 continue;
             var snapshotOn = db.AllowSnapshotIsolation;
-            // master and model carry an all-zero broker GUID (probed
-            // 2026-09-30 against SQL Server 2025).
-            var isMasterOrModel = BuiltInToken.EqualsAny(db.Name, "master", "model");
             var switches = db.Switches;
             SqlValue Switch(DatabaseSwitches flag) => (switches & flag) != 0 ? trueBit : falseBit;
             yield return [
@@ -1332,7 +1320,7 @@ internal static partial class BuiltInResources
                 falseBit, // is_merge_published
                 falseBit, // is_distributor
                 falseBit, // is_sync_with_backup
-                isMasterOrModel ? zeroGuid : brokerGuid,
+                SqlValue.FromGuid(db.ServiceBrokerGuid),
                 SqlValue.FromBoolean(db.BrokerEnabled),
                 zeroByte,
                 nothing,

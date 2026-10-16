@@ -24,6 +24,9 @@ internal enum EndpointState : byte
 internal sealed class ConversationEndpoint(Guid handle, Guid conversationId, bool isInitiator, Database database, BrokerService service, BrokerContract contract, ConversationGroup group, string farService, int principalId, DateTime lifetime, bool encrypted)
 {
     public readonly Guid Handle = handle;
+
+    /// <summary>The endpoint's key in <see cref="BrokerRuntime.Endpoints"/>.</summary>
+    public readonly BrokerKey Key = new(database, handle);
     public readonly Guid ConversationId = conversationId;
     public readonly bool IsInitiator = isInitiator;
     public readonly Database Database = database;
@@ -88,6 +91,9 @@ internal sealed class ConversationEndpoint(Guid handle, Guid conversationId, boo
 internal sealed class ConversationGroup(Guid id, Database database, BrokerService service)
 {
     public readonly Guid Id = id;
+
+    /// <summary>The group's key in <see cref="BrokerRuntime.Groups"/>.</summary>
+    public readonly BrokerKey Key = new(database, id);
     public readonly Database Database = database;
     public readonly BrokerService Service = service;
 
@@ -96,6 +102,23 @@ internal sealed class ConversationGroup(Guid id, Database database, BrokerServic
 
     /// <summary>The owner of the open transaction that created the group; null once committed.</summary>
     public object? PendingOwner;
+}
+
+/// <summary>
+/// A conversation endpoint's handle or a conversation group's id within the
+/// database that holds it: real scopes both to their database, so a restored
+/// copy of a database carries its original's handles beside it.
+/// </summary>
+internal readonly struct BrokerKey(Database database, Guid id) : IEquatable<BrokerKey>
+{
+    public readonly Database Database = database;
+    public readonly Guid Id = id;
+
+    public bool Equals(BrokerKey other) => ReferenceEquals(this.Database, other.Database) && this.Id == other.Id;
+
+    public override bool Equals(object? obj) => obj is BrokerKey other && this.Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this.Database), this.Id);
 }
 
 /// <summary>One message waiting on its sender's <c>sys.transmission_queue</c>.</summary>
@@ -125,8 +148,8 @@ internal sealed class TransmissionMessage
 internal sealed class BrokerRuntime(Simulation simulation)
 {
     public readonly object Gate = new();
-    public readonly Dictionary<Guid, ConversationEndpoint> Endpoints = [];
-    public readonly Dictionary<Guid, ConversationGroup> Groups = [];
+    public readonly Dictionary<BrokerKey, ConversationEndpoint> Endpoints = [];
+    public readonly Dictionary<BrokerKey, ConversationGroup> Groups = [];
     public readonly List<TransmissionMessage> Transmission = [];
 
     /// <summary>
@@ -190,10 +213,25 @@ internal sealed class BrokerRuntime(Simulation simulation)
     /// no statement reaches.
     /// </summary>
     public ConversationEndpoint? Find(Database database, Guid handle, object owner) =>
-        this.Endpoints.TryGetValue(handle, out var endpoint) && ReferenceEquals(endpoint.Database, database)
+        this.Endpoints.TryGetValue(new(database, handle), out var endpoint)
             && endpoint.State != EndpointState.Closed && Sees(endpoint.PendingOwner, owner)
             ? endpoint
             : null;
+
+    /// <summary>
+    /// Drops every endpoint, conversation group and held message of
+    /// <paramref name="database"/>, telling no one: <c>NEW_BROKER</c>, and a
+    /// restore replacing the database's conversations with its backup's.
+    /// Called under <see cref="Gate"/>.
+    /// </summary>
+    public void Forget(Database database)
+    {
+        foreach (var key in this.Endpoints.Keys.Where(key => ReferenceEquals(key.Database, database)).ToList())
+            _ = this.Endpoints.Remove(key);
+        foreach (var key in this.Groups.Keys.Where(key => ReferenceEquals(key.Database, database)).ToList())
+            _ = this.Groups.Remove(key);
+        _ = this.Transmission.RemoveAll(message => ReferenceEquals(message.From.Database, database));
+    }
 
     /// <summary>
     /// Takes <paramref name="group"/> for the transaction <paramref name="batch"/>

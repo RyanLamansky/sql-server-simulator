@@ -13,10 +13,12 @@ partial class DatabaseImage
     /// yet raises <see cref="NotSupportedException"/> naming it, so a backup
     /// never silently loses part of a database.
     /// </summary>
-    public static DatabaseImage Capture(Database database) => Capture(database, rows: true);
+    /// <param name="database">The database.</param>
+    /// <param name="conversations">The simulation's conversation state, whose endpoints, groups and held messages of the database the image carries.</param>
+    public static DatabaseImage Capture(Database database, BrokerRuntime? conversations) => Capture(database, rows: true, conversations);
 
-    /// <summary><see cref="Capture(Database)"/>, without the rows when <paramref name="rows"/> is false.</summary>
-    internal static DatabaseImage Capture(Database database, bool rows)
+    /// <summary><see cref="Capture(Database, BrokerRuntime)"/>, without the rows when <paramref name="rows"/> is false.</summary>
+    internal static DatabaseImage Capture(Database database, bool rows, BrokerRuntime? conversations = null)
     {
         RejectUnsupported(database);
         var image = new DatabaseImage
@@ -94,6 +96,7 @@ partial class DatabaseImage
         image.CaptureKeys(database);
         image.CapturePlanGuides(database);
         image.CapturePartitioning(database);
+        image.CaptureBroker(database, conversations);
 
         foreach (var schema in database.Schemas.Select(static pair => pair.Value).OrderBy(static schema => schema.SchemaId))
         {
@@ -120,8 +123,6 @@ partial class DatabaseImage
             throw Unsupported("full-text catalogs");
         if (database.ChangeTracking is not null)
             throw Unsupported("change tracking");
-        if (DatabaseBroker.HoldsUserObjects(database))
-            throw Unsupported("Service Broker objects");
         foreach (var (_, trigger) in database.DdlTriggers)
         {
             if (trigger.ClrEntry is not null || trigger.DefinitionText is null || trigger.FirstForEvents is not null || trigger.LastForEvents is not null)

@@ -434,6 +434,15 @@ internal sealed partial class Database
     /// </summary>
     public bool BrokerEnabled = true;
 
+    /// <summary>
+    /// <c>sys.databases.service_broker_guid</c>: the broker instance a
+    /// dialog's far side names this database by. A new database draws its
+    /// own and master and model carry none; a restore keeps the backup's, so
+    /// two databases may share one with at most one of them enabled, and
+    /// <c>NEW_BROKER</c> draws another (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    public Guid ServiceBrokerGuid = Guid.NewGuid();
+
     private DatabaseBroker? serviceBroker;
 
     /// <summary>
@@ -454,6 +463,9 @@ internal sealed partial class Database
 
     /// <summary>The Service Broker objects when a statement has asked for them, else null.</summary>
     public DatabaseBroker? ServiceBrokerIfUsed => Volatile.Read(ref this.serviceBroker);
+
+    /// <summary>Puts <paramref name="broker"/> in place of the database's Service Broker objects, as a restore does.</summary>
+    public void ReplaceServiceBroker(DatabaseBroker? broker) => Volatile.Write(ref this.serviceBroker, broker);
 
     /// <summary>
     /// <c>sys.databases.delayed_durability</c>: 0 DISABLED, 1 ALLOWED, 2

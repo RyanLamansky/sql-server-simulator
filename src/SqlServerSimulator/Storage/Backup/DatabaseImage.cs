@@ -11,7 +11,7 @@ namespace SqlServerSimulator.Storage.Backup;
 /// directly once the objects exist; and every table's rows.
 /// </summary>
 /// <remarks>
-/// Built from a live database by <see cref="Capture(Database)"/> and replayed into a new
+/// Built from a live database by <see cref="Capture(Database, BrokerRuntime)"/> and replayed into a new
 /// one by <see cref="Populate"/>. Recreating objects through the engine's own
 /// DDL, rather than copying them, is what rebinds every parsed expression —
 /// a default, a computed column, a module body — to the restored database's
@@ -230,6 +230,7 @@ internal sealed partial class DatabaseImage
         this.WriteKeys(w);
         this.WritePlanGuides(w);
         this.WritePartitioning(w);
+        this.WriteBroker(w);
     }
 
     private static DatabaseImage Read(BinaryReader r)
@@ -344,6 +345,7 @@ internal sealed partial class DatabaseImage
         ReadKeys(r, image);
         ReadPlanGuides(r, image);
         ReadPartitioning(r, image);
+        ReadBroker(r, image);
         return image;
     }
 

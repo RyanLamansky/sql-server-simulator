@@ -67,6 +67,9 @@ Ids come back as they were backed up: each replayed statement draws its ids from
 A statement that draws more ids than its objects keep — a DML trigger binds its `inserted` / `deleted` tables, a module binds a table-valued parameter's constraints — runs in a transaction the replay rolls back and repeats with the extra draws served first.
 Fix-ups look objects up by name, so an id that still came back different costs fidelity, not the restore.
 
+Service Broker's state travels as one value beside the steps, since no statement rebuilds a conversation: the broker id, the message types, contracts, queues (with their settings and messages), services, routes, bindings and priorities under their own ids, and the database's conversation endpoints, groups and held transmission-queue messages, a dialog between two databases relinked when the far side still names the endpoint it replaces.
+A restore puts it in place of whatever the database held, in place or rebuilt, and leaves the broker disabled unless a switch says otherwise (see [`service-broker.md`](service-broker.md#backup-and-restore)).
+
 A database holding something the image can't rebuild yet makes `BACKUP` raise `NotSupportedException` naming it (see Not modeled yet), so a backup never silently drops part of a database.
 
 ## How a restore runs

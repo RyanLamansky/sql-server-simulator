@@ -266,12 +266,4 @@ public sealed class ServiceBrokerDdlTests
         _ = simulation.AssertSqlError("grant insert on q to u", 4606);
         _ = simulation.AssertSqlError("execute as user = 'u'; create queue q2", 262);
     }
-
-    [TestMethod]
-    public void Backup_RefusesBrokerObjects()
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create queue q");
-        _ = Throws<NotSupportedException>(() => simulation.ExecuteNonQuery("backup database simulated to disk = '/b.bak'"));
-    }
 }

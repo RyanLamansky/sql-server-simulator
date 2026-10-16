@@ -100,7 +100,7 @@ partial class DatabaseImage
     /// The caller has made sure no other session uses the database and holds
     /// it in the RESTORING state.
     /// </remarks>
-    public bool TryRestoreInPlace(Database database, Dictionary<string, string> physicalNames)
+    public bool TryRestoreInPlace(Simulation simulation, Database database, Dictionary<string, string> physicalNames)
     {
         if (!database.CollationName.Equals(this.CollationName, StringComparison.Ordinal))
             return false;
@@ -140,6 +140,7 @@ partial class DatabaseImage
             table.MarkStatisticsFresh(null, database.Collation);
         }
         this.ApplyObjectState(database);
+        this.ApplyBroker(simulation, database);
         database.ExtendedProperties.Clear();
         foreach (var (key, value) in this.ExtendedProperties)
             database.ExtendedProperties[key] = value;
@@ -318,6 +319,7 @@ partial class DatabaseImage
         foreach (var (image, table) in tables)
             ApplyTableState(database, table, image);
         this.ApplyObjectState(database);
+        this.ApplyBroker(simulation, database);
         foreach (var (key, value) in this.ExtendedProperties)
             database.ExtendedProperties[key] = value;
         database.IsReadOnly = this.IsReadOnly;

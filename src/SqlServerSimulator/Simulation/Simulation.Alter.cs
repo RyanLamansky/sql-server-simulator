@@ -762,10 +762,13 @@ partial class Simulation
             case AlterDatabaseOptionKind.Broker:
                 if (!context.Batch.IsSkipping)
                 {
-                    target.BrokerEnabled = !BuiltInToken.Equals(name, "DISABLE_BROKER");
+                    var change = BuiltInToken.Equals(name, "DISABLE_BROKER") ? BrokerSwitch.Disable
+                        : BuiltInToken.Equals(name, "ERROR_BROKER_CONVERSATIONS") ? BrokerSwitch.ErrorConversations
+                        : BuiltInToken.Equals(name, "NEW_BROKER") ? BrokerSwitch.New
+                        : BrokerSwitch.Enable;
+                    if (!context.Connection.Simulation.TrySwitchBroker(context.Batch, target, change))
+                        throw SimulatedSqlException.BrokerIdAlreadyEnabled(target.Name);
                     LogDatabaseOption(context.Batch, target, name.ToUpperInvariant(), "ON");
-                    if (target.BrokerEnabled)
-                        context.Connection.Simulation.RedeliverHeld(context.Batch, target, BrokerDisabledStatus);
                 }
                 return true;
             case AlterDatabaseOptionKind.State:

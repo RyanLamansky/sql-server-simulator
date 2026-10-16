@@ -142,4 +142,21 @@ partial class SimulatedSqlException
     /// <summary>Msg 33303: a conversation priority whose name or properties another one has.</summary>
     internal static SimulatedSqlException PriorityAlreadyExists(string name, string? contract, string? localService, string? remoteService) =>
         new($"A conversation priority already exists in the database with either the name '{name}' or the properties CONTRACT_NAME='{contract ?? "NULL"}', LOCAL_SERVICE_NAME='{localService ?? "NULL"}', and REMOTE_SERVICE_NAME='{remoteService ?? "NULL"}'. Either use a unique name or a unique set of properties.", 33303, 16, 1);
+    /// <summary>
+    /// Mimics SQL Server error 9772, then Msg 5069: <c>ALTER DATABASE … SET
+    /// ENABLE_BROKER</c> or <c>ERROR_BROKER_CONVERSATIONS</c> of a database
+    /// whose broker id another database's enabled broker carries — a restored
+    /// copy beside its original (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BrokerIdAlreadyEnabled(string databaseName) =>
+        FollowedByAlterDatabaseFailed(new($"The Service Broker in database \"{databaseName}\" cannot be enabled because there is already an enabled Service Broker with the same ID.", 9772, 16, 1));
+
+    /// <summary>
+    /// Msg 9773 state 2, informational: a restore asked to enable a broker
+    /// whose id another database's enabled broker carries leaves it disabled,
+    /// naming the database by id (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError RestoredBrokerDisabledMessage(Parser.BatchContext batch, int databaseId) =>
+        batch.InfoMessage(@class: 0, state: 2, number: 9773, string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"The Service Broker in database \"{databaseId}\" is disabled because there is already an enabled Service Broker with the same ID."));
 }

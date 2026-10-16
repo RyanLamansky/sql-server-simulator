@@ -71,6 +71,8 @@ public sealed partial class Simulation
         master.TargetRecoveryTimeSeconds = 0;
         master.BrokerEnabled = false;
         this.Databases[ModelDatabaseName].BrokerEnabled = false;
+        master.ServiceBrokerGuid = Guid.Empty;
+        this.Databases[ModelDatabaseName].ServiceBrokerGuid = Guid.Empty;
         master.Switches |= DatabaseSwitches.MixedPageAllocation;
         this.Databases[ModelDatabaseName].Switches |= DatabaseSwitches.MixedPageAllocation;
         msdb.Switches |= DatabaseSwitches.MixedPageAllocation;

@@ -265,25 +265,25 @@ partial class Simulation
             var conversation = Guid.NewGuid();
             var initiatorGroup = new ConversationGroup(broker.NewId(), database, from);
             var targetGroup = new ConversationGroup(broker.NewId(), database, target);
-            broker.Groups[initiatorGroup.Id] = initiatorGroup;
-            broker.Groups[targetGroup.Id] = targetGroup;
+            broker.Groups[initiatorGroup.Key] = initiatorGroup;
+            broker.Groups[targetGroup.Key] = targetGroup;
             var initiator = new ConversationEndpoint(broker.NewId(), conversation, isInitiator: true, database, from, contract, initiatorGroup, target.Name, Database.DboPrincipalId, DateTime.MaxValue.AddDays(-1), encrypted: false)
             {
                 State = EndpointState.Conversing,
                 SendSequence = 1,
-                FarBrokerInstance = BrokerInstance,
+                FarBrokerInstance = BrokerInstanceOf(database),
             };
             var receiver = new ConversationEndpoint(broker.NewId(), conversation, isInitiator: false, database, target, contract, targetGroup, from.Name, Database.DboPrincipalId, initiator.Lifetime, encrypted: false)
             {
                 State = EndpointState.Conversing,
                 ReceiveSequence = 1,
                 FarPrincipalId = Database.DboPrincipalId,
-                FarBrokerInstance = BrokerInstance,
+                FarBrokerInstance = BrokerInstanceOf(database),
                 Far = initiator,
             };
             initiator.Far = receiver;
-            broker.Endpoints[initiator.Handle] = initiator;
-            broker.Endpoints[receiver.Handle] = receiver;
+            broker.Endpoints[initiator.Key] = initiator;
+            broker.Endpoints[receiver.Key] = receiver;
             if (target.Queue.Settings.Enabled)
                 _ = broker.Enqueue(null, receiver, messageType, 0, Encoding.Unicode.GetBytes(body), now);
             Monitor.PulseAll(broker.Gate);

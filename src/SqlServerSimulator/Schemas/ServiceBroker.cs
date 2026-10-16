@@ -255,6 +255,18 @@ internal sealed class DatabaseBroker
     public int AllocateBindingId() => Interlocked.Increment(ref this.nextBindingId);
     public int AllocatePriorityId() => Interlocked.Increment(ref this.nextPriorityId);
 
+    /// <summary>The last id each class handed out — message type, contract, service, route, binding, priority — as a backup carries them.</summary>
+    public int[] CaptureIdCounters() => [this.nextMessageTypeId, this.nextContractId, this.nextServiceId, this.nextRouteId, this.nextBindingId, this.nextPriorityId];
+
+    /// <summary>Puts back what <see cref="CaptureIdCounters"/> captured.</summary>
+    public void RestoreIdCounters(int[] counters)
+    {
+        if (counters.Length != 6)
+            return;
+        (this.nextMessageTypeId, this.nextContractId, this.nextServiceId, this.nextRouteId, this.nextBindingId, this.nextPriorityId) =
+            (counters[0], counters[1], counters[2], counters[3], counters[4], counters[5]);
+    }
+
     public DatabaseBroker(Database database)
     {
         var names = database.Collation.NameKeys;
@@ -409,44 +421,6 @@ internal sealed class DatabaseBroker
         foreach (var (_, service) in this.Services)
         {
             if (ReferenceEquals(service.Queue, queue))
-                return true;
-        }
-        return false;
-    }
-
-    /// <summary>Whether <paramref name="database"/> defines a Service Broker object of its own — what a backup refuses.</summary>
-    public static bool HoldsUserObjects(Database database)
-    {
-        foreach (var (_, schema) in database.Schemas)
-        {
-            if (!schema.Queues.IsEmptyLockFree())
-                return true;
-        }
-        return database.ServiceBrokerIfUsed is { } broker && broker.HoldsUserObjects();
-    }
-
-    private bool HoldsUserObjects()
-    {
-        foreach (var (_, type) in this.MessageTypes)
-        {
-            if (!type.IsSystem)
-                return true;
-        }
-        foreach (var (_, contract) in this.Contracts)
-        {
-            if (!contract.IsSystem)
-                return true;
-        }
-        foreach (var (_, service) in this.Services)
-        {
-            if (!service.IsSystem)
-                return true;
-        }
-        if (!this.RemoteServiceBindings.IsEmptyLockFree() || !this.Priorities.IsEmptyLockFree())
-            return true;
-        foreach (var (_, route) in this.Routes)
-        {
-            if (route.Id != 65536)
                 return true;
         }
         return false;

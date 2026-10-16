@@ -87,6 +87,22 @@ The server side of `SqlDependency` and `SqlNotificationRequest`, over the TDS en
 - A notification is real's `<qn:QueryNotification … id type source info database_id sid><qn:Message>…</qn:Message></qn:QueryNotification>` in UTF-16 behind a byte order mark, on a dialog of its own from the database's `QueryNotificationService` under `PostQueryNotification`, to the service the request names (`service="…";local database=…`, the quotes `SqlDependency` writes taken off).
 - `SqlDependency.Start`'s queue, service and activation procedure, and its listener's timer-and-`WAITFOR (RECEIVE …)` loop, run unchanged.
 
+## The broker instance
+
+Each database carries its own `service_broker_guid` (`Database.ServiceBrokerGuid`), which `far_broker_instance` and `DBCC DBINFO` report; `master` and `model` carry the empty one.
+`ALTER DATABASE … SET` and `RESTORE … WITH` share the switches (`Simulation.TrySwitchBroker`):
+
+- `ENABLE_BROKER` enables it and delivers what its disabled broker held; `DISABLE_BROKER` disables it.
+- `NEW_BROKER` draws a new broker id and drops every endpoint, group and queued or held message of the database without a word, then enables it.
+- `ERROR_BROKER_CONVERSATIONS` moves every endpoint to `ERROR` with Msg -9719's Error ("The database for this conversation endpoint is attached or restored.") on its own queue, then enables it.
+- Enabling a broker whose id another database's enabled broker carries — a restored copy beside its original — is refused: `ALTER DATABASE` with Msg 9772 then 5069, a restore with Msg 9773's notice (naming the database by id, ahead of Msg 3014) and the broker left disabled, its conversations untouched.
+
+## Backup and restore
+
+A backup carries the broker id, every broker object under its id (queues with their settings and messages, `AutoCreatedLocal` as altered or dropped) and the database's conversations: endpoints, groups and the messages its transmission queue holds, what an open transaction made left out.
+A restore replaces whatever the database held with that, the conversations under their original handles — a copy restored beside its original shares them, each database's under its own (`BrokerKey`) — and comes back with its broker **disabled** and its id unchanged, over itself or as a copy, unless it names a switch.
+The switch applies as the database recovers, a `RESTORE … WITH RECOVERY` alone included; with `NORECOVERY` it is Msg 3031 (`'norecovery' conflicts with option(s) 'broker_option'`), and a second, different switch is Msg 102 at it, the same one twice accepted.
+
 ## Catalog views
 
 `sys.service_message_types`, `sys.service_contracts`, `sys.service_contract_message_usages`, `sys.message_type_xml_schema_collection_usages`, `sys.services`, `sys.service_contract_usages`, `sys.service_queue_usages`, `sys.service_queues`, `sys.routes`, `sys.remote_service_bindings`, `sys.conversation_priorities`, `sys.conversation_endpoints`, `sys.conversation_groups`, `sys.transmission_queue` and `sys.dm_broker_queue_monitors` (one `INACTIVE` row per queue with an activation procedure).
@@ -98,7 +114,7 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 - **Delivery failures reach the sender as its transaction commits**, where real's broker reports them a moment later: a `SEND` right after a failing one in the same batch is refused here (Msg 8429, the endpoint already `ER`) where on real it is usually accepted and held.
 - **Reads never wait**: a `SELECT` of a queue, or of the conversation views, reads the committed state (plus the session's own changes) where real's would wait on another transaction's uncommitted `SEND` or `RECEIVE` (Msg 1222 under a lock timeout).
 - Endpoints carry no session keys, security timestamp or out-of-order bookkeeping, and every priority is 5: `CREATE BROKER PRIORITY` is catalog-only.
-- `far_broker_instance` is the simulator's fixed `service_broker_guid`, and a target's `principal_id` is always dbo.
+- A target's `principal_id` is always dbo.
 - **A reader that failed is not retried**: real's queue monitor starts it again every five seconds while messages wait (an `EXECUTE` denied, say), where here it stays `NOTIFIED` until a `RECEIVE` or an `ALTER QUEUE`.
 - Inside an activated procedure real reports `@@TRANCOUNT` one higher than its own transactions account for, and `@@SPID` as 1; here both read as an ordinary session's.
 - A query notification's dialog is begun as it fires, where real begins it as the query subscribes (its `STARTED_OUTBOUND` endpoint visible meanwhile).
@@ -106,7 +122,6 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 
 - **The shipped queues aren't in `sys.objects`**, nor are any queue's `queue_messages_<id>` internal tables, which real lists beside its 72 system base tables (see [`catalog-views.md`](catalog-views.md)); `sys.service_queues`, `OBJECT_ID` and `SELECT` reach the shipped queues all the same.
 - **Ids are spent only on success**: real spends one on a `CREATE` that fails after allocating it (a duplicate contract, a missing message type), so a later object's id can run ahead of the simulator's.
-- **Backup refuses** a database holding a Service Broker object of its own (`NotSupportedException`), since the image doesn't capture them.
 - `ALTER SCHEMA … TRANSFER` and `sp_rename` of a queue aren't built.
 
 ## Not modeled yet

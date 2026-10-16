@@ -92,7 +92,7 @@ partial class Simulation
             if (options.NoRecovery || options.Standby is not null || stop.IsSet)
                 throw new NotSupportedException($"{verb} without FROM takes only WITH RECOVERY in the simulator.");
             this.RejectRestoreWithoutPermission(batch, existing, verb);
-            this.RecoverAlone(batch, existing, verb);
+            this.RecoverAlone(batch, existing, verb, options.Broker);
             return true;
         }
         if (existing is not null)
@@ -464,17 +464,21 @@ partial class Simulation
         sequence.StoppedInsideLog = stoppedInsideLog;
         if (options.RestrictedUser)
             restored.UserAccess = 2;
-        if (options.Broker is { } broker)
-            restored.BrokerEnabled = broker;
+        // A restored database's broker comes back disabled unless the restore
+        // names a switch, which applies as it recovers (probed 2026-10-16
+        // against SQL Server 2025).
+        restored.BrokerEnabled = false;
         if (type != 'L')
         {
             LogSessionLine(batch, $"Starting up database '{restored.Name}'.");
             LogDatabaseNotRecovered(batch, restored, "RESTORING");
         }
+        SimulatedError? brokerNotice = null;
         switch (run.Ending)
         {
             case RestoreEnding.Recovered:
                 this.EndRestoreSequence(batch, restored);
+                brokerNotice = this.SwitchRestoredBroker(batch, restored, options.Broker);
                 break;
             case RestoreEnding.Standby:
                 this.EnterStandby(batch, restored, options.Standby!);
@@ -492,7 +496,7 @@ partial class Simulation
                 batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.BackupPercentProcessedMessage(batch, percent));
             batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.BackupPercentProcessedMessage(batch, 100));
         }
-        var completed = ReportRestoreFiles(batch, set, restored.Name, options.File, verb, run.Stopwatch.Elapsed.TotalSeconds, summary, beforeSummary);
+        var completed = ReportRestoreFiles(batch, set, restored.Name, options.File, verb, run.Stopwatch.Elapsed.TotalSeconds, summary, beforeSummary, brokerNotice);
         var at = batch.CurrentStatement.UtcNow;
         this.ErrorLog.Write(at, BackupProcess, string.Create(CultureInfo.InvariantCulture,
             $"{logLead}Database: {restored.Name}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, number of dump devices: 1, device information: (FILE={options.File}, TYPE=DISK: {{'{run.Device.Logged}'}}).{logTail}"));
@@ -515,7 +519,7 @@ partial class Simulation
     /// data file and its own of the log file — then, with
     /// <paramref name="summary"/>, the closing Msg 3014, whose text it returns.
     /// </summary>
-    private static string? ReportRestoreFiles(BatchContext batch, BackupSet set, string databaseName, int position, string? verb = null, double seconds = 0, bool summary = false, SimulatedError? beforeSummary = null)
+    private static string? ReportRestoreFiles(BatchContext batch, BackupSet set, string databaseName, int position, string? verb = null, double seconds = 0, bool summary = false, SimulatedError? beforeSummary = null, SimulatedError? brokerNotice = null)
     {
         var messages = batch.Connection.PendingMessages;
         long pages = 0;
@@ -534,6 +538,8 @@ partial class Simulation
         }
         if (beforeSummary is not null)
             messages.Enqueue(beforeSummary);
+        if (brokerNotice is not null)
+            messages.Enqueue(brokerNotice);
         if (!summary)
             return null;
         var completed = SimulatedSqlException.BackupCompletedMessage(batch, verb!, pages, seconds);
@@ -546,11 +552,13 @@ partial class Simulation
     /// database a restore sequence holds where it stands, with real's Msg 3014
     /// of no pages.
     /// </summary>
-    private void RecoverAlone(BatchContext batch, Database database, string verb)
+    private void RecoverAlone(BatchContext batch, Database database, string verb, BrokerSwitch? broker)
     {
         var stopwatch = Stopwatch.StartNew();
         this.TakeExclusiveAccess(batch, database, verb);
         this.EndRestoreSequence(batch, database);
+        if (this.SwitchRestoredBroker(batch, database, broker) is { } brokerNotice)
+            batch.Connection.PendingMessages.Enqueue(brokerNotice);
         this.CatalogRows.Invalidate();
         this.NoteDatabaseAdmissionChanged();
         var completed = SimulatedSqlException.BackupCompletedMessage(batch, verb, 0, stopwatch.Elapsed.TotalSeconds);
@@ -558,6 +566,14 @@ partial class Simulation
         this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, completed.Message);
         batch.Connection.LastStatementRowCount = 0;
     }
+
+    /// <summary>
+    /// Applies the broker switch a restore names to the database it recovered:
+    /// Msg 9773's notice, the broker left disabled, when another database's
+    /// enabled broker carries its broker id.
+    /// </summary>
+    private SimulatedError? SwitchRestoredBroker(BatchContext batch, Database database, BrokerSwitch? broker) =>
+        broker is { } change && !this.TrySwitchBroker(batch, database, change) ? SimulatedSqlException.RestoredBrokerDisabledMessage(batch, database.Id) : null;
 
     /// <summary>
     /// Recovers a database out of its restore sequence: online, writable as
