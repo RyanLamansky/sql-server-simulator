@@ -169,9 +169,14 @@ partial class DatabaseImage
         for (var i = 0; i < live.Tables.Count; i++)
         {
             var (a, b) = (live.Tables[i], image.Tables[i]);
-            if (a.SchemaName != b.SchemaName || a.Name != b.Name || a.ObjectId != b.ObjectId)
+            if (a.SchemaName != b.SchemaName || a.Name != b.Name || a.ObjectId != b.ObjectId
+                || a.Placement.SchemeName != b.Placement.SchemeName || a.Placement.ColumnName != b.Placement.ColumnName)
+            {
                 return false;
+            }
         }
+        if (!SamePartitioning(live, image))
+            return false;
         if (live.Schemas.Count != image.Schemas.Count)
             return false;
         for (var i = 0; i < live.Schemas.Count; i++)
@@ -295,6 +300,7 @@ partial class DatabaseImage
             try
             {
                 var replay = new Replay(connection, database);
+                this.RestorePartitioning(database, replay.Execute);
                 replay.RunPhase(this.Steps.Where(static step => step.Phase == ReplayPhase.Definitions), retryMissingDependencies: true);
                 replay.RunPhase(this.Steps.Where(static step => step.Phase == ReplayPhase.ForeignKeys), retryMissingDependencies: false);
                 replay.RunPhase(this.Steps.Where(static step => step.Phase == ReplayPhase.Statistics), retryMissingDependencies: false);
@@ -363,6 +369,9 @@ partial class DatabaseImage
         table.HeapAllowRowLocks = image.HeapAllowRowLocks;
         table.HeapAllowPageLocks = image.HeapAllowPageLocks;
         table.KeysMayExceedLimit = image.KeysMayExceedLimit;
+        table.Partitioning = Placement(database, table, image.Placement);
+        table.HeapPartitionDataCompression = PlacementImage.List(image.Placement.DataCompression);
+        table.HeapPartitionXmlCompression = PlacementImage.List(image.Placement.XmlCompression);
 
         foreach (var state in image.Keys)
         {
@@ -380,6 +389,9 @@ partial class DatabaseImage
             key.IsDisabled = state.IsDisabled;
             key.FilegroupId = state.FilegroupId;
             key.KeyMayExceedLimit = state.KeyMayExceedLimit;
+            key.Partitioning = Placement(database, table, state.Placement);
+            key.PartitionDataCompression = PlacementImage.List(state.Placement.DataCompression);
+            key.PartitionXmlCompression = PlacementImage.List(state.Placement.XmlCompression);
             key.Statistics.AutoDrop = state.AutoDrop;
             key.Statistics.HasPersistedSample = state.HasPersistedSample;
             key.ModifyDate = state.ModifyDate;
@@ -401,6 +413,9 @@ partial class DatabaseImage
             index.FilegroupId = state.FilegroupId;
             index.KeyMayExceedLimit = state.KeyMayExceedLimit;
             index.IgnoreDupKey = state.IgnoreDupKey;
+            index.Partitioning = Placement(database, table, state.Placement);
+            index.PartitionDataCompression = PlacementImage.List(state.Placement.DataCompression);
+            index.PartitionXmlCompression = PlacementImage.List(state.Placement.XmlCompression);
             index.Statistics.AutoDrop = state.AutoDrop;
             index.Statistics.HasPersistedSample = state.HasPersistedSample;
         }
@@ -614,7 +629,7 @@ partial class DatabaseImage
             }
         }
 
-        private void Execute(string sql)
+        public void Execute(string sql)
         {
             using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // the backup set's own DDL, captured from a database by the simulator, never user input

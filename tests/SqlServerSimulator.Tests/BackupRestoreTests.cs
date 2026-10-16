@@ -186,7 +186,7 @@ public sealed class BackupRestoreTests
     }
 
     [TestMethod]
-    [DataRow("restore database d from disk = N'missing.bak'", 3201, "Cannot open backup device 'missing.bak'. Operating system error 2(The system cannot find the file specified.).")]
+    [DataRow("restore database d from disk = N'missing.bak'", 3201, "Cannot open backup device '/var/opt/mssql/data/missing.bak'. Operating system error 2(The system cannot find the file specified.).")]
     [DataRow("backup database tempdb to disk = N'x.bak'", 3147, "Backup and restore operations are not allowed on database tempdb.")]
     [DataRow("restore database tempdb from disk = N'x.bak'", 3147, "Backup and restore operations are not allowed on database tempdb.")]
     [DataRow("restore database master from disk = N'x.bak'", 3108, null)]
@@ -238,8 +238,8 @@ public sealed class BackupRestoreTests
         var files = new Dictionary<string, byte[]> { ["short.bak"] = new byte[100], ["junk.bak"] = [.. Enumerable.Repeat((byte)0x41, 5000)] };
         var simulation = new Simulation { OpenBackupFile = (path, _) => files.TryGetValue(path, out var bytes) ? new MemoryStream(bytes) : null };
         _ = simulation.ExecuteNonQuery("create database d");
-        AreEqual("The volume on device 'short.bak' is empty.", simulation.AssertSqlError("restore database d from disk = N'short.bak' with replace", 3254).Errors[0].Message);
-        AreEqual("The media family on device 'junk.bak' is incorrectly formed. SQL Server cannot process this media family.",
+        AreEqual("The volume on device '/var/opt/mssql/data/short.bak' is empty.", simulation.AssertSqlError("restore database d from disk = N'short.bak' with replace", 3254).Errors[0].Message);
+        AreEqual("The media family on device '/var/opt/mssql/data/junk.bak' is incorrectly formed. SQL Server cannot process this media family.",
             simulation.AssertSqlError("restore database d from disk = N'junk.bak' with replace", 3241).Errors[0].Message);
     }
 
@@ -366,12 +366,10 @@ public sealed class BackupRestoreTests
     }
 
     [TestMethod]
-    [DataRow("backup database d to disk = N'x.bak' with differential")]
-    [DataRow("backup log d to disk = N'x.bak'")]
     [DataRow("backup database d to disk = N'a.bak', disk = N'b.bak'")]
     [DataRow("backup database d to url = N'https://x/y.bak'")]
     [DataRow("restore database d from disk = N'x.bak' with norecovery")]
-    [DataRow("restore headeronly from disk = N'x.bak'")]
+    [DataRow("restore rewindonly from disk = N'x.bak'")]
     public void UnmodeledForm_IsNotSupported(string sql) =>
         _ = Throws<NotSupportedException>(() => WithDatabase().ExecuteNonQuery(sql));
 

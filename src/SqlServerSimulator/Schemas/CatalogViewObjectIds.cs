@@ -609,5 +609,9 @@ internal static class CatalogViewObjectIds
         ["xp_msver"] = -524454186,
         ["xp_qv"] = -873056684,
         ["xp_regread"] = -34491504,
+        ["xp_create_subdir"] = -45417692,
+        ["xp_delete_file"] = -647312345,
+        ["xp_dirtree"] = -630944181,
+        ["xp_fileexist"] = -399212635,
     }.ToFrozenDictionary(BuiltInToken.Comparer);
 }

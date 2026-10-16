@@ -143,8 +143,9 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Refuses with Msg 229 a session that may not run one of the error-log
-    /// extended procedures, which <c>public</c> holds no <c>EXECUTE</c> on: a
+    /// Refuses with Msg 229 a session that may not run one of the extended
+    /// procedures <c>public</c> holds no <c>EXECUTE</c> on — the error log's
+    /// and <c>xp_create_subdir</c> / <c>xp_delete_file</c>: a
     /// sysadmin or <c>CONTROL SERVER</c> login runs them, as does one whose
     /// <c>master</c> user is granted <c>EXECUTE</c> on the procedure, while
     /// even a database owner elsewhere is refused (probed 2026-10-16 against
@@ -152,7 +153,7 @@ partial class Simulation
     /// <c>mssqlsystemresource</c> and is reported at line 1 under the name it
     /// was called by.
     /// </summary>
-    private static void RequireErrorLogProcedureExecute(BatchContext batch, string procedure, string calledAs)
+    private static void RequireExtendedProcedureExecute(BatchContext batch, string procedure, string calledAs)
     {
         var connection = batch.Connection;
         var simulation = connection.Simulation;
@@ -206,7 +207,7 @@ partial class Simulation
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
-        RequireErrorLogProcedureExecute(batch, "xp_readerrorlog", calledAs);
+        RequireExtendedProcedureExecute(batch, "xp_readerrorlog", calledAs);
         var values = new SqlValue?[arguments.Count];
         for (var i = 0; i < arguments.Count; i++)
             values[i] = arguments[i].IsDefault ? SqlValue.Null(SqlType.Int32) : arguments[i].Value;
@@ -401,7 +402,7 @@ partial class Simulation
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
-        RequireErrorLogProcedureExecute(batch, "xp_enumerrorlogs", calledAs);
+        RequireExtendedProcedureExecute(batch, "xp_enumerrorlogs", calledAs);
         if (EnumErrorLogs(batch, arguments.Count switch
         {
             0 => SqlValue.FromInt32(1),
@@ -475,7 +476,7 @@ partial class Simulation
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
-        RequireErrorLogProcedureExecute(batch, "xp_logevent", calledAs);
+        RequireExtendedProcedureExecute(batch, "xp_logevent", calledAs);
         var failure = LogEvent(batch, arguments);
         if (failure is not null)
             batch.Connection.PendingMessages.Enqueue(new SimulatedError(0, 0, failure, 0, "", batch.Connection.DataSource, "SqlServerSimulator", 0));
@@ -534,7 +535,7 @@ partial class Simulation
         RequireSystemProcedureShape("sp_cycle_errorlog", arguments, []);
         if (batch.IsSkipping)
             yield break;
-        RequireErrorLogProcedureExecute(batch, "sp_cycle_errorlog", calledAs);
+        RequireExtendedProcedureExecute(batch, "sp_cycle_errorlog", calledAs);
         if (!IsSysadminSession(batch))
             throw SimulatedSqlException.UserDoesNotHavePermission(1);
         CycleErrorLog(batch);

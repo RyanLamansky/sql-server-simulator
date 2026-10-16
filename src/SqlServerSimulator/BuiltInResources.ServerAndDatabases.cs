@@ -1870,7 +1870,8 @@ internal static partial class BuiltInResources
     /// in-memory-OLTP probe (<c>where mf.[type] = 2</c>) returns nothing.
     /// <c>max_size</c> / <c>growth</c> are 8 KB pages whenever
     /// <c>is_percent_growth</c> is 0, and a log file's unlimited ceiling reads
-    /// as its 2 TB cap. All LSN columns surface NULL (no physical log).
+    /// as its 2 TB cap. The LSN columns surface NULL (no physical log), but
+    /// for a data file's differential base, the last full backup's checkpoint.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysMasterFiles(Parser.BatchContext batch, Database database)
     {
@@ -1882,9 +1883,11 @@ internal static partial class BuiltInResources
 
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
+            var chain = db.BackupChain;
             foreach (var file in db.FilesInOrder())
             {
                 var common = FileRowCells(db, file);
+                var differentialBase = !file.IsLog && chain.DifferentialBaseBlock is not null;
                 yield return
                 [
                     SqlValue.FromInt32(id),
@@ -1893,9 +1896,9 @@ internal static partial class BuiltInResources
                     nullLsn,
                     nullLsn,
                     nullLsn,
-                    nullLsn,
-                    nullGuid,
-                    nullTime,
+                    differentialBase ? SqlValue.FromDecimal(SqlType.GetDecimal(25, 0), Storage.Backup.DatabaseBackupChain.Lsn(chain.DifferentialBaseBlock!.Value)) : nullLsn,
+                    differentialBase ? SqlValue.FromGuid(chain.DifferentialBaseGuid!.Value) : nullGuid,
+                    differentialBase ? SqlValue.FromDateTime(chain.DifferentialBaseUtc!.Value) : nullTime,
                     nullLsn,
                     nullGuid,
                     nullLsn,

@@ -174,6 +174,7 @@ internal static partial class BuiltInResources
         // tempdb's alone, NULL elsewhere (probed 2026-10-16 against SQL Server
         // 2025); tempdb's read 0 here, its temporary objects living off its files.
         var unreported = database.Collation.Equals(database.Name, Simulation.TempdbDatabaseName) ? zero : SqlValue.Null(SqlType.BigInt);
+        var modified = database.BackupChain.ModifiedExtentPages(database.Schemas.SelectMany(static pair => pair.Value.HeapTables.Select(static table => table.Value)));
         foreach (var file in database.FilesInOrder())
         {
             if (file.IsLog)
@@ -193,7 +194,7 @@ internal static partial class BuiltInResources
                 unreported,
                 unreported,
                 zero,
-                zero,
+                file.FileId == 1 ? SqlValue.FromInt64(modified) : zero,
             ];
         }
     }

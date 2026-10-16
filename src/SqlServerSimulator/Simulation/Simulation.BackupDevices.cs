@@ -166,7 +166,7 @@ partial class Simulation
         var name = values[0].IsNull ? "(null)" : values[0].AsString;
         if (values[0].IsNull || !this.LogicalBackupDevices.TryRemove(name.TrimEnd(' '), out var device))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.BackupDeviceDoesNotExist(name), 37);
-        if (deleteFile && device.Type == 2 && this.OpenBackupFile is null && this.BackupDevices.TryRemove(device.PhysicalName, out _))
+        if (deleteFile && device.Type == 2 && this.OpenBackupFile is null && this.BackupDevices.TryRemove(BackupDeviceKey(device.PhysicalName), out _))
             QueueProcedureMessage(batch, calledAs, 2503, $"Successfully deleted the physical file '{device.PhysicalName}'.", 43);
         QueueProcedureMessage(batch, calledAs, 15463, "Device dropped.", 52);
     }

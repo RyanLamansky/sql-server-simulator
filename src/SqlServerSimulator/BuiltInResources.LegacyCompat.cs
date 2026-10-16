@@ -237,6 +237,11 @@ internal static partial class BuiltInResources
         "xp_regread",
         // xp_getnetname: SMO's fully-qualified server name read.
         "xp_getnetname",
+        // The server's disk, as backup tooling reads and tidies it.
+        "xp_create_subdir",
+        "xp_delete_file",
+        "xp_dirtree",
+        "xp_fileexist",
         // The legacy wrappers over ALTER DATABASE and the application-role DDL
         // old install scripts call.
         "sp_dbcmptlevel",
@@ -1014,6 +1019,7 @@ internal static partial class BuiltInResources
         ("dm_exec_text_query_plan", -759672739, "IF"),
         ("dm_fts_parser", -970703799, "IF"),
         ("dm_io_virtual_file_stats", -806439612, "IF"),
+        ("dm_os_file_exists", -898697527, "IF"),
         ("dm_os_volume_stats", -638989397, "IF"),
         ("dm_sql_referenced_entities", -481970182, "IF"),
         ("dm_sql_referencing_entities", -686951493, "IF"),

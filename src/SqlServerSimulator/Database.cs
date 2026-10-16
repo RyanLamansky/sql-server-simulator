@@ -530,6 +530,13 @@ internal sealed partial class Database
     public Guid RecoveryForkGuid = Guid.NewGuid();
 
     /// <summary>
+    /// The differential base and log chain this database's backups have left
+    /// it with, which <c>sys.database_recovery_status</c>,
+    /// <c>sys.master_files</c> and <c>sys.dm_db_log_stats</c> report.
+    /// </summary>
+    public readonly Storage.Backup.DatabaseBackupChain BackupChain = new();
+
+    /// <summary>
     /// <c>sys.databases.user_access</c>: 0 MULTI_USER, 1 SINGLE_USER,
     /// 2 RESTRICTED_USER. A single-user database admits only
     /// <see cref="SingleUserHolder"/>; <c>RESTRICTED_USER</c> is recorded only.
@@ -881,6 +888,17 @@ internal sealed partial class Database
 
     /// <summary>The <c>data_space_id</c>s of the filegroups marked <c>AUTOGROW_ALL_FILES</c>, under the same lock.</summary>
     public readonly HashSet<int> AutogrowAllFilesFilegroups = [];
+
+    /// <summary>The name of filegroup <paramref name="dataSpaceId"/>, null for none.</summary>
+    public string? FilegroupName(int dataSpaceId)
+    {
+        foreach (var (name, id) in this.Filegroups)
+        {
+            if (id == dataSpaceId)
+                return name;
+        }
+        return null;
+    }
 
     /// <summary>Whether the filegroup <paramref name="dataSpaceId"/> is marked <c>READ_ONLY</c>.</summary>
     public bool IsFilegroupReadOnly(int dataSpaceId)

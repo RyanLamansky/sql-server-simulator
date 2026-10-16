@@ -173,6 +173,37 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BackupLogUnderSimpleRecovery() =>
         FollowedByBackupTerminating(new("The statement BACKUP LOG is not allowed while the recovery model is SIMPLE. Use BACKUP DATABASE or change the recovery model using ALTER DATABASE.", 4208, 16, 1), "BACKUP LOG");
 
+    /// <summary>Mimics SQL Server error 4214: <c>BACKUP LOG</c> while no log chain runs — before the first full backup, or once <c>SIMPLE</c> recovery broke it.</summary>
+    internal static SimulatedSqlException BackupLogWithoutDatabaseBackup() =>
+        FollowedByBackupTerminating(new("BACKUP LOG cannot be performed because there is no current database backup.", 4214, 16, 1), "BACKUP LOG");
+
+    /// <summary>Mimics SQL Server error 3035: a differential backup before any full backup it could build on.</summary>
+    internal static SimulatedSqlException DifferentialWithoutDatabaseBackup(string databaseName) =>
+        FollowedByBackupTerminating(new($"Cannot perform a differential backup for database \"{databaseName}\", because a current database backup does not exist. Perform a full database backup by reissuing BACKUP DATABASE, omitting the WITH DIFFERENTIAL option.", 3035, 16, 1), "BACKUP DATABASE");
+
+    /// <summary>Mimics SQL Server error 3024: a differential backup of <c>master</c>.</summary>
+    internal static SimulatedSqlException DifferentialBackupOfMaster() =>
+        FollowedByBackupTerminating(new("You can only perform a full backup of the master database. Use BACKUP DATABASE to back up the entire master database.", 3024, 16, 1), "BACKUP DATABASE");
+
+    /// <summary>Mimics SQL Server error 4038: <c>FILE = n</c> past the last set on the device, for the statements that only read it.</summary>
+    internal static SimulatedSqlException BackupFileIdNotFound(int file, string path, string verb) =>
+        FollowedByBackupTerminating(new(string.Create(CultureInfo.InvariantCulture, $"Cannot find file ID {file} on device '{path}'."), 4038, 16, 1), verb);
+
+    /// <summary>
+    /// Mimics SQL Server error 3032 state 2: an option the <c>RESTORE</c> form
+    /// doesn't take, named as real lowercases it — no Msg 3013 follows.
+    /// </summary>
+    internal static SimulatedSqlException RestoreOptionNotSupported(string options) =>
+        new($"One or more of the options ({options}) are not supported for this statement. Review the documentation for supported options.", 3032, 16, 2);
+
+    /// <summary>Mimics SQL Server error 3118: a differential or log restore naming a database that doesn't exist.</summary>
+    internal static SimulatedSqlException RestoreCannotCreateDatabase(string databaseName, string verb) =>
+        FollowedByBackupTerminating(new($"The database \"{databaseName}\" does not exist. RESTORE can only create a database when restoring either a full backup or a file backup of the primary file.", 3118, 16, 1), verb);
+
+    /// <summary>Msg 3262: <c>RESTORE VERIFYONLY</c>'s verdict on the set it read.</summary>
+    internal static SimulatedError BackupSetValidMessage(BatchContext batch, int position) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 3262, string.Create(CultureInfo.InvariantCulture, $"The backup set on file {position} is valid."));
+
     /// <summary>Mimics SQL Server error 4037: <c>MEDIANAME</c> naming other media than the device holds.</summary>
     internal static SimulatedSqlException BackupMediaNameMismatch(string requested, string actual, string path, string verb) =>
         FollowedByBackupTerminating(new($"The user-specified MEDIANAME \"{requested}\" does not match the MEDIANAME \"{actual}\" of the device \"{path}\".", 4037, 16, 1), verb);

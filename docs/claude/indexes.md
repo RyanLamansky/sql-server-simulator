@@ -683,6 +683,7 @@ Not modeled yet:
 - **Step compaction** — real merges adjacent values of similar spread even under 200 distinct values (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), by its own max-diff algorithm; step placement past 200 values diverges likewise.
   Not chased: the algorithm is real's internal one, which only its output shows.
 - **A cached plan's staleness check** — real recompiles a cached plan whose statistics went stale and so refreshes them; here the load runs only as a query parses, so a statement the plan cache replays refreshes nothing.
+- **Which predicates load statistics** — real loads none for some statements here that do (probed 2026-10-16 against SQL Server 2025, each a three-row table keyed on `ID`): an `UPDATE` or `DELETE` comparing the key with a local variable (`WHERE ID = @i`, `WHERE ID > @i`), a `SELECT` comparing it with an expression of one (`WHERE ID = @i + 0`), and a statement compiled with its batch before the rows it reads arrived; and with the key's equality settling one row, real creates no automatic statistic for another column the predicate names, where `MAX(V)` over a range of the key creates one there and none here.
 - **Automatic statistics through a view column computed from base columns** — `c + 1 AS c1` loads `c` on real and nothing here, as does a predicate on a derived table over a view and a write through a view.
 
 ## `DBCC SHOW_STATISTICS(<table>, <stat>)`
@@ -719,6 +720,8 @@ A NULL or 0 database names every database, as real's functions read it.
 **Divergences**: the plan real picks decides its counts, and the simulator's access paths aren't real's plans — real scans a narrower covering index for `COUNT(*)`, scans rather than seeks-and-looks-up on a small table, and decorrelates a subquery into a second scan — so `user_lookups` stays 0, and a statement's counts can differ where real's optimizer would have chosen otherwise.
 The lock, latch, allocation, page-merge, LOB and row-overflow counters of the operational view read 0.
 The physical figures (`page_count`, `avg_fragmentation_in_percent`, record sizes) are the simulator's own flat page list's, never byte-matching real's.
+Probed 2026-10-16 against SQL Server 2025 with Ola Hallengren's `IndexOptimize`, which reads them to pick each index's action: a clustered index loaded in key order reports real's page count and here no fragmentation, where real's random-order load fragments it a little; a nonclustered index here reports its table's pages, where real counts its own leaf pages (7 and 11 against 115); each partition reports the whole table's pages, where real counts its own; and a `nvarchar(max)` value real keeps in row here sits off row, so the in-row page count is far below real's and no `LOB_DATA` row is listed.
+So `IndexOptimize` issues real's commands wherever the figures it compares agree, and the action a page count or fragmentation threshold picks otherwise follows the simulator's figures.
 
 ## EF Migrations integration
 

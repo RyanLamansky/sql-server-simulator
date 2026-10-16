@@ -32,4 +32,19 @@ partial class SimulatedSqlException
     /// <summary>Msg 27219: <c>sp_readerrorlog</c> / <c>sp_enumerrorlogs</c> called by a session that may not read the log.</summary>
     internal static SimulatedSqlException ErrorLogProcedurePermissionDenied() =>
         new("Caller does not have permissions to execute the stored procedure.", 27219, 16, 1);
+
+    /// <summary>
+    /// Msg 22048 (<c>xp_create_subdir</c>) or 22049 (<c>xp_delete_file</c>)
+    /// at severity 15: a missing argument, or one the procedure can't read.
+    /// </summary>
+    internal static SimulatedSqlException ExtendedProcedureInvalidParameter(int number) =>
+        new("Error executing extended stored procedure: Invalid Parameter", number, 15, 1);
+
+    /// <summary>
+    /// Msg 22048 (<c>xp_create_subdir</c>) or 22049 (<c>xp_delete_file</c>)
+    /// at severity 16: the operating system refused the path, error 2 for
+    /// one that doesn't exist and 183 for a file in the way.
+    /// </summary>
+    internal static SimulatedSqlException ExtendedProcedureOperatingSystemError(string procedure, int number, int osError) =>
+        new($"{procedure}() returned error {osError}, '{(osError == 183 ? "Cannot create a file when that file already exists." : "The system cannot find the file specified.")}'", number, 16, 1);
 }

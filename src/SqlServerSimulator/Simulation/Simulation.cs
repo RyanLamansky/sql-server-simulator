@@ -3840,6 +3840,11 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Backup } when this.ParseBackup(context, batch):
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.Restore } when this.TryParseRestoreInformation(context, batch, out var restoreOutcomes):
+                foreach (var o in restoreOutcomes)
+                    yield return o;
+                break;
+
             case ReservedKeyword { Keyword: Keyword.Restore } when this.ParseRestore(context, batch):
                 break;
 

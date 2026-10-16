@@ -93,8 +93,8 @@ partial class SimulatedSqlException
         new($"Cannot find a row in the system catalog with the index ID {indexId} for table \"{tableName}\".", 2591, 16, 40);
 
     /// <summary>Msg 2561: a system function's numbered argument it can't take (probed 2026-10-05).</summary>
-    internal static SimulatedSqlException ParameterIncorrectForStatement(int parameterNumber) =>
-        new($"Parameter {parameterNumber} is incorrect for this statement.", 2561, 16, 1);
+    internal static SimulatedSqlException ParameterIncorrectForStatement(int parameterNumber, byte state = 1) =>
+        new($"Parameter {parameterNumber} is incorrect for this statement.", 2561, 16, state);
 
     /// <summary>Msg 2573: a DBCC table argument naming an object id no table has.</summary>
     internal static SimulatedSqlException CouldNotFindObjectId(int objectId) =>

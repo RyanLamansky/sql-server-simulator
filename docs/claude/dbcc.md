@@ -113,6 +113,7 @@ The database's name, id, compatibility level, collation id, creation date, famil
 
 `UPDATEUSAGE`, `CLEANTABLE` and `DBREINDEX` only validate and report — a `DBREINDEX` fill factor outside 0 .. 100 is Msg 129 state 2 (probed 2026-10-04) — the simulator's counts never going stale, its dropped columns reclaimed as they drop and its indexes never fragmenting; an index name the table lacks is Msg 7999 (state 4 from `DBREINDEX`, 8 from the others).
 `INDEXDEFRAG` returns the pages scanned and none moved or removed — for the named index, or one row per index (the heap's with a NULL name) — and is Msg 8920 inside a user transaction.
+Ola Hallengren's `DatabaseIntegrityCheck` (version 2026-09-12 15:02:38) runs its `CHECKDB`, `CHECKALLOC`, `CHECKTABLE`, `CHECKCATALOG` and `CHECKFILEGROUP` (`PHYSICAL_ONLY`, `NOINDEX`, `EXTENDED_LOGICAL_CHECKS`) commands here with real's text and `CommandLog` rows (probed 2026-10-16 against SQL Server 2025); the per-object messages differ only where real lists its own system tables and allocation units and counts pages its storage decides, a LOB column's in-row pages among them.
 
 ## `SHOWFILESTATS [(file_id)]`
 

@@ -142,8 +142,9 @@ internal static partial class BuiltInResources
         ], static (batch, database) => []);
 
         // sys.database_recovery_status: one row per database, a never-restored
-        // database's family and recovery fork one GUID and no log backup
-        // (probed 2026-09-30 against SQL Server 2025). SMO's
+        // database's family and recovery fork one GUID (probed 2026-09-30
+        // against SQL Server 2025), and the LSN the next log backup starts
+        // from while a log chain runs. SMO's
         // database-properties preamble LEFT JOINs it by database_id for
         // DatabaseGuid / RecoveryForkGuid / HasFullBackup.
         Sys("database_recovery_status",
@@ -162,7 +163,9 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(entry.Id),
                     SqlValue.FromGuid(entry.Database.DatabaseGuid),
                     SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
-                    SqlValue.Null(SqlType.GetDecimal(25, 0)),
+                    entry.Database.BackupChain.LastLogBackupBlock is { } logBackup
+                        ? SqlValue.FromDecimal(SqlType.GetDecimal(25, 0), Storage.Backup.DatabaseBackupChain.Lsn(logBackup))
+                        : SqlValue.Null(SqlType.GetDecimal(25, 0)),
                     SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
                     SqlValue.Null(SqlType.UniqueIdentifier),
                     SqlValue.Null(SqlType.GetDecimal(25, 0)),

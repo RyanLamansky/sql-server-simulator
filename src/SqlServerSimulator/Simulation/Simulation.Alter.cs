@@ -464,6 +464,11 @@ partial class Simulation
             return true;
 
         target.RecoveryModel = model.Value;
+        // SIMPLE recovery truncates the log, so no log backup can continue
+        // the chain; a full or differential backup starts the next (probed
+        // 2026-10-16 against SQL Server 2025).
+        if (model == RecoveryModel.Simple)
+            target.BackupChain.BreakLogChain();
         LogDatabaseOption(context.Batch, target, "RECOVERY", model.Value switch
         {
             RecoveryModel.Simple => "SIMPLE",

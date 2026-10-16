@@ -21,7 +21,7 @@ internal sealed class BackupMedia
     private static readonly byte[] Magic = "SQLSIMBK"u8.ToArray();
 
     /// <summary>Bumped whenever the layout below or <see cref="DatabaseImage"/>'s changes.</summary>
-    private const int FormatVersion = 2;
+    private const int FormatVersion = 3;
 
     /// <summary>
     /// What a media family shorter than this holds is reported as an empty
@@ -41,6 +41,15 @@ internal sealed class BackupMedia
     /// <summary>The <c>MEDIADESCRIPTION</c> the device was formatted with, or null.</summary>
     public string? MediaDescription;
 
+    /// <summary>The media set's identity, <c>LABELONLY</c>'s <c>MediaSetId</c> and <c>msdb.dbo.backupmediaset.media_uuid</c>; a <c>FORMAT</c> draws a new one.</summary>
+    public Guid MediaSetGuid = Guid.NewGuid();
+
+    /// <summary>The device's media family, <c>LABELONLY</c>'s <c>MediaFamilyId</c>.</summary>
+    public Guid MediaFamilyGuid = Guid.NewGuid();
+
+    /// <summary>When the media was formatted, <c>LABELONLY</c>'s <c>MediaDate</c>.</summary>
+    public DateTime MediaDateUtc;
+
     /// <summary>The backup sets, <c>FILE = n</c> being <c>Sets[n - 1]</c>.</summary>
     public readonly List<BackupSet> Sets = [];
 
@@ -55,6 +64,9 @@ internal sealed class BackupMedia
             writer.Write(SimulatorVersion);
             BackupBinary.WriteNullable(writer, this.MediaName);
             BackupBinary.WriteNullable(writer, this.MediaDescription);
+            writer.Write(this.MediaSetGuid.ToByteArray());
+            writer.Write(this.MediaFamilyGuid.ToByteArray());
+            writer.Write(this.MediaDateUtc.Ticks);
             writer.Write(this.Sets.Count);
             foreach (var set in this.Sets)
                 set.Write(writer);
@@ -103,6 +115,9 @@ internal sealed class BackupMedia
             {
                 MediaName = BackupBinary.ReadNullable(reader),
                 MediaDescription = BackupBinary.ReadNullable(reader),
+                MediaSetGuid = new Guid(reader.ReadBytes(16)),
+                MediaFamilyGuid = new Guid(reader.ReadBytes(16)),
+                MediaDateUtc = new DateTime(reader.ReadInt64(), DateTimeKind.Utc),
             };
             var count = reader.ReadInt32();
             for (var i = 0; i < count; i++)
@@ -132,14 +147,79 @@ internal sealed class BackupSet
     public DateTime FinishUtc;
     public bool IsCopyOnly;
 
-    /// <summary>The block of the set's first LSN, the server's last transaction id as the backup began; its last LSN is 24 blocks on, as a full backup's is on real.</summary>
+    /// <summary><c>HEADERONLY</c>'s <c>BackupType</c>: 1 a full backup, 5 a differential, 2 a log backup.</summary>
+    public byte Type = FullType;
+
+    public const byte FullType = 1;
+    public const byte LogType = 2;
+    public const byte DifferentialType = 5;
+
+    /// <summary>The log position of the set's first LSN (see <see cref="DatabaseBackupChain"/>).</summary>
     public long FirstLsnBlock;
+
+    /// <summary>The log position of the set's last LSN.</summary>
+    public long LastLsnBlock;
+
+    /// <summary>The log position of the set's checkpoint LSN.</summary>
+    public long CheckpointLsnBlock;
+
+    /// <summary>The checkpoint of the last full backup before this one, 0 for none: <c>DatabaseBackupLSN</c>.</summary>
+    public long DatabaseBackupLsnBlock;
+
+    /// <summary>A differential's base, the full backup's checkpoint and set GUID; null on every other set.</summary>
+    public long? DifferentialBaseBlock;
+
+    public Guid? DifferentialBaseGuid;
+
+    /// <summary>The database's differential base as the backup began, which <c>FILELISTONLY</c> reports on each data file.</summary>
+    public long? FileDifferentialBaseBlock;
+
+    public Guid? FileDifferentialBaseGuid;
+
+    /// <summary>A log backup that begins its chain.</summary>
+    public bool BeginsLogChain;
 
     /// <summary>Written <c>WITH CHECKSUM</c>, which a <c>RESTORE WITH CHECKSUM</c> requires.</summary>
     public bool HasChecksums;
 
+    /// <summary>The login that took the backup.</summary>
+    public string UserName = "";
+
+    /// <summary>The recovery model's name as <c>HEADERONLY</c> spells it.</summary>
+    public string RecoveryModel = "FULL";
+
+    public string Collation = "";
+
+    public byte CompatibilityLevel;
+
+    public Guid DatabaseGuid;
+
+    public Guid RecoveryForkGuid;
+
+    public bool IsReadOnly;
+
+    public bool IsSingleUser;
+
     /// <summary>The pages each file reports in the <c>Processed N pages</c> messages, by logical name, in file order.</summary>
     public readonly List<(string LogicalName, long Pages)> FilePages = [];
+
+    /// <summary>The database's files as the backup found them, which <c>FILELISTONLY</c> lists.</summary>
+    public readonly List<BackupSetFile> Files = [];
+
+    /// <summary><c>backupset.flags</c> / <c>HEADERONLY</c>'s <c>Flags</c>: 512, plus 16 for checksums, 1024 for <c>COPY_ONLY</c> and 2048 for a differential.</summary>
+    public int Flags => 512 | (this.HasChecksums ? 16 : 0) | (this.IsCopyOnly ? 1024 : 0) | (this.Type == DifferentialType ? 2048 : 0);
+
+    /// <summary>The set's size in bytes: its pages and nine of header and trailer, as real's full backup counts it.</summary>
+    public long BackupSize
+    {
+        get
+        {
+            long pages = 9;
+            foreach (var (_, filePages) in this.FilePages)
+                pages += filePages;
+            return pages * 8192;
+        }
+    }
 
     /// <summary>The deflated <see cref="DatabaseImage"/>.</summary>
     public byte[] Payload = [];
@@ -153,17 +233,48 @@ internal sealed class BackupSet
         writer.Write(this.StartUtc.Ticks);
         writer.Write(this.FinishUtc.Ticks);
         writer.Write(this.IsCopyOnly);
+        writer.Write(this.Type);
         writer.Write(this.FirstLsnBlock);
+        writer.Write(this.LastLsnBlock);
+        writer.Write(this.CheckpointLsnBlock);
+        writer.Write(this.DatabaseBackupLsnBlock);
+        WriteNullableBlock(writer, this.DifferentialBaseBlock, this.DifferentialBaseGuid);
+        WriteNullableBlock(writer, this.FileDifferentialBaseBlock, this.FileDifferentialBaseGuid);
+        writer.Write(this.BeginsLogChain);
         writer.Write(this.HasChecksums);
+        writer.Write(this.UserName);
+        writer.Write(this.RecoveryModel);
+        writer.Write(this.Collation);
+        writer.Write(this.CompatibilityLevel);
+        writer.Write(this.DatabaseGuid.ToByteArray());
+        writer.Write(this.RecoveryForkGuid.ToByteArray());
+        writer.Write(this.IsReadOnly);
+        writer.Write(this.IsSingleUser);
         writer.Write(this.FilePages.Count);
         foreach (var (name, pages) in this.FilePages)
         {
             writer.Write(name);
             writer.Write(pages);
         }
+        writer.Write(this.Files.Count);
+        foreach (var file in this.Files)
+            file.Write(writer);
         writer.Write(this.Payload.Length);
         writer.Write(this.Payload);
     }
+
+    private static void WriteNullableBlock(BinaryWriter writer, long? block, Guid? guid)
+    {
+        writer.Write(block.HasValue);
+        if (block is { } value)
+        {
+            writer.Write(value);
+            writer.Write((guid ?? Guid.Empty).ToByteArray());
+        }
+    }
+
+    private static (long?, Guid?) ReadNullableBlock(BinaryReader reader) =>
+        reader.ReadBoolean() ? (reader.ReadInt64(), new Guid(reader.ReadBytes(16))) : (null, null);
 
     public static BackupSet Read(BinaryReader reader)
     {
@@ -176,18 +287,79 @@ internal sealed class BackupSet
             StartUtc = new DateTime(reader.ReadInt64(), DateTimeKind.Utc),
             FinishUtc = new DateTime(reader.ReadInt64(), DateTimeKind.Utc),
             IsCopyOnly = reader.ReadBoolean(),
+            Type = reader.ReadByte(),
             FirstLsnBlock = reader.ReadInt64(),
-            HasChecksums = reader.ReadBoolean(),
+            LastLsnBlock = reader.ReadInt64(),
+            CheckpointLsnBlock = reader.ReadInt64(),
+            DatabaseBackupLsnBlock = reader.ReadInt64(),
         };
+        (set.DifferentialBaseBlock, set.DifferentialBaseGuid) = ReadNullableBlock(reader);
+        (set.FileDifferentialBaseBlock, set.FileDifferentialBaseGuid) = ReadNullableBlock(reader);
+        set.BeginsLogChain = reader.ReadBoolean();
+        set.HasChecksums = reader.ReadBoolean();
+        set.UserName = reader.ReadString();
+        set.RecoveryModel = reader.ReadString();
+        set.Collation = reader.ReadString();
+        set.CompatibilityLevel = reader.ReadByte();
+        set.DatabaseGuid = new Guid(reader.ReadBytes(16));
+        set.RecoveryForkGuid = new Guid(reader.ReadBytes(16));
+        set.IsReadOnly = reader.ReadBoolean();
+        set.IsSingleUser = reader.ReadBoolean();
+        var filePages = reader.ReadInt32();
+        for (var i = 0; i < filePages; i++)
+            set.FilePages.Add((reader.ReadString(), reader.ReadInt64()));
         var files = reader.ReadInt32();
         for (var i = 0; i < files; i++)
-            set.FilePages.Add((reader.ReadString(), reader.ReadInt64()));
+            set.Files.Add(BackupSetFile.Read(reader));
         var length = reader.ReadInt32();
         set.Payload = reader.ReadBytes(length);
         if (set.Payload.Length != length)
             throw new EndOfStreamException();
         return set;
     }
+}
+
+/// <summary>One database file as a <see cref="BackupSet"/> recorded it.</summary>
+internal sealed class BackupSetFile
+{
+    public string LogicalName = "";
+    public string PhysicalName = "";
+    public bool IsLog;
+
+    /// <summary>The data file's filegroup, null for a log file.</summary>
+    public string? FileGroupName;
+
+    public int FileGroupId;
+    public int FileId;
+    public long SizeBytes;
+    public long MaxSizeBytes;
+    public Guid UniqueId;
+
+    public void Write(BinaryWriter writer)
+    {
+        writer.Write(this.LogicalName);
+        writer.Write(this.PhysicalName);
+        writer.Write(this.IsLog);
+        BackupBinary.WriteNullable(writer, this.FileGroupName);
+        writer.Write(this.FileGroupId);
+        writer.Write(this.FileId);
+        writer.Write(this.SizeBytes);
+        writer.Write(this.MaxSizeBytes);
+        writer.Write(this.UniqueId.ToByteArray());
+    }
+
+    public static BackupSetFile Read(BinaryReader reader) => new()
+    {
+        LogicalName = reader.ReadString(),
+        PhysicalName = reader.ReadString(),
+        IsLog = reader.ReadBoolean(),
+        FileGroupName = BackupBinary.ReadNullable(reader),
+        FileGroupId = reader.ReadInt32(),
+        FileId = reader.ReadInt32(),
+        SizeBytes = reader.ReadInt64(),
+        MaxSizeBytes = reader.ReadInt64(),
+        UniqueId = new Guid(reader.ReadBytes(16)),
+    };
 }
 
 /// <summary>The few <see cref="BinaryWriter"/> shapes the backup format adds.</summary>

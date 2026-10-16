@@ -93,6 +93,7 @@ partial class DatabaseImage
             image.ExtendedProperties.Add((key, value));
         image.CaptureKeys(database);
         image.CapturePlanGuides(database);
+        image.CapturePartitioning(database);
 
         foreach (var schema in database.Schemas.Select(static pair => pair.Value).OrderBy(static schema => schema.SchemaId))
         {
@@ -115,8 +116,6 @@ partial class DatabaseImage
 
         if (!database.Assemblies.IsEmptyLockFree())
             throw Unsupported("CLR assemblies");
-        if (!database.PartitionFunctions.IsEmptyLockFree() || !database.PartitionSchemes.IsEmptyLockFree())
-            throw Unsupported("partition functions or schemes");
         if (!database.FullTextCatalogs.IsEmptyLockFree())
             throw Unsupported("full-text catalogs");
         if (database.ChangeTracking is not null)
@@ -170,8 +169,6 @@ partial class DatabaseImage
             throw unsupported($"the temporal table '{name}'");
         if (table.GraphKind != GraphTableKind.None)
             throw unsupported($"the graph table '{name}'");
-        if (table.Partitioning is not null || table.HeapPartitionDataCompression is not null || table.HeapPartitionXmlCompression is not null)
-            throw unsupported($"the partitioned table '{name}'");
         if (table.FullTextIndex is not null)
             throw unsupported($"the full-text index on '{name}'");
         if (table.ChangeTracking is not null)
@@ -195,13 +192,13 @@ partial class DatabaseImage
         }
         foreach (var key in table.KeyConstraints)
         {
-            if (key.IsHash || key.Partitioning is not null || key.PartitionDataCompression is not null || key.PartitionXmlCompression is not null)
-                throw unsupported($"the hash or partitioned key '{key.Name}'");
+            if (key.IsHash)
+                throw unsupported($"the hash key '{key.Name}'");
         }
         foreach (var index in table.Indexes)
         {
-            if (index.IsColumnstore || index.IsHash || index.Partitioning is not null || index.PartitionDataCompression is not null || index.PartitionXmlCompression is not null)
-                throw unsupported($"the columnstore, hash or partitioned index '{index.Name}'");
+            if (index.IsColumnstore || index.IsHash)
+                throw unsupported($"the columnstore or hash index '{index.Name}'");
         }
     }
 
@@ -393,6 +390,7 @@ partial class DatabaseImage
             HeapAllowPageLocks = table.HeapAllowPageLocks,
             KeysMayExceedLimit = table.KeysMayExceedLimit,
             MaxColumnIdUsed = table.MaxColumnIdUsed,
+            Placement = CapturePlacement(table.Partitioning, table.HeapPartitionDataCompression, table.HeapPartitionXmlCompression),
         };
         foreach (var column in table.Columns)
         {
@@ -476,9 +474,11 @@ partial class DatabaseImage
 
         foreach (var key in table.KeyConstraints)
         {
-            image.Keys.Add(CaptureIndexState(key.Name, key.IndexId, key.FillFactor, key.IsPadded, key.AllowRowLocks, key.AllowPageLocks,
+            var keyState = CaptureIndexState(key.Name, key.IndexId, key.FillFactor, key.IsPadded, key.AllowRowLocks, key.AllowPageLocks,
                 key.OptimizeForSequentialKey, key.DataCompression, key.XmlCompression, key.StatisticsNoRecompute, key.IsDisabled,
-                key.FilegroupId, key.KeyMayExceedLimit, key.IgnoreDupKey, key.Statistics, key.ModifyDate));
+                key.FilegroupId, key.KeyMayExceedLimit, key.IgnoreDupKey, key.Statistics, key.ModifyDate);
+            keyState.Placement = CapturePlacement(key.Partitioning, key.PartitionDataCompression, key.PartitionXmlCompression);
+            image.Keys.Add(keyState);
             if (key.CreateDate != table.CreateDate)
             {
                 this.Steps.Add(new ReplayStep
@@ -516,9 +516,11 @@ partial class DatabaseImage
         }
         foreach (var index in table.Indexes)
         {
-            image.Indexes.Add(CaptureIndexState(index.Name, index.IndexId, index.FillFactor, index.IsPadded, index.AllowRowLocks, index.AllowPageLocks,
+            var indexState = CaptureIndexState(index.Name, index.IndexId, index.FillFactor, index.IsPadded, index.AllowRowLocks, index.AllowPageLocks,
                 index.OptimizeForSequentialKey, index.DataCompression, index.XmlCompression, index.StatisticsNoRecompute, index.IsDisabled,
-                index.FilegroupId, index.KeyMayExceedLimit, index.IgnoreDupKey, index.Statistics, default));
+                index.FilegroupId, index.KeyMayExceedLimit, index.IgnoreDupKey, index.Statistics, default);
+            indexState.Placement = CapturePlacement(index.Partitioning, index.PartitionDataCompression, index.PartitionXmlCompression);
+            image.Indexes.Add(indexState);
             this.Steps.Add(IndexStep(schema, table.Name, table.Columns, index));
         }
         foreach (var statistic in table.UserStatistics)

@@ -75,9 +75,10 @@ partial class Selection
 
     /// <summary>
     /// <c>sys.dm_db_log_stats(database_id)</c>: one row summing up the log
-    /// <see cref="ParseLogInfoDmv"/> lists, as a database that has never
-    /// backed its log up reports it — nothing holds its truncation up. A NULL
-    /// or <c>DEFAULT</c> id reads the current database.
+    /// <see cref="ParseLogInfoDmv"/> lists — nothing holds its truncation up —
+    /// with the log chain's last backup: its time (1900-01-01 before any),
+    /// the LSN it continues from and the log written since, NULL while no
+    /// chain runs. A NULL or <c>DEFAULT</c> id reads the current database.
     /// </summary>
     public static Selection ParseLogStatsDmv(ParserContext context, string functionName)
     {
@@ -218,6 +219,11 @@ partial class Selection
         var sequence = Simulation.ActiveLogSequence;
         var start = LogLsn(sequence, 24, 1);
         var usedMegabytes = SqlValue.FromDouble(LogMegabytes(used, 6));
+        var chain = database.BackupChain;
+        // Each log position past the chain's start is a 512-byte block of log.
+        var sinceLogBackup = chain.LastLogBackupBlock is { } logBackup
+            ? SqlValue.FromDouble(LogMegabytes((Math.Max(chain.LogBlock - logBackup, 0) * 512) + 40960, 6))
+            : SqlValue.Null(SqlType.Float);
         rows.Add(RowEncoder.EncodeRow(LogStatsSchema,
         [
             SqlValue.FromInt32(id),
@@ -236,9 +242,9 @@ partial class Selection
             SqlValue.FromInt64(1),
             usedMegabytes,
             SqlValue.FromNVarchar(LogWordType, "NOTHING"),
-            SqlValue.FromDateTime(new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc)),
-            SqlValue.FromNVarchar(LogLsnType, LogLsn(0, 0, 0)),
-            SqlValue.Null(SqlType.Float),
+            SqlValue.FromDateTime(chain.LastLogBackupUtc ?? new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc)),
+            SqlValue.FromNVarchar(LogLsnType, chain.LastLogBackupBlock is { } continuesFrom ? Storage.Backup.DatabaseBackupChain.HexLsn(continuesFrom) : LogLsn(0, 0, 0)),
+            sinceLogBackup,
             SqlValue.FromNVarchar(LogLsnType, start),
             usedMegabytes,
             SqlValue.FromNVarchar(LogLsnType, start),

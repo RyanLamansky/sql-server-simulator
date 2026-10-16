@@ -52,15 +52,22 @@ partial class Simulation
     /// </summary>
     internal int RestoreExclusiveAccessWaitMillis = 20_000;
 
-    /// <summary>The backup devices written while <see cref="OpenBackupFile"/> is unset, keyed by path as spelled.</summary>
-    internal readonly ConcurrentDictionary<string, byte[]> BackupDevices = new(StringComparer.Ordinal);
+    /// <summary>
+    /// The backup devices written while <see cref="OpenBackupFile"/> is unset,
+    /// keyed by the canonical path real reaches (<see cref="BackupDeviceKey"/>):
+    /// a relative path under the default backup directory, case aside.
+    /// </summary>
+    internal readonly ConcurrentDictionary<string, byte[]> BackupDevices = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A device's bytes, or null with the operating-system error real reports for it.</summary>
     private byte[]? ReadBackupDevice(string path, out int osError)
     {
-        osError = 2;
+        // A directory in the device's place can't be opened as one (probed
+        // 2026-10-16 against SQL Server 2025: operating system error 5).
+        var key = BackupDeviceKey(path);
+        osError = this.IsServerDirectory(key) ? 5 : 2;
         if (this.OpenBackupFile is not { } open)
-            return this.BackupDevices.GetValueOrDefault(path);
+            return this.BackupDevices.GetValueOrDefault(key);
         try
         {
             using var stream = open(path, FileAccess.Read);
@@ -77,12 +84,18 @@ partial class Simulation
         }
     }
 
-    /// <summary>Replaces a device's content; 0, or the operating-system error real reports.</summary>
+    /// <summary>
+    /// Replaces a device's content, creating the directories above it as
+    /// real's Linux server does; 0, or the operating-system error real reports.
+    /// </summary>
     private int WriteBackupDevice(string path, byte[] content)
     {
+        var key = BackupDeviceKey(path);
         if (this.OpenBackupFile is not { } open)
         {
-            this.BackupDevices[path] = content;
+            this.BackupDevices[key] = content;
+            if (ServerParentDirectory(key) is { } parent)
+                this.CreateServerDirectory(parent);
             return 0;
         }
         try
@@ -91,6 +104,8 @@ partial class Simulation
             if (stream is null)
                 return 3;
             stream.Write(content);
+            if (ServerParentDirectory(key) is { } parent)
+                this.CreateServerDirectory(parent);
             return 0;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -115,12 +130,15 @@ partial class Simulation
         public string? MediaDescription;
         public int? Stats;
         public int File = 1;
+        public bool FileWritten;
         public bool Init;
         public bool Format;
         public bool Replace;
         public bool CopyOnly;
+        public bool Differential;
         public bool Checksum;
         public bool RestrictedUser;
+        public bool LoadHistory;
         public bool? Broker;
         public readonly List<(string LogicalName, string Path)> Moves = [];
 
@@ -155,15 +173,18 @@ partial class Simulation
             throw SimulatedSqlException.BackupInTransaction(verb);
         if (BuiltInToken.Equals(databaseName, TempdbDatabaseName))
             throw SimulatedSqlException.BackupOfTempdb(verb);
+        var type = isLog ? BackupSet.LogType : options.Differential ? BackupSet.DifferentialType : BackupSet.FullType;
+        // A differential names itself in its summary and its failure line, though Msg 3013 says BACKUP DATABASE.
+        var commandVerb = type == BackupSet.DifferentialType ? "BACKUP DATABASE WITH DIFFERENTIAL" : verb;
         try
         {
-            this.RunBackup(batch, databaseName, isLog, verb, devices, options);
+            this.RunBackup(batch, databaseName, type, verb, commandVerb, devices, options);
         }
         catch (SimulatedSqlException)
         {
             // Past those two checks every refusal is real's backup failure (probed 2026-10-16 against SQL Server 2025).
             this.ErrorLog.WriteError(batch.CurrentStatement.UtcNow, BackupProcess, 3041, 16, 1,
-                $"BACKUP failed to complete the command {verb} {databaseName}. Check the backup application log for detailed messages.");
+                $"BACKUP failed to complete the command {(isLog ? "BACKUP LOG" : "BACKUP DATABASE")} {databaseName}{(type == BackupSet.DifferentialType ? " WITH DIFFERENTIAL" : "")}. Check the backup application log for detailed messages.");
             throw;
         }
         return true;
@@ -189,8 +210,13 @@ partial class Simulation
             ? $"BackupDiskFile::CreateMedia: Backup device '{path}' failed to create. Operating system error {SimulatedSqlException.OperatingSystemErrorText(osError)}."
             : $"BackupDiskFile::OpenMedia: Backup device '{path}' failed to open. Operating system error {SimulatedSqlException.OperatingSystemErrorText(osError)}.");
 
-    /// <summary>The backup itself, once the statement may run: every refusal from here is logged as a failed backup.</summary>
-    private void RunBackup(BatchContext batch, string databaseName, bool isLog, string verb, List<BackupDeviceTarget> devices, BackupOptions options)
+    /// <summary>
+    /// The backup itself, once the statement may run: every refusal from here
+    /// is logged as a failed backup. <paramref name="type"/> is the
+    /// <see cref="BackupSet"/> kind; <paramref name="commandVerb"/> is how the
+    /// summary names the statement.
+    /// </summary>
+    private void RunBackup(BatchContext batch, string databaseName, byte type, string verb, string commandVerb, List<BackupDeviceTarget> devices, BackupOptions options)
     {
         var connection = batch.Connection;
         if (!this.Databases.TryGetValue(databaseName, out var database))
@@ -198,25 +224,44 @@ partial class Simulation
         if (!database.WaitForSingleUserSlot(connection))
             throw SimulatedSqlException.FollowedByBackupTerminating(SimulatedSqlException.DatabaseInSingleUserUse(database.Name), verb);
         database.RejectWhenOffline(connection);
-        if (isLog)
+        var chain = database.BackupChain;
+        if (type == BackupSet.LogType)
         {
             if (database.RecoveryModel == RecoveryModel.Simple)
                 throw SimulatedSqlException.BackupLogUnderSimpleRecovery();
-            throw new NotSupportedException("BACKUP LOG isn't modeled by the simulator; only full database backups are.");
+            if (!PermissionEnforcement.IsOwnerOrBackupOperator(batch, database) && !PermissionEnforcement.HasDatabasePermission(batch, database, "BACKUP LOG"))
+                throw SimulatedSqlException.BackupPermissionDenied("BACKUP LOG", database.Name, verb);
+            if (chain.LastLogBackupBlock is null)
+                throw SimulatedSqlException.BackupLogWithoutDatabaseBackup();
         }
-        if (!PermissionEnforcement.IsOwnerOrBackupOperator(batch, database) && !PermissionEnforcement.HasDatabasePermission(batch, database, "BACKUP DATABASE"))
-            throw SimulatedSqlException.BackupPermissionDenied("BACKUP DATABASE", database.Name, verb);
+        else
+        {
+            if (!PermissionEnforcement.IsOwnerOrBackupOperator(batch, database) && !PermissionEnforcement.HasDatabasePermission(batch, database, "BACKUP DATABASE"))
+                throw SimulatedSqlException.BackupPermissionDenied("BACKUP DATABASE", database.Name, verb);
+            if (type == BackupSet.DifferentialType)
+            {
+                if (BuiltInToken.Equals(database.Name, MasterDatabaseName))
+                    throw SimulatedSqlException.DifferentialBackupOfMaster();
+                if (chain.DifferentialBaseBlock is null)
+                    throw SimulatedSqlException.DifferentialWithoutDatabaseBackup(database.Name);
+            }
+        }
         var device = SingleDevice(devices, verb);
         var path = device.Path;
+        var start = batch.CurrentStatement.UtcNow;
 
         BackupMedia media;
         if (options.Init || options.Format)
         {
-            media = new BackupMedia();
+            // INIT overwrites the sets and keeps the media header; FORMAT writes a new one.
+            media = new BackupMedia { MediaDateUtc = start };
             if (!options.Format && this.ReadBackupDevice(path, out _) is { } existing && BackupMedia.TryRead(existing, out var kept, out _) == BackupMedia.ReadOutcome.Read)
             {
                 media.MediaName = kept!.MediaName;
                 media.MediaDescription = kept.MediaDescription;
+                media.MediaSetGuid = kept.MediaSetGuid;
+                media.MediaFamilyGuid = kept.MediaFamilyGuid;
+                media.MediaDateUtc = kept.MediaDateUtc;
             }
         }
         else
@@ -225,11 +270,11 @@ partial class Simulation
                 ? BackupMedia.TryRead(existing, out var read, out var writtenBy) switch
                 {
                     BackupMedia.ReadOutcome.Read => read!,
-                    BackupMedia.ReadOutcome.Empty => new BackupMedia(),
+                    BackupMedia.ReadOutcome.Empty => new BackupMedia { MediaDateUtc = start },
                     BackupMedia.ReadOutcome.OtherVersion => throw SimulatedSqlException.BackupFromIncompatibleVersion(writtenBy!, BackupMedia.SimulatorVersion, verb),
                     _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb),
                 }
-                : new BackupMedia();
+                : new BackupMedia { MediaDateUtc = start };
         }
         if (options.MediaName is { } mediaName)
         {
@@ -241,24 +286,17 @@ partial class Simulation
             media.MediaDescription = mediaDescription;
 
         var stopwatch = Stopwatch.StartNew();
-        var start = batch.CurrentStatement.UtcNow;
-        var set = new BackupSet
-        {
-            Name = options.Name,
-            Description = options.Description,
-            DatabaseName = database.Name,
-            BackupSetGuid = Guid.NewGuid(),
-            StartUtc = start,
-            IsCopyOnly = options.CopyOnly,
-            HasChecksums = options.Checksum,
-            FirstLsnBlock = this.LastAllocatedTransactionId,
-        };
+        var set = NewBackupSet(batch, database, type, options, start);
         DatabaseImage image;
         var tables = UserTables(database);
         var held = this.LockTablesForBackup(batch, tables);
         try
         {
+            // Every kind of set carries the database as it stands: a
+            // differential or log backup restores to that state just as a
+            // full one does.
             image = DatabaseImage.Capture(database);
+            this.DrawBackupLsns(set, chain);
             AddFilePages(set, database, tables);
         }
         finally
@@ -277,12 +315,143 @@ partial class Simulation
             throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
         }
 
-        var completed = ReportBackupMessages(batch, options.Stats, database.Name, set, media.Sets.Count, verb, stopwatch.Elapsed.TotalSeconds);
+        AdvanceBackupChain(database, set, options.CopyOnly);
+        this.RecordBackupHistory(batch, media, set, device.Display, media.Sets.Count);
+        this.CatalogRows.Invalidate();
+
+        var completed = ReportBackupMessages(batch, options.Stats, database.Name, set, media.Sets.Count, commandVerb, stopwatch.Elapsed.TotalSeconds);
         // Real's own count adds the nine pages of the set's header and trailer.
-        this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, string.Create(CultureInfo.InvariantCulture,
-            $"Database backed up. Database: {database.Name}, creation date(time): {BackupCreationDate()}, pages dumped: {TotalPages(set) + 9}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.FirstLsnBlock + 24)}, number of dump devices: 1, device information: (FILE={media.Sets.Count}, TYPE=DISK: {{'{device.Logged}'}}). This is an informational message only. No user action is required."));
+        var deviceInformation = string.Create(CultureInfo.InvariantCulture, $"number of dump devices: 1, device information: (FILE={media.Sets.Count}, TYPE=DISK: {{'{device.Logged}'}})");
+        this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, type switch
+        {
+            BackupSet.LogType => string.Create(CultureInfo.InvariantCulture,
+                $"Log was backed up. Database: {database.Name}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, {deviceInformation}. This is an informational message only. No user action is required."),
+            BackupSet.DifferentialType => string.Create(CultureInfo.InvariantCulture,
+                $"Database differential changes were backed up. Database: {database.Name}, creation date(time): {BackupCreationDate()}, pages dumped: {TotalPages(set) + 9}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, full backup LSN: {BackupLsn(set.DifferentialBaseBlock!.Value)}, {deviceInformation}. This is an informational message. No user action is required."),
+            _ => string.Create(CultureInfo.InvariantCulture,
+                $"Database backed up. Database: {database.Name}, creation date(time): {BackupCreationDate()}, pages dumped: {TotalPages(set) + 9}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, {deviceInformation}. This is an informational message only. No user action is required."),
+        });
         this.ErrorLog.Write(batch.CurrentStatement.UtcNow, BackupProcess, completed);
         connection.LastStatementRowCount = 0;
+    }
+
+    /// <summary>A backup set's header as the backup begins, before its LSNs are drawn.</summary>
+    private static BackupSet NewBackupSet(BatchContext batch, Database database, byte type, BackupOptions options, DateTime start)
+    {
+        var set = new BackupSet
+        {
+            Name = options.Name,
+            Description = options.Description,
+            DatabaseName = database.Name,
+            BackupSetGuid = Guid.NewGuid(),
+            StartUtc = start,
+            Type = type,
+            IsCopyOnly = options.CopyOnly,
+            HasChecksums = options.Checksum,
+            UserName = batch.Connection.Security.Effective.LoginName,
+            RecoveryModel = database.RecoveryModel switch
+            {
+                RecoveryModel.Simple => "SIMPLE",
+                RecoveryModel.BulkLogged => "BULK_LOGGED",
+                _ => "FULL",
+            },
+            Collation = database.CollationName,
+            CompatibilityLevel = (byte)database.CompatibilityLevel,
+            DatabaseGuid = database.DatabaseGuid,
+            RecoveryForkGuid = database.RecoveryForkGuid,
+            IsReadOnly = database.IsReadOnly,
+            IsSingleUser = database.UserAccess == 1,
+        };
+        foreach (var file in database.FilesInOrder())
+        {
+            if (file.IsContainer)
+                continue;
+            set.Files.Add(new BackupSetFile
+            {
+                LogicalName = file.Name,
+                PhysicalName = file.PhysicalName,
+                IsLog = file.IsLog,
+                FileGroupName = file.IsLog ? null : database.FilegroupName(file.DataSpaceId),
+                FileGroupId = file.IsLog ? 0 : file.DataSpaceId,
+                FileId = file.FileId,
+                SizeBytes = BuiltInResources.FileSizePages(database, file) * 8192L,
+                // An unlimited data file reports 32 TB, a log file's ceiling 2 TB (probed 2026-10-16 against SQL Server 2025).
+                MaxSizeBytes = file.MaxSizePages < 0 ? (file.IsLog ? 2_199_023_255_552L : 35_184_372_080_640L) : file.MaxSizePages * 8192L,
+                UniqueId = FileUniqueId(database.DatabaseGuid, file.FileId),
+            });
+        }
+        return set;
+    }
+
+    /// <summary>A file's identity in a backup set: the database's GUID with its file id folded into the last bytes.</summary>
+    private static Guid FileUniqueId(Guid databaseGuid, int fileId)
+    {
+        var bytes = databaseGuid.ToByteArray();
+        bytes[12] ^= (byte)(fileId >> 24);
+        bytes[13] ^= (byte)(fileId >> 16);
+        bytes[14] ^= (byte)(fileId >> 8);
+        bytes[15] ^= (byte)fileId;
+        return new Guid(bytes);
+    }
+
+    /// <summary>
+    /// Draws the set's LSNs from <paramref name="chain"/>: a full or
+    /// differential backup checkpoints past the log's position and spans 24
+    /// blocks from there; a log backup runs from where the chain left off to
+    /// the log's end, its checkpoint the last backup's.
+    /// </summary>
+    private void DrawBackupLsns(BackupSet set, DatabaseBackupChain chain)
+    {
+        set.DatabaseBackupLsnBlock = chain.DifferentialBaseBlock ?? 0;
+        set.FileDifferentialBaseBlock = chain.DifferentialBaseBlock;
+        set.FileDifferentialBaseGuid = chain.DifferentialBaseGuid;
+        if (set.Type == BackupSet.LogType)
+        {
+            set.FirstLsnBlock = chain.LastLogBackupBlock!.Value;
+            set.LastLsnBlock = Math.Max(chain.Draw(this.LastAllocatedTransactionId, gap: 0), set.FirstLsnBlock + 24);
+            chain.LogBlock = set.LastLsnBlock;
+            set.CheckpointLsnBlock = chain.LastCheckpointBlock;
+            set.BeginsLogChain = !chain.LogChainContinued;
+            return;
+        }
+        set.FirstLsnBlock = chain.Draw(this.LastAllocatedTransactionId, gap: 80);
+        set.CheckpointLsnBlock = set.FirstLsnBlock;
+        set.LastLsnBlock = set.FirstLsnBlock + 24;
+        chain.LogBlock = set.LastLsnBlock;
+        chain.LastCheckpointBlock = set.CheckpointLsnBlock;
+        if (set.Type == BackupSet.DifferentialType)
+        {
+            set.DifferentialBaseBlock = chain.DifferentialBaseBlock;
+            set.DifferentialBaseGuid = chain.DifferentialBaseGuid;
+        }
+    }
+
+    /// <summary>Moves the database's differential base and log chain past a written set (see <see cref="DatabaseBackupChain"/>).</summary>
+    private static void AdvanceBackupChain(Database database, BackupSet set, bool copyOnly)
+    {
+        if (copyOnly)
+            return;
+        var chain = database.BackupChain;
+        if (set.Type == BackupSet.LogType)
+        {
+            chain.LastLogBackupBlock = set.LastLsnBlock;
+            chain.LastLogBackupUtc = set.FinishUtc;
+            chain.LogChainContinued = true;
+            return;
+        }
+        if (set.Type == BackupSet.FullType)
+        {
+            chain.DifferentialBaseBlock = set.CheckpointLsnBlock;
+            chain.DifferentialBaseGuid = set.BackupSetGuid;
+            chain.DifferentialBaseUtc = set.StartUtc;
+            chain.TakeBaseGenerations(UserTables(database));
+        }
+        if (database.RecoveryModel != RecoveryModel.Simple && chain.LastLogBackupBlock is null)
+        {
+            chain.LastLogBackupBlock = set.FirstLsnBlock;
+            chain.LastLogBackupUtc = set.StartUtc;
+            chain.LogChainContinued = false;
+        }
     }
 
     /// <summary>Every page a backup set's files report.</summary>
@@ -339,9 +508,12 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The pages each file reports: the primary data file a new database's
-    /// 384 plus every page the tables' heaps and LOB chains hold, any other
-    /// data file 8, each log file 2.
+    /// The pages each file reports. A full backup: the primary data file a new
+    /// database's 384 plus every page the tables' heaps and LOB chains hold,
+    /// any other data file 8, each log file 2. A differential: the primary
+    /// data file 96, the changed extents of a new database's, any other 8 and
+    /// each log file 2. A log backup: the log file alone, a page for every 16
+    /// blocks of log it spans.
     /// </summary>
     private static void AddFilePages(BackupSet set, Database database, List<HeapTable> tables)
     {
@@ -352,7 +524,13 @@ partial class Simulation
         {
             if (file.IsContainer)
                 continue;
-            set.FilePages.Add((file.Name, file.IsLog ? 2 : file.FileId == 1 ? 384 + heapPages : 8));
+            if (set.Type == BackupSet.LogType)
+            {
+                if (file.IsLog)
+                    set.FilePages.Add((file.Name, ((set.LastLsnBlock - set.FirstLsnBlock) / 16) + 1));
+                continue;
+            }
+            set.FilePages.Add((file.Name, file.IsLog ? 2 : file.FileId != 1 ? 8 : set.Type == BackupSet.DifferentialType ? 96 : 384 + heapPages));
         }
     }
 
@@ -385,13 +563,14 @@ partial class Simulation
     {
         RefuseUnbuiltStatement(context, verb: null);
         var kind = context.GetNextRequired();
-        if (kind is not ReservedKeyword { Keyword: Keyword.Database })
+        var isLog = kind is Name { Value: var log } && BuiltInToken.Equals(log, "LOG");
+        if (kind is not ReservedKeyword { Keyword: Keyword.Database } && !isLog)
         {
-            if (kind is Name { Value: var form } && (BuiltInToken.EqualsAny(form, "LOG", "HEADERONLY", "FILELISTONLY", "LABELONLY", "VERIFYONLY") || BuiltInToken.Equals(form, "REWINDONLY")))
-                throw new NotSupportedException($"RESTORE {form.ToUpperInvariant()} isn't modeled by the simulator; only RESTORE DATABASE is.");
+            if (kind is Name { Value: var form } && BuiltInToken.Equals(form, "REWINDONLY"))
+                throw new NotSupportedException($"RESTORE {form.ToUpperInvariant()} isn't modeled by the simulator.");
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        const string verb = "RESTORE DATABASE";
+        var verb = isLog ? "RESTORE LOG" : "RESTORE DATABASE";
         context.MoveNextRequired();
         var databaseName = ParseBackupOperand(context, batch);
         List<BackupDeviceTarget>? devices = null;
@@ -438,25 +617,20 @@ partial class Simulation
         }
 
         var device = SingleDevice(devices, verb);
-        var path = device.Path;
-        var bytes = this.ReadBackupDevice(path, out var osError);
-        if (bytes is null)
-        {
-            this.LogBackupMediaFailure(batch, path, osError, create: false);
-            throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
-        }
-        var media = BackupMedia.TryRead(bytes, out var read, out var writtenBy) switch
-        {
-            BackupMedia.ReadOutcome.Read => read!,
-            BackupMedia.ReadOutcome.Empty => throw SimulatedSqlException.BackupVolumeEmpty(device.Display, verb),
-            BackupMedia.ReadOutcome.OtherVersion => throw SimulatedSqlException.BackupFromIncompatibleVersion(writtenBy!, BackupMedia.SimulatorVersion, verb),
-            _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb),
-        };
+        var media = this.ReadMediaForRestore(batch, device, verb);
         if (options.File > media.Sets.Count)
             throw SimulatedSqlException.BackupFileIdIncorrectlyFormed(options.File, device.Display, verb);
         var set = media.Sets[options.File - 1];
         if (options.Checksum && !set.HasChecksums)
             throw SimulatedSqlException.RestoreChecksumUnavailable(verb);
+        // Only a full backup creates a database; applying a differential or
+        // log backup to a restoring one isn't built.
+        if (isLog || set.Type != BackupSet.FullType)
+        {
+            if (existing is null)
+                throw SimulatedSqlException.RestoreCannotCreateDatabase(databaseName, verb);
+            throw new NotSupportedException($"{verb} of a {(set.Type == BackupSet.LogType ? "log" : set.Type == BackupSet.DifferentialType ? "differential" : "full")} backup set onto an existing database isn't modeled by the simulator; only a full backup restores.");
+        }
         DatabaseImage image;
         try
         {
@@ -493,7 +667,10 @@ partial class Simulation
                 restored.UserAccess = 2;
             if (options.Broker is { } broker)
                 restored.BrokerEnabled = broker;
+            ContinueBackupChainFrom(restored, set, batch.CurrentStatement.UtcNow);
         }
+        this.RecordRestoreHistory(batch, media, set, device.Display, options.File, targetName, 'D', options.Replace, physicalNames);
+        this.CatalogRows.Invalidate();
         // The restore brings back the backed-up access mode.
         this.NoteDatabaseAdmissionChanged();
         var completed = ReportBackupMessages(batch, options.Stats, targetName, set, options.File, verb, stopwatch.Elapsed.TotalSeconds);
@@ -504,10 +681,36 @@ partial class Simulation
         var at = batch.CurrentStatement.UtcNow;
         this.ErrorLog.Write(at, BackupProcess, $"Restore is complete on database '{targetName}'.  The database is now available.");
         this.ErrorLog.Write(at, BackupProcess, string.Create(CultureInfo.InvariantCulture,
-            $"Database was restored: Database: {targetName}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.FirstLsnBlock + 24)}, number of dump devices: 1, device information: (FILE={options.File}, TYPE=DISK: {{'{device.Logged}'}}). Informational message. No user action required."));
+            $"Database was restored: Database: {targetName}, creation date(time): {BackupCreationDate()}, first LSN: {BackupLsn(set.FirstLsnBlock)}, last LSN: {BackupLsn(set.LastLsnBlock)}, number of dump devices: 1, device information: (FILE={options.File}, TYPE=DISK: {{'{device.Logged}'}}). Informational message. No user action required."));
         this.ErrorLog.Write(at, BackupProcess, completed);
         connection.LastStatementRowCount = 0;
         return true;
+    }
+
+    /// <summary>
+    /// The backup chain a database restored from <paramref name="set"/> goes
+    /// on with: the set is its differential base, and outside <c>SIMPLE</c>
+    /// recovery the next log backup continues from the set's last LSN, as if
+    /// one ran as the restore finished (probed 2026-10-16 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void ContinueBackupChainFrom(Database database, BackupSet set, DateTime restoredUtc)
+    {
+        var chain = database.BackupChain;
+        chain.DifferentialBaseBlock = set.CheckpointLsnBlock;
+        chain.DifferentialBaseGuid = set.BackupSetGuid;
+        chain.DifferentialBaseUtc = set.StartUtc;
+        chain.LogBlock = Math.Max(chain.LogBlock, set.LastLsnBlock);
+        chain.LastCheckpointBlock = set.CheckpointLsnBlock;
+        chain.TakeBaseGenerations(UserTables(database));
+        if (database.RecoveryModel == RecoveryModel.Simple)
+        {
+            chain.BreakLogChain();
+            return;
+        }
+        chain.LastLogBackupBlock = set.LastLsnBlock;
+        chain.LastLogBackupUtc = restoredUtc;
+        chain.LogChainContinued = true;
     }
 
     /// <summary>
@@ -653,7 +856,8 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.MoveNextRequired();
                 var path = ParseBackupStringValue(context, batch);
-                devices.Add(new(path, path, path));
+                var resolved = ResolveBackupDevicePath(path);
+                devices.Add(new(path, resolved, resolved));
             }
             else if (token is Name { Value: var deviceKind } && BuiltInToken.EqualsAny(deviceKind, "TAPE", "URL"))
             {
@@ -718,9 +922,13 @@ partial class Simulation
     /// name) and leaving the cursor past it. Options that change nothing the
     /// simulator models — tape handling, buffer sizes, compression — are
     /// accepted; those that would change what is written or restored and
-    /// aren't modeled raise <see cref="NotSupportedException"/>.
+    /// aren't modeled raise <see cref="NotSupportedException"/>. Given
+    /// <paramref name="refused"/>, the statement is one of the forms that only
+    /// read a device, which collects the options that would change a database
+    /// as real names them in Msg 3032 — <c>STATS</c> too unless
+    /// <paramref name="takesStats"/>.
     /// </summary>
-    private static BackupOptions ParseBackupOptions(ParserContext context, BatchContext batch, string statement, string verb)
+    private static BackupOptions ParseBackupOptions(ParserContext context, BatchContext batch, string statement, string verb, List<string>? refused = null, bool takesStats = true)
     {
         var options = new BackupOptions();
         var restore = statement == "RESTORE";
@@ -738,8 +946,25 @@ partial class Simulation
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
             var advanced = false;
+            if (refused is not null && name is "REPLACE" or "RECOVERY" or "NORECOVERY" or "RESTRICTED_USER" or "KEEP_REPLICATION" or "KEEP_CDC"
+                or "ENABLE_BROKER" or "NEW_BROKER" or "ERROR_BROKER_CONVERSATIONS")
+            {
+                refused.Add(name switch
+                {
+                    "KEEP_CDC" => "keep_cdc",
+                    "KEEP_REPLICATION" => "keep_replication",
+                    "NORECOVERY" => "norecovery",
+                    "RECOVERY" => "recovery",
+                    "REPLACE" => "replace",
+                    "RESTRICTED_USER" => "restricted_user",
+                    _ => "broker_option",
+                });
+                name = "";
+            }
             switch (name)
             {
+                case "":
+                    break;
                 case "BLOCKSIZE" or "BUFFERCOUNT" or "MAXTRANSFERSIZE":
                     ExpectEquals(context);
                     _ = ParseBackupIntegerValue(context, batch);
@@ -760,7 +985,8 @@ partial class Simulation
                     options.Description = ParseBackupStringValue(context, batch);
                     break;
                 case "DIFFERENTIAL" when !restore:
-                    throw new NotSupportedException("BACKUP DATABASE WITH DIFFERENTIAL isn't modeled by the simulator; only full backups are.");
+                    options.Differential = true;
+                    break;
                 case "ENABLE_BROKER" or "NEW_BROKER" when restore:
                     options.Broker = true;
                     break;
@@ -780,6 +1006,9 @@ partial class Simulation
                     _ = options.Flags.Add(name);
                     break;
                 case "KEEP_CDC" or "KEEP_REPLICATION" or "RECOVERY" when restore:
+                    break;
+                case "LOADHISTORY" when restore:
+                    options.LoadHistory = true;
                     break;
                 case "MEDIADESCRIPTION" when !restore:
                     ExpectEquals(context);
@@ -819,9 +1048,14 @@ partial class Simulation
                         stats = (10, "10");
                         advanced = true;
                     }
+                    if (refused is not null && !takesStats)
+                    {
+                        refused.Add(advanced ? "stats" : "stats, stats=");
+                        stats = null;
+                    }
                     break;
                 case "ENCRYPTION" or "CREDENTIAL" or "EXPIREDATE" or "RETAINDAYS" or "METADATA_ONLY" or "FILE_SNAPSHOT" or "NORECOVERY" or "STANDBY"
-                    or "NO_TRUNCATE" or "PARTIAL" or "PASSWORD" or "MEDIAPASSWORD" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" or "RESTART" or "FILESTREAM" or "LOADHISTORY":
+                    or "NO_TRUNCATE" or "PARTIAL" or "PASSWORD" or "MEDIAPASSWORD" or "STOPAT" or "STOPATMARK" or "STOPBEFOREMARK" or "RESTART" or "FILESTREAM":
                     throw new NotSupportedException($"{statement} … WITH {name} isn't modeled by the simulator.");
                 default:
                     throw SimulatedSqlException.UnrecognizedBackupOption(token.Source.ToString(), statement);
@@ -850,6 +1084,7 @@ partial class Simulation
             if (fileValue.Value < 1)
                 throw SimulatedSqlException.BackupParameterOutOfRange(fileValue.Written, "FILE", verb);
             options.File = (int)fileValue.Value;
+            options.FileWritten = true;
         }
         return options;
 

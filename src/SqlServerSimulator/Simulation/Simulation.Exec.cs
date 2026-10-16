@@ -42,7 +42,8 @@ partial class Simulation
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
-        or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread")
+        or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist")
         && !systemProcName.StartsWith("sp_OA", StringComparison.Ordinal);
 
     /// <summary>
@@ -71,6 +72,7 @@ partial class Simulation
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
         or "sp_tables" or "sp_unprepare" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         || systemProcName.StartsWith("sp_OA", StringComparison.Ordinal)
         || IsOleDbRowsetProcedure(systemProcName);
@@ -442,6 +444,10 @@ partial class Simulation
             "xp_enumerrorlogs" => InvokeXpEnumErrorLogs(batch, calledAs),
             "xp_logevent" => InvokeXpLogEvent(batch, calledAs, returnCodeVar),
             "xp_readerrorlog" => InvokeXpReadErrorLog(batch, calledAs),
+            "xp_create_subdir" => InvokeXpCreateSubdir(batch, calledAs, returnCodeVar),
+            "xp_delete_file" => InvokeXpDeleteFile(batch, calledAs, returnCodeVar),
+            "xp_dirtree" => InvokeXpDirtree(batch),
+            "xp_fileexist" => InvokeXpFileExist(batch),
             "xp_getnetname" => InvokeXpGetNetName(batch),
             "xp_instance_regread" => InvokeXpInstanceRegread(batch, instanceMapped: true),
             "xp_msver" => InvokeXpMsver(batch),

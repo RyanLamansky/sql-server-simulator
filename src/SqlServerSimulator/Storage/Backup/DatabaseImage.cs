@@ -229,6 +229,7 @@ internal sealed partial class DatabaseImage
             type.Write(w);
         this.WriteKeys(w);
         this.WritePlanGuides(w);
+        this.WritePartitioning(w);
     }
 
     private static DatabaseImage Read(BinaryReader r)
@@ -342,6 +343,7 @@ internal sealed partial class DatabaseImage
             image.Types.Add(TypeImage.Read(r));
         ReadKeys(r, image);
         ReadPlanGuides(r, image);
+        ReadPartitioning(r, image);
         return image;
     }
 
@@ -490,6 +492,7 @@ internal struct IndexState
     public bool HasPersistedSample;
     public bool HasStatistics;
     public DateTime ModifyDate;
+    public PlacementImage Placement;
 
     public readonly void Write(BinaryWriter w)
     {
@@ -511,6 +514,7 @@ internal struct IndexState
         w.Write(this.HasPersistedSample);
         w.Write(this.HasStatistics);
         w.Write(this.ModifyDate.Ticks);
+        this.Placement.Write(w);
     }
 
     public static IndexState Read(BinaryReader r) => new()
@@ -533,6 +537,7 @@ internal struct IndexState
         HasPersistedSample = r.ReadBoolean(),
         HasStatistics = r.ReadBoolean(),
         ModifyDate = new DateTime(r.ReadInt64(), DateTimeKind.Utc),
+        Placement = PlacementImage.Read(r),
     };
 }
 
@@ -637,6 +642,9 @@ internal sealed class TableImage
     public bool KeysMayExceedLimit;
     public int MaxColumnIdUsed;
 
+    /// <summary>The base rows' placement on a partition scheme, and a heap's per-partition compression.</summary>
+    public PlacementImage Placement;
+
     /// <summary>Per column, in order: its id, ANSI_PADDING capture and untyped-NULL mark.</summary>
     public readonly List<(int ColumnId, bool IsAnsiPaddingOff, bool IsUntypedNull)> Columns = [];
 
@@ -674,6 +682,7 @@ internal sealed class TableImage
         w.Write(this.HeapAllowPageLocks);
         w.Write(this.KeysMayExceedLimit);
         w.Write(this.MaxColumnIdUsed);
+        this.Placement.Write(w);
         w.Write(this.Columns.Count);
         foreach (var (columnId, paddingOff, untypedNull) in this.Columns)
         {
@@ -730,6 +739,7 @@ internal sealed class TableImage
             HeapAllowPageLocks = r.ReadBoolean(),
             KeysMayExceedLimit = r.ReadBoolean(),
             MaxColumnIdUsed = r.ReadInt32(),
+            Placement = PlacementImage.Read(r),
         };
         for (var i = r.ReadInt32(); i > 0; i--)
             table.Columns.Add((r.ReadInt32(), r.ReadBoolean(), r.ReadBoolean()));
