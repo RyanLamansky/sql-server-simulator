@@ -24,7 +24,7 @@ The dispatch routes `Keyword.Declare` to cursor handling when the token after `D
 `Keyword.Open` / `Fetch` / `Close` / `Deallocate` get their own dispatch cases and are in `IsStatementBoundary`.
 The query after `FOR` parses through the shared body seam, so it may carry a `WITH cte AS (…)` prefix (the bindings are captured into the stored plan at DECLARE, and OPEN re-executes it) → [`ctes.md`](ctes.md#where-a-prefix-may-appear).
 
-**API server cursors** (the `sp_cursor*` TDS RPC family SSMS's grid editor and legacy ODBC / OLE DB apps drive) reuse this engine surface from the wire layer: `Network/TdsSession.Cursors.cs` synthesizes a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch, pulls the engine `Cursor` out of `SimulatedDbConnection.Cursors`, drives `Cursor.Fetch` per row, and runs `UPDATE/DELETE … WHERE CURRENT OF` for positioned edits.
+**API server cursors** (the `sp_cursor*` family SSMS's grid editor and legacy ODBC / OLE DB apps drive as TDS RPC requests, and a batch can call as `EXEC` text) reuse this engine surface: `Simulation.ApiCursors.cs` synthesizes a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch, pulls the engine `Cursor` out of `SimulatedDbConnection.Cursors`, drives `Cursor.Fetch` per row, and runs `UPDATE/DELETE … WHERE CURRENT OF` for positioned edits.
 Handle→cursor mapping, the scrollopt/ccopt option translation, and the probed wire contract live in [`tds-endpoint.md`](tds-endpoint.md).
 
 ## Sensitivity model (probe-confirmed)

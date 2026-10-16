@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
@@ -115,8 +117,8 @@ partial class SimulatedSqlException
     /// OF</c> targeted a read-only cursor (STATIC / FAST_FORWARD / declared
     /// <c>FOR READ ONLY</c>). Probe-confirmed verbatim against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException CursorIsReadOnly() =>
-        new("The cursor is READ ONLY.", 16929, 16, 1);
+    internal static SimulatedSqlException CursorIsReadOnly(byte state = 1) =>
+        new("The cursor is READ ONLY.", 16929, 16, state);
 
     /// <summary>
     /// Msg 16931: <c>WHERE CURRENT OF</c> on a cursor that isn't positioned on
@@ -257,6 +259,55 @@ partial class SimulatedSqlException
     /// cursor with a concurrency other than READ_ONLY — SCROLL_LOCKS (2) or
     /// either OPTIMISTIC (4, 8). Probed 2026-09-29 against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException ApiCursorConcurrencyIncompatible(int ccopt) =>
-        new($"sp_cursoropen: Specified concurrency control option {ccopt} ({(ccopt == 2 ? "SCROLL_LOCKS" : "OPTIMISTIC")}) is incompatible with static or fast forward only cursors. Only read-only is compatible with static or fast forward only cursors.", 16966, 16, 1);
+    internal static SimulatedSqlException ApiCursorConcurrencyIncompatible(int ccopt, string procedure) =>
+        new($"{procedure}: Specified concurrency control option {ccopt} ({(ccopt == 2 ? "SCROLL_LOCKS" : "OPTIMISTIC")}) is incompatible with static or fast forward only cursors. Only read-only is compatible with static or fast forward only cursors.", 16966, 16, 1);
+
+    /// <summary>
+    /// Msg 16902: an API server cursor procedure's argument it can't take — a
+    /// handle not passed as an <c>int OUTPUT</c>, an option of another type
+    /// than <c>int</c>, a fetch type or option code it doesn't know — each
+    /// parameter's refusal at a state of its own (probed 2026-10-16 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ApiCursorParameterInvalid(string procedure, string parameter, byte state) =>
+        new($"{procedure}: The value of the parameter '{parameter}' is invalid.", 16902, 16, state);
+
+    /// <summary>Msg 16903: an API server cursor procedure called with fewer arguments than it needs.</summary>
+    internal static SimulatedSqlException ApiCursorWrongParameterCount(string procedure, byte state) =>
+        new($"The \"{procedure}\" procedure was called with an incorrect number of parameters.", 16903, 16, state);
+
+    /// <summary>Msg 16909: an API server cursor handle the session holds no cursor under, in hexadecimal.</summary>
+    internal static SimulatedSqlException ApiCursorHandleInvalid(string procedure, int handle) =>
+        new($"{procedure}: The cursor identifier value provided ({handle.ToString("x", CultureInfo.InvariantCulture)}) is not valid.", 16909, 16, 1);
+
+    /// <summary>Msg 16914: <c>sp_cursor</c>'s SETPOSITION given a table or values it doesn't take.</summary>
+    internal static SimulatedSqlException ApiCursorTooManyParameters(string procedure) =>
+        new($"The \"{procedure}\" procedure was called with too many parameters.", 16914, 16, 2);
+
+    /// <summary>Msg 16926: <c>sp_cursoroption</c>'s TEXTPTR_ONLY or TEXTDATA naming a column that holds no <c>text</c>, <c>ntext</c> or <c>image</c>.</summary>
+    internal static SimulatedSqlException ApiCursorColumnNotText(int column) =>
+        new($"sp_cursoroption: The column ID ({column.ToString(CultureInfo.InvariantCulture)}) does not correspond to a text, ntext, or image column.", 16926, 16, 1);
+
+    /// <summary>Msg 16930: a positioned <c>sp_cursor</c> operation naming a row past the fetch buffer.</summary>
+    internal static SimulatedSqlException ApiCursorRowNotInBuffer() =>
+        new("The requested row is not in the fetch buffer.", 16930, 16, 1);
+
+    /// <summary>Msg 16936: <c>sp_cursor</c> given a value that names no column.</summary>
+    internal static SimulatedSqlException ApiCursorValuesInvalid() =>
+        new("sp_cursor: One or more values parameters were invalid.", 16936, 16, 1);
+
+    /// <summary>
+    /// Msg 16938: an API server cursor's statement that is no single
+    /// <c>SELECT</c> — a batch of several, or a statement of another kind.
+    /// </summary>
+    internal static SimulatedSqlException ApiCursorStatementNotSelect() =>
+        new("sp_cursoropen/sp_cursorprepare: The statement parameter can only be a batch or a stored procedure with a single select, without FOR BROWSE, COMPUTE BY, or variable assignments.", 16938, 16, 1);
+
+    /// <summary>Msg 16945: the API server cursor an open's statement failed to make, after that failure's errors.</summary>
+    internal static SimulatedSqlException ApiCursorNotDeclared() =>
+        new("The cursor was not declared.", 16945, 16, 2);
+
+    /// <summary>Msg 16955: an open whose CHECK_ACCEPTED_TYPES the type the cursor settled on isn't among.</summary>
+    internal static SimulatedSqlException ApiCursorNotAcceptable() =>
+        new("Could not create an acceptable cursor.", 16955, 16, 2);
 }

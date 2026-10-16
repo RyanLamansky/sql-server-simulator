@@ -2577,6 +2577,30 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>The last prepared-statement handle handed out; a session numbers its handles from 1.</summary>
     private int lastPreparedHandle;
 
+    /// <summary>The API server cursors open on this session, by handle.</summary>
+    internal readonly Dictionary<int, ApiServerCursor> ApiCursors = [];
+
+    /// <summary>The cursor statements prepared on this session, by handle.</summary>
+    internal readonly Dictionary<int, PreparedApiCursor> PreparedApiCursors = [];
+
+    /// <summary>
+    /// The last prepared-cursor handle handed out; a session numbers its
+    /// handles from 0x40000001 (probed 2026-10-16 against SQL Server 2025).
+    /// </summary>
+    private int lastCursorPrepHandle = 0x40000000;
+
+    /// <summary>Prepares cursor <paramref name="statement"/> under the next handle, which it answers.</summary>
+    internal int PrepareCursor(string statement, string declaration) =>
+        this.StorePreparedCursor(new PreparedApiCursor(statement, declaration));
+
+    /// <summary>Stores <paramref name="prepared"/> under the next cursor-preparation handle, which it answers.</summary>
+    internal int StorePreparedCursor(PreparedApiCursor prepared)
+    {
+        var handle = ++this.lastCursorPrepHandle;
+        this.PreparedApiCursors[handle] = prepared;
+        return handle;
+    }
+
     /// <summary>Prepares <paramref name="statement"/> under the next handle, which it answers.</summary>
     internal int Prepare(string statement, string declaration)
     {

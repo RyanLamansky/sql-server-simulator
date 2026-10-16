@@ -541,7 +541,7 @@ public sealed class CursorRpcTests
     }
 
     [TestMethod]
-    public async Task CursorOption_AcceptedAndIgnored()
+    public async Task CursorOption_CursorName_NamesTheCursor()
     {
         var simulation = new Simulation();
         await using var listener = await simulation.ListenLocalAsync(0, Token);
@@ -554,11 +554,13 @@ public sealed class CursorRpcTests
         _ = option.Parameters.Add(ret);
         _ = option.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
         _ = option.Parameters.Add(new SqlParameter("@code", SqlDbType.Int) { Value = 2 });
-        _ = option.Parameters.Add(new SqlParameter("@value", SqlDbType.Int) { Value = 0 });
+        _ = option.Parameters.Add(new SqlParameter("@value", SqlDbType.NVarChar, 128) { Value = "apicur" });
         _ = await option.ExecuteNonQueryAsync(Token);
         AreEqual(0, ret.Value);
 
-        // The cursor still works after the ignored option call.
+        // CURSOR_NAME names the cursor for T-SQL, and the handle still fetches.
+        await using (var status = new SqlCommand("select cursor_status('global', 'apicur')", connection))
+            AreEqual((short)1, await status.ExecuteScalarAsync(Token));
         var rows = await FetchAsync(connection, handle, 0x1, 1, 1, Token);
         HasCount(1, rows);
         _ = await CloseAsync(connection, handle, Token);

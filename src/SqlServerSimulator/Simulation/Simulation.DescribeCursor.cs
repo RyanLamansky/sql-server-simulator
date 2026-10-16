@@ -219,7 +219,7 @@ partial class Simulation
     }
 
     /// <summary>Attributes an error to the describe procedure's own source line.</summary>
-    private static SimulatedSqlException AtProcedureLine(SimulatedSqlException error, string procedure, int line)
+    internal static SimulatedSqlException AtProcedureLine(SimulatedSqlException error, string procedure, int line)
     {
         error.PreserveDiagnostics(line, procedure);
         error.RaisedBySystemProcedure = true;

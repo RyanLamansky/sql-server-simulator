@@ -168,7 +168,7 @@ partial class Simulation
         RequireSystemProcedureShape("sp_unprepare", arguments, ["handle"]);
         var handle = arguments[0].Value;
         var number = handle.IsNull ? 0 : handle.CoerceTo(SqlType.Int32).AsInt32;
-        if (!batch.Connection.PreparedStatements.Remove(number))
+        if (!Unprepare(batch.Connection, number))
             throw AtProcedureLine(SimulatedSqlException.CouldNotFindPreparedStatement(number, state: 8), "sp_unprepare", 1);
     }
 

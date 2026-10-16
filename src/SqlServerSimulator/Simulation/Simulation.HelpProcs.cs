@@ -580,7 +580,9 @@ partial class Simulation
                     foreach (var entry in exception.Errors)
                         entry.Procedure = inner;
                 }
-                exception.RaisedBySystemProcedure = exception.Number != 201 && !exception.SystemProcedureBindingError;
+                // sp_cursorunprepare's missing handle returns its number
+                // (probed 2026-10-16 against SQL Server 2025).
+                exception.RaisedBySystemProcedure = (exception.Number != 201 || systemProcName == "sp_cursorunprepare") && !exception.SystemProcedureBindingError;
                 if (returnCode is not null && exception.RaisedBySystemProcedure && !exception.CaughtBeforeReturn)
                     returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
                 throw;
@@ -628,7 +630,7 @@ partial class Simulation
         // 2026-10-02 against SQL Server 2025).
         ("sp_executesql", 201) => (1, null),
         ("sp_describe_first_result_set" or "sp_describe_undeclared_parameters", 201 or 214 or 11552) => (1, null),
-        ("sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_unprepare", 201) => (1, null),
+        ("sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_unprepare" or "sp_cursorunprepare", 201) => (1, null),
         // The extended procedures report every error at line 1 (probed
         // 2026-10-04 against SQL Server 2025).
         ("sp_bindsession" or "sp_getbindtoken" or "sp_testlinkedserver", _) => (1, null),

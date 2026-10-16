@@ -37,7 +37,7 @@ partial class Simulation
     /// (Msg 201) never starts, so it takes the transaction back.
     /// </summary>
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
-        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
+        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_cursor" or "sp_cursorclose" or "sp_cursorexecute" or "sp_cursorfetch" or "sp_cursoropen" or "sp_cursoroption" or "sp_cursorprepare" or "sp_cursorprepexec" or "sp_cursorunprepare" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
@@ -59,7 +59,7 @@ partial class Simulation
     /// invalidates for itself.
     /// </summary>
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
-        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_90" or "sp_columns_100" or "sp_columns_170" or "sp_databases" or "sp_datatype_info" or "sp_datatype_info_90" or "sp_datatype_info_170" or "sp_dbfixedrolepermission"
+        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_cursor" or "sp_cursorclose" or "sp_cursorexecute" or "sp_cursorfetch" or "sp_cursoropen" or "sp_cursoroption" or "sp_cursorprepare" or "sp_cursorprepexec" or "sp_cursorunprepare" or "sp_columns_90" or "sp_columns_100" or "sp_columns_170" or "sp_databases" or "sp_datatype_info" or "sp_datatype_info_90" or "sp_datatype_info_170" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_estimate_data_compression_savings" or "sp_execute" or "sp_executesql" or "sp_fkeys" or "sp_fulltext_load_thesaurus_file" or "sp_getapplock" or "sp_help" or "sp_help_fulltext_catalogs"
         or "sp_help_fulltext_columns" or "sp_help_fulltext_system_components" or "sp_help_fulltext_tables" or "sp_helpconstraint" or "sp_helpdb"
@@ -302,6 +302,15 @@ partial class Simulation
             "sp_execute" => this.InvokeSpExecute(batch, returnCodeVar, insertExecSource),
             "sp_prepexec" => this.InvokeSpPrepExec(batch, returnCodeVar, insertExecSource),
             "sp_unprepare" => InvokeSpUnprepare(batch),
+            "sp_cursor" => ApiCursorCall(this.InvokeSpCursor(batch)),
+            "sp_cursorclose" => ApiCursorCall(InvokeSpCursorClose(batch)),
+            "sp_cursorexecute" => ApiCursorCall(this.InvokeSpCursorExecute(batch)),
+            "sp_cursorfetch" => ApiCursorCall(InvokeSpCursorFetch(batch)),
+            "sp_cursoropen" => ApiCursorCall(this.InvokeSpCursorOpen(batch)),
+            "sp_cursoroption" => ApiCursorCall(InvokeSpCursorOption(batch)),
+            "sp_cursorprepare" => ApiCursorCall(this.InvokeSpCursorPrepare(batch)),
+            "sp_cursorprepexec" => ApiCursorCall(this.InvokeSpCursorPrepExec(batch)),
+            "sp_cursorunprepare" => ApiCursorCall(InvokeSpCursorUnprepare(batch)),
             "sp_estimate_data_compression_savings" => InvokeSpEstimateDataCompressionSavings(batch, calledAs),
             "sp_create_plan_guide" => this.InvokeSpCreatePlanGuide(batch, calledAs),
             "sp_control_plan_guide" => InvokeSpControlPlanGuide(batch, calledAs),

@@ -951,6 +951,9 @@ partial class Simulation
     /// that names its <paramref name="declarations"/> has its compile
     /// remembered (<see cref="DynamicBatchKey"/>), so the same call again skips
     /// it until a schema change, as a repeated top-level batch does.
+    /// <paramref name="apiServerCursor"/> marks the batch as an API server
+    /// cursor's synthesized <c>DECLARE</c> and <c>OPEN</c> (see
+    /// <see cref="BatchContext.ApiServerCursor"/>).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> ExecuteDynamicBatch(
         BatchContext outerBatch,
@@ -961,7 +964,8 @@ partial class Simulation
         Dictionary<string, HeapTable>? tableVariables = null,
         bool streams = false,
         string? declarations = null,
-        ResultSetsSink? resultSetsSink = null)
+        ResultSetsSink? resultSetsSink = null,
+        bool apiServerCursor = false)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -980,7 +984,7 @@ partial class Simulation
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
-        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch), ResultSetsSink = resultSetsSink };
+        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch), ResultSetsSink = resultSetsSink, ApiServerCursor = apiServerCursor };
 
         connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;

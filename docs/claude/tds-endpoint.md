@@ -230,9 +230,10 @@ Dispatch (`TdsSession.Rpc.cs`):
 
 ## API server cursors (sp_cursor\* RPC family)
 
-`TdsSession.Cursors.cs` handles the special-ProcID cursor family SSMS's query-editor grid and legacy ODBC / OLE DB server-cursor apps drive.
+`TdsSession.Cursors.cs` handles the special-ProcID cursor family SSMS's query-editor grid and legacy ODBC / OLE DB server-cursor apps drive, over the operations the `EXEC` text form shares (`Simulation.ApiCursors.cs`; see [The procedures as `EXEC` text](#the-procedures-as-exec-text)).
 `WellKnownProcId` in `TdsSession.Rpc.cs` maps both the well-known numeric ProcIDs (1 sp_cursor, 2 sp_cursoropen, 3 sp_cursorprepare, 4 sp_cursorexecute, 5 sp_cursorprepexec, 6 sp_cursorunprepare, 7 sp_cursorfetch, 8 sp_cursoroption, 9 sp_cursorclose) **and** the by-name form (SqlClient sends `CommandType.StoredProcedure` with `CommandText = "sp_cursoropen"` as ProcID 0 + name) to the dispatch.
-Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … CURSOR … FOR <stmt>; OPEN` batch and pulling the object out of `SimulatedDbConnection.Cursors` under an opaque `sss_apicursor_<handle>` name), stored in a per-session `Dictionary<int, ApiCursor>` — wire-protocol state, so on the session not the engine.
+Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … CURSOR GLOBAL … FOR <stmt>; OPEN` batch and pulling the object out of `SimulatedDbConnection.Cursors` under an opaque `sss_apicursor_<handle>` name), stored under its handle in `SimulatedDbConnection.ApiCursors`, so a handle the RPC form opens the text form fetches and a pooled reset drops them.
+The handle is the engine cursor's own, which a T-SQL `DECLARE` draws from too: a session's first is 180150003 and each next one two more (probed 2026-10-16 against SQL Server 2025); prepared cursor handles number from 0x40000001.
 Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRids` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires.
 Probed against SQL Server 2025.
 
@@ -257,19 +258,23 @@ The rows probed 2026-09-29 against SQL Server 2025, the KEYSET cap and FAST_FORW
 ccopt low bits: 0x1 READ_ONLY, 0x2 SCROLL_LOCKS, 0x4 OPTIMISTIC (values), 0x8 OPTIMISTIC (rowversion).
 A STATIC or FAST_FORWARD request with any of the last three is **Msg 16966** from `sp_cursoropen` at line 1, return status 1, a zero handle, the options echoed and a NULL row count.
 The UPDT_IN_PLACE bit (0x4000) comes back on the effective ccopt beside whatever concurrency the cursor settles on; the other `0x1000`-series flag bits are stripped from both values.
-On an **invalid statement**, the engine's error (e.g. Msg 208) plus **Msg 16945** (`The cursor was not declared.`, state 2) are emitted, the handle comes back 0, the option values echo the requested low bits, and the return status is the engine error number.
+On an **invalid statement**, the engine's error (e.g. Msg 208) plus **Msg 16945** (`The cursor was not declared.`, state 2, from the procedure called) are emitted, the handle comes back 0, the option values echo the requested low bits, and the return status is the engine error number; a statement that isn't one `SELECT` — a batch of several, an `UPDATE` — is **Msg 16938** in place of the engine's error.
+`sp_cursorprepexec`'s failing statement is its errors then **Msg 8180** instead, returning 8180 with the preparation handle NULL and nothing prepared.
 
 **sp_cursorfetch**(@cursor, @fetchtype, @rownum, @nrows) — @rownum / @nrows are **input** for a data fetch: either sent ByRef on a fetch other than INFO is Msg 16902, state 5 for @rownum ahead of state 6 for @nrows, return status 1 (probed 2026-10-07 against SQL Server 2025).
 Rows come back as an ordinary result set of up to @nrows rows, closed by a DONEINPROC counting them — under a COLMETADATA of no columns (count `0xFFFF`) when the RPC's fNoMetaData option asks, as SQL Server's OLE DB provider's fetches do, since it holds the open's metadata — each with the trailing ROWSTAT column — 1 for a fetched row, 2 for a keyset member deleted (or key-moved) out from under the cursor, which fills its buffer row with the zeroed-or-NULL values a T-SQL `FETCH` reports and doesn't end the fetch (probed 2026-09-29 against SQL Server 2025). fetchtype: 0x1 FIRST, 0x2 NEXT, 0x4 PREV, 0x8 LAST, 0x10 ABSOLUTE (@rownum), 0x20 RELATIVE (@rownum), 0x100 INFO.
 The first buffer row uses the requested direction; subsequent rows advance NEXT.
 A **past-end** fetch returns an empty result set with return status 0.
-**INFO** writes no rows and reports the current 1-based position (@rownum) and total row count (@nrows) as OUT params.
+RELATIVE counts from the first row of the last fetch buffer, where the engine cursor sits on its last, and a forward-only cursor takes a forward RELATIVE as that many NEXTs; a direction the cursor's type refuses is the T-SQL `FETCH`'s own Msg 16911 / 16925 at line 1, returning 0 with no result set.
+A fetch leaves `@@ROWCOUNT` at the rows it sent and `@@FETCH_STATUS` at its last row's status (all probed 2026-10-16 against SQL Server 2025).
+**INFO** writes no rows and reports the 1-based position of the last fetch buffer's first row (-1 for an empty one, 0 before any fetch) as @rownum and the cursor's row count as @nrows, both OUT params.
 An **invalid handle** → **Msg 16909** (`sp_cursorfetch: The cursor identifier value provided (<hex>) is not valid.`, state 1), return status 1.
 Each fetch's RIDs are buffered on the ApiCursor for positioned DML.
 
 **sp_cursor**(@cursor, @optype, @rownum, @table, @col=value…) — positioned DML against the last fetch buffer, @rownum 1-based into it. optype 0x1 UPDATE (named `@col` params become `SET [col] = @col`), 0x2 DELETE, 0x20 SETPOSITION (no DML, just repositions), and 0x4 INSERT, which needs no fetched row (named `@col` params become the new row's columns).
 A positioned UPDATE or DELETE reports its row in two DONEINPROC tokens and an INSERT in one, each of current command `0x7D` (probed 2026-10-11 against SQL Server 2025: the OLE DB provider writes a linked server's INSERT, and an UPDATE without a WHERE, through these).
 Empty buffer → **Msg 16931** (`There are no rows in the current fetch buffer.`) + Msg 3621; @rownum past the buffer → **Msg 16930** (`The requested row is not in the fetch buffer.`) + Msg 3621; in both the return status is the primary Msg number.
+An UPDATE or DELETE through a read-only cursor is **Msg 16929** state 2 from `sp_cursor`, ahead of the buffer checks, and an empty `@table` names the cursor's own table (probed 2026-10-16 against SQL Server 2025).
 A DML enforcement failure surfaces the engine error and returns its number.
 
 **sp_cursorprepexec**(@prep OUT, @cursor OUT, @paramdef, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) — prepares (stores statement + declaration-parsed parameter names in a per-session handle map) and opens in one call, returning both handles; the parameterized statement's bindings are the trailing params.
@@ -282,18 +287,30 @@ Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
 
 **Accept-and-ignore / divergences (documented, not byte-identical):**
 
-- **sp_cursoroption** is accepted and discarded (return status 0) — its codes weren't reachably probed from SqlClient.
+- **sp_cursoroption**: CURSOR_NAME (2) registers the cursor under the name, which T-SQL then reaches it by (`FETCH NEXT FROM name`, `CURSOR_STATUS`), though `sys.dm_exec_cursors` keeps reporting no name; TEXTPTR_ONLY (1) and TEXTDATA (3) check that their column number names a `text` / `ntext` / `image` column (else Msg 16926) and are otherwise discarded, where real then sends that column as a text pointer (`varbinary`, NULL in the probe); SCROLLOPT, CCOPT and ROWCOUNT (4 – 6) refuse every value probed, with Msg 16902 states 12 – 14, and any other code is state 15 (probed 2026-10-16 against SQL Server 2025).
 - **Concurrency control is not wired for the API path.** ccopt SCROLL_LOCKS / OPTIMISTIC keep the cursor updatable and echo in the OUT ccopt, but no scroll locks are held and **no optimistic conflict is raised** — probe-confirmed the real API cursor did **not** surface a conflict even with a second connection modifying a buffered row (unlike the T-SQL `OPTIMISTIC` cursor, which raises the Msg 16947 chain).
   The positioned DML uses the default relocate-and-rewrite.
 - **Handle values** are a simple per-session counter, not the real server's descriptor-derived integers (opaque to the client).
 - **FAST_FORWARD** reads live rows over a navigable shape and settles them at OPEN over a sort, a row limit or a non-navigable one, as the T-SQL `FAST_FORWARD` does — see [`cursors.md`](cursors.md#fast_forward).
 - **sp_cursor @rownum = 0** (real: "apply to every buffered row" batch update) is not modeled — only 1-based single-row positioned DML.
 - **REFRESH fetchtype (0x80)** maps to a plain re-fetch rather than an in-place buffer refresh.
-- **Not modeled yet**: real raises Msg 16902 when a parameterized `sp_cursorprepexec` omits PARAMETERIZED_STMT (0x1000), where the simulator opens the cursor; and ccopt's CHECK_ACCEPTED_OPTS (0x10000) with its `*_ACCEPTABLE` bits, which refused nothing in the probes (an OPTIMISTIC request with only READ_ONLY acceptable opened OPTIMISTIC on both, probed 2026-10-06 against SQL Server 2025), is stripped.
+- **Not modeled yet**: ccopt's CHECK_ACCEPTED_OPTS (0x10000) with its `*_ACCEPTABLE` bits, which refused nothing in the probes (an OPTIMISTIC request with only READ_ONLY acceptable opened OPTIMISTIC on both, probed 2026-10-06 against SQL Server 2025), is stripped.
 
-**The scrollopt flags past the type** (`OpenAndAnnounce`, all probed 2026-10-06 against SQL Server 2025):
+### The procedures as `EXEC` text
 
-- **PARAMETERIZED_STMT (0x1000)** on an `sp_cursoropen` carrying no parameter definition is **Msg 16902** state 22 (`sp_cursoropen: The value of the parameter 'scrollopt' is invalid.`), return status 1, a zero handle, both options echoed as sent and the row count as sent.
+`Simulation.ApiCursorProcs.cs` runs the nine procedures written as `EXEC` text, where each was Msg 2812, through the same operations, so their handles, result sets, errors and return statuses are the RPC form's (probed 2026-10-16 against SQL Server 2025).
+What only the text form meets is the check of its arguments, which real makes as the extended procedure reads them: a handle argument that isn't an `int` variable marked `OUTPUT` is Msg 16902 state 16 (`'cursor'` / `'prepared handle'`), an option of another type than `int` — a `0x…` literal included — state 20 for `scrollopt` and 25 for `ccopt` and `rowcount`, an empty or non-string statement state 18, and too few arguments Msg 16903 at a state per procedure (29 `sp_cursoropen` / `sp_cursorprepexec`, 5 `sp_cursorprepare` / `sp_cursorexecute`, 4 `sp_cursoroption`, 6 or 7 `sp_cursor`, 1 `sp_cursorfetch` / `sp_cursorclose`).
+An open takes exactly one scroll type and one concurrency, with only the flags it knows past them: anything else is state 24 for `scrollopt` (AUTO_CLOSE, 0x4000, included) and 26 for `ccopt`.
+`sp_cursorfetch` takes `@fetchtype` from the six directions and INFO (3, 64 and the like are state 4, REFRESH state 45), `@nrows` 20 when left out and a negative one state 7, and INFO only with both `@rownum` and `@nrows` as `OUTPUT` variables; `sp_cursor` takes one operation (state 33), SETPOSITION alone with no table (Msg 16914), a NULL table state 36 and a value without a column name Msg 16936; `sp_cursorprepare` takes `@options` only as 1 (else Msg 214 state 3) and sends the statement's columns as an empty result set, its check drawing no cursor handle.
+Without PARAMETERIZED_STMT `sp_cursoropen` ignores its definitions and values, so a statement naming a parameter fails to declare it (Msg 137 then 16945); `sp_cursorprepexec` refuses definitions without it (state 50), and values to a statement declaring no parameters are Msg 8146.
+An error any of them raises ends only the call: the caller's batch goes on and `@@ROWCOUNT` stays as the statement before left it.
+`sp_unprepare` and `sp_cursorunprepare` each release the other's handles.
+
+**Not modeled yet**: a statement that is an `EXEC` of a procedure with a single `SELECT`, which real opens a cursor over, fails here with Msg 156 then 16945; real's refusal of one with several (Msg 16937, raised from inside the procedure) isn't modeled either.
+
+**The scrollopt flags past the type** (`Simulation.OpenApiCursor`, all probed 2026-10-06 against SQL Server 2025):
+
+- **PARAMETERIZED_STMT (0x1000)** on an `sp_cursoropen` carrying no parameter definition is **Msg 16902** state 22 (`sp_cursoropen: The value of the parameter 'scrollopt' is invalid.`), return status 1, a zero handle, both options echoed as sent and the row count as sent; an `sp_cursorprepexec` carrying definitions without it is state 50, with a zero handle and row count and nothing prepared (probed 2026-10-16).
 - **AUTO_FETCH (0x2000)** fetches the first rows with the open, in its result set — as many as the `@rowcount` sent, else 20 — and returns how many it fetched as `@rowcount`, whatever the cursor's type (a DYNAMIC cursor's included).
 - **CHECK_ACCEPTED_TYPES (0x8000)** accepts the open only when the type the cursor settled on carries its `*_ACCEPTABLE` bit (its type bit shifted 16: KEYSET 0x10000, DYNAMIC 0x20000, FORWARD_ONLY 0x40000, STATIC 0x80000, FAST_FORWARD 0x100000) — a KEYSET request over a `DISTINCT` needs STATIC acceptable — else it is **Msg 16955** (`Could not create an acceptable cursor.`) and Msg 16945, both state 2, return status 16955, a zero handle, the options echoed and a zero row count.
 

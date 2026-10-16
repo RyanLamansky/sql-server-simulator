@@ -179,7 +179,7 @@ internal sealed partial class TdsSession
                 }
 
             case Tds.ProcIdUnprepare:
-                _ = this.connection!.PreparedStatements.Remove(Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture));
+                _ = Simulation.Unprepare(this.connection!, Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture));
                 writer.WriteReturnStatus(0);
                 writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
                 break;
