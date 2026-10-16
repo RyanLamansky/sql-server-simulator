@@ -153,6 +153,9 @@ internal sealed class ServiceQueue(Schema schema, string name, int objectId, Dat
 
     /// <summary>The <c>object_id</c> of the queue's internal message table, <c>queue_messages_&lt;id&gt;</c>.</summary>
     public int InternalTableId;
+
+    /// <summary>How many committed <c>RECEIVE</c>s took messages from the queue, which tells activation a reader made progress.</summary>
+    public long ReceivedCount;
 }
 
 /// <summary>

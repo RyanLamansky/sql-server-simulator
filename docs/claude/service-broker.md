@@ -70,6 +70,15 @@ Its rowset is fifteen columns, `status` through `message_enqueue_time`.
 - Error message bodies are real's XML document (`<Error xmlns="http://schemas.microsoft.com/SQL/ServiceBroker/Error"><Code>…</Code><Description>…</Description></Error>`) in UTF-16 behind a byte order mark, sequence -1.
 - `BEGIN DIALOG` and `RECEIVE` need `RECEIVE` on the queue (Msg 1088 states 41 and 42), `SELECT` on a queue the `SELECT` permission.
 
+## Activation
+
+- A message committed to a queue whose activation is on starts its procedure on a background session of its own (`Simulation.NoteQueueArrival`), in the queue's database, as the activation's principal: dbo for `OWNER` and for `SELF` run by dbo, otherwise `EXECUTE AS USER`, whose `EXECUTE` on the procedure real checks.
+  `@@NESTLEVEL` reads 1 in it, as on real.
+- One reader starts at once; another, up to `MAX_QUEUE_READERS`, only once the running ones have had five seconds, as real's queue monitor ramps up.
+- A reader that ends having received something runs again while ready messages remain; one that received nothing leaves the queue `NOTIFIED`, activated again only once a `RECEIVE` takes from it — or `ALTER QUEUE` turns activation on again, which also starts a reader for messages already waiting.
+- Every error and message the procedure raises goes to the error log as real writes it: `The activated proc '[dbo].[p]' running on queue 'db.dbo.q' output the following:  '…'` under process `spidNNs`.
+- `sys.dm_broker_activated_tasks` lists each running reader (spid, database, queue, procedure, principal) and `sys.dm_broker_queue_monitors` reports `RECEIVES_OCCURRING` while one runs, `NOTIFIED`, or `INACTIVE`.
+
 ## Catalog views
 
 `sys.service_message_types`, `sys.service_contracts`, `sys.service_contract_message_usages`, `sys.message_type_xml_schema_collection_usages`, `sys.services`, `sys.service_contract_usages`, `sys.service_queue_usages`, `sys.service_queues`, `sys.routes`, `sys.remote_service_bindings`, `sys.conversation_priorities`, `sys.conversation_endpoints`, `sys.conversation_groups`, `sys.transmission_queue` and `sys.dm_broker_queue_monitors` (one `INACTIVE` row per queue with an activation procedure).
@@ -82,6 +91,8 @@ A queue's `SELECT` lists its messages in its clustered index's order — status,
 - **Reads never wait**: a `SELECT` of a queue, or of the conversation views, reads the committed state (plus the session's own changes) where real's would wait on another transaction's uncommitted `SEND` or `RECEIVE` (Msg 1222 under a lock timeout).
 - Endpoints carry no session keys, security timestamp or out-of-order bookkeeping, and every priority is 5: `CREATE BROKER PRIORITY` is catalog-only.
 - `far_broker_instance` is the simulator's fixed `service_broker_guid`, and a target's `principal_id` is always dbo.
+- **A reader that failed is not retried**: real's queue monitor starts it again every five seconds while messages wait (an `EXECUTE` denied, say), where here it stays `NOTIFIED` until a `RECEIVE` or an `ALTER QUEUE`.
+- Inside an activated procedure real reports `@@TRANCOUNT` one higher than its own transactions account for, and `@@SPID` as 1; here both read as an ordinary session's.
 - The DONE token a conversation statement closes with: real's own codes aren't captured, so `RECEIVE` closes as a `SELECT` and the rest send none.
 
 - **The shipped queues aren't in `sys.objects`**, nor are any queue's `queue_messages_<id>` internal tables, which real lists beside its 72 system base tables (see [`catalog-views.md`](catalog-views.md)); `sys.service_queues`, `OBJECT_ID` and `SELECT` reach the shipped queues all the same.

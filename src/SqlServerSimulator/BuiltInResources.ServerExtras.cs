@@ -168,7 +168,7 @@ internal static partial class BuiltInResources
             new("pool_id", SqlType.Int32, null, true),
         ], static (_, _) => ResourceSemaphoreRows());
 
-        // Service Broker activates no stored procedure here.
+        // Each activation procedure running on its background session.
         Sys("dm_broker_activated_tasks",
         [
             new("spid", SqlType.Int32, null, true),
@@ -176,7 +176,7 @@ internal static partial class BuiltInResources
             new("queue_id", SqlType.Int32, null, true),
             new("procedure_name", SqlType.NVarchar, 325, true),
             new("execute_as", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (batch, _) => ActivatedTaskRows(batch.Connection.Simulation));
 
         // A query is granted memory while it runs a memory-consuming operator,
         // which no query the simulator runs reports, so the view is empty.

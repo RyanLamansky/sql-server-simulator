@@ -522,6 +522,10 @@ partial class Simulation
         // queue still off is held again.
         if (options.Status is true)
             batch.Connection.Simulation.RedeliverHeld(batch, null, QueueRefusedStatus);
+        // A queue whose activation is turned on with messages waiting starts
+        // its reader.
+        if (!maintenance && queue.Settings.ActivationEnabled)
+            batch.Connection.Simulation.KickActivation(queue, schema.Database);
     }
 
     /// <summary>

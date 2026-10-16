@@ -425,10 +425,31 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary><c>sys.dm_broker_activated_tasks</c>: each activation procedure running.</summary>
+    private static List<SqlValue[]> ActivatedTaskRows(Simulation simulation)
+    {
+        var rows = new List<SqlValue[]>();
+        lock (simulation.ActivatedTasks)
+        {
+            foreach (var task in simulation.ActivatedTasks)
+            {
+                rows.Add([
+                    SqlValue.FromInt32(task.Spid),
+                    SqlValue.FromInt16(task.Database.Id),
+                    SqlValue.FromInt32(task.Queue.ObjectId),
+                    SqlValue.FromNVarchar(task.Procedure),
+                    SqlValue.FromInt32(task.ExecuteAs),
+                ]);
+            }
+        }
+        return rows;
+    }
+
     /// <summary>
     /// <c>sys.dm_broker_queue_monitors</c>: one row per queue with an
-    /// activation procedure in every database that has used Service Broker,
-    /// <c>INACTIVE</c> while no activated reader runs.
+    /// activation procedure in every database that has used Service Broker —
+    /// <c>RECEIVES_OCCURRING</c> while a reader runs, <c>NOTIFIED</c> once one
+    /// ended receiving nothing, else <c>INACTIVE</c>.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateQueueMonitors(Parser.BatchContext batch)
     {
@@ -442,13 +463,14 @@ internal static partial class BuiltInResources
             {
                 if (queue.Settings.ActivationProcedure is null)
                     continue;
+                var (state, waiting) = batch.Connection.Simulation.QueueMonitorState(queue);
                 yield return [
                     SqlValue.FromInt32(database.Id),
                     SqlValue.FromInt32(queue.ObjectId),
-                    SqlValue.FromNVarchar("INACTIVE"),
+                    SqlValue.FromNVarchar(state),
                     SqlValue.FromDateTime(queue.CreateDate),
                     SqlValue.FromDateTime(queue.CreateDate),
-                    SqlValue.FromInt32(0),
+                    SqlValue.FromInt32(waiting),
                 ];
             }
         }

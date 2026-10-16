@@ -282,7 +282,17 @@ internal sealed class BrokerRuntime(Simulation simulation)
         };
         queue.Messages.Add(message);
         if (batch is not null)
-            this.Log(batch, () => _ = queue.Messages.Remove(message), () => message.PendingOwner = null);
+        {
+            this.Log(batch, () => _ = queue.Messages.Remove(message), () =>
+            {
+                message.PendingOwner = null;
+                simulation.NoteQueueArrival(queue, endpoint.Database);
+            });
+        }
+        else
+        {
+            simulation.NoteQueueArrival(queue, endpoint.Database);
+        }
         return message;
     }
 

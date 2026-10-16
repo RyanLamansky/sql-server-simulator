@@ -1293,6 +1293,8 @@ partial class Simulation
         }, () =>
         {
             queue.ConsecutiveRollbacks = 0;
+            queue.ReceivedCount++;
+            batch.Connection.Simulation.NoteQueueReceived(queue);
             foreach (var message in taken)
             {
                 message.ReceivedBy = null;
