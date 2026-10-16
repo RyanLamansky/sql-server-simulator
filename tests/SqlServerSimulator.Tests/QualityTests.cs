@@ -609,15 +609,16 @@ public partial class QualityTests
     /// <c>docs/claude/backlog.md</c>'s over-permissive register or in the
     /// owning feature's <c>Not modeled yet</c> section. The rest are
     /// informational messages a feature builds where it sends them (the
-    /// <c>sp_help</c> family's severity-10 texts, Msg 3604).
+    /// <c>sp_help</c> family's severity-10 texts, Msg 3604) or writes only to
+    /// the error log (a failed backup's Msg 3041 and 18204).
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
         223, 355, 572, 608, 1021, 1724, 1784,
-        1789, 1969, 2023, 2390, 2503, 3604, 3915, 3920, 3964,
+        1789, 1969, 2023, 2390, 2503, 3041, 3604, 3915, 3920, 3964,
         4624, 4628, 5508, 6263, 6338, 6589, 6847, 6848, 6855, 6860, 6916, 6920, 6941, 6944, 6947, 6953,
         8711, 9341, 9802, 10525, 10537,
         11502, 11509, 11521, 11525, 13643, 13656, 15457, 15459, 15460,
-        15461, 15477, 15574, 15575, 15622, 15660, 15662, 16909, 16930, 16945, 16956, 16961,
+        15461, 15477, 15574, 15575, 15622, 15660, 15662, 16909, 16930, 16945, 16956, 16961, 18204,
         22001, 12311, 23119, 41305, 41325,
     ];
 
