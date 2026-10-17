@@ -77,7 +77,7 @@ internal sealed partial class Selection
     /// value. Runs once the WHERE is parsed and before <c>SELECT *</c> expands,
     /// which leaves the paths' columns out.
     /// </summary>
-    private static void ApplyShortestPath(ParserContext context, QueryScope scope, List<FromSource> sources, List<JoinSpec> joins, List<Expression> expressions, FromClause fromClause)
+    private static List<(ShortestPathSpec Spec, ShortestPathPlan Plan)> ApplyShortestPath(ParserContext context, QueryScope scope, List<FromSource> sources, List<JoinSpec> joins, List<Expression> expressions, FromClause fromClause)
     {
         var aggregates = context.GraphPathAggregates ?? [];
         var match = fromClause.Match;
@@ -139,7 +139,7 @@ internal sealed partial class Selection
         {
             if (aggregates.Count > 0)
                 throw SimulatedSqlException.GraphPathAggregateWithoutPath(aggregates[0].LowerName);
-            return;
+            return [];
         }
         // A derived table or CTE may recurse; a subquery may not (probed
         // 2026-09-27 against SQL Server 2025).
@@ -269,6 +269,7 @@ internal sealed partial class Selection
         }
 
         var originalTypes = ColumnTypeResolverFor([.. sources]);
+        var applied = new List<(ShortestPathSpec, ShortestPathPlan)>(ordered.Count);
         foreach (var spec in ordered)
         {
             var pathAggregates = new List<GraphPathAggregate>();
@@ -307,6 +308,7 @@ internal sealed partial class Selection
             }
 
             var path = new ShortestPathPlan(spec, context.Batch.CurrentDatabase, [.. pathAggregates], operandTypes, schema);
+            applied.Add((spec, path));
             var plan = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false, path.Rows);
             var pathSource = new FromSource(
                 qualifier: end.Qualifier,
@@ -335,6 +337,80 @@ internal sealed partial class Selection
             sources.Add(pathSource);
             joins.Add(new JoinSpec(JoinKind.CrossApply, null));
         }
+        return applied;
+    }
+
+    /// <summary>The qualifier of <see cref="StartPathsFromMissingNodes"/>'s source, a name no identifier can spell.</summary>
+    private const string MissingStartQualifier = "\u001Dgraph_path_missing_start";
+
+    /// <summary>
+    /// Starts a path from each node its table no longer holds that the first
+    /// hop's edges still leave — real starts one there as from any node,
+    /// reporting the start's columns, its <c>$node_id</c> included, as NULL
+    /// (probed 2026-10-17 against SQL Server 2025). The missing starts come
+    /// from a source <c>FULL JOIN</c>ed to the start's node table on a false
+    /// condition, so they add rows of their own where the start's are
+    /// NULL-filled; the path reads its start's graph id there. Applied when
+    /// the start is a node table leading the FROM clause and the first hop's
+    /// edges are a table's.
+    /// </summary>
+    private static void StartPathsFromMissingNodes(List<(ShortestPathSpec Spec, ShortestPathPlan Plan)> paths, List<FromSource> sources, List<JoinSpec> joins)
+    {
+        foreach (var (spec, plan) in paths)
+        {
+            if (spec.StartIsLastNode
+                || spec.Start is not { BackingTable: { GraphKind: GraphTableKind.Node } nodeTable, LateralPlan: null } start
+                || spec.Hops[0].Edge is not { BackingTable: { } edgeTable, LateralPlan: null }
+                || sources.Count == 0 || !ReferenceEquals(sources[0], start))
+            {
+                continue;
+            }
+            var forward = spec.Hops[0].Forward;
+            var columns = new[] { new HeapColumn(ShortestPathSpec.IdColumn, SqlType.BigInt, maxLength: null, nullable: false, isHidden: true) };
+            SqlType[] schema = [SqlType.BigInt];
+            string[] names = [ShortestPathSpec.IdColumn];
+            var missing = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false,
+                (_, _) => MissingStartRows(nodeTable, edgeTable, forward, schema));
+            sources.Insert(1, new FromSource(
+                qualifier: MissingStartQualifier,
+                columnNames: names,
+                columns: columns,
+                storedSchema: columns,
+                storageOrdinals: null,
+                lobStore: null,
+                rows: [],
+                lateralPlan: missing));
+            joins.Insert(0, new JoinSpec(JoinKind.Full, BooleanExpression.Equality(new Value(SqlValue.FromInt32(1)), new Value(SqlValue.FromInt32(0)))));
+            plan.MissingStarts = MissingStartQualifier;
+            return;
+        }
+    }
+
+    /// <summary>
+    /// The graph ids, ascending, that <paramref name="edgeTable"/>'s edges
+    /// leave (walking backwards, enter) in <paramref name="nodeTable"/> where
+    /// it holds no row.
+    /// </summary>
+    private static List<byte[]> MissingStartRows(HeapTable nodeTable, HeapTable edgeTable, bool forward, SqlType[] schema)
+    {
+        var graphId = nodeTable.StorageOrdinals[GraphColumns.OrdinalOf(nodeTable, GraphColumnKind.GraphId)];
+        var present = new HashSet<long>();
+        foreach (var row in ClusteredScan.Rows(nodeTable))
+            _ = present.Add(RowDecoder.DecodeColumn(nodeTable.StoredColumns, row, graphId, nodeTable.Heap).AsInt64);
+        var objectOrdinal = edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromObjId : GraphColumnKind.ToObjId)];
+        var idOrdinal = edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromId : GraphColumnKind.ToId)];
+        var missing = new SortedSet<long>();
+        foreach (var row in ClusteredScan.Rows(edgeTable))
+        {
+            var objectId = RowDecoder.DecodeColumn(edgeTable.StoredColumns, row, objectOrdinal, edgeTable.Heap);
+            var id = RowDecoder.DecodeColumn(edgeTable.StoredColumns, row, idOrdinal, edgeTable.Heap);
+            if (!objectId.IsNull && !id.IsNull && objectId.AsInt32 == nodeTable.ObjectId && !present.Contains(id.AsInt64))
+                _ = missing.Add(id.AsInt64);
+        }
+        var rows = new List<byte[]>(missing.Count);
+        foreach (var id in missing)
+            rows.Add(RowEncoder.EncodeRow(schema, [SqlValue.FromInt64(id)]));
+        return rows;
     }
 
     /// <summary>
@@ -437,6 +513,13 @@ internal sealed partial class Selection
     private sealed class ShortestPathPlan(ShortestPathSpec spec, Database database, GraphPathAggregate[] aggregates, SqlType[] operandTypes, SqlType[] schema)
     {
         private readonly ShortestPathHop[] hops = spec.Hops;
+
+        /// <summary>
+        /// The qualifier of the source carrying the start's graph id where
+        /// the start's table holds no row (see
+        /// <see cref="StartPathsFromMissingNodes"/>), or null.
+        /// </summary>
+        public string? MissingStarts;
 
         /// <summary>The edges out of (walking backwards, into) each node, per hop, and each hop's node rows by identity.</summary>
         private sealed class GraphSnapshot(long[] generations, int hopCount)
@@ -568,6 +651,8 @@ internal sealed partial class Selection
             if (start.BackingTable is { } table)
             {
                 var graphId = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(table.Columns[GraphColumns.OrdinalOf(table, GraphColumnKind.GraphId)].Name));
+                if (graphId.IsNull && this.MissingStarts is { } missing)
+                    graphId = outerResolver(new MultiPartName(missing).WithAddedPart(ShortestPathSpec.IdColumn));
                 return graphId.IsNull ? null : (table.ObjectId, graphId.CoerceTo(SqlType.BigInt).AsInt64);
             }
             var text = outerResolver(new MultiPartName(start.Qualifier!).WithAddedPart(start.ColumnNames[GraphColumns.FindPseudoColumn(start.ColumnNames, GraphColumns.NodeId)]));

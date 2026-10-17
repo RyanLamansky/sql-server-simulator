@@ -2547,8 +2547,9 @@ internal sealed partial class Selection
                     var seeksDeferred = ValidateForcedSeeks(context, [.. sources], [.. joins], fromClause.Having is { } having ? [.. fromClause.Excluders, having] : fromClause.Excluders, expressions, scope.Position == QueryPosition.Subquery && expressions.Count == 1 ? expressions[0] : null, out var seekLeansOnIn);
                     if (!context.Batch.IsSkipping && ReadsPredicateColumns(sources, fromClause, joins, distinct))
                         Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
-                    ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
+                    var paths = ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
                     ApplyMatchOuterNodes(sources, joins, fromClause);
+                    StartPathsFromMissingNodes(paths, sources, joins);
                     // An EXISTS body's bare star names no column, so it never
                     // meets the grouping check a qualified star or a named
                     // column does (`EXISTS (SELECT * FROM t GROUP BY a)` runs,
