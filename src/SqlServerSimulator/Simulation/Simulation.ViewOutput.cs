@@ -87,6 +87,8 @@ partial class Simulation
     /// reaches. A column the chain passes straight through comes off the row
     /// by its base ordinal; a derived one runs its level's projection, whose
     /// names resolve against the level below the same way, down to the row.
+    /// With no <paramref name="table"/> the chain ends in a partitioned view
+    /// and the row is that view's.
     /// </summary>
     /// <remarks>
     /// Each level's body is re-parsed here, as the other writes through a view
@@ -96,7 +98,7 @@ partial class Simulation
     /// read running against the batch it is handed, so a cached DML plan's
     /// <c>OUTPUT</c> clause can share it.
     /// </remarks>
-    private static Func<SqlValue[], int, BatchContext, SqlValue> SingleBaseViewReader(BatchContext batch, View view, HeapTable table)
+    private static Func<SqlValue[], int, BatchContext, SqlValue> SingleBaseViewReader(BatchContext batch, View view, HeapTable? table)
     {
         var collation = batch.CurrentDatabase.Collation;
         var levels = new List<(View View, Expression[]? Projections)>();
@@ -117,10 +119,10 @@ partial class Simulation
     /// <see cref="SingleBaseViewReader"/>'s reader over the parsed levels — a
     /// static helper, so no closure over the parsing batch reaches it.
     /// </summary>
-    private static Func<SqlValue[], int, BatchContext, SqlValue> ReaderOver((View View, Expression[]? Projections)[] levels, HeapTable table, Collation collation)
+    private static Func<SqlValue[], int, BatchContext, SqlValue> ReaderOver((View View, Expression[]? Projections)[] levels, HeapTable? table, Collation collation)
     {
-        static SqlValue ReadBase(HeapTable table, SqlValue[] row, int ordinal, BatchContext batch) =>
-            table.Columns[ordinal] is { Computed: not null, IsPersisted: false }
+        static SqlValue ReadBase(HeapTable? table, SqlValue[] row, int ordinal, BatchContext batch) =>
+            table?.Columns[ordinal] is { Computed: not null, IsPersisted: false }
                 ? EvaluateComputedColumn(table, row, ordinal, batch)
                 : row[ordinal];
 
@@ -138,7 +140,7 @@ partial class Simulation
                 {
                     if (below == levels.Length)
                     {
-                        var baseOrdinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
+                        var baseOrdinal = table is null ? -1 : Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
                         return baseOrdinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : ReadBase(table, row, baseOrdinal, batch);
                     }
                     var lowerOrdinal = IndexOfViewOutputColumn(collation, levels[below].View, name.Leaf);

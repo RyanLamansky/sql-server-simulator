@@ -27,9 +27,14 @@ partial class Simulation
     }
 
     /// <summary>One member table of a partitioned view, as a write reads it.</summary>
-    private sealed class PartitionedMember(HeapTable table, Expression[] projections, int[] bareOrdinals, int[] ordinals)
+    private sealed class PartitionedMember(HeapTable table, LinkedServer? server, Expression[] projections, int[] bareOrdinals, int[] ordinals)
     {
         public readonly HeapTable Table = table;
+
+        /// <summary>The linked server the member's table is on, for a
+        /// distributed partitioned view's remote member; null for a local
+        /// one.</summary>
+        public readonly LinkedServer? Server = server;
 
         /// <summary>The branch's projections, one per view column.</summary>
         public readonly Expression[] Projections = projections;
@@ -127,7 +132,7 @@ partial class Simulation
         var members = new List<(HeapTable, Selection)>();
         foreach (var branch in body.UnionAllBranches!)
         {
-            var table = branch.UpdatabilityProfile!.Sources[0].BackingTable!;
+            var table = MemberTableOf(branch)!;
             if (Array.Exists(table.Columns, column => column.Computed is not null))
             {
                 throw write == PartitionedWrite.Delete
@@ -152,7 +157,8 @@ partial class Simulation
             return false;
         foreach (var branch in branches)
         {
-            if (branch.UpdatabilityProfile is not { Sources: [{ BackingTable: { IsTableVariable: false } table }], Excluders.Length: 0 }
+            if (branch.UpdatabilityProfile is not { Excluders.Length: 0 }
+                || MemberTableOf(branch) is not { IsTableVariable: false } table
                 || branch.HasTopOrOffsetOrFetch
                 || branch.HasWindows
                 || table.Name.StartsWith('#'))
@@ -198,16 +204,57 @@ partial class Simulation
     /// <summary>A partitioned view as its refusals name it: <c>db.schema.view</c>.</summary>
     private static string PartitionedViewLabel(View view) => $"{view.Schema.Database.Name}.{view.Schema.Name}.{view.Name}";
 
-    /// <summary>A member table as a partitioned view's refusals name it: <c>[db].[schema].[table]</c>.</summary>
-    private static string PartitionedMemberLabel(BatchContext batch, HeapTable table)
+    /// <summary>The partitioned view member <paramref name="member"/> as its refusals name it.</summary>
+    private static string PartitionedMemberLabel(BatchContext batch, PartitionedMember member) =>
+        PartitionedMemberLabel(batch, member.Table, member.Server);
+
+    /// <summary>The partitioned view member <paramref name="member"/> as its refusals name it.</summary>
+    private static string PartitionedMemberLabel(BatchContext batch, (HeapTable Table, Selection Branch) member) =>
+        PartitionedMemberLabel(batch, member.Table, RemoteServerOf(member.Branch));
+
+    /// <summary>
+    /// A member table as a partitioned view's refusals name it:
+    /// <c>[db].[schema].[table]</c>, led by <c>[server]</c> for a linked
+    /// server's (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    private static string PartitionedMemberLabel(BatchContext batch, HeapTable table, LinkedServer? server)
     {
+        var prefix = server is null ? "" : $"[{server.Name}].";
         var database = batch.DatabaseFor(table);
         foreach (var (schemaName, schema) in database.Schemas)
         {
             if (schema.SchemaId == table.SchemaId)
-                return $"[{database.Name}].[{schemaName}].[{table.Name}]";
+                return $"{prefix}[{database.Name}].[{schemaName}].[{table.Name}]";
         }
-        return $"[{database.Name}].[{table.Name}]";
+        return $"{prefix}[{database.Name}].[{table.Name}]";
+    }
+
+    /// <summary>The table a partitioned view's branch reads: a base table, or a linked server's.</summary>
+    private static HeapTable? MemberTableOf(Selection branch) =>
+        branch.UpdatabilityProfile?.Sources is [var source] ? source.BackingTable ?? source.RemoteTable?.Table : null;
+
+    /// <summary>The linked server a partitioned view's branch reads its member from; null for a local member.</summary>
+    private static LinkedServer? RemoteServerOf(Selection branch) =>
+        branch.UpdatabilityProfile?.Sources is [{ BackingTable: null, RemoteTable: { } remote }] ? remote.Server : null;
+
+    /// <summary>
+    /// Refuses a write through a distributed partitioned view — one with a
+    /// member on a linked server — once its own checks have passed: real
+    /// writes its members in a distributed transaction, which out of the box
+    /// no coordinator accepts, so every write through one is the refusal the
+    /// first remote member's enlistment meets, whether or not a transaction is
+    /// open and whichever members its rows reach (probed 2026-10-17 against
+    /// SQL Server 2025: Msg 3910 for a loopback).
+    /// </summary>
+    private static void RefuseDistributedPartitionedWrite(BatchContext batch, PartitionedPlan plan)
+    {
+        if (batch.IsSkipping)
+            return;
+        foreach (var member in plan.Members)
+        {
+            if (member.Server is { } server)
+                RemoteWrite.RefuseEnlistment(batch, server);
+        }
     }
 
     /// <summary>
@@ -228,7 +275,7 @@ partial class Simulation
                 _ => -1,
             };
             if (member >= 0)
-                throw SimulatedSqlException.PartitionedViewSourceReadsMember(PartitionedViewLabel(partitioned), PartitionedMemberLabel(batch, members[member].Table));
+                throw SimulatedSqlException.PartitionedViewSourceReadsMember(PartitionedViewLabel(partitioned), PartitionedMemberLabel(batch, members[member]));
         }
     }
 
@@ -264,7 +311,7 @@ partial class Simulation
             for (var j = 0; j < i; j++)
             {
                 if (ReferenceEquals(found[i].Table, found[j].Table))
-                    throw SimulatedSqlException.UnionAllViewTableUsedTwice(label, PartitionedMemberLabel(batch, found[j].Table));
+                    throw SimulatedSqlException.UnionAllViewTableUsedTwice(label, PartitionedMemberLabel(batch, found[j]));
             }
         }
 
@@ -286,7 +333,7 @@ partial class Simulation
                 var written = bare[i] >= 0 ? bare[i] : KeptColumnOrdinal(projections[i], table, collation);
                 direct[i] = written >= 0 && SameTypeLengthAside(table.Columns[written].Type, columns[i].Type) ? written : -1;
             }
-            members[m] = new PartitionedMember(table, projections, bare, direct);
+            members[m] = new PartitionedMember(table, RemoteServerOf(branch), projections, bare, direct);
         }
 
         // Real names the column a member projects twice, but the last member's
@@ -296,7 +343,7 @@ partial class Simulation
             for (var i = 0; i < width; i++)
             {
                 if (member.BareOrdinals[i] >= 0 && Array.IndexOf(member.BareOrdinals, member.BareOrdinals[i], i + 1) > i)
-                    throw SimulatedSqlException.UnionAllViewColumnUsedTwice(label, member.Table.Columns[member.BareOrdinals[i]].Name, PartitionedMemberLabel(batch, members[^1].Table));
+                    throw SimulatedSqlException.UnionAllViewColumnUsedTwice(label, member.Table.Columns[member.BareOrdinals[i]].Name, PartitionedMemberLabel(batch, members[^1]));
             }
         }
 
@@ -305,13 +352,13 @@ partial class Simulation
         {
             var member = members[m];
             if (member.Table.KeyConstraints.Find(key => key.Kind == KeyConstraintKind.PrimaryKey) is not { } primaryKey)
-                throw SimulatedSqlException.UnionAllViewMemberWithoutPrimaryKey(label, PartitionedMemberLabel(batch, member.Table));
+                throw SimulatedSqlException.UnionAllViewMemberWithoutPrimaryKey(label, PartitionedMemberLabel(batch, member));
             var positions = new List<int>();
             foreach (var ordinal in primaryKey.FullOrdinals)
             {
                 var position = KeyPosition(member, ordinal);
                 if (position < 0)
-                    throw SimulatedSqlException.UnionAllViewPrimaryKeyNotProjected(label, PartitionedMemberLabel(batch, member.Table));
+                    throw SimulatedSqlException.UnionAllViewPrimaryKeyNotProjected(label, PartitionedMemberLabel(batch, member));
                 positions.Add(position);
             }
             positions.Sort();
@@ -320,7 +367,7 @@ partial class Simulation
         for (var m = 1; m < members.Length; m++)
         {
             if (!keyPositions[m].SequenceEqual(keyPositions[0]))
-                throw SimulatedSqlException.UnionAllViewPrimaryKeyMisaligned(label, PartitionedMemberLabel(batch, members[m].Table));
+                throw SimulatedSqlException.UnionAllViewPrimaryKeyMisaligned(label, PartitionedMemberLabel(batch, members[m]));
         }
 
         var partitionColumn = -1;
@@ -436,7 +483,7 @@ partial class Simulation
                 if (TypesDiffer(partitionColumn))
                     throw SimulatedSqlException.PartitionedViewPartitionTypesDiffer(label, 18);
                 if (Array.Find(members, member => member.Table.IdentityOrdinal >= 0) is { } identityMember)
-                    throw SimulatedSqlException.PartitionedViewInsertIdentity(label, PartitionedMemberLabel(batch, identityMember.Table));
+                    throw SimulatedSqlException.PartitionedViewInsertIdentity(label, PartitionedMemberLabel(batch, identityMember));
                 RefuseMemberTimestampAndInsteadOf(batch, members, label, state: 4);
                 break;
             case PartitionedWrite.Update:
@@ -449,7 +496,7 @@ partial class Simulation
                 var partitionName = columns[partitionColumn].Name;
                 foreach (var member in members)
                 {
-                    var memberLabel = PartitionedMemberLabel(batch, member.Table);
+                    var memberLabel = PartitionedMemberLabel(batch, member);
                     if (member.Table.IdentityOrdinal is >= 0 and var identity)
                         throw SimulatedSqlException.PartitionedViewUpdateIdentity(label, columns[Array.IndexOf(member.Ordinals, identity)].Name, memberLabel);
                     if (member.Table.IncomingForeignKeys.Exists(key => key.DeleteAction == ReferentialAction.Cascade || key.UpdateAction == ReferentialAction.Cascade))
@@ -465,7 +512,7 @@ partial class Simulation
                 break;
             default:
                 if (Array.Find(members, member => HasInsteadOfTrigger(batch, member.Table, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete)) is { } insteadOfMember)
-                    throw SimulatedSqlException.PartitionedViewInsteadOfTrigger(label, PartitionedMemberLabel(batch, insteadOfMember.Table), 2);
+                    throw SimulatedSqlException.PartitionedViewInsteadOfTrigger(label, PartitionedMemberLabel(batch, insteadOfMember), 2);
                 break;
         }
 
@@ -483,9 +530,9 @@ partial class Simulation
     private static void RefuseMemberTimestampAndInsteadOf(BatchContext batch, PartitionedMember[] members, string label, byte state)
     {
         if (Array.Find(members, member => Array.Exists(member.Table.Columns, column => column.Type is RowVersionSqlType)) is { } timestampMember)
-            throw SimulatedSqlException.PartitionedViewTimestampColumn(label, PartitionedMemberLabel(batch, timestampMember.Table), state);
+            throw SimulatedSqlException.PartitionedViewTimestampColumn(label, PartitionedMemberLabel(batch, timestampMember), state);
         if (Array.Find(members, member => HasInsteadOfTrigger(batch, member.Table, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete)) is { } insteadOfMember)
-            throw SimulatedSqlException.PartitionedViewInsteadOfTrigger(label, PartitionedMemberLabel(batch, insteadOfMember.Table), state);
+            throw SimulatedSqlException.PartitionedViewInsteadOfTrigger(label, PartitionedMemberLabel(batch, insteadOfMember), state);
     }
 
     /// <summary>
@@ -586,6 +633,7 @@ partial class Simulation
         RefusePartitionedWrite(batch, partitioned, plan, PartitionedWrite.Insert, written);
         if (Array.IndexOf(covered, false) >= 0)
             throw SimulatedSqlException.PartitionedViewInsertMissingValues(PartitionedViewLabel(partitioned));
+        RefuseDistributedPartitionedWrite(batch, plan);
         foreach (var member in plan.Members)
             FunctionBodyShape.NoteTableWrite(batch, "INSERT", member.Table);
         if (batch.IsSkipping)
@@ -694,6 +742,7 @@ partial class Simulation
         var resolver = Selection.ColumnTypeResolverFor(sources);
         BindSetValues(batch, plan.Members[0].Table, assignments[0], resolver, _ => false);
         CheckPartitionedWritePermissions(batch, name, view, "UPDATE", where is not null || rawAssignments.Exists(static assignment => assignment.Expr.ReadsAnyColumn()));
+        RefuseDistributedPartitionedWrite(batch, plan);
         foreach (var member in plan.Members)
         {
             FunctionBodyShape.NoteTableWrite(batch, "UPDATE", member.Table);
@@ -806,6 +855,7 @@ partial class Simulation
         var plan = AnalyzePartitionedView(batch, partitioned, found);
         RefusePartitionedWrite(batch, partitioned, plan, PartitionedWrite.Delete, []);
         CheckPartitionedWritePermissions(batch, name, view, "DELETE", where is not null);
+        RefuseDistributedPartitionedWrite(batch, plan);
         foreach (var member in plan.Members)
         {
             FunctionBodyShape.NoteTableWrite(batch, "DELETE", member.Table);

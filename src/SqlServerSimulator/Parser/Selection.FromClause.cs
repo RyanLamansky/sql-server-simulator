@@ -1337,7 +1337,14 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteName, remoteColumns));
+                        lateralPlan: Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteName, remoteColumns))
+                    {
+                        RemoteTable = linkedServer.Target.Databases.TryGetValue(remoteDbName, out var remoteDatabase)
+                            && remoteDatabase.Schemas.TryGetValue(remoteSchemaName, out var remoteSchema)
+                            && remoteSchema.HeapTables.TryGetValue(remoteName, out var remoteTable)
+                                ? (linkedServer, remoteTable)
+                                : null,
+                    };
                 }
 
                 if (objectName.Count == 1

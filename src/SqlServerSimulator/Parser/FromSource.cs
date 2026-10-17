@@ -296,6 +296,13 @@ internal sealed class FromSource(
     public readonly HeapTable? BackingTable = backingTable;
 
     /// <summary>
+    /// The linked server's table a four-part name reads, for a source that
+    /// names one — what a distributed partitioned view's member is; null
+    /// otherwise.
+    /// </summary>
+    public (LinkedServer Server, HeapTable Table)? RemoteTable;
+
+    /// <summary>
     /// Back-reference to the <see cref="View"/> when this source is a view
     /// reference (<c>FROM schema.view</c>); null otherwise. <see cref="LateralPlan"/>
     /// holds the view's body plan, but consumers that need the view's

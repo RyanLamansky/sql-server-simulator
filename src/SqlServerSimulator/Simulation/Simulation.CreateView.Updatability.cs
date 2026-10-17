@@ -149,11 +149,12 @@ partial class Simulation
         // row can be put to on its own.
         var excluders = correlated ? [] : profile.Excluders;
         // A WHERE reading a column the view below derives judges each base
-        // row by that view's projection — or, below a windowed or row-limited
-        // view, is left to the body's own run, which picks the rows the write
-        // reaches (probed 2026-10-06 against SQL Server 2025).
-        var derivedReader = upstreamLevel is { IsWindowed: false, IsRowLimited: false, BaseTable: { } readTable }
-            ? DerivedColumnReader(upstreamLevel, readTable, source.ColumnNames, collation)
+        // row — or each row of the partitioned view the chain reaches — by
+        // that view's projection, or, below a windowed or row-limited view, is
+        // left to the body's own run, which picks the rows the write reaches
+        // (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
+        var derivedReader = upstreamLevel is { IsWindowed: false, IsRowLimited: false } && (upstreamLevel.BaseTable is not null || partitionedBase is not null)
+            ? DerivedColumnReader(upstreamLevel, upstreamLevel.BaseTable, source.ColumnNames, collation)
             : null;
         List<BooleanExpression>? checkedExcluders = null;
         foreach (var excluder in excluders)
@@ -321,10 +322,11 @@ partial class Simulation
     /// <summary>
     /// Reads a column <paramref name="upstream"/> derives off a row of its
     /// base table, by name among <paramref name="sourceColumnNames"/>, through
-    /// the view's projections (<see cref="SingleBaseViewReader"/>); null for a
-    /// name it doesn't carry.
+    /// the view's projections (<see cref="SingleBaseViewReader"/>), or off a
+    /// row of the partitioned view its chain reaches when it has no base
+    /// table; null for a name it doesn't carry.
     /// </summary>
-    private static Func<SqlValue[], string, BatchContext, SqlValue?> DerivedColumnReader(View upstream, HeapTable table, string[] sourceColumnNames, Collation collation) =>
+    private static Func<SqlValue[], string, BatchContext, SqlValue?> DerivedColumnReader(View upstream, HeapTable? table, string[] sourceColumnNames, Collation collation) =>
         (row, name, batch) =>
         {
             for (var j = 0; j < sourceColumnNames.Length; j++)

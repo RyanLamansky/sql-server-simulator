@@ -261,6 +261,83 @@ public sealed class PartitionedViewTests
         AreEqual("2:41 | 150:6002", simulation.ExecuteScalar(Members));
     }
 
+    /// <summary>A chained view's <c>WHERE</c> over a column the level below
+    /// derives filters the members' rows by it (probed 2026-10-17 against
+    /// SQL Server 2025).</summary>
+    [TestMethod]
+    public void ChainedWhereOverADerivedColumn_FiltersTheMembers()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches(
+            "create view doubled as select k, v, v * 2 as d from pv",
+            "create view big as select k, v from doubled where d > 30",
+            "create view bigd as select k, v, d from doubled where d > 30");
+        AreEqual(2, simulation.ExecuteNonQuery("update big set v = v + 1"));
+        AreEqual(1, simulation.ExecuteNonQuery("delete big where k > 100"));
+        AreEqual(1, simulation.ExecuteNonQuery("update bigd set v = 0"));
+        AreEqual("1:10 2:0 | ", simulation.ExecuteScalar(Members));
+    }
+
+    /// <summary>
+    /// A distributed partitioned view — one with a member on a linked server
+    /// — reads its members and checks them as a local one does, naming a
+    /// remote member with its server, and then refuses every write: its
+    /// distributed transaction is one a loopback can't enlist (Msg 3910), with
+    /// a transaction open or not and whichever member a row reaches (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert dpv values (3, 3)", 3910)]
+    [DataRow("insert dpv values (13, 3)", 3910)]
+    [DataRow("insert dpv values (null, 3)", 3910)]
+    [DataRow("update dpv set v = 0 where k = 1", 3910)]
+    [DataRow("delete dpv where k = 999", 3910)]
+    [DataRow("begin tran; insert dpv values (5, 5)", 3910)]
+    [DataRow("update wdpv set v = 0 where k = 1", 3910)]
+    [DataRow("insert dpv (k) values (4)", 4448)]
+    [DataRow("insert dpv output inserted.k values (3, 3)", 489)]
+    [DataRow("update top (1) dpv set v = 0", 417)]
+    [DataRow("merge dpv using (select 1 k) s on dpv.k = s.k when matched then update set v = 0;", 5317)]
+    public void DistributedPartitionedView_RefusesItsWrites(string statement, int number)
+    {
+        var simulation = new Simulation();
+        simulation.AddRemoteSimulation("SELF", simulation);
+        simulation.ExecuteBatches(
+            """
+            exec sp_addlinkedserver @server = 'SELF', @srvproduct = '', @provider = 'MSOLEDBSQL', @datasrc = 'localhost';
+            create database rdb;
+            create table rdb.dbo.r2 (k int primary key check (k >= 10), v int);
+            insert rdb.dbo.r2 values (11, 1), (12, 2);
+            create table m1 (k int primary key check (k < 10), v int);
+            insert m1 values (1, 1), (2, 2);
+            """,
+            "create view dpv as select k, v from m1 union all select k, v from SELF.rdb.dbo.r2",
+            "create view wdpv as select k, v from dpv where k > 0");
+        var error = simulation.AssertSqlError(statement, number);
+        if (number == 3910)
+            AreEqual(1, error.LineNumber);
+        AreEqual("1:1 2:2 11:1 12:2", simulation.ExecuteScalar("select string_agg(concat(k, ':', v), ' ') within group (order by k) from dpv"));
+    }
+
+    /// <summary>A distributed partitioned view's refusals name a remote
+    /// member with its linked server.</summary>
+    [TestMethod]
+    public void DistributedPartitionedView_NamesARemoteMemberWithItsServer()
+    {
+        var simulation = new Simulation();
+        simulation.AddRemoteSimulation("SELF", simulation);
+        simulation.ExecuteBatches(
+            """
+            exec sp_addlinkedserver @server = 'SELF', @srvproduct = '', @provider = 'MSOLEDBSQL', @datasrc = 'localhost';
+            create database rdb;
+            create table rdb.dbo.r3 (k int, v int);
+            create table m1 (k int primary key check (k < 10), v int);
+            """,
+            "create view dpv2 as select k, v from m1 union all select k, v from SELF.rdb.dbo.r3");
+        simulation.AssertSqlError("insert dpv2 values (3, 3)", 4440,
+            "UNION ALL view 'simulated.dbo.dpv2' is not updatable because a primary key was not found on table '[SELF].[rdb].[dbo].[r3]'.");
+    }
+
     /// <summary>
     /// A cursor reading a partitioned view is a read-only snapshot: a
     /// positioned write naming a level over it is Msg 16929 and one naming

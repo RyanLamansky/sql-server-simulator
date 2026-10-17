@@ -547,7 +547,7 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 **Derived columns a write reads.** An `UPDATE`'s `SET` values and a write's `WHERE` read a view's derived column as the view computes it, through every level of a chain (`SingleBaseViewReader`; probed 2026-10-06 against SQL Server 2025: `UPDATE v SET o = s2` where `s2` is `s + 'x'`), an error the computation raises ending the write.
 A chained view's own `WHERE` over a column the level below derives filters the write the same way, under `WITH CHECK OPTION` too; below a windowed or row-limited level the body's run picks the rows instead, which over a partitioned view is each member's run (probed 2026-10-01 and 2026-10-06: `UPDATE ww SET v = rn` through `SELECT k, v, rn FROM w WHERE c > 0`, `c` a `COUNT(*) OVER ()`).
 
-**Not modeled yet**: that `WHERE` over a partitioned view's level deriving a column by a scalar expression is Msg 4406 here, where real filters the members' rows by it (probed 2026-10-06 against SQL Server 2025).
+Over a partitioned view's level deriving a column by a scalar expression the chained `WHERE` reads it off each partitioned-view row the same way (probed 2026-10-17 against SQL Server 2025: `UPDATE w2` through `SELECT k, v FROM w1 WHERE d > 10`, `d` being `v * 10`).
 
 ## A joined write through a view
 
@@ -662,7 +662,7 @@ The rules the translation adds, each probed 2026-09-28:
 
 A stored `UNION ALL` view each of whose branches reads one base table with no filter, row limit, window, `DISTINCT`, grouping or join is a partitioned view (`View.PartitionedBase`, settled at `CREATE VIEW` from the body's `Selection.UnionAllBranches`); `INSERT`, `UPDATE` and `DELETE` through it route to the members by the CHECK constraints on a partitioning column, as do a view, CTE or derived table over it, whose filter picks the rows (probed 2026-10-01 against SQL Server 2025).
 `Simulation.PartitionedView.cs` holds it.
-Only local members are modeled — a member is a table in any database of the simulation, never a linked server's.
+A member is a table in any database of the simulation, or a linked server's table read by its four-part name, which makes the view a distributed partitioned view (see below).
 There is no catalog surface: real exposes no `OBJECTPROPERTY` for it.
 
 **Whether the members qualify** is settled at every write, since their keys and constraints may have changed, in real's order — each refusal names the view `db.schema.view` and a member `[db].[schema].[table]`:
@@ -696,7 +696,8 @@ Into a union that is no partitioned view the load meets the refusal an `INSERT` 
 
 Real's session-ending answer sends nothing ahead of its Msg 596, so the DONE of the statement before it, which real holds until the next token, goes down unsent — the row count a client was owed included (probed 2026-10-06 against SQL Server 2025); the TDS endpoint takes that DONE back (`TdsSession.TakeBackDoneAheadOfKill`).
 
-**Not modeled yet**: distributed members over a linked server.
+**A distributed partitioned view** — a member on a linked server (`FromSource.RemoteTable`) — reads as any union does and is checked as a local one is, a remote member named `[server].[db].[schema].[table]` in its refusals, and every write through it, or through a level over it, then ends in the refusal of the distributed transaction its members need, whether or not one is open and whichever members its rows would reach (`RefuseDistributedPartitionedWrite`): over a loopback that is Msg 3910 at line 1, ending the batch (probed 2026-10-17 against SQL Server 2025, ahead of routing, so a row no member admits is Msg 3910 too).
+Over a remote server the refusal is the one a remote write's enlistment meets, Msg 7391 after the provider's Msg 7412 — the remote-write refusal ([`linked-servers.md`](linked-servers.md)), not probed for a partitioned view; out of the box no coordinator accepts the transaction, so no write through one commits.
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.
