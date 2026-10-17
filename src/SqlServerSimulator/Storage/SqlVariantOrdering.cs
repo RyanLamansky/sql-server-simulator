@@ -11,7 +11,8 @@ namespace SqlServerSimulator.Storage;
 /// equal values are truly equal (<c>=</c> true, one GROUP BY / DISTINCT
 /// bucket, ORDER BY tie with undefined relative order). The six observed
 /// families, lowest to highest: 1 <c>uniqueidentifier</c>; 2 binary
-/// (<c>binary</c>/<c>varbinary</c>, byte-lexicographic); 3 character
+/// (<c>binary</c>/<c>varbinary</c>, byte-lexicographic with trailing zero
+/// bytes ignored, as outside a variant: probed 2026-10-17); 3 character
 /// (<c>char</c>/<c>varchar</c>/<c>nchar</c>/<c>nvarchar</c> — Unicode and
 /// non-Unicode are one family); 4 exact numeric (<c>bit</c> through
 /// <c>bigint</c>, <c>decimal</c>, <c>money</c>/<c>smallmoney</c>);
@@ -35,7 +36,7 @@ internal static class SqlVariantOrdering
         return rankA != rankB ? rankA.CompareTo(rankB) : rankA switch
         {
             1 => new SqlGuid(a.AsGuid).CompareTo(new SqlGuid(b.AsGuid)),
-            2 => a.AsBytes.AsSpan().SequenceCompareTo(b.AsBytes),
+            2 => a.AsBytes.AsSpan().TrimEnd((byte)0).SequenceCompareTo(b.AsBytes.AsSpan().TrimEnd((byte)0)),
             3 => CompareStrings(a, b),
             4 => ExactValue(a).CompareTo(ExactValue(b)),
             5 => ApproximateValue(a).CompareTo(ApproximateValue(b)),
@@ -64,7 +65,7 @@ internal static class SqlVariantOrdering
                 hash.Add(value.AsGuid);
                 break;
             case 2:
-                hash.AddBytes(value.AsBytes);
+                hash.AddBytes(value.AsBytes.AsSpan().TrimEnd((byte)0));
                 break;
             case 3:
                 break;

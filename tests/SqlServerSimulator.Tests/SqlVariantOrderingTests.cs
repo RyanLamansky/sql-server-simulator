@@ -118,6 +118,20 @@ public sealed class SqlVariantOrderingTests
             """));
     }
 
+    /// <summary>
+    /// Binary values compare with their trailing zero bytes ignored inside a
+    /// variant as outside one, and share a GROUP BY bucket (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select case when cast(0x01 as sql_variant) = cast(0x0100 as sql_variant) then 1 else 0 end", 1)]
+    [DataRow("select case when cast(0x01 as sql_variant) = cast(0x0100 as varbinary(2)) then 1 else 0 end", 1)]
+    [DataRow("select case when cast(cast(0x01 as binary(2)) as sql_variant) > cast(0x01 as sql_variant) then 1 else 0 end", 0)]
+    [DataRow("select case when cast(0x01 as sql_variant) < cast(0x0101 as sql_variant) then 1 else 0 end", 1)]
+    [DataRow("select count(*) from (select v from (values (cast(0x01 as sql_variant)), (cast(0x0100 as sql_variant))) t(v) group by v) g", 1)]
+    public void BinaryFamily_IgnoresTrailingZeroBytes(string query, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(query));
+
     // Unicode and non-Unicode strings are ONE family, compared by value.
     [TestMethod]
     public void CharacterFamily_UnicodeAndAnsi_ValueOrdered()

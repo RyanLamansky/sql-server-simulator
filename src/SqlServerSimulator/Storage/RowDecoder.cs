@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator.Storage;
 
@@ -78,7 +79,7 @@ internal static class RowDecoder
             else if (schema[i].Type.IsFixedLength)
             {
                 var width = schema[i].Type.FixedLength;
-                values[i] = isNull ? SqlValue.Null(schema[i].Type) : schema[i].Type.Decode(bytes.Slice(fixedPos, width));
+                values[i] = isNull ? SqlValue.Null(schema[i].Type) : DecodeFixed(schema[i].Type, bytes, fixedPos, i);
                 fixedPos += width;
                 bitsInRun = 0;
             }
@@ -171,7 +172,7 @@ internal static class RowDecoder
         switch (layout.Kinds[ordinal])
         {
             case RowLayout.ColumnKind.Fixed:
-                return schema[ordinal].Type.Decode(bytes.Slice(layout.Offsets[ordinal], schema[ordinal].Type.FixedLength));
+                return DecodeFixed(schema[ordinal].Type, bytes, layout.Offsets[ordinal], ordinal);
             case RowLayout.ColumnKind.Bit:
                 return SqlValue.FromBoolean((bytes[layout.Offsets[ordinal]] & (1 << layout.BitIndexes[ordinal])) != 0);
             default:
@@ -231,7 +232,7 @@ internal static class RowDecoder
             {
                 var width = schema[i].Type.FixedLength;
                 if (i == ordinal)
-                    return isNull ? SqlValue.Null(schema[i].Type) : schema[i].Type.Decode(bytes.Slice(fixedPos, width));
+                    return isNull ? SqlValue.Null(schema[i].Type) : DecodeFixed(schema[i].Type, bytes, fixedPos, i);
                 fixedPos += width;
                 bitsInRun = 0;
             }
@@ -359,6 +360,51 @@ internal static class RowDecoder
             prevVarEnd = end;
             varIndex++;
         }
+    }
+
+    /// <summary>
+    /// Decodes the fixed-length value at <paramref name="offset"/>, at its own
+    /// length when the row's short-binary trailer
+    /// (<see cref="RowEncoder.TagB_ShortBinaryTrailer"/>) lists the ordinal.
+    /// Inlined into the three decode loops, so an ordinary row pays only the
+    /// TagB test.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static SqlValue DecodeFixed(SqlType type, ReadOnlySpan<byte> bytes, int offset, int ordinal) => bytes[1] == 0
+        ? type.Decode(bytes.Slice(offset, type.FixedLength))
+        : DecodeFixedOfTrailedRow(type, bytes, offset, ordinal);
+
+    private static SqlValue DecodeFixedOfTrailedRow(SqlType type, ReadOnlySpan<byte> bytes, int offset, int ordinal)
+    {
+        var slot = bytes.Slice(offset, type.FixedLength);
+        return ShortBinaryLength(bytes, ordinal) is >= 0 and var length
+            ? SqlValue.UnpaddedFixedLength(type, slot[..length].ToArray())
+            : type.Decode(slot);
+    }
+
+    /// <summary>
+    /// The length the short-binary trailer records for
+    /// <paramref name="ordinal"/>, or -1 when it lists none. The trailer's
+    /// position is read from the row's own header — the variable section's
+    /// last offset, or the NULL bitmap's end — so no schema walk is needed.
+    /// </summary>
+    private static int ShortBinaryLength(ReadOnlySpan<byte> bytes, int ordinal)
+    {
+        var fixedEnd = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(2, 2));
+        var columnCount = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(fixedEnd, 2));
+        var position = fixedEnd + 2 + ((columnCount + 7) / 8);
+        if ((bytes[0] & TagA_VarSection) != 0)
+        {
+            var varCount = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(position, 2));
+            position = ReadDirectoryOffset(bytes, position + 2, (bytes[0] & TagA_WideVarOffsets) != 0 ? 4 : 2, varCount - 1);
+        }
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(position, 2));
+        for (var entry = position + 2; count > 0; count--, entry += 4)
+        {
+            if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(entry, 2)) == ordinal)
+                return BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(entry + 2, 2));
+        }
+        return -1;
     }
 
     private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)

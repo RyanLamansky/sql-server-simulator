@@ -390,7 +390,7 @@ internal sealed class Cursor(
             case CursorSensitivity.Static:
                 // SET ROWCOUNT caps the population as it caps a SELECT (probed
                 // 2026-10-06 against SQL Server 2025: @@CURSOR_ROWS reads the cap).
-                this.staticRows = [.. this.Selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit).RowBytes.Select(b => RowDecoder.DecodeRow(this.Selection.Schema, b))];
+                this.staticRows = [.. this.Selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit).RowBytes.Select(b => StaticWorktableRow(RowDecoder.DecodeRow(this.Selection.Schema, b)))];
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.FastForward ? -1 : this.staticRows.Count;
                 break;
@@ -883,6 +883,19 @@ internal sealed class Cursor(
         FetchDirection.Prior => "prior",
         _ => "relative",
     };
+
+    /// <summary>
+    /// A static cursor's row as its worktable stores it, which pads the short
+    /// <c>binary(N)</c> <c>CONVERT(binary(N), '', 2)</c> makes where every
+    /// other cursor reads it unpadded (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SqlValue[] StaticWorktableRow(SqlValue[] row)
+    {
+        for (var i = 0; i < row.Length; i++)
+            row[i] = row[i].PaddedToFixedLength();
+        return row;
+    }
 
     private (int, SqlValue[]?) FetchStatic(FetchDirection direction, long offset)
     {

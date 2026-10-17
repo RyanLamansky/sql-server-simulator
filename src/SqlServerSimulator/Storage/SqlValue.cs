@@ -364,6 +364,18 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     internal static SqlValue UnpaddedFixedLength(SqlType type, object value) => new(type, 0, value, isNull: false);
 
     /// <summary>
+    /// This value padded to its <c>binary(N)</c> type's width when it is
+    /// shorter (<see cref="UnpaddedFixedLength"/>), else this value: what a
+    /// scalar function's <c>RETURN</c>, a static cursor's worktable and a
+    /// conversion out of a <c>sql_variant</c> make of the short value, which
+    /// real pads in each (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal SqlValue PaddedToFixedLength() =>
+        this.Type is BinarySqlType { IsFixedLength: true } binary && !this.IsNull && this.AsBytes.Length < binary.length
+            ? FromBinary(binary, this.AsBytes)
+            : this;
+
+    /// <summary>
     /// Wraps the raw <see cref="long"/> counter of a <c>rowversion</c>
     /// value. Stored in the primitive slot — no <c>byte[]</c> allocation —
     /// so encode / decode / equality / compare run alloc-free in the hot

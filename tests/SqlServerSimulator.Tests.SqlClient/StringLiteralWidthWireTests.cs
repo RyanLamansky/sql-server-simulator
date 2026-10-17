@@ -231,4 +231,22 @@ public sealed class StringLiteralWidthWireTests
         AreEqual(4000, columnSize);
         AreEqual("ab", value);
     }
+
+    /// <summary>
+    /// <c>CONVERT(binary(3), '', 2)</c> declares its <c>binary(3)</c> but
+    /// sends no bytes, through a derived table, a sort and a
+    /// <c>sql_variant</c> alike (probed 2026-10-17 against SQL Server 2025
+    /// through SqlClient).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select x from (select convert(binary(3), '', 2) x) d", 3)]
+    [DataRow("select x from (values (convert(binary(3), '', 2)), (cast(0x01 as binary(3)))) v(x) order by x", 3)]
+    [DataRow("select cast(convert(binary(3), '', 2) as sql_variant) x", 0)]
+    public async Task EmptyBinaryFromStyle2_DeclaresItsWidthAndSendsNoBytes(string sql, int expectedColumnSize)
+    {
+        var (columnSize, value) = await WidthAndValueAsync(sql);
+        if (expectedColumnSize != 0)
+            AreEqual(expectedColumnSize, columnSize);
+        IsEmpty((byte[])value!);
+    }
 }

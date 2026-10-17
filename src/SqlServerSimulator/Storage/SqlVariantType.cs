@@ -127,11 +127,10 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
         return 1 + 2 + 1 + collLen + 4 + payload;
     }
 
-    private static int BinaryByteCount(SqlValue inner)
-    {
-        var payload = inner.Type.IsFixedLength ? inner.Type.FixedLength : inner.Type.GetVariableByteCount(inner);
-        return 1 + 2 + 4 + payload;
-    }
+    // A binary(N) is carried at its own length, so the short one
+    // CONVERT(binary(N), '', 2) makes keeps its bytes in a stored variant as
+    // it does on real (probed 2026-10-17 against SQL Server 2025).
+    private static int BinaryByteCount(SqlValue inner) => 1 + 2 + 4 + inner.AsBytes.Length;
 
     private static int EncodeInner(SqlValue inner, Span<byte> destination)
     {
@@ -218,7 +217,7 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
     {
         destination[0] = kind;
         BinaryPrimitives.WriteInt16LittleEndian(destination.Slice(1, 2), declaredLength);
-        var payloadLen = inner.Type.IsFixedLength ? inner.Type.FixedLength : inner.Type.GetVariableByteCount(inner);
+        var payloadLen = inner.AsBytes.Length;
         BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(3, 4), payloadLen);
         _ = inner.Type.Encode(inner, destination.Slice(7, payloadLen));
         return 7 + payloadLen;
@@ -290,6 +289,6 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
         var payloadLen = BinaryPrimitives.ReadInt32LittleEndian(source.Slice(3, 4));
         var payload = source.Slice(7, payloadLen);
         var type = kind == KindBinary ? SqlType.GetBinary(declaredLength) : VarbinarySqlType.Get(declaredLength);
-        return type.Decode(payload);
+        return kind == KindBinary && payloadLen < declaredLength ? SqlValue.UnpaddedFixedLength(type, payload.ToArray()) : type.Decode(payload);
     }
 }

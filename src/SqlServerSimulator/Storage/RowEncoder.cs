@@ -29,6 +29,23 @@ internal static class RowEncoder
     private const byte TagA_WideVarOffsets = 0x40;
 
     /// <summary>
+    /// TagB (byte 1) flag marking a row that carries a short-binary trailer:
+    /// one or more of its <c>binary(N)</c> values is shorter than its slot,
+    /// which only <c>CONVERT(binary(N), '', 2)</c> and a concatenation over it
+    /// make. Real keeps such a value at its own length through every
+    /// intermediate and result row and pads it only where a row is stored
+    /// (probed 2026-10-17 against SQL Server 2025), so only a row encoded
+    /// without a heap carries one: a heap row (a <c>lobStore</c> given) pads
+    /// the value by the zero-filled slot alone. The trailer follows the variable
+    /// section (or the NULL bitmap when there is none): a <c>ushort</c> count,
+    /// then a <c>ushort</c> ordinal and <c>ushort</c> length per short value
+    /// in ordinal order, the value's bytes sitting left-aligned in its
+    /// zero-filled slot. A row without one leaves TagB zero, so an ordinary
+    /// row costs the decoder one byte test per fixed-length read.
+    /// </summary>
+    internal const byte TagB_ShortBinaryTrailer = 0x01;
+
+    /// <summary>
     /// First byte of every non-NULL variable-length column's payload.
     /// <see cref="VarInlineMarker"/> means the rest of the payload is the
     /// value's bytes; <see cref="VarPointerMarker"/> means the rest is an
@@ -132,7 +149,8 @@ internal static class RowEncoder
     /// The row's bytes are zeroed before the value pass, which the encoding
     /// depends on: the NULL bitmap and the bit-column runs are written with
     /// <c>|=</c>, a NULL fixed-length column is skipped rather than written,
-    /// and TagB (byte 1) is never written at all. A freshly allocated array
+    /// and TagB (byte 1) is written only on a row carrying the trailer
+    /// <see cref="TagB_ShortBinaryTrailer"/> describes. A freshly allocated array
     /// arrives zeroed and is used as-is; a reused one is cleared.
     /// </remarks>
     public static int EncodeRowInto(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<SqlValue> values, Heap? lobStore, ref byte[]? buffer)
@@ -181,6 +199,7 @@ internal static class RowEncoder
         // wouldn't fit).
         var chainPointers = n <= StackScratchColumns ? stackalloc (int Head, int Length)?[n] : new (int Head, int Length)?[n];
         var bitsInRun = 0;
+        var shortBinaryCount = 0;
 
         for (var i = 0; i < n; i++)
         {
@@ -198,6 +217,8 @@ internal static class RowEncoder
             {
                 fixedSectionLength += t.FixedLength;
                 bitsInRun = 0;
+                if (t is BinarySqlType && lobStore is null && !values[i].IsNull && values[i].AsBytes.Length < t.FixedLength)
+                    shortBinaryCount++;
             }
             else
             {
@@ -219,7 +240,8 @@ internal static class RowEncoder
         var hasVar = varColumnCount > 0;
         var varOffsetEntrySize = 2;
         var headerOverhead = bitmapEnd + (hasVar ? 2 + (varOffsetEntrySize * varColumnCount) : 0);
-        var totalLength = headerOverhead + varDataLength;
+        var trailerLength = shortBinaryCount == 0 ? 0 : 2 + (4 * shortBinaryCount);
+        var totalLength = headerOverhead + varDataLength + trailerLength;
 
         // Greedy row-overflow push: when the encoded row would exceed
         // <see cref="Heap.MaxRowSize"/>, repeatedly move the largest still-inline
@@ -253,7 +275,7 @@ internal static class RowEncoder
                 chainPointers[pickIndex] = (head, pickInlinePayload);
                 varDataLength -= varByteCounts[pickIndex] - VarPointerSize;
                 varByteCounts[pickIndex] = VarPointerSize;
-                totalLength = headerOverhead + varDataLength;
+                totalLength = headerOverhead + varDataLength + trailerLength;
             }
 
             if (totalLength > Heap.MaxRowSize)
@@ -265,11 +287,11 @@ internal static class RowEncoder
         // would push the offset entries past the 16-bit cap, widen the
         // offset entries to 4 bytes. Heap-stored rows always stay under
         // the 8060-byte MaxRowSize so they keep the legacy 2-byte width.
-        if (hasVar && totalLength > 65535)
+        if (hasVar && totalLength - trailerLength > 65535)
         {
             varOffsetEntrySize = 4;
             headerOverhead = bitmapEnd + 2 + (varOffsetEntrySize * varColumnCount);
-            totalLength = headerOverhead + varDataLength;
+            totalLength = headerOverhead + varDataLength + trailerLength;
         }
 
         // A fresh array is already zeroed; a reused one carries the previous
@@ -318,6 +340,7 @@ internal static class RowEncoder
 
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(fixedEnd, 2), checked((ushort)n));
 
+        var trailerStart = bitmapEnd;
         if (hasVar)
         {
             BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(bitmapEnd, 2), checked((ushort)varColumnCount));
@@ -343,9 +366,36 @@ internal static class RowEncoder
                     BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(offsetArrayStart + (2 * varIndex), 2), checked((ushort)dataPos));
                 varIndex++;
             }
+            trailerStart = dataPos;
+        }
+
+        if (shortBinaryCount != 0)
+        {
+            bytes[1] = TagB_ShortBinaryTrailer;
+            WriteShortBinaryTrailer(schema, values, bytes[trailerStart..], shortBinaryCount);
         }
 
         return totalLength;
+    }
+
+    /// <summary>
+    /// Writes the trailer <see cref="TagB_ShortBinaryTrailer"/> describes.
+    /// </summary>
+    private static void WriteShortBinaryTrailer(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<SqlValue> values, Span<byte> trailer, int count)
+    {
+        BinaryPrimitives.WriteUInt16LittleEndian(trailer, checked((ushort)count));
+        var entry = 2;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            if (schema[i].Type is not BinarySqlType { IsFixedLength: true } binary || values[i].IsNull)
+                continue;
+            var length = values[i].AsBytes.Length;
+            if (length >= binary.length)
+                continue;
+            BinaryPrimitives.WriteUInt16LittleEndian(trailer[entry..], checked((ushort)i));
+            BinaryPrimitives.WriteUInt16LittleEndian(trailer[(entry + 2)..], (ushort)length);
+            entry += 4;
+        }
     }
 
     /// <summary>

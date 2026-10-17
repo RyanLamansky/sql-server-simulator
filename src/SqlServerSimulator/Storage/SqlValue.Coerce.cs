@@ -56,10 +56,12 @@ internal readonly partial struct SqlValue
             // for the time itself (probe-confirmed for date / time /
             // datetime2 / datetimeoffset). datetime and smalldatetime already
             // default to style 0, so the two paths agree there.
+            // A short binary(N) the variant holds converts to a binary(M) padded, even to
+            // its own type (probed 2026-10-17 against SQL Server 2025).
             var inner = this.AsVariantInner;
             return SqlType.IsStringCategory(target) && !inner.IsNull && IsTemporal(inner.Type)
                 ? inner.CoerceDateTimeToStringWithStyle(target, 0)
-                : inner.CoerceTo(target);
+                : target is BinarySqlType ? inner.PaddedToFixedLength().CoerceTo(target) : inner.CoerceTo(target);
         }
 
         static bool IsTemporal(SqlType type) =>

@@ -143,8 +143,10 @@ partial class Simulation
         }
 
         // The returned value is cut to the declared width as an assignment
-        // to a variable of the return type is.
-        return Parser.Expressions.Cast.ApplyCoercion(udfFrame.ReturnedValue, function.ReturnType, function.ReturnMaxLength);
+        // to a variable of the return type is, and a short binary(N) comes out
+        // padded where that variable would keep it short (probed 2026-10-17
+        // against SQL Server 2025).
+        return Parser.Expressions.Cast.ApplyCoercion(udfFrame.ReturnedValue, function.ReturnType, function.ReturnMaxLength).PaddedToFixedLength();
     }
 
     /// <summary>

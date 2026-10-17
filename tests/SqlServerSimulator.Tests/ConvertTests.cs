@@ -910,8 +910,69 @@ public sealed class ConvertTests
     [DataRow("create table #t (y varbinary(5)); insert #t values (convert(binary(3), '', 2)); select datalength(y) from #t", 0)]
     [DataRow("create table #t (x binary(3)); insert #t values (0x01); update #t set x = convert(binary(3), '', 2) output datalength(inserted.x)", 3)]
     [DataRow("select convert(binary(3), '', 2) x into #t; select datalength(x) from #t", 3)]
+    [DataRow("create table #t (x int); insert #t output datalength(convert(binary(3), '', 2)) values (1)", 0)]
+    [DataRow("select datalength(cast(0x01 as binary(4)))", 4)]
+    [DataRow("select datalength(cast(1 as binary(2)))", 2)]
+    [DataRow("select datalength(cast(newid() as binary(20)))", 20)]
+    [DataRow("select datalength(convert(binary(4), '0x', 1))", 4)]
+    [DataRow("select datalength(cast(N'a' as binary(4)))", 4)]
+    [DataRow("declare @t table (x binary(4)); insert @t values (0x01); select datalength(x) from @t", 4)]
     public void EmptyStringStyle2_IntoBinary_PadsOnlyWhereARowStoresIt(string batch, int expected)
         => AreEqual(expected, ExecuteScalar(batch));
+
+    /// <summary>
+    /// The empty value keeps its zero bytes through every intermediate row
+    /// that stores nothing — derived tables, CTEs, views, inline TVFs, set
+    /// operations, DISTINCT, GROUP BY, aggregates, window functions and sorts
+    /// — and compares equal to the padded value, so a group or a DISTINCT
+    /// keeps whichever arrived first; a scalar function's RETURN, a static
+    /// cursor, and a conversion out of a <c>sql_variant</c> to a
+    /// <c>binary(n)</c> pad it, while a stored <c>sql_variant</c> keeps it
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select datalength(x) from (select convert(binary(3), '', 2) x) d", 0)]
+    [DataRow("with c as (select convert(binary(3), '', 2) x) select datalength(x) from c", 0)]
+    [DataRow("select top 1 datalength(x) from (select convert(binary(3), '', 2) x union all select cast(0x01 as binary(3))) u", 0)]
+    [DataRow("select top 1 datalength(x) from (select convert(binary(3), '', 2) x union select cast(0x01 as binary(3))) u order by x", 0)]
+    [DataRow("select datalength(x) from (select distinct convert(binary(3), '', 2) x from (values (1), (2)) v(a)) d", 0)]
+    [DataRow("select datalength(x) from (select top 5 convert(binary(3), '', 2) x, a from (values (2), (1)) v(a) order by a) d order by a", 0)]
+    [DataRow("select datalength(max(x)) from (select convert(binary(3), '', 2) x) d", 0)]
+    [DataRow("select datalength(max(x)) from (select cast(0x000000 as binary(3)) x union all select convert(binary(3), '', 2)) d", 3)]
+    [DataRow("select datalength(x) from (select convert(binary(3), '', 2) x from (values (1), (2)) v(a)) d group by x", 0)]
+    [DataRow("select count(*) from (select convert(binary(3), '', 2) x union all select cast(0x000000 as binary(3))) d group by x", 2)]
+    [DataRow("select datalength(x) from (select distinct x from (select convert(binary(3), '', 2) x union all select cast(0x000000 as binary(3))) d) e", 0)]
+    [DataRow("select top 1 datalength(lag(x) over (order by a)) from (select convert(binary(3), '', 2) x, a from (values (1), (2)) v(a)) d order by a desc", 0)]
+    [DataRow("select datalength(x) from (select convert(binary(3), '', 2) x, a from (values (1), (2)) v(a)) d order by a offset 1 rows", 0)]
+    [DataRow("select datalength(x) from (values (1)) v(a) cross apply (select convert(binary(3), '', 2) x) c", 0)]
+    [DataRow("select datalength((select convert(binary(3), '', 2)))", 0)]
+    [DataRow("select datalength(x) from (select convert(binary(3), '', 2) x intersect select cast(0x000000 as binary(3))) d", 0)]
+    [DataRow("create table #t (a int); insert #t values (1); select datalength(d.x) from #t cross join (select convert(binary(3), '', 2) x) d", 0)]
+    [DataRow("create function dbo.f() returns binary(3) as begin return convert(binary(3), '', 2) end", 3, "select datalength(dbo.f())")]
+    [DataRow("create function dbo.f() returns table as return select convert(binary(3), '', 2) x", 0, "select datalength(x) from dbo.f()")]
+    [DataRow("create view dbo.v as select convert(binary(3), '', 2) x", 0, "select datalength(x) from dbo.v")]
+    [DataRow("create table #k (id int primary key); insert #k values (1); declare @x binary(3); declare c cursor dynamic for select convert(binary(3), '', 2) from #k; open c; fetch c into @x; close c; deallocate c; select datalength(@x)", 0)]
+    [DataRow("create table #k (id int primary key); insert #k values (1); declare @x binary(3); declare c cursor static for select convert(binary(3), '', 2) from #k; open c; fetch c into @x; close c; deallocate c; select datalength(@x)", 3)]
+    [DataRow("create table #s (v sql_variant); insert #s values (convert(binary(3), '', 2)); select datalength(v) from #s", 0)]
+    [DataRow("create table #s (v sql_variant); insert #s values (convert(binary(3), '', 2)); select sql_variant_property(v, 'MaxLength') from #s", 3)]
+    [DataRow("create table #s (v sql_variant); insert #s values (convert(binary(3), '', 2)); select datalength(cast(v as binary(3))) from #s", 3)]
+    [DataRow("create table #s (v sql_variant); insert #s values (convert(binary(3), '', 2)); select datalength(cast(v as varbinary(5))) from #s", 0)]
+    [DataRow("create table #s (v sql_variant); insert #s values (convert(binary(3), '', 2)); select count(*) from #s where v = cast(0x000000 as binary(3))", 1)]
+    public void EmptyStringStyle2_IntoBinary_KeepsItsLengthThroughIntermediateRows(string batch, int expected, string? query = null)
+        => AreEqual(expected, query is null ? ExecuteScalar(batch) : new Simulation().ExecuteBatchesScalar(batch, query));
+
+    /// <summary>
+    /// A client reads the empty value at its own length from a result column,
+    /// whether a variable, a derived table or a sort produced it (probed
+    /// 2026-10-17 against SQL Server 2025 through SqlClient).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @b binary(3) = convert(binary(3), '', 2); select @b", 0)]
+    [DataRow("select x from (select convert(binary(3), '', 2) x) d", 0)]
+    [DataRow("select x from (values (convert(binary(3), '', 2)), (cast(0x01 as binary(3)))) v(x) order by x", 0)]
+    [DataRow("select x from (select convert(binary(3), '', 2) x) d order by x", 0)]
+    public void EmptyStringStyle2_IntoBinary_ReachesTheClientUnpadded(string query, int expected)
+        => HasCount(expected, (byte[])ExecuteScalar(query)!);
 
     /// <summary>
     /// A <c>sql_variant</c> converts as the value it holds, so the style
