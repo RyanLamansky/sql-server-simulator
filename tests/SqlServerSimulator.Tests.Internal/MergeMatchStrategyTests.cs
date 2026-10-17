@@ -167,11 +167,25 @@ public sealed class MergeMatchStrategyTests
     /// </summary>
     [TestMethod]
     public void IndexedTarget_SeeksPerSourceRow()
-        => Contains("Merge:TargetSeek", CaptureStrategies(
+        => Contains("Merge:TargetSeekBySourceRow", CaptureStrategies(
             ["create table pk_t (id int primary key, v int); insert pk_t values (1, 100)"],
             """
             merge pk_t using (values (1, 11)) as s (id, v) on pk_t.id = s.id
             when matched then update set v = s.v;
+            """));
+
+    /// <summary>
+    /// A seek whose actions can't be judged one source row at a time — a
+    /// NOT MATCHED BY SOURCE pass here — matches every source row first.
+    /// </summary>
+    [TestMethod]
+    public void IndexedTarget_VisitingEveryTargetRow_MatchesFirst()
+        => Contains("Merge:TargetSeek", CaptureStrategies(
+            ["create table pk_t (id int primary key, v int); insert pk_t values (1, 100), (2, 200)"],
+            """
+            merge pk_t using (values (1, 11)) as s (id, v) on pk_t.id = s.id
+            when matched then update set v = s.v
+            when not matched by source then delete;
             """));
 
     /// <summary>

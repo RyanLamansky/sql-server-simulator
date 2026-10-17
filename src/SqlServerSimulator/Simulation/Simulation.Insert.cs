@@ -551,9 +551,62 @@ partial class Simulation
         // 2026-10-11 against SQL Server 2025); a source with a row limit of its
         // own, or no plan to hand it to, leaves the cap to the rows it returns.
         using var sourcePercent = ParserScope.Enter(ref batch.SourceTopPercent, insert.Top is { Percent: true } percent ? (selection, percent) : null);
+        // A source that can't meet the rows the statement writes is read as
+        // the rows are written, as real's plan pipelines it; one reading the
+        // target is read whole first, real's spool.
+        if (StreamsInsertSource(batch, selection, insert))
+        {
+            ConvertSelectSourceStartupValues(context, selection, insert.DestinationColumns, insert.DestinationTable);
+            return InsertRows(
+                context,
+                insert,
+                [],
+                valueTupleStamps: null,
+                streamedSource: SelectSourceRows(context, selection, insert.DestinationColumns, SourceRowLimit(insert.Top, batch)).GetEnumerator());
+        }
         var sourceRows = ReadSelectSource(context, selection, insert.DestinationColumns, insert.DestinationTable, SourceRowLimit(insert.Top, batch), sourceStamps);
         var percentTaken = insert.Top is { Percent: true } && batch.SourceTopPercent is null;
         return InsertRows(context, insert, sourceRows, valueTupleStamps: StampsByRow(sourceStamps), topTaken: percentTaken);
+    }
+
+    /// <summary>
+    /// Whether an <c>INSERT</c> reads its <c>SELECT</c> source as it writes,
+    /// as real's plan pipelines a source that can't meet the rows written
+    /// (probed 2026-10-17 against SQL Server 2025: with another session
+    /// holding the 1,500th of 2,000 source rows, a <c>NOLOCK</c> reader
+    /// counted 1,499 written, a heap target's held in RID X, and an
+    /// <c>OUTPUT</c> reader read 1,499 rows before a 1,500th row's error; a
+    /// source reading the target counted none). Only a source this can
+    /// prove reads other tables alone streams: plain base tables, no view,
+    /// function, derived table, set operation or subquery, no
+    /// <c>PERCENT</c> cap needing every row counted, and no <c>OUTPUT
+    /// INTO</c> a source might be.
+    /// </summary>
+    private static bool StreamsInsertSource(BatchContext batch, Selection selection, InsertPlan insert)
+    {
+        if (batch.IsSkipping
+            || insert.Top is { Percent: true }
+            || insert.DestinationView is not null
+            || insert.JoinViewPlan is not null
+            || insert.Output is { HasTarget: true }
+            || selection.IsSetOperationResult
+            || batch.CurrentStatement.CallsUserFunction
+            || ExplicitIdentityOrdinal(batch, insert.DestinationTable, insert.DestinationColumns) >= 0
+            || selection.BranchFromSources is not { Length: > 0 } sources
+            || selection.ProjectionExpressions is not { } projections
+            || selection.ClauseExpressions is not { } clauses)
+        {
+            return false;
+        }
+        foreach (var source in sources)
+        {
+            if (source is not { BackingTable: { } table, LateralPlan: null, BackingView: null, BackingCatalogView: null }
+                || ReferenceEquals(table, insert.DestinationTable))
+            {
+                return false;
+            }
+        }
+        return !ReadsSubquery(projections) && !ReadsSubquery(clauses);
     }
 
     /// <summary>
@@ -701,8 +754,11 @@ partial class Simulation
     /// Writes an <c>INSERT</c>'s source rows: the checks real makes once the
     /// source is read, then per row the defaults, identity, computed columns,
     /// constraints and the heap write, then the triggers and <c>OUTPUT</c>.
+    /// A source read as the rows are written (<see cref="StreamsInsertSource"/>)
+    /// comes as <paramref name="streamedSource"/>, its rows joining
+    /// <paramref name="sourceRows"/> one at a time.
     /// </summary>
-    private static SimulatedStatementOutcome InsertRows(ParserContext context, InsertPlan plan, List<SqlValue[]> sourceRows, long[]? valueTupleStamps, bool topTaken = false)
+    private static SimulatedStatementOutcome InsertRows(ParserContext context, InsertPlan plan, List<SqlValue[]> sourceRows, long[]? valueTupleStamps, bool topTaken = false, IEnumerator<SqlValue[]>? streamedSource = null)
     {
         var (destinationTable, destinationView, joinViewPlan, destinationColumns) = (plan.DestinationTable, plan.DestinationView, plan.JoinViewPlan, plan.DestinationColumns);
         var (output, top, valueTuples) = (plan.Output, plan.Top, plan.ValueTuples);
@@ -790,7 +846,12 @@ partial class Simulation
         // IGNORE_DUP_KEY key dropped a duplicate, which real excludes from
         // rows-affected and @@ROWCOUNT alike (probe-confirmed).
         var insertedCount = 0;
-        var keyGuard = insteadOfActive || sourceRows.Count == 0 ? null : BeginUniqueKeyGuard(context.Batch, destinationTable);
+        var keyGuard = insteadOfActive || (sourceRows.Count == 0 && streamedSource is null) ? null : BeginUniqueKeyGuard(context.Batch, destinationTable);
+        // A streamed row projected under a stamp of its own, as a buffered
+        // source's rows streamed one stamp apart are, has its defaults
+        // re-enter it (see StampsByRow).
+        var streamedStamps = streamedSource is null ? null : new List<long>();
+        var stampBeforeSource = context.Batch.CurrentRowStamp;
         if (!insteadOfActive)
             IndexUsageAccounting.NoteWrite(context.Batch, destinationTable, WriteKind.Insert, 0);
         // A key referencing the table itself is checked once the rows are in.
@@ -812,8 +873,48 @@ partial class Simulation
                 WritesAsItSends = true,
             };
         }
-        for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
-            _ = WriteRow(rowIndex);
+        try
+        {
+            for (var rowIndex = 0; HaveRow(rowIndex); rowIndex++)
+                _ = WriteRow(rowIndex);
+        }
+        finally
+        {
+            streamedSource?.Dispose();
+        }
+
+        // Whether source row rowIndex is at hand: a streamed source reads its
+        // next row here, the row before it written and let go.
+        bool HaveRow(int rowIndex)
+        {
+            if (rowIndex < sourceRows.Count)
+                return true;
+            if (streamedSource is null)
+                return false;
+            bool more;
+            try
+            {
+                more = streamedSource.MoveNext();
+            }
+            catch (SimulatedSqlException failure) when (failure.RaisedInRowProjection)
+            {
+                // A row failing its projection drew its identity value first,
+                // as real's does (see UseUpIdentityValues).
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1);
+                throw;
+            }
+            if (!more)
+            {
+                streamedSource.Dispose();
+                streamedSource = null;
+                return false;
+            }
+            if (rowIndex > 0)
+                sourceRows[rowIndex - 1] = null!;
+            sourceRows.Add(streamedSource.Current);
+            streamedStamps!.Add(context.Batch.CurrentRowStamp);
+            return true;
+        }
 
         // Writes one source row, its OUTPUT row added to outputRows; false
         // when it wrote nothing.
@@ -832,6 +933,8 @@ partial class Simulation
             // and keep the fresh bump.
             if (valueTupleStamps is not null && rowIndex < valueTupleStamps.Length)
                 context.Batch.CurrentRowStamp = valueTupleStamps[rowIndex];
+            else if (streamedStamps is not null && streamedStamps[rowIndex] > (rowIndex > 0 ? streamedStamps[rowIndex - 1] : stampBeforeSource))
+                context.Batch.CurrentRowStamp = streamedStamps[rowIndex];
             else
                 context.Batch.BumpRowStamp();
             var rowValues = new SqlValue[destinationTable.Columns.Length];
@@ -1036,7 +1139,8 @@ partial class Simulation
         // read, under the sequence values its tuple drew.
         IEnumerable<byte[]> WriteAsSent(Dictionary<(Sequence Sequence, long Stamp), SqlValue>? sequenceValues)
         {
-            for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
+            using var reading = streamedSource;
+            for (var rowIndex = 0; HaveRow(rowIndex); rowIndex++)
             {
                 var savedSequenceValues = context.Batch.SequenceValuesByRow;
                 context.Batch.SequenceValuesByRow = sequenceValues;
@@ -1810,6 +1914,48 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return [];
 
+        ConvertSelectSourceStartupValues(context, selection, destinationColumns, destinationTable);
+        var rows = new List<SqlValue[]>();
+        var explicitIdentity = destinationTable is null ? -1 : ExplicitIdentityOrdinal(context.Batch, destinationTable, destinationColumns);
+        var failingRow = explicitIdentity >= 0
+            ? new FailingRowIdentity(selection.ProjectionExpressions is { } cells && explicitIdentity < cells.Length ? cells[explicitIdentity] : null)
+            : null;
+        using var capture = ParserScope.Enter(ref context.Batch.FailingRowIdentity, failingRow);
+        try
+        {
+            foreach (var row in SelectSourceRows(context, selection, destinationColumns, rowLimit))
+            {
+                rows.Add(row);
+                rowStamps?.Add(context.Batch.CurrentRowStamp);
+            }
+            return rows;
+        }
+        catch (SimulatedSqlException sourceError) when (destinationTable is not null)
+        {
+            // A PERCENT cap the source plan didn't take is applied over the
+            // whole read, which real finishes before its first row is written,
+            // so a source failing partway draws nothing (probed 2026-10-11
+            // against SQL Server 2025).
+            var readsWhole = context.Batch.SourceTopPercent is { Plan: var percentPlan } && ReferenceEquals(percentPlan, selection);
+            if (failingRow is not null)
+            {
+                if (!readsWhole)
+                    ObserveExplicitIdentities(context.Batch, destinationTable, explicitIdentity, rows, sourceError.RaisedInRowProjection ? failingRow.Value : null);
+            }
+            else
+            {
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+            }
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Meets each statement-wide value an <c>INSERT</c>'s source projects with
+    /// its target column, as real's plan does as it starts.
+    /// </summary>
+    private static void ConvertSelectSourceStartupValues(ParserContext context, Selection selection, HeapColumn[] destinationColumns, HeapTable? destinationTable)
+    {
         // A projected statement-wide value meets its target column as the plan
         // starts, so one too long for it raises Msg 2628 though no row
         // qualifies (probed 2026-09-26 against SQL Server 2025). A FROM-less
@@ -1841,35 +1987,6 @@ partial class Simulation
                 UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1);
                 throw;
             }
-        }
-
-        var rows = new List<SqlValue[]>();
-        var explicitIdentity = destinationTable is null ? -1 : ExplicitIdentityOrdinal(context.Batch, destinationTable, destinationColumns);
-        var failingRow = explicitIdentity >= 0
-            ? new FailingRowIdentity(selection.ProjectionExpressions is { } cells && explicitIdentity < cells.Length ? cells[explicitIdentity] : null)
-            : null;
-        using var capture = ParserScope.Enter(ref context.Batch.FailingRowIdentity, failingRow);
-        try
-        {
-            return ReadSelectSourceRows(context, selection, destinationColumns, rows, rowLimit, rowStamps);
-        }
-        catch (SimulatedSqlException sourceError) when (destinationTable is not null)
-        {
-            // A PERCENT cap the source plan didn't take is applied over the
-            // whole read, which real finishes before its first row is written,
-            // so a source failing partway draws nothing (probed 2026-10-11
-            // against SQL Server 2025).
-            var readsWhole = context.Batch.SourceTopPercent is { Plan: var percentPlan } && ReferenceEquals(percentPlan, selection);
-            if (failingRow is not null)
-            {
-                if (!readsWhole)
-                    ObserveExplicitIdentities(context.Batch, destinationTable, explicitIdentity, rows, sourceError.RaisedInRowProjection ? failingRow.Value : null);
-            }
-            else
-            {
-                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
-            }
-            throw;
         }
     }
 
@@ -1936,11 +2053,10 @@ partial class Simulation
         : null;
 
     /// <summary>
-    /// Runs an <c>INSERT</c>'s source query into <paramref name="rows"/>, which
-    /// holds what it produced if it fails partway, reading at most
-    /// <paramref name="rowLimit"/> rows (<see cref="SourceRowLimit"/>).
+    /// An <c>INSERT</c>'s source query's rows as it produces them, at most
+    /// <paramref name="rowLimit"/> of them (<see cref="SourceRowLimit"/>).
     /// </summary>
-    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows, int? rowLimit, List<long>? rowStamps)
+    private static IEnumerable<SqlValue[]> SelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, int? rowLimit)
     {
         var expectedColumnCount = destinationColumns.Length;
         var resultSet = selection.Execute(context.Batch);
@@ -1948,7 +2064,8 @@ partial class Simulation
         // 2026-09-27 against SQL Server 2025).
         var masking = DataMasking.Applying(context.Batch, selection.ColumnMasks);
         if (rowLimit == 0)
-            return rows;
+            yield break;
+        var read = 0;
         foreach (var rowBytes in resultSet.RowBytes)
         {
             var row = RowDecoder.DecodeRow(resultSet.Schema, rowBytes);
@@ -1961,14 +2078,12 @@ partial class Simulation
                 if (destinationColumns[i].Type is SqlVariantSqlType && row[i] is { IsNull: false, Type: DecimalSqlType })
                     row[i] = SqlValue.NameVariantBase(row[i], SqlValue.FromVariant(row[i]), resultSet.ColumnReportsNumeric is { } numeric && numeric[i]);
             }
-            rows.Add(row);
-            rowStamps?.Add(context.Batch.CurrentRowStamp);
+            yield return row;
             // Stopping before the next row is pulled keeps its projection
             // from running.
-            if (rows.Count == rowLimit)
-                break;
+            if (++read == rowLimit)
+                yield break;
         }
-        return rows;
     }
 
     /// <summary>

@@ -64,6 +64,36 @@ public sealed class WriteAsSentWireTests
         AreEqual(0, await ScalarAsync(observer, "select count(*) from t where v = 1"));
     }
 
+    /// <summary>
+    /// A <c>MERGE</c> upsert from a keyed source judges each source row's
+    /// action as it goes, so a reader partway in leaves no matched row ahead
+    /// held in U, only the source's position in S.
+    /// </summary>
+    [TestMethod]
+    public async Task MergeUpsert_HoldsNothingAhead()
+    {
+        var simulation = Big();
+        Wire.ExecInProc(simulation, "create table t2 (id int primary key, v int not null, pad char(2000) not null); insert t2 select id, v, pad from t where id % 2 = 0");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, ";MultipleActiveResultSets=True");
+        await using var observer = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var spid = await SpidAsync(connection);
+        await using var command = new SqlCommand("merge t2 using t on t2.id = t.id when matched then update set v = t2.v + 1 when not matched then insert (id, v, pad) values (t.id, 5, t.pad) output inserted.id, $action, inserted.pad;", connection);
+        await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            await Wire.AwaitSuspendedAsync(observer, spid, TestContext.CancellationToken);
+            AreEqual(0, await ScalarAsync(observer, $"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and request_mode = 'U'"));
+            AreEqual(1, await ScalarAsync(observer, $"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and resource_type = 'KEY' and request_mode = 'S'"));
+            var read = 2;
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+                read++;
+            AreEqual(Rows, read);
+        }
+        AreEqual(Rows, await ScalarAsync(observer, "select count(*) from t2"));
+    }
+
     /// <summary>The rows before a failing row go out ahead of its error.</summary>
     [TestMethod]
     public async Task RowsBeforeAnError_GoOutAheadOfIt()

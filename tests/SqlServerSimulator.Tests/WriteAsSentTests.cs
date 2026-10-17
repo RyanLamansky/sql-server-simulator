@@ -201,7 +201,8 @@ public sealed class WriteAsSentTests
         using var other = sim.CreateOpenConnection();
         var spid = Spid(connection);
         using var rows = Read(connection, "insert t2 output inserted.id, inserted.v, inserted.pad select id, v, pad from t");
-        AreEqual($"KEY Xx{Window}, OBJECT IS, OBJECT IX, PAGE IXx{Window / 4}", Locks(other, spid));
+        // The source is read as the rows are written, its position held in S.
+        AreEqual($"KEY S, KEY Xx{Window}, OBJECT IS, OBJECT IX, PAGE IS, PAGE IXx{Window / 4}", Locks(other, spid));
         AreEqual(Window, Scalar(other, "select count(*) from t2 with (nolock)"));
         AreEqual(Rows, ReadRest(rows));
         AreEqual(Rows, rows.RecordsAffected);
@@ -352,12 +353,13 @@ public sealed class WriteAsSentTests
 
     /// <summary>
     /// A MERGE writes each action as it sends it — EF Core's insert shape
-    /// matching no target row, and an upsert, whose matched rows ahead are
-    /// held in U until each is written.
+    /// matching no target row, and an upsert reading its keyed source in the
+    /// target key's order as it goes, holding nothing ahead (probed 2026-10-17
+    /// against SQL Server 2025: the source position's KEY S and 20 KEY X).
     /// </summary>
     [TestMethod]
     [DataRow("", "merge t2 using (select id, pad from t) as i on 1 = 0 when not matched then insert (id, v, pad) values (i.id, 5, i.pad) output inserted.id, inserted.pad;", "KEY Xx20, OBJECT IS, OBJECT IX, PAGE IXx5", 20)]
-    [DataRow("insert t2 select id, v, pad from t where id % 2 = 0", "merge t2 using t on t2.id = t.id when matched then update set v = t2.v + 1 when not matched then insert (id, v, pad) values (t.id, 5, t.pad) output inserted.id, $action, inserted.pad;", "KEY Ux990, KEY Xx20, OBJECT IS, OBJECT IX, PAGE IUx248, PAGE IXx5", 1010)]
+    [DataRow("insert t2 select id, v, pad from t where id % 2 = 0", "merge t2 using t on t2.id = t.id when matched then update set v = t2.v + 1 when not matched then insert (id, v, pad) values (t.id, 5, t.pad) output inserted.id, $action, inserted.pad;", "KEY S, KEY Xx20, OBJECT IS, OBJECT IX, PAGE IS, PAGE IXx5", 1010)]
     public void Merge_WritesTheActionsItSends(string setup, string sql, string locks, int seen)
     {
         var sim = Big("create table t2 (id int primary key, v int not null, pad char(2000) not null); " + setup);

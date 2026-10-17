@@ -516,6 +516,70 @@ partial class Simulation
     }
 
     /// <summary>
+    /// A <c>MERGE</c> whose <c>USING</c> names a table: its rows read through
+    /// the scan's per-row locks, whole (<see cref="Materialize"/>) or as the
+    /// statement's actions go (<see cref="Rows"/>).
+    /// </summary>
+    private sealed class BareTableMergeSource(HeapTable table, PerExecutionRows scan)
+    {
+        public readonly HeapTable Table = table;
+
+        /// <summary>The source's rows as the scan reads them, in the table's key order.</summary>
+        public IEnumerable<SqlValue[]> Rows(BatchContext batch)
+        {
+            foreach (var rowBytes in scan.For(batch))
+            {
+                batch.PollCancellation();
+                var fullValues = DecodeFullRow(this.Table, rowBytes);
+                EvaluateComputedColumns(this.Table, fullValues, batch);
+                yield return fullValues;
+            }
+        }
+
+        /// <summary>Reads every row into <paramref name="rows"/>, which holds those read if the scan fails partway.</summary>
+        public List<SqlValue[]> Materialize(BatchContext batch, List<SqlValue[]> rows)
+        {
+            foreach (var row in this.Rows(batch))
+                rows.Add(row);
+            return rows;
+        }
+
+        /// <summary>
+        /// Whether the source's rows arrive in the order of
+        /// <paramref name="target"/>'s clustered key: the <c>ON</c> equates
+        /// the leading column of each table's clustered key.
+        /// </summary>
+        public bool ArrivesInKeyOrderOf(HeapTable target, BooleanExpression on, MergeSides sides)
+        {
+            var sourceLead = ClusteredLeadOrdinal(this.Table);
+            var targetLead = ClusteredLeadOrdinal(target);
+            if (sourceLead < 0 || targetLead < 0 || TryPlanMergeMatch(on, sides) is not { } match)
+                return false;
+            foreach (var key in match.Keys)
+            {
+                if (key.TargetOrdinal == targetLead && key.SourceOrdinal == sourceLead)
+                    return true;
+            }
+            return false;
+        }
+
+        private static int ClusteredLeadOrdinal(HeapTable table)
+        {
+            foreach (var key in table.KeyConstraints)
+            {
+                if (key.IsClustered)
+                    return key.FullOrdinals[0];
+            }
+            foreach (var index in table.Indexes)
+            {
+                if (index is { IsClustered: true, IsDisabled: false })
+                    return index.KeyFullOrdinals[0];
+            }
+            return -1;
+        }
+    }
+
+    /// <summary>
     /// Whether the <c>USING</c> under the cursor opens a table source with
     /// joins — <c>USING a JOIN b ON …</c>, <c>USING (a CROSS JOIN b)</c> —
     /// rather than one table, view or parenthesized query.
@@ -877,19 +941,11 @@ partial class Simulation
             var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
             var sourceHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
             // Phase 1b: MERGE bare-table source is a READ — table-IS plus
-            // per-row probe (or hint-driven row-S / row-U / row-X).
-            _ = context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
-            materialize = (batch, rows) =>
-            {
-                foreach (var rowBytes in RowSecurity.FilterRows(sourceTable, ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo), batch))
-                {
-                    batch.PollCancellation();
-                    var fullValues = DecodeFullRow(sourceTable, rowBytes);
-                    EvaluateComputedColumns(sourceTable, fullValues, batch);
-                    rows.Add(fullValues);
-                }
-                return rows;
-            };
+            // per-row probe (or hint-driven row-S / row-U / row-X), so a row
+            // another session is writing is waited on as a SELECT's scan waits
+            // (probed 2026-10-17 against SQL Server 2025: LCK_M_S on it).
+            var sourcePlan = context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
+            materialize = new BareTableMergeSource(sourceTable, sourcePlan.NoLockReader ? new UnlockedScanRows(sourceTable) : new LockCheckedScanRows(sourceTable, sourcePlan)).Materialize;
             // Another database's table answers permission checks the session's
             // standing here says nothing about.
             return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable), [MergeMatchSource(alias, columnNames, sourceSchema, table: sourceTable)], []);

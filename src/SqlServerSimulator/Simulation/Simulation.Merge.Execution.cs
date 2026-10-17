@@ -249,20 +249,44 @@ partial class Simulation
             return new SimulatedNonQuery(0);
 
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
-        var sourceRows = new List<SqlValue[]>();
-        try
-        {
-            _ = materializeSource(context.Batch, sourceRows);
-        }
-        catch (SimulatedSqlException sourceError) when (viewRowsTarget is null && joinWrite is null && sourceView is null)
-        {
-            UseUpMergeIdentityValues(context, destinationTable, onPredicate, whenClauses, sourceRows, sourceError.RaisedInRowProjection, sourceAlias, sourceColumnNames);
-            throw;
-        }
         // A statement whose client reads its OUTPUT rows as they come writes
         // each action as it sends it, its matched rows held in U meanwhile.
         var writesAsSent = sourceView is null && viewRowsTarget is null && joinWrite is null
             && WritesAsItSends(context.Batch, output) && MergeWritesAsSent(context.Batch, destinationTable, whenClauses);
+        var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
+        var readsTarget = hasNotMatchedBySource
+            || !(onPredicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(onPredicate, context, out var onConstant) && onConstant != true));
+        var targetSeek = readsTarget && sourceView is null
+            ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
+            : null;
+        var capped = top is not null || context.Connection.RowCountLimit > 0;
+        var streamsBySource = targetSeek is not null && StreamsBySourceRow();
+        // A table source arriving in the order of the target key it is joined
+        // to is read as the actions go, as real's merge join reads it without
+        // a sort (probed 2026-10-17 against SQL Server 2025: a NOLOCK reader
+        // counted 1,499 written with the 1,500th source row held, and an
+        // OUTPUT reader read 1,199 rows before the 1,200th source row's error);
+        // any other source real sorts or hashes first, as it is read here.
+        var streamedSource = streamsBySource
+            && materializeSource.Target is BareTableMergeSource bare
+            && !ReferenceEquals(bare.Table, destinationTable)
+            && !(serializableHint || context.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
+            && bare.ArrivesInKeyOrderOf(destinationTable, onPredicate, new MergeSides(context.Batch.CurrentDatabase.Collation, destinationTable, sourceView, targetAlias, destinationTable.Name, sourceAlias, sourceColumnNames, sourceSchema))
+            ? bare.Rows(context.Batch).GetEnumerator()
+            : null;
+        var sourceRows = new List<SqlValue[]>();
+        if (streamedSource is null)
+        {
+            try
+            {
+                _ = materializeSource(context.Batch, sourceRows);
+            }
+            catch (SimulatedSqlException sourceError) when (viewRowsTarget is null && joinWrite is null && sourceView is null)
+            {
+                UseUpMergeIdentityValues(context, destinationTable, onPredicate, whenClauses, sourceRows, sourceError.RaisedInRowProjection, sourceAlias, sourceColumnNames);
+                throw;
+            }
+        }
         var sourceMatched = new bool[sourceRows.Count];
 
         // A non-persisted computed column of the target is evaluated only where
@@ -379,7 +403,6 @@ partial class Simulation
         // real's usual source-driven plan takes them in. TOP (n) PERCENT is a
         // share, rounded up, of every action the statement would take (34.5
         // PERCENT of three takes two).
-        var capped = top is not null || context.Connection.RowCountLimit > 0;
         var deferredSteps = capped ? new List<MergeStep>() : null;
         void Step(MergeStep step)
         {
@@ -435,17 +458,11 @@ partial class Simulation
         // the target at scan count 0 and lists no work table (probed 2026-10-01
         // against SQL Server 2025), where walking it here cost a decode per
         // target row and an ON per target × source pair.
-        var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
-        var readsTarget = hasNotMatchedBySource
-            || !(onPredicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(onPredicate, context, out var onConstant) && onConstant != true));
         // The heap's generation before the match reads any target row: a row
         // held with the heap unwritten since is the row as it was read.
         var walkGeneration = Volatile.Read(ref destinationTable.Heap.MutationGeneration);
         // Noted before the target is read, as an UPDATE's walk notes it.
         var keysPutBack = Volatile.Read(ref destinationTable.KeysPutBack);
-        var targetSeek = readsTarget && sourceView is null
-            ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
-            : null;
         // Real's MERGE lists a work table between its source and its target.
         if (readsTarget)
             context.Connection.StatementIo?.UseWorktable();
@@ -471,8 +488,17 @@ partial class Simulation
         // deleted, or rewritten off the seek or the ON — is waited out first
         // when its prior image matches a source row, or whatever it held when
         // NOT MATCHED BY SOURCE visits every target row.
+        // A statement judging each source row in turn waits at its turn on a
+        // row its seek still finds, as real does, and here only on one the
+        // write took out of the seek's reach.
         if (readsTarget && !destinationTable.SupersededKeyImages.IsEmptyLockFree())
-            _ = AwaitSupersededTargetRows(context.Batch, destinationTable, (_, prior) => hasNotMatchedBySource || PriorImageMatches(prior));
+        {
+            _ = AwaitSupersededTargetRows(
+                context.Batch,
+                destinationTable,
+                (address, prior) => (hasNotMatchedBySource || PriorImageMatches(prior))
+                    && !(streamsBySource && destinationTable.Heap.ReadLiveRow(address.Page, address.Slot) is { } live && PriorImageMatches(live)));
+        }
         bool PriorImageMatches(byte[] prior)
         {
             var priorValues = DecodeFullRow(destinationTable, prior);
@@ -488,6 +514,21 @@ partial class Simulation
         if (!readsTarget)
         {
             JoinDiagnostics.Sink?.Add("Merge:NoTargetRead");
+        }
+        else if (streamsBySource)
+        {
+            // Each source row matched, judged and written in turn, as real's
+            // join pipelines them, with nothing held ahead.
+            JoinDiagnostics.Sink?.Add("Merge:TargetSeekBySourceRow");
+            var writer = new MergeActionWriter(context, destinationTable, pendingInserts, pendingUpdates, pendingDeletes, output, whenClauses);
+            if (writesAsSent)
+                return SentAsWritten(output!, WriteBySourceRow(writer));
+            foreach (var _ in WriteBySourceRow(writer))
+            {
+            }
+            var total = pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count;
+            context.Connection.LastStatementRowCount = total;
+            return new SimulatedNonQuery(total);
         }
         else if (targetSeek is not null)
         {
@@ -740,6 +781,104 @@ partial class Simulation
             return SentAsWritten(output!, CommitMergeAsSent(context, destinationTable, pendingInserts, pendingUpdates, pendingDeletes, output!, outputOrder!, whenClauses));
         return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses, viewRowsTarget, joinWrite);
 
+        // Whether the seek path judges and writes each source row's action in
+        // turn, as real's join pipelines them (probed 2026-10-17 against SQL
+        // Server 2025: with another session holding the 700th of 1,000 target
+        // rows, a NOLOCK reader counted 699 written, the statement holding
+        // their X and waiting in U, nothing ahead): a statement whose actions
+        // are judged one row at a time (MergeWritesAsSent), with no NOT
+        // MATCHED BY SOURCE pass, no cap and no DELETE, whose OUTPUT, if any,
+        // goes to a client reading it as it comes or to no consumer at all.
+        bool StreamsBySourceRow() =>
+            !hasNotMatchedBySource
+            && !capped
+            && sourceView is null && viewRowsTarget is null && joinWrite is null
+            && (writesAsSent || output is null)
+            && !whenClauses.Exists(static clause => clause.Action == MergeActionKind.Delete)
+            && MergeWritesAsSent(context.Batch, destinationTable, whenClauses);
+
+        // The streamed seek path: each source row's matches sought, its action
+        // queued and written, its OUTPUT row handed on. A target row the
+        // statement itself inserted is no match, and one an earlier source
+        // row matched is judged against the row as that one matched it — a
+        // second match of a row it updated being Msg 8672.
+        IEnumerable<byte[]> WriteBySourceRow(MergeActionWriter writer)
+        {
+            var acted = new Dictionary<(int Page, int Slot), (SqlValue[] Values, bool Updated)>();
+            HashSet<(int Page, int Slot)>? inserted = null;
+            int writtenInserts = 0, writtenUpdates = 0;
+            using var reading = streamedSource;
+            for (var si = 0; si < sourceRows.Count || PullSource(); si++)
+            {
+                context.Batch.PollCancellation();
+                var sourceValues = sourceRows[si];
+                var matched = false;
+                foreach (var (page, slot, candidateBytes) in targetSeek!(name => ResolveCombined(null, sourceValues, name)))
+                {
+                    if (inserted?.Contains((page, slot)) == true)
+                        continue;
+                    if (acted.TryGetValue((page, slot), out var prior))
+                    {
+                        if (!OnMatches(new RuntimeContext(name => ResolveCombined(prior.Values, sourceValues, name), context.Batch)))
+                            continue;
+                        if (prior.Updated)
+                            throw SimulatedSqlException.MergeMultiMatch();
+                        matched = true;
+                        break;
+                    }
+                    var rowBytes = candidateBytes;
+                    var hold = context.Batch.AwaitTargetRow(destinationTable, page, slot, ref rowBytes);
+                    while (hold != TargetRowHold.Gone)
+                    {
+                        var candidateValues = DecodeFullRow(destinationTable, rowBytes);
+                        EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
+                        if (!RowSecurity.Admits(context.Batch, destinationTable, candidateValues)
+                            || !OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
+                        {
+                            context.Batch.ReleaseTargetRow(destinationTable, page, slot, hold);
+                            break;
+                        }
+                        if (!HoldMatchedRow(page, slot, ref hold, ref rowBytes))
+                            continue;
+                        matched = true;
+                        var updatesBefore = pendingUpdates.Count;
+                        RunStep(new MergeStep(si, page, slot, candidateValues, [si]));
+                        acted[(page, slot)] = (candidateValues, pendingUpdates.Count > updatesBefore);
+                        break;
+                    }
+                    if (matched)
+                        break;
+                }
+                if (!matched && nmbtClause is not null && NotMatchedByTargetApplies(si))
+                {
+                    ApplyInsert(context, destinationTable, sourceView, nmbtClause, writeMasks, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: false);
+                    Tag(si);
+                }
+                while (writtenUpdates < pendingUpdates.Count)
+                {
+                    if (writer.Write(MergeActionKind.Update, writtenUpdates++) is { } row)
+                        yield return row;
+                }
+                while (writtenInserts < pendingInserts.Count)
+                {
+                    var row = writer.Write(MergeActionKind.Insert, writtenInserts++);
+                    _ = (inserted ??= []).Add(writer.LastInserted);
+                    if (row is not null)
+                        yield return row;
+                }
+            }
+            writer.Finish();
+        }
+
+        // Reads a streamed source's next row into sourceRows.
+        bool PullSource()
+        {
+            if (streamedSource is null || !streamedSource.MoveNext())
+                return false;
+            sourceRows.Add(streamedSource.Current);
+            return true;
+        }
+
         // Takes the lock a matched target row is acted on under: its X, or,
         // for a statement writing each action as it sends it, a U its write
         // converts. False when the row changed since rowBytes was read —
@@ -813,108 +952,201 @@ partial class Simulation
         List<(int Key, MergeActionKind Kind, int Index)> outputOrder,
         List<WhenClause> whenClauses)
     {
-        var batch = context.Batch;
-        var updatedColumnOrdinals = new List<int>();
-        foreach (var clause in whenClauses)
-        {
-            if (clause.Action != MergeActionKind.Update || clause.Assignments is null)
-                continue;
-            foreach (var (ordinal, _) in clause.Assignments)
-            {
-                if (!updatedColumnOrdinals.Contains(ordinal))
-                    updatedColumnOrdinals.Add(ordinal);
-            }
-        }
-        foreach (var (page, slot, _, _, _) in pendingUpdates)
-            VersionStore.CheckSnapshotUpdateConflict(batch, table, (page, slot));
-        foreach (var (page, slot, _, _) in pendingDeletes)
-            VersionStore.CheckSnapshotUpdateConflict(batch, table, (page, slot), delete: true);
-        if (pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count > 0)
-            table.OwningDatabase?.RejectWriteWhenReadOnly();
-
-        var undoLog = table.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
-        var lockableTable = IsLockableTable(table);
-        var keyGuard = pendingInserts.Count + pendingUpdates.Count > 0 ? BeginUniqueKeyGuard(batch, table) : null;
-        var tracking = table.ChangeTracking;
-        var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(table);
-        var trackedColumns = tracking?.UpdatedColumns(table, keyOrdinals, updatedColumnOrdinals);
-        var lobColumns = LegacyLobColumnsAmong(table, updatedColumnOrdinals);
-        var nullTarget = new SqlValue[table.Columns.Length];
-        for (var i = 0; i < nullTarget.Length; i++)
-            nullTarget[i] = SqlValue.Null(table.Columns[i].Type);
-        // The one action being written, as the key checks take it.
-        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected = [default];
+        var writer = new MergeActionWriter(context, table, pendingInserts, pendingUpdates, pendingDeletes, output, whenClauses);
+        writer.BeginAll();
         foreach (var (_, kind, index) in outputOrder.OrderBy(action => action.Key))
         {
-            batch.PollCancellation();
-            var row = kind switch
-            {
-                MergeActionKind.Delete => WriteDelete(index),
-                MergeActionKind.Update => WriteUpdate(index),
-                _ => WriteInsert(index),
-            };
-            if (row is not null)
+            context.Batch.PollCancellation();
+            if (writer.Write(kind, index) is { } row)
                 yield return row;
         }
-        if (pendingInserts.Count > 0 && table.IdentityOrdinal >= 0)
+        writer.Finish();
+    }
+
+    /// <summary>
+    /// Writes a <c>MERGE</c>'s actions one at a time as <see cref="CommitMerge"/>
+    /// writes them all — each judged, checked and written as it goes, its
+    /// <c>OUTPUT</c> row projected — for a statement whose actions are judged
+    /// one row at a time (<see cref="MergeWritesAsSent"/>).
+    /// </summary>
+    private sealed class MergeActionWriter
+    {
+        private readonly ParserContext context;
+        private readonly HeapTable table;
+        private readonly List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts;
+        private readonly List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates;
+        private readonly List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes;
+        private readonly OutputProjection? output;
+        private readonly List<int> updatedColumnOrdinals = [];
+        private readonly UndoLog? undoLog;
+        private readonly bool lockableTable;
+        private readonly TableChangeTracking? tracking;
+        private readonly int[] keyOrdinals;
+        private readonly int[]? trackedColumns;
+        private readonly int[]? lobColumns;
+        private readonly SqlValue[] nullTarget;
+        private UniqueKeyWriteGuard? keyGuard;
+        private bool begun;
+
+        /// <summary>The one action being written, as the key checks take it.</summary>
+        private readonly List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected = [default];
+
+        /// <summary>Where the last insert landed.</summary>
+        public (int Page, int Slot) LastInserted;
+
+        public MergeActionWriter(
+            ParserContext context,
+            HeapTable table,
+            List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
+            List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
+            List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
+            OutputProjection? output,
+            List<WhenClause> whenClauses)
         {
-            var lastId = pendingInserts[^1].NewValues[table.IdentityOrdinal];
-            context.Connection.RecordInsertIdentity(lastId.IsNull ? null : IdentityState.FromSqlValue(lastId));
+            this.context = context;
+            this.table = table;
+            this.pendingInserts = pendingInserts;
+            this.pendingUpdates = pendingUpdates;
+            this.pendingDeletes = pendingDeletes;
+            this.output = output;
+            foreach (var clause in whenClauses)
+            {
+                if (clause.Action != MergeActionKind.Update || clause.Assignments is null)
+                    continue;
+                foreach (var (ordinal, _) in clause.Assignments)
+                {
+                    if (!this.updatedColumnOrdinals.Contains(ordinal))
+                        this.updatedColumnOrdinals.Add(ordinal);
+                }
+            }
+            var batch = context.Batch;
+            this.undoLog = table.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
+            this.lockableTable = IsLockableTable(table);
+            this.tracking = table.ChangeTracking;
+            this.keyOrdinals = this.tracking is null ? [] : TableChangeTracking.KeyOrdinals(table);
+            this.trackedColumns = this.tracking?.UpdatedColumns(table, this.keyOrdinals, this.updatedColumnOrdinals);
+            this.lobColumns = LegacyLobColumnsAmong(table, this.updatedColumnOrdinals);
+            this.nullTarget = new SqlValue[table.Columns.Length];
+            for (var i = 0; i < this.nullTarget.Length; i++)
+                this.nullTarget[i] = SqlValue.Null(table.Columns[i].Type);
+        }
+
+        /// <summary>
+        /// Judges every queued action ahead of the first write, as a statement
+        /// whose actions were all computed first does: a write conflict under
+        /// <c>SNAPSHOT</c>, a read-only database.
+        /// </summary>
+        public void BeginAll()
+        {
+            var batch = this.context.Batch;
+            foreach (var (page, slot, _, _, _) in this.pendingUpdates)
+                VersionStore.CheckSnapshotUpdateConflict(batch, this.table, (page, slot));
+            foreach (var (page, slot, _, _) in this.pendingDeletes)
+                VersionStore.CheckSnapshotUpdateConflict(batch, this.table, (page, slot), delete: true);
+            if (this.pendingInserts.Count + this.pendingUpdates.Count + this.pendingDeletes.Count > 0)
+                this.table.OwningDatabase?.RejectWriteWhenReadOnly();
+            if (this.pendingInserts.Count + this.pendingUpdates.Count > 0)
+                this.keyGuard = BeginUniqueKeyGuard(batch, this.table);
+            this.begun = true;
+        }
+
+        /// <summary>Writes one queued action, its <c>OUTPUT</c> row back when the statement has one.</summary>
+        public byte[]? Write(MergeActionKind kind, int index)
+        {
+            if (!this.begun)
+            {
+                // Judged as it is due, the first write meeting the database.
+                var batch = this.context.Batch;
+                switch (kind)
+                {
+                    case MergeActionKind.Update:
+                        VersionStore.CheckSnapshotUpdateConflict(batch, this.table, (this.pendingUpdates[index].Page, this.pendingUpdates[index].Slot));
+                        break;
+                    case MergeActionKind.Delete:
+                        VersionStore.CheckSnapshotUpdateConflict(batch, this.table, (this.pendingDeletes[index].Page, this.pendingDeletes[index].Slot), delete: true);
+                        break;
+                }
+                this.table.OwningDatabase?.RejectWriteWhenReadOnly();
+                if (kind != MergeActionKind.Delete)
+                    this.keyGuard ??= BeginUniqueKeyGuard(batch, this.table);
+            }
+            return kind switch
+            {
+                MergeActionKind.Delete => this.WriteDelete(index),
+                MergeActionKind.Update => this.WriteUpdate(index),
+                _ => this.WriteInsert(index),
+            };
+        }
+
+        /// <summary>Records the statement's last identity value, once its last action is written.</summary>
+        public void Finish()
+        {
+            if (this.pendingInserts.Count > 0 && this.table.IdentityOrdinal >= 0)
+            {
+                var lastId = this.pendingInserts[^1].NewValues[this.table.IdentityOrdinal];
+                this.context.Connection.RecordInsertIdentity(lastId.IsNull ? null : IdentityState.FromSqlValue(lastId));
+            }
         }
 
         // Each action's write and checks, as CommitMerge's are, and its OUTPUT row.
-        byte[]? WriteDelete(int index)
+        private byte[]? WriteDelete(int index)
         {
-            var (page, slot, oldValues, sourceValues) = pendingDeletes[index];
-            DeleteRowAt(context, table, page, slot, oldValues, undoLog);
-            EnforceIncomingForeignKeysOnDelete(table, [oldValues], context, "MERGE", depth: 0);
-            return output.ProjectRow(batch, insertedValues: nullTarget, deletedValues: oldValues, sourceValues: sourceValues, action: "DELETE");
+            var (page, slot, oldValues, sourceValues) = this.pendingDeletes[index];
+            DeleteRowAt(this.context, this.table, page, slot, oldValues, this.undoLog);
+            EnforceIncomingForeignKeysOnDelete(this.table, [oldValues], this.context, "MERGE", depth: 0);
+            return this.output?.ProjectRow(this.context.Batch, insertedValues: this.nullTarget, deletedValues: oldValues, sourceValues: sourceValues, action: "DELETE");
         }
 
-        byte[]? WriteUpdate(int index)
+        private byte[]? WriteUpdate(int index)
         {
-            var (page, slot, oldValues, newValues, sourceValues) = pendingUpdates[index];
-            affected[0] = (page, slot, newValues, oldValues);
-            EnforceKeysForUpdate(table, affected, batch, onlyRow: 0);
+            var batch = this.context.Batch;
+            var table = this.table;
+            var (page, slot, oldValues, newValues, sourceValues) = this.pendingUpdates[index];
+            this.affected[0] = (page, slot, newValues, oldValues);
+            EnforceKeysForUpdate(table, this.affected, batch, onlyRow: 0);
             if (table.OutgoingForeignKeys.Count > 0)
-                EnforceOutgoingForeignKeys(table, [newValues], context, "MERGE", updatedOrdinals: updatedColumnOrdinals);
-            if (lobColumns is not null)
-                NoteRootedLobNulls(table, lobColumns, page, slot, oldValues, newValues);
+                EnforceOutgoingForeignKeys(table, [newValues], this.context, "MERGE", updatedOrdinals: this.updatedColumnOrdinals);
+            if (this.lobColumns is not null)
+                NoteRootedLobNulls(table, this.lobColumns, page, slot, oldValues, newValues);
             List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
-            tracking?.RecordUpdate(batch, table, keyOrdinals, oldValues, newValues, trackedColumns, setsKey: false, ref keyMoves);
+            this.tracking?.RecordUpdate(batch, table, this.keyOrdinals, oldValues, newValues, this.trackedColumns, setsKey: false, ref keyMoves);
             var storedNew = ProjectStoredValues(table, newValues);
             var rewritten = RowEncoder.EncodeRow(table.StoredColumns, storedNew, table.Heap);
-            if (lockableTable)
+            if (this.lockableTable)
             {
                 batch.AcquireRowLockTxScoped(table, page, slot, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 batch.NoteSupersededRow(table, page, slot);
                 batch.ProbeKeyLocksForUpdate(table, page, slot, rewritten);
                 CaptureMergeVersion(batch, table, page, slot, VersionWriteKind.Update);
             }
-            UpdateCheckedRow(batch, table, affected, 0, rewritten, storedNew, undoLog, ReclaimSuperseded(table, context), keyGuard);
-            ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (page, slot), undoLog);
+            UpdateCheckedRow(batch, table, this.affected, 0, rewritten, storedNew, this.undoLog, ReclaimSuperseded(table, this.context), this.keyGuard);
+            ClusteredScan.NoteKeyAssignment(table, this.updatedColumnOrdinals, (page, slot), this.undoLog);
             EnforceLandedRowChecks(table, newValues, batch, "MERGE");
-            table.NoteColumnsUpdated(updatedColumnOrdinals, 1);
-            IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Update, 1, updatedColumnOrdinals);
-            return output.ProjectRow(batch, insertedValues: newValues, deletedValues: oldValues, sourceValues: sourceValues, action: "UPDATE");
+            table.NoteColumnsUpdated(this.updatedColumnOrdinals, 1);
+            IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Update, 1, this.updatedColumnOrdinals);
+            return this.output?.ProjectRow(batch, insertedValues: newValues, deletedValues: oldValues, sourceValues: sourceValues, action: "UPDATE");
         }
 
-        byte[]? WriteInsert(int index)
+        private byte[]? WriteInsert(int index)
         {
-            var (newValues, sourceValues) = pendingInserts[index];
-            affected[0] = (-1, 0, newValues, null);
-            EnforceKeysForUpdate(table, affected, batch, onlyRow: 0);
+            var batch = this.context.Batch;
+            var table = this.table;
+            var (newValues, sourceValues) = this.pendingInserts[index];
+            this.affected[0] = (-1, 0, newValues, null);
+            EnforceKeysForUpdate(table, this.affected, batch, onlyRow: 0);
             if (table.OutgoingForeignKeys.Count > 0)
-                EnforceOutgoingForeignKeys(table, [newValues], context, "MERGE");
-            tracking?.RecordRow(batch, table, newValues, ChangeTrackingOperation.Insert);
+                EnforceOutgoingForeignKeys(table, [newValues], this.context, "MERGE");
+            this.tracking?.RecordRow(batch, table, newValues, ChangeTrackingOperation.Insert);
             var storedNew = ProjectStoredValues(table, newValues);
             var image = RowEncoder.EncodeRow(table.StoredColumns, storedNew, table.Heap);
-            var guard = keyGuard;
-            while (InsertRow(batch, table, image, undoLog, guard: guard, storedValues: storedNew).PageIndex < 0)
-                guard = RecheckAffectedRow(batch, table, affected, 0);
+            var guard = this.keyGuard;
+            (int PageIndex, int SlotIndex) landed;
+            while ((landed = InsertRow(batch, table, image, this.undoLog, guard: guard, storedValues: storedNew)).PageIndex < 0)
+                guard = RecheckAffectedRow(batch, table, this.affected, 0);
+            this.LastInserted = landed;
             EnforceLandedRowChecks(table, newValues, batch, "MERGE");
-            context.Connection.StatementIo?.CountWrite(table);
-            return output.ProjectRow(batch, insertedValues: newValues, deletedValues: nullTarget, sourceValues: sourceValues, action: "INSERT");
+            this.context.Connection.StatementIo?.CountWrite(table);
+            return this.output?.ProjectRow(batch, insertedValues: newValues, deletedValues: this.nullTarget, sourceValues: sourceValues, action: "INSERT");
         }
     }
 
