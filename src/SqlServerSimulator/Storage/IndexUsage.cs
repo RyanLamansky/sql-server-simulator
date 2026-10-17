@@ -109,7 +109,7 @@ internal static class IndexUsageAccounting
     /// <paramref name="equality"/> probe of a whole unique key is a singleton
     /// lookup.
     /// </summary>
-    public static void NoteRead(BatchContext batch, HeapTable table, int[]? seekOrdinals, bool seek, bool equality = false)
+    public static void NoteRead(BatchContext batch, HeapTable table, int[]? seekOrdinals, bool seek, bool equality = false, SeekedIndexMemo? memo = null)
     {
         if (table.OwningDatabase is null)
             return;
@@ -119,10 +119,32 @@ internal static class IndexUsageAccounting
             _ = Interlocked.Increment(ref table.UsageOf(BaseIndexId(table)).RangeScans);
             return;
         }
-        var (indexId, singleton) = SeekedIndex(table, seekOrdinals);
+        (int IndexId, bool Singleton) seeked;
+        if (memo is { Ordinals: { } known } && seekOrdinals is not null && known.AsSpan().SequenceEqual(seekOrdinals))
+        {
+            seeked = memo.Index;
+        }
+        else
+        {
+            seeked = SeekedIndex(table, seekOrdinals);
+            if (memo is not null)
+                (memo.Ordinals, memo.Index) = (seekOrdinals, seeked);
+        }
+        var (indexId, singleton) = seeked;
         Charge(batch, table, indexId, IndexOperation.Seek);
         var usage = table.UsageOf(indexId);
         _ = singleton && equality ? Interlocked.Increment(ref usage.SingletonLookups) : Interlocked.Increment(ref usage.RangeScans);
+    }
+
+    /// <summary>
+    /// The index the last seek of one table a loop charged named, by its
+    /// ordinals, so a seek per outer row of a join asks the table's indexes
+    /// once rather than per row; the indexes can't change while the loop runs.
+    /// </summary>
+    public sealed class SeekedIndexMemo
+    {
+        public int[]? Ordinals;
+        public (int IndexId, bool Singleton) Index;
     }
 
     /// <summary>

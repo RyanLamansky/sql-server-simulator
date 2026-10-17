@@ -274,9 +274,24 @@ internal sealed class FromSource(
     /// </summary>
     public IEnumerable<byte[]> RowsFor(BatchContext batch)
     {
-        if (this.BackingTable is { OwningDatabase: not null } table && this.LateralPlan is null && !batch.IsSkipping)
-            Storage.IndexUsageAccounting.NoteRead(batch, table, this.SeekOrdinals, this.Seeks, this.SeekIsEquality);
+        if (this.LateralPlan is null)
+            NoteRead(this.BackingTable, this.SeekOrdinals, this.Seeks, this.SeekIsEquality, batch);
         return this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
+    }
+
+    /// <summary>
+    /// Charges the index usage counters with a read of <paramref name="table"/>
+    /// seeking on <paramref name="seekOrdinals"/> (or scanning, without
+    /// <paramref name="seeks"/>), as <see cref="RowsFor"/> charges a source
+    /// carrying them — called directly by a join that seeks its inner once per
+    /// outer row without a source per seek. <paramref name="memo"/>, when
+    /// given, remembers which index the last seek's ordinals named.
+    /// </summary>
+    public static void NoteRead(
+        HeapTable? table, int[]? seekOrdinals, bool seeks, bool equality, BatchContext batch, Storage.IndexUsageAccounting.SeekedIndexMemo? memo = null)
+    {
+        if (table is { OwningDatabase: not null } && !batch.IsSkipping)
+            Storage.IndexUsageAccounting.NoteRead(batch, table, seekOrdinals, seeks, equality, memo);
     }
 
     /// <summary>

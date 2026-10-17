@@ -850,12 +850,16 @@ internal sealed partial class Selection
         if (buffer.Count == 0)
             yield break;
 
-        // Probe seekability on the first buffered outer row. MaybeApplyIndexSeek
-        // returns the same FromSource on decline, a narrowed one on seek; the
-        // decline is value-independent so this one probe settles the strategy.
+        // Probe seekability on the first buffered outer row. NarrowedRows
+        // returns no rows on decline; the decline is value-independent so this
+        // one probe settles the strategy. What the ON offers the seek is
+        // collected once, and each outer row evaluates only its probes.
         Array.Copy(buffer[0], tuple, level);
-        var firstSeek = MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
-        if (ReferenceEquals(firstSeek[0], right))
+        List<BooleanExpression> on = [join.OnPredicate!];
+        var shape = new SeekConjunctShape();
+        var usage = new IndexUsageAccounting.SeekedIndexMemo();
+        var firstSeek = NarrowedRows(right, on, batch, resolve, null, out _, out _, shape: shape);
+        if (firstSeek.Rows is null)
         {
             LogHash();
             foreach (var t in HashEquiJoin(Replay(buffer, tuple, level), right, plan, tuple, level, batch, resolve, emitUnmatchedLeft, emitUnmatchedRight: false))
@@ -869,9 +873,11 @@ internal sealed partial class Selection
         {
             batch.ThrowIfCancelled();
             Array.Copy(buffer[i], tuple, level);
-            var seeked = i == 0 ? firstSeek : MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
+            var seeked = i == 0 ? firstSeek : NarrowedRows(right, on, batch, resolve, null, out _, out _, shape: shape);
             var matched = false;
-            foreach (var row in seeked[0].RowsFor(batch))
+            if (seeked.Rows is not null)
+                FromSource.NoteRead(right.BackingTable, seeked.SeekOrdinals, seeked.Seeks, seeked.Equality, batch, usage);
+            foreach (var row in seeked.Rows ?? right.RowsFor(batch))
             {
                 tuple[level] = row;
                 if (join.OnPredicate!.Run(runtime) == true)

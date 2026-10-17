@@ -58,6 +58,22 @@ internal sealed partial class Selection
         => MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver, planSources, out _, out _, where);
 
     /// <summary>
+    /// What the index-seek narrowing (<c>MaybeApplyIndexSeek</c>)
+    /// reads off a source's conjuncts before it evaluates anything: the
+    /// conjuncts themselves, the columns they equate with a stable value and
+    /// the columns they bound. None of it depends on the values the value
+    /// sides take, so a read seeking the same source by the same conjuncts
+    /// once per outer row — a join's inner — collects it on the first row and
+    /// only evaluates the probes on the rest.
+    /// </summary>
+    private sealed class SeekConjunctShape
+    {
+        public List<BooleanExpression>? Conjuncts;
+        public Dictionary<int, Expression[]>? Equalities;
+        public Dictionary<int, RangeBoundExprs>? Bounds;
+    }
+
+    /// <summary>
     /// The narrowing above, additionally reporting how many candidate row
     /// addresses the seek selected (<c>-1</c> when it declined and the source
     /// keeps its full scan). The count is the seek's own pre-materialization
@@ -83,25 +99,71 @@ internal sealed partial class Selection
     {
         seekedCandidates = -1;
         keyedOrdinals = null;
-        if (sources.Length != 1 || joins.Length != 0 || excluders.Count == 0)
+        if (sources.Length != 1 || joins.Length != 0)
             return sources;
-        var source = sources[0];
-        if (source.BackingTable is not { } table || source.LateralPlan is not null)
-            return sources;
+        var outcome = NarrowedRows(sources[0], excluders, batch, outerResolver, planSources, out seekedCandidates, out keyedOrdinals, where);
+        return outcome.Rows is { } rows ? SeekedSource(sources[0], rows, outcome.SeekOrdinals, outcome.Seeks, outcome.Equality) : sources;
+    }
+
+    /// <summary>
+    /// The rows a narrowed read of a source produces, and how
+    /// the index usage counters see it (<see cref="SeekedSource"/>); no rows
+    /// when the read keeps its full scan.
+    /// </summary>
+    private readonly struct SeekOutcome(IEnumerable<byte[]> rows, int[]? seekOrdinals = null, bool seeks = true, bool equality = false)
+    {
+        public readonly IEnumerable<byte[]>? Rows = rows;
+        public readonly int[]? SeekOrdinals = seekOrdinals;
+        public readonly bool Seeks = seeks;
+        public readonly bool Equality = equality;
+    }
+
+    /// <summary>
+    /// The narrowing of <c>MaybeApplyIndexSeek</c> over its one source, without wrapping the rows in a source of their
+    /// own: a join seeking its inner once per outer row reads them directly.
+    /// <paramref name="shape"/>, when given, holds what the conjuncts offer
+    /// the seek from the first call to the next (see <see cref="SeekConjunctShape"/>).
+    /// </summary>
+    private static SeekOutcome NarrowedRows(
+        FromSource source,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver,
+        FromSource[]? planSources,
+        out int seekedCandidates,
+        out int[]? keyedOrdinals,
+        bool where = false,
+        SeekConjunctShape? shape = null)
+    {
+        seekedCandidates = -1;
+        keyedOrdinals = null;
+        if (excluders.Count == 0 || source.BackingTable is not { } table || source.LateralPlan is not null)
+            return default;
 
         if (source.HeapPlan is not { } plan)
         {
             IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-            return sources;
+            return default;
         }
 
-        var conjuncts = new List<BooleanExpression>();
-        foreach (var excluder in excluders)
-            excluder.CollectConjuncts(conjuncts);
-
-        var equalities = CollectColumnEqualities(
-            source, conjuncts, allowCorrelatedColumnValue: true, planSources, table, batch, outerResolver);
-        var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
+        List<BooleanExpression> conjuncts;
+        Dictionary<int, Expression[]> equalities;
+        Dictionary<int, RangeBoundExprs> bounds;
+        if (shape is { Conjuncts: { } shapeConjuncts, Equalities: { } shapeEqualities, Bounds: { } shapeBounds })
+        {
+            (conjuncts, equalities, bounds) = (shapeConjuncts, shapeEqualities, shapeBounds);
+        }
+        else
+        {
+            conjuncts = [];
+            foreach (var excluder in excluders)
+                excluder.CollectConjuncts(conjuncts);
+            equalities = CollectColumnEqualities(
+                source, conjuncts, allowCorrelatedColumnValue: true, planSources, table, batch, outerResolver);
+            bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: true, planSources);
+            if (shape is not null)
+                (shape.Conjuncts, shape.Equalities, shape.Bounds) = (conjuncts, equalities, bounds);
+        }
 
         // A SERIALIZABLE / HOLDLOCK reader's phantom fence is settled here,
         // before any candidate address is read: the conjuncts that bound the
@@ -144,7 +206,7 @@ internal sealed partial class Selection
                 if (planSources is not null)
                     seekedCandidates = CountFencedRows(table, keyFence);
                 var walkQualifier = plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where) : null;
-                return SeekedSource(source, RowSecurity.FilterRows(table,
+                return new SeekOutcome(RowSecurity.FilterRows(table,
                     WalkKeyFence(table, batch, plan, keyFence.Group, keyFence.Commons, keyFence.Intervals, descending: false, walkQualifier), batch));
             }
             SettleSerializablePhantomFence(table, plan, batch, keyFence);
@@ -166,10 +228,10 @@ internal sealed partial class Selection
                 || (qualifier = RowLockQualifier.For(source, conjuncts, outerResolver, where)) is null)
             {
                 IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-                return sources;
+                return default;
             }
             if (RowLockQualifier.For(source, conjuncts, outerResolver) is null)
-                return QualifiedScan(source, table, plan, batch, scanFences, qualifier);
+                return QualifiedScan(table, plan, batch, scanFences, qualifier);
         }
 
         // A snapshot / RCSI reader sees the version visible at its snapshot, not
@@ -207,7 +269,7 @@ internal sealed partial class Selection
                 IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
             seekedCandidates = equalityCandidates;
             keyedOrdinals = equalityKeyed;
-            return SeekedSource(source, RowSecurity.FilterRows(table, seekRows, batch), equalityKeyed, equality: !rangeExtended);
+            return new SeekOutcome(RowSecurity.FilterRows(table, seekRows, batch), equalityKeyed, equality: !rangeExtended);
         }
         // The equality's bucket held too much of the table to seek: the read
         // scans, as it does with nothing to seek on, rather than trying the
@@ -216,7 +278,7 @@ internal sealed partial class Selection
         if (width < 0)
         {
             IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-            return sources;
+            return default;
         }
 
         // No equality seek on the conjunction — try the union of seeks a
@@ -236,13 +298,13 @@ internal sealed partial class Selection
             {
                 batch.EnsureSerializableTableLock(table, plan);
                 if (!TryComputeUnionCandidates(source, table, batch, outerResolver, conjuncts, allowCorrelatedColumnValue: true, planSources, out unionCandidates, out unionDisjuncts))
-                    return sources;
+                    return default;
             }
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"UnionSeek({table.Name},{unionDisjuncts})");
             IndexSeekDiagnostics.Sink?.Add($"UnionSeekCandidates({table.Name},{unionCandidates.Count})");
             seekedCandidates = unionCandidates.Count;
-            return SeekedSource(source, RowSecurity.FilterRows(table, snapshotXid is { } unionSx
+            return new SeekOutcome(RowSecurity.FilterRows(table, snapshotXid is { } unionSx
                 ? MaterializeSnapshotCandidates(table, batch, unionSx, unionCandidates)
                 : MaterializeWithLockChecks(table, batch, plan, unionCandidates, qualifier), batch));
         }
@@ -258,13 +320,13 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
             seekedCandidates = rangeCandidates;
             keyedOrdinals = FindRangeLeadingKey(table, bounds, out _) is { } rangeKey ? [rangeKey[0]] : null;
-            return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch), keyedOrdinals);
+            return new SeekOutcome(RowSecurity.FilterRows(table, rangeRows, batch), keyedOrdinals);
         }
 
         if (qualifier is not null)
-            return QualifiedScan(source, table, plan, batch, scanFences, qualifier);
+            return QualifiedScan(table, plan, batch, scanFences, qualifier);
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-        return sources;
+        return default;
     }
 
     /// <summary>
@@ -272,19 +334,19 @@ internal sealed partial class Selection
     /// each lock let go where <paramref name="qualifier"/> rejects the row — a
     /// <c>SERIALIZABLE</c> one walking its keys as it reaches them.
     /// </summary>
-    private static FromSource[] QualifiedScan(FromSource source, HeapTable table, DataLockPlan plan, BatchContext batch, bool scanFences, RowLockQualifier qualifier)
+    private static SeekOutcome QualifiedScan(HeapTable table, DataLockPlan plan, BatchContext batch, bool scanFences, RowLockQualifier qualifier)
     {
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
         if (scanFences && KeyLockGroup.RowGroupOf(table) is { } scanned && WalksKeyFence(table, plan, scanned))
         {
             batch.AwaitUncommittedDeletes(table);
             plan.Fence!.Settled = true;
-            return SeekedSource(source, RowSecurity.FilterRows(table,
+            return new SeekOutcome(RowSecurity.FilterRows(table,
                 WalkKeyFence(table, batch, plan, scanned, scanned.Commons, [KeyFenceInterval.Everything], descending: false, qualifier), batch), seeks: false);
         }
         if (scanFences)
             batch.EnsureSerializableTableLock(table, plan);
-        return SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch), seeks: false);
+        return new SeekOutcome(RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch), seeks: false);
     }
 
     /// <summary>
@@ -3204,10 +3266,15 @@ internal sealed partial class Selection
     // matches when every equality column's value in its pre-delete image equals
     // one of that column's probes.
     private static bool AwaitUncommittedDeletesMatching(
-        HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities)
+        HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities) =>
+        OtherSessionsDeletedRows(table, batch) is { } deleted && AwaitDeletesMatching(table, batch, outerResolver, equalities, deleted);
+
+    // The waits of AwaitUncommittedDeletesMatching once there are deletes to
+    // match, apart so the closure its resolver builds is allocated only then.
+    private static bool AwaitDeletesMatching(
+        HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities,
+        List<(byte[] Image, LockResource Lock)> deleted)
     {
-        if (OtherSessionsDeletedRows(table, batch) is not { } deleted)
-            return false;
         var matched = false;
 
         var runtime = new RuntimeContext(name => outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name), batch);
@@ -3280,7 +3347,9 @@ internal sealed partial class Selection
         seeks = 0;
         keyed = null;
 
-        var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
+        // A column's probes once evaluated, by storage ordinal: a handful at
+        // most, which a list scans faster than a dictionary is built.
+        var resolved = new List<(int Ordinal, (SqlType Common, SqlValue[] Probes)? Component)>(equalities.Count);
 
         var bestLen = 0;
         var bestContinues = false;
@@ -3331,7 +3400,7 @@ internal sealed partial class Selection
         for (var i = 0; i < bestLen; i++)
         {
             prefix[i] = bestKeyOrdinals is { } ko ? ko[i] : bestIndex!.KeyColumns[i].StorageOrdinal;
-            var (common, probes) = resolved[prefix[i]]!.Value;
+            var (common, probes) = ResolveComponent(prefix[i])!.Value;
             commons[i] = common;
             probesPerColumn[i] = probes;
         }
@@ -3464,10 +3533,13 @@ internal sealed partial class Selection
         {
             if (!equalities.TryGetValue(storageOrdinal, out var valueSides))
                 return null;
-            if (resolved.TryGetValue(storageOrdinal, out var cached))
-                return cached;
+            foreach (var (ordinal, cached) in resolved)
+            {
+                if (ordinal == storageOrdinal)
+                    return cached;
+            }
             var component = EvaluateProbeComponent(source, storageOrdinal, valueSides, batch, outerResolver);
-            resolved[storageOrdinal] = component;
+            resolved.Add((storageOrdinal, component));
             return component;
         }
     }
@@ -3708,6 +3780,9 @@ internal sealed partial class Selection
     // row-invariant (IsStableValueSide), so this runs once per column per
     // inner execution. Duplicates aren't deduplicated; the cache lookup is a
     // hash hit and duplicate keys just probe the same bucket.
+    // The resolver of a probe evaluated with no enclosing scope: a name reads NULL.
+    private static readonly Func<MultiPartName, SqlValue> NullForEveryName = static _ => SqlValue.Null(SqlType.Int32);
+
     private static (SqlType Common, SqlValue[] Probes)? EvaluateProbeComponent(
         FromSource source, int storageOrdinal, Expression[] valueSides, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -3720,9 +3795,7 @@ internal sealed partial class Selection
             SqlValue value;
             try
             {
-                value = valueSide.Run(new RuntimeContext(
-                    name => outerResolver is { } resolve ? resolve(name) : SqlValue.Null(SqlType.Int32),
-                    batch));
+                value = valueSide.Run(new RuntimeContext(outerResolver ?? NullForEveryName, batch));
             }
             catch (SimulatedSqlException)
             {
