@@ -562,7 +562,7 @@ partial class Simulation
         /// </summary>
         private static bool ResultsDisallowed(SimulatedDbConnection connection) =>
             connection.TriggerNestLevel > 0
-            && connection.InsertExecTargetTypes is null
+            && connection.InsertExecTarget is null
             && connection.Simulation.DisallowsResultsFromTriggers;
 
         /// <summary>
@@ -1221,7 +1221,8 @@ partial class Simulation
                 yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
-            yield return errorOutcome;
+            if (!continuedError.UnseenInProcess || connection.FramesEveryStatement)
+                yield return errorOutcome;
             if (continuedError.FollowingMessage is { } following)
                 yield return new SimulatedInfoOutcome(following, followsRows: true);
             // A statement its error ended still reports its time, after the

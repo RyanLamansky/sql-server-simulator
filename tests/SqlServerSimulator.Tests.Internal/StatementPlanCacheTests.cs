@@ -180,6 +180,26 @@ public sealed class StatementPlanCacheTests
             "create procedure s @id int as select id, v from t where id = @id; update t set v = v + 1 where id = @id; select @id, v from t where id = 2",
             "insert log exec s 1"));
 
+    /// <summary>
+    /// A body's replayed <c>SELECT</c> converts its rows to the target of the
+    /// <c>INSERT … EXEC</c> running it, raising for a target the rows don't
+    /// fit, as its first parse would.
+    /// </summary>
+    [TestMethod]
+    public void InsertExecOfAProcedure_ReplayedBodyConvertsPerTarget()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateDbConnection();
+        connection.Open();
+        Execute(connection, "create table s (v varchar(10)); insert s values ('abcd'); create table wide (a varchar(10)); create table narrow (a varchar(3))");
+        Execute(connection, "create procedure p as select v from s");
+        Execute(connection, "insert wide exec p");
+        Execute(connection, "insert wide exec p");
+        var hits = simulation.SelectPlanHits;
+        AreEqual(8152, Throws<SimulatedSqlException>(() => Execute(connection, "insert narrow exec p")).Number);
+        IsGreaterThan(hits, simulation.SelectPlanHits);
+    }
+
     [TestMethod]
     public void InsertExecOfADynamicBatch_ReplaysItsBody()
         => AreEqual((2L, 0L), ReplaysOverThreeRuns(

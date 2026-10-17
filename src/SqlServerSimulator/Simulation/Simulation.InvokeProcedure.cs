@@ -424,6 +424,7 @@ partial class Simulation
                 innerBatch.CallerStreams = streams && !compiles;
                 innerBatch.YieldsBetweenStatements = outerBatch.YieldsBetweenStatements && innerBatch.CallerStreams;
                 innerBatch.StreamsResultRows = outerBatch.StreamsResultRows && innerBatch.CallerStreams;
+                innerBatch.DiscardsResultRows = outerBatch.DiscardsResultRows;
                 innerBatch.InRpcProcedure = outerBatch.InRpcProcedure;
                 // An error that ends the body keeps what the body sent before
                 // it, which reaches the caller ahead of the error.

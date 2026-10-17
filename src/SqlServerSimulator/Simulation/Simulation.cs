@@ -1719,13 +1719,13 @@ public sealed partial class Simulation
     /// produced, as <see cref="StreamsRows"/> judges a <c>SELECT</c>'s.
     /// </summary>
     private static bool StreamsWrittenRows(BatchContext batch) =>
-        batch.StreamsResultRows
+        batch is { StreamsResultRows: true, DiscardsResultRows: false }
         && batch.StreamingFrames == batch.FramedStatementDepth - 1
         && !batch.IsSkipping
         && batch.BindErrors is null
         && !batch.CreateTimeBinding
         && batch.TriggerFrame is null
-        && batch.Connection.InsertExecTargetTypes is null;
+        && batch.Connection.InsertExecTarget is null;
 
     /// <summary>
     /// Whether a DML statement of <paramref name="batch"/> writes its rows as
@@ -4316,8 +4316,9 @@ public sealed partial class Simulation
                 batch.CurrentStatement.DoneCount = 0;
             return null;
         }
-        if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
-            RequireInsertExecAssignable(selection, insertExecTargets, batch);
+        var insertExecTarget = selection.IsAssignmentOnly ? null : connection.InsertExecTarget;
+        if (insertExecTarget is not null)
+            RequireInsertExecAssignable(selection, insertExecTarget, batch);
         // Inside an EXECUTE … WITH RESULT SETS the statement sends its set
         // through the contract: a set it can't claim fails it before it sends
         // anything, and its rows convert as it produces them.
@@ -4347,6 +4348,8 @@ public sealed partial class Simulation
             executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
             if (resultSetClaims is not null)
                 executed = SendThroughResultSets(executed, resultSetClaims, batch.ResultSetsSink!);
+            else if (insertExecTarget is not null && executed.Schema.Length == insertExecTarget.Columns.Length)
+                executed = executed.WithConvertedRows(row => insertExecTarget.Convert(row, connection));
             // A result larger than real gets ahead of its client goes out as the
             // client reads it, the statement holding its position meanwhile;
             // one that fits is produced whole, as it would be anyway.
@@ -4433,7 +4436,7 @@ public sealed partial class Simulation
         && !selection.IsAssignmentOnly
         && batch.BindErrors is null
         && !batch.CreateTimeBinding
-        && batch.Connection.InsertExecTargetTypes is null;
+        && batch.Connection.InsertExecTarget is null;
 
     /// <summary>A statement's lifecycle as its own thread runs it (see <see cref="RunsOnItsOwnThread"/>).</summary>
     private sealed class StatementLifecycleBox(StatementLifecycle lifecycle)
@@ -4463,7 +4466,7 @@ public sealed partial class Simulation
     /// either way.
     /// </summary>
     private static bool RunsOnItsOwnThread(BatchContext batch) =>
-        batch.StreamsResultRows
+        batch is { StreamsResultRows: true, DiscardsResultRows: false }
         && batch.StreamingFrames == batch.FramedStatementDepth - 1
         && batch.StatementCoroutine is null
         && !batch.IsSkipping
@@ -4471,7 +4474,7 @@ public sealed partial class Simulation
         && !batch.CreateTimeBinding
         && batch.TriggerFrame is null
         && batch.CallerTriggerFrame is null
-        && batch.Connection is { InsertExecTargetTypes: null, StatisticsIo: false, StatisticsTime: false }
+        && batch.Connection is { InsertExecTarget: null, StatisticsIo: false, StatisticsTime: false }
         && batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
         && (HasDmlTrigger(batch.Connection.Simulation, batch.CurrentDatabase) || MayFireCrossDatabaseTrigger(batch))
         && SomeTriggerMaySendRows(batch.Connection.Simulation)
@@ -4567,7 +4570,7 @@ public sealed partial class Simulation
     /// <summary>
     /// Whether the DML statement at the cursor names its target, as written
     /// after <c>INSERT [INTO]</c>, <c>UPDATE</c>, <c>DELETE [FROM]</c> or
-    /// <c>MERGE [INTO]</c>, with three or four parts.
+    /// <c>MERGE [INTO]</c>, with three or four parts, or through a synonym.
     /// </summary>
     private static bool WritesThroughLongName(BatchContext batch)
     {
@@ -4582,8 +4585,11 @@ public sealed partial class Simulation
             {
                 context.MoveNextOptional();
             }
-            return context.Token is Name or UnquotedString { ContextualKeyword: ContextualKeyword.None }
-                && BatchContext.ParseObjectName(context).Count >= 3;
+            if (context.Token is not (Name or UnquotedString { ContextualKeyword: ContextualKeyword.None }))
+                return false;
+            var name = BatchContext.ParseObjectName(context);
+            // A synonym may name another database's table.
+            return name.Count >= 3 || (batch.TryResolveSchema(name, out var schema) && schema.Synonyms.ContainsKey(name.Leaf));
         }
         catch (SimulatedSqlException)
         {
@@ -5184,6 +5190,8 @@ public sealed partial class Simulation
 
         var connection = context.Connection;
         var tx = connection.CurrentTransaction;
+        if (connection.InsertExecTarget is { } insertExec && (tx?.TranCount ?? 0) <= insertExec.EntryTranCount)
+            throw SimulatedSqlException.InsertExecCommit();
         if (tx is null)
         {
             // In a trigger body fired by an auto-commit statement it commits
@@ -5269,6 +5277,8 @@ public sealed partial class Simulation
 
                     if (context.Batch.IsSkipping)
                         return true;
+                    if (context.Connection.InsertExecTarget is not null)
+                        throw SimulatedSqlException.InsertExecRollback();
                     if (variable is not null)
                         name = TransactionNameFromVariable(context.Batch, variable.Value) ?? string.Empty;
 
@@ -5298,6 +5308,8 @@ public sealed partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+        if (context.Connection.InsertExecTarget is not null)
+            throw SimulatedSqlException.InsertExecRollback();
 
         // Bare ROLLBACK (or ROLLBACK TRAN / ROLLBACK WORK with no name) →
         // full rollback regardless of TRANCOUNT. In a trigger body fired by an

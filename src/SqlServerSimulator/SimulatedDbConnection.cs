@@ -2397,11 +2397,11 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool InsertExecActive;
 
     /// <summary>
-    /// The column types an <c>INSERT … EXEC</c> in progress writes, which each
+    /// The columns an <c>INSERT … EXEC</c> in progress writes, which each
     /// <c>SELECT</c> the executed body runs is judged against as it compiles
-    /// (<c>Simulation.RequireInsertExecAssignable</c>); null otherwise.
+    /// and converts its rows to as it produces them; null otherwise.
     /// </summary>
-    internal SqlType[]? InsertExecTargetTypes;
+    internal InsertExecTarget? InsertExecTarget;
 
     /// <summary>
     /// The triggers mid-fire on this connection, innermost last: each frame

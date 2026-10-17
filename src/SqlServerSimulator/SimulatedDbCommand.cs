@@ -74,6 +74,16 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     internal bool StreamsResultRows;
 
+    /// <summary>
+    /// Set alongside <see cref="StreamsResultRows"/> by a consumer that reads
+    /// no rows — <see cref="ExecuteNonQuery"/>, and <see cref="ExecuteScalar"/>
+    /// past its first: a <c>SELECT</c>'s rows are produced and discarded as
+    /// they go rather than held whole, while a DML statement's <c>OUTPUT</c>
+    /// rows and a trigger's are produced whole as before, since nothing reads
+    /// them as they come.
+    /// </summary>
+    internal bool DiscardsResultRows;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
@@ -209,23 +219,34 @@ public sealed class SimulatedDbCommand : DbCommand
         var affected = 0;
         var counted = false;
         var compileError = new CompileErrorCount();
-        foreach (var outcome in simulation.CreateResultSetsForCommand(this))
+        // A SELECT's rows are produced and discarded as they go, as SqlClient
+        // reads past them, rather than held whole.
+        this.StreamsResultRows = this.DiscardsResultRows = true;
+        try
         {
-            if (!compileError.Admits(outcome) && outcome is not SimulatedErrorOutcome)
-                continue;
-            switch (outcome)
+            foreach (var outcome in simulation.CreateResultSetsForCommand(this))
             {
-                case SimulatedErrorOutcome error:
-                    (errors ??= []).Add(error.Exception);
-                    break;
-                case SimulatedInfoOutcome info:
-                    (messages ??= []).Add(info.Message);
-                    break;
-                case { ClientRecordsAffected: >= 0 } counting:
-                    affected += counting.ClientRecordsAffected;
-                    counted = true;
-                    break;
+                PassOver(outcome);
+                if (!compileError.Admits(outcome) && outcome is not SimulatedErrorOutcome)
+                    continue;
+                switch (outcome)
+                {
+                    case SimulatedErrorOutcome error:
+                        (errors ??= []).Add(error.Exception);
+                        break;
+                    case SimulatedInfoOutcome info:
+                        (messages ??= []).Add(info.Message);
+                        break;
+                    case { ClientRecordsAffected: >= 0 } counting:
+                        affected += counting.ClientRecordsAffected;
+                        counted = true;
+                        break;
+                }
             }
+        }
+        finally
+        {
+            this.StreamsResultRows = this.DiscardsResultRows = false;
         }
 
         ThrowIfExecutionCancelled();
@@ -250,38 +271,60 @@ public sealed class SimulatedDbCommand : DbCommand
         List<SimulatedError>? messages = null;
         object? scalar = null;
         var haveScalar = false;
-        foreach (var outcome in simulation.CreateResultSetsForCommand(this))
+        // The first row is read off the first window of a SELECT producing its
+        // rows as they go, and the rest produced and discarded, as SqlClient
+        // reads past them.
+        this.StreamsResultRows = this.DiscardsResultRows = true;
+        try
         {
-            switch (outcome)
+            foreach (var outcome in simulation.CreateResultSetsForCommand(this))
             {
-                case SimulatedErrorOutcome error:
-                    (errors ??= []).Add(error.Exception);
-                    break;
-                case SimulatedInfoOutcome info:
-                    (messages ??= []).Add(info.Message);
-                    break;
-                case SimulatedQueryResult query when !haveScalar:
-                    using (var cursor = query.CreateClientCursor())
-                    {
-                        if (cursor.MoveNext())
+                switch (outcome)
+                {
+                    case SimulatedErrorOutcome error:
+                        (errors ??= []).Add(error.Exception);
+                        break;
+                    case SimulatedInfoOutcome info:
+                        (messages ??= []).Add(info.Message);
+                        break;
+                    case SimulatedQueryResult query when !haveScalar:
+                        using (var cursor = query.CreateClientCursor())
                         {
-                            var value = cursor[0];
-                            // A present-but-NULL first column surfaces as
-                            // DBNull.Value (matching SqlClient and the reader's
-                            // GetValue); only an empty first result set leaves
-                            // the C# null that signals "no value".
-                            scalar = value.IsNull ? DBNull.Value : value.Type is Storage.XmlSqlType ? SimulatedDbDataReader.ClientString(value) : value.ToObject();
+                            if (cursor.MoveNext())
+                            {
+                                var value = cursor[0];
+                                // A present-but-NULL first column surfaces as
+                                // DBNull.Value (matching SqlClient and the reader's
+                                // GetValue); only an empty first result set leaves
+                                // the C# null that signals "no value".
+                                scalar = value.IsNull ? DBNull.Value : value.Type is Storage.XmlSqlType ? SimulatedDbDataReader.ClientString(value) : value.ToObject();
+                            }
                         }
-                    }
 
-                    haveScalar = true;
-                    break;
+                        haveScalar = true;
+                        break;
+                }
+                PassOver(outcome);
             }
+        }
+        finally
+        {
+            this.StreamsResultRows = this.DiscardsResultRows = false;
         }
 
         ThrowIfExecutionCancelled();
         this.CompleteDrainedBatch(errors, messages);
         return scalar;
+    }
+
+    /// <summary>
+    /// Leaves the rest of a result set's rows, which a statement still
+    /// produces as they are read, to be produced and discarded.
+    /// </summary>
+    private static void PassOver(SimulatedStatementOutcome outcome)
+    {
+        if (outcome is SimulatedSqlResultSet { Stream: { } passed })
+            passed.Draining = true;
     }
 
     /// <summary>

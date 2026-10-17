@@ -2034,9 +2034,18 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         // A body compile walk reaching a nested one hands the flags back as
         // it found them, so the outer drain keeps refusing the nested run.
-        var (outerActive, outerTargetTypes) = (connection.InsertExecActive, connection.InsertExecTargetTypes);
+        var (outerActive, outerTarget) = (connection.InsertExecActive, connection.InsertExecTarget);
         connection.InsertExecActive = true;
-        connection.InsertExecTargetTypes = Array.ConvertAll(destinationColumns, column => column.Type);
+        var target = connection.InsertExecTarget = new InsertExecTarget(destinationColumns, connection.CurrentTransaction?.TranCount ?? 0);
+        var sentError = false;
+        // In auto-commit the body runs inside the transaction real opens for
+        // the INSERT, as a trigger body runs inside its firing statement's:
+        // @@TRANCOUNT reads 1, its writes join the statement's and go with it,
+        // and an error a TRY in it catches can doom that unit (probed
+        // 2026-10-17 against SQL Server 2025).
+        using var unit = connection.CurrentTransaction is null && connection.TriggerStatementUndoLog is null && batch.CurrentUndoLog is not null
+            ? StatementUnitScope.Publish(batch)
+            : default;
         try
         {
             foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
@@ -2064,12 +2073,33 @@ partial class Simulation
                     else
                         connection.PendingMessages.Enqueue(info.Message);
                 }
+                sentError |= outcome is SimulatedErrorOutcome;
                 if (outcome is not SimulatedSqlResultSet resultSet)
                     continue;
                 if (resultSet.Schema.Length != expectedColumnCount)
                     throw SimulatedSqlException.InsertExecColumnCountMismatch();
-                foreach (var rowBytes in resultSet.RowBytes)
-                    rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
+                // A SELECT of the body hands its rows over converted to the
+                // target's types; any other producer's are decoded as sent.
+                rows.AddRange(resultSet.RowValues);
+            }
+            // A row the body's SELECT couldn't convert fails the INSERT whole,
+            // whether a TRY in the body caught the error or not — every row of
+            // every set left out — with a DONE carrying the error bit and no
+            // error of its own, which SqlClient reports as its class-11 Msg 0
+            // when nothing else was (probed 2026-10-17 against SQL Server
+            // 2025); with a TRY open around it or XACT_ABORT on, the caller's
+            // whole batch ends.
+            if (target.RowsRefused)
+            {
+                rows.Clear();
+                if (CallerEndedBySilentCompile(connection) is { } callerEnded)
+                    throw callerEnded;
+                throw SimulatedSqlException.InsertExecRowsRefused(afterReportedError: sentError);
+            }
+            // A unit the body doomed refuses the INSERT's own write.
+            else
+            {
+                RejectWriteInDoomedTransaction(connection);
             }
         }
         catch (SimulatedSqlException ended) when (ended is { EndedCalledBatch: true, XactAbortPromoted: false, TerminatesBatch: false } && ContinuesCalledBatch(batch))
@@ -2087,7 +2117,7 @@ partial class Simulation
         finally
         {
             connection.InsertExecActive = outerActive;
-            connection.InsertExecTargetTypes = outerTargetTypes;
+            connection.InsertExecTarget = outerTarget;
         }
         return rows;
 
@@ -2096,6 +2126,55 @@ partial class Simulation
             var pending = batch.PendingTriggerOutcomes ??= [];
             pending.AddRange(DrainPendingMessages(batch.Connection));
             pending.Add(outcome);
+        }
+    }
+
+    /// <summary>
+    /// An auto-commit statement's atomic scope published as the unit a body it
+    /// runs works in, as a trigger's firing statement publishes its own (see
+    /// <see cref="SimulatedDbConnection.TriggerStatementUndoLog"/>), and put
+    /// back as it was when disposed; the default value publishes nothing.
+    /// </summary>
+    private readonly struct StatementUnitScope : IDisposable
+    {
+        private readonly SimulatedDbConnection? connection;
+        private readonly Storage.UndoLog? log;
+        private readonly List<Storage.PendingVersionEntry>? versionEntries;
+        private readonly List<(Storage.LockResource Resource, Storage.LockMode Mode, SessionToken Owner)>? locks;
+        private readonly List<(string Name, int UndoPosition, int VersionEntryCount)>? savepoints;
+        private readonly bool doomed;
+
+        private StatementUnitScope(SimulatedDbConnection connection)
+        {
+            this.connection = connection;
+            this.log = connection.TriggerStatementUndoLog;
+            this.versionEntries = connection.TriggerStatementVersionEntries;
+            this.locks = connection.TriggerStatementLocks;
+            this.savepoints = connection.TriggerUnitSavepoints;
+            this.doomed = connection.TriggerUnitDoomed;
+        }
+
+        public static StatementUnitScope Publish(BatchContext batch)
+        {
+            var connection = batch.Connection;
+            var scope = new StatementUnitScope(connection);
+            connection.TriggerStatementUndoLog = batch.CurrentUndoLog;
+            connection.TriggerStatementVersionEntries = batch.CurrentStatementVersionEntries;
+            connection.TriggerStatementLocks = batch.StatementSchemaLocks;
+            connection.TriggerUnitSavepoints = null;
+            connection.TriggerUnitDoomed = false;
+            return scope;
+        }
+
+        public void Dispose()
+        {
+            if (this.connection is not { } connection)
+                return;
+            connection.TriggerStatementUndoLog = this.log;
+            connection.TriggerStatementVersionEntries = this.versionEntries;
+            connection.TriggerStatementLocks = this.locks;
+            connection.TriggerUnitSavepoints = this.savepoints;
+            connection.TriggerUnitDoomed = this.doomed;
         }
     }
 
@@ -2125,8 +2204,9 @@ partial class Simulation
     /// column that is a constant <c>NULL</c>, typed or not (probed 2026-09-28
     /// against SQL Server 2025).
     /// </summary>
-    internal static void RequireInsertExecAssignable(Selection selection, SqlType[] targets, BatchContext batch)
+    internal static void RequireInsertExecAssignable(Selection selection, InsertExecTarget target, BatchContext batch)
     {
+        var targets = target.Types;
         if (selection.Schema.Length != targets.Length)
             return;
         for (var i = 0; i < targets.Length; i++)
@@ -2146,6 +2226,7 @@ partial class Simulation
                 // caller's batch.
                 refused.EndedCalledBatch = true;
                 refused.EndsInsertExec = true;
+                target.RowsRefused = true;
                 throw;
             }
         }
@@ -2254,4 +2335,116 @@ partial class Simulation
 
     private static string QualifyTableName(HeapTable table, ParserContext context) =>
         Simulation.QualifyTableName(table, context.CurrentDatabase);
+
+    /// <summary>
+    /// <paramref name="value"/>, a value a <c>SELECT</c> of an <c>INSERT …
+    /// EXEC</c> body produces, converted to <paramref name="column"/>'s type
+    /// as real converts it there: a string or binary too long for the column
+    /// is the legacy Msg 8152, at a state naming the pair — 14 from
+    /// <c>varchar</c> into <c>varchar</c>, 4 into <c>nvarchar</c>, 2 from
+    /// <c>nvarchar</c> into <c>varchar</c>, 13 into <c>nvarchar</c>, 11 from a
+    /// binary and 10 from a MAX type — leaving the transaction committable;
+    /// any other conversion that fails is Msg 8114 state 1 naming the two
+    /// types' bare words, which dooms it as under <c>XACT_ABORT</c>; and what
+    /// a <c>CAST</c> answers otherwise stands — <c>'*'</c> for a number too
+    /// wide for a <c>varchar</c>, a fraction cut from an integer (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SqlValue ConvertForInsertExec(SqlValue value, HeapColumn column, SimulatedDbConnection connection)
+    {
+        if (value.IsNull)
+            return value;
+        if (column.MaxLength is int max && max != SqlType.MaxLengthSentinel && TruncationStateForInsertExec(value, column, max) is { } state && connection.AnsiWarnings)
+            throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state);
+        try
+        {
+            return Parser.Expressions.Cast.ApplyCoercion(value, column.Type, column.MaxLength, column.Type.Collation);
+        }
+        catch (SimulatedSqlException failed) when (Parser.Expressions.Cast.IsConversionFailure(failed.Number))
+        {
+            throw SimulatedSqlException.ConvertingDataTypeError(value.Type, column.TypeName, state: 1).AbortingAsUnderXactAbort();
+        }
+    }
+
+    /// <summary>
+    /// The Msg 8152 state <see cref="ConvertForInsertExec"/> raises when
+    /// <paramref name="value"/> overruns <paramref name="column"/>'s
+    /// <paramref name="max"/> by more than trailing spaces or zero bytes; null
+    /// when it fits, or isn't a string or binary meeting a column of its kind.
+    /// </summary>
+    private static byte? TruncationStateForInsertExec(SqlValue value, HeapColumn column, int max)
+    {
+        var target = column.Type;
+        var source = value.Type;
+        if (target is VarbinarySqlType or BinarySqlType)
+        {
+            if (source is not (VarbinarySqlType or BinarySqlType))
+                return null;
+            var bytes = value.AsBytes;
+            if (bytes.Length <= max || !bytes.AsSpan(max).ContainsAnyExcept((byte)0))
+                return null;
+        }
+        else if (target is VarcharSqlType or CharSqlType or NVarcharSqlType or NCharSqlType or SystemNameSqlType && source.Category == SqlTypeCategory.String && !source.IsLob)
+        {
+            var text = value.AsString;
+            var kept = target is VarcharSqlType or CharSqlType
+                ? Collation.ClipToByteBudget(text, max, target.Collation!.StorageEncoding).Length
+                : Math.Min(text.Length, max);
+            if (!text.AsSpan(kept).ContainsAnyExcept(' '))
+                return null;
+        }
+        else
+        {
+            return null;
+        }
+        var nationalSource = source is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
+        return SqlType.IsMaxLength(source) ? (byte)10
+            : source is VarbinarySqlType or BinarySqlType ? (byte)11
+            : target is VarcharSqlType or CharSqlType ? (nationalSource ? (byte)2 : (byte)14)
+            : nationalSource ? (byte)13 : (byte)4;
+    }
+}
+
+/// <summary>
+/// The columns an <c>INSERT … EXEC</c> writes, which each <c>SELECT</c> of the
+/// body it executes converts its rows to as it produces them, as real does —
+/// so a value that won't convert is that <c>SELECT</c>'s own error, raised at
+/// its line inside the body, where a <c>TRY</c> catches it (probed 2026-10-17
+/// against SQL Server 2025).
+/// </summary>
+internal sealed class InsertExecTarget(HeapColumn[] columns, int entryTranCount)
+{
+    public readonly HeapColumn[] Columns = columns;
+
+    public readonly SqlType[] Types = Array.ConvertAll(columns, column => column.Type);
+
+    /// <summary>
+    /// The session's transaction depth as the <c>INSERT</c> began, which a
+    /// <c>COMMIT</c> in the body may not end (Msg 3916).
+    /// </summary>
+    public readonly int EntryTranCount = entryTranCount;
+
+    /// <summary>
+    /// Set once a row of the body's was refused — a conversion, a truncation,
+    /// a type the target can't be assigned — which fails the whole
+    /// <c>INSERT</c> however the body went on.
+    /// </summary>
+    public bool RowsRefused;
+
+    /// <summary><paramref name="row"/> converted to <see cref="Types"/>, noting a refusal before it raises.</summary>
+    public SqlValue[] Convert(SqlValue[] row, SimulatedDbConnection connection)
+    {
+        var converted = new SqlValue[row.Length];
+        try
+        {
+            for (var i = 0; i < row.Length; i++)
+                converted[i] = Simulation.ConvertForInsertExec(row[i], this.Columns[i], connection);
+        }
+        catch (SimulatedSqlException)
+        {
+            this.RowsRefused = true;
+            throw;
+        }
+        return converted;
+    }
 }

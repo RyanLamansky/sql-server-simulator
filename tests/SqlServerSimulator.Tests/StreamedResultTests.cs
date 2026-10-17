@@ -963,6 +963,49 @@ public sealed class StreamedResultTests
     /// last rows, seeing what the result's statement left.
     /// </summary>
     [TestMethod]
+    public void ExecuteScalar_ReadsTheFirstRow_AndTheRestIsProducedAndDiscarded()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("create table l (n int); select k, v from big order by k; insert l values (@@rowcount); select 'later'").ExecuteScalar());
+        AreEqual(Rows, connection.CreateCommand("select n from l").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ExecuteNonQuery_ProducesAndDiscardsTheRows()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("create table l (n int)").ExecuteNonQuery();
+        AreEqual(1, connection.CreateCommand("select k, v from big; select * from heap; insert l values (@@rowcount)").ExecuteNonQuery());
+        AreEqual(Rows, connection.CreateCommand("select n from l").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ExecuteNonQuery_RowsErrorEndsTheStatement()
+    {
+        using var connection = Big().CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select k, v, 1 / iif(k = 1500, 0, 1) from big; print 'after'").ExecuteNonQuery());
+        AreEqual((8134, "after"), (ex.Number, ex.Errors[^1].Message));
+    }
+
+    [TestMethod]
+    public void ExecuteNonQuery_WaitsOnALockedRowAsTheRowsGo()
+    {
+        var sim = Big();
+        using var connection = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+        using var transaction = writer.BeginTransaction();
+        using (var update = writer.CreateCommand("update big set v = 'y' where k = 1500"))
+        {
+            update.Transaction = transaction;
+            _ = update.ExecuteNonQuery();
+        }
+        AreEqual(1222, Throws<SimulatedSqlException>(() => connection.CreateCommand("set lock_timeout 0; select k, v from big").ExecuteNonQuery()).Number);
+        transaction.Rollback();
+    }
+
+    [TestMethod]
     public void NextStatement_ReadsTheStreamedCount()
     {
         using var reader = Big().ExecuteReader("select * from big; select @@rowcount");

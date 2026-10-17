@@ -472,6 +472,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisedByClient;
 
     /// <summary>
+    /// Set on a <see cref="RaisedByClient"/> error that follows another error
+    /// of the same response, which SqlClient doesn't raise at all: the TDS
+    /// endpoint still sends its DONE's error bit, while an in-process
+    /// consumer is handed nothing.
+    /// </summary>
+    internal bool UnseenInProcess;
+
+    /// <summary>
     /// Set on the failure that ends a batch's compile without a message: a
     /// table variable's column defaulting to a sequence missing as the batch
     /// compiles. The batch, procedure or dynamic batch whose compile met it

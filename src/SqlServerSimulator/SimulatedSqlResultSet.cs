@@ -103,6 +103,20 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     }
 
     /// <summary>
+    /// Passes each row through <paramref name="convert"/> as the rows stream
+    /// out, in the <see cref="SqlValue"/>[] form, whose values then answer to
+    /// the types the conversion produces rather than <see cref="Schema"/>.
+    /// </summary>
+    internal SimulatedSqlResultSet WithConvertedRows(Func<SqlValue[], SqlValue[]> convert)
+    {
+        var schema = this.schema;
+        var rows = this.rowValues ?? this.rowBytes!.Select(bytes => RowDecoder.DecodeRow(schema, bytes));
+        this.rowValues = rows.Select(convert);
+        this.rowBytes = null;
+        return this;
+    }
+
+    /// <summary>
     /// Drains the row sequence into a list, keeping whichever form the producer
     /// yielded, and reports the row count. The dispatch loop calls this at the
     /// statement boundary — statement atomicity requires the rows be produced

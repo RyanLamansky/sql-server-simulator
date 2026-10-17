@@ -782,6 +782,13 @@ internal sealed partial class BatchContext
     public bool StreamsResultRows;
 
     /// <summary>
+    /// Whether the consumer reading this batch's rows discards them
+    /// (<see cref="SimulatedDbCommand.DiscardsResultRows"/>), so only a
+    /// <c>SELECT</c> streams.
+    /// </summary>
+    public bool DiscardsResultRows;
+
+    /// <summary>
     /// The <c>WITH RESULT SETS</c> contract the result sets this batch's
     /// statements send pass through, when an <c>EXECUTE</c> carrying one runs
     /// the batch or a batch it calls (<c>Simulation.ResultSetsSinkFor</c>):
@@ -1863,6 +1870,7 @@ internal sealed partial class BatchContext
     {
         this.CallerStreams = true;
         this.StreamsResultRows = command.StreamsResultRows;
+        this.DiscardsResultRows = command.DiscardsResultRows;
         this.NoExecActive = command.Connection!.NoExec;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);

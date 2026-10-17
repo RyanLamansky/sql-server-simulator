@@ -1609,6 +1609,45 @@ partial class SimulatedSqlException
         new($"Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. '{qualifiedTableName}' is not a system-versioned table.", 13544, 16, state);
 
     /// <summary>
+    /// An <c>INSERT … EXEC</c> whose body's <c>SELECT</c> couldn't convert a
+    /// row to the target's types, the error caught by a <c>TRY</c> in the body
+    /// (or sent ahead of it): real ends the statement, writing nothing, with a
+    /// DONE carrying the error bit and no error, which SqlClient reports as its
+    /// own class-11 Msg 0 when the response carried no other error;
+    /// <c>@@ERROR</c> reads 0 after it (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    /// <param name="afterReportedError">
+    /// Whether the body sent an error of its own first, after which SqlClient
+    /// raises nothing for the DONE, so an in-process consumer sees nothing.
+    /// </param>
+    internal static SimulatedSqlException InsertExecRowsRefused(bool afterReportedError)
+    {
+        var refused = new SimulatedSqlException(SevereErrorMessage, 0, 11, 0) { RaisedByClient = true, UnseenInProcess = afterReportedError };
+        // SqlClient's own error names no line.
+        refused.PreserveDiagnostics(0, procedure: null);
+        return refused;
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 3915: a <c>ROLLBACK</c> — to a save point too —
+    /// in a body an <c>INSERT … EXEC</c> executes. Uncaught it ends the batch
+    /// and rolls the transaction back; a <c>TRY</c> in the body that catches
+    /// it leaves the transaction doomed (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException InsertExecRollback() =>
+        new SimulatedSqlException("Cannot use the ROLLBACK statement within an INSERT-EXEC statement.", 3915, 16, 0).AbortingAsUnderXactAbort();
+
+    /// <summary>
+    /// Mimics SQL Server error 3916: a <c>COMMIT</c> in a body an <c>INSERT …
+    /// EXEC</c> executes that would end a transaction the body didn't begin;
+    /// it acts as Msg 3915 does (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InsertExecCommit() =>
+        new SimulatedSqlException("Cannot use the COMMIT statement within an INSERT-EXEC statement unless BEGIN TRANSACTION is used first.", 3916, 16, 0).AbortingAsUnderXactAbort();
+
+    /// <summary>
     /// Mimics SQL Server error 213 as raised by <c>INSERT … EXEC</c> when a
     /// result set produced by the executed procedure / dynamic batch has a
     /// column count that doesn't match the INSERT target's column list.

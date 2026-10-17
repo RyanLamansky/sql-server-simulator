@@ -657,7 +657,7 @@ partial class Simulation
     /// </summary>
     private static StatementCoroutine? SendingCoroutine(BatchContext firing) =>
         firing.StatementCoroutine is { OnStatementThread: true } coroutine ? coroutine
-        : firing is { StreamsResultRows: true, IsSkipping: false, ResultSetsSink: null, Connection.InsertExecTargetTypes: null }
+        : firing is { StreamsResultRows: true, IsSkipping: false, ResultSetsSink: null, Connection.InsertExecTarget: null }
             && firing.StreamingFrames == firing.FramedStatementDepth - 1
             && StatementCoroutine.Running is { OnStatementThread: true } running
             ? running

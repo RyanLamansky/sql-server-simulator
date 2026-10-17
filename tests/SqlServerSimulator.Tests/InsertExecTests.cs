@@ -86,14 +86,170 @@ public sealed class InsertExecTests
             213, "Column name or number of supplied values does not match table definition.");
 
     [TestMethod]
-    public void UncoercibleValue_SurfacesConversionError()
+    public void UncoercibleValue_FailsInTheBodysSelect_EndingTheBatch()
     {
-        // The result-set rows flow through the same per-row coercion path as
-        // INSERT…SELECT, so a value that won't convert to the target type
-        // raises the simulator's usual conversion error (Msg 245).
-        var ex = new Simulation().AssertSqlError(
-            "create table #t (a int); insert #t exec('select ''notanint''')", 245);
-        Contains("Conversion failed", ex.Message);
+        // Real converts each row to the target's types inside the body's
+        // SELECT: Msg 8114 at its line and procedure, ending the batch.
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int)", "create procedure dbo.p as\nbegin\n  select 1;\n  select 'x'\nend");
+        var ex = sim.AssertSqlError("insert dbo.t exec dbo.p; print 'ran on'", 8114);
+        AreEqual("Error converting data type varchar to int.", ex.Errors[0].Message);
+        AreEqual((1, 4, "dbo.p"), (ex.Errors[0].State, ex.Errors[0].LineNumber, ex.Errors[0].Procedure));
+        HasCount(1, ex.Errors);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from dbo.t"));
+    }
+
+    [TestMethod]
+    public void BodyPlanReplayed_ConvertsToEachExecutionsTarget()
+    {
+        // The body's SELECT keeps its plan across executions, and each one
+        // converts its rows to that INSERT's own target.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.s (v varchar(10)); insert dbo.s values ('12'), ('abcd'); create table dbo.wide (a varchar(10)); create table dbo.narrow (a varchar(3)); create table dbo.num (a int)",
+            "create procedure dbo.p as\nbegin\n  select v from dbo.s order by v\nend");
+        AreEqual(2, sim.ExecuteScalar("insert dbo.wide exec dbo.p; insert dbo.wide exec dbo.p; select count(*) / 2 from dbo.wide"));
+        var truncated = sim.AssertSqlError("insert dbo.narrow exec dbo.p", 8152);
+        AreEqual((14, 3), (truncated.Errors[0].State, truncated.Errors[0].LineNumber));
+        var converted = sim.AssertSqlError("insert dbo.num exec dbo.p", 8114);
+        AreEqual("Error converting data type varchar to int.", converted.Errors[0].Message);
+        AreEqual(2, sim.ExecuteScalar("insert dbo.wide exec dbo.p; select count(*) / 3 from dbo.wide"));
+        AreEqual(0, sim.ExecuteScalar("select (select count(*) from dbo.narrow) + (select count(*) from dbo.num)"));
+    }
+
+    [TestMethod]
+    public void ConversionCaughtInTheBody_FailsTheWholeInsert()
+    {
+        // A TRY in the body catches the conversion, which dooms the unit the
+        // body runs in (@@TRANCOUNT 1 there); the body goes on, its write
+        // refused with Msg 3930, and the INSERT writes nothing — not even
+        // another statement's rows — while the batch goes on with @@ERROR 0.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int, b varchar(3)); create table dbo.t2 (a int)",
+            """
+            create procedure dbo.p as
+            begin
+              select 7, 'ok';
+              begin try
+                select v, 'ok' from (values ('8'), ('x')) d(v);
+              end try
+              begin catch
+                print concat(error_number(), ' ', error_state(), ' ', error_line(), ' ', xact_state(), ' ', @@trancount);
+              end catch
+              insert dbo.t2 values (1);
+              select 9, 'ok'
+            end
+            """);
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert dbo.t exec dbo.p; print concat('after ', @@error, ' ', @@rowcount)").ExecuteNonQuery());
+        CollectionAssert.AreEqual(
+            new[] { "3930", "8114 1 5 -1 1", "after 0 0" },
+            ex.Errors.Select(error => error.Number == 0 ? error.Message : error.Number.ToInvariantString()).ToArray());
+        AreEqual(0, connection.CreateCommand("select count(*) from dbo.t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ConversionCaughtInTheBody_EndsTheInsertWithTheClientsSevereError()
+    {
+        // With nothing else reported, the INSERT's DONE carrying the error bit
+        // alone is SqlClient's class-11 Msg 0.
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int)", "create procedure dbo.p as begin try select 'x' end try begin catch end catch");
+        var ex = sim.AssertSqlError("insert dbo.t exec dbo.p", 0);
+        AreEqual(((byte)11, 0, "A severe error occurred on the current command.  The results, if any, should be discarded."), (ex.Errors[0].Class, ex.Errors[0].LineNumber, ex.Errors[0].Message));
+    }
+
+    [TestMethod]
+    public void TruncationCaughtInTheBody_StatesNameTheTypePair_AndLeaveTheUnitCommittable()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (b varchar(3), n nvarchar(3), v varbinary(2))",
+            """
+            create procedure dbo.p @k int as
+            begin
+              begin try
+                if @k = 1 select 'abcd', null, null;
+                if @k = 2 select N'abcd', null, null;
+                if @k = 3 select null, 'abcd', null;
+                if @k = 4 select null, N'abcd', null;
+                if @k = 5 select null, null, 0x010203;
+                if @k = 6 select cast('abcd' as varchar(max)), null, null;
+                if @k = 7 select cast('abcd' as char(4)), null, null;
+              end try
+              begin catch
+                print concat(error_number(), ' ', error_state(), ' ', xact_state());
+              end catch
+            end
+            """);
+        using var connection = sim.CreateOpenConnection();
+        var printed = Enumerable.Range(1, 7).Select(k => Throws<SimulatedSqlException>(() => connection.CreateCommand($"insert dbo.t exec dbo.p {k.ToInvariantString()}").ExecuteNonQuery()).Errors[^1].Message).ToArray();
+        CollectionAssert.AreEqual(new[] { "8152 14 1", "8152 2 1", "8152 4 1", "8152 13 1", "8152 11 1", "8152 10 1", "8152 14 1" }, printed);
+    }
+
+    [TestMethod]
+    public void OnlyPaddingCut_IsNoTruncation()
+        => AreEqual("[ab ][ab ]", new Simulation().ExecuteScalar(
+            "create table #t (b varchar(3), n nvarchar(3)); insert #t exec('select ''ab     '', N''ab    '''); select concat('[', b, '][', n, ']') from #t"));
+
+    [TestMethod]
+    public void UncaughtTruncation_TheBodyGoesOn_AndTheInsertWritesNothing()
+    {
+        // The body's own Msg 8152 is all the client hears: SqlClient raises
+        // nothing for the INSERT's error bit behind it, and @@ERROR reads 0.
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int, b varchar(3))", "create procedure dbo.p as\nbegin\n  select 1, 'xxxx';\n  select 2, 'y'\nend");
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert dbo.t exec dbo.p; print concat('after ', @@error, ' ', @@rowcount)").ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[] { 8152, 0 }, ex.Errors.Select(error => error.Number).ToArray());
+        AreEqual((14, 3, "dbo.p"), (ex.Errors[0].State, ex.Errors[0].LineNumber, ex.Errors[0].Procedure));
+        AreEqual("after 0 0", ex.Errors[1].Message);
+        AreEqual(0, connection.CreateCommand("select count(*) from dbo.t").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ConversionCaughtInTheBody_UnderAnOuterTry_EndsTheBatch()
+    {
+        // The INSERT's failure is no error a CATCH sees: with a TRY open around
+        // it the whole batch ends, nothing after it running.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int)",
+            "create procedure dbo.p as begin try select 'x' end try begin catch end catch");
+        var ex = sim.AssertSqlError("begin try insert dbo.t exec dbo.p; print 'in try' end try begin catch print 'caught' end catch; print 'after'", 0);
+        HasCount(1, ex.Errors);
+    }
+
+    [TestMethod]
+    public void BodyWrites_JoinTheInsertsUnit()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int, b varchar(3)); create table dbo.t2 (a int)",
+            "create procedure dbo.p @k int as begin insert dbo.t2 values (@@trancount); begin try if @k = 1 select 1, 'abcd' end try begin catch end catch select 2, 'ok' end",
+            "insert dbo.t exec dbo.p 0");
+        _ = sim.AssertSqlError("insert dbo.t exec dbo.p 1", 0);
+        AreEqual("2 1 1", sim.ExecuteScalar("select concat((select a from dbo.t2), ' ', (select count(*) from dbo.t), ' ', (select count(*) from dbo.t2))"));
+    }
+
+    [TestMethod]
+    public void RollbackInTheBody_Raises3915()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int)", "create procedure dbo.p as begin select 1; rollback end");
+        _ = sim.AssertSqlError("insert dbo.t exec dbo.p; print 'ran on'", 3915);
+    }
+
+    [TestMethod]
+    public void CommitInTheBody_Raises3916_UnlessTheBodyBeganIt()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int)",
+            "create procedure dbo.p @k int as begin select 1; if @k = 1 commit; if @k = 2 begin begin tran; commit end end");
+        _ = sim.AssertSqlError("insert dbo.t exec dbo.p 1", 3916);
+        AreEqual(1, sim.ExecuteScalar("insert dbo.t exec dbo.p 2; select count(*) from dbo.t"));
     }
 
     [TestMethod]

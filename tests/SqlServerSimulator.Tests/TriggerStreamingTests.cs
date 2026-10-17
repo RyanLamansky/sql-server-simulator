@@ -391,4 +391,30 @@ public sealed class TriggerStreamingTests
         }
         AreEqual("fired", Scalar(connection, "select m from a.dbo.log"));
     }
+
+    /// <summary>
+    /// A synonym naming another database's table fires that table's trigger
+    /// too, whose rows go out as read, the body's statements after its
+    /// <c>SELECT</c> waiting for the reader.
+    /// </summary>
+    [TestMethod]
+    public void TriggerThroughASynonym_SendsItsRowsAsRead()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create database a",
+            "create database b",
+            $"use a; create table dbo.t (id int primary key); create table dbo.log (m varchar(20)); create table dbo.big (k int primary key, v char(2000) not null); insert dbo.big select value, 'x' from generate_series(1, {Rows})",
+            "create trigger dbo.tr on dbo.t after insert as begin select k, v from dbo.big order by k; insert dbo.log values ('after'); end",
+            "use b; create synonym dbo.s for a.dbo.t");
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("use b").ExecuteNonQuery();
+        using (var rows = ReadTwo(connection, "insert dbo.s values (1)"))
+        {
+            AreEqual(0, Scalar(other, "select count(*) from a.dbo.log with (nolock)"));
+            AreEqual(Rows, ReadRest(rows));
+        }
+        AreEqual(1, Scalar(other, "select count(*) from a.dbo.log"));
+    }
 }
