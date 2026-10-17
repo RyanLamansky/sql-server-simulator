@@ -118,7 +118,10 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
         // a session is the DATA response). Emitting a server SYN is a protocol
         // violation that Windows native SNI rejects with "Physical connection is
         // not usable" (SMux error 19); managed SNI on Linux tolerated it.
-        _ = owner.RunMarsSessionAsync(session, cancellationToken);
+        //
+        // The session's requests run on the engine's own threads, as the
+        // connection's do (see EngineThreads).
+        _ = EngineThreads.RunAsync(() => owner.RunMarsSessionAsync(session, cancellationToken));
         return ValueTask.CompletedTask;
     }
 

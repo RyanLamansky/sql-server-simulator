@@ -490,6 +490,28 @@ public partial class QualityTests
     }
 
     /// <summary>
+    /// The TDS session and its token writer never await with
+    /// <c>ConfigureAwait(false)</c>: they run on the engine's own threads, and
+    /// an <c>await</c> dropping its context resumes on the shared thread pool,
+    /// whose thread the statements after it would then hold for as long as they
+    /// wait. The Debug build's runtime check catches the same slip only when
+    /// the awaited operation happens to complete asynchronously.
+    /// </summary>
+    [TestMethod]
+    [Description("Keeps the TDS session's awaits on the engine's own threads.")]
+    public void TdsSessionAwaitsKeepTheirContext()
+    {
+        var network = Path.Combine(FindRepoRoot(), "src", "SqlServerSimulator", "Network");
+        var files = Directory.EnumerateFiles(network, "TdsSession*.cs").Append(Path.Combine(network, "TdsTokenWriter.cs")).ToList();
+        Assert.IsGreaterThan(4, files.Count);
+        var offenders = files
+            .Where(path => File.ReadAllText(path).Contains("ConfigureAwait(false)", StringComparison.Ordinal))
+            .Select(Path.GetFileName)
+            .ToList();
+        Assert.IsEmpty(offenders, "ConfigureAwait(false) in: " + string.Join(", ", offenders));
+    }
+
+    /// <summary>
     /// Every <c>SomeFile.cs</c> a Markdown file names must exist, and every
     /// link to a Markdown document or heading must resolve to a real file and a
     /// real heading, whether it crosses documents or stays within one.

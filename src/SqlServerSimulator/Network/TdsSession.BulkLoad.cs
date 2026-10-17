@@ -137,7 +137,7 @@ internal sealed partial class TdsSession
                 connection.AbandonParkedBulkText();
                 writer.WriteErrorOrInfo(Tds.TokenInfo, terminated.Number, terminated.State, terminated.Class, terminated.Message, ServerName, terminated.Procedure, terminated.LineNumber);
                 writer.WriteDoneToken(Tds.TokenDone, Tds.DoneAttention | Tds.DoneError, 0, StatementDoneKind.Batch);
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                 return true;
             case Tds.PacketBulkLoad:
                 var payload = message.Payload;
@@ -181,8 +181,8 @@ internal sealed partial class TdsSession
                     WriteErrors(writer, SimulatedSqlException.SessionKilled());
                     writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError | Tds.DoneServerError, 0, StatementDoneKind.Batch);
                 }
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
-                await connection.CloseAsync().ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
+                await connection.CloseAsync().ConfigureAwait(true);
                 return false;
             default:
                 break;
@@ -190,8 +190,8 @@ internal sealed partial class TdsSession
 
         this.watchedRequest = connection.BeginRequest();
         this.resumedScopes = parked.OpenScopes;
-        await this.ExecuteBatchTextAsync(parked.CommandText, writer, cancellationToken).ConfigureAwait(false);
-        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+        await this.ExecuteBatchTextAsync(parked.CommandText, writer, cancellationToken).ConfigureAwait(true);
+        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
         return connection.State != System.Data.ConnectionState.Closed;
     }
 }

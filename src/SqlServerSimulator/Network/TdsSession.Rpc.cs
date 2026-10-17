@@ -50,7 +50,7 @@ internal sealed partial class TdsSession
             var moreRequests = i < requests.Count - 1;
             try
             {
-                await this.DispatchRpcAsync(requests[i], writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                await this.DispatchRpcAsync(requests[i], writer, moreRequests, cancellationToken).ConfigureAwait(true);
             }
             catch (SimulatedSqlException ex)
             {
@@ -102,7 +102,7 @@ internal sealed partial class TdsSession
         switch (procId)
         {
             case 0:
-                await this.ExecuteProcedureRpcAsync(request, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                await this.ExecuteProcedureRpcAsync(request, writer, moreRequests, cancellationToken).ConfigureAwait(true);
                 break;
             case Tds.ProcIdCursor:
             case Tds.ProcIdCursorOpen:
@@ -127,7 +127,7 @@ internal sealed partial class TdsSession
                     var bound = request.Parameters.Count >= 2
                         ? NameUnnamedParameters(request.Parameters, 2, ParseDeclarationNames(declaration!))
                         : [.. request.Parameters.Skip(1)];
-                    await this.ExecuteStatementRpcAsync(statement, declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(statement, declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(true);
                     break;
                 }
 
@@ -140,7 +140,7 @@ internal sealed partial class TdsSession
                     // columns from.
                     if (request.Parameters.Count > 3 && request.Parameters[3].Value is not (null or DBNull)
                         && (Convert.ToInt32(request.Parameters[3].Value, CultureInfo.InvariantCulture) & 1) != 0
-                        && await this.DescribePreparedStatementAsync(this.connection.PreparedStatements[handle], writer, cancellationToken).ConfigureAwait(false))
+                        && await this.DescribePreparedStatementAsync(this.connection.PreparedStatements[handle], writer, cancellationToken).ConfigureAwait(true))
                     {
                         return;
                     }
@@ -161,7 +161,7 @@ internal sealed partial class TdsSession
                     }
 
                     var bound = NameUnnamedParameters(request.Parameters, 1, prepared.ParameterNames);
-                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, handleReturn: null, writer, moreRequests, cancellationToken).ConfigureAwait(true);
                     break;
                 }
 
@@ -174,7 +174,7 @@ internal sealed partial class TdsSession
                     // native ODBC / OLE DB (name=''); name them from the prepared
                     // declaration so `@P1` binds, the same mapping sp_execute uses.
                     var bound = NameUnnamedParameters(request.Parameters, 3, prepared.ParameterNames);
-                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(false);
+                    await this.ExecuteStatementRpcAsync(prepared.Statement, prepared.Declaration, bound, (handleName, handle), writer, moreRequests, cancellationToken).ConfigureAwait(true);
                     break;
                 }
 
@@ -223,7 +223,7 @@ internal sealed partial class TdsSession
         connection.FmtOnly = true;
         try
         {
-            return await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false);
+            return await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(true);
         }
         finally
         {
@@ -266,7 +266,7 @@ internal sealed partial class TdsSession
 
         // A cancelled RPC skips its trailing RETURNSTATUS / RETURNVALUE /
         // DONEPROC: the batch loop emits the single DONE_ATTN acknowledgment.
-        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
+        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(true))
             return;
 
         // Statements an error ended close with a DONEPROC carrying it, after
@@ -322,7 +322,7 @@ internal sealed partial class TdsSession
 
         // A cancelled RPC skips its trailing RETURNSTATUS / RETURNVALUE /
         // DONEPROC: the batch loop emits the single DONE_ATTN acknowledgment.
-        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
+        if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(true))
             return;
 
         if (this.rpcEndingError is not null)

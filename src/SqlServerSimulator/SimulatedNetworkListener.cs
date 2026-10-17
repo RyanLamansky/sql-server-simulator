@@ -122,16 +122,23 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
         }
     }
 
-    private async Task RunSessionAsync(TdsSession session)
-    {
-        try
+    /// <summary>
+    /// Runs a session on the engine's own threads, never the shared pool's:
+    /// its statements block the thread they run on while they wait (see
+    /// <see cref="EngineThreads"/>), and its teardown rolls back what it left
+    /// open.
+    /// </summary>
+    private Task RunSessionAsync(TdsSession session) =>
+        EngineThreads.RunAsync(async () =>
         {
-            await session.RunAsync(this.stopSource.Token).ConfigureAwait(false);
-        }
-        finally
-        {
-            _ = this.sessions.TryRemove(session, out _);
-            session.Dispose();
-        }
-    }
+            try
+            {
+                await session.RunAsync(this.stopSource.Token).ConfigureAwait(true);
+            }
+            finally
+            {
+                _ = this.sessions.TryRemove(session, out _);
+                session.Dispose();
+            }
+        });
 }

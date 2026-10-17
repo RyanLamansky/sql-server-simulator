@@ -91,8 +91,36 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         this.multiplexer?.Dispose();
     }
 
+    /// <summary>
+    /// Whether the session serves a socket (<see cref="RunAsync"/>), whose
+    /// engine work runs on the engine's own threads; the test-only entries
+    /// run a handler on the caller's.
+    /// </summary>
+    private bool hosted;
+
+    /// <summary>
+    /// Fails, in a Debug build, when a socket's engine work runs on the
+    /// shared pool (<see cref="EngineThreads.AssertOffSharedPool"/>):
+    /// every <c>await</c> on the way from a request to its statements keeps
+    /// its context, so one among them dropping it would put the
+    /// statements on the shared pool, whose threads they hold while they wait.
+    /// </summary>
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void AssertOnEngineThread()
+    {
+        if (this.hosted)
+            EngineThreads.AssertOffSharedPool();
+    }
+
+    /// <summary>
+    /// Serves the socket until it closes. Runs on the engine's own threads
+    /// (<see cref="EngineThreads.RunAsync"/>), and every <c>await</c> in the
+    /// session keeps its context, so each request's statements run there while
+    /// the socket's reads and writes wait on no thread.
+    /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        this.hosted = true;
         CultureScope.SetEngine();
         Stream transportStream = new NetworkStream(socket, ownsSocket: true);
         TdsTokenWriter? writer = null;
@@ -105,7 +133,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // in prelogin packets afterward. The first byte on the wire
             // routes between them.
             var peek = new byte[1];
-            if (await socket.ReceiveAsync(peek, SocketFlags.Peek, cancellationToken).ConfigureAwait(false) == 0)
+            if (await socket.ReceiveAsync(peek, SocketFlags.Peek, cancellationToken).ConfigureAwait(true) == 0)
                 return;
 
             var strictEncryption = peek[0] == Tds.TlsRecordHandshake;
@@ -119,19 +147,19 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         ServerCertificate = certificate,
                         ApplicationProtocols = [Tds8AlpnProtocol],
                     },
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken).ConfigureAwait(true);
             }
 
             var transport = new TdsPacketTransport(transportStream);
 
-            var prelogin = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+            var prelogin = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(true);
             if (prelogin is null || prelogin.PacketType != Tds.PacketPrelogin)
                 return;
 
             var clientEncryption = ParsePreloginEncryption(prelogin.Payload);
             var fedAuthRequested = ParsePreloginHasOption(prelogin.Payload, Tds.PreloginFedAuthRequired);
             var marsRequested = ParsePreloginMars(prelogin.Payload);
-            await transport.WritePacketAsync(Tds.PacketTabularResult, BuildPreloginResponse(fedAuthRequested, marsRequested), endOfMessage: true, cancellationToken).ConfigureAwait(false);
+            await transport.WritePacketAsync(Tds.PacketTabularResult, BuildPreloginResponse(fedAuthRequested, marsRequested), endOfMessage: true, cancellationToken).ConfigureAwait(true);
             if (!strictEncryption)
             {
                 if (clientEncryption == Tds.EncryptNotSupported)
@@ -153,13 +181,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         ServerCertificate = certificate,
                         EnabledSslProtocols = SslProtocols.Tls12,
                     },
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken).ConfigureAwait(true);
 #pragma warning restore CA5398
                 framing.EnablePassthrough();
                 transport.SwitchStream(ssl);
             }
 
-            var loginMessage = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+            var loginMessage = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(true);
             if (loginMessage is null || loginMessage.PacketType != Tds.PacketLogin7)
                 return;
 
@@ -182,13 +210,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // for a disabled one — then the connection closes.
                 writer.WriteErrorOrInfo(Tds.TokenError, refusal.Number, refusal.State, refusal.Class, refusal.Message, "SIMULATED", "", 1);
                 writer.WriteDone(Tds.DoneError, 0);
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                 return;
             }
 
             if (!this.TryOpenConnection(login, writer))
             {
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                 return;
             }
 
@@ -197,13 +225,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 Ipv4Form(socket.RemoteEndPoint), Ipv4Form(socket.LocalEndPoint), login.TdsVersion, transport.PacketSize);
             if (!this.TryFireLogonTriggers(writer))
             {
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                 return;
             }
             this.connection.TransactionEvents = [];
             this.connection.RunsMars = marsRequested;
             this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
-            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
 
             // MARS negotiated: prelogin, TLS, and LOGIN7 stayed raw (the login
             // response above is unwrapped), but every post-login TDS message is
@@ -217,7 +245,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 this.connection.PublishedSettings = SessionSettings.Capture(this.connection);
                 this.marsPacketSize = transport.PacketSize;
                 this.multiplexer = new SmpMultiplexer(transportStream, this);
-                await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(false);
+                await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(true);
                 return;
             }
 
@@ -229,7 +257,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
             while (true)
             {
-                var message = await pendingRead.ConfigureAwait(false);
+                var message = await pendingRead.ConfigureAwait(true);
                 if (message is null)
                     return;
 
@@ -237,7 +265,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // next, in place of what that message asks.
                 if (this.connection!.ParkedBulkText is { } parkedBulkText)
                 {
-                    if (!await this.ResumeBulkTextAsync(parkedBulkText, message, writer, cancellationToken).ConfigureAwait(false))
+                    if (!await this.ResumeBulkTextAsync(parkedBulkText, message, writer, cancellationToken).ConfigureAwait(true))
                         return;
                     pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
                     continue;
@@ -250,8 +278,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // naturally. Either way, acknowledge it — SqlClient waits for
                     // the DONE_ATTN before declaring the connection reusable — and
                     // keep the session alive.
-                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(false);
-                    await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(true);
+                    await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                     pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
                     continue;
                 }
@@ -301,16 +329,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         TaskScheduler.Default);
                 }
 
+                this.AssertOnEngineThread();
                 switch (message.PacketType)
                 {
                     case Tds.PacketSqlBatch:
                         if (isBulkInsertBegin)
                             this.BeginBulkInsert(batchText!, writer);
                         else
-                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(true);
                         break;
                     case Tds.PacketRpc:
-                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(true);
                         break;
                     case Tds.PacketBulkLoad:
                         this.ExecuteBulkLoad(message, writer);
@@ -352,10 +381,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // (SimulatedDbConnection.SettleCancelledExecution); send
                     // what that announces, then the single DONE_ATTN the
                     // client is waiting for.
-                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: true, cancellationToken).ConfigureAwait(false);
+                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: true, cancellationToken).ConfigureAwait(true);
                 }
 
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
 
                 // A command whose error ended the session closed its connection;
                 // real drops the client there too.
@@ -384,7 +413,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // than letting the session die silently — the client seeing only a
             // raw transport reset — emit a best-effort in-band severe error so
             // SqlClient surfaces a SqlException, then let the connection close.
-            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(false);
+            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(true);
         }
 #pragma warning restore CA1031
         finally
@@ -392,7 +421,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // The connection, transaction, and MARS machinery are torn down in
             // Dispose (invoked by the listener once this returns); here only the
             // transport stream, a RunAsync-local, needs releasing.
-            await transportStream.DisposeAsync().ConfigureAwait(false);
+            await transportStream.DisposeAsync().ConfigureAwait(true);
         }
     }
 
@@ -458,7 +487,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             writer.WriteErrorOrInfo(Tds.TokenError, 0, 1, 20, SevereErrorMessage, ServerName, "", 0);
             writer.WriteDone(Tds.DoneError, 0);
-            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
         }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidDataException or AuthenticationException)
         {
@@ -533,6 +562,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private bool TryFireLogonTriggers(TdsTokenWriter writer)
     {
+        this.AssertOnEngineThread();
         var opened = this.connection!;
         try
         {
@@ -627,14 +657,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // Another request sending a DML statement's OUTPUT rows holds the
             // session: this one waits beside it, outside the gate so that
             // request can drain, until Msg 3980 refuses it.
-            await this.connection!.AwaitSessionAsync(request, timeout: null, stop: () => request.AttentionReceived).ConfigureAwait(false);
-            await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await this.connection!.AwaitSessionAsync(request, timeout: null, stop: () => request.AttentionReceived).ConfigureAwait(true);
+            await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(true);
         }
         catch
         {
             session.Executing = false;
             throw;
         }
+        this.AssertOnEngineThread();
         this.connection!.ResumeRequest(request);
         try
         {
@@ -652,10 +683,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                         if (isBulkInsertBegin)
                             this.BeginBulkInsert(batchText!, writer);
                         else
-                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(true);
                         break;
                     case Tds.PacketRpc:
-                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(true);
                         break;
                     case Tds.PacketBulkLoad:
                         this.ExecuteBulkLoad(message, writer);
@@ -692,9 +723,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // the DONE_ATTN.
         var attention = Interlocked.Exchange(ref session.AttentionState, 0) == 1;
         if (cancelled || attention)
-            await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: cancelled, cancellationToken).ConfigureAwait(false);
+            await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: cancelled, cancellationToken).ConfigureAwait(true);
 
-        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
     }
 
     /// <summary>
@@ -720,7 +751,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             while (true)
             {
-                var message = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+                var message = await transport.ReadMessageAsync(cancellationToken).ConfigureAwait(true);
                 if (message is null)
                     return;
 
@@ -732,8 +763,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // have consumed it when the attention raced completion.
                     if (Interlocked.Exchange(ref session.AttentionState, 0) == 1)
                     {
-                        await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(false);
-                        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                        await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(true);
+                        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
                     }
 
                     continue;
@@ -775,7 +806,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 writer.Request = request;
                 try
                 {
-                    await this.ServeMarsRequestAsync(session, request, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(false);
+                    await this.ServeMarsRequestAsync(session, request, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(true);
                 }
                 finally
                 {
@@ -800,14 +831,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // best-effort severe error rather than letting an unanticipated
             // exception fault the session loop and silently kill the whole mux.
             // The FIN in the finally still tears just this session down.
-            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(false);
+            await TryWriteSevereErrorAsync(writer, cancellationToken).ConfigureAwait(true);
         }
 #pragma warning restore CA1031
         finally
         {
             try
             {
-                await this.multiplexer!.SendFinAsync(session, CancellationToken.None).ConfigureAwait(false);
+                await this.multiplexer!.SendFinAsync(session, CancellationToken.None).ConfigureAwait(true);
             }
             catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
             {
@@ -829,7 +860,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         simulation.NetworkBatchCrashHookForTesting?.Invoke();
         // A query notification request rides the request's ALL_HEADERS.
         this.connection!.PendingQueryNotification = QueryNotificationRequest.FromAllHeaders(message.Payload);
-        await this.ExecuteBatchTextAsync(ExtractBatchText(message.Payload), writer, cancellationToken).ConfigureAwait(false);
+        await this.ExecuteBatchTextAsync(ExtractBatchText(message.Payload), writer, cancellationToken).ConfigureAwait(true);
     }
 
     /// <summary>
@@ -861,7 +892,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             command.StreamsResultRows = true;
             // A cancelled batch (return value true) leaves the DONE_ATTN
             // acknowledgment to the session loop; nothing more to emit here.
-            _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
+            _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(true);
         }
         catch (SimulatedSqlException ex)
         {
@@ -1133,7 +1164,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         session.SendingToClient = true;
         try
         {
-            return await this.WriteOutcomesAsync(command, writer, doneToken, trailingTokensFollow, cancellationToken).ConfigureAwait(false);
+            return await this.WriteOutcomesAsync(command, writer, doneToken, trailingTokensFollow, cancellationToken).ConfigureAwait(true);
         }
         finally
         {
@@ -1161,6 +1192,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         ExceptionDispatchInfo? escaped = null;
         bool Advance()
         {
+            this.AssertOnEngineThread();
             try
             {
                 return outcomes.MoveNext();
@@ -1214,7 +1246,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             {
                 if (this.FlushInfoMessages(writer))
                     closed = false;
-                await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(false);
+                await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(true);
                 if (this.connection.ExecutionCancellationRequested)
                     return true;
                 hasOutcome = Advance();
@@ -1329,12 +1361,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     {
                         TdsTypeCodec.WriteRow(writer, query.Schema, cursor, query.ColumnNullability);
                         rows++;
-                        await this.FlushRowAsync(writer, cancellationToken).ConfigureAwait(false);
+                        await this.FlushRowAsync(writer, cancellationToken).ConfigureAwait(true);
                         // A MARS request's statement suspended on its client
                         // steps aside for the session's other requests while
                         // the client's window is shut, as real's does.
                         if (streamed is { Complete: false } && writer.MarsSession is not null)
-                            await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(false);
+                            await this.SendWhatTheClientTakesAsync(writer, cancellationToken).ConfigureAwait(true);
                         // Mid-result-set attention: stop between rows (never
                         // mid-row — the flush above closed the last ROW token).
                         // The partial rows already sent are discarded client-side
@@ -1525,7 +1557,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             return;
         if (packets <= session.SendWindowRemaining())
         {
-            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(false);
+            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(true);
             return;
         }
         var connection = this.connection!;
@@ -1535,13 +1567,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         _ = this.engineExecutionGate.Release();
         try
         {
-            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(false);
+            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(true);
         }
         finally
         {
             // The batch's own unwinding, an error's included, runs on its
             // state under the gate.
-            await this.engineExecutionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            await this.engineExecutionGate.WaitAsync(CancellationToken.None).ConfigureAwait(true);
             connection.ResumeRequest(request);
             connection.Session.SendingToClient = true;
             this.databaseAtMessageStart = database;
@@ -1558,14 +1590,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var flush = writer.FlushAsync(final: false, cancellationToken);
         if (flush.IsCompleted)
         {
-            await flush.ConfigureAwait(false);
+            await flush.ConfigureAwait(true);
             return;
         }
         var session = this.connection!.Session;
         session.SendingToClient = false;
         try
         {
-            await flush.ConfigureAwait(false);
+            await flush.ConfigureAwait(true);
         }
         finally
         {
@@ -1619,7 +1651,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
             }
             writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, curCmd);
-            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(true);
         }
         writer.WriteDoneToken(Tds.TokenDone, Tds.DoneAttention, 0, StatementDoneKind.Batch);
     }

@@ -66,6 +66,28 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   Schema validated up front so unsupported column types fail as an ERROR token, never a mid-stream desync.
 - `TdsCollationCodec` — the COLMETADATA 5-byte collation structure, derived generatively from the collation name plus the core-layer `Collation.LcidAndCodePageByPrefix` probe table (details below).
 
+### Threading model
+
+**A session's engine work never runs on the shared .NET thread pool.**
+The engine is synchronous: a statement blocks the thread it runs on for as long as it waits — a `WAITFOR`, a lock wait, `ALTER DATABASE … WITH ROLLBACK`'s settle, a `WAITFOR (RECEIVE …)`.
+When the session ran on the pool thread that read its request, every waiting session held one, and the pool adds threads past its floor (one per core) only gradually, so in any process hosting the endpoint the waiting sessions starved everything else on the pool — the endpoint's own accept, TLS handshake and login continuations included.
+Measured before the change on a 16-core container, with 100 sessions entering `WAITFOR DELAY` or a lock wait together: logins timed out at 30 seconds while the pool grew from 16 to 102 threads.
+
+`EngineThreads` is the engine's own elastic pool: a job takes an idle worker or starts a new thread at once, so blocked work never waits for a thread, and a worker idle for ten seconds retires.
+The listener starts each session with `EngineThreads.RunAsync`, the multiplexer each MARS logical session the same way, and every worker runs under `EngineThreads.Context`, a synchronization context posting each continuation back to a worker.
+Every `await` in `TdsSession*.cs` and `TdsTokenWriter.cs` keeps its context (`ConfigureAwait(true)`), so the code after it — the next statement — resumes on a worker, while the socket reads and writes themselves wait on no thread: an idle session holds none, and a session holds one only while a request runs, including while that request waits on its client's window as real's worker does on `ASYNC_NETWORK_IO`.
+The layers below (`TdsPacketTransport`, the SMP multiplexer, `SslStream`) stay `ConfigureAwait(false)`: they do I/O only, and their continuations hand straight back up.
+Two checks hold the line: `QualityTests.TdsSessionAwaitsKeepTheirContext` fails the build on a `ConfigureAwait(false)` in those files, and a Debug build's `EngineThreads.AssertOffSharedPool` fails a request whose statements reached the pool anyway.
+`StatementCoroutine` runs its statements on the same workers, and the service broker's activated readers too, since a reader's `WAITFOR (RECEIVE …)` waits as long as any statement; a background production (`ResultStream.StartBackground`) keeps its own long-running thread.
+
+The cost is one thread handoff per request: the read completes on a pool thread, which posts the session's continuation to a worker.
+A worker that has just gone idle spins briefly before it sleeps, so the next request of a client reading quickly finds it awake.
+Measured 2026-10-17 on the same container, Release builds, eight clients each looping a 50-row `SELECT`: about 31-34k queries a second before the change and 28-32k after (6-8% fewer on the tightest loop that exists, with no spin it was 10-15%), 200 serial logins in about 0.42 s either way, and with the 100 waiting sessions every login took 3 ms and the pool stayed at 16 threads.
+
+Roads not taken: a dedicated thread per session holds a thread while the session is idle, which an application keeping a connection pool open never releases; making the request path synchronous, blocking its thread on socket writes, keeps a thread through every wait on the client and rewrites every handler; raising the pool's floor from the library changes a process-wide setting its host owns, and only moves the cliff.
+The in-process ADO.NET path is untouched: its async methods are `DbCommand`'s and `DbDataReader`'s base implementations, which run the engine synchronously on the caller's thread, so a caller's own threads decide what blocks.
+Not modeled yet: real's `max worker threads` cap and the `THREADPOOL` wait past it — the simulator starts a thread for every concurrently running request.
+
 ## Batch loop semantics
 
 - **SQLBatch** (type 1): ALL_HEADERS skipped via its leading length DWORD; UCS-2 text executed on the session connection.

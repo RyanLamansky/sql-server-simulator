@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Storage;
 
@@ -83,7 +82,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
         this.consumer = new WeakReference<object>(running);
         var request = connection.ExecutingRequest;
         MarkMidStatement(request, true);
-        Worker.Run(() => this.RunStatement(statement));
+        EngineThreads.Run(() => this.RunStatement(statement));
         try
         {
             while (true)
@@ -124,6 +123,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
     {
         Volatile.Write(ref this.statementThreadId, Environment.CurrentManagedThreadId);
         Running = this;
+        OnAnyStatementThread = true;
         try
         {
             using var culture = CultureScope.Engine();
@@ -144,117 +144,10 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
         finally
         {
             Running = null;
+            OnAnyStatementThread = false;
             Volatile.Write(ref this.statementThreadId, 0);
             this.ended = true;
             _ = this.toCaller.Release();
-        }
-    }
-
-    /// <summary>
-    /// A thread statements run on, kept idle between them for a while so a
-    /// statement doesn't pay for a thread of its own each time it runs.
-    /// </summary>
-    private sealed class Worker : IDisposable
-    {
-        /// <summary>How long an idle worker waits for its next statement before its thread ends.</summary>
-        private const int IdleMilliseconds = 10_000;
-
-        private static readonly Lock IdleGate = new();
-
-        /// <summary>The idle workers, the latest first, linked through <see cref="nextIdle"/>.</summary>
-        private static Worker? idle;
-
-        private readonly SemaphoreSlim woken = new(0, 1);
-
-        private Worker? nextIdle;
-
-        private Action? job;
-
-        /// <summary>Runs <paramref name="statement"/> on an idle worker's thread, or a new one's.</summary>
-        public static void Run(Action statement)
-        {
-            Worker? worker;
-            lock (IdleGate)
-            {
-                worker = idle;
-                if (worker is not null)
-                {
-                    idle = worker.nextIdle;
-                    worker.nextIdle = null;
-                }
-            }
-            if (worker is not null)
-            {
-                worker.job = statement;
-                _ = worker.woken.Release();
-                return;
-            }
-            // The worker's own thread disposes it as it retires.
-            worker = new Worker { job = statement };
-            new Thread(worker.Loop) { IsBackground = true, Name = "Simulated statement" }.Start();
-        }
-
-        private void Loop()
-        {
-            OnAnyStatementThread = true;
-            while (true)
-            {
-                this.RunJob();
-                lock (IdleGate)
-                {
-                    this.nextIdle = idle;
-                    idle = this;
-                }
-                while (!this.woken.Wait(IdleMilliseconds))
-                {
-                    // Retire unless a caller took this worker meanwhile, whose
-                    // wake is on its way.
-                    lock (IdleGate)
-                    {
-                        if (Unlink(this))
-                        {
-                            this.Dispose();
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Runs the statement handed over, in a frame of its own, so the idle
-        /// thread that ran it names nothing of it — its batch and session
-        /// would otherwise stay reachable until the thread runs another.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private void RunJob()
-        {
-            var statement = this.job!;
-            this.job = null;
-            statement();
-        }
-
-        public void Dispose() => this.woken.Dispose();
-
-        /// <summary>Takes <paramref name="worker"/> out of the idle list, if it is still in it.</summary>
-        private static bool Unlink(Worker worker)
-        {
-            if (ReferenceEquals(idle, worker))
-            {
-                idle = worker.nextIdle;
-                worker.nextIdle = null;
-                return true;
-            }
-            for (var at = idle; at is not null; at = at.nextIdle)
-            {
-                if (ReferenceEquals(at.nextIdle, worker))
-                {
-                    at.nextIdle = worker.nextIdle;
-                    worker.nextIdle = null;
-                    return true;
-                }
-            }
-            return false;
         }
     }
 

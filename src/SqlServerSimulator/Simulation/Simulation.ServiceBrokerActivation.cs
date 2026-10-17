@@ -61,7 +61,7 @@ partial class Simulation
             task = new ActivatedTask(queue, database, settings.ActivationProcedure!, executeAs);
             this.ActivatedTasks.Add(task);
         }
-        _ = Task.Run(() => this.RunActivation(task, settings.ActivationSchema!, settings.ActivationName));
+        EngineThreads.Run(() => this.RunActivation(task, settings.ActivationSchema!, settings.ActivationName));
     }
 
     /// <summary>

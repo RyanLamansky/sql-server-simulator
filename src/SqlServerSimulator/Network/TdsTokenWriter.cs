@@ -138,15 +138,15 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         var offset = 0;
         var holdFrom = final && this.BeforeEndOfMessage is not null && this.FinalDoneBuffered ? this.finalDoneAt : this.length;
         while (this.length - offset > capacity && offset + capacity <= holdFrom)
-            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
+            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(true);
 
         if (final)
         {
             this.BeforeEndOfMessage?.Invoke();
             while (this.length - offset > capacity)
-                offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
+                offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(true);
             this.NoteSending(offset, this.length - offset);
-            await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, this.length - offset), endOfMessage: true, cancellationToken).ConfigureAwait(false);
+            await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, this.length - offset), endOfMessage: true, cancellationToken).ConfigureAwait(true);
             offset = this.length;
             this.sessionHolds.Clear();
             if (this.Request is { } request)
@@ -179,7 +179,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         var capacity = this.transport.PacketSize - Tds.HeaderSize;
         var offset = 0;
         for (var packets = this.CompletePacketsPending(); packets > 0; packets--)
-            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
+            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(true);
         this.Compact(offset);
         // What still holds the session is what hasn't gone yet.
         if (this.Request is { } request)
@@ -242,7 +242,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     private async ValueTask<int> SendPacketAsync(int offset, int capacity, CancellationToken cancellationToken)
     {
         this.NoteSending(offset, capacity);
-        await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, capacity), endOfMessage: false, cancellationToken).ConfigureAwait(false);
+        await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, capacity), endOfMessage: false, cancellationToken).ConfigureAwait(true);
         return offset + capacity;
     }
 
