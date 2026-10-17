@@ -77,6 +77,16 @@ partial class Simulation
         if (!isFirst && !isLast && !BuiltInToken.Equals(order, "None"))
             throw SimulatedSqlException.InvalidTriggerOrderParameter().AtSystemProcedureLine(56);
 
+        // Past its argument checks the procedure works in a transaction of its
+        // own, committed after a refusal (probed 2026-10-17 against SQL Server
+        // 2025).
+        foreach (var outcome in InProcedureTransaction(batch, Ordered(batch, triggerName, order, statementType, action, isFirst, isLast), ProcedureTransactionEnding.CommitAfter))
+            yield return outcome;
+    }
+
+    /// <summary><see cref="InvokeSpSetTriggerOrder"/>'s work on a DML trigger, once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Ordered(BatchContext batch, string triggerName, string order, string statementType, TriggerActions action, bool isFirst, bool isLast)
+    {
         var trigger = ResolveTriggerForOrdering(batch, triggerName);
         if (trigger.Timing == TriggerTiming.InsteadOf)
             throw SimulatedSqlException.InsteadOfTriggerCannotBeOrdered(triggerName).AtSystemProcedureLine(153);

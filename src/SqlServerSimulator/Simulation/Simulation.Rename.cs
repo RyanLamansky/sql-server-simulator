@@ -48,6 +48,9 @@ partial class Simulation
     /// (Msg 15253) — each at its own line of real's source. Success sends the
     /// Msg 15477 caution and leaves <c>@@ROWCOUNT</c> at 1, as real's last
     /// statement does; a rename inside a transaction rolls back with it.
+    /// Past those checks the rename runs in a transaction of the procedure's
+    /// own, whose commit follows the caution and precedes a refusal (probed
+    /// 2026-10-17 against SQL Server 2025).
     /// </remarks>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpRename(BatchContext batch, string procedureName)
     {
@@ -86,51 +89,58 @@ partial class Simulation
         if (!ObjectId.TryParseObjectName(objName, out _))
             throw SimulatedSqlException.RenameIdentifierSyntax(objName).AtSystemProcedureLine(120);
 
-        try
-        {
-            // Without @objtype a table.leaf name no object answers renames the
-            // column, else the index, it names, and a name no object or
-            // subobject answers renames the user type it names; the collision
-            // message names the kind in lower case where a passed @objtype is
-            // echoed as written (probed 2026-09-30 against SQL Server 2025).
-            var inferred = kind is null ? InferredSubobjectKind(batch, objName) : null;
-            if (inferred == "column" || (kind is not null && BuiltInToken.Equals(kind, "COLUMN")))
-            {
-                RenameColumn(batch, objName, newName, inferred ?? objType!);
-                RecordRenameEvent(batch, objName, "COLUMN");
-            }
-            else if (inferred == "index" || (kind is not null && BuiltInToken.Equals(kind, "INDEX")))
-            {
-                RenameIndex(batch, objName, newName, inferred ?? objType!, procedureName);
-                RecordRenameEvent(batch, objName, "INDEX");
-            }
-            else if (inferred == "userdatatype" || (kind is not null && BuiltInToken.Equals(kind, "USERDATATYPE")))
-            {
-                this.RenameUserType(batch, objName, newName, procedureName);
-            }
-            else if (kind is not null && BuiltInToken.Equals(kind, "STATISTICS"))
-            {
-                RenameStatistics(batch, objName, newName, procedureName);
-                RecordRenameEvent(batch, objName, "STATISTICS");
-            }
-            else
-            {
-                var renamedKind = this.RenameObject(batch, objName, newName, objType);
-                RecordRenameEvent(batch, objName, renamedKind);
-            }
-        }
-        catch (SimulatedSqlException refused) when (refused.Number is 3906 or 4928 or 5074)
-        {
-            // Real cautions before it finds the database read-only, a filter
-            // reading the column or the column computed, so the caution
-            // precedes the Msg 3906, 5074 or 4928 (probed 2026-09-25 and
-            // 2026-09-30).
-            QueueRenameCaution(batch, procedureName);
-            throw;
-        }
-
-        QueueRenameCaution(batch, procedureName);
+        foreach (var outcome in InProcedureTransaction(batch, Renamed(), ProcedureTransactionEnding.CommitFirst, sendsMessagesInside: true))
+            yield return outcome;
         batch.Connection.LastStatementRowCount = 1;
+
+        IEnumerable<SimulatedStatementOutcome> Renamed()
+        {
+            try
+            {
+                // Without @objtype a table.leaf name no object answers renames the
+                // column, else the index, it names, and a name no object or
+                // subobject answers renames the user type it names; the collision
+                // message names the kind in lower case where a passed @objtype is
+                // echoed as written (probed 2026-09-30 against SQL Server 2025).
+                var inferred = kind is null ? InferredSubobjectKind(batch, objName) : null;
+                if (inferred == "column" || (kind is not null && BuiltInToken.Equals(kind, "COLUMN")))
+                {
+                    RenameColumn(batch, objName, newName, inferred ?? objType!);
+                    RecordRenameEvent(batch, objName, "COLUMN");
+                }
+                else if (inferred == "index" || (kind is not null && BuiltInToken.Equals(kind, "INDEX")))
+                {
+                    RenameIndex(batch, objName, newName, inferred ?? objType!, procedureName);
+                    RecordRenameEvent(batch, objName, "INDEX");
+                }
+                else if (inferred == "userdatatype" || (kind is not null && BuiltInToken.Equals(kind, "USERDATATYPE")))
+                {
+                    this.RenameUserType(batch, objName, newName, procedureName);
+                }
+                else if (kind is not null && BuiltInToken.Equals(kind, "STATISTICS"))
+                {
+                    RenameStatistics(batch, objName, newName, procedureName);
+                    RecordRenameEvent(batch, objName, "STATISTICS");
+                }
+                else
+                {
+                    var renamedKind = this.RenameObject(batch, objName, newName, objType);
+                    RecordRenameEvent(batch, objName, renamedKind);
+                }
+            }
+            catch (SimulatedSqlException refused) when (refused.Number is 3906 or 4928 or 5074)
+            {
+                // Real cautions before it finds the database read-only, a filter
+                // reading the column or the column computed, so the caution
+                // precedes the Msg 3906, 5074 or 4928 (probed 2026-09-25 and
+                // 2026-09-30).
+                QueueRenameCaution(batch, procedureName);
+                throw;
+            }
+
+            QueueRenameCaution(batch, procedureName);
+            yield break;
+        }
     }
 
     /// <summary>

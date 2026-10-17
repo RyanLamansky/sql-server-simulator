@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
@@ -9,6 +10,20 @@ partial class Simulation
     internal sealed class SystemProcedureResult
     {
         public bool Failed;
+    }
+
+    /// <summary>
+    /// Writes the code a system procedure returns into the caller's
+    /// <c>EXEC @rc =</c> slot, if it wrote one, and records it as the status
+    /// the call's RETURNSTATUS sends (<see cref="BatchContext.SystemProcedureStatus"/>).
+    /// </summary>
+    private static void SetReturnCode(BatchContext batch, string? returnCodeVar, int code)
+    {
+        batch.SystemProcedureStatus = code;
+        if (returnCodeVar is null)
+            return;
+        var slot = batch.GetVariableSlot(returnCodeVar);
+        slot.Value = SqlValue.FromInt32(code).CoerceTo(slot.DeclaredType);
     }
 
     /// <summary>

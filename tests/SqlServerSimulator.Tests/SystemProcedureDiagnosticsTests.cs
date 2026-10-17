@@ -57,8 +57,29 @@ public sealed class SystemProcedureDiagnosticsTests
         AreEqual(expected, string.Join(" | ", messages));
     }
 
+    /// <summary>
+    /// A <c>TRY</c> catches <c>sys.xp_userlock</c>'s error before the
+    /// procedure returns, so the caller's return code stays unset (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void ReleaseApplock_OfANotHeldLock_StillAnswersMinus999()
-        => AreEqual(-999, new Simulation().ExecuteScalar(
+    public void ReleaseApplock_OfANotHeldLock_CaughtByTry_LeavesTheReturnCodeUnset()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
             "declare @r int; begin try exec @r = sp_releaseapplock 'r', 'Session'; end try begin catch end catch; select @r"));
+
+    /// <summary>
+    /// Outside a <c>TRY</c> the procedure's call of <c>sys.xp_userlock</c>
+    /// fails and the procedure goes on, answering -999 (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ReleaseApplock_OfANotHeldLock_InAProcedure_AnswersMinus999()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table log (rc int, e int)",
+            "create procedure p as begin declare @r int; exec @r = sp_releaseapplock 'r', 'Session'; insert log values (@r, @@error) end");
+        _ = simulation.AssertSqlError("exec p", 1223);
+        AreEqual("-999 0", simulation.ExecuteScalar("select concat(rc, ' ', e) from log"));
+    }
 }

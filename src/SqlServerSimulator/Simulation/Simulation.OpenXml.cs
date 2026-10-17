@@ -41,7 +41,7 @@ public partial class Simulation
         batch.Connection.PreparedXmlDocuments[handle] = document;
         if (args.HandleSlot is { } slot)
             slot.Value = SqlValue.FromInt32(handle).CoerceTo(slot.DeclaredType);
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     /// <summary>
@@ -59,18 +59,16 @@ public partial class Simulation
             ? ScalarArguments.CoerceProcedureParameter(args.Handle, SqlType.Int32)
             : 0;
         if (!batch.Connection.PreparedXmlDocuments.TryRemove(handle, out _))
-            throw SimulatedSqlException.CouldNotFindPreparedStatement(handle);
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        {
+            // The extended procedure raises it as its own (probed 2026-10-17
+            // against SQL Server 2025).
+            var missing = SimulatedSqlException.CouldNotFindPreparedStatement(handle);
+            missing.PreserveDiagnostics(1, "sp_xml_removedocument");
+            throw missing;
+        }
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
-    /// <summary>Writes a system procedure's return code into the caller's <c>EXEC @rc =</c> slot, if it wrote one.</summary>
-    private static void SetProcedureReturnCode(BatchContext batch, string? returnCodeVariableName, int code)
-    {
-        if (returnCodeVariableName is null)
-            return;
-        var slot = batch.GetVariableSlot(returnCodeVariableName);
-        slot.Value = SqlValue.FromInt32(code).CoerceTo(slot.DeclaredType);
-    }
 
     // Parsed sp_xml_preparedocument / sp_xml_removedocument arguments.
     // Presence flags are distinct from NULL-ness: an omitted argument has no

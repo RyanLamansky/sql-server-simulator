@@ -341,7 +341,7 @@ partial class Simulation
 
         templateSlot.Value = SqlValue.FromNVarchar(template.Text).CoerceTo(templateSlot.DeclaredType);
         parametersSlot.Value = SqlValue.FromNVarchar(template.Declaration).CoerceTo(parametersSlot.DeclaredType);
-        SetProcedureReturnCode(batch, returnCodeVar, 1);
+        SetReturnCode(batch, returnCodeVar, 1);
     }
 
     /// <summary>

@@ -663,7 +663,9 @@ partial class Simulation
     /// DATABASE::</c> for the current database. A missing <c>@loginame</c> is
     /// Msg 201, a NULL one a silent no-op, and <c>@map</c> is read and ignored
     /// (probed 2026-09-27 against SQL Server 2025, where the proc's refusals
-    /// carry line 1 and no procedure attribution).
+    /// carry line 1 and no procedure attribution). The change runs in a
+    /// transaction of the procedure's own, which commits even after the
+    /// statement fails (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpChangeDbOwner(BatchContext batch)
     {
@@ -689,14 +691,21 @@ partial class Simulation
             yield break;
         if (!CanTakeDatabaseOwnership(batch, batch.CurrentDatabase))
             throw SimulatedSqlException.CannotFindSecurable("database", batch.CurrentDatabase.Name);
-        try
+        foreach (var outcome in InProcedureTransaction(batch, Changed(batch, login.CoerceTo(SqlType.SystemName).AsString), commitsAfterFailedStatement: true))
+            yield return outcome;
+
+        static IEnumerable<SimulatedStatementOutcome> Changed(BatchContext batch, string login)
         {
-            ChangeDatabaseOwner(batch.Parser, batch.CurrentDatabase, login.CoerceTo(SqlType.SystemName).AsString);
-        }
-        catch (SimulatedSqlException refusal)
-        {
-            // Raised from inside the proc's own body, at its line 1.
-            throw refusal.PinLine(1);
+            try
+            {
+                ChangeDatabaseOwner(batch.Parser, batch.CurrentDatabase, login);
+            }
+            catch (SimulatedSqlException refusal)
+            {
+                // The ALTER AUTHORIZATION the procedure runs refuses it.
+                throw ProcedureStatementError(refusal);
+            }
+            yield break;
         }
     }
 }

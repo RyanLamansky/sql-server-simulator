@@ -556,12 +556,4 @@ partial class Simulation
         refusal.PreserveDiagnostics(0, null);
         return new SimulatedErrorOutcome(refusal) { DoneKind = batch.CurrentStatement.DoneKind };
     }
-
-    private static void SetReturnCode(BatchContext batch, string? returnCodeVar, int code)
-    {
-        if (returnCodeVar is null)
-            return;
-        var slot = batch.GetVariableSlot(returnCodeVar);
-        slot.Value = SqlValue.FromInt32(code).CoerceTo(slot.DeclaredType);
-    }
 }

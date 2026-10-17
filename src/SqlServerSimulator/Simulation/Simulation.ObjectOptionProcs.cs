@@ -38,6 +38,9 @@ partial class Simulation
     /// new owner without a schema of its own name that it owns Msg 15411. The
     /// transfer runs as the statement real builds, so what it refuses comes
     /// back from it at line 1, and a success sends real's caution, Msg 15477.
+    /// Past the name's syntax the move runs in a transaction of the
+    /// procedure's own, committed ahead of a refusal and of the caution
+    /// (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpChangeObjectOwner(BatchContext batch, string calledAs)
     {
@@ -52,29 +55,35 @@ partial class Simulation
         var written = values[0].IsNull ? "(null)" : values[0].AsString;
         if (values[0].IsNull || !Parser.Expressions.ObjectId.TryParseObjectName(written, out var name) || name.Leaf.Length == 0)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.HelpNameIsNotAnIdentifier(written), 32);
-        if (name.Count > 2 || !batch.TryResolveCallerSchema(name, out var schema)
-            || schema.SchemaId is Database.InformationSchemaId or Database.SysSchemaId
-            || TransferableObject(schema, name.Leaf) is not { } target
-            || SchemaBinding.FindReferencingModule(database, target) is not null)
-        {
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ObjectNotValidForOperation(written), 64);
-        }
-        if (target.OwnerPrincipalId is not null || !SchemaNamedForItsOwner(database, schema))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ObjectNotValidForOperation(written), 78);
-
-        var newOwner = values[1].IsNull ? null : values[1].AsString;
-        if (newOwner is null || !database.Schemas.TryGetValue(newOwner, out var destination) || !SchemaNamedForItsOwner(database, destination))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PrincipalOrSchemaDoesNotExist(newOwner ?? "(null)"), 114);
-
-        var source = name.Count == 2 ? QuoteIdentifier(name[0]) + "." : "";
         var failed = false;
-        foreach (var outcome in this.RunStatements(batch, [$"alter schema {QuoteIdentifier(newOwner)} transfer {source}{QuoteIdentifier(name.Leaf)}"]))
+        foreach (var outcome in InProcedureTransaction(batch, Moved(), ProcedureTransactionEnding.CommitFirst))
         {
             failed |= outcome is SimulatedErrorOutcome;
             yield return outcome;
         }
         if (!failed)
             QueueProcedureMessage(batch, calledAs, 15477, RenameCautionMessage, 135);
+
+        IEnumerable<SimulatedStatementOutcome> Moved()
+        {
+            if (name.Count > 2 || !batch.TryResolveCallerSchema(name, out var schema)
+                || schema.SchemaId is Database.InformationSchemaId or Database.SysSchemaId
+                || TransferableObject(schema, name.Leaf) is not { } target
+                || SchemaBinding.FindReferencingModule(database, target) is not null)
+            {
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ObjectNotValidForOperation(written), 64);
+            }
+            if (target.OwnerPrincipalId is not null || !SchemaNamedForItsOwner(database, schema))
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ObjectNotValidForOperation(written), 78);
+
+            var newOwner = values[1].IsNull ? null : values[1].AsString;
+            if (newOwner is null || !database.Schemas.TryGetValue(newOwner, out var destination) || !SchemaNamedForItsOwner(database, destination))
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PrincipalOrSchemaDoesNotExist(newOwner ?? "(null)"), 114);
+
+            var source = name.Count == 2 ? QuoteIdentifier(name[0]) + "." : "";
+            foreach (var outcome in this.RunStatements(batch, [$"alter schema {QuoteIdentifier(newOwner)} transfer {source}{QuoteIdentifier(name.Leaf)}"]))
+                yield return outcome;
+        }
     }
 
     /// <summary>

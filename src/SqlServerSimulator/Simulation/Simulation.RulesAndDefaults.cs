@@ -166,7 +166,10 @@ partial class Simulation
     /// that still carry the type's previous binding, unless
     /// <c>@futureonly</c> is <c>'futureonly'</c>; a column bound later takes
     /// the type's. The binding is transactional, and each outcome prints real's
-    /// confirmation from the line of its source that prints it.
+    /// confirmation from the line of its source that prints it. Past the
+    /// arguments' checks it runs in a transaction of the procedure's own,
+    /// committed after the confirmation and after a refusal (probed
+    /// 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpBind(BatchContext batch, string procedureName, bool isRule)
     {
@@ -183,7 +186,13 @@ partial class Simulation
         var futureOnly = futureOnlyText is not null;
         if (futureOnly && !BuiltInToken.Equals(futureOnlyText, "futureonly"))
             throw SimulatedSqlException.BindUsage(isRule);
+        foreach (var outcome in InProcedureTransaction(batch, Bound(batch, procedureName, isRule, objectName, targetName, futureOnly, futureOnlyText), ProcedureTransactionEnding.CommitAfter, sendsMessagesInside: true))
+            yield return outcome;
+    }
 
+    /// <summary><see cref="InvokeSpBind"/>'s work, once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Bound(BatchContext batch, string procedureName, bool isRule, string objectName, string targetName, bool futureOnly, string? futureOnlyText)
+    {
         var database = batch.CurrentDatabase;
         BindableObject? bound = null;
         if (ObjectId.TryParseObjectName(objectName, out var boundName) && batch.TryResolveSchema(boundName, out var boundSchema))
@@ -257,7 +266,10 @@ partial class Simulation
     /// <c>sp_unbindrule @objname [, @futureonly]</c>, the inverse of
     /// <see cref="InvokeSpBind"/>: unbinding a type also unbinds the columns
     /// declared with it that carry the type's binding, unless
-    /// <c>@futureonly</c> is <c>'futureonly'</c>.
+    /// <c>@futureonly</c> is <c>'futureonly'</c>. A column with nothing bound
+    /// is refused ahead of the transaction the unbinding runs in, and a
+    /// missing column after it commits; the confirmation follows the commit
+    /// (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpUnbind(BatchContext batch, string procedureName, bool isRule)
     {
@@ -270,7 +282,24 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, "objname");
         var futureOnly = futureOnlyText is not null && BuiltInToken.Equals(futureOnlyText, "futureonly");
 
-        var target = ResolveBindTarget(batch, targetName);
+        (HeapColumn? Column, AliasType? AliasType) target;
+        try
+        {
+            target = ResolveBindTarget(batch, targetName);
+        }
+        catch (SimulatedSqlException missing)
+        {
+            throw RaisedInProcedureTransaction(batch, missing, ProcedureTransactionEnding.CommitFirst);
+        }
+        if (target.Column is { } boundColumn && (isRule ? boundColumn.BoundRule is null : boundColumn.BoundDefault is null))
+            throw SimulatedSqlException.ColumnHasNothingBound(targetName, isRule);
+        foreach (var outcome in InProcedureTransaction(batch, Unbound(batch, procedureName, isRule, targetName, futureOnly, futureOnlyText, target)))
+            yield return outcome;
+    }
+
+    /// <summary><see cref="InvokeSpUnbind"/>'s work, once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Unbound(BatchContext batch, string procedureName, bool isRule, string targetName, bool futureOnly, string? futureOnlyText, (HeapColumn? Column, AliasType? AliasType) target)
+    {
         // A column reports its table's schema and its own name, a type its own
         // (probed 2026-09-28 against SQL Server 2025).
         if (RaisesDdlEvents(batch.Parser))
@@ -283,8 +312,6 @@ partial class Simulation
         }
         if (target.Column is { } column)
         {
-            if (isRule ? column.BoundRule is null : column.BoundDefault is null)
-                throw SimulatedSqlException.ColumnHasNothingBound(targetName, isRule);
             if (isRule)
                 BindRule(batch, column, null);
             else

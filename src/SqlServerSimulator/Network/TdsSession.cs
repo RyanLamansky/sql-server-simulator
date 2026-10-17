@@ -1047,13 +1047,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// The pending transaction events that go out ahead of an outcome's first
     /// token: all of them, except that a rollback the outcome's own error
     /// caused goes out after that error, as real sends it (probed 2026-09-28
-    /// against SQL Server 2025).
+    /// against SQL Server 2025) — unless a system procedure rolled back before
+    /// raising it (<see cref="SimulatedSqlException.FollowsTransactionEnd"/>).
     /// </summary>
     private int TransactionEventsAheadOf(SimulatedStatementOutcome outcome)
     {
         var count = this.EventsBefore(outcome, this.PendingTransactionEventCount);
         return count > 0
-            && outcome is SimulatedErrorOutcome or SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false }
+            && outcome is SimulatedErrorOutcome { Exception.FollowsTransactionEnd: false } or SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false }
             && this.connection!.TransactionEvents![count - 1].Event == TransactionEvent.Rollback
                 ? count - 1
                 : count;
@@ -1294,6 +1295,16 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     writer.WriteEnvChange(Tds.EnvLanguage, this.connection.Language.Name, this.announcedLanguage);
                     this.announcedLanguage = this.connection.Language.Name;
                     this.pendingInfoMessages.Enqueue(info.Message);
+                }
+                // One a system procedure sent inside the transaction it opened
+                // follows that transaction's beginning and precedes its end.
+                else if (info.TransactionEventMark >= 0)
+                {
+                    _ = this.FlushInfoMessages(writer);
+                    this.WriteTransactionEnvChanges(writer, this.EventsBefore(info, 0));
+                    this.pendingInfoMessages.Enqueue(info.Message);
+                    _ = this.FlushInfoMessages(writer);
+                    closed = false;
                 }
                 else
                 {

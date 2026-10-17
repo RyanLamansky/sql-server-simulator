@@ -223,7 +223,7 @@ partial class Simulation
     private static SimulatedSqlException TraceRefusal(BatchContext batch, string procedure, string? returnCodeVariableName, int code, SimulatedSqlException error)
     {
         if (batch.Connection.OpenTryFrames == 0)
-            SetProcedureReturnCode(batch, returnCodeVariableName, code);
+            SetReturnCode(batch, returnCodeVariableName, code);
         return AtProcedureLine(error, procedure, 1);
     }
 
@@ -314,7 +314,7 @@ partial class Simulation
         var trace = server.Add(id => new UserTrace(id, options, file, maxSize, stopTime, rollover ? fileCount ?? 0 : 1, connection.Security.OriginalLoginName));
         trace.CreateFile(server.Files);
         output.Value = SqlValue.FromInt32(trace.Id);
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     /// <summary>
@@ -345,7 +345,7 @@ partial class Simulation
         if (columnId == 12 && !on)
             throw TraceRefusal(batch, procedure, returnCodeVariableName, 11, SimulatedSqlException.TraceSpidColumnRequired());
         trace.SetEvent(eventId, columnId, on);
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     /// <summary>
@@ -371,7 +371,7 @@ partial class Simulation
         if (bound[1] is not { IsUntypedNull: false, Value.IsNull: false } columnArgument)
         {
             trace.ClearFilters();
-            SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+            SetReturnCode(batch, returnCodeVariableName, 0);
             yield break;
         }
         var columnId = columnArgument.Value.AsInt32;
@@ -414,7 +414,7 @@ partial class Simulation
         if (type == TraceParameterType.DateTime && !value.IsNull)
             value = value.CoerceTo(SqlType.DateTime);
         trace.AddFilter(new TraceFilter(columnId, logical, comparison, value));
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     /// <summary>
@@ -461,7 +461,7 @@ partial class Simulation
                 server.Remove(trace);
                 break;
         }
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     /// <summary>
@@ -488,6 +488,6 @@ partial class Simulation
             ("event_id", ExtendedEvents.XeValue.FromSigned(eventId)),
             ("user_info", ExtendedEvents.XeValue.FromUnicode(info)),
             ("user_data", ExtendedEvents.XeValue.FromBinary(data))));
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 }

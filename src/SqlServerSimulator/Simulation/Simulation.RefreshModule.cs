@@ -20,7 +20,9 @@ partial class Simulation
     /// procedure or trigger named drops its compiled plan, and a table named
     /// takes a new <c>modify_date</c>, which every plan reading it sees as a
     /// change; a function named changes nothing a caller's plan depends on
-    /// (probed 2026-10-01; see <see cref="ModulePlan"/>).
+    /// (probed 2026-10-01; see <see cref="ModulePlan"/>). The marking runs in
+    /// a transaction of the procedure's own, committed ahead of Msg 15165 and
+    /// of Msg 15070 (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpRecompile(BatchContext batch, string procedureName)
     {
@@ -31,6 +33,14 @@ partial class Simulation
         var (objectName, _) = ParseHelpArgs(arguments, "sp_recompile", firstName: "objname");
         if (objectName is null)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_recompile", "objname");
+        foreach (var outcome in InProcedureTransaction(batch, Marked(batch, objectName), ProcedureTransactionEnding.CommitFirst))
+            yield return outcome;
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName));
+    }
+
+    /// <summary><see cref="InvokeSpRecompile"/>'s work, once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Marked(BatchContext batch, string objectName)
+    {
         if (!Parser.Expressions.ObjectId.TryParseObjectName(objectName, out var name)
             || !batch.TryResolveSchema(name, out var schema)
             || !schema.TryFindInSharedNamespace(name.Leaf, out var marked))
@@ -56,7 +66,7 @@ partial class Simulation
                 batch.Connection.Simulation.BumpSchemaVersion();
                 break;
         }
-        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName));
+        yield break;
     }
 
     /// <summary>

@@ -1058,6 +1058,15 @@ internal sealed partial class BatchContext
     public int TryFrameDepth;
 
     /// <summary>
+    /// The status the system procedure this batch is running returns, set by
+    /// one that writes a code of its own (<c>sp_getapplock</c>'s -999, the
+    /// error-log readers', <c>sp_xml_preparedocument</c>'s) and sent as its
+    /// RETURNSTATUS; null while it has written none, when the call returns 1
+    /// after a failed statement and 0 otherwise.
+    /// </summary>
+    public int? SystemProcedureStatus;
+
+    /// <summary>
     /// Number of <c>CATCH</c> bodies currently being dispatched on the stack.
     /// Incremented when a CATCH body starts running (i.e. the matching TRY
     /// caught an error), decremented when it ends. Gates <c>THROW;</c> (the

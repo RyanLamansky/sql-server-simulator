@@ -38,7 +38,7 @@ partial class Simulation
         if (values[0].IsNull)
         {
             QueueProcedureMessage(batch, calledAs, 15048, SimulatedSqlException.InvalidCompatibilityLevel().Message, 42);
-            SetProcedureReturnCode(batch, returnCode, 0);
+            SetReturnCode(batch, returnCode, 0);
             yield break;
         }
 
@@ -49,7 +49,7 @@ partial class Simulation
         if (values[1].IsNull)
         {
             QueueProcedureMessage(batch, calledAs, 15054, $"The current compatibility level is {(int)database.CompatibilityLevel}.", 69);
-            SetProcedureReturnCode(batch, returnCode, 0);
+            SetReturnCode(batch, returnCode, 0);
             yield break;
         }
 
@@ -60,7 +60,7 @@ partial class Simulation
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureCannotRunInTransaction("sp_dbcmptlevel"), 97);
         foreach (var outcome in this.RunStatements(batch, [$"alter database {QuoteIdentifier(name)} set compatibility_level = {level}"]))
             yield return outcome;
-        SetProcedureReturnCode(batch, returnCode, 0);
+        SetReturnCode(batch, returnCode, 0);
     }
 
     /// <summary>

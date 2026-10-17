@@ -8,7 +8,9 @@ namespace SqlServerSimulator;
 // the pre-DDL spellings of login management. Each checks what real's procedure
 // checks itself, then runs the CREATE / DROP / ALTER LOGIN statement real builds,
 // so what the statement refuses (a duplicate name, a missing database, a weak
-// password) comes back from it at line 1 in no procedure.
+// password) comes back from it at line 1 in no procedure. Each refuses to run in
+// a transaction, and sp_defaultdb / sp_defaultlanguage wrap their work in one of
+// their own (Simulation.ProcedureTransactions.cs).
 partial class Simulation
 {
     private static readonly SystemProcedureParameter[] AddLoginParameters =
@@ -77,6 +79,7 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_addlogin", calledAs, arguments, AddLoginParameters);
+        RefuseInTransaction(batch, calledAs, "sp_addlogin", 19);
         var name = RequireValidName(values[0]);
         if (!values[5].IsNull)
         {
@@ -95,7 +98,7 @@ partial class Simulation
             var bytes = sid.CoerceTo(SqlType.Varbinary).AsBytes;
             statement += ", sid = 0x" + Convert.ToHexString(bytes.AsSpan(0, Math.Min(bytes.Length, 16)));
         }
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in WithoutImplicitTransaction(batch.Connection, this.RunProcedureStatement(batch, statement)))
             yield return outcome;
     }
 
@@ -111,10 +114,11 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_droplogin", calledAs, arguments, LoginNameParameter);
+        RefuseInTransaction(batch, calledAs, "sp_droplogin", 13);
         var name = RequireValidName(values[0]);
         if (!IsRegisteredLogin(batch, name))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 26);
-        foreach (var outcome in this.RunProcedureStatement(batch, "drop login " + QuoteIdentifier(name)))
+        foreach (var outcome in WithoutImplicitTransaction(batch.Connection, this.RunProcedureStatement(batch, "drop login " + QuoteIdentifier(name))))
             yield return outcome;
     }
 
@@ -130,14 +134,20 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_defaultdb", calledAs, arguments, DefaultDatabaseParameters);
+        RefuseInTransaction(batch, calledAs, "sp_defaultdb", 14);
         var name = RequireValidName(values[0]);
         if (values[1].IsNull)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.DefaultDatabaseDoesNotExist("(null)"), 26);
-        if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 41);
-        var statement = "alter login " + QuoteIdentifier(name) + " with default_database = " + QuoteIdentifier(values[1].AsString);
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 41);
+            foreach (var produced in this.RunProcedureStatement(batch, "alter login " + QuoteIdentifier(name) + " with default_database = " + QuoteIdentifier(values[1].AsString)))
+                yield return produced;
+        }
     }
 
     /// <summary>
@@ -151,12 +161,18 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_defaultlanguage", calledAs, arguments, DefaultLanguageParameters);
+        RefuseInTransaction(batch, calledAs, "sp_defaultlanguage", 14);
         var name = RequireValidName(values[0]);
-        if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 34);
-        var statement = "alter login " + QuoteIdentifier(name) + " with default_language = " + QuoteIdentifier(values[1].IsNull ? this.DefaultLoginLanguage.Name : values[1].AsString);
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 34);
+            foreach (var produced in this.RunProcedureStatement(batch, "alter login " + QuoteIdentifier(name) + " with default_language = " + QuoteIdentifier(values[1].IsNull ? this.DefaultLoginLanguage.Name : values[1].AsString)))
+                yield return produced;
+        }
     }
 
     /// <summary>
@@ -172,6 +188,7 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_password", calledAs, arguments, PasswordParameters);
+        RefuseInTransaction(batch, calledAs, "sp_password", 21);
         var name = values[2].IsNull ? batch.Connection.Security.Effective.LoginName : values[2].AsString;
         if (!values[2].IsNull && !IsRegisteredLogin(batch, name))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 29);
@@ -179,7 +196,7 @@ partial class Simulation
             .Append(QuoteText(values[1].IsNull ? "" : values[1].AsString));
         if (!values[0].IsNull)
             _ = statement.Append(" old_password = ").Append(QuoteText(values[0].AsString));
-        foreach (var outcome in this.RunProcedureStatement(batch, statement.ToString()))
+        foreach (var outcome in WithoutImplicitTransaction(batch.Connection, this.RunProcedureStatement(batch, statement.ToString())))
             yield return outcome;
     }
 }

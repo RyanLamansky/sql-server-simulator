@@ -1191,9 +1191,14 @@ partial class Simulation
                 {
                     errorOutcome.DoneKind = StatementDoneKind.Batch;
                 }
+                else if (this.IsCall && continuedError.EndsExtendedProcedure && this.OpenScopes(outcomes) <= 1)
+                {
+                    errorOutcome.DoneKind = StatementDoneKind.ClosedByScope;
+                    closedScopes = [ExtendedProcedureExit(batch, continuedError.SystemProcedureReturnCode)];
+                }
                 else if (this.IsCall && continuedError.RaisedBySystemProcedure && this.OpenScopes(outcomes) == 1)
                 {
-                    errorOutcome.DoneKind = StatementDoneKind.RaisError;
+                    errorOutcome.DoneKind = continuedError.RaisedByProcedureStatement ? StatementDoneKind.SecurityDdlFailed : StatementDoneKind.RaisError;
                     closedScopes = [ScopeExit(batch, continuedError.SystemProcedureReturnCode)];
                 }
                 else if (this.IsCall || this.OpenScopes(outcomes) > 0)
@@ -1209,7 +1214,7 @@ partial class Simulation
                         : StatementDoneKind.Batch;
                 }
                 errorOutcome.InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
-                errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
+                errorOutcome.TransactionEventMark = continuedError.TransactionEventMark >= 0 ? continuedError.TransactionEventMark : connection.TransactionEventsRecorded;
             }
             // A statement compiled before its error ran into it.
             if (this.TimedKind is not null && !batch.BatchAborted && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, this.StatementStart)))

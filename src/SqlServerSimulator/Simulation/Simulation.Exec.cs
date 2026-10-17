@@ -33,8 +33,11 @@ partial class Simulation
     /// catalog set, <c>sp_rename</c>, the extended-property and bind
     /// procedures — while the ones below run no query of their own, and
     /// <c>sp_executesql</c> leaves it to the statements it runs (probed
-    /// 2026-09-28 against SQL Server 2025). A call whose arguments don't bind
-    /// (Msg 201) never starts, so it takes the transaction back.
+    /// 2026-09-28 against SQL Server 2025). The legacy security procedures
+    /// that wrap their work in a transaction of their own check
+    /// <c>@@TRANCOUNT</c> before any query, so that transaction is the one
+    /// they open, and commit (probed 2026-10-17). A call whose arguments don't
+    /// bind (Msg 201) never starts, so it takes the transaction back.
     /// </summary>
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
         "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_cursor" or "sp_cursorclose" or "sp_cursorexecute" or "sp_cursorfetch" or "sp_cursoropen" or "sp_cursoroption" or "sp_cursorprepare" or "sp_cursorprepexec" or "sp_cursorunprepare" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
@@ -47,7 +50,9 @@ partial class Simulation
         or "xp_regenumvalues" or "xp_instance_regenumvalues" or "xp_regenumkeys" or "xp_instance_regenumkeys"
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
-        or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_flush_log")
+        or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_flush_log"
+        or "sp_addapprole" or "sp_addlogin" or "sp_addrole" or "sp_addsrvrolemember" or "sp_adduser" or "sp_approlepassword" or "sp_defaultdb" or "sp_defaultlanguage"
+        or "sp_dropapprole" or "sp_droplogin" or "sp_droprole" or "sp_dropsrvrolemember" or "sp_grantdbaccess" or "sp_password" or "sp_revokedbaccess")
         && !systemProcName.StartsWith("sp_OA", StringComparison.Ordinal);
 
     /// <summary>
@@ -554,9 +559,11 @@ partial class Simulation
                     procedureDatabase.RejectWhenOffline(batch.Connection);
                 systemProc = ModuleDatabaseScope.Enumerate(batch.Connection, procedureDatabase, systemProc);
             }
+            batch.SystemProcedureStatus = null;
             try
             {
-                foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult))
+                var attributed = AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult);
+                foreach (var outcome in AsExtendedProcedure(attributed, systemProcName!, CalledName(procName)))
                     yield return outcome;
             }
             finally
@@ -565,9 +572,10 @@ partial class Simulation
                     this.CatalogRows.Invalidate();
             }
             // One whose statement failed returns 1 (probed 2026-10-06 against
-            // SQL Server 2025: sp_addrole of a fixed role's name).
+            // SQL Server 2025: sp_addrole of a fixed role's name), and one
+            // writing a code of its own sends that (sp_getapplock's -999).
             if (framesScope)
-                yield return ScopeExit(batch, procedureResult.Failed ? 1 : 0);
+                yield return ScopeExit(batch, batch.SystemProcedureStatus ?? (procedureResult.Failed ? 1 : 0));
             // A system procedure that finishes answers 0 to `EXEC @rc = …`
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
             // extended-property procedures); the few with codes of their own

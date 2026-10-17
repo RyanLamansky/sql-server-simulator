@@ -395,6 +395,10 @@ partial class Simulation
     /// <c>ALTER ROLE … ADD | DROP MEMBER</c>, with real's own signature — a
     /// missing argument is Msg 201, a third Msg 8144, an unknown name Msg 8145
     /// and a NULL one Msg 15004 (probed 2026-09-25 against SQL Server 2025).
+    /// The membership change is the <c>ALTER ROLE</c> real runs as dynamic SQL,
+    /// so its refusals close as that statement's, at line 1 of no procedure;
+    /// <c>sp_addrolemember</c> runs it in a transaction of its own, rolled back
+    /// ahead of its own Msg 15410 (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpRoleMember(BatchContext batch, bool isAdd)
     {
@@ -427,12 +431,28 @@ partial class Simulation
         if (values[0]!.Value.IsNull || values[1]!.Value.IsNull)
             throw SimulatedSqlException.NameCannotBeNull();
 
-        ChangeRoleMembership(
-            batch.Parser,
-            values[0]!.Value.CoerceTo(SqlType.SystemName).AsString,
-            values[1]!.Value.CoerceTo(SqlType.SystemName).AsString,
-            isAdd,
-            viaProcedure: true);
+        var change = Changed(batch, values[0]!.Value.CoerceTo(SqlType.SystemName).AsString, values[1]!.Value.CoerceTo(SqlType.SystemName).AsString, isAdd);
+        foreach (var outcome in isAdd ? InProcedureTransaction(batch, change) : change)
+            yield return outcome;
+
+        static IEnumerable<SimulatedStatementOutcome> Changed(BatchContext batch, string role, string member, bool isAdd)
+        {
+            try
+            {
+                ChangeRoleMembership(batch.Parser, role, member, isAdd, viaProcedure: true);
+            }
+            catch (SimulatedSqlException error) when (error.Number == 15410)
+            {
+                // The procedure's own check of the member, its RAISERROR.
+                error.RaisedBySystemProcedure = true;
+                throw;
+            }
+            catch (SimulatedSqlException error)
+            {
+                throw ProcedureStatementError(error);
+            }
+            yield break;
+        }
     }
 
     /// <summary>

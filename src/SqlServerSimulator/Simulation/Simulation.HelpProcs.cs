@@ -607,6 +607,42 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Passes an extended procedure's outcomes through, marking an error it
+    /// raises itself — one attributed to it by the name it was called by —
+    /// as ending it (<see cref="SimulatedSqlException.EndsExtendedProcedure"/>),
+    /// with the status real returns: the error's number for
+    /// <c>sp_execute</c> and <c>sp_unprepare</c>, 1 for the rest (probed
+    /// 2026-10-17 against SQL Server 2025). Any other procedure's pass
+    /// through untouched.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> AsExtendedProcedure(IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName)
+    {
+        if (systemProcName is not ("sp_cursorclose" or "sp_execute" or "sp_getbindtoken" or "sp_set_session_context" or "sp_unprepare" or "sp_xml_preparedocument" or "sp_xml_removedocument"))
+            return outcomes;
+        return Marked(outcomes, systemProcName, calledName);
+
+        static IEnumerable<SimulatedStatementOutcome> Marked(IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName)
+        {
+            using var enumerator = outcomes.GetEnumerator();
+            while (true)
+            {
+                try
+                {
+                    if (!enumerator.MoveNext())
+                        yield break;
+                }
+                catch (SimulatedSqlException exception) when (string.Equals(exception.Errors[0].Procedure, calledName, StringComparison.OrdinalIgnoreCase))
+                {
+                    exception.EndsExtendedProcedure = true;
+                    exception.SystemProcedureReturnCode = systemProcName is "sp_execute" or "sp_unprepare" ? exception.Number : 1;
+                    throw;
+                }
+                yield return enumerator.Current;
+            }
+        }
+    }
+
+    /// <summary>
     /// Where real raises <paramref name="exception"/> in
     /// <paramref name="systemProcName"/>: the line of its own source, and the
     /// procedure the error names when that isn't the one called — an inner
@@ -665,7 +701,6 @@ partial class Simulation
         ("sp_dropserver", 15247) => (20, null),
         ("sp_dropserver", 15600) => (31, null),
         ("sp_updateextendedproperty", 15096 or 15135 or 15217 or 15600) => (36, null),
-        ("sp_addrolemember", 15151) => (1, ""),
         ("sp_addrolemember", 15410) => (35, null),
         ("sp_bindefault", 4185) => (223, null),
         ("sp_bindefault", 15016) => (102, null),

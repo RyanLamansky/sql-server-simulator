@@ -133,6 +133,22 @@ public class ApplicationLockTests
             1227);
     }
 
+    /// <summary>
+    /// The procedure judges the mode, the owner and a Transaction owner
+    /// outside a transaction itself, answering -999, ahead of the timeout,
+    /// resource and principal checks <c>sys.xp_userlock</c> makes (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void GetAppLock_JudgesItsOwnChecksBeforeXpUserlocks()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        AreEqual(-999, ReturnCode(connection, "declare @r int; exec @r = sp_getapplock @Resource = N'res', @LockMode = 'Bogus', @LockOwner = 'Session', @DbPrincipal = 'nobody'; select @r"));
+        AreEqual(-999, ReturnCode(connection, "declare @r int; exec @r = sp_getapplock @Resource = NULL, @LockMode = 'Exclusive'; select @r"));
+        _ = AssertError(connection, "declare @r int; exec @r = sp_getapplock @Resource = NULL, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = -2; select @r", 1227);
+        _ = AssertError(connection, "declare @r int; exec @r = sp_releaseapplock @Resource = NULL, @LockOwner = 'Transaction'; select @r", 1224);
+    }
+
     [TestMethod]
     public void ReleaseAppLock_NotHeld_RaisesMsg1223()
     {

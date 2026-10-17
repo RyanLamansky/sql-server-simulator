@@ -22,12 +22,16 @@ public partial class Simulation
     /// <c>EXEC @rc = sp_getapplock @Resource, @LockMode, @LockOwner,
     /// @LockTimeout, @DbPrincipal</c>. Return codes (never exceptions for
     /// lock-arbitration outcomes, probe-confirmed): 0 granted, 1 granted
-    /// after waiting, -1 timeout, -3 deadlock victim, -999 validation
-    /// failure (bad mode / owner string, Transaction owner outside a
-    /// transaction, missing <c>@Resource</c>). Raised errors are reserved
-    /// for NULL resource (Msg 1224), timeout below -1 (Msg 1227), unknown
-    /// principal (Msg 1202), and missing <c>@LockMode</c> (Msg 201, a
-    /// binding-time check).
+    /// after waiting, -1 timeout, -3 deadlock victim, -999 refused. The
+    /// procedure judges the mode, then the owner, then a Transaction owner
+    /// outside a transaction, each printing its message and answering -999;
+    /// what passes goes to <c>sys.xp_userlock</c>, which refuses a timeout
+    /// below -1 (Msg 1227), a missing or NULL resource (Msg 1224) and an
+    /// unknown principal (Msg 1202) in that order, after which the procedure
+    /// still answers -999 (probed 2026-10-17 against SQL Server 2025). A
+    /// missing <c>@LockMode</c> is Msg 201, a binding-time check. Each of the
+    /// statements real's procedure runs on the way closes with a DONEINPROC
+    /// of its own, which <c>NOCOUNT</c> drops (<see cref="AppLockStep"/>).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpGetAppLock(BatchContext batch, string? returnCodeVariableName)
     {
@@ -36,48 +40,64 @@ public partial class Simulation
             yield break;
 
         // Missing @LockMode is a parameter-binding failure (Msg 201) and so
-        // precedes every body-level check — including the silent -999 a
-        // missing @Resource produces.
+        // precedes every body-level check.
         if (!args.HasMode)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_getapplock", "LockMode");
 
         var connection = batch.Connection;
-        if (!args.HasResource || args.Resource.IsNull)
-            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockResource());
-
-        // NULL timeout falls back to the session default, like an omitted
-        // parameter (probe-confirmed rc=0 with @LockTimeout=NULL).
-        var timeout = args.HasTimeout && !args.Timeout.IsNull
+        // A NULL timeout falls back to the session default, like an omitted
+        // parameter (probe-confirmed rc=0 with @LockTimeout=NULL), which the
+        // procedure assigns in a statement of its own; one out of int's range
+        // fails binding (Msg 8114).
+        var timeoutGiven = args.HasTimeout && !args.Timeout.IsNull;
+        var timeout = timeoutGiven
             ? ScalarArguments.CoerceProcedureParameter(args.Timeout, SqlType.Int32)
             : connection.LockTimeoutMillis;
-        if (timeout < -1)
-            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockTimeout());
-
-        var (principalId, _) = ResolveAppLockPrincipal(batch, args);
-
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        yield return AppLockStep(batch, StatementDoneKind.Condition);
         var writtenMode = args.Mode.IsNull ? "" : args.Mode.CoerceTo(SqlType.NVarchar).AsString;
         if (!AppLock.TryParseMode(writtenMode, out var mode))
         {
-            yield return UnrecognizedAppLockOption(batch, "sp_getapplock", 26, writtenMode, "LockMode");
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+            foreach (var step in AppLockRefusal(batch, returnCodeVariableName, UnrecognizedAppLockOption(batch, "sp_getapplock", 26, writtenMode, "LockMode")))
+                yield return step;
             yield break;
         }
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        yield return AppLockStep(batch, StatementDoneKind.Condition);
         if (!TryResolveAppLockOwner(args, out var isTransaction))
         {
-            yield return UnrecognizedAppLockOption(batch, "sp_getapplock", 39, WrittenOwner(args), "LockOwner");
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+            foreach (var step in AppLockRefusal(batch, returnCodeVariableName, UnrecognizedAppLockOption(batch, "sp_getapplock", 39, WrittenOwner(args), "LockOwner")))
+                yield return step;
             yield break;
         }
+
+        yield return AppLockStep(batch, StatementDoneKind.Condition);
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        if (!timeoutGiven)
+            yield return AppLockStep(batch, StatementDoneKind.Select);
+        yield return AppLockStep(batch, StatementDoneKind.Condition);
 
         // Transaction owner without an active transaction: Msg 15626 and
         // -999, where APPLOCK_MODE / APPLOCK_TEST raise Msg 3918.
         var transaction = connection.CurrentTransaction;
         if (isTransaction && transaction is null)
         {
-            yield return Printed(SimulatedSqlException.TransactionalAppLockWithoutTransactionMessage(batch));
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+            foreach (var step in AppLockRefusal(batch, returnCodeVariableName, Printed(SimulatedSqlException.TransactionalAppLockWithoutTransactionMessage(batch))))
+                yield return step;
             yield break;
         }
+
+        var refusal = timeout < -1 ? SimulatedSqlException.InvalidAppLockTimeout()
+            : !args.HasResource || args.Resource.IsNull ? SimulatedSqlException.InvalidAppLockResource()
+            : !TryResolveAppLockPrincipal(batch, args, out _, out var unknownPrincipal) ? SimulatedSqlException.DatabasePrincipalDoesNotExist(unknownPrincipal)
+            : null;
+        if (refusal is not null)
+        {
+            foreach (var step in UserLockFailure(batch, returnCodeVariableName, refusal))
+                yield return step;
+            yield break;
+        }
+        _ = TryResolveAppLockPrincipal(batch, args, out var principalId, out _);
 
         var resourceName = AppLock.NormalizeResource(args.Resource.CoerceTo(SqlType.NVarchar).AsString);
         var resource = batch.CurrentDatabase.GetOrCreateApplicationLock(principalId, resourceName);
@@ -111,16 +131,23 @@ public partial class Simulation
             }
         }
 
-        SetAppLockReturnCode(batch, returnCodeVariableName, code);
+        yield return AppLockStep(batch, StatementDoneKind.Execute);
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        SetReturnCode(batch, returnCodeVariableName, code);
     }
 
     /// <summary>
     /// <c>EXEC @rc = sp_releaseapplock @Resource, @LockOwner,
     /// @DbPrincipal</c>. Releases ONE reference of the owner's hold on the
     /// resource (probe-confirmed reference counting); after a mode
-    /// conversion the strongest-mode hold releases first. Missing or NULL
-    /// <c>@Resource</c> raises Msg 1224; releasing a resource the owner
-    /// doesn't hold raises Msg 1223; a bad owner string returns -999.
+    /// conversion the strongest-mode hold releases first. A bad owner string
+    /// prints Msg 15625 and returns -999; <c>sys.xp_userlock</c> then refuses
+    /// a missing or NULL <c>@Resource</c> (Msg 1224), a Transaction owner
+    /// outside a transaction (Msg 3918), an unknown principal (Msg 1202) and
+    /// a resource the owner doesn't hold (Msg 1223) in that order, the
+    /// procedure answering -999 after each (probed 2026-10-17 against SQL
+    /// Server 2025). Its statements close in DONEINPROCs of their own, as
+    /// <c>sp_getapplock</c>'s do.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpReleaseAppLock(BatchContext batch, string? returnCodeVariableName)
     {
@@ -128,22 +155,29 @@ public partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        if (!args.HasResource || args.Resource.IsNull)
-            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockResource());
-
-        var (principalId, principalName) = ResolveAppLockPrincipal(batch, args);
-
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        yield return AppLockStep(batch, StatementDoneKind.Condition);
         if (!TryResolveAppLockOwner(args, out var isTransaction))
         {
-            yield return UnrecognizedAppLockOption(batch, "sp_releaseapplock", 20, WrittenOwner(args), "LockOwner");
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+            foreach (var step in AppLockRefusal(batch, returnCodeVariableName, UnrecognizedAppLockOption(batch, "sp_releaseapplock", 20, WrittenOwner(args), "LockOwner")))
+                yield return step;
             yield break;
         }
+        yield return AppLockStep(batch, StatementDoneKind.Select);
 
         var connection = batch.Connection;
         var transaction = connection.CurrentTransaction;
-        if (isTransaction && transaction is null)
-            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.MustExecuteInUserTransaction(state: 1));
+        var refusal = !args.HasResource || args.Resource.IsNull ? SimulatedSqlException.InvalidAppLockResource()
+            : isTransaction && transaction is null ? SimulatedSqlException.MustExecuteInUserTransaction(state: 1)
+            : !TryResolveAppLockPrincipal(batch, args, out _, out var unknownPrincipal) ? SimulatedSqlException.DatabasePrincipalDoesNotExist(unknownPrincipal)
+            : null;
+        if (refusal is not null)
+        {
+            foreach (var step in UserLockFailure(batch, returnCodeVariableName, refusal))
+                yield return step;
+            yield break;
+        }
+        _ = TryResolveAppLockPrincipal(batch, args, out var principalId, out var principalName);
 
         var resourceName = AppLock.NormalizeResource(args.Resource.CoerceTo(SqlType.NVarchar).AsString);
         var ledger = isTransaction ? transaction!.TransactionAppLocks : connection.SessionAppLocks;
@@ -163,7 +197,11 @@ public partial class Simulation
         }
 
         if (bestIndex < 0)
-            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName));
+        {
+            foreach (var step in UserLockFailure(batch, returnCodeVariableName, SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName)))
+                yield return step;
+            yield break;
+        }
 
         var hold = ledger[bestIndex];
         var owner = connection.Session;
@@ -184,12 +222,14 @@ public partial class Simulation
         }
         connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, owner);
 
-        SetAppLockReturnCode(batch, returnCodeVariableName, 0);
+        yield return AppLockStep(batch, StatementDoneKind.Execute);
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 
     // Parsed sp_getapplock / sp_releaseapplock arguments. Presence flags are
-    // distinct from NULL-ness — a missing @Resource behaves differently from
-    // an explicit NULL (silent -999 vs Msg 1224 on sp_getapplock).
+    // distinct from NULL-ness, so an omitted argument never reads a default
+    // SqlValue.
     private struct AppLockArguments
     {
         public SqlValue Resource;
@@ -263,17 +303,17 @@ public partial class Simulation
     }
 
     // Resolves @DbPrincipal (default 'public') against the current
-    // database's principals; unknown → Msg 1202. The simulator has no
-    // membership model, so an existing principal always passes — real SQL
-    // Server additionally requires the caller to be a member.
-    private static (int PrincipalId, string Name) ResolveAppLockPrincipal(BatchContext batch, in AppLockArguments args)
+    // database's principals; false for an unknown one (Msg 1202). The
+    // simulator has no membership model, so an existing principal always
+    // passes — real SQL Server additionally requires the caller to be a
+    // member.
+    private static bool TryResolveAppLockPrincipal(BatchContext batch, in AppLockArguments args, out int principalId, out string name)
     {
-        var name = args.HasPrincipal && !args.Principal.IsNull
+        name = args.HasPrincipal && !args.Principal.IsNull
             ? args.Principal.CoerceTo(SqlType.NVarchar).AsString
             : "public";
-        return batch.CurrentDatabase.Principals.TryGetValue(name, out var principal)
-            ? (principal.PrincipalId, name)
-            : throw SimulatedSqlException.DatabasePrincipalDoesNotExist(name);
+        principalId = batch.CurrentDatabase.Principals.TryGetValue(name, out var principal) ? principal.PrincipalId : 0;
+        return principal is not null;
     }
 
     // Owner defaults to Transaction when omitted (probe-confirmed); a NULL
@@ -293,28 +333,60 @@ public partial class Simulation
         return false;
     }
 
-    // Writes an app-lock return code into the EXEC @rc = … variable, when
-    // one was supplied. Mirrors InvokeProcedure's return-code write-back.
-    private static void SetAppLockReturnCode(BatchContext batch, string? returnCodeVariableName, int code)
+    /// <summary>
+    /// An error the application-lock procedures raise through
+    /// <c>sys.xp_userlock</c>, which real attributes to it at line 1: the
+    /// procedure's call of it fails, closing in a DONEINPROC of its own, and
+    /// the procedure goes on to its last statement and answers -999 (probed
+    /// 2026-10-17 against SQL Server 2025). A <c>TRY</c> around the call
+    /// catches it before the procedure returns, the call's DONEINPROC going
+    /// out without the error and the caller's return code left unset, and
+    /// under <c>XACT_ABORT</c> it ends the batch; both throw it.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> UserLockFailure(BatchContext batch, string? returnCodeVariableName, SimulatedSqlException error)
     {
-        if (returnCodeVariableName is null)
-            return;
-        var slot = batch.GetVariableSlot(returnCodeVariableName);
-        slot.Value = SqlValue.FromInt32(code).CoerceTo(slot.DeclaredType);
+        error.PreserveDiagnostics(1, "sys.xp_userlock");
+        var connection = batch.Connection;
+        if (connection.OpenTryFrames > 0 || connection.XactAbort)
+        {
+            error.CaughtBeforeReturn = connection.OpenTryFrames > 0;
+            if (error.CaughtBeforeReturn)
+                yield return AppLockStep(batch, StatementDoneKind.Execute);
+            throw error;
+        }
+        SetReturnCode(batch, returnCodeVariableName, -999);
+        yield return new SimulatedErrorOutcome(error)
+        {
+            DoneKind = StatementDoneKind.Execute,
+            InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null,
+            TransactionEventMark = connection.TransactionEventsRecorded,
+        };
+        yield return AppLockStep(batch, StatementDoneKind.Select);
     }
 
     /// <summary>
-    /// An error the application-lock procedures raise through
-    /// <c>sys.xp_userlock</c>, which real attributes to it at line 1 while the
-    /// procedure still answers -999 (probed 2026-09-26 against SQL Server
-    /// 2025).
+    /// A check the application-lock procedures fail themselves: its message,
+    /// the <c>RAISERROR</c> that printed it closing, the statement after it,
+    /// and -999.
     /// </summary>
-    private static SimulatedSqlException UserLockError(BatchContext batch, string? returnCodeVariableName, SimulatedSqlException error)
+    private static IEnumerable<SimulatedStatementOutcome> AppLockRefusal(BatchContext batch, string? returnCodeVariableName, SimulatedInfoOutcome message)
     {
-        SetAppLockReturnCode(batch, returnCodeVariableName, -999);
-        error.PreserveDiagnostics(1, "sys.xp_userlock");
-        return error;
+        yield return message;
+        yield return AppLockStep(batch, StatementDoneKind.RaisError);
+        yield return AppLockStep(batch, StatementDoneKind.Select);
+        SetReturnCode(batch, returnCodeVariableName, -999);
     }
+
+    /// <summary>
+    /// The DONEINPROC one of the statements real's application-lock procedures
+    /// are written in closes with — a variable assignment counting its one
+    /// row, an <c>IF</c>, the call of <c>sys.xp_userlock</c>, a
+    /// <c>RAISERROR</c> — which <c>NOCOUNT ON</c> drops, as it drops any
+    /// that carries neither rows nor an error (probed 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static SimulatedNonQuery AppLockStep(BatchContext batch, ushort kind) =>
+        StatementDone(batch, kind, kind == StatementDoneKind.Select ? 1 : -1);
 
     // Msg 15625, which the procedure prints ahead of answering -999.
     private static SimulatedInfoOutcome UnrecognizedAppLockOption(BatchContext batch, string procedure, int line, string written, string parameter) =>

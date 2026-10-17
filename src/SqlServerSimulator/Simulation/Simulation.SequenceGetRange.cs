@@ -99,6 +99,6 @@ partial class Simulation
         Write(5, sequence.AsDeclaredVariant(sequence.Increment));
         Write(6, sequence.AsDeclaredVariant(sequence.MinValue));
         Write(7, sequence.AsDeclaredVariant(sequence.MaxValue));
-        SetProcedureReturnCode(batch, returnCodeVariableName, 0);
+        SetReturnCode(batch, returnCodeVariableName, 0);
     }
 }

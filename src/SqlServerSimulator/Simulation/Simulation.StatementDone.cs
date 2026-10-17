@@ -326,6 +326,20 @@ partial class Simulation
         };
 
     /// <summary>
+    /// The marker closing an extended procedure an error of its own ended
+    /// (<see cref="SimulatedSqlException.EndsExtendedProcedure"/>): its
+    /// RETURNSTATUS, then a DONEPROC carrying the error bit.
+    /// </summary>
+    private static SimulatedProcScopeBoundary ExtendedProcedureExit(BatchContext caller, int returnStatus) =>
+        new(isEnter: false, returnStatus: returnStatus, endedByError: true)
+        {
+            DoneKind = StatementDoneKind.Execute,
+            InModule = caller.ProcFrame is not null || caller.TriggerFrame is not null,
+            CountSuppressed = caller.Connection.NoCount,
+            TransactionEventMark = caller.Connection.TransactionEventsRecorded,
+        };
+
+    /// <summary>
     /// How many procedure or dynamic-SQL scopes <paramref name="outcomes"/>
     /// opened and didn't close — the ones an error abandoned.
     /// </summary>

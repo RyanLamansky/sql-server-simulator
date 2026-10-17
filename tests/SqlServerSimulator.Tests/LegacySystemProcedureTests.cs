@@ -538,4 +538,65 @@ public sealed class LegacySystemProcedureTests
         AreEqual(("sp_dropapprole", 28), (missing.Errors[0].Procedure, missing.Errors[0].LineNumber));
         simulation.AssertSqlError("exec sp_approlepassword 'nosuch', 'x'", 15151, "Cannot alter the application role 'nosuch', because it does not exist or you do not have permission.");
     }
+
+    /// <summary>
+    /// The legacy security procedures refuse a transaction, implicit or
+    /// explicit, ahead of any check of their arguments — <c>sp_adduser</c>
+    /// and <c>sp_dropuser</c> through the inner procedure they run, once
+    /// their own checks pass (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_addrole null", "sp_addrole", "sp_addrole", 16)]
+    [DataRow("exec sp_droprole 'nosuch'", "sp_droprole", "sp_droprole", 13)]
+    [DataRow("exec sp_grantdbaccess 'nosuch'", "sp_grantdbaccess", "sp_grantdbaccess", 30)]
+    [DataRow("exec sp_revokedbaccess 'nosuch'", "sp_revokedbaccess", "sp_revokedbaccess", 13)]
+    [DataRow("exec sp_adduser 'l', 'u'", "sp_grantdbaccess", "sys.sp_grantdbaccess", 30)]
+    [DataRow("exec sp_dropuser 'u0'", "sp_revokedbaccess", "sys.sp_revokedbaccess", 13)]
+    [DataRow("exec sp_addapprole 'ar', 'Pw!12345678'", "sp_addapprole", "sp_addapprole", 22)]
+    [DataRow("exec sp_approlepassword 'ar', 'Pw!12345678'", "sp_approlepassword", "sp_approlepassword", 25)]
+    [DataRow("exec sp_dropapprole 'ar'", "sp_dropapprole", "sp_dropapprole", 13)]
+    [DataRow("exec sp_defaultdb 'l', 'master'", "sp_defaultdb", "sp_defaultdb", 14)]
+    [DataRow("exec sp_defaultlanguage 'l', 'us_english'", "sp_defaultlanguage", "sp_defaultlanguage", 14)]
+    [DataRow("exec sp_password @new = 'Pw!12345678', @loginame = 'l'", "sp_password", "sp_password", 21)]
+    [DataRow("exec sp_addlogin 'l2', 'Pw!12345678'", "sp_addlogin", "sp_addlogin", 19)]
+    [DataRow("exec sp_droplogin 'nosuch'", "sp_droplogin", "sp_droplogin", 13)]
+    public void SecurityProcedure_InATransaction_RaisesMsg15002(string exec, string refusing, string procedure, int line)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create login l with password = 'Pw!12345678', check_policy = off; create user u0 for login l");
+        var error = simulation.AssertSqlError($"begin tran; {exec}", 15002).Errors[0];
+        AreEqual($"The procedure 'sys.{refusing}' cannot be executed within a transaction.", error.Message);
+        AreEqual((procedure, line), (error.Procedure, error.LineNumber));
+    }
+
+    /// <summary>
+    /// A legacy security procedure works in a transaction of its own: a
+    /// <c>TRY</c> that catches its error before it rolls back leaves that
+    /// transaction open and committable, and under <c>IMPLICIT_TRANSACTIONS</c>
+    /// it commits what it opened (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SecurityProcedure_OwnTransaction_ATryKeepsItOpen_AndImplicitModeCommitsIt()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using (var caught = connection.CreateCommand("begin try exec sp_droprole 'nosuch' end try begin catch select concat(error_number(), ' ', @@trancount, ' ', xact_state()) end catch"))
+            AreEqual("15151 1 1", caught.ExecuteScalar());
+        using var rollback = connection.CreateCommand("rollback; create login l with password = 'Pw!12345678', check_policy = off; set implicit_transactions on; exec sp_addrole 'r'; exec sp_password @new = 'Pw!87654321', @loginame = 'l'; select @@trancount");
+        AreEqual(0, rollback.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// The membership procedures refuse through the <c>ALTER ROLE</c> they
+    /// run, at line 1 of no procedure, returning 1 (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DropRoleMember_StatementRefusal_ReturnsOne()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table log (rc int)");
+        var error = simulation.AssertSqlError("declare @rc int; exec @rc = sp_droprolemember 'nosuch', 'dbo'; insert log values (@rc)", 15151).Errors[0];
+        AreEqual(("", 1), (error.Procedure, error.LineNumber));
+        AreEqual(1, simulation.ExecuteScalar("select rc from log"));
+    }
 }

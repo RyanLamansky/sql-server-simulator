@@ -181,8 +181,8 @@ public sealed class StatementDoneTokenTests
     /// 2026-10-06 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow("exec sp_recompile 'nosuch'", "ERR 15165 / DONEINPROC F6 MORE|ERROR 0 / RET 15165 / DONEPROC E0 FINAL 0")]
-    [DataRow("exec sp_addrole 'db_owner'", "ERR 15023 / DONEINPROC AA MORE|ERROR 0 / RET 1 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec sp_recompile 'nosuch'", "ENV8 / ENV9 / ERR 15165 / DONEINPROC F6 MORE|ERROR 0 / RET 15165 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec sp_addrole 'db_owner'", "ENV8 / ERR 15023 / DONEINPROC AA MORE|ERROR 0 / ENV10 / RET 1 / DONEPROC E0 FINAL 0")]
     [DataRow("exec sp_executesql N'raiserror(''x'', 16, 1)'", "ERR 50000 / DONEINPROC F6 MORE|ERROR 0 / RET 50000 / DONEPROC E0 FINAL 0")]
     [DataRow("exec sp_executesql N'select 1/0; declare @x int'", "ROWS / ERR 8134 / DONEINPROC C1 MORE|ERROR 0 / RET 8134 / DONEPROC E0 FINAL 0")]
     public void SystemProcedure_ReturnStatus(string sql, string expected)

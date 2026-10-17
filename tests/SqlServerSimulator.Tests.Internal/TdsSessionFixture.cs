@@ -171,7 +171,7 @@ internal sealed class TdsSessionFixture : IDisposable
                         i += isFixed ? 4 : 1 + response[i];
                     break;
                 case Tds.TokenReturnStatus:
-                    tokens.Add($"RET {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i))}");
+                    tokens.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"RET {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i))}"));
                     i += 4;
                     break;
                 case Tds.TokenDone:

@@ -8,7 +8,8 @@ namespace SqlServerSimulator;
 // sp_addsrvrolemember / sp_dropsrvrolemember, sp_helprolemember and
 // sp_change_users_login. Each does what real's procedure does itself, then runs
 // the statement it builds, so the statement's refusals arrive at line 1 in no
-// procedure.
+// procedure. Most refuse to run in a transaction and wrap their work in one of
+// their own (Simulation.ProcedureTransactions.cs).
 partial class Simulation
 {
     private static readonly SystemProcedureParameter[] AddUserParameters =
@@ -104,14 +105,27 @@ partial class Simulation
     /// Runs one statement a legacy security or type procedure is made of, as
     /// a batch of its own but as the procedure's own statement, so no
     /// dynamic-SQL scope frames it on the wire (probed 2026-10-06 against SQL
-    /// Server 2025).
+    /// Server 2025). An error it throws — one a <c>TRY</c> around the call
+    /// will catch — is the statement's
+    /// (<see cref="SimulatedSqlException.RaisedByProcedureStatement"/>).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> RunProcedureStatement(BatchContext batch, string statement)
     {
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        using var outcomes = this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null).GetEnumerator();
+        while (true)
         {
-            if (outcome is not SimulatedProcScopeBoundary)
-                yield return outcome;
+            try
+            {
+                if (!outcomes.MoveNext())
+                    yield break;
+            }
+            catch (SimulatedSqlException error)
+            {
+                error.RaisedByProcedureStatement = true;
+                throw;
+            }
+            if (outcomes.Current is not SimulatedProcScopeBoundary)
+                yield return outcomes.Current;
         }
     }
 
@@ -144,12 +158,17 @@ partial class Simulation
     /// <c>sp_adduser @loginame [, @name_in_db [, @grpname]]</c> is <c>CREATE USER … FOR LOGIN</c>
     /// with a schema of its own name as the default, and the user added to <c>@grpname</c> when
     /// that role exists (Msg 15014 when it doesn't, ahead of any change). <c>guest</c> is the
-    /// exception: it is granted <c>CONNECT</c> instead of created.
+    /// exception: it is granted <c>CONNECT</c> instead of created. Its checks pass before
+    /// <c>sys.sp_grantdbaccess</c>, which it runs, refuses a transaction.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpAddUser(BatchContext batch, string calledAs) =>
         this.AddUser(batch, calledAs, "sp_adduser", AddUserParameters, viaAddUser: true);
 
-    /// <summary><c>sp_grantdbaccess @loginame [, @name_in_db]</c>: <c>sp_adduser</c> without the group.</summary>
+    /// <summary>
+    /// <c>sp_grantdbaccess @loginame [, @name_in_db]</c>: <c>sp_adduser</c> without the group,
+    /// refused in a transaction (Msg 15002 from line 30); a name that is no login is its
+    /// <c>CREATE USER</c>'s Msg 15007.
+    /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpGrantDbAccess(BatchContext batch, string calledAs) =>
         this.AddUser(batch, calledAs, "sp_grantdbaccess", GrantDbAccessParameters, viaAddUser: false);
 
@@ -160,6 +179,8 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments(procedure, calledAs, arguments, parameters);
+        if (!viaAddUser)
+            RefuseInTransaction(batch, calledAs, procedure, 30);
         var login = RequireValidName(values[0]);
         var userName = values[1].IsNull ? login : values[1].AsString;
         var group = viaAddUser && !values[2].IsNull ? values[2].AsString : null;
@@ -170,32 +191,41 @@ partial class Simulation
                 yield return outcome;
             yield break;
         }
-        if (!IsRegisteredLogin(batch, login))
-        {
-            throw viaAddUser
-                ? AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(login), 15)
-                : SimulatedSqlException.NotAValidLogin(login).PinLine(1);
-        }
+        if (viaAddUser && !IsRegisteredLogin(batch, login))
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(login), 15);
         if (group is not null && FindDatabasePrincipal(batch, group) is not { TypeCode: "R" })
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.RoleDoesNotExistInDatabase(group), 23);
+        if (viaAddUser)
+            RefuseInTransaction(batch, "sys.sp_grantdbaccess", "sp_grantdbaccess", 30);
 
-        List<string> statements = ["create user " + QuoteIdentifier(userName) + " for login " + QuoteIdentifier(login), .. OwnSchemaStatements(batch, userName, isUser: true)];
-        if (group is not null)
-            statements.Add("alter role " + QuoteIdentifier(group) + " add member " + QuoteIdentifier(userName));
-        foreach (var outcome in this.RunStatements(batch, statements))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            if (!IsRegisteredLogin(batch, login))
+                throw ProcedureStatementError(SimulatedSqlException.NotAValidLogin(login));
+            List<string> statements = ["create user " + QuoteIdentifier(userName) + " for login " + QuoteIdentifier(login), .. OwnSchemaStatements(batch, userName, isUser: true)];
+            if (group is not null)
+                statements.Add("alter role " + QuoteIdentifier(group) + " add member " + QuoteIdentifier(userName));
+            foreach (var produced in this.RunStatements(batch, statements))
+                yield return produced;
+        }
     }
 
     /// <summary>
     /// <c>sp_dropuser @name_in_db</c> drops the user's own empty schema and the user
     /// (<c>REVOKE CONNECT</c> for <c>guest</c>). A name that isn't a principal is
-    /// Msg 15008 from line 12; <c>dbo</c> is refused by <c>sys.sp_revokedbaccess</c>,
-    /// which it runs.
+    /// Msg 15008 from line 12; a transaction and <c>dbo</c> are refused by
+    /// <c>sys.sp_revokedbaccess</c>, which it runs.
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpDropUser(BatchContext batch, string calledAs) =>
         this.DropUser(batch, calledAs, "sp_dropuser", viaDropUser: true);
 
-    /// <summary><c>sp_revokedbaccess @name_in_db</c>: <c>sp_dropuser</c>'s own body.</summary>
+    /// <summary>
+    /// <c>sp_revokedbaccess @name_in_db</c>: <c>sp_dropuser</c>'s own body, refused in a
+    /// transaction (Msg 15002 from line 13).
+    /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpRevokeDbAccess(BatchContext batch, string calledAs) =>
         this.DropUser(batch, calledAs, "sp_revokedbaccess", viaDropUser: false);
 
@@ -212,25 +242,29 @@ partial class Simulation
             name = values[0].IsNull ? "(null)" : values[0].AsString;
             if (values[0].IsNull || FindDatabasePrincipal(batch, name) is null)
                 throw AtSystemProcedureLine(calledAs, SimulatedSqlException.UserDoesNotExistInDatabase(name), 12);
+            RefuseInTransaction(batch, "sys.sp_revokedbaccess", "sp_revokedbaccess", 13);
         }
         else
         {
+            RefuseInTransaction(batch, calledAs, procedure, 13);
             name = RequireValidName(values[0]);
-            if (FindDatabasePrincipal(batch, name) is null)
-                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropUser(name), 51);
         }
 
-        var principal = FindDatabasePrincipal(batch, name)!;
-        if (principal.PrincipalId == Database.DboPrincipalId)
-            throw AtProcedureLine(SimulatedSqlException.CannotDropDatabaseOwnerUser(name), viaDropUser ? "sys.sp_revokedbaccess" : calledAs, 51);
-        if (principal.PrincipalId == Database.GuestPrincipalId)
-        {
-            foreach (var outcome in this.RunProcedureStatement(batch, "revoke connect from guest"))
-                yield return outcome;
-            yield break;
-        }
-        foreach (var outcome in this.RunStatements(batch, [DropOwnSchemaStatement(batch, principal), "drop user " + QuoteIdentifier(name)]))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            var revoking = viaDropUser ? "sys.sp_revokedbaccess" : calledAs;
+            var principal = FindDatabasePrincipal(batch, name) ?? throw ProcedureStatementError(SimulatedSqlException.CannotDropUser(name), revoking, 51);
+            if (principal.PrincipalId == Database.DboPrincipalId)
+                throw ProcedureStatementError(SimulatedSqlException.CannotDropDatabaseOwnerUser(name), revoking, 51);
+            var statements = principal.PrincipalId == Database.GuestPrincipalId
+                ? this.RunProcedureStatement(batch, "revoke connect from guest")
+                : this.RunStatements(batch, [DropOwnSchemaStatement(batch, principal), "drop user " + QuoteIdentifier(name)]);
+            foreach (var produced in statements)
+                yield return produced;
+        }
     }
 
     /// <summary>
@@ -244,11 +278,12 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_addrole", calledAs, arguments, AddRoleParameters);
+        RefuseInTransaction(batch, calledAs, "sp_addrole", 16);
         var name = RequireValidName(values[0]);
         var owner = values[1].IsNull ? "dbo" : values[1].AsString;
         List<string> statements = ["create role " + QuoteIdentifier(name) + " authorization " + QuoteIdentifier(owner)];
         statements.AddRange(OwnSchemaStatements(batch, name, isUser: false));
-        foreach (var outcome in this.RunStatements(batch, statements))
+        foreach (var outcome in InProcedureTransaction(batch, this.RunStatements(batch, statements)))
             yield return outcome;
     }
 
@@ -264,11 +299,12 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         var values = BindSystemProcedureArguments("sp_addapprole", calledAs, arguments, AddAppRoleParameters);
+        RefuseInTransaction(batch, calledAs, "sp_addapprole", 22);
         var name = RequireValidName(values[0]);
         var quoted = QuoteIdentifier(name);
         List<string> statements = [$"create application role {quoted} with password = {QuoteText(values[1].IsNull ? "" : values[1].AsString)}, default_schema = {quoted}"];
         statements.AddRange(OwnSchemaStatements(batch, name, isUser: false));
-        foreach (var outcome in this.RunStatements(batch, statements))
+        foreach (var outcome in InProcedureTransaction(batch, this.RunStatements(batch, statements)))
             yield return outcome;
     }
 
@@ -279,8 +315,9 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         var values = BindSystemProcedureArguments("sp_approlepassword", calledAs, arguments, AppRolePasswordParameters);
+        RefuseInTransaction(batch, calledAs, "sp_approlepassword", 25);
         var statement = $"alter application role {QuoteIdentifier(RequireValidName(values[0]))} with password = {QuoteText(values[1].IsNull ? "" : values[1].AsString)}";
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in InProcedureTransaction(batch, this.RunProcedureStatement(batch, statement)))
             yield return outcome;
     }
 
@@ -295,10 +332,17 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
         var values = BindSystemProcedureArguments("sp_dropapprole", calledAs, arguments, DropRoleParameters);
+        RefuseInTransaction(batch, calledAs, "sp_dropapprole", 13);
         var name = RequireValidName(values[0]);
-        var principal = FindDatabasePrincipal(batch, name) ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropApplicationRole(name), 28);
-        foreach (var outcome in this.RunStatements(batch, [principal.TypeCode == "A" ? DropOwnSchemaStatement(batch, principal) : string.Empty, "drop application role " + QuoteIdentifier(name)]))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            var principal = FindDatabasePrincipal(batch, name) ?? throw ProcedureStatementError(SimulatedSqlException.CannotDropApplicationRole(name), calledAs, 28);
+            foreach (var produced in this.RunStatements(batch, [principal.TypeCode == "A" ? DropOwnSchemaStatement(batch, principal) : string.Empty, "drop application role " + QuoteIdentifier(name)]))
+                yield return produced;
+        }
     }
 
     /// <summary>
@@ -312,12 +356,19 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_droprole", calledAs, arguments, DropRoleParameters);
+        RefuseInTransaction(batch, calledAs, "sp_droprole", 13);
         var name = RequireValidName(values[0]);
-        var principal = FindDatabasePrincipal(batch, name) ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropRole(name), 28);
-        if (principal.TypeCode == "R" && principal.IsFixedRole)
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotDropFixedRole(name), 28);
-        foreach (var outcome in this.RunStatements(batch, [principal.TypeCode == "R" ? DropOwnSchemaStatement(batch, principal) : string.Empty, "drop role " + QuoteIdentifier(name)]))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            var principal = FindDatabasePrincipal(batch, name) ?? throw ProcedureStatementError(SimulatedSqlException.CannotDropRole(name), calledAs, 28);
+            if (principal.TypeCode == "R" && principal.IsFixedRole)
+                throw ProcedureStatementError(SimulatedSqlException.CannotDropFixedRole(name), calledAs, 28);
+            foreach (var produced in this.RunStatements(batch, [principal.TypeCode == "R" ? DropOwnSchemaStatement(batch, principal) : string.Empty, "drop role " + QuoteIdentifier(name)]))
+                yield return produced;
+        }
     }
 
     /// <summary>
@@ -334,11 +385,16 @@ partial class Simulation
         var values = BindSystemProcedureArguments("sp_addsrvrolemember", calledAs, arguments, ServerRoleMemberParameters);
         var login = RequireValidName(values[0]);
         var role = RequireValidName(values[1]);
-        if (!batch.Connection.Simulation.TryResolveServerPrincipalId(login, out _))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(login), 33);
-        var statement = "alter server role " + QuoteIdentifier(role) + " add member " + QuoteIdentifier(login);
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
             yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
+        {
+            if (!batch.Connection.Simulation.TryResolveServerPrincipalId(login, out _))
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(login), 33);
+            foreach (var produced in this.RunProcedureStatement(batch, "alter server role " + QuoteIdentifier(role) + " add member " + QuoteIdentifier(login)))
+                yield return produced;
+        }
     }
 
     /// <summary><c>sp_dropsrvrolemember @loginame, @rolename</c> is <c>ALTER SERVER ROLE … DROP MEMBER</c>.</summary>
@@ -352,7 +408,7 @@ partial class Simulation
         var login = RequireValidName(values[0]);
         var role = RequireValidName(values[1]);
         var statement = "alter server role " + QuoteIdentifier(role) + " drop member " + QuoteIdentifier(login);
-        foreach (var outcome in this.RunProcedureStatement(batch, statement))
+        foreach (var outcome in WithoutImplicitTransaction(batch.Connection, this.RunProcedureStatement(batch, statement)))
             yield return outcome;
     }
 

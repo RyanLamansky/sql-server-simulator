@@ -569,6 +569,41 @@ public sealed partial class SimulatedSqlException : DbException
     /// </summary>
     internal int SystemProcedureReturnCode = 1;
 
+    /// <summary>
+    /// Set on an error an extended procedure raised (<c>sp_set_session_context</c>,
+    /// <c>sp_xml_removedocument</c> …), which has no statement of its own to
+    /// close: real sends the error, the procedure's RETURNSTATUS, then its
+    /// DONEPROC carrying the error bit (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal bool EndsExtendedProcedure;
+
+    /// <summary>
+    /// Set on an error a statement inside a system procedure raised — the
+    /// <c>DROP ROLE</c> <c>sp_droprole</c> runs, rather than a
+    /// <c>RAISERROR</c> of its own — whose DONEINPROC names the failed
+    /// security statement (<see cref="StatementDoneKind.SecurityDdlFailed"/>)
+    /// where a raised one names <c>RAISERROR</c> (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool RaisedByProcedureStatement;
+
+    /// <summary>
+    /// How many transaction events the session had recorded when this error
+    /// was raised, where a system procedure ends the transaction it opened
+    /// only after the error (<c>sp_droprole</c>'s rollback follows its DROP
+    /// ROLE's error), so the error goes out ahead of that ending; -1 when the
+    /// error's outcome is stamped as it is sent.
+    /// </summary>
+    internal int TransactionEventMark = -1;
+
+    /// <summary>
+    /// Set on an error a system procedure raises after ending the transaction
+    /// it opened (<c>sp_addrolemember</c>'s rollback precedes its Msg 15410), so
+    /// the rollback goes out ahead of the error rather than after it.
+    /// </summary>
+    internal bool FollowsTransactionEnd;
+
     /// <summary>Set on a refusal binding a system procedure's arguments, which leaves the caller's return code unset.</summary>
     internal bool SystemProcedureBindingError;
 
