@@ -45,9 +45,9 @@ public sealed class RemoteCallTokenTests
     /// it (captured 2026-10-17 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow("exec ('print ''x''; waitfor delay ''00:00:01.500''; select 1 as a') at SELF", "INFO 7412 / DONEPROC E0 FINAL 0")]
-    [DataRow("exec ('waitfor delay ''00:00:01.500''') at SELF; select 2 as b", "INFO 7412 / DONEPROC E0 MORE 0 / ROWS / DONE C1 COUNT 1")]
-    [DataRow("exec SELF.master.sys.sp_executesql N'waitfor delay ''00:00:01.500'''", "INFO 7412 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec ('print ''x''; waitfor delay ''00:00:10''; select 1 as a') at SELF", "INFO 7412 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec ('waitfor delay ''00:00:10''') at SELF; select 2 as b", "INFO 7412 / DONEPROC E0 MORE 0 / ROWS / DONE C1 COUNT 1")]
+    [DataRow("exec SELF.master.sys.sp_executesql N'waitfor delay ''00:00:10'''", "INFO 7412 / DONEPROC E0 FINAL 0")]
     public void RemoteCall_PastTheQueryTimeout_ClosesInADoneProcAlone(string sql, string expected)
     {
         using var fixture = Loopback();
