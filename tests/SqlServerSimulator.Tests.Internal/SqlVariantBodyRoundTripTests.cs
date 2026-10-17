@@ -84,27 +84,38 @@ public sealed class SqlVariantBodyRoundTripTests
     public void NullVariant_IsAZeroTotalLength()
     {
         // Not a body at all: a non-NULL variant is always at least the 2-byte
-        // type + prop-count header, so a total length of 0 is how NULL travels.
-        var row = Row(SqlValue.Null(SqlType.SqlVariant));
+        // type + prop-count header, so a total length of 0 is how NULL travels
+        // in a ROW — one 25 columns wide, whose 4-byte bitmap an NBCROW would
+        // spend to save those four bytes.
+        var row = Row(SqlValue.Null(SqlType.SqlVariant), otherColumns: 24);
         AreEqual(0xD1, row[0]);
-        HasCount(5, row);
         AreEqual(0u, BitConverter.ToUInt32(row, 1));
     }
+
+    /// <summary>
+    /// On its own, a NULL variant's four bytes outweigh an NBCROW's one-byte
+    /// bitmap, so real sends that instead (captured 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NullVariant_AloneIsAnNbcRow() => CollectionAssert.AreEqual(new byte[] { 0xD2, 0x01 }, Row(SqlValue.Null(SqlType.SqlVariant)));
 
     /// <summary>The variant body of a one-column <c>sql_variant</c> ROW token,
     /// past the token byte and the 4-byte total length.</summary>
     private static byte[] VariantBody(SqlValue inner) => Row(SqlValue.FromVariant(inner))[5..];
 
-    private static byte[] Row(SqlValue value)
+    /// <summary>The ROW token of <paramref name="value"/> in a <c>sql_variant</c> column, ahead of <paramref name="otherColumns"/> nullable <c>int</c> columns of 1.</summary>
+    private static byte[] Row(SqlValue value, int otherColumns = 0)
     {
         var stream = new MemoryStream();
         var transport = new TdsPacketTransport(stream) { PacketSize = Tds.DefaultPacketSize };
         var writer = new TdsTokenWriter(transport);
-        var result = new SimulatedSqlResultSet([SqlType.SqlVariant], ["v"], [[value]]);
+        SqlType[] schema = [SqlType.SqlVariant, .. Enumerable.Repeat(SqlType.Int32, otherColumns)];
+        var result = new SimulatedSqlResultSet(schema, [.. schema.Select(static (_, i) => "c" + i.ToString(System.Globalization.CultureInfo.InvariantCulture))], [[value, .. Enumerable.Repeat(SqlValue.FromInt32(1), otherColumns)]]);
         using (var cursor = result.CreateCursor())
         {
             while (cursor.MoveNext())
-                TdsTypeCodec.WriteRow(writer, [SqlType.SqlVariant], cursor, [true]);
+                TdsTypeCodec.WriteRow(writer, schema, cursor, [.. Enumerable.Repeat(true, schema.Length)]);
         }
 
         writer.FlushAsync(final: true, CancellationToken.None).AsTask().GetAwaiter().GetResult();

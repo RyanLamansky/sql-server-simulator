@@ -135,7 +135,7 @@ internal sealed class TdsSessionFixture : IDisposable
     /// <c>DONE FD ERROR|ATTN 0</c>,
     /// <c>DONEPROC E0 FINAL 0</c> — with <c>RET n</c> for a RETURNSTATUS,
     /// <c>ENVn</c> for an ENVCHANGE, <c>ERR n</c> / <c>INFO n</c>,
-    /// <c>ROWS</c> for a result set — whose rows may carry fixed-width, integer,
+    /// <c>ROWS</c> for a result set — whose rows, ROW or NBCROW, may carry fixed-width, integer,
     /// decimal and non-MAX string or binary columns — and <c>ORDER 2,1</c> for
     /// an ORDER token.
     /// </summary>
@@ -227,16 +227,27 @@ internal sealed class TdsSessionFixture : IDisposable
                         break;
                     }
                 case Tds.TokenRow:
-                    foreach (var width in widths)
+                case Tds.TokenNbcRow:
                     {
-                        i += width switch
+                        // An NBCROW leads with one bit per column, and a NULL's
+                        // bit stands for its value.
+                        var bitmap = token == Tds.TokenNbcRow ? i : -1;
+                        if (token == Tds.TokenNbcRow)
+                            i += (widths.Count + 7) / 8;
+                        for (var c = 0; c < widths.Count; c++)
                         {
-                            > 0 => width,
-                            -1 => 1 + response[i],
-                            _ => BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i)) is var length && length == 0xFFFF ? 2 : 2 + length,
-                        };
+                            if (bitmap >= 0 && (response[bitmap + (c / 8)] & (1 << (c % 8))) != 0)
+                                continue;
+                            var width = widths[c];
+                            i += width switch
+                            {
+                                > 0 => width,
+                                -1 => 1 + response[i],
+                                _ => BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i)) is var length && length == 0xFFFF ? 2 : 2 + length,
+                            };
+                        }
+                        break;
                     }
-                    break;
                 case Tds.TokenReturnStatus:
                     tokens.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"RET {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i))}"));
                     i += 4;

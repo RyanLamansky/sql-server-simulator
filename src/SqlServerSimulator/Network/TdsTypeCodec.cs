@@ -147,20 +147,75 @@ internal static class TdsTypeCodec
         }
     }
 
+    /// <summary>
+    /// Writes one row as real does: an NBCROW (<c>0xD2</c>) — a bitmap of one
+    /// bit per column, then only the non-NULL values — when the NULL forms it
+    /// leaves out (<see cref="NullValueBytes"/>) outweigh the bitmap, else a
+    /// ROW, so a tie stays a ROW. Real decides row by row: one NULL <c>int</c>
+    /// among two columns is a ROW, two NULL <c>int</c>s an NBCROW, and a NULL
+    /// <c>nvarchar(max)</c> an NBCROW up to 56 columns and a ROW from 57
+    /// (captured 2026-10-17 against SQL Server 2025 with a raw TDS client).
+    /// </summary>
     public static void WriteRow(TdsTokenWriter writer, SqlType[] schema, RowCursor cursor, bool[]? columnNullability)
     {
-        writer.EnterComposite();
-        writer.WriteByte(Tds.TokenRow);
+        var values = writer.RowValues(schema.Length);
+        var nullBytes = 0;
         for (var i = 0; i < schema.Length; i++)
         {
-            if (columnNullability is not null && !columnNullability[i] && IsRawWhenNotNull(schema[i]))
-                WriteRawFixedValue(writer, schema[i], cursor[i]);
-            else
-                WriteValue(writer, schema[i], cursor[i]);
+            values[i] = cursor[i];
+            if (values[i].IsNull)
+                nullBytes += NullValueBytes(writer, schema[i]);
         }
 
+        var bitmapBytes = (schema.Length + 7) / 8;
+        var compressed = nullBytes > bitmapBytes;
+        writer.EnterComposite();
+        writer.WriteByte(compressed ? Tds.TokenNbcRow : Tds.TokenRow);
+        if (compressed)
+        {
+            for (var b = 0; b < bitmapBytes; b++)
+            {
+                var bits = 0;
+                for (var i = b * 8; i < Math.Min(schema.Length, (b * 8) + 8); i++)
+                {
+                    if (values[i].IsNull)
+                        bits |= 1 << (i - (b * 8));
+                }
+
+                writer.WriteByte((byte)bits);
+            }
+        }
+
+        for (var i = 0; i < schema.Length; i++)
+        {
+            if (compressed && values[i].IsNull)
+                continue;
+            if (columnNullability is not null && !columnNullability[i] && IsRawWhenNotNull(schema[i]))
+                WriteRawFixedValue(writer, schema[i], values[i]);
+            else
+                WriteValue(writer, schema[i], values[i]);
+        }
+
+        Array.Clear(values, 0, schema.Length);
         writer.LeaveComposite();
     }
+
+    /// <summary>
+    /// The bytes a NULL of <paramref name="type"/> takes in a ROW token, as
+    /// <see cref="WriteValue"/> writes it: the PLP sentinel's eight for the
+    /// MAX and PLP-only types, a <c>sql_variant</c>'s four-byte zero length,
+    /// the USHORTLEN families' <c>0xFFFF</c>, and one byte for the BYTELEN
+    /// families and the legacy LOB trio's empty text pointer.
+    /// </summary>
+    private static int NullValueBytes(TdsTokenWriter writer, SqlType type) => type switch
+    {
+        VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel } => 8,
+        XmlSqlType or JsonSqlType or SpatialSqlType or HierarchyIdSqlType or ClrUdtSqlType => 8,
+        VectorSqlType => IsNativeVector(writer, type) ? 2 : 8,
+        SqlVariantSqlType => 4,
+        VarcharSqlType or CharSqlType or NVarcharSqlType or NCharSqlType or SystemNameSqlType or VarbinarySqlType or BinarySqlType or RowVersionSqlType => 2,
+        _ => 1,
+    };
 
     /// <summary>
     /// The bytes of length prefix a fixed-length value of <paramref name="type"/>

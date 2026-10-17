@@ -520,6 +520,10 @@ Specifics:
   This matches real byte-for-byte (probe-captured against SQL Server 2025): the old always-N-variant form (`0x26` INTN, etc. with a max-length byte) desynced the native ODBC driver, which follows the TDS spec and reads a `0x26` value as length-prefixed.
   The other BYTELEN families (date / time / datetime2 / datetimeoffset, DECIMALN, GUIDN) have no FIXEDLENTYPE token, so they keep the N-variant + prefix regardless of the flag, as do all USHORTLEN / PLP forms.
   Load-bearing for DacFx bacpac export: the BCP data-file layout drops per-value prefixes on fixed-width NOT NULL columns per the *wire's* fNullable while the bacpac loader decodes per *model.xml* nullability — disagreement misaligns every exported row (`ColumnNullabilityWireTests`, `FixedLenTokenWireTests`).
+- **NBCROW (`0xD2`)**: a row goes out null-bitmap compressed — one bit per column, then only the non-NULL values — exactly when the bytes its NULLs take in a ROW outweigh the bitmap's `ceil(columns / 8)`, and as a ROW on a tie; real decides row by row, so one result mixes the two (captured 2026-10-17 against SQL Server 2025 with a raw TDS client).
+  A NULL weighs one byte in the BYTELEN families and the legacy LOB trio, two in the USHORTLEN ones, four as a `sql_variant` and eight as a PLP sentinel: one NULL `int` among two columns stays a ROW, two go compressed, and a NULL `nvarchar(max)` compresses up to 56 columns and not from 57.
+  A cursor fetch's rows follow the same rule, its `ROWSTAT` counted among the columns.
+  Every client already meets the token from real; SqlClient reads it as it reads the in-process rows (`NbcRowTokenTests`, `NbcRowWireTests`).
 
 - **decimal**: TYPE_INFO length by precision (5/9/13/17); value = sign byte + little-endian magnitude rescaled to the declared scale via `BigInteger` (round-half-up when the stored .NET decimal scale exceeds the declared).
 - **money/smallmoney**: `SqlValue.AsMoneyScaledUnits` (scale-4 int64); money wire order is high-int32 then low-uint32.

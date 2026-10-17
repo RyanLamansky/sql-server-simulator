@@ -59,6 +59,21 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     /// </summary>
     public bool NativeVector;
 
+    private SqlValue[] rowValues = [];
+
+    /// <summary>
+    /// A reused array of at least <paramref name="columns"/> slots that
+    /// <see cref="TdsTypeCodec.WriteRow"/> reads a row's values into once, since
+    /// choosing between ROW and NBCROW needs every value's nullness before the
+    /// first is written; the writer clears what it used before it returns.
+    /// </summary>
+    public SqlValue[] RowValues(int columns)
+    {
+        if (this.rowValues.Length < columns)
+            this.rowValues = new SqlValue[columns];
+        return this.rowValues;
+    }
+
     /// <summary>
     /// The client negotiated JSON support at login, so a <c>json</c> value
     /// goes out as the native type (<c>0xF4</c>) rather than its down-level
