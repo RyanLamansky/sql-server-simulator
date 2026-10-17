@@ -1085,8 +1085,23 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
-
+    /// <summary>
+    /// Value equality as SQL Server's identity sees it — what a <c>GROUP BY</c>
+    /// key, a join's hash key and a seek's probe compare by.
+    /// </summary>
+    /// <remarks>
+    /// Two non-NULL values of one type that carry no reference — the integers,
+    /// <c>bit</c>, the date-time family, the approximate and money types and
+    /// an inline decimal — are equal exactly when their primitives are, which
+    /// the type-test chain below reaches only after a dozen tests, once per
+    /// probe of every grouping and join key.
+    /// </remarks>
     public bool Equals(SqlValue other) =>
+        this.reference is null && other.reference is null && ReferenceEquals(this.Type, other.Type) && !this.IsNull && !other.IsNull
+            ? this.IdentityPrimitive == other.IdentityPrimitive
+            : EqualsSlow(other);
+
+    private bool EqualsSlow(SqlValue other) =>
         (this.Type == other.Type || IsLengthOnlyBinaryVariance(this.Type, other.Type))
         && this.IsNull == other.IsNull
         && (this.IsNull

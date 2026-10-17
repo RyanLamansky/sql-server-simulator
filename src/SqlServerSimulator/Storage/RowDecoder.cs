@@ -147,12 +147,20 @@ internal static class RowDecoder
     /// misreading; the remaining per-read validation is entrusted to span
     /// bounds, as encoder and decoder share one format authority.
     /// </summary>
-    public static SqlValue DecodeColumn(HeapColumn[] schema, ReadOnlySpan<byte> bytes, int ordinal, Heap? lobStore = null)
+    public static SqlValue DecodeColumn(HeapColumn[] schema, ReadOnlySpan<byte> bytes, int ordinal, Heap? lobStore = null) =>
+        DecodeColumn(schema, RowLayout.For(schema), bytes, ordinal, lobStore);
+
+    /// <summary>
+    /// <see cref="DecodeColumn(HeapColumn[], ReadOnlySpan{byte}, int, Heap?)"/>
+    /// through <paramref name="layout"/>, <paramref name="schema"/>'s own, which
+    /// a caller reading one schema row after row holds rather than asking
+    /// <see cref="RowLayout.For"/> for it per read.
+    /// </summary>
+    public static SqlValue DecodeColumn(HeapColumn[] schema, RowLayout layout, ReadOnlySpan<byte> bytes, int ordinal, Heap? lobStore)
     {
         if ((uint)ordinal >= (uint)schema.Length)
             throw new ArgumentOutOfRangeException(nameof(ordinal), $"Ordinal {ordinal} is out of range for schema of {schema.Length} columns.");
 
-        var layout = RowLayout.For(schema);
         var fixedEnd = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(2, 2));
         if (fixedEnd != layout.ExpectedFixedEnd)
             throw new InvalidDataException($"Fixed-length end offset {fixedEnd} does not match schema's expected {layout.ExpectedFixedEnd}.");

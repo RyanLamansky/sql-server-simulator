@@ -471,12 +471,13 @@ internal sealed partial class Selection
         }
 
         // One input row into its group under one grouping set. The key tuple is
-        // computed into a reused scratch buffer and only copied out on the
-        // first row of a group — a per-row key array was one allocation per
-        // input row where the group count is what actually needs one. The
-        // scratch-backed key is handed to TryGetValue alone, which reads the
-        // components without retaining them; the stable copy is what the
-        // dictionary and the group state then share.
+        // computed into a reused scratch buffer, which a group's first row
+        // hands over to the dictionary and the group state, taking a fresh one
+        // — a per-row key array was one allocation per input row where the
+        // group count is what actually needs one. The group's slot is found
+        // with one hash and probe whether or not the group exists: asking
+        // TryGetValue and then inserting hashed every new group's key twice,
+        // a GROUP BY of mostly distinct keys nearly every row's.
         //
         // `tupleIsShared` says the caller is handing over the join driver's own
         // mutable tuple, so a retained representative has to be snapshotted.
@@ -493,13 +494,13 @@ internal sealed partial class Selection
                     keyScratch = new SqlValue[groupingSet.Length];
                 for (var i = 0; i < groupingSet.Length; i++)
                     keyScratch[i] = groupingSet[i].Run(rowRuntime);
-                if (!groups.TryGetValue(new SqlValueKey(keyScratch), out state!))
+                ref var slot = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(groups, new SqlValueKey(keyScratch), out var exists);
+                if (!exists)
                 {
-                    var keyValues = new SqlValue[groupingSet.Length];
-                    Array.Copy(keyScratch, keyValues, groupingSet.Length);
-                    state = NewGroup(keyValues);
-                    groups[new SqlValueKey(keyValues)] = state;
+                    slot = NewGroup(keyScratch);
+                    keyScratch = new SqlValue[groupingSet.Length];
                 }
+                state = slot!;
             }
 
             // Keep the first row that lands in each group as a

@@ -701,6 +701,7 @@ Over a table whose first row zeroes the divisor and whose last row's text isn't 
 
 The scaffolding follows the hoisted-resolver pattern the row-level loops use: one resolver delegate and one `RuntimeContext` for the whole loop, one reused grouping-key scratch buffer (a stable copy is taken only on a group's first row), and a per-group representative row snapshotted once rather than a snapshot per input row.
 The representative is what a projection reaching the column *underneath* a grouping expression resolves against (`SELECT MONTH(d), MIN(d) … GROUP BY MONTH(d)`), so it has to be a copy: the join driver rewrites its tuple in place per row.
+A row finds its group's slot with one hash and probe whether the group exists or not, the key's equality settles a non-NULL reference-free value (an integer, a date-time, money, an inline decimal) by its primitive ahead of the type-test chain, and a column read takes the row layout its `FromSource` holds (`StoredLayout`): measured 2026-10-17 (Release, minimum of six alternating rounds at a load average of 6–17), `groupby.highcard_73k` 64 → 56 ms of CPU, `countdistinct.per_customer` 106 → 90, `conditional.agg_pivot` 172 → 153 and the `derived.agg_join_*` reports 9–11% less.
 
 Oracle: `GroupedAggregateStreamingTests`.
 

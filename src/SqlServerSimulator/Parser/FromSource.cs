@@ -250,6 +250,15 @@ internal sealed class FromSource(
         return this.spatialColumn == 1;
     }
     public readonly HeapColumn[] StoredSchema = storedSchema;
+
+    /// <summary>
+    /// <see cref="StoredSchema"/>'s <see cref="RowLayout"/>, held by the source
+    /// so a column read per row skips the layout cache's weak-table lookup.
+    /// </summary>
+    public RowLayout StoredLayout() => this.storedLayout ??= RowLayout.For(this.StoredSchema);
+
+    private RowLayout? storedLayout;
+
     public readonly int[]? StorageOrdinals = storageOrdinals;
 #pragma warning disable IDE0032 // The property reads the backing table's heap for a reused pseudo-table, so it isn't the field's wrapper.
     private readonly Heap? lobStore = lobStore;

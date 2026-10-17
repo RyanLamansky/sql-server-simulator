@@ -1154,7 +1154,7 @@ internal sealed partial class Selection
             // A column the reader evaluates itself, read here off its row
             // alone — a read with the whole tuple in hand takes ReadSourceColumn.
             if (source.DeferredColumns is not { } deferred || deferred[columnIndex] is not { } evaluated)
-                return RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore);
+                return RowDecoder.DecodeColumn(source.StoredSchema, source.StoredLayout(), bytes, columnIndex, source.LobStore);
             return evaluated.ReadsOnlyItsRow
                 ? evaluated.Evaluate([source], [bytes], 0, batch, outerResolver: null, memo: null)
                 : throw new InvalidOperationException($"Column {columnIndex} of '{source.Qualifier}' reads outside its row and was read without the tuple holding it.");
@@ -1162,7 +1162,7 @@ internal sealed partial class Selection
 
         var column = source.Columns[columnIndex];
         return column.Computed is not { } computedExpr || column.IsPersisted
-            ? RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore)
+            ? RowDecoder.DecodeColumn(source.StoredSchema, source.StoredLayout(), bytes, source.StorageOrdinals[columnIndex], source.LobStore)
             : Compute(source, computedExpr, bytes, batch);
     }
 
