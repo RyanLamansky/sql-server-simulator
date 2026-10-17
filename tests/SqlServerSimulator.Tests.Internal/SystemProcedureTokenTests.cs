@@ -90,6 +90,19 @@ public sealed class SystemProcedureTokenTests
     }
 
     [TestMethod]
+    [DataRow(@"exec sp_denylogin 'NT AUTHORITY\SYSTEM'", "ENV8 / ENV9 / RET 0 / DONEPROC E0 FINAL 0")]
+    [DataRow(@"exec sp_grantlogin 'NT AUTHORITY\SYSTEM'", "ENV8 / ENV9 / RET 0 / DONEPROC E0 FINAL 0")]
+    [DataRow(@"exec sp_grantlogin 'NT AUTHORITY\LOCAL SERVICE'", "ENV8 / ERR 15151 / DONEINPROC AA MORE|ERROR 0 / ENV10 / ERR 15401 / DONEINPROC F6 MORE|ERROR 0 / RET 1 / DONEPROC E0 FINAL 0")]
+    [DataRow(@"exec sp_denylogin 'zz\nosuch'", "ENV8 / ENV10 / ERR 15401 / DONEINPROC F6 MORE|ERROR 0 / RET 1 / DONEPROC E0 FINAL 0")]
+    [DataRow(@"exec sp_revokelogin 'zz\nosuch'", "ERR 15401 / DONEINPROC AA MORE|ERROR 0 / RET 1 / DONEPROC E0 FINAL 0")]
+    [DataRow(@"set implicit_transactions on; exec sp_grantlogin 'NT AUTHORITY\SYSTEM'; exec sp_revokelogin 'zz\nosuch'; set implicit_transactions off", "DONE B9 MORE 0 / ENV8 / ENV9 / RET 0 / DONEPROC E0 MORE 0 / ERR 15401 / DONEINPROC AA MORE|ERROR 0 / RET 1 / DONEPROC E0 MORE 0 / DONE BA FINAL 0")]
+    public void WindowsLoginProcedures_FollowTheLegacyTransactionRule(string sql, string expected)
+    {
+        using var fixture = new TdsSessionFixture();
+        Assert.AreEqual(expected, string.Join(" / ", Batch(fixture, sql)));
+    }
+
+    [TestMethod]
     public void SecurityProcedure_InACallersTransaction_RefusesWithMsg15002()
         => AssertBatch(
             "begin tran; exec sp_droprole 'nosuch'; rollback",

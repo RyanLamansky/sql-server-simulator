@@ -52,7 +52,8 @@ partial class Simulation
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_flush_log"
         or "sp_addapprole" or "sp_addlogin" or "sp_addrole" or "sp_addsrvrolemember" or "sp_adduser" or "sp_approlepassword" or "sp_defaultdb" or "sp_defaultlanguage"
-        or "sp_dropapprole" or "sp_droplogin" or "sp_droprole" or "sp_dropsrvrolemember" or "sp_grantdbaccess" or "sp_password" or "sp_revokedbaccess")
+        or "sp_dropapprole" or "sp_droplogin" or "sp_droprole" or "sp_dropsrvrolemember" or "sp_grantdbaccess" or "sp_password" or "sp_revokedbaccess"
+        or "sp_denylogin" or "sp_grantlogin" or "sp_revokelogin")
         && !systemProcName.StartsWith("sp_OA", StringComparison.Ordinal);
 
     /// <summary>

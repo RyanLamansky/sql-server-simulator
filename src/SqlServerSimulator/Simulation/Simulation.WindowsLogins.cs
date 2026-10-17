@@ -387,20 +387,29 @@ partial class Simulation
         var name = values[0].IsNull ? null : values[0].AsString;
         if (name is not null && !name.Contains('\\', StringComparison.Ordinal))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InvalidWindowsName(name, level: 11), invalidNameLine);
-        if (name is not null && this.Logins.TryGetValue(name.TrimEnd(' '), out var login) && login.IsWindows)
+        // Past those checks the work runs in a transaction of the procedure's
+        // own: a failed CREATE LOGIN rolls it back, as the procedure's Msg 15401
+        // does ahead of itself (probed 2026-10-17 against SQL Server 2025).
+        foreach (var outcome in InProcedureTransaction(batch, Body()))
+            yield return outcome;
+
+        IEnumerable<SimulatedStatementOutcome> Body()
         {
-            // The server-scope statement runs in master whatever database the call is made from.
-            var statement = this.RunProcedureStatement(batch, (deny ? "deny" : "grant") + " connect sql to " + QuoteIdentifier(login.Name));
-            foreach (var outcome in ModuleDatabaseScope.Enumerate(batch.Connection, this.Databases[MasterDatabaseName], statement))
-                yield return outcome;
-            yield break;
+            if (name is not null && this.Logins.TryGetValue(name.TrimEnd(' '), out var login) && login.IsWindows)
+            {
+                // The server-scope statement runs in master whatever database the call is made from.
+                var statement = this.RunProcedureStatement(batch, (deny ? "deny" : "grant") + " connect sql to " + QuoteIdentifier(login.Name));
+                foreach (var produced in ModuleDatabaseScope.Enumerate(batch.Connection, this.Databases[MasterDatabaseName], statement))
+                    yield return produced;
+                yield break;
+            }
+            if (name is not null && TryResolveWindowsAccount(name, out _, out _))
+            {
+                foreach (var produced in this.RunProcedureStatement(batch, "create login " + QuoteIdentifier(name) + " from windows"))
+                    yield return produced;
+            }
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.WindowsPrincipalNotFound(name ?? "(null)", level: 11), notFoundLine);
         }
-        if (name is not null && TryResolveWindowsAccount(name, out _, out _))
-        {
-            foreach (var outcome in this.RunProcedureStatement(batch, "create login " + QuoteIdentifier(name) + " from windows"))
-                yield return outcome;
-        }
-        throw AtSystemProcedureLine(calledAs, SimulatedSqlException.WindowsPrincipalNotFound(name ?? "(null)", level: 11), notFoundLine);
     }
 
     /// <summary>
@@ -423,7 +432,9 @@ partial class Simulation
         var name = RequireValidName(values[0]);
         if (!name.Contains('\\', StringComparison.Ordinal))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InvalidWindowsName(name, level: 11), 25);
-        foreach (var outcome in this.RunProcedureStatement(batch, "drop login " + QuoteIdentifier(name)))
+        // Its DROP LOGIN opens no implicit transaction (probed 2026-10-17
+        // against SQL Server 2025).
+        foreach (var outcome in WithoutImplicitTransaction(batch.Connection, this.RunProcedureStatement(batch, "drop login " + QuoteIdentifier(name))))
             yield return outcome;
     }
 }

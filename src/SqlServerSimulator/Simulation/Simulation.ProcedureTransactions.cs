@@ -133,7 +133,7 @@ partial class Simulation
     /// Runs <paramref name="body"/> — the security statement a legacy login
     /// procedure builds — so that it opens no <c>IMPLICIT_TRANSACTIONS</c>
     /// transaction: under the option real's <c>sp_password</c>,
-    /// <c>sp_addlogin</c>, <c>sp_droplogin</c> and <c>sp_dropsrvrolemember</c>
+    /// <c>sp_addlogin</c>, <c>sp_droplogin</c>, <c>sp_revokelogin</c> and <c>sp_dropsrvrolemember</c>
     /// leave <c>@@TRANCOUNT</c> 0, where the statement run on its own opens
     /// one (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
