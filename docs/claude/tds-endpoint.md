@@ -203,14 +203,15 @@ The rules the capture showed:
 
 Real sends an ORDER token (`0xA9`: a length, then one `USHORT` per term) after a result's COLMETADATA — after its TABNAME / COLINFO when it carries them — whenever its statement has an `ORDER BY`, at batch level, in a procedure, in dynamic SQL, over RPC and in a T-SQL or API cursor's every fetch (captured 2026-10-17 against SQL Server 2025 with a raw TDS client).
 Each term names its select-list position: an ordinal its number, an unqualified name the output column so named, and anything else the first projection whose expression has the term's shape — `b + 1` matches `b + 1` but not `1 + b`, a column matches through any alias, `SELECT a x, a y … ORDER BY a` is 1 — or 0 when the select list holds none.
+A `COLLATE` naming the collation its column already has — `database_default` over a column of the database's collation, or that collation by name — is the column itself, where any other `COLLATE` is an expression of its own.
 A term that is a constant, written or reached through its column's alias or ordinal, is left out, so `SELECT a, 1 AS x … ORDER BY x` and `SELECT 1 AS x ORDER BY x` send no token; a variable, `GETDATE()`, `NEWID()` and a subquery are no constants.
 A nested query's `ORDER BY` — a derived table's `TOP`, a view's — sends none, nor does `FOR XML` / `FOR JSON` or a statement whose rows go to a table or variables.
 The list is computed as the query parses (`Selection.OrderTokenColumns`, carried on `Selection.OrderColumns` and `SimulatedQueryResult.OrderColumns`), so a new path building a statement's result from a `Selection` copies it as it copies `Browse`.
 
-A system procedure's results carry the ORDER its query has: one list per result for most (`Simulation.SystemProcedureResultOrder`), and where the order follows the arguments the procedure sets it itself — `sp_columns` and `sp_stored_procedures` order by position within the one object a name without a wildcard found and by owner and name otherwise, `sp_fkeys` by the foreign key's side when a primary key table is named, `sp_configure`, `sp_lock` and `sp_helpfile` only when listing everything, `sp_help` without an object, `sp_helpindex` and `sp_helpconstraint` wherever they report.
+A system procedure's results carry the ORDER its query has: one list per result for most (`Simulation.SystemProcedureResultOrder`), and where the order follows the arguments the procedure sets it itself — `sp_columns` and `sp_stored_procedures` order by position within the one object a name without a wildcard found and by owner and name otherwise — `sp_stored_procedures` by qualifier, owner and name under `@fUsePattern = 0`, where it matches exactly — `sp_fkeys` by the foreign key's side when a primary key table is named, `sp_configure`, `sp_lock` and `sp_helpfile` only when listing everything, `sp_help` without an object, `sp_helpindex` and `sp_helpconstraint` wherever they report.
 SqlClient and SMO read past the token, which none of them surfaces.
 
-**Divergences**: a term with a no-op `COLLATE database_default` matches its column on real and reads as 0 here; and `sp_stored_procedures` under `@fUsePattern = 0` orders `1, 2, 3` on real, where the simulator always matches by pattern.
+**Divergence**: `catalog_default` resolves to the database's collation on real, so it is a no-op over such a column there, where it names the catalog collation here and reads as 0 (see `CollateExpression.ResolvePseudoCollationName`).
 
 ## Unexpected-fault handling
 

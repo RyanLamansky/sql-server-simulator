@@ -5,7 +5,8 @@ namespace SqlServerSimulator;
 /// <summary>
 /// The ORDER token (0xA9) real SQL Server 2025 sends after a result's
 /// COLMETADATA when the statement has an ORDER BY — each term's select-list
-/// position, 0 for one the select list doesn't hold, constants left out —
+/// position, 0 for one the select list doesn't hold, constants left out, a
+/// COLLATE naming the column's own collation read as the column —
 /// captured 2026-10-17 with a raw TDS client.
 /// </summary>
 [TestClass]
@@ -16,7 +17,10 @@ public sealed class OrderTokenTests
     private static TdsSessionFixture Seeded()
     {
         var fixture = new TdsSessionFixture();
-        _ = fixture.RunBatch("create table t (a int primary key, b int); insert t values (1, 2), (2, 1)");
+        _ = fixture.RunBatch("""
+            create table t (a int primary key, b int, c varchar(10) collate SQL_Latin1_General_CP1_CI_AS, d varchar(10) collate Latin1_General_BIN);
+            insert t values (1, 2, 'x', 'y'), (2, 1, 'z', 'w')
+            """);
         return fixture;
     }
 
@@ -38,6 +42,11 @@ public sealed class OrderTokenTests
     [DataRow("select a from t union all select b from t order by 1", "ORDER 1")]
     [DataRow("select a as x from t union select b from t order by a", "ORDER 1")]
     [DataRow("declare @v int = 1; select @v as v order by v", "ORDER 1")]
+    [DataRow("select a, c from t order by c collate database_default", "ORDER 2")]
+    [DataRow("select a, c from t order by (c) collate SQL_Latin1_General_CP1_CI_AS", "ORDER 2")]
+    [DataRow("select a, c from t order by c collate Latin1_General_BIN", "ORDER 0")]
+    [DataRow("select a, d from t order by d collate database_default", "ORDER 0")]
+    [DataRow("select a, d from t order by d collate Latin1_General_BIN", "ORDER 2")]
     public void OrderedResult_SendsTheTermsPositions(string sql, string order)
     {
         using var fixture = Seeded();
@@ -71,7 +80,8 @@ public sealed class OrderTokenTests
     /// <summary>
     /// A system procedure's results carry the ORDER its query has: by
     /// position within the one object a name picked, by owner and name for a
-    /// pattern or a miss.
+    /// pattern or a miss — and <c>sp_stored_procedures</c> by qualifier,
+    /// owner and name when it matches exactly.
     /// </summary>
     [TestMethod]
     [DataRow("exec sp_columns t", "ORDER 17")]
@@ -81,6 +91,7 @@ public sealed class OrderTokenTests
     [DataRow("exec sp_fkeys 'nosuch'", "ORDER 5,6,7,9,8")]
     [DataRow("exec sp_fkeys @fktable_name = 'nosuch'", "ORDER 1,2,3,9,4")]
     [DataRow("exec sp_stored_procedures 'nosuch'", "ORDER 2,3")]
+    [DataRow("exec sp_stored_procedures 'nosuch', @fUsePattern = 0", "ORDER 1,2,3")]
     [DataRow("exec sp_datatype_info 99", "ORDER 2,0,12,11,20")]
     public void SystemProcedureResult_SendsItsQuerysOrder(string sql, string order)
     {

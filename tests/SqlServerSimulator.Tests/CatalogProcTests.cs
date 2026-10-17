@@ -453,6 +453,18 @@ public sealed class CatalogProcTests
     }
 
     /// <summary>
+    /// <c>@fUsePattern = 0</c> matches the name and owner exactly, case-blind
+    /// under the database's collation (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_stored_procedures @sp_name='my%', @fUsePattern = 0", 0)]
+    [DataRow("exec sp_stored_procedures 'MYPROC', @fUsePattern = 0", 1)]
+    [DataRow("exec sp_stored_procedures 'myproc', 'dbo', @fUsePattern = 0", 1)]
+    [DataRow("exec sp_stored_procedures 'myproc', 'd%', @fUsePattern = 0", 0)]
+    public void SpStoredProcedures_WithoutPatterns_MatchesExactly(string sql, int count) => HasCount(count, Run(NewIndexedFixture(), sql));
+
+    /// <summary>
     /// Several matches come back ordered by owner then name, which is the
     /// order real returns them in (probed against SQL Server 2025) — the
     /// ODBC <c>SQLProcedures</c> contract a one-row filter never exercises.

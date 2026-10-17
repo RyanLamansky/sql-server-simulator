@@ -848,6 +848,7 @@ internal sealed partial class Selection
             // An ordered set operation inlines none of its branches' calls.
             if (combined.IsSetOperationResult)
                 context.Batch.InlinedCalls?.DropFrom(inlinedCallsBefore);
+            RefuseRepeatedOrderTerms([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames);
             var orderColumns = scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames) : null;
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
             combined.OrderColumns = orderColumns;
@@ -4080,6 +4081,7 @@ internal sealed partial class Selection
 
         var isBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
             && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true);
+        RefuseRepeatedOrderTerms([], orderBy, expressions, columnNames);
         return new Selection(schema, columnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,

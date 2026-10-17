@@ -421,6 +421,12 @@ Reading projected columns alone is not enough: `ORDER BY n + 0`, `ORDER BY 1 + i
 The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
 Under DISTINCT the qualified form follows the same source-reference rule as the non-DISTINCT path: it must name a source column that is itself projected, and a miss is Msg 145 rather than a leaf match against the output aliases (tightened 2026-07-31 — `SELECT DISTINCT val AS id … ORDER BY t.id` is an error, while `ORDER BY c.nm` over `SELECT DISTINCT nm AS Col5` is legal).
 
+### Repeated terms (Msg 169)
+
+Two terms reaching one column or expression are **Msg 169** while compiling, ending the batch, at any query level — a derived table's `TOP`, a set operation's, a cursor's (probed 2026-10-17 against SQL Server 2025).
+Terms compare as the ORDER token places them (`Selection.RefuseRepeatedOrderTerms`): two are one when they reach the same select-list item, by ordinal, output name or shape (`ORDER BY 2, c`, `ORDER BY x, c` over `c x`, `ORDER BY e, a + 1` over `a + 1 e`), or, reaching none, have one shape — direction, qualification, case, parentheses and a `COLLATE` naming the column's own collation aside, and `NEWID()` or `@@SPID` twice as much a repeat as a column.
+A constant and a subquery never repeat, nor do two items projecting one column (`SELECT a, a b … ORDER BY 1, 2`), `a + 1` and `1 + a`, or a window's `OVER (ORDER BY a, a)`.
+
 ### Constant terms (Msg 408) and bare variables (Msg 1008)
 
 A term the server folds to a constant is rejected with **Msg 408** `A constant expression was encountered in the ORDER BY list, position N.` — position being the term's 1-based index in the list, and the rule applying to a single SELECT, a set-op chain, a `TOP` / `OFFSET` query and a `SELECT … INTO` alike.

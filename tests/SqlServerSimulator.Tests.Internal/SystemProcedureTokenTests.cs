@@ -318,4 +318,31 @@ public sealed class SystemProcedureTokenTests
     [DataRow("exec sp_testlinkedserver 'nosuch'", "ERR 214")]
     [DataRow("exec sp_testlinkedserver N'nosuch'", "ERR 7202")]
     public void TestLinkedServer_RefusalClosesItsDoneProc(string sql, string error) => AssertBatch(sql, error, "RET 1", "DONEPROC E0 ERROR 0");
+
+    /// <summary>
+    /// <c>sp_stored_procedures</c> looks a name holding no <c>%</c> up by its
+    /// exact name, an underscore or bracket included, and under
+    /// <c>@fUsePattern = 0</c> ends its statements two conditions after the
+    /// lookup.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_stored_procedures 'a_p'", "I I I I I I S S S I I S I I I I")]
+    [DataRow("exec sp_stored_procedures 'a[_]p'", "I I I I I I S S I I S I I I I S")]
+    [DataRow("exec sp_stored_procedures 'a_p', @fUsePattern = 0", "I I I I I I S S S I I")]
+    [DataRow("exec sp_stored_procedures 'a_%', @fUsePattern = 0", "I I I I I S S I I")]
+    [DataRow("exec sp_stored_procedures '%', @fUsePattern = 0", "I I S I I S S I I")]
+    [DataRow("exec sp_stored_procedures 'a_p', '%', @fUsePattern = 0", "I I I S I I I S S S I I")]
+    public void StoredProcedures_ExactLookupAndUsePattern(string sql, string steps)
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create procedure a_p as select 1");
+        var tokens = Batch(fixture, sql);
+        var ahead = tokens.TakeWhile(static token => token != "ROWS").Select(static token => token switch
+        {
+            "DONEINPROC C0 MORE 0" => "I",
+            "DONEINPROC C1 MORE|COUNT 1" => "S",
+            _ => token,
+        });
+        Assert.AreEqual(steps, string.Join(' ', ahead), string.Join(" / ", tokens));
+    }
 }

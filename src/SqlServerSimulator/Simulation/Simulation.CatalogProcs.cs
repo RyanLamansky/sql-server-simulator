@@ -1201,7 +1201,7 @@ partial class Simulation
     /// carries the trailing <c>;1</c> group number, the three param/result
     /// counts report <c>-1</c> (real doesn't compute them), and
     /// <c>PROCEDURE_TYPE</c> is 2 (SQL_PT_PROCEDURE). <c>@sp_name</c> /
-    /// <c>@sp_owner</c> are LIKE patterns. The simulator has no system-procedure
+    /// <c>@sp_owner</c> are LIKE patterns unless <c>@fUsePattern</c> is 0. The simulator has no system-procedure
     /// catalog, so (unlike real, which also lists the ~1600 <c>sys</c> procs)
     /// only user procedures are projected.
     /// </summary>
@@ -1211,11 +1211,18 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var (spName, spOwner, spQualifier) = ParseSpStoredProceduresArgs(arguments);
+        var (spName, spOwner, spQualifier, usePattern) = ParseSpStoredProceduresArgs(arguments);
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
-        var namePattern = CompileCatalogPattern(spName);
-        var ownerPattern = CompileCatalogPattern(spOwner);
+        // Under @fUsePattern = 0 a name and an owner match exactly, under the
+        // database's collation, and one of exactly % stands for none.
+        var namePattern = usePattern ? CompileCatalogPattern(spName) : null;
+        var ownerPattern = usePattern ? CompileCatalogPattern(spOwner) : null;
+        var exactName = spName == "%" ? null : spName;
+        var exactOwner = spOwner == "%" ? null : spOwner;
+        bool NameMatches(string candidate) => usePattern ? Matches(namePattern, candidate) : exactName is null || database.Collation.Equals(exactName, candidate);
+        bool OwnerMatches(string candidate) => usePattern ? Matches(ownerPattern, candidate) : exactOwner is null || database.Collation.Equals(exactOwner, candidate);
+        var exactFound = false;
         var negativeOne = SqlValue.FromInt32(-1);
         var nullRemarks = SqlValue.Null(CatalogVarchar254);
         var procedureType = SqlValue.FromInt16(2);
@@ -1225,12 +1232,16 @@ partial class Simulation
         {
             foreach (var (_, schema) in database.Schemas)
             {
-                if (!Matches(ownerPattern, schema.Name))
+                foreach (var (_, procedure) in schema.Procedures)
+                    exactFound |= exactName is not null && database.Collation.Equals(exactName, procedure.Name);
+                foreach (var (_, function) in schema.Functions)
+                    exactFound |= exactName is not null && database.Collation.Equals(exactName, function.Name);
+                if (!OwnerMatches(schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var (_, procedure) in schema.Procedures)
                 {
-                    if (!Matches(namePattern, procedure.Name))
+                    if (!NameMatches(procedure.Name))
                         continue;
                     rows.Add([
                         qualifier, owner,
@@ -1251,7 +1262,7 @@ partial class Simulation
                 // (probed 2026-09-26 against SQL Server 2025).
                 foreach (var (_, function) in schema.Functions)
                 {
-                    if (!Matches(namePattern, function.Name))
+                    if (!NameMatches(function.Name))
                         continue;
                     rows.Add([
                         qualifier, owner,
@@ -1263,12 +1274,15 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpStoredProceduresRows);
-        var oneObject = NamesOneObject(spName, rows.Count > 0);
-        foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, rows.Count > 0, oneObject)))
+        var oneObject = usePattern && NamesOneObject(spName, rows.Count > 0);
+        foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, usePattern, exactFound, oneObject)))
             yield return step;
+        // Real orders by owner and name, or by qualifier, owner and name for
+        // one routine a name picked and whenever it matches exactly (captured
+        // 2026-10-17 against SQL Server 2025).
         yield return new SimulatedSqlResultSet(SpStoredProceduresSchema, SpStoredProceduresColumnNames, rows)
         {
-            OrderColumns = oneObject ? [1, 2, 3] : [2, 3],
+            OrderColumns = oneObject || !usePattern ? [1, 2, 3] : [2, 3],
         };
     }
 
@@ -1280,10 +1294,11 @@ partial class Simulation
         return cmp != 0 ? cmp : string.Compare(a[2].AsString, b[2].AsString, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static (string? Name, string? Owner, string? Qualifier) ParseSpStoredProceduresArgs(
+    private static (string? Name, string? Owner, string? Qualifier, bool UsePattern) ParseSpStoredProceduresArgs(
         List<ProcArgument> arguments)
     {
         string? name = null, owner = null, qualifier = null;
+        var usePattern = true;
         var positional = 0;
         foreach (var arg in arguments)
         {
@@ -1294,7 +1309,7 @@ partial class Simulation
                     case 0: name = CatalogStringArg(arg); break;
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
-                    case 3: break; // @fUsePattern — pattern mode is always on
+                    case 3: usePattern = CatalogUsePatternArg(arg); break;
                     default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_stored_procedures"));
                 }
 
@@ -1306,13 +1321,17 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "sp_name"): name = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "sp_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "sp_qualifier"): qualifier = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "fUsePattern"): break;
+                case var n when BuiltInToken.Equals(n, "fUsePattern"): usePattern = CatalogUsePatternArg(arg); break;
                 default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_stored_procedures"));
             }
         }
 
-        return (name, owner, qualifier);
+        return (name, owner, qualifier, usePattern);
     }
+
+    // A catalog procedure's @fUsePattern: omitted / NULL is the declared default 1.
+    private static bool CatalogUsePatternArg(ProcArgument arg) =>
+        arg.IsDefault || arg.Value.IsNull || ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Bit) != 0;
 
     private static string? CatalogStringArg(ProcArgument arg) =>
         arg.IsDefault || arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.NVarchar).AsString;

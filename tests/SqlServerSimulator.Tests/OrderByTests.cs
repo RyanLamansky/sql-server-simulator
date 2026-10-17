@@ -527,4 +527,51 @@ public class OrderByTests
         _ = sim.ExecuteNonQuery("create table t (a int, b int); insert t values (1, 2)");
         AreEqual(1, sim.ExecuteScalar(sql));
     }
+
+    /// <summary>
+    /// An ORDER BY reaching one column or expression twice is Msg 169 at any
+    /// level, whatever spells it — an ordinal, an alias, a qualifier, another
+    /// case, parentheses, a no-op COLLATE, the other direction — while a
+    /// constant, a subquery, two items projecting one column and two shapes
+    /// of one sum repeat nothing (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, c from t order by c, c")]
+    [DataRow("select a, c from t order by 2, c")]
+    [DataRow("select a, c x from t order by x, c")]
+    [DataRow("select a from t order by a asc, a desc")]
+    [DataRow("select a from t order by (a), A")]
+    [DataRow("select a from t order by t.a, a")]
+    [DataRow("select a from t order by b, b")]
+    [DataRow("select a from t order by 1, 1")]
+    [DataRow("select a, a + 1 e from t order by e, a + 1")]
+    [DataRow("select a from t order by upper(c), UPPER(c)")]
+    [DataRow("select a from t order by newid(), newid()")]
+    [DataRow("select a from t order by @@spid, @@spid")]
+    [DataRow("select a, c from t order by c collate database_default, c")]
+    [DataRow("select * from (select top 1 a from t order by a, a) q")]
+    [DataRow("select a from t union select a from t order by a, a")]
+    [DataRow("select a from t group by a order by a, a")]
+    [DataRow("declare c cursor for select a from t order by a, a")]
+    public void OrderBy_RepeatedTerm_IsMsg169(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int, c varchar(10))");
+        AreEqual((byte)1, sim.AssertSqlError(sql, 169).State);
+    }
+
+    [TestMethod]
+    [DataRow("select a, a b from t order by 1, 2")]
+    [DataRow("select a, a b from t order by a, b")]
+    [DataRow("select a from t order by a + 1, 1 + a")]
+    [DataRow("select a from t order by (select 1), (select 1)")]
+    [DataRow("select a, 'k' k from t order by k, k")]
+    [DataRow("select a, c from t order by c collate Latin1_General_BIN, c")]
+    [DataRow("select a, row_number() over (order by a, a) from t")]
+    public void OrderBy_TermsRepeatingNothing_Bind(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int, c varchar(10)); insert t values (1, 2, 'x')");
+        AreEqual(1, sim.ExecuteScalar(sql));
+    }
 }

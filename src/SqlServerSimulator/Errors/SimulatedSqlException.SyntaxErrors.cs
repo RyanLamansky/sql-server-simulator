@@ -522,6 +522,14 @@ partial class SimulatedSqlException
         new("A column has been specified more than once in the order by list. Columns in the order by list must be unique.", 169, 15, 10);
 
     /// <summary>
+    /// Mimics SQL Server error 169 state 1: a query's <c>ORDER BY</c> naming
+    /// one column or expression twice, which ends the batch while it compiles
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OrderByColumnRepeated() =>
+        new("A column has been specified more than once in the order by list. Columns in the order by list must be unique.", 169, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 319: a CTE-prefixed statement (a <c>WITH</c>
     /// clause introducing a common table expression) followed another
     /// statement with no <c>;</c> separator. Probe-confirmed verbatim text /

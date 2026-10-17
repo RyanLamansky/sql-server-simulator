@@ -138,15 +138,17 @@ partial class Simulation
     /// a name of exactly <c>%</c>, a condition, an assignment for an owner of
     /// exactly <c>%</c> — each of which the procedure then takes as none —
     /// and a condition; a name adds a condition, as does a qualifier, and a
-    /// name without a wildcard and no owner adds another, then assigns once
-    /// more after the next two assignments when it found the routine; two
-    /// conditions and an assignment follow, then an assignment and two
+    /// name holding no <c>%</c> with no owner looks the routine up by its
+    /// exact name, adding another condition, then assigns once more after the
+    /// next two assignments when one has that name. Under
+    /// <c>@fUsePattern = 0</c> two conditions close it; matching by pattern,
+    /// two conditions and an assignment follow, then an assignment and two
     /// conditions for a name that picked one routine, four conditions for
     /// another name, or a condition, an assignment, two conditions, an
-    /// assignment and a condition for none, either closing with one more
-    /// assignment when no owner was given.
+    /// assignment and a condition for none, closing with one more assignment
+    /// unless an owner was given or the lookup found the routine.
     /// </summary>
-    private static string SpStoredProceduresSteps(string? name, string? owner, string? qualifier, bool found, bool oneRoutine)
+    private static string SpStoredProceduresSteps(string? name, string? owner, string? qualifier, bool usePattern, bool exactFound, bool oneRoutine)
     {
         var program = new StringBuilder("II");
         if (name == "%")
@@ -165,15 +167,18 @@ partial class Simulation
             _ = program.Append('I');
         if (qualifier is not null)
             _ = program.Append('I');
-        var looksUpOwner = name is not null && !HasCatalogWildcard(name) && owner is null;
+        var looksUpOwner = name is not null && !name.Contains('%', StringComparison.Ordinal) && owner is null;
         if (looksUpOwner)
             _ = program.Append('I');
         _ = program.Append("SS");
-        if (looksUpOwner && found)
+        var lookedUp = looksUpOwner && exactFound;
+        if (lookedUp)
             _ = program.Append('S');
+        if (!usePattern)
+            return program.Append("II").ToString();
         _ = program.Append("IIS");
         return (oneRoutine ? program.Append("SII")
             : name is not null ? program.Append("IIII")
-            : program.Append("ISIISI")).Append(oneRoutine || owner is not null ? "" : "S").ToString();
+            : program.Append("ISIISI")).Append(lookedUp || owner is not null ? "" : "S").ToString();
     }
 }

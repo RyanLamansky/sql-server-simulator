@@ -64,7 +64,7 @@ internal sealed partial class Selection
             if (named >= 0)
                 return named + 1;
         }
-        var key = GroupingKey(sources, written);
+        var key = GroupingKey(sources, WithoutNoOpCollate(sources, written));
         for (var i = 0; i < projections.Count; i++)
         {
             var projection = projections[i] is Expressions.NamedExpression alias ? alias.Inner : projections[i];
@@ -74,6 +74,76 @@ internal sealed partial class Selection
                 return i + 1;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// <paramref name="term"/> without a <c>COLLATE</c> naming the collation
+    /// its column already has — <c>database_default</c> over a column of the
+    /// database's collation, or that collation by name — which real reads as
+    /// the column itself, matching its select-list item and repeating it
+    /// (probed 2026-10-17 against SQL Server 2025); any other term unchanged.
+    /// </summary>
+    private static Expression WithoutNoOpCollate(FromSource[] sources, Expression term)
+    {
+        if (term is not Expressions.CollateExpression collate)
+            return term;
+        var inner = collate.Inner;
+        while (inner is Expressions.Parenthesized parenthesized)
+            inner = parenthesized.Wrapped;
+        return inner is Expressions.Reference reference
+            && TryResolveSourceColumn(sources, reference.ReferencedName) is { } at
+            && sources[at.Source].Columns[at.Column].Type.Collation is { } own
+            && string.Equals(own.Name, collate.ResolvedCollation.Name, StringComparison.OrdinalIgnoreCase)
+                ? inner
+                : term;
+    }
+
+    /// <summary>
+    /// Refuses an <c>ORDER BY</c> naming one column twice — Msg 169, at any
+    /// query level, a set operation's included — comparing terms as
+    /// <see cref="OrderTokenColumns"/> places them: two are one when they
+    /// reach the same select-list item, by ordinal, output name or shape, or,
+    /// reaching none, have one shape; direction, qualification, case,
+    /// parentheses and a no-op <c>COLLATE</c> aside, and a nondeterministic
+    /// call like any other. A constant and a term holding a subquery never
+    /// repeat, nor do two items projecting the same column
+    /// (<c>SELECT a, a b … ORDER BY 1, 2</c>) (probed 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static void RefuseRepeatedOrderTerms(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    {
+        if (orderBy.Count < 2)
+            return;
+        var seen = new HashSet<object>();
+        foreach (var term in orderBy)
+        {
+            var column = OrderTermColumn(sources, term, projections, outputColumnNames);
+            var sorted = column == 0 ? term.Expr : column <= projections.Count ? projections[column - 1] : null;
+            if (sorted is Expressions.NamedExpression named)
+                sorted = named.Inner;
+            if (sorted is null || sorted.IsWrittenConstant || (column == 0 && HoldsSubquery(sorted)))
+                continue;
+            if (!seen.Add(column > 0 ? column : GroupingKey(sources, WithoutNoOpCollate(sources, Unparenthesized(sorted)))))
+                throw SimulatedSqlException.OrderByColumnRepeated();
+        }
+
+        static Expression Unparenthesized(Expression expression)
+        {
+            while (expression is Expressions.Parenthesized parenthesized)
+                expression = parenthesized.Wrapped;
+            return expression;
+        }
+
+        static bool HoldsSubquery(Expression expression)
+        {
+            var holds = false;
+            expression.Walk((node, _) =>
+            {
+                holds |= node is Expressions.ScalarSubqueryExpression;
+                return !holds;
+            });
+            return holds;
+        }
     }
 
     /// <summary>

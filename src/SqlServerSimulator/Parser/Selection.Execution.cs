@@ -2371,6 +2371,7 @@ internal sealed partial class Selection
             selection.GraphIdentityColumnCount = graphIdentityHidden;
             selection.GraphIdentityTable = graphIdentityTable;
         }
+        RefuseRepeatedOrderTerms(sources, orderBy, expressions, outputColumnNames);
         if (orderBy.Count > 0 && scope.Position == QueryPosition.Statement)
             selection.OrderColumns = OrderTokenColumns(sources, orderBy, expressions, outputColumnNames);
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
