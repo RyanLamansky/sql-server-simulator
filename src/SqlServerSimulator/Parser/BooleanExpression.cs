@@ -1530,6 +1530,14 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Whether this predicate is a written <c>=</c> itself — not a fold or a
+    /// filter wrapping one, which offer its operands but answer for it — so
+    /// two operands of one type answer it as <see cref="SqlValue.Equals(SqlValue)"/>
+    /// does, UNKNOWN when either is NULL.
+    /// </summary>
+    internal virtual bool IsPlainEquality => false;
+
+    /// <summary>
     /// Decomposes this predicate into a list of equality operand pairs when it
     /// is logically a chain of equalities OR'd together — i.e. an <c>IN</c>
     /// list (<c>x IN (a, b, c)</c> → three pairs of <c>(x, a)</c> /
@@ -3217,6 +3225,8 @@ internal abstract class BooleanExpression : ExpressionNode
         protected override string OperatorName => "equal to";
 
         protected override string? FilterOperator => "=";
+
+        internal override bool IsPlainEquality => true;
 
         internal override bool TryGetEqualityOperands([NotNullWhen(true)] out Expression? l, [NotNullWhen(true)] out Expression? r)
         {

@@ -488,6 +488,7 @@ public sealed partial class Simulation
                 }
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
+                batch.CurrentStatement.MaterializedEqualityIndexes = null;
                 batch.CurrentStatement.RowAddresses = null;
                 batch.CurrentStatement.CatalogViewRows = null;
 #if DEBUG

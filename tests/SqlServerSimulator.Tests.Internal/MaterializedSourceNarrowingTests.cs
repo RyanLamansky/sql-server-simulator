@@ -156,4 +156,75 @@ public sealed class MaterializedSourceNarrowingTests
         Contains("MaterializedFilter(o,1,2)", seeks);
         AreEqual(1005, rows[0]);
     }
+
+    [TestMethod]
+    public void LaterExecutions_LookUpTheRows_AndKeepWhatTheFilterKept()
+    {
+        // Ten outer rows probing three values and a NULL over a 6,000-row
+        // union: the first execution filters its rows, the rest look them up,
+        // and each keeps what the filter keeps — v = 1 included, which passes
+        // more than half of the first 4,096 rows and so keeps the remaining
+        // 1,904 unfiltered.
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                create table k (id int not null primary key, v int null);
+                insert k select value, value % 3 from generate_series(1, 9);
+                insert k values (10, null);
+                create table single (id int not null primary key);
+                insert single values (1);
+                create table u (id int not null primary key, v int null, w int not null);
+                insert u select value, case when value % 7 = 0 then null when value <= 3000 then 1 else value % 5 end, value from generate_series(1, 6000);
+                """;
+            _ = command.ExecuteNonQuery();
+        }
+
+        var (seeks, _, sums) = Run(connection, """
+            select x.s from k cross apply (
+                select sum(d.w) as s from single t cross join (select v, w from u union all select v, w from u where w < 0) d
+                where d.v = k.v and d.w > 10) x
+            """);
+        var (filtered, _, expected) = Run(connection, """
+            select x.s from k cross apply (
+                select sum(d.w) as s from single t cross join (select v, w from u union all select v, w from u where w < 0) d
+                where d.v + 0 = k.v and d.w > 10) x
+            """);
+
+        IsEmpty(filtered.FindAll(static s => s.StartsWith("MaterializedLookup(", StringComparison.Ordinal)));
+        CollectionAssert.AreEqual(expected, sums);
+        HasCount(9, seeks.FindAll(static s => s == "MaterializedLookup(d)"));
+        var kept = seeks.FindAll(static s => s.StartsWith("MaterializedFilter(", StringComparison.Ordinal));
+        HasCount(10, kept);
+        for (var id = 1; id <= 9; id++)
+            AreEqual(kept[(id - 1) % 3], kept[id - 1]);
+        AreEqual("MaterializedFilter(d,2,4656)", kept[0]);
+        AreEqual("MaterializedFilter(d,2,0)", kept[9]);
+    }
+
+    [TestMethod]
+    public void LaterExecutions_KeepTheRowALaterConjunctRaisesOn()
+    {
+        // Customer 1 is probed first and last; both keep the order whose code
+        // `o.code = 5` can't convert, which no line joins.
+        using var connection = Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "insert ord values (99, 1, 'abc')";
+            _ = command.ExecuteNonQuery();
+        }
+
+        var (seeks, _, rows) = Run(connection, $"""
+            select sum(x.qty) from (select cust_id from cust union all select 1) c cross apply (
+                select l.qty from line l join {OrdersUnion} o on l.ord_id = o.ord_id
+                where o.cust_id = c.cust_id and o.code = 5) x
+            """);
+        AreEqual(1005, rows[0]);
+        HasCount(20, seeks.FindAll(static s => s == "MaterializedLookup(o)"));
+        var kept = seeks.FindAll(static s => s.StartsWith("MaterializedFilter(", StringComparison.Ordinal));
+        HasCount(21, kept);
+        AreEqual("MaterializedFilter(o,2,1)", kept[0]);
+        AreEqual("MaterializedFilter(o,2,1)", kept[20]);
+    }
 }

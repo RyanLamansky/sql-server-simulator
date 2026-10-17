@@ -49,6 +49,14 @@ internal sealed class StatementContext
     public Dictionary<object, object>? SubqueryResults;
 
     /// <summary>
+    /// Per equality conjunct narrowing a materialized FROM source, the hash
+    /// over that source's rows its later executions look up
+    /// (<c>Selection.TryNarrowByEqualityIndex</c>). Cleared with
+    /// <see cref="SubqueryResults"/>, whose materialized rows it indexes.
+    /// </summary>
+    public Dictionary<BooleanExpression, Selection.MaterializedEqualityIndex>? MaterializedEqualityIndexes;
+
+    /// <summary>
     /// The values this statement has drawn, in draw order, from each sequence
     /// its <c>NEXT VALUE FOR … OVER (ORDER BY …)</c> references read: the row
     /// ranked k takes the k-th, so the draws follow the <c>OVER</c> ordering
@@ -687,6 +695,7 @@ internal sealed class StatementContext
         this.UtcNow = DateTime.UtcNow;
         this.StatementScopedValues = null;
         this.SubqueryResults = null;
+        this.MaterializedEqualityIndexes = null;
         this.OrderedSequenceDraws = null;
         this.AutoOpenedKeys = null;
         this.RowAddresses = null;

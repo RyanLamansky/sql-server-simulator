@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -274,9 +275,202 @@ partial class Selection
         if (pushed is null)
             return null;
 
-        List<byte[]> kept = [.. PrefilteredRows(source, [.. pushed], batch, outerResolver)];
+        var kept = TryNarrowByEqualityIndex(source, pushed, batch, outerResolver) ?? [.. PrefilteredRows(source, [.. pushed], batch, outerResolver)];
         IndexSeekDiagnostics.Sink?.Add($"MaterializedFilter({source.Qualifier},{pushed.Count},{kept.Count})");
         return kept;
+    }
+
+    /// <summary>
+    /// The hash <see cref="TryNarrowByEqualityIndex"/> keeps over one
+    /// materialized source's rows for one equality conjunct, per statement
+    /// (<see cref="StatementContext.MaterializedEqualityIndexes"/>): built on
+    /// the second execution asking over the same rows, so a statement that
+    /// narrows them once pays the one filter pass and no build, and left
+    /// unusable (<see cref="Buckets"/> null once built) when the column's
+    /// values aren't all of one type.
+    /// </summary>
+    internal sealed class MaterializedEqualityIndex(List<byte[]> rows)
+    {
+        public readonly List<byte[]> Rows = rows;
+
+        public bool Built;
+
+        /// <summary>The ordinals of the rows holding each non-NULL value, ascending.</summary>
+        public Dictionary<SqlValueKey, List<int>>? Buckets;
+
+        /// <summary>The one type every value of the column has, NULLs included.</summary>
+        public SqlType? KeyType;
+    }
+
+    /// <summary>
+    /// <see cref="PrefilteredRows"/>'s answer over a materialized source for
+    /// <paramref name="pushed"/> whose first conjunct is a plain equality
+    /// between this source's column and a value fixed for the execution, read
+    /// from a hash over the rows rather than by asking every row — the shape a
+    /// correlated body joining a body that reads no outer row repeats once per
+    /// outer row over the same rows. Null, for the filter pass to answer, the
+    /// first time a statement asks over these rows, and wherever the hash
+    /// can't answer exactly as the pass would.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Exactness rests on the equality being the first conjunct the pass asks:
+    /// a row it answers FALSE or UNKNOWN for is dropped before any later
+    /// conjunct runs, so only the rows the hash finds go on to the rest, which
+    /// run as the pass runs them, a raise keeping the row. The equality itself
+    /// neither converts nor raises: every value of the column and the probe
+    /// value have one type, which the comparison answers by
+    /// <see cref="SqlValue.Equals(SqlValue)"/>, the equality the hash keys by.
+    /// Any other pairing, a <c>sql_variant</c> or a value side that raises,
+    /// leaves the answer to the pass. The pass's give-up past
+    /// <see cref="PrefilterProbeRows"/> rows is replayed over the found rows'
+    /// ordinals, so the rows kept, their order and their count are the pass's.
+    /// </para>
+    /// </remarks>
+    private static List<byte[]>? TryNarrowByEqualityIndex(
+        FromSource source, List<BooleanExpression> pushed, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var equality = pushed[0];
+        if (!equality.IsPlainEquality || !equality.TryGetEqualityOperands(out var left, out var right))
+            return null;
+        FromSource[] one = [source];
+        int columnIndex;
+        Expression valueSide;
+        if (left is Reference leftColumn && FindSourceColumn(one, leftColumn.ReferencedName) is (0, var leftIndex))
+            (columnIndex, valueSide) = (leftIndex, right);
+        else if (right is Reference rightColumn && FindSourceColumn(one, rightColumn.ReferencedName) is (0, var rightIndex))
+            (columnIndex, valueSide) = (rightIndex, left);
+        else
+            return null;
+
+        var rows = source.MaterializedRows!;
+        if (source.Columns[columnIndex].Computed is not null || rows.Count == 0)
+            return null;
+        var indexes = batch.CurrentStatement.MaterializedEqualityIndexes ??= new(ReferenceEqualityComparer.Instance);
+        if (!indexes.TryGetValue(equality, out var index) || !ReferenceEquals(index.Rows, rows))
+        {
+            indexes[equality] = new MaterializedEqualityIndex(rows);
+            return null;
+        }
+        if (!index.Built)
+            BuildEqualityIndex(index, source, columnIndex, batch);
+        if (index.Buckets is not { } buckets)
+            return null;
+
+        var tuple = new byte[]?[1];
+        var memo = new SourceColumnMemo();
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(one, tuple, name, batch, outerResolver, memo);
+        var runtime = new RuntimeContext(resolve, batch);
+        SqlValue probe;
+        try
+        {
+            probe = valueSide.Run(runtime);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+        if (probe.Type != index.KeyType)
+            return null;
+
+        IndexSeekDiagnostics.Sink?.Add($"MaterializedLookup({source.Qualifier})");
+        var found = !probe.IsNull && buckets.TryGetValue(new SqlValueKey([probe]), out var bucket) ? bucket : [];
+        var kept = new List<byte[]>();
+        var keptCount = 0;
+        var stoppedAfter = -1;
+        var checkpointPassed = rows.Count < PrefilterProbeRows;
+        foreach (var ordinal in found)
+        {
+            // The pass asks whether to give up after every row from the probe
+            // window's last on; between found rows its kept count stands while
+            // its row count grows, so only the window's last row and each found
+            // row past it can trip it.
+            if (!checkpointPassed && ordinal >= PrefilterProbeRows)
+            {
+                checkpointPassed = true;
+                if (keptCount * PrefilterKeepRateDivisor > PrefilterProbeRows)
+                {
+                    stoppedAfter = PrefilterProbeRows - 1;
+                    break;
+                }
+            }
+
+            var row = rows[ordinal];
+            tuple[0] = row;
+            var keep = true;
+            for (var c = 1; c < pushed.Count; c++)
+            {
+                bool? answer;
+                try
+                {
+                    answer = pushed[c].Run(runtime);
+                }
+                catch (SimulatedSqlException)
+                {
+                    break;
+                }
+                if (answer != true)
+                {
+                    keep = false;
+                    break;
+                }
+            }
+            if (keep)
+            {
+                keptCount++;
+                kept.Add(row);
+            }
+            if (ordinal >= PrefilterProbeRows - 1)
+            {
+                checkpointPassed = true;
+                if (keptCount * PrefilterKeepRateDivisor > ordinal + 1)
+                {
+                    stoppedAfter = ordinal;
+                    break;
+                }
+            }
+        }
+        if (stoppedAfter < 0 && !checkpointPassed && keptCount * PrefilterKeepRateDivisor > PrefilterProbeRows)
+            stoppedAfter = PrefilterProbeRows - 1;
+        if (stoppedAfter >= 0)
+        {
+            for (var ordinal = stoppedAfter + 1; ordinal < rows.Count; ordinal++)
+                kept.Add(rows[ordinal]);
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// Fills <paramref name="index"/> from its rows' values of column
+    /// <paramref name="columnIndex"/>, leaving it unusable when those values
+    /// aren't all of one type, or are of a type no hash keys.
+    /// </summary>
+    private static void BuildEqualityIndex(MaterializedEqualityIndex index, FromSource source, int columnIndex, BatchContext batch)
+    {
+        index.Built = true;
+        var buckets = new Dictionary<SqlValueKey, List<int>>();
+        SqlType? keyType = null;
+        var rows = index.Rows;
+        for (var ordinal = 0; ordinal < rows.Count; ordinal++)
+        {
+            var value = DecodeOrCompute(source, columnIndex, rows[ordinal], batch);
+            if (keyType is null)
+            {
+                if (value.Type is SqlVariantSqlType || value.Type.IsLob)
+                    return;
+                keyType = value.Type;
+            }
+            else if (value.Type != keyType)
+            {
+                return;
+            }
+            if (value.IsNull)
+                continue;
+            ref var bucket = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, new SqlValueKey([value]), out _);
+            (bucket ??= []).Add(ordinal);
+        }
+        index.KeyType = keyType;
+        index.Buckets = buckets;
     }
 
     // Whether a top-level conjunct compares a bare column of THIS source against
