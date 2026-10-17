@@ -388,12 +388,17 @@ internal sealed class StorageLayout
             var inRow = new int[this.columns.Length];
             var shape = new RecordShape(indexLeaf: false, heapLocator: false, this.versioned, uniquified: false);
             var pages = new List<int>();
+            var pageRecords = new List<int>();
             int Fill(int record, bool bulk = false)
             {
                 var cost = record + 2;
                 if (pages.Count == 0 || pages[^1] + cost > RealRecordFormat.PageBytes || (!bulk && pages[^1] > RealRecordFormat.PageBytes * 0.95))
+                {
                     pages.Add(0);
+                    pageRecords.Add(0);
+                }
                 pages[^1] += cost;
+                pageRecords[^1]++;
                 return pages.Count - 1;
             }
             var g = 0;
@@ -412,6 +417,7 @@ internal sealed class StorageLayout
                 {
                     var page = Fill(record, bulk);
                     pages[page] -= record + 2;
+                    pageRecords[page]--;
                     continue;
                 }
                 figures.Rows++;
@@ -450,6 +456,9 @@ internal sealed class StorageLayout
             level.Pages = pages.Count;
             if (level.Pages > 0)
                 level.Fragments = 1;
+            level.PageList = new PageFigures[pages.Count];
+            for (var i = 0; i < pages.Count; i++)
+                level.PageList[i] = new PageFigures(i, pageRecords[i], 0, pages[i]);
             figures.Levels = level.Pages == 0 ? [] : [level];
             figures.InRowReserved = level.Pages == 0 ? 0 : (8 * Extents(level.Pages)) + 1;
             return figures;
@@ -572,16 +581,106 @@ internal sealed class StorageLayout
             for (var i = 1; i < figures.Levels.Length; i++)
                 nodePages += figures.Levels[i].Pages;
             long extents;
+            List<(long Extents, List<(PageRef Page, int Key)> Members)> regions = [];
             if (leafPages == 0)
+            {
                 extents = 0;
+            }
             else if (builtCount > 0)
+            {
                 extents = Extents(leafPages) + Extents(nodePages);
+                regions.Add((Extents(leafPages), Members(figures.Levels, leaves: true, first: null)));
+                regions.Add((Extents(nodePages), Members(figures.Levels, leaves: false, first: null)));
+            }
             else if (multiRowStart && this.clustered && !this.hasLobUnit)
+            {
                 extents = 1 + Extents(leafPages - 1) + (nodePages == 0 ? 0 : 1 + Extents(nodePages - 1));
+                var leaves = Members(figures.Levels, leaves: true, first: null);
+                var nodes = Members(figures.Levels, leaves: false, first: null);
+                regions.Add((1, leaves.Count == 0 ? [] : [leaves[0]]));
+                if (nodePages != 0)
+                    regions.Add((1, [nodes[0]]));
+                regions.Add((Extents(leafPages - 1), leaves.Count == 0 ? [] : leaves[1..]));
+                if (nodePages != 0)
+                    regions.Add((Extents(nodePages - 1), nodes[1..]));
+            }
             else
+            {
                 extents = Extents(leafPages + nodePages);
+                // The first root, made by the split of the index's only page,
+                // took the leaf numbering's second number.
+                var members = Members(figures.Levels, leaves: true, first: null);
+                var lastLeaf = members.Count == 0 ? -1 : members.Max(member => member.Key);
+                var nodes = Members(figures.Levels, leaves: false, first: tree.RootTookLeafNumber ? 1 : null);
+                foreach (var (page, key) in nodes)
+                    members.Add((page, key == -1 ? 1 : lastLeaf + 1 + key));
+                regions.Add((extents, members));
+            }
             figures.InRowReserved = extents == 0 ? 0 : (8 * extents) + 1;
+            PlaceSlots(figures.Levels, regions);
             return figures;
+        }
+
+        /// <summary>
+        /// The pages of the leaf (or of the levels above it) keyed by their
+        /// allocation order: a leaf by its number, a non-leaf page by its rank
+        /// over the levels in turn — the root <paramref name="first"/> names,
+        /// the first page of level 1, keyed -1 and left out of the ranks.
+        /// </summary>
+        private static List<(PageRef Page, int Key)> Members(LevelFigures[] levels, bool leaves, int? first)
+        {
+            var members = new List<(PageRef Page, int Key)>();
+            if (leaves)
+            {
+                if (levels.Length != 0)
+                {
+                    for (var p = 0; p < levels[0].PageList.Length; p++)
+                        members.Add((new PageRef(0, p), levels[0].PageList[p].Slot));
+                    members.Sort(static (x, y) => x.Key.CompareTo(y.Key));
+                }
+                return members;
+            }
+            var rank = 0;
+            for (var l = 1; l < levels.Length; l++)
+            {
+                var ordered = new List<(PageRef Page, int Allocation)>();
+                for (var p = 0; p < levels[l].PageList.Length; p++)
+                    ordered.Add((new PageRef(l, p), levels[l].PageList[p].Slot));
+                ordered.Sort(static (x, y) => x.Allocation.CompareTo(y.Allocation));
+                foreach (var (page, allocation) in ordered)
+                    members.Add(first is not null && l == 1 && allocation == 0 ? (page, -1) : (page, rank++));
+            }
+            members.Sort(static (x, y) => x.Key.CompareTo(y.Key));
+            return members;
+        }
+
+        /// <summary>
+        /// Gives each page its place among the rowset's reserved pages: the
+        /// regions follow one another, each a whole number of extents, and a
+        /// region's pages sit at their keys' distances from its first, which
+        /// keeps a page freed since in its place, or one after another when
+        /// those distances outrun the region.
+        /// </summary>
+        private static void PlaceSlots(LevelFigures[] levels, List<(long Extents, List<(PageRef Page, int Key)> Members)> regions)
+        {
+            long offset = 0;
+            foreach (var (regionExtents, members) in regions)
+            {
+                var capacity = 8 * regionExtents;
+                if (members.Count != 0)
+                {
+                    var low = members[0].Key;
+                    var spread = members[^1].Key - low + 1 <= capacity;
+                    for (var i = 0; i < members.Count; i++)
+                    {
+                        var (page, key) = members[i];
+                        var level = levels[page.Level];
+                        var figures = level.PageList[page.Index];
+                        level.PageList[page.Index] = new PageFigures((int)(offset + (spread ? key - low : i)), figures.Records, figures.Ghosts, figures.Bytes);
+                    }
+                }
+                offset += capacity;
+            }
         }
 
         private SqlValueKey SortKey(byte[] image, int[] ordinals)
@@ -594,6 +693,13 @@ internal sealed class StorageLayout
     }
 
     private static long Extents(long pages) => (pages + 7) / 8;
+
+    /// <summary>A page of a replayed rowset: its level and its place in that level's key order.</summary>
+    private readonly struct PageRef(int level, int index)
+    {
+        public readonly int Level = level;
+        public readonly int Index = index;
+    }
 
     private enum SourceKind : byte
     {
@@ -711,9 +817,15 @@ internal sealed class StorageLayout
         private Leaf NewSibling(Leaf from)
         {
             if (from.Parent is null && !this.rooted)
+            {
                 this.leafAllocations++;
+                this.RootTookLeafNumber = true;
+            }
             return this.NewLeaf();
         }
+
+        /// <summary>Whether the first root took a number of the leaf's, as it does when the split of the index's only page makes it.</summary>
+        public bool RootTookLeafNumber;
 
         /// <summary>Lays <paramref name="sorted"/> out as an index build does: every level packed in key order.</summary>
         public void Build(List<Entry> sorted, int fillFactor, bool padIndex)
@@ -1048,6 +1160,7 @@ internal sealed class StorageLayout
                 var figures = new LevelFigures();
                 var previous = -2;
                 var pages = levels[l];
+                figures.PageList = new PageFigures[pages.Count];
                 for (var p = 0; p < pages.Count; p++)
                 {
                     var page = pages[p];
@@ -1056,12 +1169,15 @@ internal sealed class StorageLayout
                     if (page is Leaf leaf)
                     {
                         allocation = leaf.Allocation;
+                        var ghosts = 0;
                         foreach (var row in leaf.Rows)
                         {
                             if (row.Ghost)
-                                figures.Ghosts++;
+                                ghosts++;
                             figures.Add(row.Record, counted: !row.Ghost);
                         }
+                        figures.Ghosts += ghosts;
+                        figures.PageList[p] = new PageFigures(allocation, leaf.Rows.Count - ghosts, ghosts, leaf.Used);
                     }
                     else
                     {
@@ -1069,6 +1185,7 @@ internal sealed class StorageLayout
                         allocation = node.Allocation;
                         foreach (var child in node.Children)
                             figures.Add(child.Cost - 2);
+                        figures.PageList[p] = new PageFigures(allocation, node.Children.Count, 0, node.Used);
                     }
                     if (allocation != previous + 1)
                         figures.Fragments++;
@@ -1115,6 +1232,13 @@ internal sealed class LevelFigures
 {
     public long Pages;
 
+    /// <summary>
+    /// The level's pages in key order — a heap's in the order it filled
+    /// them — each with its place among the rowset's reserved pages, which
+    /// the page ids the page surfaces number are read from.
+    /// </summary>
+    public PageFigures[] PageList = [];
+
     /// <summary>The level's records, its ghosts left out.</summary>
     public long Records;
 
@@ -1150,6 +1274,19 @@ internal sealed class LevelFigures
         this.MinRecord = this.SizedRecords == 1 ? record : Math.Min(this.MinRecord, record);
         this.MaxRecord = Math.Max(this.MaxRecord, record);
     }
+}
+
+/// <summary>
+/// One page of a replayed rowset: its place among the rowset's reserved
+/// pages, counted from the first page of its first extent, its records
+/// (ghosts apart) and the bytes they and their slots take.
+/// </summary>
+internal readonly struct PageFigures(int slot, int records, int ghosts, int bytes)
+{
+    public readonly int Slot = slot;
+    public readonly int Records = records;
+    public readonly int Ghosts = ghosts;
+    public readonly int Bytes = bytes;
 }
 
 /// <summary>One partition of one index's storage, as the storage views report it.</summary>
@@ -1189,6 +1326,18 @@ internal sealed class RowsetFigures(bool isHeap)
     }
 
     public static long UsedPages(RealRecordFormat.SpillUnit unit) => unit.Pages == 0 ? 0 : unit.Pages + 1;
+
+    /// <summary>
+    /// How full <paramref name="pages"/> pages holding <paramref name="bytes"/>
+    /// of records and slots are on average, as a percentage, the way real
+    /// reckons it: each page's bytes less two over 8,094 (probed 2026-10-17
+    /// against SQL Server 2025, where every <c>avg_page_space_used_in_percent</c>
+    /// and <c>DBCC SHOWCONTIG</c> density read is a fraction over 8,094 — 18
+    /// 15-byte records on one page read 304 / 8,094, 3.756%, and 8 11-byte
+    /// root records 102 / 8,094).
+    /// </summary>
+    public static double PageSpaceUsedPercent(long bytes, long pages) =>
+        pages == 0 ? 0 : Math.Max(0, 100.0 * (bytes - (2.0 * pages)) / (pages * (RealRecordFormat.PageBytes - 2.0)));
 
     public static long ReservedPages(RealRecordFormat.SpillUnit unit) => unit.Pages == 0 ? 0 : (8 * ((unit.Pages + 7) / 8)) + 1;
 

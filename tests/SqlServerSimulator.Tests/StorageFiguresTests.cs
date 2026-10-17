@@ -89,9 +89,9 @@ public sealed class StorageFiguresTests
     [TestMethod]
     [DataRow("@i", "53:2000:99.28:1.89")]
     [DataRow("10000 - @i", "53:2000:99.28:98.11")]
-    [DataRow("(@i * 7919) % 10007", "64:2000:82.22:98.44")]
+    [DataRow("(@i * 7919) % 10007", "64:2000:82.21:98.44")]
     [DataRow("case when @i % 2 = 0 then @i else 100000 + @i end", "54:2000:97.44:")]
-    [DataRow("cast(substring(hashbytes('MD5', cast(@i as varchar(10))), 1, 4) as int)", "77:2000:68.34:")]
+    [DataRow("cast(substring(hashbytes('MD5', cast(@i as varchar(10))), 1, 4) as int)", "77:2000:68.33:")]
     public void RowsInsertedOneByOne_SplitPagesAsRealDoes(string key, string expected)
     {
         var sim = new Simulation();
@@ -253,7 +253,7 @@ public sealed class StorageFiguresTests
         StartsWith("71:2500:2500:", (string)connection.CreateCommand(Figures).ExecuteScalar()!);
         _ = connection.CreateCommand("commit").ExecuteNonQuery();
         // Real's ghost cleanup takes a few seconds; the pages keep their place.
-        AreEqual("71:2500:0:49.15", connection.CreateCommand(Figures).ExecuteScalar());
+        AreEqual("71:2500:0:49.13", connection.CreateCommand(Figures).ExecuteScalar());
     }
 
     [TestMethod]

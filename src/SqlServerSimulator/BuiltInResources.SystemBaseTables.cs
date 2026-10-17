@@ -685,9 +685,8 @@ internal static partial class BuiltInResources
     /// <summary>
     /// Rows for <c>sys.system_internals_allocation_units</c>: each
     /// <c>sys.allocation_units</c> row with its filegroup and the addresses of
-    /// its first page, root page and first IAM page — file 1's pages numbered
-    /// as <c>sys.dm_os_buffer_descriptors</c> numbers them, the IAM page first,
-    /// and zero for a unit that holds none.
+    /// its first page, root page and first IAM page as <see cref="MapPages"/>
+    /// numbers file 1's pages, zero for a unit that holds none.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSystemInternalsAllocationUnits(Parser.BatchContext batch, Database database)
     {
@@ -702,11 +701,14 @@ internal static partial class BuiltInResources
             System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(4), 1);
             return SqlValue.FromBinary(BinarySqlType.Get(6), bytes);
         }
-        long pageId = FirstBufferedPageId;
+        var mapped = new Dictionary<long, MappedUnit>();
+        foreach (var unit in MapPages(batch, database))
+            mapped[unit.AllocationUnitId] = unit;
         foreach (var (containerId, allocationUnitId, indexId, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(batch, database))
         {
-            var first = usedPages > 1 ? Address(pageId + 1) : none;
-            var root = usedPages <= 1 || type != 1 || indexId == 0 ? none : Address(pageId + usedPages - 1);
+            var map = mapped.GetValueOrDefault(allocationUnitId);
+            var first = map is { FirstPage: > 0 } ? Address(map.FirstPage) : none;
+            var root = map is null || type != 1 || indexId == 0 || map.RootPage == 0 ? none : Address(map.RootPage);
             yield return
             [
                 SqlValue.FromInt64(allocationUnitId),
@@ -719,9 +721,8 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt64(dataPages),
                 first,
                 root,
-                usedPages > 0 ? Address(pageId) : none,
+                map is { IamPage: > 0 } ? Address(map.IamPage) : none,
             ];
-            pageId += usedPages;
         }
     }
 }

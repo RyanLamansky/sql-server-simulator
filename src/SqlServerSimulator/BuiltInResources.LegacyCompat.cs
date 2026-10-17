@@ -1095,6 +1095,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static readonly (string Name, int ObjectId, string Type)[] SystemFunctions =
     [
+        ("dm_db_database_page_allocations", -466280530, "IF"),
         ("dm_db_incremental_stats_properties", -280166929, "IF"),
         ("dm_db_index_operational_stats", -500638940, "IF"),
         ("dm_db_index_physical_stats", -333557461, "IF"),

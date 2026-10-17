@@ -738,6 +738,8 @@ What the views read off the replay:
 
 - **Records**: real's data, nonclustered-leaf and non-leaf formats — the row locator, the uniquifier of a repeated non-unique clustered key, a nullable column's NULL bitmap in a non-leaf record, the first non-leaf record of an insert-grown level keeping no key — and real's placement of long values (`RealRecordFormat.Place`): in the row up to 8,000 bytes while the row fits 8,060, the longest pushed off first, LOB pieces of 8,040 bytes, `large value types out of row` and `text in row` as `sp_tableoption` sets them.
 - **Fragmentation**: pages are numbered per level in the order they were allocated, the first root taking the leaf numbering's second number as real's does, so a key-ordered load has one page out of order, a descending one all but one, and a random order nearly all.
+- **Fullness**: `avg_page_space_used_in_percent` reads each page's bytes less two over 8,094, as real reckons it (probed 2026-10-17 against SQL Server 2025: 18 15-byte records on one page read 304 / 8,094, 3.756%, and every leaf and non-leaf density probed is such a fraction).
+- **Page ids**: each page keeps its place among the extents its rowset reserves, which is what the page-level surfaces number it by — see [`dbcc.md`](dbcc.md#the-page-ids).
 - **Allocation**: `data_pages` is the leaf, `used_pages` every page of the unit and its IAM page, `total_pages` the IAM page and the extents reserved — a build's leaf and upper levels in extents of their own, an insert-grown index's sharing theirs, an `INSERT … SELECT` of 25 rows or more into an empty clustered index without LOB columns starting its leaf and root each in an extent of its own.
 - **Units**: `IN_ROW_DATA` always, `LOB_DATA` for a rowset with a LOB column and `ROW_OVERFLOW_DATA` for one whose longest record would pass 8,060 bytes, empty or not; `sys.dm_db_index_physical_stats` lists the last two only while they hold pages.
 - **Modes**: `DETAILED` every level, `LIMITED` and `SAMPLED` the leaf; `LIMITED` leaves the record figures NULL, and `SAMPLED` reads a heap's fragmentation and fragment size as 0, as real's does.
@@ -748,7 +750,6 @@ What the views read off the replay:
 - **Fragment counts run lower than real's**, whose allocation interleaves the extents of the table's other rowsets and of other tables: an ascending load beside four other tables' made eight fragments on real, two here, and a clustered index grown one row at a time beside its nonclustered index read 99% fragmented on real, 0.7% here.
   Real's default `CREATE INDEX` over 20,000 400-byte keys built in parallel, leaving 1,059 leaf pages where its serial build and the figures here leave 1,053.
 - **A few random-order loads differ by a page**: 1,950 rows sorted into a 50-row index took 67 pages on real, 66 here, and an interleaved and an MD5-random load read 96.3% and 97.4% fragmented on real, 98.1% and 98.7% here.
-- **Real's non-leaf page fullness runs a fraction below its records' bytes** (3.756% for 18 15-byte records on one page, where the bytes give 3.780%), which the figures don't reproduce.
 - **The delete order isn't kept**: a deleted row is taken out after every insert, where real's freed slot can take a later row, and one the simulator's page has compacted away is replayed as never inserted; ghosts leave once their transaction ends, where real's cleanup takes some seconds; an update changes a row in place, where real moves one whose key changed.
 - **Forwarding starts from the simulator's own first sizes**: 476 of 500 widened rows forwarded here, 482 on real.
 - **Reserved extents follow real's allocation history**, which the figures don't keep: in a database that had dropped tables, `INSERT … SELECT` of 21 to 200 rows reserved one extent where 25 had reserved three before, and an index grown alongside its table's load reserved 201 pages on real, 177 here.
@@ -757,7 +758,7 @@ What the views read off the replay:
 - **`sp_tableoption` applies to every value**, where real moves an existing value only when it is next written.
 - **`SAMPLED` reads every page**, where real samples past 10,000.
 - **A columnstore index holds no pages**: real reports a clustered one as one `CLUSTERED INDEX` row of no pages — a nonclustered one as three, one per delete buffer — with its segments in a LOB unit (five pages used and 25 reserved for 5,000 rows of two `int`s), where one row and no LOB unit are reported here.
-- `DBCC SHOWCONTIG` is unbuilt (see [`dbcc.md`](dbcc.md#not-modeled-yet)), and a `PAGE` or `ROW` compressed rowset reports its uncompressed pages.
+- A `PAGE` or `ROW` compressed rowset reports its uncompressed pages.
 
 ## EF Migrations integration
 

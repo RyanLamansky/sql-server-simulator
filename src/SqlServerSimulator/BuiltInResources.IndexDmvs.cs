@@ -500,7 +500,7 @@ internal static partial class BuiltInResources
             fragments,
             fragmentSize,
             SqlValue.FromInt64(pages),
-            known ? SqlValue.FromDouble(pages == 0 ? 0 : 100.0 * r.Bytes / (pages * (double)RealRecordFormat.PageBytes)) : nullFloat,
+            known ? SqlValue.FromDouble(RowsetFigures.PageSpaceUsedPercent(r.Bytes, pages)) : nullFloat,
             known ? SqlValue.FromInt64(r.Records) : nullBig,
             known ? SqlValue.FromInt64(r.Ghosts) : nullBig,
             zero,

@@ -30,8 +30,8 @@ partial class SimulatedSqlException
         new($"'{option}' is not a recognized option.", 195, 15, 4);
 
     /// <summary>Msg 7983: a database-scope <c>DBCC</c> check run by a principal that isn't <c>db_owner</c>.</summary>
-    internal static SimulatedSqlException DbccDatabasePermissionDenied(string userName, string command, string databaseName) =>
-        new($"User '{userName}' does not have permission to run DBCC {command} for database '{databaseName}'.", 7983, 14, 36);
+    internal static SimulatedSqlException DbccDatabasePermissionDenied(string userName, string command, string databaseName, byte state = 36) =>
+        new($"User '{userName}' does not have permission to run DBCC {command} for database '{databaseName}'.", 7983, 14, state);
 
     /// <summary>Msg 2557: an object-scope <c>DBCC</c> (<c>CHECKTABLE</c> state 3, <c>DBREINDEX</c> state 1) run by a principal that doesn't own the table.</summary>
     internal static SimulatedSqlException DbccObjectPermissionDenied(string userName, string command, string objectName, byte state) =>
@@ -223,12 +223,86 @@ partial class SimulatedSqlException
     internal static SimulatedError EstimatedTempdbSpaceMessage(BatchContext batch, string command, string databaseName, long kilobytes) =>
         batch.InfoMessage(@class: 0, state: 1, number: 5281, $"Estimated TEMPDB space (in KB) needed for {command} on database {databaseName} = {kilobytes}.");
 
-    /// <summary>Msg 2538 and 8915 for the data file, then 2539 and 8918 for the database: <c>DBCC CHECKALLOC</c>'s totals.</summary>
-    internal static SimulatedError[] AllocationTotalsMessages(BatchContext batch, long extents, long usedPages, long reservedPages) =>
-    [
-        batch.InfoMessage(@class: 0, state: 1, number: 2538, $"File 1. The number of extents = {extents}, used pages = {usedPages}, and reserved pages = {reservedPages}."),
-        batch.InfoMessage(@class: 0, state: 1, number: 8915, "           File 1 (number of mixed extents = 0, mixed pages = 0)."),
-        batch.InfoMessage(@class: 0, state: 1, number: 2539, $"The total number of extents = {extents}, used pages = {usedPages}, and reserved pages = {reservedPages} in this database."),
-        batch.InfoMessage(@class: 0, state: 1, number: 8918, "       (number of mixed extents = 0, mixed pages = 0) in this database."),
-    ];
+    /// <summary>The texts of Msg 2538 and 8915, a data file's totals in <c>DBCC CHECKALLOC</c>.</summary>
+    internal static (string Extents, string Mixed) FileAllocationTexts(int fileId, long extents, long usedPages, long reservedPages, long mixedExtents, long mixedPages) =>
+        ($"File {fileId}. The number of extents = {extents}, used pages = {usedPages}, and reserved pages = {reservedPages}.",
+            $"           File {fileId} (number of mixed extents = {mixedExtents}, mixed pages = {mixedPages}).");
+
+    /// <summary>The text of Msg 8983, a data file's totals as one <c>CHECKALLOC … WITH TABLERESULTS</c> row.</summary>
+    internal static string FileAllocationRowText(int fileId, long extents, long usedPages, long reservedPages, long mixedExtents, long mixedPages) =>
+        $"File {fileId}. Extents {extents}, used pages {usedPages}, reserved pages {reservedPages}, mixed extents {mixedExtents}, mixed pages {mixedPages}.";
+
+    /// <summary>The texts of Msg 2539 and 8918, the database's totals in <c>DBCC CHECKALLOC</c>.</summary>
+    internal static (string Extents, string Mixed) DatabaseAllocationTexts(long extents, long usedPages, long reservedPages, long mixedExtents, long mixedPages) =>
+        ($"The total number of extents = {extents}, used pages = {usedPages}, and reserved pages = {reservedPages} in this database.",
+            $"       (number of mixed extents = {mixedExtents}, mixed pages = {mixedPages}) in this database.");
+
+    /// <summary>The asterisk rule of Msg 7922, ahead of each table of a <c>DBCC CHECKALLOC</c> report.</summary>
+    internal const string AllocationTableRuleText = "***************************************************************";
+
+    /// <summary>The text of Msg 7923, a table's heading in a <c>DBCC CHECKALLOC</c> report.</summary>
+    internal static string AllocationTableText(string tableName, int objectId) => $"Table {tableName}                Object ID {objectId}.";
+
+    /// <summary>The text of Msg 7924, an allocation unit's IAM page, root page and data pages in a <c>DBCC CHECKALLOC</c> report.</summary>
+    internal static string AllocationUnitPagesText(int indexId, long partitionId, long allocationUnitId, string unitType, string firstIam, string root, long dataPages) =>
+        $"Index ID {indexId}, partition ID {partitionId}, alloc unit ID {allocationUnitId} (type {unitType}). FirstIAM {firstIam}. Root {root}. Dpages {dataPages}.";
+
+    /// <summary>The text of Msg 7925, an allocation unit's pages and dedicated extents in a <c>DBCC CHECKALLOC</c> report.</summary>
+    internal static string AllocationUnitExtentsText(int indexId, long partitionId, long allocationUnitId, string unitType, long usedPages, long extents) =>
+        $"Index ID {indexId}, partition ID {partitionId}, alloc unit ID {allocationUnitId} (type {unitType}). {usedPages} pages used in {extents} dedicated extents.";
+
+    /// <summary>The text of Msg 7927, a table's dedicated extents in a <c>DBCC CHECKALLOC</c> report.</summary>
+    internal static string AllocationTableExtentsText(long extents) => $"Total number of extents is {extents}.";
+
+    /// <summary>
+    /// The text of Msg 8916 — a heap's or clustered index's in-row unit — or
+    /// 8917 — any other unit — in a data file's totals.
+    /// </summary>
+    internal static string AllocationUnitTotalsText(bool data, int objectId, int indexId, long partitionId, long allocationUnitId, string unitType, long extents, long pages, long mixedPages) =>
+        $"    Object ID {objectId}, index ID {indexId}, partition ID {partitionId}, alloc unit ID {allocationUnitId} (type {unitType}), {(data ? "data" : "index")} extents {extents}, pages {pages}, mixed extent pages {mixedPages}.";
+
+    /// <summary>Msg 7942, heading a <c>DBCC SHOWCONTIG</c> report.</summary>
+    internal static SimulatedError ShowContigScanningMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7942, $"DBCC SHOWCONTIG scanning '{tableName}' table...");
+
+    /// <summary>Msg 7943, the table, index and database a <c>DBCC SHOWCONTIG</c> report covers.</summary>
+    internal static SimulatedError ShowContigTableMessage(BatchContext batch, string tableName, int objectId, int indexId, int databaseId) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7943, $"Table: '{tableName}' ({objectId}); index ID: {indexId}, database ID: {databaseId}");
+
+    /// <summary>Msg 7944: <c>TABLE</c> for a heap or clustered index, <c>LEAF</c> for a nonclustered one.</summary>
+    internal static SimulatedError ShowContigLevelMessage(BatchContext batch, string level) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7944, $"{level} level scan performed.");
+
+    /// <summary>One figure line of a <c>DBCC SHOWCONTIG</c> report: Msg 7945 through 7954, each label dotted as real prints it.</summary>
+    internal static SimulatedError ShowContigFigureMessage(BatchContext batch, int number, string value)
+    {
+        var label = number switch
+        {
+            7945 => "- Pages Scanned................................: ",
+            7946 => "- Extents Scanned..............................: ",
+            7947 => "- Extent Switches..............................: ",
+            7948 => "- Avg. Pages per Extent........................: ",
+            7949 => "- Scan Density [Best Count:Actual Count].......: ",
+            7950 => "- Logical Scan Fragmentation ..................: ",
+            7952 => "- Extent Scan Fragmentation ...................: ",
+            7953 => "- Avg. Bytes Free per Page.....................: ",
+            _ => "- Avg. Page Density (full).....................: ",
+        };
+        return batch.InfoMessage(@class: 0, state: 1, number: number, label + value);
+    }
+
+    /// <summary>Msg 2587: a <c>DBCC IND</c> partition number below 0 (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException DbccInvalidPartitionNumber(long number) =>
+        new($"The invalid partition number {number} was specified.", 2587, 16, 3);
+
+    /// <summary>Msg 2586 state 5: a <c>DBCC IND</c> partition number past the index's partitions (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException DbccPartitionNotFound(long number, string indexName, string tableName) =>
+        new($"Cannot find partition number {number} for index \"{indexName}\", table \"{tableName}\".", 2586, 16, 5);
+
+    /// <summary>
+    /// Msg 913 state 8: <c>sys.dm_db_database_page_allocations</c> naming a
+    /// database id no database has (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseIdNotActivated(int databaseId) =>
+        new($"Could not find database ID {databaseId}. Database may not be activated yet or may be in transition. Reissue the query once the database is available. If you do not think this error is due to a database that is transitioning its state and this error continues to occur, contact your primary support provider. Please have available for review the Microsoft SQL Server error log and any additional information relevant to the circumstances when the error occurred.", 913, 16, 8);
 }

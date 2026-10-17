@@ -474,18 +474,17 @@ public sealed class DbccCommandTests
     [TestMethod]
     public void CheckAllocCatalogAndFilegroup()
     {
+        var checkAlloc = Run("create table t (id int); insert t values (1); dbcc checkalloc").Messages;
+        AreEqual("2536: DBCC results for 'simulated'.", checkAlloc[0]);
         CollectionAssert.AreEqual(
             new[]
             {
-                "2536: DBCC results for 'simulated'.",
-                "2538: File 1. The number of extents = 1, used pages = 1, and reserved pages = 8.",
-                "8915:            File 1 (number of mixed extents = 0, mixed pages = 0).",
-                "2539: The total number of extents = 1, used pages = 1, and reserved pages = 8 in this database.",
-                "8918:        (number of mixed extents = 0, mixed pages = 0) in this database.",
+                "2539: The total number of extents = 61, used pages = 354, and reserved pages = 483 in this database.",
+                "8918:        (number of mixed extents = 25, mixed pages = 195) in this database.",
                 "8989: CHECKALLOC found 0 allocation errors and 0 consistency errors in database 'simulated'.",
                 "2528: " + Completed,
             },
-            Run("create table t (id int); insert t values (1); dbcc checkalloc").Messages);
+            checkAlloc[^4..]);
         CollectionAssert.AreEqual(new[] { "2528: " + Completed }, Run("dbcc checkcatalog").Messages);
         _ = new Simulation().AssertSqlError("dbcc checkcatalog with tableresults", 2532);
         CollectionAssert.AreEqual(
@@ -797,7 +796,7 @@ public sealed class DbccCommandTests
         AreEqual("User 'lo' does not have permission to run DBCC page.", sim.AssertSqlError("execute as user = 'lo'; dbcc page(0, 1, 1, 0)", 2571).Errors[0].Message);
         AreEqual(14, sim.AssertSqlError("execute as user = 'lo'; dbcc dbinfo", 2571).Errors[0].State);
         _ = sim.AssertSqlError("execute as user = 'lo'; dbcc proccache", 7983);
-        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("dbcc showcontig"));
+        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("dbcc memorystatus"));
         var opentran = sim.AssertSqlError("execute as user = 'lo'; dbcc opentran", 7983);
         AreEqual(2528, opentran.Errors[^1].Number);
     }

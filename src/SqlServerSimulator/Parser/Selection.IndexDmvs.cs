@@ -7,7 +7,8 @@ namespace SqlServerSimulator.Parser;
 partial class Selection
 {
     /// <summary>
-    /// The index and statistics system TVFs — <c>sys.dm_db_index_physical_stats</c>,
+    /// The index, page and statistics system TVFs — <c>sys.dm_db_database_page_allocations</c>,
+    /// <c>dm_db_index_physical_stats</c>,
     /// <c>dm_db_index_operational_stats</c>, <c>dm_db_stats_properties</c>,
     /// <c>dm_db_stats_histogram</c>, <c>dm_db_incremental_stats_properties</c>
     /// and <c>dm_db_missing_index_columns</c> — by name, or null for another.
@@ -21,6 +22,9 @@ partial class Selection
         _ = leaf.AsSpan().ToUpperInvariant(upper);
         return upper switch
         {
+            "DM_DB_DATABASE_PAGE_ALLOCATIONS" => ParseSystemTvf(context, functionName, database, 5, PageAllocationsColumns,
+                static (batch, args) => BuiltInResources.DatabasePageAllocations(batch, IntArgument(args[0]), IntArgument(args[1]), IntArgument(args[2]), IntArgument(args[3]),
+                    args[4].IsNull ? null : args[4].CoerceTo(SqlType.NVarchar).AsString), arityState: 3),
             "DM_DB_INCREMENTAL_STATS_PROPERTIES" => ParseSystemTvf(context, functionName, database, 2, IncrementalStatsColumns, static (_, _) => [], notNullColumns: 2),
             "DM_DB_INDEX_OPERATIONAL_STATS" => ParseSystemTvf(context, functionName, database, 4, OperationalStatsColumns,
                 static (batch, args) => BuiltInResources.OperationalStats(batch, IntArgument(args[0]), IntArgument(args[1]), IntArgument(args[2]), IntArgument(args[3])),
@@ -44,6 +48,19 @@ partial class Selection
         ("object_id", SqlType.Int32), ("stats_id", SqlType.Int32), ("last_updated", SqlType.GetDateTime2(7)), ("rows", SqlType.BigInt),
         ("rows_sampled", SqlType.BigInt), ("steps", SqlType.Int32), ("unfiltered_rows", SqlType.BigInt), ("modification_counter", SqlType.BigInt),
         ("persisted_sample_percent", SqlType.Float),
+    ];
+
+    private static readonly (string Name, SqlType Type)[] PageAllocationsColumns =
+    [
+        ("database_id", SqlType.Int32), ("object_id", SqlType.Int32), ("index_id", SqlType.Int32), ("partition_id", SqlType.Int32), ("rowset_id", SqlType.BigInt),
+        ("allocation_unit_id", SqlType.BigInt), ("allocation_unit_type", SqlType.Int32),
+        ("allocation_unit_type_desc", NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit)), ("data_clone_id", SqlType.Int32), ("clone_state", SqlType.Int32),
+        ("clone_state_desc", NVarcharSqlType.Get(9, Collation.Catalog, Coercibility.Implicit)), ("extent_file_id", SqlType.SmallInt), ("extent_page_id", SqlType.Int32),
+        ("allocated_page_iam_file_id", SqlType.SmallInt), ("allocated_page_iam_page_id", SqlType.Int32), ("allocated_page_file_id", SqlType.SmallInt),
+        ("allocated_page_page_id", SqlType.Int32), ("is_allocated", SqlType.TinyInt), ("is_iam_page", SqlType.TinyInt), ("is_mixed_page_allocation", SqlType.TinyInt),
+        ("page_free_space_percent", SqlType.Int32), ("page_type", SqlType.Int32), ("page_type_desc", NVarcharSqlType.Get(256, Collation.Catalog, Coercibility.Implicit)),
+        ("page_level", SqlType.TinyInt), ("next_page_file_id", SqlType.SmallInt), ("next_page_page_id", SqlType.Int32), ("previous_page_file_id", SqlType.SmallInt),
+        ("previous_page_page_id", SqlType.Int32), ("is_page_compressed", SqlType.TinyInt), ("has_ghost_records", SqlType.TinyInt),
     ];
 
     private static readonly (string Name, SqlType Type)[] StatsHistogramColumns =

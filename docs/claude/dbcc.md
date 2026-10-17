@@ -12,7 +12,7 @@ Everything below was probed 2026-09-28 against SQL Server 2025 through the `.vs/
 - **What settles at parse, what at run.**
   A `WITH` word that is no DBCC option at all is Msg 195 state 4 while the batch compiles, so none of it runs; `MAXDOP` without `= n` is the same.
   Everything else raises when the statement runs: an unknown subcommand (Msg 2526 state 3), an option the subcommand doesn't take (Msg 2532), the wrong argument count (Msg 2583) and an unusable argument (Msg 2560, state 9 unless noted).
-  A known subcommand the simulator hasn't built (`PAGE`, `IND`, `SHOWCONTIG`, `MEMORYSTATUS`, …) is `NotSupportedException`, not Msg 2526 — after the permission refusal real raises first for a caller outside `sysadmin`: Msg 2571 for `PAGE`, `IND`, `MEMORYSTATUS` and `OUTPUTBUFFER` (state 1), Msg 7983 for `PROCCACHE` without `db_owner` (probed 2026-10-04 against SQL Server 2025).
+  A known subcommand the simulator hasn't built (`MEMORYSTATUS`, `EXTENTINFO`, …) is `NotSupportedException`, not Msg 2526 — after the permission refusal real raises first for a caller outside `sysadmin`: Msg 2571 for `MEMORYSTATUS` and `OUTPUTBUFFER` (state 1), Msg 7983 for `PROCCACHE` without `db_owner` (probed 2026-10-04 against SQL Server 2025).
 - **Messages.**
   Msg 2528 closes every successful run, `WITH NO_INFOMSGS` silencing it and every other informational line — and, for `INDEXDEFRAG` and `SHRINKFILE`, the result set too.
   A command's rows close with their own counted DONE before Msg 2528, which a second DONE follows; `CHECKCONSTRAINTS` alone sends Msg 2528 before its rows' DONE and leaves that DONE uncounted (`AfterDbccRows`, and the wire test in `StatementDoneWireTests`).
@@ -91,11 +91,62 @@ A simulated database is always consistent, so each check reports a healthy one:
 - `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name; an index id the table has no index under is Msg 7999 state 7 naming the number (probed 2026-10-04).
   Under a database-scoped identity — `EXECUTE AS USER`, `dbo` included — it is Msg 916 state 2 after the permission check, naming the server principal as a refused `USE` does (a login, or a `WITHOUT LOGIN` user's `S-1-9-3-…` SID string), and the batch ends unless a `TRY` catches it: real's check reads an internal snapshot of the database, which that identity can't reach, while `WITH TABLOCK` takes locks instead and runs.
   The other checks run under the same identity (probed 2026-09-28 against SQL Server 2025, with real's SID-derived name there where the simulator's is its own deterministic one).
-- `CHECKALLOC`: the heading, Msg 2538 / 8915 for the data file and 2539 / 8918 for the database, and Msg 8989.
+- `CHECKALLOC`: the allocation report described under [`CHECKALLOC`](#checkalloc).
 - `CHECKCATALOG`: Msg 2528 alone.
 - `ESTIMATEONLY` answers Msg 5281 instead of checking, `NO_INFOMSGS` or not.
 - Each check that completes writes real's completion line to the error log, and a `CHECKDB` short of `ESTIMATEONLY` sets the database's `LastGoodCheckDbTime` — see [the error log](catalog-views.md#the-sql-server-error-log).
 - A `REPAIR_*` argument is `NotSupportedException`: real refuses it outside single-user mode, and probing it against a live server is off limits.
+
+## The page ids
+
+`SHOWCONTIG`, `IND`, `CHECKALLOC`, `sys.dm_db_database_page_allocations`, `sys.dm_os_buffer_descriptors` and `sys.system_internals_allocation_units` number a database's pages through one layout of file 1 (`BuiltInResources.MapPages`), computed when one of them reads it from the [storage figures](indexes.md#storage-figures), which place every page of a replayed rowset among the extents it reserves (`PageFigures.Slot`).
+The layout follows what real shows of a database whose user rowsets take uniform extents and whose system base tables take mixed ones (probed 2026-10-17 against SQL Server 2025 with `DBCC IND`, `CHECKALLOC` and the page-allocation DMV):
+
+- **Extents of eight pages from page 16**, the allocation maps' pages first — a mixed page and 7 used of an extent, which real reports under object 99 — then the system tables' units in object order, then the user rowsets', each unit's extents following one another.
+- **Every IAM page sits in a mixed extent**, eight to an extent; a system base table's first eight pages sit there too, the rest in extents of its own (`sysschobjs`' 43 pages, 9 mixed, in five dedicated extents), while an internal table's pages take dedicated extents as a user table's do.
+- **A user rowset's pages sit where the replay put them**: a leaf page at its place in the leaf's allocation order, the first root in the second place when the split of the index's only page made it — the page real's root takes, `(1:385)` between leaf pages 384 and 386 — and the other pages above the leaf after the leaf; a build's leaf and upper levels in extents of their own; a LOB or row-overflow unit's pages in order.
+  So the leaf's ids read the same out-of-order pages the fragmentation figures count, a key-ordered load's one gap and all.
+- Each level's pages are chained in key order (a heap's not at all), as `IND`'s and the DMV's next and previous pages show.
+
+The ids are the simulator's own: real's follow its allocation history, interleaving a table's units and other tables' extents, so the same table sits at other pages there.
+`%%physloc%%` and the lock DMVs' pages (`LockPageMap`, numbered per table) aren't on this layout.
+
+## `SHOWCONTIG`
+
+`DBCC SHOWCONTIG [( table [, index] )] [WITH ALL_INDEXES, FAST, TABLERESULTS, ALL_LEVELS, NO_INFOMSGS]` reports each index's first partition, as real does (probed 2026-10-17 against SQL Server 2025):
+
+- **The figures** are the leaf's: its pages, the extents its pages sit in read in key order (a heap's in page order), the switches between them, the scan density of the best extent count (pages over eight, rounded up) against the actual (switches plus one), the logical fragmentation the storage figures' out-of-order pages, the extent fragmentation the switches to an extent other than the next, and the free bytes and page density, which reads each page's bytes less two over 8,094 as `sys.dm_db_index_physical_stats` does.
+- **Messages** Msg 7942 through 7954, each a message of its own, a heap's without Msg 7950; `FAST` keeps the pages, switches, scan density and — for an index — logical fragmentation, or — for a heap — extents and extent fragmentation.
+  `NO_INFOMSGS` silences Msg 2528 alone, the report still sent.
+- **`TABLERESULTS`** returns real's 20 columns, a heap's index name empty, the record sizes and free bytes cut to three decimals, the forwarding stubs among a heap's rows; `ALL_LEVELS` adds every level above the leaf, whose scan figures read 0; `FAST` leaves what it didn't read NULL and the levels out.
+  `@@ROWCOUNT` reads the rows, or 0 for the messages.
+- **The table**: by name or object id; without one, every user table and queue of the current database in object-id order, a queue under `queue_clustered_index`, which takes `db_owner` (Msg 7983 state 10 naming `SHOWCONTIG`).
+  One table takes `ALTER` on it (Msg 229), a `#temp` table only through `tempdb..` (Msg 2501 otherwise), and a `sys` system table reports nothing but Msg 2528.
+- **The index**: by name (Msg 7999 state 8 when the table lacks it) or id (state 7), the base rowset without one; `ALL_INDEXES` reports every index, whatever the second argument names.
+  A third argument is Msg 2583, and an option outside the five Msg 2532.
+
+## `IND` and `sys.dm_db_database_page_allocations`
+
+`DBCC IND ( database, table, index [, partition] )` is `sysadmin`'s (Msg 2571), and lists each allocation unit's IAM page and then its pages in page order — the in-row, row-overflow and LOB units in turn — with real's 15 columns: the IAM page's own IAM and level NULL, a missing neighbor `0:0` (probed 2026-10-17 against SQL Server 2025).
+The table is named in the database the first argument gives, a `sys` system table among them; the index is an id — 0 the base rowset, -1 every index, -2 every index's IAM pages alone, one the table lacks Msg 7999 state 7, a string, NULL or a number below -2 Msg 2560 state 9 — and the partition 0 for all, a negative one Msg 2587, one past the index's Msg 2586 state 5, NULL Msg 2560.
+Any `WITH` option is taken, `NO_INFOMSGS` silencing Msg 2528; no page sends no result set.
+
+`sys.dm_db_database_page_allocations(database_id, object_id, index_id, partition_number, mode)` lists, per unit, its IAM page and then every page of its mixed and dedicated extents in page order, an extent's unallocated pages among them, with real's 30 columns and its `SECONDARY` clone state; a NULL object, index or partition reads every one.
+`LIMITED` (or NULL) leaves the page type, level and neighbors NULL; a heap's or LOB unit's pages report the page free space map's bucket — 100 for an empty or unallocated page, then 50, 20, 5 and 0 — and an index's NULL.
+A NULL or negative database is Msg 2561 state 110, an unknown one Msg 913 state 8, another mode Msg 2561 state 111, four arguments Msg 313 state 3; a caller without `VIEW SERVER PERFORMANCE STATE` is Msg 300 even in `db_owner`, and `EXECUTE AS USER` Msg 15562.
+
+`sys.dm_os_buffer_descriptors` gives each page its level, records and free bytes from the same layout, an IAM page 2 records and 6 bytes free as real's, and `sys.system_internals_allocation_units` its first leaf page, root and IAM page.
+
+## `CHECKALLOC`
+
+`DBCC CHECKALLOC [( database [, NOINDEX] )]` reports real's allocation report over the [page ids](#the-page-ids) (probed 2026-10-17 against SQL Server 2025):
+
+- **Per table** in object-id order, system tables among the user tables, each named as `CHECKDB` names it: Msg 7922's rule and Msg 7923, then per allocation unit Msg 7924 (its first IAM page, root and `Dpages`) and 7925 (its pages and dedicated extents), and Msg 7927 with the table's dedicated extents.
+  A system table's units go in their allocation-unit id order, a user table's in-row unit ahead of its row-overflow and LOB units, and a table's heading waits for its first in-row unit — so a queue's message table, whose LOB unit real allocated first, lists that unit under the table before it, as real does.
+  `Dpages` reads 0 for a heap or clustered index, a nonclustered index's leaf pages, and a LOB or row-overflow unit's pages.
+- **Per data file** Msg 2538 and 8915, then Msg 8916 (a heap's or clustered index's in-row unit) or 8917 for each unit holding pages, the allocation maps' object 99 among them, an index's units the last allocated first; then the database's Msg 2539 and 8918 and Msg 8989.
+  The totals add the units up: extents are the dedicated ones and the mixed ones, reserved pages eight per dedicated extent and every mixed page.
+- **`TABLERESULTS`** returns the same lines as rows of the 23 columns, but for the rules and Msg 2536, with the file's totals as one Msg 8983 row and real's row-identifier values per kind of line; with `NO_INFOMSGS` it returns nothing.
 
 ## `PAGE`
 
@@ -124,16 +175,17 @@ A caller outside `db_owner` is Msg 7983 state 36 and a non-integer argument Msg 
 
 ## Divergences
 
-- Values that describe real's physical storage are read off the simulator's own: a table's page count is its heap's data pages, `CHECKALLOC`'s totals are the user tables' pages in whole uniform extents, `WITH ESTIMATEONLY` adds those pages to what a fresh database reports (2435 KB for `CHECKDB`, 351 for `CHECKALLOC`), `SQLPERF(LOGSPACE)` reports a fixed 54 pages of log in use, `LOGINFO`'s active file and every `OPENTRAN` LSN carry sequence number 34, and the system databases' logs are the size of any other.
-- `CHECKALLOC` prints no per-allocation-unit lines and its totals leave the system tables' pages out, where real reports both for its catalog (over a hundred objects in a fresh database).
+- Values that describe real's physical storage are read off the simulator's own: `WITH ESTIMATEONLY` adds the user tables' heap pages to what a fresh database reports (2435 KB for `CHECKDB`, 351 for `CHECKALLOC`), `SQLPERF(LOGSPACE)` reports a fixed 54 pages of log in use, `LOGINFO`'s active file and every `OPENTRAN` LSN carry sequence number 34, and the system databases' logs are the size of any other.
+- **The page reports' figures** are the [storage figures'](indexes.md#storage-figures), with their divergences, and their ids [the simulator's own](#the-page-ids).
+  Real's allocation interleaves a table's in-row, LOB and other rowsets' extents, so its extent fragmentation runs higher — 85.71% for a clustered index beside its LOB unit, 0 here — and a build's or an `INSERT … SELECT`'s first pages can sit in extents the replay doesn't give them (a partition's two leaf pages in one extent on real, in two here).
+- `CHECKALLOC`'s system tables carry the fresh database's figures, where real's Query Store tables fill as it runs (three of them holding 14 pages here and none in a probed database), so the totals differ by those pages; real gives a few system tables' clustered indexes a `Dpages` count (`sysrscols` 18) and lists a few system tables' LOB units ahead of their headings (`sysxmitbody`) by an order it doesn't show.
+- A queue's `SHOWCONTIG` figures read as empty, and `IND` and the page DMV find every unit on file 1, where real puts a partition's on its filegroup's file.
 - Real leaves `@@ROWCOUNT` after the consistency checks at a count its internal queries leave behind; the simulator leaves 0.
 - Real's Query Store opens a transaction of its own in each user database, which `OPENTRAN` reports as the oldest (`QDS batch nested transaction`) — and as written to a user transaction that has only read, where the simulator, keeping no such transaction, reports none (probed 2026-10-04 against SQL Server 2025).
 - Messages other than Msg 2528, which follows `SET LANGUAGE` (`Language.DbccCompletedMessage`, the texts real's `sys.messages` holds), stay in English, as the engine's other messages do.
 
 ## Not modeled yet
 
-- `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
-  `SHOWCONTIG` over one table first asks `ALTER` on it (Msg 229 naming the `DBCC` permission), as real does, and then is `NotSupportedException`.
-  What these report is real's storage — `IND`'s page list (none over an empty table), `SHOWCONTIG`'s fragmentation, `CHECKALLOC`'s per-allocation-unit rows, `PAGE`'s dump — or the server process's own state (probed 2026-10-06 against SQL Server 2025).
-  `SHOWCONTIG`'s and `CHECKALLOC`'s page and fragmentation figures are the [storage figures](indexes.md#storage-figures) the index DMVs report, so those two are the nearest to built; a page's id and contents aren't kept.
-  `CHECKTABLE`'s and `CHECKDB`'s rows-in-pages counts are those figures' leaf pages.
+- `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE`, `EXTENTINFO` and the other undocumented commands, the repair options, and `PAGE`'s dump.
+  What these report is the server process's own state or real's page image (probed 2026-10-06 against SQL Server 2025); `PAGE`'s header fields could read off the [page ids](#the-page-ids), its records' bytes not.
+- `SHOWCONTIG` over an indexed view, which real reports by its clustered index and the simulator, keeping no rows for one, refuses with Msg 5239; and `%%physloc%%`.

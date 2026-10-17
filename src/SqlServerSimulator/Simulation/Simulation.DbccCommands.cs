@@ -108,11 +108,13 @@ partial class Simulation
             "FREESESSIONCACHE" => RunDbccFreeSessionCache(batch, dbcc),
             "FREESYSTEMCACHE" => RunDbccFreeSystemCache(batch, dbcc),
             "HELP" => RunDbccHelp(batch, dbcc),
+            "IND" => RunDbccInd(batch, dbcc),
             "INDEXDEFRAG" => RunDbccIndexDefrag(batch, dbcc),
             "LOGINFO" => RunDbccLogInfo(batch, dbcc),
             "OPENTRAN" => RunDbccOpenTran(batch, dbcc),
             "PAGE" => RunDbccPage(batch, dbcc),
             "PINTABLE" => RunDbccPinTable(batch, dbcc, "pintable"),
+            "SHOWCONTIG" => RunDbccShowContig(batch, dbcc),
             "SHOWFILESTATS" => RunDbccShowFileStats(batch, dbcc),
             "SQLPERF" => RunDbccSqlPerf(batch, dbcc),
             "TRACEOFF" => RunDbccTraceOnOff(batch, dbcc, on: false),
@@ -122,7 +124,7 @@ partial class Simulation
             "UPDATEUSAGE" => RunDbccUpdateUsage(batch, dbcc),
             "USEROPTIONS" => RunDbccUserOptions(batch, dbcc),
             _ => IsUnbuiltDbccCommand(upper)
-                ? throw UnbuiltDbccCommand(batch, dbcc, upper)
+                ? throw UnbuiltDbccCommand(batch, upper)
                 : throw SimulatedSqlException.DbccStatementIncorrect(),
         };
     }
@@ -133,21 +135,12 @@ partial class Simulation
     /// <c>PROCCACHE</c> (db_owner) — and otherwise <see cref="NotSupportedException"/>
     /// (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    private static Exception UnbuiltDbccCommand(BatchContext batch, DbccInvocation dbcc, ReadOnlySpan<char> upper)
+    private static Exception UnbuiltDbccCommand(BatchContext batch, ReadOnlySpan<char> upper)
     {
-        // SHOWCONTIG over one table asks ALTER on it before anything else
-        // (probed 2026-10-06 against SQL Server 2025).
-        if (upper is "SHOWCONTIG" && dbcc.Arguments.Count > 0)
-        {
-            var (table, _, database) = ResolveDbccTable(batch, dbcc, 0, allowTemporary: true);
-            RequireDbccTableAlter(batch, database, table);
-        }
         if (!IsSysadminSession(batch))
         {
             switch (upper)
             {
-                case "IND":
-                    return DbccPermissionDenied(batch, "ind", 1);
                 case "MEMORYSTATUS":
                     return DbccPermissionDenied(batch, "memorystatus", 1);
                 case "OUTPUTBUFFER":
@@ -169,8 +162,8 @@ partial class Simulation
     /// </summary>
     private static bool IsUnbuiltDbccCommand(ReadOnlySpan<char> upper) => upper switch
     {
-        "BUFFER" or "CLONEDATABASE" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
-            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SHOWCONTIG" or "SQLMGRSTATS"
+        "BUFFER" or "CLONEDATABASE" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "LOG"
+            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SQLMGRSTATS"
             or "STACKDUMP" or "TUPLEMOVER" or "WRITEPAGE" => true,
         _ => false,
     };
@@ -188,7 +181,10 @@ partial class Simulation
         {
             "ALL_CONSTRAINTS" => DbccOptions.AllConstraints,
             "ALL_ERRORMSGS" => DbccOptions.AllErrorMessages,
-            "ALL_INDEXES" or "ALL_LEVELS" or "DENSITY_VECTOR" or "FAST" or "HISTOGRAM" or "STAT_HEADER" or "STATS_STREAM" => DbccOptions.Other,
+            "ALL_INDEXES" => DbccOptions.AllIndexes,
+            "ALL_LEVELS" => DbccOptions.AllLevels,
+            "DENSITY_VECTOR" or "HISTOGRAM" or "STAT_HEADER" or "STATS_STREAM" => DbccOptions.Other,
+            "FAST" => DbccOptions.Fast,
             "COUNT_ROWS" => DbccOptions.CountRows,
             "DATA_PURITY" => DbccOptions.DataPurity,
             "ESTIMATEONLY" => DbccOptions.EstimateOnly,
@@ -918,8 +914,12 @@ internal enum DbccOptions
     CountRows = 1 << 10,
     MarkInUseForRemoval = 1 << 11,
 
-    /// <summary>An option DBCC knows that no modeled subcommand takes (<c>HISTOGRAM</c>, <c>FAST</c>, …).</summary>
+    /// <summary>An option DBCC knows that no modeled subcommand takes (<c>HISTOGRAM</c>, <c>STATS_STREAM</c>, …).</summary>
     Other = 1 << 12,
+
+    AllIndexes = 1 << 13,
+    AllLevels = 1 << 14,
+    Fast = 1 << 15,
 }
 
 /// <summary>How a DBCC argument was written.</summary>

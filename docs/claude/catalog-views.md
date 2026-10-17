@@ -803,7 +803,8 @@ Rows follow the simulator's own state where it has that state; where real's figu
   `sys.dm_os_memory_clerks` has one clerk on node 0 for each of real's 118 clerk types, with the name and parent broker real's first clerk of the type carries: the buffer pool's holds every database's table pages, `CACHESTORE_SQLCP` and `CACHESTORE_OBJCP` the `size_in_bytes` of the batch and module plans `sys.dm_exec_cached_plans` lists, and every other holds nothing.
 - **The buffer pool.**
   Every page is in memory, so `sys.dm_os_buffer_descriptors` lists each page in use `sys.allocation_units` counts (`used_pages`), under its `allocation_unit_id` — the `IAM_PAGE`, a heap's or clustered index's leaf pages as `DATA_PAGE`s, every other in-row page an `INDEX_PAGE`, a LOB or row-overflow page a `TEXT_MIX_PAGE` — so the per-database and per-object buffer-usage queries join through it, and the buffer pool clerk and the `Database pages` counter count the same pages.
-  **Divergences**: page ids are numbered through each database's primary file from 16 rather than read off a page map, a page's `row_count` and `free_space_in_bytes` are NULL, no page is ever dirty, and real's own catalog and allocation pages aren't listed.
+  Each page carries its id, level, records and free bytes from the layout `DBCC IND` reads (see [`dbcc.md`](dbcc.md#the-page-ids)).
+  **Divergences**: the ids are the simulator's own, a system table's or LOB page's `row_count` and `free_space_in_bytes` are NULL, no page is ever dirty, and real's allocation pages (object 99) aren't listed.
 - `sys.dm_os_ring_buffers` is empty: the simulator samples none of the scheduler, memory-broker or connectivity records real's ring buffers keep.
 - **The log.**
   `sys.dm_db_log_space_usage` (the current database), `sys.dm_db_log_info(database_id)` and `sys.dm_db_log_stats(database_id)` describe the log `DBCC LOGINFO` and `DBCC SQLPERF(LOGSPACE)` report — the log file's size less its header page, the four virtual log files real cuts a log under 64 MB into with the first active under sequence 34, and the fixed 54 pages in use a fresh database shows, which also stand for the log written since a backup the database never had.
@@ -895,7 +896,7 @@ Every database lists real's own tables in its catalog: the system base tables (`
 
 - Every other row count is the fresh database's and never moves — `sysobjvalues` with a module's or constraint's definition, the dependency tables with its references, a system database's tables with anything — and no system table's pages move, a queue or change table's being an estimate (none for an empty one).
 - The column statistics real creates on system tables as its own catalog queries run (`_WA_Sys_*`, some hundred in a fresh database) aren't listed, in `sys.stats` or `sysindexes`.
-- `sys.system_internals_allocation_units`' page addresses number file 1's pages as `sys.dm_os_buffer_descriptors` does, from page 16 in allocation-unit order, not real's addresses.
+- `sys.system_internals_allocation_units`' page addresses are the simulator's own numbering of file 1, which the buffer descriptors and `DBCC IND` share (see [`dbcc.md`](dbcc.md#the-page-ids)), not real's addresses.
   Its user rowsets' record-length figures in `sys.system_internals_partitions` are computed from their columns by real's record layout (validated over seventeen rowset shapes), `dropped_lob_column_state` 2 as real reports for a user table.
 - `wpr_bucket_table` dates from the database's creation, where real's is stamped a moment after it.
 
@@ -903,7 +904,7 @@ Every database lists real's own tables in its catalog: the system base tables (`
 
 - `sp_help`, `sp_spaceused`, `sp_columns` and `sp_helpindex` over a system table (Msg 15009 here), and `sys.system_internals_partition_columns`.
 - The internal tables a full-text index (`fulltext_index_docidstatus_<id>` and its three siblings), a spatial index (`extended_index_<id>_<index id>`), a JSON or vector index makes; a primary XML index's node table is listed in `sys.objects` and `sys.internal_tables` without its columns and indexes.
-- `sys.dm_db_index_physical_stats` listing each queue's two message-table indexes under the queue's id, `DBCC CHECKALLOC`'s per-allocation-unit report and its totals' system pages, and `STATISTICS IO`'s system base table lines.
+- `sys.dm_db_index_physical_stats` listing each queue's two message-table indexes under the queue's id, and `STATISTICS IO`'s system base table lines.
 
 ## Cross-statement row cache and indexes
 

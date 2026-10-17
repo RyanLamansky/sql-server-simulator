@@ -195,11 +195,15 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>DBCC CHECKALLOC [( database [, NOINDEX] )]</c>: the heading, the
-    /// data file's and the database's extent and page totals, and the
-    /// zero-error summary. The totals count every user table's data and LOB
-    /// pages, in whole uniform extents of eight; real's per-object and
-    /// per-allocation-unit lines have no counterpart here.
+    /// <c>DBCC CHECKALLOC [( database [, NOINDEX] )]</c>: the heading, then
+    /// each table's allocation units in object-id order — system tables among
+    /// them — with each unit's IAM page, root page and pages in dedicated
+    /// extents (Msg 7922 through 7927), then the data file's totals with a
+    /// line per unit holding pages (Msg 2538, 8915, 8916, 8917), the
+    /// database's (Msg 2539, 8918) and the zero-error summary, every page as
+    /// <see cref="BuiltInResources.MapPages"/> lays it out. <c>TABLERESULTS</c>
+    /// returns the same lines as rows, but for the rules and with the file's
+    /// totals as one Msg 8983 row (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static List<SimulatedStatementOutcome> RunDbccCheckAlloc(BatchContext batch, DbccInvocation dbcc)
     {
@@ -225,16 +229,137 @@ partial class Simulation
             LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: null);
             return [];
         }
-        if (dbcc.Has(DbccOptions.TableResults))
-            throw new NotSupportedException("DBCC CHECKALLOC WITH TABLERESULTS isn't modeled.");
-        var extents = (used + 7) / 8;
-        Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, database.Name));
-        foreach (var message in SimulatedSqlException.AllocationTotalsMessages(batch, extents, used, extents * 8))
-            Info(batch, message);
-        Info(batch, SimulatedSqlException.CheckFoundErrorsMessage(batch, "CHECKALLOC", database.Name));
-        LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: database.Name);
-        return DbccCompleted(batch, dbcc, []);
+        var tableResults = dbcc.Has(DbccOptions.TableResults);
+        var databaseId = DatabaseIdOf(batch.Connection.Simulation, database);
+        var rows = new List<SqlValue[]>();
+        void Line(int number, string text, MappedUnit? unit, (short Database, short Pru, short File, int Page, int Slot) rid, (short Database, short File, int Page) reference)
+        {
+            if (!tableResults)
+            {
+                Info(batch, batch.InfoMessage(@class: 0, state: 1, number, text));
+                return;
+            }
+            var objectId = number == 8983 ? int.MinValue : unit?.ObjectId ?? 0;
+            var indexId = number == 8983 ? int.MinValue : unit?.IndexId ?? 0;
+            rows.Add([
+                SqlValue.FromInt32(number), SqlValue.FromInt32(10), SqlValue.FromInt32(1), SqlValue.FromNVarchar(text), SqlValue.Null(SqlType.NVarchar),
+                SqlValue.FromInt32(0), SqlValue.FromInt32(databaseId), SqlValue.FromInt32(1), SqlValue.FromInt32(objectId), SqlValue.FromInt32(indexId),
+                SqlValue.FromInt64(unit?.PartitionId ?? 0), SqlValue.FromInt64(unit?.AllocationUnitId ?? 0),
+                SqlValue.FromInt16(rid.Database), SqlValue.FromInt16(rid.Pru), SqlValue.FromInt16(rid.File), SqlValue.FromInt32(rid.Page), SqlValue.FromInt32(rid.Slot),
+                SqlValue.FromInt16(reference.Database), SqlValue.FromInt16(0), SqlValue.FromInt16(reference.File), SqlValue.FromInt32(reference.Page), SqlValue.FromInt32(0),
+                SqlValue.FromInt16(2),
+            ]);
+        }
+
+        var units = BuiltInResources.MapPages(batch, database);
+        var names = new Dictionary<int, string>();
+        foreach (var (table, display) in tables)
+            names[table.ObjectId] = table.InternalName ?? display;
+        foreach (var systemTable in BuiltInResources.SystemTableObjects(database))
+            names[systemTable.ObjectId] = "sys." + systemTable.Name;
+
+        // Each table's units: a system table's in the order real allocated
+        // them, a user table's in-row unit ahead of its row-overflow and LOB
+        // units. A table's heading waits for its first in-row unit, so a queue
+        // table's LOB unit, allocated first, lists under the table before it.
+        static int Creation(MappedUnit unit) => unit.Type switch { 1 => 0, 3 => 1, _ => 2 };
+        var ordered = units.FindAll(unit => unit.ObjectId != BuiltInResources.AllocationMapsObjectId);
+        ordered.Sort((x, y) =>
+            x.ObjectId != y.ObjectId ? x.ObjectId.CompareTo(y.ObjectId)
+            : x.IndexId != y.IndexId ? x.IndexId.CompareTo(y.IndexId)
+            : x.PartitionNumber != y.PartitionNumber ? x.PartitionNumber.CompareTo(y.PartitionNumber)
+            : x.SystemTable is not null ? x.AllocationUnitId.CompareTo(y.AllocationUnitId)
+            : Creation(x).CompareTo(Creation(y)));
+        if (!tableResults)
+            Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, database.Name));
+        int? current = null;
+        MappedUnit? heading = null;
+        long tableExtents = 0;
+        foreach (var unit in ordered)
+        {
+            if (unit.ObjectId != current)
+            {
+                if (heading is not null)
+                    Line(7927, SimulatedSqlException.AllocationTableExtentsText(tableExtents), heading, (databaseId, 0, 0, 0, 0), (databaseId, 0, 0));
+                (current, heading, tableExtents) = (unit.ObjectId, null, 0);
+            }
+            if (heading is null && unit.Type == 1)
+            {
+                heading = unit;
+                if (!tableResults)
+                    Info(batch, batch.InfoMessage(@class: 0, state: 1, number: 7922, SimulatedSqlException.AllocationTableRuleText));
+                Line(7923, SimulatedSqlException.AllocationTableText(names.GetValueOrDefault(unit.ObjectId, unit.ObjectId.ToString(CultureInfo.InvariantCulture)), unit.ObjectId), unit, (databaseId, 0, 0, 0, 0), (databaseId, 0, 0));
+            }
+            var root = unit.Type == 1 && unit.IndexId == 0 ? 0 : unit.RootPage;
+            // Real's count reads 0 for most heaps and clustered indexes.
+            var dataPages = unit.Type != 1 ? unit.UsedPages : unit.IndexId > 1 ? unit.DataPages : 0;
+            var type = AllocationUnitTypeText(unit.Type);
+            var rid = (databaseId, (short)0, (short)(unit.IamPage == 0 ? 0 : 1), unit.IamPage, 0);
+            var reference = (databaseId, (short)(root == 0 ? 0 : 1), root);
+            Line(7924, SimulatedSqlException.AllocationUnitPagesText(unit.IndexId, unit.PartitionId, unit.AllocationUnitId, type, PageAddress(unit.IamPage), PageAddress(root), dataPages), unit, rid, reference);
+            Line(7925, SimulatedSqlException.AllocationUnitExtentsText(unit.IndexId, unit.PartitionId, unit.AllocationUnitId, type, unit.UsedPages, unit.Extents.Count), unit, rid, reference);
+            tableExtents += unit.Extents.Count;
+        }
+        if (heading is not null)
+            Line(7927, SimulatedSqlException.AllocationTableExtentsText(tableExtents), heading, (databaseId, 0, 0, 0, 0), (databaseId, 0, 0));
+
+        // The file's totals, then each unit holding pages, a table's units by
+        // index and, within one, the last allocated first.
+        long dedicated = 0, usedPages = 0, mixedPages = 0;
+        var mixedExtents = units.Count == 0 ? 0 : units[0].MixedExtents;
+        foreach (var unit in units)
+        {
+            dedicated += unit.Extents.Count;
+            usedPages += unit.UsedPages;
+            mixedPages += unit.MixedPageCount;
+        }
+        var reserved = (8 * dedicated) + mixedPages;
+        if (tableResults)
+        {
+            Line(8983, SimulatedSqlException.FileAllocationRowText(1, dedicated + mixedExtents, usedPages, reserved, mixedExtents, mixedPages), null, (databaseId, 0, 1, 0, 0), (databaseId, 0, 0));
+        }
+        else
+        {
+            var (fileExtents, fileMixed) = SimulatedSqlException.FileAllocationTexts(1, dedicated + mixedExtents, usedPages, reserved, mixedExtents, mixedPages);
+            Info(batch, batch.InfoMessage(@class: 0, state: 1, number: 2538, fileExtents));
+            Info(batch, batch.InfoMessage(@class: 0, state: 1, number: 8915, fileMixed));
+        }
+        var holding = units.FindAll(unit => unit.UsedPages > 0);
+        holding.Sort((x, y) =>
+            x.ObjectId != y.ObjectId ? x.ObjectId.CompareTo(y.ObjectId)
+            : x.IndexId != y.IndexId ? x.IndexId.CompareTo(y.IndexId)
+            : x.PartitionNumber != y.PartitionNumber ? x.PartitionNumber.CompareTo(y.PartitionNumber)
+            : x.SystemTable is not null ? y.AllocationUnitId.CompareTo(x.AllocationUnitId)
+            : Creation(y).CompareTo(Creation(x)));
+        foreach (var unit in holding)
+        {
+            var data = unit.Type == 1 && unit.IndexId <= 1 && unit.ObjectId != BuiltInResources.AllocationMapsObjectId;
+            Line(data ? 8916 : 8917, SimulatedSqlException.AllocationUnitTotalsText(data, unit.ObjectId, unit.IndexId, unit.PartitionId, unit.AllocationUnitId, AllocationUnitTypeText(unit.Type), unit.Extents.Count, unit.UsedPages, unit.MixedPageCount),
+                unit, (databaseId, 0, 1, 0, 0), (databaseId, 0, 0));
+        }
+        var (databaseExtents, databaseMixed) = SimulatedSqlException.DatabaseAllocationTexts(dedicated + mixedExtents, usedPages, reserved, mixedExtents, mixedPages);
+        Line(2539, databaseExtents, null, (databaseId, short.MaxValue, short.MaxValue, int.MaxValue, 0), (databaseId, 0, 0));
+        Line(8918, databaseMixed, null, (databaseId, short.MaxValue, short.MaxValue, int.MaxValue, 1), (databaseId, 0, 0));
+        Line(8989, SimulatedSqlException.CheckFoundErrorsText("CHECKALLOC", database.Name), null, (0, 0, 0, 0, 0), (0, 0, 0));
+        LogDbccCheck(batch, dbcc, "CHECKALLOC", logTarget, database, foundIn: tableResults ? null : database.Name);
+        if (!tableResults)
+            return DbccCompleted(batch, dbcc, []);
+        var outcomes = DbccRows(batch, CheckResultSchema(batch), CheckResultColumnNames, rows);
+        batch.Connection.LastStatementRowCount = 0;
+        return DbccCompleted(batch, dbcc, outcomes);
     }
+
+    /// <summary>The name a <c>CHECKALLOC</c> report gives an allocation unit's type.</summary>
+    private static string AllocationUnitTypeText(byte type) => type switch
+    {
+        0 => "Unknown",
+        1 => "In-row data",
+        2 => "LOB data",
+        _ => "Row-overflow data",
+    };
+
+    /// <summary>A page address as DBCC prints one, <c>(file:page)</c>, <c>(0:0)</c> for none.</summary>
+    private static string PageAddress(int page) => page == 0 ? "(0:0)" : string.Create(CultureInfo.InvariantCulture, $"(1:{page})");
 
     /// <summary><c>DBCC CHECKCATALOG [( database )]</c>: a consistent catalog reports nothing but Msg 2528.</summary>
     private static List<SimulatedStatementOutcome> RunDbccCheckCatalog(BatchContext batch, DbccInvocation dbcc)

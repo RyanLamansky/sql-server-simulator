@@ -747,12 +747,13 @@ internal static partial class BuiltInResources
     /// <summary>
     /// <c>sys.dm_os_buffer_descriptors</c>: every page of every database's
     /// tables is in memory, so the buffer pool lists each page in use in the
-    /// allocation units <c>sys.allocation_units</c> reports, under its unit —
-    /// the IAM page, a heap's or clustered index's leaf pages as data pages,
-    /// the rest of an index's as index pages, a LOB or row-overflow page as a
-    /// text page. Page ids are numbered through each database's primary file;
-    /// a page's row count and free space aren't kept, and no page waits to be
-    /// written.
+    /// allocation units <c>sys.allocation_units</c> reports, under its unit and
+    /// the id <see cref="MapPages"/> numbers it by — the IAM page, a heap's or
+    /// clustered index's leaf pages as data pages, the rest of an index's as
+    /// index pages, a LOB or row-overflow page as a text page — with its level,
+    /// and with its records and free bytes where the storage figures keep them
+    /// (an IAM page reads 2 records and 6 bytes free, as real's does, probed
+    /// 2026-10-17 against SQL Server 2025). No page waits to be written.
     /// </summary>
     private static IEnumerable<SqlValue[]> BufferDescriptorRows(Parser.BatchContext batch)
     {
@@ -769,18 +770,29 @@ internal static partial class BuiltInResources
         foreach (var (database, id) in DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
             var databaseId = SqlValue.FromInt32(id);
-            var pageId = FirstBufferedPageId;
-            foreach (var (_, allocationUnitId, indexId, type, _, usedPages, dataPages, _) in EnumerateAllocationUnitData(batch, database))
+            foreach (var mapped in MapPages(batch, database))
             {
-                var unit = SqlValue.FromInt64(allocationUnitId);
-                var leafType = indexId <= 1 ? dataPage : indexPage;
-                for (long i = 0; i < usedPages; i++)
+                if (mapped.IamPage == 0 || mapped.ObjectId == AllocationMapsObjectId)
+                    continue;
+                var unit = SqlValue.FromInt64(mapped.AllocationUnitId);
+                yield return
+                [
+                    databaseId, fileId, SqlValue.FromInt32(mapped.IamPage), zero, unit, iamPage,
+                    SqlValue.FromInt32(2), SqlValue.FromInt32(6), off, zero, SqlValue.FromInt64(0), off, zero, noBinary, noBinary, noBinary, noLatch,
+                ];
+                foreach (var page in mapped.Pages)
                 {
-                    var pageType = i == 0 ? iamPage : type != 1 ? textPage : i <= dataPages ? leafType : indexPage;
+                    var pageType = page.PageType switch
+                    {
+                        MappedPage.DataPage => dataPage,
+                        MappedPage.IndexPage => indexPage,
+                        _ => textPage,
+                    };
                     yield return
                     [
-                        databaseId, fileId, SqlValue.FromInt32(pageId++), zero, unit, pageType,
-                        nullInt, nullInt, off, zero, SqlValue.FromInt64(0), off, zero, noBinary, noBinary, noBinary, noLatch,
+                        databaseId, fileId, SqlValue.FromInt32(page.Id), SqlValue.FromInt32(page.Level), unit, pageType,
+                        page.Records < 0 ? nullInt : SqlValue.FromInt32(page.Records), page.FreeBytes < 0 ? nullInt : SqlValue.FromInt32(page.FreeBytes),
+                        off, zero, SqlValue.FromInt64(0), off, zero, noBinary, noBinary, noBinary, noLatch,
                     ];
                 }
             }
