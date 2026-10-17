@@ -2746,6 +2746,7 @@ public sealed partial class Simulation
             var box = new StatementLifecycleBox(lifecycle);
             var coroutine = new StatementCoroutine(batch.Connection);
             batch.StatementCoroutine = coroutine;
+            _ = Interlocked.Increment(ref this.StatementThreadRuns);
             try
             {
                 foreach (var sent in coroutine.Run(this.RunBoxed(box, batch, outcomes, requireSemicolonBeforeCte, atBatchStart)))
@@ -4437,6 +4438,9 @@ public sealed partial class Simulation
         public StatementLifecycle Lifecycle = lifecycle;
     }
 
+    /// <summary>How many statements have run on a thread of their own (<see cref="RunsOnItsOwnThread"/>).</summary>
+    internal long StatementThreadRuns;
+
     /// <summary>The run of a statement on its own thread, over its boxed lifecycle.</summary>
     private Action RunBoxed(StatementLifecycleBox box, BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool requireSemicolonBeforeCte, bool atBatchStart) =>
         () => box.Lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
@@ -4449,7 +4453,11 @@ public sealed partial class Simulation
     /// whose outcomes reach that consumer (as <see cref="StreamsRows"/>
     /// judges a <c>SELECT</c>), in a database with a DML trigger, outside a
     /// trigger's own statements and without the <c>STATISTICS</c> reports a
-    /// trigger body's compile would have to go ahead of.
+    /// trigger body's compile would have to go ahead of — and only while some
+    /// trigger may send rows (<see cref="SomeTriggerMaySendRows"/>), and then
+    /// only for a statement that may reach one (<see cref="MayFireTrigger"/>):
+    /// a trigger's counts and messages alone wait for the statement's end
+    /// either way.
     /// </summary>
     private static bool RunsOnItsOwnThread(BatchContext batch) =>
         batch.StreamsResultRows
@@ -4463,7 +4471,53 @@ public sealed partial class Simulation
         && batch.Connection is { InsertExecTargetTypes: null, StatisticsIo: false, StatisticsTime: false }
         && batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
         && (HasDmlTrigger(batch.Connection.Simulation, batch.CurrentDatabase) || MayFireCrossDatabaseTrigger(batch))
+        && SomeTriggerMaySendRows(batch.Connection.Simulation)
         && MayFireTrigger(batch);
+
+    /// <summary>
+    /// Whether some trigger of the simulation — a DML trigger of any database,
+    /// or a DDL trigger of a database or the server, which a trigger body's
+    /// definition change fires — may send rows
+    /// (<see cref="TriggerBodyReach.SendsRows"/>), cached per
+    /// <see cref="SchemaVersion"/> and server-trigger set. While none may, no
+    /// statement's trigger, however it is reached — nested, cascaded, through
+    /// a view or another database — has anything to send as its client reads.
+    /// </summary>
+    private static bool SomeTriggerMaySendRows(Simulation simulation)
+    {
+        var version = Volatile.Read(ref simulation.SchemaVersion);
+        var serverTriggers = simulation.ServerTriggers.All;
+        if (Volatile.Read(ref simulation.triggerRowsProbe) is { } probe && probe.SchemaVersion == version && ReferenceEquals(probe.ServerTriggers, serverTriggers))
+            return probe.MaySend;
+        var maySend = false;
+        foreach (var trigger in serverTriggers)
+            maySend |= (trigger.BodyReach() & TriggerBodyReach.SendsRows) != 0;
+        foreach (var (_, database) in simulation.Databases)
+        {
+            if (maySend)
+                break;
+            foreach (var (_, trigger) in database.DdlTriggers)
+                maySend |= (trigger.BodyReach() & TriggerBodyReach.SendsRows) != 0;
+            foreach (var (_, schema) in database.Schemas)
+            {
+                foreach (var (_, trigger) in schema.Triggers)
+                    maySend |= (trigger.BodyReach() & TriggerBodyReach.SendsRows) != 0;
+            }
+        }
+        Volatile.Write(ref simulation.triggerRowsProbe, new TriggerRowsProbe(version, serverTriggers, maySend));
+        return maySend;
+    }
+
+    /// <summary>What <see cref="SomeTriggerMaySendRows"/> last answered, and as of what.</summary>
+    private TriggerRowsProbe? triggerRowsProbe;
+
+    /// <inheritdoc cref="triggerRowsProbe"/>
+    private sealed class TriggerRowsProbe(long schemaVersion, DdlTrigger[] serverTriggers, bool maySend)
+    {
+        public readonly long SchemaVersion = schemaVersion;
+        public readonly DdlTrigger[] ServerTriggers = serverTriggers;
+        public readonly bool MaySend = maySend;
+    }
 
     /// <summary>
     /// Whether the DML statement at the cursor, in a database with no DML
@@ -4555,13 +4609,16 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// Whether the DML statement at the cursor may fire a trigger: false only
-    /// when the object it names as written — after <c>INSERT [INTO]</c>,
-    /// <c>UPDATE</c>, <c>DELETE [FROM]</c> or <c>MERGE [INTO]</c> — is a table
-    /// or view no trigger is attached to, or a table variable, which carries
-    /// none, written from anything but an <c>EXEC</c>, whose body runs
-    /// statements of its own; any shape the look-ahead doesn't read, a
-    /// <c>TOP</c> or an alias among them, may.
+    /// Whether the DML statement at the cursor may fire a trigger that sends
+    /// rows: false only when the object it names as written — after
+    /// <c>INSERT [INTO]</c>, <c>UPDATE</c>, <c>DELETE [FROM]</c> or
+    /// <c>MERGE [INTO]</c> — is a table no trigger that may send or write is
+    /// attached to, nor to a table its cascading foreign keys reach
+    /// (<see cref="MayReachRowSendingTrigger"/>), or a table variable, which
+    /// carries none, written from anything but an <c>EXEC</c>, whose body runs
+    /// statements of its own; a view, whose write may pass to its base tables,
+    /// and any shape the look-ahead doesn't read, a <c>TOP</c> or an alias
+    /// among them, may.
     /// </summary>
     private static bool MayFireTrigger(BatchContext batch)
     {
@@ -4584,7 +4641,7 @@ public sealed partial class Simulation
             SchemaObject? target = batch.TryResolveTable(name, out var table) ? table
                 : batch.TryResolveView(name, out var view) ? view
                 : null;
-            return target is null || TriggersAttachedTo(batch, target).Length != 0;
+            return target is not HeapTable heap || MayReachRowSendingTrigger(batch, heap, cascades: verb is not ReservedKeyword { Keyword: Keyword.Insert });
         }
         catch (SimulatedSqlException)
         {
@@ -4594,6 +4651,41 @@ public sealed partial class Simulation
         {
             context.RestoreCheckpoint(start);
         }
+    }
+
+    /// <summary>
+    /// Whether a write to <paramref name="target"/> may fire a trigger that
+    /// sends rows: one attached to it — or, when the write
+    /// <paramref name="cascades"/>, to a table a cascading, <c>SET NULL</c> or
+    /// <c>SET DEFAULT</c> foreign key reaches from it — that may send rows, or
+    /// that may write, which can fire any other (probed 2026-10-17 against SQL
+    /// Server 2025: a <c>DELETE</c> cascading into a table whose trigger
+    /// selects 40,000 rows held its keys' X locks with a reader two rows in,
+    /// the trigger's <c>PRINT</c> after its <c>SELECT</c> not yet sent).
+    /// Enabled or not, as no trigger's state is read here.
+    /// </summary>
+    private static bool MayReachRowSendingTrigger(BatchContext batch, HeapTable target, bool cascades)
+    {
+        List<HeapTable> pending = [target];
+        HashSet<HeapTable> visited = [target];
+        while (pending.Count != 0)
+        {
+            var table = pending[^1];
+            pending.RemoveAt(pending.Count - 1);
+            foreach (var trigger in TriggersAttachedTo(batch, table))
+            {
+                if (trigger.BodyReach() != TriggerBodyReach.None)
+                    return true;
+            }
+            if (!cascades)
+                continue;
+            foreach (var foreignKey in table.IncomingForeignKeys)
+            {
+                if ((foreignKey.DeleteAction != ReferentialAction.NoAction || foreignKey.UpdateAction != ReferentialAction.NoAction) && visited.Add(foreignKey.ChildTable))
+                    pending.Add(foreignKey.ChildTable);
+            }
+        }
+        return false;
     }
 
     /// <summary>

@@ -129,6 +129,25 @@ internal sealed class Trigger(
     /// </summary>
     public readonly string BodyText = bodyText;
 
+    /// <summary>The body's <see cref="TriggerBodyReach"/>, once read; -1 before.</summary>
+    private int bodyReach = -1;
+
+    /// <summary>
+    /// What the body may do beyond its own statements, read from
+    /// <see cref="BodyText"/> as the trigger first fires or is asked about —
+    /// <c>ALTER TRIGGER</c> makes a new trigger, so the reading never goes
+    /// stale — and everything for a CLR trigger.
+    /// </summary>
+    public TriggerBodyReach BodyReach()
+    {
+        if (this.ClrEntry is not null)
+            return TriggerBodyScan.Everything;
+        var reach = Volatile.Read(ref this.bodyReach);
+        if (reach < 0)
+            Volatile.Write(ref this.bodyReach, reach = (int)TriggerBodyScan.Of(this.BodyText));
+        return (TriggerBodyReach)reach;
+    }
+
     /// <summary>
     /// True when the trigger is disabled via <c>DISABLE TRIGGER … ON
     /// parent</c>; disabled triggers don't fire on DML against the parent

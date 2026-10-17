@@ -97,6 +97,24 @@ internal sealed class DdlTrigger(
     /// </summary>
     public readonly string BodyText = bodyText;
 
+    /// <summary>The body's <see cref="TriggerBodyReach"/>, once read; -1 before.</summary>
+    private int bodyReach = -1;
+
+    /// <summary>
+    /// What the body may do beyond its own statements, read from
+    /// <see cref="BodyText"/> once (an <c>ALTER TRIGGER</c> makes a new
+    /// trigger), and everything for a CLR trigger.
+    /// </summary>
+    public TriggerBodyReach BodyReach()
+    {
+        if (this.ClrEntry is not null)
+            return TriggerBodyScan.Everything;
+        var reach = Volatile.Read(ref this.bodyReach);
+        if (reach < 0)
+            Volatile.Write(ref this.bodyReach, reach = (int)TriggerBodyScan.Of(this.BodyText));
+        return (TriggerBodyReach)reach;
+    }
+
     /// <summary>
     /// Newlines between the <c>CREATE TRIGGER</c> verb and the body's first
     /// token, so a body error reports a line relative to the whole CREATE

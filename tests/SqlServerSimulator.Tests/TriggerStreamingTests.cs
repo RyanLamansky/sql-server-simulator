@@ -271,6 +271,91 @@ public sealed class TriggerStreamingTests
         AreEqual(logged, Scalar(other, "select count(*) from l"));
     }
 
+    /// <summary>
+    /// A trigger fired through a cascading foreign key or a write through a
+    /// view sends its rows as the client reads them too (probed 2026-10-17
+    /// against SQL Server 2025: a <c>DELETE</c> cascading into a table whose
+    /// trigger selects 40,000 rows held its keys' X locks with a reader two
+    /// rows in, the trigger's <c>PRINT</c> after its <c>SELECT</c> not yet
+    /// sent).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete p where id = 1")]
+    [DataRow("update v set id = 2 where id = 1")]
+    public void CascadedOrViewWrittenTriggerRows_GoOutAsRead(string sql)
+    {
+        var sim = WithTrigger();
+        sim.ExecuteBatches(
+            "create table p (id int primary key); create table c (id int primary key, pid int references p (id) on delete cascade); insert p values (1); insert c values (1, 1); create table w (id int primary key); insert w values (1)",
+            "create view v as select id from w",
+            "create trigger tc on c after delete as begin select k, v from big order by k; insert l values ('after select'); end",
+            "create trigger tw on w after update as begin select k, v from big order by k; insert l values ('after select'); end");
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        using (var rows = ReadTwo(connection, sql))
+        {
+            AreEqual(0, Scalar(other, "select count(*) from l with (nolock)"));
+            AreEqual(Rows, ReadRest(rows));
+        }
+        AreEqual(1, Scalar(other, "select count(*) from l"));
+    }
+
+    /// <summary>
+    /// A trigger whose body can't send rows reports through a reader what it
+    /// reports otherwise — its messages and counts ahead of the statement's,
+    /// the statement's own <c>@@ROWCOUNT</c> after — whether or not another
+    /// trigger of the simulation sends rows.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void RowlessTrigger_ReportsAsBefore(bool rowsElsewhere)
+    {
+        var sim = WithTrigger("print 'before'; insert l values ('a'), ('b'); print 'after';");
+        if (rowsElsewhere)
+            sim.ExecuteBatches("create table x (id int)", "create trigger tx on x after insert as select 1");
+        using var connection = sim.CreateOpenConnection();
+        List<string> messages = [];
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.Add(e.Message);
+        using (var reader = connection.CreateCommand("update t set v = v + 1 where id < 4; select @@rowcount").ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(3, reader.GetInt32(0));
+            AreEqual(5, reader.RecordsAffected);
+        }
+        AreEqual("before,after", string.Join(",", messages));
+        AreEqual(2, Scalar(connection, "select count(*) from l"));
+    }
+
+    /// <summary>
+    /// <c>ALTER TRIGGER</c> between two runs of one command changes whether the
+    /// firing statement's trigger rows stream, either way, its cached plan
+    /// notwithstanding.
+    /// </summary>
+    [TestMethod]
+    public void AlterTrigger_FlipsStreamingBetweenRuns()
+    {
+        var sim = WithTrigger();
+        using var connection = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        void Streams()
+        {
+            using var rows = ReadTwo(connection, "update t set v = v + 1 where id = 1");
+            AreEqual(0, Scalar(other, "select count(*) from l with (nolock)"));
+            AreEqual(Rows, ReadRest(rows));
+        }
+        Streams();
+        _ = other.CreateCommand("alter trigger tr on t after update, insert as begin set nocount on; insert l values ('rowless'); end").ExecuteNonQuery();
+        using (var reader = connection.CreateCommand("update t set v = v + 1 where id = 1").ExecuteReader())
+        {
+            IsFalse(reader.Read());
+            AreEqual(1, reader.RecordsAffected);
+        }
+        AreEqual(2, Scalar(other, "select count(*) from l"));
+        _ = other.CreateCommand("delete l; exec ('alter trigger tr on t after update, insert as begin select k, v from big order by k; insert l values (''after select''); end')").ExecuteNonQuery();
+        Streams();
+    }
+
     [TestMethod]
     public void ExecuteNonQuery_RunsTheTriggerWhole()
     {
