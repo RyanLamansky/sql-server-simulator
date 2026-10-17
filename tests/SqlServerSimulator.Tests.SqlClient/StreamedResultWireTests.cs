@@ -99,6 +99,48 @@ public sealed class StreamedResultWireTests
         AreEqual(Rows, read);
     }
 
+    /// <summary>
+    /// Over MARS the statement produces what the client's window takes at the
+    /// packet size its login negotiated — a <c>SELECT</c>'s rows and a DML
+    /// statement's <c>OUTPUT</c> rows alike — so a <c>REPEATABLE READ</c>
+    /// reader holds the keys of exactly the rows those packets carry (probed
+    /// 2026-10-17 against SQL Server 2025 with 2,000 rows).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from w", 2000, 8000, 2, 20, "S")]
+    [DataRow("select * from w", 2000, 8000, 21, 44, "S")]
+    [DataRow("select * from w", 2000, 8000, 100, 116, "S")]
+    [DataRow("select * from w", 2000, 4096, 10, 17, "S")]
+    [DataRow("select * from w", 2000, 16000, 2, 40, "S")]
+    [DataRow("select * from w", 500, 8000, 50, 127, "S")]
+    [DataRow("select * from w", 100, 8000, 200, 598, "S")]
+    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 8000, 2, 20, "X")]
+    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 4096, 10, 17, "X")]
+    public async Task OverMars_TheStatementRunsAheadByTheClientsWindow(string sql, int width, int packetSize, int read, int held, string mode)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, $"""
+            create table w (k int primary key, v char({width}) not null);
+            alter table w set (lock_escalation = disable);
+            insert w select value, 'x' from generate_series(1, 2000)
+            """);
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var reader = await Wire.OpenAsync(listener, TestContext.CancellationToken, $";MultipleActiveResultSets=True;Packet Size={packetSize.ToString(CultureInfo.InvariantCulture)}");
+        await using var other = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var spid = await this.SpidAsync(reader);
+        await using var transaction = (SqlTransaction)await reader.BeginTransactionAsync(IsolationLevel.RepeatableRead, TestContext.CancellationToken);
+        await using var command = new SqlCommand(sql, reader, transaction);
+        await using (var rows = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            for (var i = 0; i < read; i++)
+                IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
+            await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
+            AreEqual(held, await this.HeldKeysAsync(other, spid, mode));
+            command.Cancel();
+        }
+        await transaction.RollbackAsync(TestContext.CancellationToken);
+    }
+
     [TestMethod]
     public async Task RepeatableRead_SuspendedReader_HoldsTheKeysProducedSoFar()
     {

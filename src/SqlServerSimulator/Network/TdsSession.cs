@@ -244,6 +244,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 this.connection.ScopesTransactionsToBatch = true;
                 this.connection.PublishedSettings = SessionSettings.Capture(this.connection);
                 this.marsPacketSize = transport.PacketSize;
+                this.connection.MarsPacketBytes = transport.PacketSize;
                 this.multiplexer = new SmpMultiplexer(transportStream, this);
                 await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(true);
                 return;
@@ -1364,7 +1365,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // client's window, which runs the statement's four packets
                     // ahead of the client itself (see SendWhatTheClientTakesAsync).
                     if (writer.MarsSession is not null)
+                    {
                         stream.LeadPackets = 1;
+                        stream.ConsumerPacketRoom = writer.RoomInPacket;
+                    }
                     stream.FramesPackets = true;
                     stream.Pull = () =>
                     {

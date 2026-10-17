@@ -167,12 +167,25 @@ internal abstract class ResultStream
     /// from its tenth, 44 from its twenty-first, 56 from its thirty-second,
     /// and 116 a hundred rows in; of 107-byte rows 373 until it read into the
     /// third packet, then 596, then 820 from its 380th). The MARS endpoint's
-    /// writer has the statement a packet past the one it sends
-    /// (<see cref="LeadPackets"/>).
+    /// writer has the statement produce what fills the packet it is writing
+    /// (<see cref="LeadPackets"/>, <see cref="ConsumerPacketRoom"/>).
     /// </summary>
     private protected long WindowEnd(long read) => this.LeadPackets == 1
-        ? ((read / PacketBytes) + 1) * PacketBytes
+        ? this.producedBytes + Math.Max(1, this.ConsumerPacketRoom?.Invoke() ?? PacketBytes)
         : (FirstWindowPackets + (RefillPackets * (((read / PacketBytes) + 1) / RefillPackets))) * PacketBytes;
+
+    /// <summary>
+    /// For the MARS endpoint's writer, the bytes left in the packet it is
+    /// filling, which a refill produces the rows to fill: real's statement
+    /// produces only what its packets take, so with the client's window shut
+    /// it holds the rows of the packets in that window and the one it was
+    /// writing (probed 2026-10-17 against SQL Server 2025 over MARS: a
+    /// <c>REPEATABLE READ</c> reader two rows into 2,000 rows of 2,007 bytes
+    /// held 20 keys with 8,000-byte packets, 11 with 4,096 and 40 with
+    /// 16,000; of 507-byte rows 79, of 107-byte rows 374). Null for every
+    /// other consumer.
+    /// </summary>
+    public Func<int>? ConsumerPacketRoom;
 
     /// <summary>The packets a refill adds to the window (<see cref="WindowEnd"/>).</summary>
     private const int RefillPackets = 3;
@@ -180,7 +193,8 @@ internal abstract class ResultStream
     /// <summary>
     /// How many packets past the one its consumer is on the statement
     /// produces (<see cref="WindowEnd"/>): one for the MARS endpoint's writer,
-    /// whose packets wait in the client's four-packet window beside it;
+    /// which asks for rows only as it runs dry — its packets wait in the
+    /// client's four-packet window beside it — and is never run ahead of;
     /// otherwise the window steps as a client reading the rows itself reads.
     /// </summary>
     public int LeadPackets = FirstWindowPackets;
@@ -670,7 +684,7 @@ internal abstract class ResultStream
     /// </summary>
     private protected const long FirstWindowBytes = FirstWindowPackets * PacketBytes;
 
-    private const int FirstWindowPackets = 5;
+    private protected const int FirstWindowPackets = 5;
 
     /// <summary>
     /// An estimate of the bytes a column metadata token takes, which the first
@@ -770,7 +784,12 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
         var bytes = header;
         var owner = connection?.LockOwner;
         var contended = owner is not null && Volatile.Read(ref connection!.Simulation.LockManager.BlockingHolds) > Volatile.Read(ref owner.BlockingHolds);
-        var window = contended ? PacketBytes : FirstWindowBytes;
+        // Over the MARS endpoint the window is the packets the client's window
+        // takes, at the size its login negotiated, which the endpoint's writer
+        // fills from there.
+        var window = contended ? PacketBytes
+            : connection is { MarsPacketBytes: > 0 and var marsPacket } ? Math.Min(FirstWindowBytes, (long)FirstWindowPackets * marsPacket)
+            : FirstWindowBytes;
         try
         {
             var probed = false;
@@ -968,7 +987,7 @@ internal sealed class ResultStream<T, TMeasure> : ResultStream
                     {
                         _ = this.packetEnds.Dequeue();
                         this.clientBytes = end.Bytes;
-                        if (!this.Complete && !this.Draining && this.Pull is { } refill)
+                        if (this.LeadPackets != 1 && !this.Complete && !this.Draining && this.Pull is { } refill)
                         {
                             // Most of the buffer read, it starts again from the front.
                             if (this.Head >= 64 && this.Head * 2 >= this.Buffer.Count)

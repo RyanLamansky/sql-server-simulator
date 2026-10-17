@@ -157,6 +157,15 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     }
 
     /// <summary>
+    /// The bytes the packet being filled can still take before it is whole.
+    /// </summary>
+    public int RoomInPacket()
+    {
+        var capacity = this.transport.PacketSize - Tds.HeaderSize;
+        return capacity - (this.length % capacity);
+    }
+
+    /// <summary>
     /// How many whole packets are buffered ahead of the response's last DONE,
     /// which stays unsent while it may yet be reopened or taken back.
     /// </summary>

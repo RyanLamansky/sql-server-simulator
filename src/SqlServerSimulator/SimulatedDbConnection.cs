@@ -1805,6 +1805,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool ReplacedByReset;
 
     /// <summary>
+    /// The packet size a TDS MARS session's login negotiated, which bounds the
+    /// first window a streamed result produces before the endpoint's writer
+    /// reads it (<see cref="ResultStream"/>); 0 for every other session.
+    /// </summary>
+    internal int MarsPacketBytes;
+
+    /// <summary>
     /// The client application name this session reported: the connection
     /// string's <c>Application Name</c> / <c>App</c> keyword in-process, the
     /// LOGIN7 <c>AppName</c> field over the TDS endpoint. Empty when neither
