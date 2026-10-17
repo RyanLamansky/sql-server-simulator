@@ -58,16 +58,21 @@ public sealed class WriterLockFidelityTests
     }
 
     // The keys these tests lock, by the description SQL Server 2025 gives
-    // each: its hash of the index row's key (probed 2026-10-07).
+    // each: its hash of the index row's key (probed 2026-10-07). The heap
+    // index ix_h3's rows carry their RID, which real hashes after the key, so
+    // its two descriptions are real's hash over the RID this simulation
+    // reports for the row (1:8:2 and 1:8:0).
     private static string KeyOf(string description) => description switch
     {
         "(30b7763ed433)" => "(9)",
         "(40fd182c0dd9)" => "(7)",
         "(59855d342c69)" => "(5)",
         "(61a06abd401c)" => "(2)",
+        "(6529ac721415)" => "(3)",
         "(75233ce2f320)" => "(150)",
         "(8194443284a0)" => "(1)",
         "(98ec012aa510)" => "(3)",
+        "(99aad8f7e283)" => "(1)",
         "(9f502deadad2)" => "(300)",
         "(a0c936a3c965)" => "(4)",
         "(af5579654878)" => "(200)",
@@ -184,6 +189,11 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 cross apply (select 1 x) a where c1.k = 5", "KEY X WAIT (5)", DisplayName = "Joined UPDATE applying a constant body")]
     [DataRow("update c1 set v = 50 where k = 5", "delete c1 from c1 join (values (5)) d (k) on c1.k = d.k", "KEY X WAIT (5)", DisplayName = "Joined DELETE from one VALUES row")]
     [DataRow("delete c1 where k = 5; insert c1 values (5, 50)", "update c1 set v = 9 from c1 join (values (5)) d (k) on c1.k = d.k", "KEY X WAIT (5)", DisplayName = "Joined UPDATE from VALUES of a key deleted and inserted again")]
+    [DataRow("update c1 set v = 50 where k = 5", "with c as (select * from (values (5)) x (id)) update c1 set v = 9 from c1 join c on c1.k = c.id", "KEY X WAIT (5)", DisplayName = "Joined UPDATE from a CTE over VALUES")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join (select top (1) * from (values (5)) x (id)) d on c1.k = d.id", "KEY X WAIT (5)", DisplayName = "Joined UPDATE from a TOP derived table over VALUES")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join (select id from (values (5)) x (id) where id > 0) d on c1.k = d.id", "KEY X WAIT (5)", DisplayName = "Joined UPDATE from a filtered derived table over VALUES")]
+    [DataRow("update c1 set v = 50 where k = 5", "with c as (select * from (values (5)) x (id)) delete c1 from c1 join c on c1.k = c.id", "KEY X WAIT (5)", DisplayName = "Joined DELETE from a CTE over VALUES")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join (select k from d1) d on c1.k = d.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE from a derived table over a table")]
     [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join (values (5), (6)) d (k) on c1.k = d.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE from two VALUES rows")]
     [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join (values (5)) d (k) on c1.k = d.k where c1.v > 0", "KEY U WAIT (5)", DisplayName = "Joined UPDATE from VALUES with a residual predicate")]
     [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 left join (values (5)) d (k) on c1.k = d.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE outer-joining VALUES")]

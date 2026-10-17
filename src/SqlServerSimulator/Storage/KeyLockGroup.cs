@@ -77,6 +77,13 @@ internal sealed class KeyLockGroup
     // uniquifier, which the anchor tuple leaves out (see KeyLockHash).
     private readonly KeyLockUniquifier uniquifier;
 
+    /// <summary>
+    /// Whether real's index row carries the base row's RID as its locator: a
+    /// non-unique nonclustered index over a heap. The anchor tuple leaves it
+    /// out, one anchor standing for every row of a key.
+    /// </summary>
+    public readonly bool CarriesRid;
+
     /// <summary>Anchors interned per key tuple, leaking the way <see cref="HeapTable.RowLocks"/> does.</summary>
     public readonly ConcurrentDictionary<SqlValueKey, LockResource> Anchors = new();
 
@@ -100,9 +107,10 @@ internal sealed class KeyLockGroup
     /// </summary>
     public int Holds;
 
-    private KeyLockGroup(HeapTable table, object owner, int[] ordinals, int keyLength, bool isRowGroup, bool isUnique, bool[]? carried, KeyLockUniquifier uniquifier)
+    private KeyLockGroup(HeapTable table, object owner, int[] ordinals, int keyLength, bool isRowGroup, bool isUnique, bool[]? carried, KeyLockUniquifier uniquifier, bool carriesRid = false)
     {
         this.uniquifier = uniquifier;
+        this.CarriesRid = carriesRid;
         this.Table = table;
         this.Owner = owner;
         this.Ordinals = ordinals;
@@ -161,11 +169,13 @@ internal sealed class KeyLockGroup
     /// The <c>resource_description</c> <c>sys.dm_tran_locks</c> reports for the
     /// anchor on <paramref name="key"/>: real's hash of the key
     /// (<see cref="KeyLockHash"/>), or its <c>(ffffffffffff)</c> for the
-    /// infinity anchor. A non-unique nonclustered index over a heap hashes its
-    /// key alone, where real's carries the row's RID too.
+    /// infinity anchor. An index that <see cref="CarriesRid"/> hashes the
+    /// row's <paramref name="rid"/> after its key, the page real's layout puts
+    /// the row on and its slot; without one — an anchor standing for every row
+    /// of its key — it hashes the key alone, short of real's.
     /// </summary>
-    public string Describe(SqlValueKey? key) =>
-        key is { } k ? KeyLockHash.Describe(k, this.Commons, this.uniquifier) : "(ffffffffffff)";
+    public string Describe(SqlValueKey? key, (int Page, int Slot)? rid = null) =>
+        key is { } k ? KeyLockHash.Describe(k, this.Commons, this.uniquifier, this.CarriesRid ? rid : null) : "(ffffffffffff)";
 
     /// <summary>
     /// The group for <paramref name="owner"/> — one of <paramref name="table"/>'s
@@ -272,6 +282,7 @@ internal sealed class KeyLockGroup
         }
 
         return new KeyLockGroup(table, owner, [.. ordinals], keyOrdinals.Length, isRowGroup: false, isUnique, carried,
-            !isUnique && clusteredOwner is Index { IsUnique: false } ? KeyLockUniquifier.Last : KeyLockUniquifier.None);
+            !isUnique && clusteredOwner is Index { IsUnique: false } ? KeyLockUniquifier.Last : KeyLockUniquifier.None,
+            carriesRid: !isUnique && clusteredOwner is null && !table.Indexes.Exists(static index => index.IsClustered));
     }
 }

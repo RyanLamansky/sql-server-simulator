@@ -4124,10 +4124,12 @@ internal sealed partial class Selection
     /// <see cref="WhereIsClusteredKeySeek"/> for a joined UPDATE or DELETE,
     /// whose plan real folds the same way when every source beside the target
     /// is one row of constants — a one-row <c>VALUES</c>, a FROM-less
-    /// <c>SELECT</c>, a CTE or <c>APPLY</c> body of one — so that a column of
+    /// <c>SELECT</c>, a CTE or <c>APPLY</c> body of one, and any query reading
+    /// only such rows (<see cref="FoldsToConstants"/>) — so that a column of
     /// theirs is a constant too: the target's predicates, its inner joins'
     /// <c>ON</c> conditions with the <c>WHERE</c>, then seek the clustered key
-    /// and the write waits in X (probed 2026-10-08 against SQL Server 2025).
+    /// and the write waits in X (probed 2026-10-08 and 2026-10-17 against SQL
+    /// Server 2025).
     /// A table, a table variable, a derived table reading one, two
     /// <c>VALUES</c> rows, an outer join's <c>ON</c> and an <c>IN</c> or
     /// <c>EXISTS</c> over the constants keep the read, which waits in U.
@@ -4136,7 +4138,7 @@ internal sealed partial class Selection
     {
         for (var i = 0; i < sources.Length; i++)
         {
-            if (i != targetIndex && sources[i].LateralPlan is not { IsSingleConstantRow: true })
+            if (i != targetIndex && !(sources[i].LateralPlan is { } plan && FoldsToConstants(plan)))
                 return false;
         }
         var target = sources[targetIndex];
@@ -4153,6 +4155,19 @@ internal sealed partial class Selection
             && IsConstantAcrossJoin(left, sources, targetIndex) && IsConstantAcrossJoin(right, sources, targetIndex));
         return IsClusteredKeySeek(table, target, conjuncts, value => IsConstantAcrossJoin(value, sources, targetIndex));
     }
+
+    /// <summary>
+    /// Whether <paramref name="plan"/> yields at most one row computed from
+    /// constants alone: one row of constants, or a query whose every source is
+    /// one, however nested — a CTE or derived table over a <c>VALUES</c> row,
+    /// with a <c>TOP</c>, a <c>WHERE</c> or a projection of its own — which
+    /// real folds as it folds the row itself (probed 2026-10-17 against SQL
+    /// Server 2025); grouping, a window or a set operation keeps it a query.
+    /// </summary>
+    private static bool FoldsToConstants(Selection plan) =>
+        plan.IsSingleConstantRow
+        || (plan is { IsSetOperationResult: false, UnionAllBranches: null, IsGrouped: false, HasWindows: false, BranchFromSources: { Length: > 0 } sources }
+            && Array.TrueForAll(sources, static source => source.LateralPlan is { } inner && FoldsToConstants(inner)));
 
     /// <summary>Whether <paramref name="value"/> is fixed across a joined write's walk: constants, variables and the one-row constant sources' columns.</summary>
     private static bool IsConstantAcrossJoin(Expression value, FromSource[] sources, int targetIndex)

@@ -840,7 +840,7 @@ internal static class LockDmvs
             {
                 if (hold.Mode != LockMode.Exclusive)
                     continue;
-                foreach (var (group, key, keyImage) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
+                foreach (var (group, key, keyImage) in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live, (page, address.SlotIndex)))
                 {
                     if (!shown.Add((group, key, hold.Owner.Acting.Spid, ModeAbbreviation(LockMode.Exclusive), false)))
                         continue;
@@ -903,7 +903,7 @@ internal static class LockDmvs
     /// already is reported by that lock's own row.
     /// </summary>
     private static List<(KeyLockGroup Group, string Description, byte[] Image)> IndexKeysWritten(
-        BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live)
+        BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live, (int Page, int Slot) rid)
     {
         var keys = new List<(KeyLockGroup Group, string Description, byte[] Image)>();
         var locks = batch.Connection.Simulation.LockManager;
@@ -938,9 +938,9 @@ internal static class LockDmvs
                 return;
             var changed = pre is not null && live is not null && group.RowChanges(pre, live);
             if (live is not null && (inserted || changed))
-                AddKey(group, live, DescribeImageKey(table, group, live), filter);
+                AddKey(group, live, DescribeImageKey(table, group, live, rid), filter);
             if (pre is not null && (live is null || changed))
-                AddKey(group, pre, DescribeImageKey(table, group, pre), filter);
+                AddKey(group, pre, DescribeImageKey(table, group, pre, rid), filter);
         }
 
         void AddKey(KeyLockGroup group, byte[] image, string description, Parser.BooleanExpression? filter)
@@ -965,13 +965,13 @@ internal static class LockDmvs
     }
 
     // An image's key tuple in group, NULL components included, as an anchor
-    // on it is described.
-    private static string DescribeImageKey(HeapTable table, KeyLockGroup group, byte[] image)
+    // on it is described — a heap row's index key with the row's RID.
+    private static string DescribeImageKey(HeapTable table, KeyLockGroup group, byte[] image, (int Page, int Slot)? rid = null)
     {
         var components = new SqlValue[group.Ordinals.Length];
         for (var i = 0; i < components.Length; i++)
             components[i] = RowDecoder.DecodeColumn(table.StoredColumns, image, group.Ordinals[i], table.Heap);
-        return group.Describe(new Parser.SqlValueKey(components));
+        return group.Describe(new Parser.SqlValueKey(components), rid);
     }
 
     private static IEnumerable<LockRow> EmitRowsForResource(

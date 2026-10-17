@@ -20,7 +20,10 @@ namespace SqlServerSimulator.Storage;
 /// a non-unique clustered index's uniquifier. A non-unique clustered index
 /// counts its uniquifier as column 1 and its key from 2; a row's uniquifier is
 /// absent until a second row shares its key, so the first row of a key hashes
-/// it as zero-length.
+/// it as zero-length. A non-unique nonclustered index over a heap carries the
+/// base row's RID instead — the page id as four little-endian bytes, the file
+/// id as two and the slot as two — hashed whole as one more column (probed
+/// 2026-10-17 against SQL Server 2025, five keys of one index matched).
 /// </para>
 /// </summary>
 internal static class KeyLockHash
@@ -45,9 +48,10 @@ internal static class KeyLockHash
     /// <summary>
     /// The description of the key <paramref name="key"/> of columns typed
     /// <paramref name="types"/>, the uniquifier placed as
-    /// <paramref name="uniquifier"/> says.
+    /// <paramref name="uniquifier"/> says and a heap row's
+    /// <paramref name="rid"/> after the key when one is given.
     /// </summary>
-    public static string Describe(SqlValueKey key, SqlType[] types, KeyLockUniquifier uniquifier)
+    public static string Describe(SqlValueKey key, SqlType[] types, KeyLockUniquifier uniquifier, (int Page, int Slot)? rid = null)
     {
         var crc = ulong.MaxValue;
         var ordinal = uniquifier == KeyLockUniquifier.First ? 2 : 1;
@@ -92,6 +96,14 @@ internal static class KeyLockHash
             KeyLockUniquifier.Last => Absent(crc, ordinal),
             _ => crc,
         };
+        if (rid is var (page, slot))
+        {
+            Span<byte> locator = stackalloc byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(locator, page);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(locator[4..], 1);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(locator[6..], (short)slot);
+            crc = Update(crc, locator);
+        }
         return Format(~crc);
     }
 
