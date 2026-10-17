@@ -1574,7 +1574,8 @@ internal sealed partial class Selection
                     var viewSystemTime = ParseOptionalForSystemTimeClause(context);
                     var viewFlattens = context.BrowseFlattenFrom;
                     var viewGraphIdentity = !viewFlattens && context.GraphIdentityPassthrough;
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens, viewGraphIdentity);
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens, viewGraphIdentity,
+                        carriesDeferredReads: !viewFlattens && !viewGraphIdentity && context.MayCarryDeferredReads);
                     // A body a browse statement flattens trails the view's own
                     // columns with its base tables' hidden ones, and a body
                     // carrying a graph table's identity with that.
@@ -1701,7 +1702,7 @@ internal sealed partial class Selection
                             InlinedScalarCalls.Note(context, expanded);
                         var lateralPlan = function switch
                         {
-                            InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName),
+                            InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName).DeferringAs(Simulation.InlineTvfOfferBody(context.Batch, inlineTvf, tvfArgs, objectName)),
                             ClrTableValuedFunction clrTvf => Selection.ForClrTvf(context.Batch, clrTvf, tvfArgs),
                             _ => Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs),
                         };
@@ -1946,6 +1947,7 @@ internal sealed partial class Selection
                 var derivedFlattens = context.BrowseFlattenFrom;
                 using (ParserScope.Enter(ref context.BrowseFlatten, derivedFlattens))
                 using (ParserScope.Enter(ref context.ForceSeekDeferrable, true))
+                using (ParserScope.Enter(ref context.CarriesDeferredReads, !derivedFlattens && context.MayCarryDeferredReads))
                 {
                     derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
                         QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));

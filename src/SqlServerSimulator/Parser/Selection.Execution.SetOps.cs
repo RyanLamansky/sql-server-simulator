@@ -497,6 +497,15 @@ internal sealed partial class Selection
     private static Selection? PushIntoBranches(Selection combined, List<BooleanExpression> templates)
     {
         var (left, right, kind) = combined.SetOperands!.Value;
+        // Whether real filters an INTERSECT's or EXCEPT's branches by an
+        // expression of their columns follows its plan, so only plain columns'
+        // conjuncts reach them.
+        if (kind is SetOpKind.Intersect or SetOpKind.Except)
+        {
+            templates = templates.FindAll(static template => !ComputesOverSlots(template));
+            if (templates.Count == 0)
+                return null;
+        }
         var pushedLeft = left.PredicatePushdown?.Invoke(templates);
         var pushedRight = right.PredicatePushdown?.Invoke(templates);
         if (pushedLeft is null && pushedRight is null)

@@ -274,6 +274,7 @@ internal abstract class Expression : ExpressionNode
         Numeric number => NumericLiteral(context, number),
         Literal literal => new Value(literal.Value),
         AtPrefixedString atPrefixed when context.RuleVariables is { } ruleVariables => RuleVariable(ruleVariables, atPrefixed),
+        AtPrefixedString atPrefixed when context.Batch.InlinesVariableValues => Value.NonLiteral(context.Batch.GetVariableSlot(atPrefixed.Value).Value),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
         DoubleAtPrefixedString doubleAtPrefixedString => MarkOpeningAtAt(context, doubleAtPrefixedString.Parse()) switch
         {

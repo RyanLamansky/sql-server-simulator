@@ -1676,6 +1676,11 @@ internal sealed partial class Selection
             && parseBatch.Parser.Token is not Tokens.ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect }
             ? AppendGraphIdentityColumns(sources, expressions, out graphIdentityTable)
             : 0;
+        var carrierHidden = !browse && !browseFlattened && graphIdentityHidden == 0 && browsePassesRows && parseBatch.Parser.CarriesDeferredReads
+            && intoTarget is null && !isAssignmentOnly && !parseBatch.Parser.LaterSetOperationBranch
+            && (scope.Position, parseBatch.Parser.Token) is (QueryPosition.Derived, Tokens.Operator { Character: ')' }) or (QueryPosition.Inlined, null)
+            ? AppendCarrierColumns(sources, expressions)
+            : 0;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
@@ -2387,6 +2392,10 @@ internal sealed partial class Selection
             selection.GraphIdentityColumnCount = graphIdentityHidden;
             selection.GraphIdentityTable = graphIdentityTable;
         }
+        else
+        {
+            selection.CarrierColumnCount = carrierHidden;
+        }
         RefuseRepeatedOrderTerms(sources, orderBy, expressions, outputColumnNames);
         if (orderBy.Count > 0 && scope.Position == QueryPosition.Statement)
             selection.OrderColumns = OrderTokenColumns(sources, orderBy, expressions, outputColumnNames);
@@ -2468,8 +2477,30 @@ internal sealed partial class Selection
         // leaves the rest of uncomputed — unless another plan built over the
         // same sources has said so already (notesDemand: false).
         if (notesDemand)
-            NoteProjectionDemand(selection, sources, joins, expressions, fromClause, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, distinct, topExpression, outputColumnNames, projectionStartupOwners);
+        {
+            NoteProjectionDemand(selection, sources, joins, expressions, fromClause, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, distinct, topExpression, outputColumnNames, projectionStartupOwners,
+                OneRowAggregatesOf(sources, joins, fromClause, aggregates, parseBatch, resolveColumnType));
+        }
         return selection;
+    }
+
+    /// <summary>
+    /// The aggregates of a query each of whose groups holds one row
+    /// (<see cref="GroupsHoldOneRow"/>) that reduce to that row's value (see
+    /// <see cref="OneRowAggregate"/>); null for any other query.
+    /// </summary>
+    private static OneRowAggregate[]? OneRowAggregatesOf(FromSource[] sources, JoinSpec[] joins, FromClause fromClause, List<AggregateExpression> aggregates, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (aggregates.Count == 0 || !GroupsHoldOneRow(sources, joins, fromClause))
+            return null;
+        var reduced = new List<OneRowAggregate>(aggregates.Count);
+        foreach (var aggregate in aggregates)
+        {
+            var operandType = aggregate.Operand?.GetSqlType(batch, resolveColumnType) ?? SqlType.Int32;
+            if (OneRowAggregate.For(aggregate, operandType, aggregate.GetSqlType(batch, resolveColumnType)) is { } one)
+                reduced.Add(one);
+        }
+        return reduced.Count > 0 ? [.. reduced] : null;
     }
 
     /// <summary>
@@ -2738,6 +2769,14 @@ internal sealed partial class Selection
         return flags;
     }
 
+    /// <summary>
+    /// The base-table column behind a view reference's column at
+    /// <paramref name="ordinal"/>, or -1 — for a derived column, and for a
+    /// hidden one the body carries past the view's own.
+    /// </summary>
+    private static int BaseOrdinalOf(Schemas.View view, int ordinal) =>
+        ordinal < view.BaseColumnOrdinals.Length ? view.BaseColumnOrdinals[ordinal] : -1;
+
     private static byte SourceColumnWireFlags(FromSource from, int ordinal)
     {
         // A FOR SYSTEM_TIME source is read-only, as is a period column
@@ -2758,9 +2797,9 @@ internal sealed partial class Selection
         }
         // An updatable view's column traces to the base column behind it, and
         // one of its expressions is computed.
-        if (from.BackingView is { BaseTable: not null } expressionView && expressionView.BaseColumnOrdinals[ordinal] < 0)
+        if (from.BackingView is { BaseTable: not null } expressionView && BaseOrdinalOf(expressionView, ordinal) < 0)
             return 0x20;
-        var column = from.BackingView is { BaseTable: { } baseTable } view && view.BaseColumnOrdinals[ordinal] is >= 0 and var baseOrdinal
+        var column = from.BackingView is { BaseTable: { } baseTable } view && BaseOrdinalOf(view, ordinal) is >= 0 and var baseOrdinal
             ? baseTable.Columns[baseOrdinal]
             : from.Columns[ordinal];
         return column switch
@@ -2791,7 +2830,7 @@ internal sealed partial class Selection
             var from = sources[source[i]];
             // A view column traces through to the base column behind it.
             var column = from.BackingTable is not null ? from.Columns[ordinal[i]]
-                : from.BackingView is { BaseTable: { } baseTable } view && view.BaseColumnOrdinals[ordinal[i]] is >= 0 and var baseOrdinal ? baseTable.Columns[baseOrdinal]
+                : from.BackingView is { BaseTable: { } baseTable } view && BaseOrdinalOf(view, ordinal[i]) is >= 0 and var baseOrdinal ? baseTable.Columns[baseOrdinal]
                 : null;
             if (column is not null)
                 (origins ??= new HeapColumn?[source.Length])[i] = column;

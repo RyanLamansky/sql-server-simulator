@@ -242,8 +242,39 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// The body a call of <paramref name="inline"/> offers its reader the
+    /// deferred columns of (see <see cref="Selection.DeferringAs"/>), as a
+    /// view's does: real merges the body into the query, so <c>SELECT x FROM
+    /// f(1000) WHERE k % 1000 &lt;&gt; 3</c> answers over a body projecting
+    /// <c>10 / (k % @m - 3)</c> (probed 2026-10-17 against SQL Server 2025).
+    /// The body parses each parameter as its argument's value, so the offered
+    /// columns read a constant; null for a call whose arguments aren't all
+    /// written constants, which only a constant keeps for every run, or whose
+    /// body doesn't parse here.
+    /// </summary>
+    internal static Selection? InlineTvfOfferBody(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
+        if (batch.IsSkipping || !Array.TrueForAll(arguments, static argument => argument is null || (argument is not Parser.Expressions.TableValuedArgument && argument.IsWrittenConstant)))
+            return null;
+        try
+        {
+#if DEBUG
+            // Only the columns the body offers are kept, which no principal
+            // changes: a body failing to parse for one offers none, and its
+            // run parses it again as the executing principal.
+            using var principalIndependent = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+            return ParseInlineTvfCall(batch, inline, arguments, name, inlinesArguments: true);
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>An inline function's body parsed with <paramref name="arguments"/> evaluated as its parameters' values.</summary>
-    private static Selection ParseInlineTvfCall(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    private static Selection ParseInlineTvfCall(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name, bool inlinesArguments = false)
     {
         var (argValues, isDefault, _) = EvaluateFunctionArguments(
             inline, arguments, new RuntimeContext(written => throw SimulatedSqlException.InvalidColumnName(written), batch));
@@ -277,6 +308,7 @@ partial class Simulation
             SuppressDiagnosticsResolution = true,
             BindsModuleDefinition = true,
             CursorDeclarationSnapshot = new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer),
+            InlinesVariableValues = inlinesArguments,
             ModuleSchema = inline.Schema,
         };
         innerBatch.AdoptStatementFreezeFrom(batch);

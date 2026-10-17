@@ -118,7 +118,8 @@ partial class Simulation
         OutputProjection? output,
         Dictionary<SqlValue[], byte[]?[]>? tuplesByRow,
         Selection.DmlTopLimit? top,
-        PositionedCursorTarget? positionedCursor)
+        PositionedCursorTarget? positionedCursor,
+        bool[]? targetReads = null)
     {
         var batch = context.Batch;
         var seen = new HashSet<(int Page, int Slot)>();
@@ -157,7 +158,7 @@ partial class Simulation
         // rows, computed here, after the waits above.
         var targetAddresses = new RowAddressMap();
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        sources = SourcesAlongPath(batch, chain, path, 0, original => original.AsWriteTarget(targetAddresses), rowMaps);
+        sources = SourcesAlongPath(batch, chain, path, 0, original => original.AsWriteTarget(targetAddresses), rowMaps, targetReads);
         // A target among the chain's own sources narrows, seeks and reorders
         // as a joined UPDATE's does, by the filters every level and the
         // statement apply, rebound onto the join's sources.
@@ -253,7 +254,7 @@ partial class Simulation
         byte[]? QualifyingTuple(byte[] rowBytes)
         {
             var narrowedMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-            var narrowed = SourcesAlongPath(batch, chain, path, 0, original => SingleRowSource(original, rowBytes, original.LobStore), narrowedMaps);
+            var narrowed = SourcesAlongPath(batch, chain, path, 0, original => SingleRowSource(original, rowBytes, original.LobStore), narrowedMaps, targetReads);
             foreach (var candidate in Selection.EnumerateJoinedRows(narrowed, chain.Joins, batch, outerResolver: null))
             {
                 tuple = candidate;

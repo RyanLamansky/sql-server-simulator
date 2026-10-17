@@ -216,6 +216,35 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool GraphIdentityPassthrough = command.CommandText?.Contains("MATCH", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>
+    /// Whether the derived table or view body parsing carries, behind its own
+    /// columns and hidden, the columns its computed columns read but don't
+    /// project (<c>Selection.AppendCarrierColumns</c>), so its reader may
+    /// evaluate those columns where it reads them. Armed by a derived table
+    /// or view reference wherever <see cref="MayCarryDeferredReads"/> allows.
+    /// </summary>
+    public bool CarriesDeferredReads;
+
+    /// <summary>
+    /// Whether this view body is parsed for a reference carrying the columns
+    /// its computed columns read (see <see cref="CarriesDeferredReads"/>),
+    /// which the derived tables and view references inside it follow, so
+    /// every parse of one body lays its sources out alike.
+    /// </summary>
+    public bool InCarryingBody;
+
+    /// <summary>
+    /// Whether a derived table or view reference parsed here carries the
+    /// columns its body's computed columns read (see <see cref="CarriesDeferredReads"/>):
+    /// in a view's or function's body, as the reference parsing it asked; in
+    /// a <c>SELECT</c> or <c>INSERT</c> statement, whose sources only their
+    /// reader reads, by name, outside a module's definition and a cursor's
+    /// query, which re-reads its sources itself; never elsewhere.
+    /// </summary>
+    public bool MayCarryDeferredReads => this.Batch.UdfFrame is not null
+        ? this.InCarryingBody
+        : this.Batch.CurrentStatement.StatementVerb is "SELECT" or "INSERT" && this.DefiningModuleQuery == DefiningModuleQuery.None && !this.Batch.CreateTimeBinding && !this.CursorStatement;
+
+    /// <summary>
     /// Armed by a FROM source of a <see cref="BrowseFlattenFrom"/> clause just
     /// before it parses its body, and consumed by the first query block that
     /// body begins — which then flattens (<see cref="BrowseFlattenBody"/>)

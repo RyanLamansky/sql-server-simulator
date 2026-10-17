@@ -44,6 +44,17 @@ partial class Simulation
         public readonly List<(int Page, int Slot)> HeldRows = [];
 
         public readonly bool ChecksOption = chain.HasCheckOptionAlong(path);
+
+        /// <summary>
+        /// Per view column, whether the statement reads it, the rest going
+        /// uncomputed as a read of the view leaves them — save one projecting
+        /// the written table's column, which the write carries back to its
+        /// base row, and one the view-shaped heap holds NOT NULL: a
+        /// <c>MERGE</c> into a join view projecting <c>10 / (a.k - 3)</c>
+        /// whose clauses never read that column answers (probed 2026-10-17
+        /// against SQL Server 2025). Null: every column is read.
+        /// </summary>
+        public bool[]? TargetReads;
     }
 
     /// <summary>
@@ -254,6 +265,11 @@ partial class Simulation
             var values = new SqlValue[columns.Length];
             for (var i = 0; i < values.Length; i++)
             {
+                if (plan.TargetReads is { } reads && !reads[i] && plan.ViewToBase[i] < 0 && columns[i].Nullable)
+                {
+                    values[i] = SqlValue.Null(columns[i].Type);
+                    continue;
+                }
                 var value = resolvers[topLevel](names[i]);
                 values[i] = value.Type == columns[i].Type ? value
                     : value.IsNull ? SqlValue.Null(columns[i].Type)

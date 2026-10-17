@@ -2372,6 +2372,14 @@ internal sealed partial class BatchContext
     public Dictionary<string, VariableSlot>? CursorDeclarationSnapshot;
 
     /// <summary>
+    /// Whether a variable this batch's queries name parses as the value it
+    /// holds, a constant: an inline function's body parsed for the columns it
+    /// offers its reader over constant arguments, whose offer outlives the
+    /// parse in a shared plan (see <c>Simulation.InlineTvfOfferBody</c>).
+    /// </summary>
+    public bool InlinesVariableValues;
+
+    /// <summary>
     /// The copy of <paramref name="slot"/> a cursor declaration reads — see
     /// <see cref="CursorDeclarationSnapshot"/> — or null outside one.
     /// </summary>

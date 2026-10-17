@@ -354,6 +354,13 @@ partial class Simulation
     /// chain's own tuples, each encoded row recorded against the inner tuple
     /// it came from in <paramref name="rowMaps"/> at its depth — which is how a
     /// tuple of the outer view leads back to the base row it shows.
+    /// <paramref name="read"/> names the columns a joined statement reads of
+    /// the join view its target source is (null: every one), whose other
+    /// columns go uncomputed, and whose columns the view offers its reader
+    /// are evaluated where the statement reads them, as a read through the
+    /// view leaves them: <c>UPDATE jv SET j = 9 FROM jv JOIN t ON jv.k = t.k
+    /// WHERE jv.k &lt;&gt; 3 AND jv.x &gt; -100</c> answers over a view projecting
+    /// <c>10 / (a.k - 3)</c> (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static FromSource[] SourcesAlongPath(
         BatchContext batch,
@@ -361,7 +368,8 @@ partial class Simulation
         int[] path,
         int depth,
         Func<FromSource, FromSource> wrapTarget,
-        Dictionary<byte[], byte[]?[]>[] rowMaps)
+        Dictionary<byte[], byte[]?[]>[] rowMaps,
+        bool[]? read = null)
     {
         var sources = (FromSource[])chain.Sources.Clone();
         var slot = path[depth];
@@ -380,6 +388,21 @@ partial class Simulation
         SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(innerSources, tuple, name, batch);
         var (resolvers, belowRuntimes) = BuildChainResolvers(batch, inner, resolveTuple);
         var topLevel = inner.Views.Length - 1;
+        bool[]? computes = null;
+        DeferredColumn?[]? deferred = null;
+        if (depth == 0 && read is not null && read.Length == original.Columns.Length)
+        {
+            computes = (bool[])read.Clone();
+            if (original.LateralPlan?.DeferrableColumns() is { } offered && offered.Length == computes.Length)
+            {
+                for (var c = 0; c < computes.Length; c++)
+                {
+                    if (computes[c] && offered[c] is { ReadsOnlyItsRow: true } column)
+                        (deferred ??= new DeferredColumn?[computes.Length])[c] = column;
+                }
+            }
+            DeferredColumn.ComputeDependenciesInstead(computes, deferred);
+        }
         var rows = new List<byte[]>();
         foreach (var candidate in Selection.EnumerateJoinedRows(innerSources, inner.Joins, batch, outerResolver: null))
         {
@@ -388,7 +411,11 @@ partial class Simulation
                 continue;
             var values = new SqlValue[original.Columns.Length];
             for (var i = 0; i < values.Length; i++)
-                values[i] = resolvers[topLevel](new MultiPartName(inner.Views[topLevel].OutputColumns[i].Name));
+            {
+                values[i] = computes is null || computes[i]
+                    ? resolvers[topLevel](new MultiPartName(inner.Views[topLevel].OutputColumns[i].Name))
+                    : SqlValue.Null(original.Columns[i].Type);
+            }
             var bytes = RowEncoder.EncodeRow(original.Columns, values);
             rowMap[bytes] = (byte[]?[])candidate.Clone();
             rows.Add(bytes);
@@ -403,7 +430,10 @@ partial class Simulation
             lobStore: null,
             rows: rows,
             backingTable: null,
-            unaliasedName: original.UnaliasedName);
+            unaliasedName: original.UnaliasedName)
+        {
+            DeferredColumns = deferred,
+        };
         return sources;
     }
 

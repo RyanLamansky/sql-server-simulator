@@ -299,6 +299,10 @@ partial class Simulation
         // 2026-10-17 against SQL Server 2025: a source column dividing by zero
         // that no action reads, or that an action reads under a guard the
         // failing row never passes, leaves the MERGE running).
+        // So do the target's, through a join view whose rows the statement
+        // builds itself, unless an OUTPUT or a WITH CHECK OPTION reads them whole.
+        if (joinWrite is { ChecksOption: false } && output is null)
+            joinWrite.TargetReads = MergeSourceReads(context.CurrentDatabase.Collation, targetAlias, [.. destinationTable.Columns.Select(static column => column.Name)], onPredicate, whenClauses, output: null);
         var sourceDeferred = sourceDemand?.Invoke(
             MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output),
             MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, [], output));

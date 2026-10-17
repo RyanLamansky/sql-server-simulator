@@ -162,7 +162,12 @@ partial class Selection
             }
 
             if (!operand.IsRowIndependent)
-                return null;
+            {
+                if (SlotExpression.Of(operand, sources, index, batch) is not { } slotted)
+                    return null;
+                namesTheSource = true;
+                return slotted;
+            }
             try
             {
                 return Value.NonLiteral(operand.Run(new RuntimeContext(
@@ -283,6 +288,7 @@ partial class Selection
             var rebound = RebindTemplate(template, operand => operand switch
             {
                 ProjectionSlot slot => slotColumn(slot.Ordinal),
+                SlotExpression slotted => slotted.Bind(slotColumn),
                 Value constant => constant,
                 _ => null,
             });
@@ -742,5 +748,195 @@ partial class Selection
         internal override string DebugDisplay() => $"<projection slot {this.Ordinal}>";
 
         internal override void Describe(NodeShape shape) => shape.Local(this.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="template"/> computes over a slot's column rather
+    /// than comparing the column itself (see <see cref="SlotExpression"/>).
+    /// </summary>
+    private static bool ComputesOverSlots(BooleanExpression template)
+    {
+        var computes = false;
+        template.Walk(ref computes, static (node, _, ref computes) =>
+        {
+            computes |= node is SlotExpression;
+            return !computes;
+        });
+        return computes;
+    }
+
+    /// <summary>
+    /// A template operand computing over the columns this plan projects — the
+    /// <c>k % 1000</c> of <c>WHERE k % 1000 &lt;&gt; 3</c> — which real filters
+    /// beneath a <c>DISTINCT</c>, a <c>UNION</c> or <c>UNION ALL</c> and a
+    /// grouping as it does a plain column's conjunct, so <c>SELECT x FROM
+    /// (SELECT DISTINCT k, 10 / (k % 1000 - 3) AS x FROM t) d WHERE k % 1000
+    /// &lt;&gt; 3</c> answers there (probed 2026-10-17 against SQL Server 2025,
+    /// alike under every plan, hint and index layout tried). The written
+    /// expression runs over the body's row, each name it reads answered by the
+    /// body's own expression for the column the name projects (<see cref="Bind"/>).
+    /// </summary>
+    /// <remarks>
+    /// Only an expression that is NULL whenever a column it reads is NULL
+    /// qualifies — columns, literals, arithmetic, unary minus and the
+    /// conversions — since the residual invariant rests on the rebuilt
+    /// predicate reading UNKNOWN over a NULL-extended row, as the plain shapes
+    /// do.
+    /// </remarks>
+    private sealed class SlotExpression : Expression
+    {
+        private readonly Expression written;
+        private readonly MultiPartName[] names;
+        private readonly int[] ordinals;
+        private readonly SqlType type;
+
+        /// <summary>The body's expressions each name reads, in <see cref="names"/>' order; null on a template.</summary>
+        private readonly Expression[]? bound;
+
+        private SlotExpression(Expression written, MultiPartName[] names, int[] ordinals, SqlType type, Expression[]? bound)
+        {
+            this.written = written;
+            this.names = names;
+            this.ordinals = ordinals;
+            this.type = type;
+            this.bound = bound;
+        }
+
+        /// <summary>
+        /// The template of <paramref name="operand"/> for the source at
+        /// <paramref name="index"/> of <paramref name="sources"/>: every name it
+        /// reads one of that source's columns, every node one of the
+        /// NULL-propagating kinds; null otherwise.
+        /// </summary>
+        public static SlotExpression? Of(Expression operand, FromSource[] sources, int index, BatchContext batch)
+        {
+            var state = (Sources: sources, Index: index, Names: new List<MultiPartName>(), Ordinals: new List<int>(), Qualifies: true);
+            operand.Walk(ref state, static (node, shape, ref state) =>
+            {
+                switch (node)
+                {
+                    case Reference reference:
+                        var (source, column) = FindSourceColumn(state.Sources, reference.ReferencedName);
+                        if (source != state.Index)
+                        {
+                            state.Qualifies = false;
+                        }
+                        else if (IndexOfName(state.Names, reference.ReferencedName) < 0)
+                        {
+                            state.Names.Add(reference.ReferencedName);
+                            state.Ordinals.Add(column);
+                        }
+                        return false;
+                    case Value or Parenthesized or Expressions.Negate or Add or Subtract or Multiply or Divide or Modulus or Cast or ConvertExpression:
+                        return state.Qualifies;
+                    default:
+                        state.Qualifies = false;
+                        return false;
+                }
+            });
+            if (!state.Qualifies || state.Names.Count == 0)
+                return null;
+            var columns = sources[index].Columns;
+            var (names, ordinals) = (state.Names, state.Ordinals);
+            SqlType type;
+            try
+            {
+                type = operand.GetSqlType(batch, name => columns[ordinals[IndexOfName(names, name)]].Type);
+            }
+            catch (Exception e) when (e is SimulatedSqlException or NotSupportedException or ArgumentOutOfRangeException)
+            {
+                return null;
+            }
+            return new SlotExpression(operand, [.. names], [.. ordinals], type, bound: null);
+        }
+
+        private static int IndexOfName(List<MultiPartName> names, MultiPartName name)
+        {
+            for (var i = 0; i < names.Count; i++)
+            {
+                if (DeferredColumn.SameName(names[i], name))
+                    return i;
+            }
+            return -1;
+        }
+
+        /// <summary>
+        /// This template over a body whose column at each ordinal
+        /// <paramref name="slotColumn"/> answers; null when one of them doesn't.
+        /// </summary>
+        public SlotExpression? Bind(Func<int, Expression?> slotColumn)
+        {
+            var bound = new Expression[this.ordinals.Length];
+            for (var i = 0; i < bound.Length; i++)
+            {
+                if (slotColumn(this.ordinals[i]) is not { } column)
+                    return null;
+                bound[i] = column;
+            }
+            return new SlotExpression(this.written, this.names, this.ordinals, this.type, bound);
+        }
+
+        public override SqlValue Run(RuntimeContext runtime)
+        {
+            if (this.bound is null)
+                throw new NotSupportedException("A pushed-predicate projection slot must be rebound before it runs.");
+            // Evaluated once per body row, so the resolver comes from a
+            // per-thread pool of frames rather than a closure per call.
+            var frame = idleFrames ?? new Frame();
+            idleFrames = frame.NextIdle;
+            (frame.Owner, frame.Runtime) = (this, runtime);
+            try
+            {
+                return this.written.Run(new RuntimeContext(frame.Resolve, runtime.Batch));
+            }
+            finally
+            {
+                (frame.Owner, frame.Runtime) = (null, default);
+                frame.NextIdle = idleFrames;
+                idleFrames = frame;
+            }
+        }
+
+        private SqlValue Read(MultiPartName name, RuntimeContext runtime)
+        {
+            for (var i = 0; i < this.names.Length; i++)
+            {
+                if (DeferredColumn.SameName(this.names[i], name))
+                    return this.bound![i].Run(runtime);
+            }
+            throw new InvalidOperationException($"'{name}' in a pushed predicate has no binding.");
+        }
+
+        [ThreadStatic]
+        private static Frame? idleFrames;
+
+        /// <summary>One evaluation's state, read by its cached resolver.</summary>
+        private sealed class Frame
+        {
+            public readonly Func<MultiPartName, SqlValue> Resolve;
+
+            public SlotExpression? Owner;
+
+            public RuntimeContext Runtime;
+
+            public Frame? NextIdle;
+
+            public Frame() => this.Resolve = name => this.Owner!.Read(name, this.Runtime);
+        }
+
+        public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.type;
+
+        internal override string DebugDisplay() => $"<pushed {this.written.DebugDisplay()}>";
+
+        // The written expression binds in the enclosing query's scope, so a
+        // walk reaches only the body's expressions it reads through.
+        internal override void Describe(NodeShape shape)
+        {
+            _ = shape.Local(this.written);
+            foreach (var ordinal in this.ordinals)
+                _ = shape.Local(ordinal);
+            if (this.bound is { } columns)
+                _ = shape.Children(columns);
+        }
     }
 }

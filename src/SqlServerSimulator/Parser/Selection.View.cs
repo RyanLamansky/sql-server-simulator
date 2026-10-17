@@ -83,6 +83,9 @@ partial class Selection
         bool graphIdentity = false)
     {
         columns ??= view.OutputColumns;
+        // Hidden columns past the recorded ones, of neither kind above, are
+        // the ones the body carries for its reader (see ParserContext.CarriesDeferredReads).
+        var carriesDeferredReads = !browseFlatten && !graphIdentity && columns.Length > view.OutputColumns.Length;
         var schema = new SqlType[columns.Length];
         var columnNames = new string[columns.Length];
         for (var i = 0; i < columns.Length; i++)
@@ -99,7 +102,7 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) => RowSecurity.FilterViewRows(
-                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten, rowNumberBounds, graphIdentity, RowSecurity.ViewReaderDemand(view, self!.ReaderDemand, outerBatch)), outerBatch))
+                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten, rowNumberBounds, graphIdentity, carriesDeferredReads, RowSecurity.ViewReaderDemand(view, self!.ReaderDemand, outerBatch)), outerBatch))
         {
             PredicatePushdown = templates => ForView(
                 view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten, rowNumberBounds, graphIdentity).TakingReaderDemand(self!.ReaderDemand),

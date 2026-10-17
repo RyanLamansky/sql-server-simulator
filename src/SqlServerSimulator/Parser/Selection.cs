@@ -4179,7 +4179,8 @@ internal sealed partial class Selection
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
             OrderColumns = orderBy.Count > 0 && scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, expressions, columnNames) : null,
-        }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread);
+        }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread,
+            yieldsOneRow: excluders.Count == 0 && topCount is null && offsetCount is null && fetchCount is null && !isAssignmentOnly && intoTarget is null);
     }
 
     /// <summary>

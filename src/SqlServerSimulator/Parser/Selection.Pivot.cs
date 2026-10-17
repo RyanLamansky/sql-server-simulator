@@ -128,13 +128,14 @@ internal sealed partial class Selection
         }
 
         // Grouping key = every inner column except the FOR column and the
-        // aggregate argument column. Each has to be comparable (Msg 488).
+        // aggregate argument column — and the hidden ones a body carries
+        // behind its own. Each has to be comparable (Msg 488).
         var groupingRefs = new List<Expression>();
         var groupingNames = new List<string>();
         for (var i = 0; i < source.ColumnNames.Length; i++)
         {
             var colName = source.ColumnNames[i];
-            if (BuiltInToken.Equals(colName, forColName) || BuiltInToken.Equals(colName, argColName))
+            if (source.Columns[i].IsHidden || BuiltInToken.Equals(colName, forColName) || BuiltInToken.Equals(colName, argColName))
                 continue;
             if (source.Columns[i].Type.IsIncomparable)
             {
@@ -269,10 +270,14 @@ internal sealed partial class Selection
         if (namesMissing)
             return FromSource.DeferredPlaceholder(alias);
 
-        // Passthrough columns = inner columns not folded by the IN list.
+        // Passthrough columns = inner columns not folded by the IN list, the
+        // hidden ones aside.
         var passthroughNames = new List<string>();
-        foreach (var colName in source.ColumnNames)
+        for (var c = 0; c < source.ColumnNames.Length; c++)
         {
+            var colName = source.ColumnNames[c];
+            if (source.Columns[c].IsHidden)
+                continue;
             var folded = false;
             foreach (var col in unpivotColumns)
             {

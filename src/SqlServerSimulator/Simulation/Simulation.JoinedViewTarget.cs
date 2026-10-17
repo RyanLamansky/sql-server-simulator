@@ -476,7 +476,17 @@ partial class Simulation
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
-        return RunJoinViewUpdate(context, chain, path, table, assignments, where, output, tuplesByRow, top, positionedCursor: null);
+        // The join view's columns the statement never reads go uncomputed,
+        // unless an OUTPUT or a WITH CHECK OPTION reads its rows whole.
+        bool[]? targetReads = null;
+        if (output is null && !chain.HasCheckOptionAlong(path))
+        {
+            List<ExpressionNode> reads = [.. rawAssignments.Select(static assignment => assignment.Expr)];
+            if (where is not null)
+                reads.Add(where);
+            targetReads = Selection.TargetColumnReads(sources, joins, targetIndex, reads);
+        }
+        return RunJoinViewUpdate(context, chain, path, table, assignments, where, output, tuplesByRow, top, positionedCursor: null, targetReads);
     }
 
     /// <summary>

@@ -53,6 +53,7 @@ partial class Simulation
     /// an ordinary reference.
     /// </param>
     /// <param name="graphIdentity">Whether the body carries the graph table it reads through as hidden trailing columns.</param>
+    /// <param name="carriesDeferredReads">Whether the body carries the columns its computed columns read as hidden trailing columns (see <see cref="ParserContext.CarriesDeferredReads"/>).</param>
     /// <param name="readerDemand">
     /// The columns the referencing query reads (see <see cref="Selection.AcceptDemand"/>),
     /// the rest of which the body leaves uncomputed; null when it reads every column.
@@ -66,12 +67,13 @@ partial class Simulation
         bool browseFlatten = false,
         List<Selection.RowNumberBound>? rowNumberBounds = null,
         bool graphIdentity = false,
+        bool carriesDeferredReads = false,
         bool[]? readerDemand = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
-        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten, rowNumberBounds, graphIdentity, readerDemand);
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten, rowNumberBounds, graphIdentity, carriesDeferredReads, readerDemand);
         return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
@@ -101,10 +103,12 @@ partial class Simulation
     /// When a browse statement flattens the body (<c>browseFlatten</c>), the
     /// body comes back carrying its base tables' hidden browse columns, which
     /// the returned columns don't include — and so does a body asked to carry
-    /// the graph table it reads through (<c>graphIdentity</c>).
+    /// the graph table it reads through (<c>graphIdentity</c>), and so does
+    /// one asked to carry the columns its computed columns read
+    /// (<c>carriesDeferredReads</c>).
     /// </para>
     /// </remarks>
-    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body, ForSystemTimeClause? systemTime = null, bool browseFlatten = false, bool graphIdentity = false)
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body, ForSystemTimeClause? systemTime = null, bool browseFlatten = false, bool graphIdentity = false, bool carriesDeferredReads = false)
     {
         body = null;
         Selection plan;
@@ -122,7 +126,7 @@ partial class Simulation
             // again as the executing principal.
             using var principalIndependent = PlanCacheCaptureAudit.SuspendPrincipalWatch();
 #endif
-            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited, browseFlatten, graphIdentity);
+            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited, browseFlatten, graphIdentity, carriesDeferredReads);
         }
         catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281 or 13590)
         {
@@ -205,7 +209,7 @@ partial class Simulation
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
         view.UnstoredBody ?? ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
 
-    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks, InheritedSystemTime? systemTime = null, bool browseFlatten = false, bool graphIdentity = false)
+    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks, InheritedSystemTime? systemTime = null, bool browseFlatten = false, bool graphIdentity = false, bool carriesDeferredReads = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -235,6 +239,7 @@ partial class Simulation
             parser.MoveNextRequired();
             parser.BrowseFlatten = browseFlatten;
             parser.GraphIdentityPassthrough = graphIdentity;
+            parser.CarriesDeferredReads = parser.InCarryingBody = carriesDeferredReads;
             var body = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A join hint in the body warns as the referencing statement compiles.
             outerBatch.Parser.JoinOrderEnforced |= parser.JoinOrderEnforced;
@@ -266,6 +271,7 @@ partial class Simulation
         bool browseFlatten,
         List<Selection.RowNumberBound>? rowNumberBounds,
         bool graphIdentity,
+        bool carriesDeferredReads,
         bool[]? readerDemand)
     {
         var connection = outerBatch.Connection;
@@ -305,6 +311,7 @@ partial class Simulation
             parser.MoveNextRequired();
             parser.BrowseFlatten = browseFlatten;
             parser.GraphIdentityPassthrough = graphIdentity;
+            parser.CarriesDeferredReads = parser.InCarryingBody = carriesDeferredReads;
             var bodySelection = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A view body is inlined into the referencing statement, so its
             // reads reach no ordinary check site — and a same-database one

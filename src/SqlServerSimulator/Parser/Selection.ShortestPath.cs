@@ -21,13 +21,15 @@ internal sealed partial class Selection
     /// <summary>The node or edge table whose identity <see cref="GraphIdentityColumnCount"/> columns carry.</summary>
     internal HeapTable? GraphIdentityTable;
 
-    /// <summary>How many hidden columns trail this body's own: a browse statement's, or a graph identity's.</summary>
-    internal int TrailingHiddenColumnCount => this.BrowseFlattened ? this.HiddenColumnCount : this.GraphIdentityColumnCount;
+    /// <summary>How many hidden columns trail this body's own: a browse statement's, a graph identity's, or the carried ones (see <see cref="CarrierColumnCount"/>).</summary>
+    internal int TrailingHiddenColumnCount => this.BrowseFlattened ? this.HiddenColumnCount : this.GraphIdentityColumnCount > 0 ? this.GraphIdentityColumnCount : this.CarrierColumnCount;
 
     /// <summary>The name a FROM source over this body gives the hidden column at <paramref name="ordinal"/>.</summary>
     internal string TrailingHiddenName(int ordinal) => this.BrowseFlattened
         ? BrowseHiddenName(ordinal)
-        : GraphIdentityName(ordinal - (this.Schema.Length - this.GraphIdentityColumnCount));
+        : this.GraphIdentityColumnCount > 0
+        ? GraphIdentityName(ordinal - (this.Schema.Length - this.GraphIdentityColumnCount))
+        : CarrierName(ordinal - (this.Schema.Length - this.CarrierColumnCount));
 
     /// <summary>The name of a body's graph identity column <paramref name="index"/>, one no identifier can spell.</summary>
     internal static string GraphIdentityName(int index) => "\u0001graph" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);

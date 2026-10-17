@@ -124,6 +124,17 @@ public sealed class ProjectionDemandTests
     [DataRow("3", "select cast(count(*) as varchar) from (select x from v1 where k <> 3 group by x) g")]
     [DataRow("3", "select cast(count(*) as varchar) from src s where exists (select 1 from v1 d where d.k = s.k and d.k <> 3 and d.x > -100)")]
     [DataRow("-5", "select cast(sum(case when k = 3 then 0 else x end) as varchar) from v1")]
+    [DataRow("1,0,3,4", "select string_agg(cast(case when k = 2 then 0 else c end as varchar), ',') within group (order by k) from (select k, cast(s as int) as c from src) d")]
+    [DataRow("1,0,3,4", "select string_agg(cast(case when k = 2 then 0 else c end as varchar), ',') within group (order by k) from (select k, c from (select k, cast(s as int) as c from src) i) d")]
+    [DataRow("1,0,3,4", "select string_agg(cast(case when k = 2 then 0 else c end as varchar), ',') within group (order by k) from v1")]
+    [DataRow("1,0,3,4", "select string_agg(cast(case when k = 2 then 0 else c end as varchar), ',') within group (order by k) from (select * from v1) e")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, (select 10 / (s.k - 3)) as x from src s) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, (select 10 / (s.v - 3)) as x from src s) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from tvf1(3)")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from tvf1(3) where k <> 3")]
+    [DataRow("-10", "select cast(sum(case when k = 3 then 0 else x end) as varchar) from (select k, 10 / (k - 3) as x from src union all select k, 10 / (k - 3) from src) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, sum(10 / (k - 3)) as x from src group by k) d")]
+    [DataRow("-4,-9,0,11", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, max(10 / (k - 3)) + count(*) as x from src group by k) d")]
     public void ReadColumn_IsEvaluatedWhereItsReaderUsesIt(string expected, string query) => AreEqual(expected, Seeded().ExecuteScalar(query));
 
     /// <summary>
@@ -141,6 +152,11 @@ public sealed class ProjectionDemandTests
     [DataRow("3", "select cast(count(*) as varchar) from (select k, 10 / (k - 3) as x from src2 except select k, 0 from src2 where k = 1) d where k <> 3")]
     [DataRow("1,3,4", "select string_agg(cast(c as varchar), ',') within group (order by c) from (select k, cast(s as int) as c from src) d where k <> 2")]
     [DataRow("3", "select cast(count(*) as varchar) from v1 where x > -100 and k <> 3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select distinct k, v, 10 / (k - 3) as x from src2) d where k % 4 <> 3")]
+    [DataRow("-5,-10,10,1", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src2 union select 5, 1) d where k + 0 <> 3")]
+    [DataRow("-5,-10,10,1", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src2 union all select 5, 1) d where -k <> -3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, sum(10 / (k - 3)) as x from src2 group by k) d where k * 2 <> 6")]
+    [DataRow("1,3,4", "select string_agg(cast(c as varchar), ',') within group (order by c) from (select distinct k, cast(s as int) as c from src) d where cast(k as varchar) <> '2'")]
     public void Filter_ReachesBeneathTheBody(string expected, string query) => AreEqual(expected, Seeded().ExecuteScalar(query));
 
     /// <summary>
@@ -327,6 +343,30 @@ public sealed class ProjectionDemandTests
             update u set v = d.x from @u u join (select k, 10 / (k - 3) as x from src) d on d.k = u.k;
             """,
             8134);
+    }
+
+    /// <summary>
+    /// A write through a join view computes only the view's columns it reads:
+    /// a <c>MERGE</c> into one never computes a column no clause reads, and a
+    /// joined <c>UPDATE</c> naming one in its <c>FROM</c> clause evaluates the
+    /// column where it reads it (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void JoinViewWrite_ComputesOnlyWhatItReads()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table a (k int primary key, j int);
+            create table b (k int primary key, bk int);
+            insert a values (1, 0), (2, 0), (3, 0), (4, 0);
+            insert b values (1, 1), (2, 2), (3, 3), (4, 4);
+            """,
+            "create view jv as select a.k, a.j, b.bk, 10 / (a.k - 3) as x from a join b on a.k = b.k");
+        AreEqual(1, simulation.ExecuteScalar("merge jv using (select 1 as k) s on jv.k = s.k when matched then update set j = 1; select j from a where k = 1"));
+        AreEqual(4, simulation.ExecuteScalar("merge jv using (select k from a) s on jv.k = s.k when matched then update set j = 1; select sum(j) from a"));
+        AreEqual(27, simulation.ExecuteScalar("update jv set j = 9 from jv join a s on jv.k = s.k where jv.k <> 3 and jv.x > -100; update a set j = 0 where k = 3; select sum(j) from a"));
+        _ = simulation.AssertSqlError("update jv set j = jv.x from jv join a s on jv.k = s.k", 8134);
     }
 
     [TestMethod]

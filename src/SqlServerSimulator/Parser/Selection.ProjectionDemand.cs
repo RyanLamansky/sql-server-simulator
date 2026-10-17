@@ -45,6 +45,87 @@ partial class Selection
     private DeferredColumn?[]? offeredColumns;
 
     /// <summary>
+    /// How many hidden columns trail this derived table's or view's body's
+    /// own, each a column of one of its sources that a computed column reads
+    /// and nothing projects (<see cref="AppendCarrierColumns"/>).
+    /// </summary>
+    internal int CarrierColumnCount;
+
+    /// <summary>The name of a body's carried column <paramref name="index"/>, one no identifier can spell.</summary>
+    internal static string CarrierName(int index) => CarrierNamePrefix + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Whether <paramref name="name"/> names a carried column (see <see cref="CarrierName"/>).</summary>
+    internal static bool IsCarrierName(string name) => name.StartsWith(CarrierNamePrefix, StringComparison.Ordinal);
+
+    private const string CarrierNamePrefix = "\u0001carried";
+
+    /// <summary>
+    /// Appends to a derived table's or view's body's select list, as hidden
+    /// trailing columns, the columns of its sources that a column its reader
+    /// could evaluate itself reads without the body projecting them — the <c>s</c> of
+    /// <c>CAST(s AS int) AS c</c> — so the reader evaluates the column where
+    /// it reads it as real's merged projection does: <c>SELECT CASE WHEN k =
+    /// 3 THEN 0 ELSE c END FROM (SELECT k, CAST(s AS int) AS c FROM t) d</c>
+    /// answers over a row whose <c>s</c> isn't numeric (probed 2026-10-17
+    /// against SQL Server 2025, alike under every plan, hint and index layout
+    /// tried). Each stays uncomputed unless a reader evaluates such a column;
+    /// returns how many it appended.
+    /// </summary>
+    private static int AppendCarrierColumns(FromSource[] sources, List<Expression> expressions)
+    {
+        var visible = expressions.Count;
+        var projected = new List<(int Source, int Column)>(visible);
+        foreach (var expression in expressions)
+        {
+            if (Unwrapped(expression) is Reference reference && TryBindSourceColumn(sources, reference.ReferencedName) is { Source: >= 0 } column)
+                projected.Add(column);
+        }
+        void Carry((int Source, int Column) column)
+        {
+            if (projected.Contains(column) || sources[column.Source].Qualifier is not { } qualifier)
+                return;
+            projected.Add(column);
+            expressions.Add(new Reference(qualifier, sources[column.Source].ColumnNames[column.Column]));
+        }
+        for (var i = 0; i < visible; i++)
+        {
+            var expression = DeferredColumn.Merged(Unwrapped(expressions[i]));
+            // A source's column its reader evaluates reads what the source
+            // carries, which this body carries on in turn.
+            if (expression is Reference reference)
+            {
+                if (TryBindSourceColumn(sources, reference.ReferencedName) is { Source: >= 0 } plain
+                    && sources[plain.Source] is { LateralPlan: not null, IsPlaceholder: false, ForPath: false, BrowseBody: null, MaterializeOnce: false } source
+                    && ProjectionDemand.SourceTemplates(source) is { } offered && plain.Column < offered.Length && offered[plain.Column] is { } template)
+                {
+                    foreach (var dependency in template.Dependencies)
+                        Carry((plain.Source, dependency));
+                }
+                continue;
+            }
+            if (!expression.ParallelSafe)
+                continue;
+            var names = new List<MultiPartName>();
+            expression.VisitColumnReferences(names.Add);
+            foreach (var name in names)
+            {
+                if (TryBindSourceColumn(sources, name) is { Source: >= 0 } column && !sources[column.Source].Columns[column.Column].IsHidden)
+                    Carry(column);
+            }
+        }
+        return expressions.Count - visible;
+    }
+
+    /// <summary>
+    /// The one value a FROM-less, filterless single-column query yields as its
+    /// one row — <c>(SELECT 10 / (t.k - 3))</c> — which real merges into the
+    /// query holding it as a scalar subquery, so a column computing it is
+    /// evaluated where its reader uses it as the expression itself is (probed
+    /// 2026-10-17 against SQL Server 2025); null for every other plan.
+    /// </summary>
+    internal Expression? SingleRowValue;
+
+    /// <summary>
     /// Per select-list column, the form a query reading this plan as a FROM
     /// source may evaluate the column in itself, where it reads it, rather than
     /// have this plan compute it per row (see <see cref="DeferredColumn"/>);
@@ -55,7 +136,46 @@ partial class Selection
     {
         if (this.IsForClauseDocument)
             return null;
-        return this.projectionDemand is { } demand ? demand.Templates() : this.offeredColumns;
+        if (this.projectionDemand is { } demand)
+            return demand.Templates();
+        if (this.UnionAllBranches is { } branches && !this.HasOrderBy && !this.HasTopOrOffsetOrFetch && this.offeredColumns is null)
+            this.offeredColumns = this.UnionAllOffer(branches);
+        return this.offeredColumns;
+    }
+
+    /// <summary>
+    /// The columns a <c>UNION ALL</c> offers its reader: real pushes the
+    /// reader's projection into every branch, so <c>SELECT CASE WHEN k = 3
+    /// THEN 0 ELSE x END</c> over branches each projecting <c>10 / (k - 3) AS
+    /// x</c> answers there (probed 2026-10-17 against SQL Server 2025, alike
+    /// under every plan, hint and index layout tried). Each column is offered
+    /// when every branch offers it alike (<see cref="DeferredColumn.SameAs"/>),
+    /// the column and what it reads typed in every branch as the union types
+    /// them, so one evaluation over any branch's row is that branch's own;
+    /// a reader then hands every branch the same demand (see
+    /// <see cref="AcceptDemand"/>). An empty array when none qualifies, which
+    /// settles the question for the plan.
+    /// </summary>
+    private DeferredColumn?[] UnionAllOffer(Selection[] branches)
+    {
+        var offered = new DeferredColumn?[this.Schema.Length];
+        var branchOffers = Array.ConvertAll(branches, static branch => branch.DeferrableColumns());
+        for (var c = 0; c < offered.Length; c++)
+        {
+            if (branchOffers[0] is not { } firstOffer || c >= firstOffer.Length || firstOffer[c] is not { } first)
+                continue;
+            var alike = true;
+            for (var b = 0; b < branches.Length && alike; b++)
+            {
+                alike = branches[b].Schema.Length == this.Schema.Length
+                    && branchOffers[b] is { } offer && c < offer.Length && offer[c] is { } column && first.SameAs(column)
+                    && branches[b].Schema[c] == this.Schema[c]
+                    && Array.TrueForAll(first.Dependencies, dependency => branches[b].Schema[dependency] == this.Schema[dependency]);
+            }
+            if (alike)
+                offered[c] = first;
+        }
+        return Array.Exists(offered, static column => column is not null) ? offered : [];
     }
 
     /// <summary>
@@ -95,8 +215,10 @@ partial class Selection
     /// <c>CROSS APPLY (SELECT 10 / (t.k - 3) AS x) a</c> computes nothing when
     /// nothing reads <c>a.x</c> (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
-    private Selection NotingSynthesizedDemand(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, bool prunable)
+    private Selection NotingSynthesizedDemand(List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, bool prunable, bool yieldsOneRow)
     {
+        if (yieldsOneRow && expressions is [var only])
+            this.SingleRowValue = only is NamedExpression named ? named.Inner : only;
         var collector = new ProjectionDemand.Collector([], expressions.Count, [], []);
         for (var i = 0; i < expressions.Count; i++)
             collector.Walk(expressions[i], ProjectionDemand.Collector.ProjectionSlot(i));
@@ -375,7 +497,8 @@ partial class Selection
         bool distinct,
         Expression? topExpression,
         string[] outputColumnNames,
-        List<int> startupConstantOwners)
+        List<int> startupConstantOwners,
+        OneRowAggregate[]? oneRowAggregates)
     {
         var collector = new ProjectionDemand.Collector(sources, expressions.Count, aggregates, windows);
         for (var i = 0; i < expressions.Count; i++)
@@ -448,8 +571,9 @@ partial class Selection
             }
         }
         // A browse statement's or a graph identity's hidden trailing columns
-        // are read by position, never by name.
-        for (var i = Math.Max(0, expressions.Count - selection.TrailingHiddenColumnCount); i < expressions.Count; i++)
+        // are read by position, never by name; a carried one only by the
+        // columns its reader evaluates.
+        for (var i = Math.Max(0, expressions.Count - (selection.TrailingHiddenColumnCount - selection.CarrierColumnCount)); i < expressions.Count; i++)
             selfRead[i] = true;
 
         selection.freeNames = collector.Unknown ? null : [.. collector.FreeNames];
@@ -459,6 +583,10 @@ partial class Selection
         foreach (var owner in startupConstantOwners)
             ownsStartupConstant[owner] = true;
         selection.projectionDemand = collector.Finish(selection.Schema, outputColumnNames, expressions, selfRead, readsWholeRow, windowOperandTypes, windowResultTypes, ownsStartupConstant, LateralSlots(sources, joins));
+        selection.projectionDemand.OneRowAggregates = oneRowAggregates;
+        selection.projectionDemand.FiltersNothing = fromClause.Excluders.Count == 0 && fromClause.Having is null
+            && topExpression is null && fromClause.OffsetExpression is null && fromClause.FetchExpression is null
+            && Array.TrueForAll(joins, static join => join.OnPredicate is null);
         _ = selection.projectionDemand.Apply(null);
     }
 }
@@ -502,6 +630,21 @@ internal sealed class ProjectionDemand
     private readonly bool[] lateral;
     private DeferredColumn?[]? templates;
     private bool templatesSettled;
+
+    /// <summary>
+    /// The query's aggregates when each of its groups holds one row, which a
+    /// deferred column evaluates over its row (see <see cref="OneRowAggregate"/>);
+    /// null otherwise.
+    /// </summary>
+    public OneRowAggregate[]? OneRowAggregates;
+
+    /// <summary>
+    /// Whether the query projects every row its sources produce — no
+    /// <c>WHERE</c>, <c>ON</c>, <c>HAVING</c> or row limit — so a source
+    /// column it reads only as a bare select-list column is evaluated for
+    /// every row wherever it is evaluated.
+    /// </summary>
+    public bool FiltersNothing;
 
     /// <summary>
     /// The windows a reader reads, with their operand and result types, once
@@ -582,8 +725,10 @@ internal sealed class ProjectionDemand
                 continue;
             var columns = this.sources[s].Columns;
             var mask = new bool[columns.Length];
+            // A hidden column is read by position, save a carried one, which
+            // only a deferred column reading it reads.
             for (var c = 0; c < columns.Length; c++)
-                mask[c] = columns[c].IsHidden;
+                mask[c] = columns[c].IsHidden && !Selection.IsCarrierName(this.sources[s].ColumnNames[c]);
             masks[s] = mask;
         }
         foreach (var (slot, source, column) in this.reads)
@@ -598,7 +743,7 @@ internal sealed class ProjectionDemand
         for (var s = 0; s < this.sources.Length; s++)
         {
             if (masks[s] is { } mask)
-                Hand(this.sources[s], mask, this.DeferredAt(s, mask));
+                Hand(this.sources[s], mask, this.DeferredAt(s, mask, slotLive));
         }
         this.Narrowed = narrowed;
         return narrowed;
@@ -611,22 +756,51 @@ internal sealed class ProjectionDemand
     /// computes — to the columns it reads there instead; null when it defers
     /// none.
     /// </summary>
-    private DeferredColumn?[]? DeferredAt(int slot, bool[] mask)
+    private DeferredColumn?[]? DeferredAt(int slot, bool[] mask, bool[] slotLive)
     {
         if (SourceTemplates(this.sources[slot]) is not { } offered)
             return null;
         DeferredColumn?[]? deferred = null;
         for (var c = 0; c < mask.Length && c < offered.Length; c++)
         {
-            if (mask[c] && offered[c]?.BindAtReader(this.sources, slot, this.lateral.Length > slot && this.lateral[slot]) is { } bound)
+            if (mask[c] && offered[c] is { } template && !this.EvaluatesAlike(slot, c, template, slotLive)
+                && template.BindAtReader(this.sources, slot, this.lateral.Length > slot && this.lateral[slot]) is { } bound)
+            {
                 (deferred ??= new DeferredColumn?[mask.Length])[c] = bound;
+            }
         }
         DeferredColumn.ComputeDependenciesInstead(mask, deferred);
         return deferred;
     }
 
+    /// <summary>
+    /// Whether evaluating column <paramref name="column"/> of the source at
+    /// <paramref name="slot"/> here rather than in its body would change
+    /// nothing but cost, where <paramref name="template"/> reads columns the
+    /// body carries only for it: the query filters no row, and reads the
+    /// column only as a bare select-list column, which every row computes. A
+    /// column over the body's own columns is deferred regardless, since moving
+    /// it costs nothing.
+    /// </summary>
+    private bool EvaluatesAlike(int slot, int column, DeferredColumn template, bool[] slotLive)
+    {
+        if (!this.FiltersNothing)
+            return false;
+        var names = this.sources[slot].ColumnNames;
+        if (!Array.Exists(template.Dependencies, dependency => dependency < names.Length && Selection.IsCarrierName(names[dependency])))
+            return false;
+        foreach (var (readSlot, source, read) in this.reads)
+        {
+            if (source != slot || (read != column && read >= 0) || !slotLive[readSlot])
+                continue;
+            if (readSlot is Always || readSlot > this.written.Length || Unwrap(this.written[readSlot - 1]) is not Reference)
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>The deferred columns the body behind <paramref name="source"/> offers.</summary>
-    private static DeferredColumn?[]? SourceTemplates(FromSource source) =>
+    public static DeferredColumn?[]? SourceTemplates(FromSource source) =>
         source.Cte is { } binding ? binding.Plan?.DeferrableColumns() : source.LateralPlan?.DeferrableColumns();
 
     /// <summary>
@@ -657,7 +831,7 @@ internal sealed class ProjectionDemand
                     continue;
                 var template = plain[i] is var (source, column)
                     ? this.Lift(source, column, plain)
-                    : DeferredColumn.Of(Unwrap(this.written[i]), this.schema[i], name => this.BindInBody(name, plain));
+                    : DeferredColumn.Of(Unwrap(this.written[i]), this.schema[i], name => this.BindInBody(name, plain), this.OneRowAggregates);
                 if (template is not null)
                     (result ??= new DeferredColumn?[count])[i] = template;
             }
