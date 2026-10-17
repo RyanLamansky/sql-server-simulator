@@ -48,7 +48,13 @@ internal sealed class Soundex : Expression
 
     internal override void Describe(NodeShape shape) => shape.Child(this.input);
 
-    internal static string Compute(string source)
+    /// <param name="source">The string to code.</param>
+    /// <param name="firstLetterJoinsRun">
+    /// Whether the first letter's own code absorbs a run of equal codes right
+    /// after it, as SOUNDEX's does (<c>cc</c> is <c>C000</c>); the code
+    /// DIFFERENCE compares leaves it out (<c>C200</c>).
+    /// </param>
+    internal static string Compute(string source, bool firstLetterJoinsRun = true)
     {
         if (string.IsNullOrEmpty(source))
             return "0000";
@@ -61,7 +67,7 @@ internal sealed class Soundex : Expression
         var firstIdx = 0;
         var first = char.ToUpperInvariant(source[firstIdx]);
         _ = sb.Append(first);
-        var prevCode = Encode(first);
+        var prevCode = firstLetterJoinsRun ? Encode(first) : '0';
         for (var i = firstIdx + 1; i < source.Length && sb.Length < 4; i++)
         {
             // Real's two departures from the textbook algorithm, probe-
@@ -101,10 +107,8 @@ internal sealed class Soundex : Expression
 }
 
 /// <summary>
-/// SQL <c>DIFFERENCE(s1, s2)</c>: returns an integer 0-4 measuring the
-/// similarity of the two strings' SOUNDEX codes. The count is the
-/// number of matching positions (out of 4) when the two codes are
-/// compared character-by-character. NULL on either side returns NULL.
+/// SQL <c>DIFFERENCE(s1, s2)</c>: an integer 0-4 scoring how alike the two
+/// strings sound, NULL when either is (see <see cref="Score"/>).
 /// </summary>
 internal sealed class Difference : Expression
 {
@@ -133,15 +137,55 @@ internal sealed class Difference : Expression
         StringScalars.RejectLegacyLob(r, "difference", argumentIndex: 2, allowAnsiText: true);
         if (l.IsNull || r.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var sl = Soundex.Compute(l.CoerceTo(SqlType.NVarchar).AsString);
-        var sr = Soundex.Compute(r.CoerceTo(SqlType.NVarchar).AsString);
-        var matches = 0;
-        for (var i = 0; i < 4; i++)
+        return SqlValue.FromInt32(Score(l.CoerceTo(SqlType.NVarchar).AsString, r.CoerceTo(SqlType.NVarchar).AsString));
+    }
+
+    /// <summary>
+    /// Real's score, recovered from probes against SQL Server 2025
+    /// (2026-10-17, some 87,000 pairs matched): it compares codes of its own
+    /// — SOUNDEX's, but with the first letter's code left out of the run
+    /// after it — and reads the first string's three digits as a needle in
+    /// the second's. Equal codes score 4; otherwise a matching first letter
+    /// scores 1, plus 3 when the needle occurs whole in the second code's
+    /// digits, else the better of 2 — when its last two or first two do — and
+    /// the count of its digits found one by one. That count searches the
+    /// second code from its letter on, each search starting where the earlier
+    /// ones' hits add up to (the first hit's index, then the sum of both plus
+    /// one), except that a digit just missed is sought again from the start.
+    /// A second string not starting with a letter scores 0, unless neither
+    /// does, which is 4; a first one not starting with one reads as
+    /// <c>0000</c>.
+    /// </summary>
+    internal static int Score(string left, string right)
+    {
+        var needle = Soundex.Compute(left, firstLetterJoinsRun: false);
+        var haystack = Soundex.Compute(right, firstLetterJoinsRun: false);
+        if (needle == haystack)
+            return 4;
+        if (haystack[0] == '0')
+            return 0;
+        var score = needle[0] == haystack[0] ? 1 : 0;
+        var digits = needle.AsSpan(1);
+        var searched = haystack.AsSpan(1);
+        if (searched.IndexOf(digits) >= 0)
+            return score + 3;
+        var pair = searched.IndexOf(digits[1..]) >= 0 || searched.IndexOf(digits[..2]) >= 0 ? 2 : 0;
+        int found = 0, start = 0;
+        var missed = '\0';
+        foreach (var digit in digits)
         {
-            if (sl[i] == sr[i])
-                matches++;
+            var from = digit == missed ? 0 : start;
+            var hit = from < haystack.Length ? haystack.AsSpan(from).IndexOf(digit) : -1;
+            if (hit < 0)
+            {
+                missed = digit;
+                continue;
+            }
+            found++;
+            start += from + hit;
+            missed = '\0';
         }
-        return SqlValue.FromInt32(matches);
+        return score + Math.Max(pair, found);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

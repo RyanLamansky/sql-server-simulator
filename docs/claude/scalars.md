@@ -520,11 +520,9 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
   A string whose first character isn't a letter is `0000` — a leading space included (probed 2026-09-25 against SQL Server 2025).
   Empty input → `'0000'`.
   NULL → NULL.
-- **`DIFFERENCE(s1, s2)`** — counts matching positions (0–4) between the two strings' SOUNDEX codes.
-  Result `int`; NULL on either side → NULL.
-  **Divergence**: real scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score 1 and 0 against `'abcd'` — and asymmetrically (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3), so the position count matches real on most pairs but not all (re-checked 2026-10-03 against SQL Server 2025).
-  The best rule found (a 6,561-pair grid over first letters A and B, zero to three of the digits 1–3 and the empty string, probed 2026-09-28) fits 6,001 pairs with the *first* code's digits as the needle: equal codes score 4; otherwise a matching first letter scores 1, plus 3 when the first code's three padded digits occur in the second code's, else 2 when its last or first two do, else one per digit found searching left to right from the previous hit's own position (not past it).
-  Most misses have a repeated digit in the first code — `DIFFERENCE('aababab', 'babab')` (`A111`, `B110`) is 3 where the rule gives 2, `A112` against any `A12x` is 4 — and `DIFFERENCE('', x)` is 3 for a code with no digits, 2 for one or two and 0 for three, so padding and repeats are what the rule still gets wrong.
+- **`DIFFERENCE(s1, s2)`** — scores 0–4 how alike the two strings sound, `int`, NULL on either side → NULL; the rule is on `Difference.Score`, matched against some 87,000 pairs probed 2026-10-17 against SQL Server 2025.
+  It is not a comparison of the two `SOUNDEX` results: real codes each string as SOUNDEX does but without letting the first letter's code absorb the run after it (`cc` is `C200` there, `C000` to SOUNDEX), and scores asymmetrically, reading the first code's digits as a needle in the second's — so `'xc'` and `'x'` score 1 and 0 against `'abcd'`, and `DIFFERENCE('x', '1')` is 0 where `DIFFERENCE('1', 'x')` is 3.
+  The digit-by-digit count is the odd part: each search starts where the earlier hits' positions add up to, and a digit just missed is sought again from the start.
   Unlike SOUNDEX it accepts a `text` argument (implicitly converted to `varchar`) while refusing `ntext` / `image` — see *Legacy LOB arguments* above.
 - **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string.
   Defaults: length 10, decimals 0.

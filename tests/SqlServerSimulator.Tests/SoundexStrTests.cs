@@ -6,7 +6,7 @@ namespace SqlServerSimulator;
 /// Tests for <c>SOUNDEX(s)</c>, <c>DIFFERENCE(a, b)</c>, and
 /// <c>STR(num, [length, [decimals]])</c> — the remaining String-category
 /// scalars. SOUNDEX is the standard 4-character English phonetic code;
-/// DIFFERENCE returns 0-4 comparing two SOUNDEX codes; STR formats a
+/// DIFFERENCE scores 0-4 how alike two strings sound; STR formats a
 /// float right-aligned in a fixed-width string.
 /// </summary>
 [TestClass]
@@ -35,6 +35,60 @@ public sealed class SoundexStrTests
     [TestMethod]
     public void Difference_SmithSmyth_Returns4()
         => AreEqual(4, new Simulation().ExecuteScalar("select difference('Smith', 'Smyth')"));
+
+    /// <summary>
+    /// Pairs probed against SQL Server 2025 (2026-10-17), one or more per
+    /// branch of the score: the codes it compares keep a run after the first
+    /// letter, the needle's search positions add up, and a digit just missed
+    /// is sought again from the start.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Ipdc", "syle", 0)]
+    [DataRow("mb", "wmxl", 0)]
+    [DataRow("tbn", "os", 1)]
+    [DataRow("hccxc", "lmxmr", 1)]
+    [DataRow("babab", "dhlh", 1)]
+    [DataRow("fbjgEpoh", "yft1u", 2)]
+    [DataRow("w", "rxcar", 2)]
+    [DataRow("acalal", "elacad", 2)]
+    [DataRow("abacac", "ecalab", 2)]
+    [DataRow("IEqyjxju", "cwqp", 3)]
+    [DataRow("acacab", "ecadab", 3)]
+    [DataRow("my", "qu", 3)]
+    [DataRow("alacab", "ecabal", 2)]
+    [DataRow("pb", "lz-", 2)]
+    [DataRow("alacac", "ecacal", 2)]
+    [DataRow("yjhxIiAO", "lsxy", 3)]
+    [DataRow(" kyw q", "1cyz1-", 4)]
+    [DataRow("ac", "ax", 4)]
+    [DataRow("cc", "cxc", 4)]
+    [DataRow("hblar", "hammm", 1)]
+    [DataRow("ah", "abcd", 1)]
+    [DataRow("wla", "wracr", 1)]
+    [DataRow("tbn", "t", 2)]
+    [DataRow("xc", "xxzmkgw", 2)]
+    [DataRow("yz", "yvOzwvvi", 2)]
+    [DataRow("lcll", "lhc", 3)]
+    [DataRow("husjowux", "hqAv", 4)]
+    [DataRow("xwmh", "xd", 3)]
+    [DataRow("yjhxIiAO", "yz", 4)]
+    [DataRow("Ashcraft", "-gIe cy", 0)]
+    [DataRow(" mI", "bizOm", 2)]
+    [DataRow("1", "dxm", 2)]
+    [DataRow("xc", "abcd", 1)]
+    [DataRow("x", "abcd", 0)]
+    [DataRow("x", "1", 0)]
+    [DataRow("1", "x", 3)]
+    [DataRow("aababab", "babab", 3)]
+    [DataRow("Tymczak", "bizOm", 2)]
+    [DataRow("zqmEm", "dmyagqq", 2)]
+    [DataRow("mgipif", "abcd", 2)]
+    [DataRow("", "abcd", 0)]
+    [DataRow("", "ab", 2)]
+    [DataRow("Robert", "Rupert", 4)]
+    [DataRow("Green", "Greene", 4)]
+    public void Difference_ScoresAsRealDoes(string left, string right, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select difference('{left}', '{right}')"));
 
     [TestMethod]
     public void Difference_NullSide_ReturnsNull()
