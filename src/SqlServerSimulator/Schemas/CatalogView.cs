@@ -77,6 +77,14 @@ internal sealed class CatalogView(
     public readonly HeapColumn[] Columns = Array.ConvertAll(columns, SizedColumn);
 
     /// <summary>
+    /// Per column, whether real's definition of the view computes it, so a
+    /// result reading it carries <c>fComputed</c> (from
+    /// <c>CatalogViewComputedColumns.tsv</c>, captured 2026-10-17 against SQL
+    /// Server 2025); null when none is.
+    /// </summary>
+    public bool[]? ComputedColumns;
+
+    /// <summary>
     /// The ordinals declared <c>sysname</c> or another <c>nvarchar</c>, whose
     /// generators may produce either: real types each view's name columns
     /// one way or the other (probed 2026-09-26 against SQL Server 2025), and

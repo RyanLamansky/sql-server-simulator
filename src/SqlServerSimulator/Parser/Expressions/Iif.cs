@@ -102,6 +102,11 @@ internal sealed class Iif : Expression
         return this.cachedResultType;
     }
 
+    // A CASE its constant fold settles on one arm is that arm, when the arm
+    // needs no conversion to the CASE's type.
+    internal override Expression DescribedOperand(NullabilityContext context) =>
+        this.settledArm?.DescribedOperand(context) is Reference column && SameDescribedType(context.TypeOf(column), context.TypeOf(this)) ? column : this;
+
     // IIF desugars to a searched CASE, so it inherits CASE's metadata rule: the
     // result is NOT NULL only when both value arms are non-null (probe-confirmed
     // against SQL Server 2025; exposed by go-mssqldb / tedious COLMETADATA

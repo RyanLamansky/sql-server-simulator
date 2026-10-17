@@ -112,6 +112,7 @@ internal static partial class BuiltInResources
         ApplyMetadataVisibility(views);
         ApplyDmvGating(views);
         ApplyRowCaching(views);
+        ApplyRealComputedColumns(views);
         foreach (var (key, view) in views)
         {
             if (CatalogViewObjectIds.ByKey.TryGetValue(key, out var realId))

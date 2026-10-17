@@ -398,7 +398,6 @@ A table named in another database lists nothing; one that doesn't resolve, or a 
   Its regular forms come from the lexicon too, so a listing differs where a rule can't tell (probed 2026-10-07 against SQL Server 2025): a final consonant doubles in a word of one syllable here (`stop` → `stopped`) but real doubles `admit`, `commit` and `prefer` too, lists `travelled` beside `traveled`, doesn't double `quit`'s vowel pair yet lists `quitted`, gives `hit`, `cut`, `set` and `put` no `-ed` form, lists `shown`, withholds the possessives of `admit`, `quit`, `prefer` and `beg`, and gives a single letter its plural possessive (`x` → `x's`, `xs'`) and `i` its pronoun forms.
   A search whose expansion reaches a noise word (`FREETEXT(b, 'saw')`, through `see`) reports real's noise-word informational message there, which the simulator doesn't.
 - **A help procedure's conversion failure** — `sp_fulltext_load_thesaurus_file 'abc'` is Msg 8114 at state 1 on real and state 5 here, the state the system-procedure binder probed elsewhere.
-- **`sp_describe_first_result_set` over a rowset** calls `KEY` and `RANK` updatable, where real's `is_updateable` is 0.
 - **A predicate compared to a value** (`CONTAINS(body, 'x') = 1`) is Msg 102 near `1` here and near `=` on real.
 - **`ALTER TABLE … ALTER COLUMN` of the key index's column** names the key as `The object` in its Msg 5074, where real names it `The index` once a full-text index uses it.
 

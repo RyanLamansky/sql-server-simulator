@@ -2373,12 +2373,12 @@ internal sealed partial class Selection
         selection.ClauseExpressions = ClauseExpressionsOf(fromClause, joins, orderBy);
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
-        selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);
+        selection.ColumnWireFlags = WireFlagsOf(expressions, sources, fromClause.AllGroupingExpressions, ColumnNullabilityContext(sources, joins, fromClause.GroupingSetsWritten, parseBatch, resolveColumnType), out selection.ColumnDerivedWireFlags, out selection.DescribedProjections);
         selection.IsGrouped = isGrouped;
         selection.ReadsStorage = readsStorage;
         if (browse)
         {
-            selection.Browse = BrowseInfoFor(sources, expressions, outputColumnNames, browseHidden);
+            selection.Browse = BrowseInfoFor(sources, [.. selection.DescribedProjections], outputColumnNames, browseHidden);
             selection.HiddenColumnCount = browseHidden;
         }
         else if (browseFlattened)
@@ -2402,7 +2402,7 @@ internal sealed partial class Selection
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
         {
             parseBatch.Parser.CursorStatement = false;
-            selection.CursorBrowse = BrowseInfoFor(sources, expressions, outputColumnNames, 0, cursor: true);
+            selection.CursorBrowse = BrowseInfoFor(sources, [.. selection.DescribedProjections], outputColumnNames, 0, cursor: true);
         }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
@@ -2611,6 +2611,21 @@ internal sealed partial class Selection
         BatchContext parseBatch,
         Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var context = ColumnNullabilityContext(sources, joins, groupingSetsWritten, parseBatch, resolveColumnType);
+        var nullability = new bool[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+            nullability[i] = expressions[i].ResultIsNullable(context);
+        return nullability;
+    }
+
+    /// <summary>
+    /// The <see cref="NullabilityContext"/> a projection over
+    /// <paramref name="sources"/> reads its columns' nullability through: a
+    /// column on an outer join's NULL-filled side, every column under written
+    /// grouping sets and an unresolved name read nullable.
+    /// </summary>
+    internal static NullabilityContext ColumnNullabilityContext(FromSource[] sources, JoinSpec[] joins, bool groupingSetsWritten, BatchContext parseBatch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
         var nullFilled = NullFilledSources(sources, joins);
 
         bool ResolveNullable(MultiPartName name)
@@ -2621,11 +2636,7 @@ internal sealed partial class Selection
             return s == -1 || nullFilled[s] || sources[s].Columns[c].Nullable;
         }
 
-        var context = new NullabilityContext(parseBatch, ResolveNullable, resolveColumnType);
-        var nullability = new bool[expressions.Count];
-        for (var i = 0; i < expressions.Count; i++)
-            nullability[i] = expressions[i].ResultIsNullable(context);
-        return nullability;
+        return new NullabilityContext(parseBatch, ResolveNullable, resolveColumnType);
     }
 
     /// <summary>
@@ -2742,30 +2753,76 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Per projection column, the COLMETADATA flags
-    /// <see cref="SimulatedQueryResult.ColumnWireFlags"/> describes: a column
-    /// read takes its source column's character, traced through a view or a
-    /// derived table's own flags; anything else is an expression or an
-    /// aggregate.
+    /// Per projection column, the character
+    /// <see cref="SimulatedQueryResult.ColumnWireFlags"/> describes, and in
+    /// <paramref name="derived"/> the character an enclosing query reads it
+    /// with when this query is its derived table, CTE or <c>APPLY</c> body
+    /// (<see cref="ColumnDerivedWireFlags"/>). A column read — through the
+    /// parentheses, no-op conversions and settled CASE arms
+    /// <see cref="Expression.DescribedOperand"/> sees through — takes its
+    /// source's character in both, and <paramref name="described"/> holds
+    /// what each column describes. Otherwise an aggregate, a window function,
+    /// a sequence draw and a grouping expression the grouping doesn't settle
+    /// from grouped columns are <see cref="ColumnCharacter.Derived"/>, any other
+    /// expression <see cref="ColumnCharacter.Computed"/>, and every expression
+    /// is <see cref="ColumnCharacter.Derived"/> to an enclosing query (probed
+    /// 2026-10-17 against SQL Server 2025: <c>a + 1 … GROUP BY a + 1</c> is
+    /// derived, <c>a + 1 … GROUP BY a + 1, a</c> computed).
     /// </summary>
-    private static byte[] WireFlagsOf(List<Expression> expressions, FromSource[] sources, int[] source, int[] ordinal)
+    internal static byte[] WireFlagsOf(List<Expression> expressions, FromSource[] sources, List<Expression>? groupingExpressions, NullabilityContext context, out byte[] derived, out Expression[] described)
     {
         var flags = new byte[expressions.Count];
+        derived = new byte[expressions.Count];
+        described = new Expression[expressions.Count];
+        HashSet<ShapeKey>? groupingKeys = null;
+        if (groupingExpressions is { Count: > 0 })
+        {
+            groupingKeys = [];
+            foreach (var grouping in groupingExpressions)
+                _ = groupingKeys.Add(GroupingKey(sources, Unparenthesized(grouping)));
+        }
+
         for (var i = 0; i < flags.Length; i++)
         {
             var expression = expressions[i];
             while (expression is Expressions.NamedExpression named)
                 expression = named.Inner;
-            flags[i] = expression switch
+            described[i] = expression.DescribedOperand(context);
+            if (described[i] is Reference reference)
             {
-                // A sequence draw reads as neither updatable nor computed
-                // (probed 2026-10-04 against SQL Server 2025).
-                Expressions.AggregateExpression or Expressions.WindowExpression or Expressions.NextValueFor => 0x00,
-                Reference when source[i] >= 0 => SourceColumnWireFlags(sources[source[i]], ordinal[i]),
-                Reference => 0x08,
-                _ => 0x20,
-            };
+                if (TryResolveSourceColumn(sources, reference.ReferencedName) is { } at)
+                {
+                    flags[i] = SourceColumnWireFlags(sources[at.Source], at.Column, catalog: false);
+                    derived[i] = SourceColumnWireFlags(sources[at.Source], at.Column, catalog: true);
+                }
+                else
+                {
+                    flags[i] = derived[i] = ColumnCharacter.UpdatableUnknown;
+                }
+                continue;
+            }
+
+            derived[i] = ColumnCharacter.Derived;
+            flags[i] = expression is Expressions.AggregateExpression or Expressions.WindowExpression or Expressions.NextValueFor
+                || (groupingKeys is not null && IsUnsettledGroupingTerm(sources, Unparenthesized(expression), groupingKeys))
+                ? ColumnCharacter.Derived
+                : ColumnCharacter.Computed;
         }
+        return flags;
+
+        static Expression Unparenthesized(Expression expression)
+        {
+            while (expression is Expressions.Parenthesized parenthesized)
+                expression = parenthesized.Wrapped;
+            return expression;
+        }
+    }
+
+    /// <summary><paramref name="count"/> columns of <see cref="ColumnCharacter.Derived"/> character.</summary>
+    internal static byte[] DerivedColumns(int count)
+    {
+        var flags = new byte[count];
+        Array.Fill(flags, ColumnCharacter.Derived);
         return flags;
     }
 
@@ -2777,40 +2834,94 @@ internal sealed partial class Selection
     private static int BaseOrdinalOf(Schemas.View view, int ordinal) =>
         ordinal < view.BaseColumnOrdinals.Length ? view.BaseColumnOrdinals[ordinal] : -1;
 
-    private static byte SourceColumnWireFlags(FromSource from, int ordinal)
+    /// <summary>
+    /// Whether <paramref name="expression"/> is one of the query's grouping
+    /// expressions that some column it reads isn't grouped by on its own, so
+    /// the grouping produces its value rather than the select list computing it
+    /// from grouped columns.
+    /// </summary>
+    private static bool IsUnsettledGroupingTerm(FromSource[] sources, Expression expression, HashSet<ShapeKey> groupingKeys)
+    {
+        if (!groupingKeys.Contains(GroupingKey(sources, expression)))
+            return false;
+        var unsettled = false;
+        expression.Walk((node, _) =>
+        {
+            if (node is Reference column && !groupingKeys.Contains(GroupingKey(sources, column)))
+                unsettled = true;
+            return !unsettled;
+        });
+        return unsettled;
+    }
+
+    /// <summary>
+    /// The character a column of <paramref name="from"/> passes to a query
+    /// reading it: a table's column its own, a derived table's or CTE's what
+    /// its body passes through, and a view's or inline function's what its
+    /// body describes when the reading query expands it — or, when
+    /// <paramref name="catalog"/> (the reading query is itself a derived
+    /// table, CTE or <c>APPLY</c> body), what its catalog entry describes
+    /// (<see cref="ColumnCharacter.AsCatalogColumn"/>).
+    /// </summary>
+    private static byte SourceColumnWireFlags(FromSource from, int ordinal, bool catalog)
     {
         // A FOR SYSTEM_TIME source is read-only, as is a period column
         // (probed 2026-10-04 against SQL Server 2025).
         if (from.Rows is TemporalRowSource)
-            return 0x00;
-        // A derived table or CTE passes its columns' updatability through but
-        // not their computed flag (probed 2026-09-26 against SQL Server 2025).
-        if (from.LateralPlan is { ColumnWireFlags: { } inner } && ordinal < inner.Length)
-            return from.LateralIsQueryBody ? (byte)(inner[ordinal] & ~0x20) : inner[ordinal];
+            return ColumnCharacter.ReadOnly;
+        // A catalog view's or system function's column is updatable unless
+        // real's definition computes it.
+        if (from.ComputedCatalogColumns() is { } catalogColumns)
+        {
+            return ordinal < catalogColumns.Length && catalogColumns[ordinal]
+                ? catalog ? ColumnCharacter.UpdatableUnknown : ColumnCharacter.Computed
+                : ColumnCharacter.UpdatableUnknown;
+        }
+        if (from.LateralPlan is { } plan && from.LateralIsQueryBody)
+        {
+            if (plan.ColumnDerivedWireFlags is { } passed && ordinal < passed.Length)
+                return passed[ordinal];
+            return plan.ColumnWireFlags is { } inner && ordinal < inner.Length && inner[ordinal] != ColumnCharacter.Computed ? inner[ordinal] : ColumnCharacter.Derived;
+        }
         // A view's hidden browse column reads as the base column it carries.
         if (from is { BackingView: not null, BrowseBody: { BranchFromSources: { } bodySources, ProjectionExpressions: { } projections } } && from.Columns[ordinal].IsHidden)
         {
             return ordinal < projections.Length
                 && BrowseBaseColumn(bodySources, projections[ordinal]) is { Table: { } baseSource, Ordinal: var baseColumn }
-                ? SourceColumnWireFlags(baseSource, baseColumn)
-                : (byte)0x00;
+                ? SourceColumnWireFlags(baseSource, baseColumn, catalog: false)
+                : ColumnCharacter.ReadOnly;
         }
+        if (from.ViewColumnWireFlags is { } viewFlags && ordinal < viewFlags.Length)
+            return catalog ? ColumnCharacter.AsCatalogColumn(viewFlags[ordinal]) : ColumnCharacter.ThroughView(viewFlags[ordinal]);
+        if (from.LateralPlan is { ColumnWireFlags: { } lateral } && ordinal < lateral.Length)
+        {
+            return from.InlineCall is null ? lateral[ordinal]
+                : catalog ? ColumnCharacter.AsCatalogColumn(lateral[ordinal])
+                : ColumnCharacter.ThroughView(lateral[ordinal]);
+        }
+        // A VALUES constructor's or rowset function's column is derived.
+        if (from.ConstructsRows)
+            return ColumnCharacter.Derived;
         // An updatable view's column traces to the base column behind it, and
         // one of its expressions is computed.
         if (from.BackingView is { BaseTable: not null } expressionView && BaseOrdinalOf(expressionView, ordinal) < 0)
-            return 0x20;
+            return catalog ? ColumnCharacter.UpdatableUnknown : ColumnCharacter.Computed;
         var column = from.BackingView is { BaseTable: { } baseTable } view && BaseOrdinalOf(view, ordinal) is >= 0 and var baseOrdinal
             ? baseTable.Columns[baseOrdinal]
             : from.Columns[ordinal];
-        return column switch
+        var character = column switch
         {
-            { Identity: not null } => 0x10,
+            { Identity: not null } => ColumnCharacter.Identity,
+            // A column set computes its value from the sparse columns but reads
+            // as updatable (captured 2026-10-17 against SQL Server 2025).
+            { IsColumnSet: true } => (byte)(ColumnCharacter.ColumnSet | ColumnCharacter.UpdatableUnknown),
             // A graph pseudo-column reads as updatable, not computed (probed
             // 2026-09-27 against SQL Server 2025).
-            { Computed: not null, GraphKind: GraphColumnKind.None } => 0x20,
-            { Type: RowVersionSqlType } or { GeneratedAs: not GeneratedAlwaysAsRow.None } => 0x00,
-            _ => 0x08,
+            { Computed: not null, GraphKind: GraphColumnKind.None } => ColumnCharacter.Computed,
+            { Type: RowVersionSqlType } or { GeneratedAs: not GeneratedAlwaysAsRow.None } => ColumnCharacter.ReadOnly,
+            _ => ColumnCharacter.UpdatableUnknown,
         };
+        return catalog && from.BackingView is not null ? ColumnCharacter.AsCatalogColumn(character) : character;
     }
 
     /// <summary>

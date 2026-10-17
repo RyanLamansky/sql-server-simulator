@@ -200,6 +200,31 @@ public sealed class DescribeFirstResultSetTests
         AreEqual("numeric", sim.ExecuteScalar("select type_name(system_type_id) from sys.columns where object_id = object_id('itf') and name = 'y'"));
     }
 
+    /// <summary>
+    /// Describing follows a column's COLMETADATA character: a grouping
+    /// column is updatable, a view's aggregate updatable where a derived
+    /// table's is neither, a constant and a no-op cast's column what they read,
+    /// and a column set flagged (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, count(*) n from dbo.t group by a", "a:0:1:0:0|n:0:0:0:0")]
+    [DataRow("select * from dbo.vg", "a:0:1:0:0|n:0:1:0:0")]
+    [DataRow("select q.n from (select count(*) n from dbo.t) q", "n:0:0:0:0")]
+    [DataRow("select 1 k, (a) p, cast(b as varchar(10)) cb from dbo.t", "k:0:0:1:0|p:0:1:0:0|cb:0:1:0:0")]
+    [DataRow("select v from (values (1)) q(v)", "v:0:0:0:0")]
+    [DataRow("select * from dbo.s", "k:0:1:0:0|cset:0:1:0:1")]
+    public void TheFlags_FollowTheColumnsCharacter(string query, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int identity primary key, a int not null, b varchar(10) null); create table s (k int primary key, sp int sparse null, cset xml column_set for all_sparse_columns)",
+            "create view vg as select a, count(*) n from dbo.t group by a");
+        AreEqual(expected, sim.ExecuteScalar($"""
+            select string_agg(concat(name, ':', 0 + is_identity_column, ':', 0 + is_updateable, ':', 0 + is_computed_column, ':', 0 + is_sparse_column_set), '|') within group (order by column_ordinal)
+            from sys.dm_exec_describe_first_result_set(N'{query}', null, 0)
+            """));
+    }
+
     /// <summary>Real types order_by_is_descending bit (probed 2026-09-26 against SQL Server 2025).</summary>
     [TestMethod]
     public void OrderByIsDescending_IsBit()

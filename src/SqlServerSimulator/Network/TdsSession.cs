@@ -1390,7 +1390,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // hold a MARS session from their first.
                 if (query is SimulatedSqlResultSet { Stream.PendingWrite: not null })
                     writer.HoldSessionFromResultStart();
-                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse, query.OrderColumns);
+                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse, query.OrderColumns, query.ColumnAliasTypes);
                 long rows = 0;
                 using (var cursor = query.CreateClientCursor())
                 {

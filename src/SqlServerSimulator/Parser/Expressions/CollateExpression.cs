@@ -113,6 +113,12 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
 
     internal override bool ResultIsNullable(NullabilityContext context) => this.Inner.ResultIsNullable(context);
 
+    internal override Expression DescribedOperand(NullabilityContext context) =>
+        this.Inner.DescribedOperand(context) is Reference column
+        && string.Equals(context.TypeOf(column).Collation?.Name, this.ResolvedCollation.Name, StringComparison.OrdinalIgnoreCase)
+            ? column
+            : this;
+
     // Real folds the postfix away when its operand is constant, so
     // `ORDER BY 'x' COLLATE Latin1_General_CI_AS` is Msg 408 (probe-confirmed).
     private protected override bool IsStructuralConstant => this.Inner.IsWrittenConstant;

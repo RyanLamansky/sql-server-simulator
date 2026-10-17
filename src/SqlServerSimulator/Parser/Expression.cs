@@ -1072,6 +1072,40 @@ internal abstract class Expression : ExpressionNode
     internal virtual bool ResultIsNullable(NullabilityContext context) => true;
 
     /// <summary>
+    /// What a result's column metadata describes this expression as: the column
+    /// it reads when real's compile reduces it to that read — parentheses, a
+    /// <c>CAST</c> / <c>CONVERT</c> without a style / <c>TRY_CAST</c> to a
+    /// nullable column's own type, a <c>COLLATE</c> naming the collation the
+    /// column already has, a <c>CASE</c> / <c>IIF</c> whose constant fold
+    /// leaves one arm of its own result type — and itself otherwise (probed
+    /// 2026-10-17 against SQL Server 2025: <c>CAST(b AS varchar(10))</c> over a
+    /// nullable <c>varchar(10)</c> column describes the column, where the same
+    /// cast over a NOT NULL column, to <c>varchar(11)</c>, or with a style is an
+    /// expression).
+    /// </summary>
+    internal virtual Expression DescribedOperand(NullabilityContext context) => this;
+
+    /// <summary>
+    /// <paramref name="operand"/> when it reduced to a column of exactly
+    /// <paramref name="resultType"/> (length, collation and type alike) that
+    /// the column's own nullability lets a conversion leave alone; null
+    /// otherwise.
+    /// </summary>
+    private protected static Expression? NoOpConversionOperand(Expression operand, SqlType resultType, NullabilityContext context) =>
+        operand is Expressions.Reference reference
+        && context.ColumnIsNullable(reference.ReferencedName)
+        && SameDescribedType(context.TypeOf(operand), resultType)
+            ? operand
+            : null;
+
+    /// <summary>Whether two static types are one declared type, coercibility aside.</summary>
+    private protected static bool SameDescribedType(SqlType a, SqlType b) =>
+        ReferenceEquals(a, b)
+        || (a.GetType() == b.GetType()
+            && string.Equals(a.ToString(), b.ToString(), StringComparison.Ordinal)
+            && string.Equals(a.Collation?.Name, b.Collation?.Name, StringComparison.Ordinal));
+
+    /// <summary>
     /// Adds to <paramref name="foldedAway"/> the operands real's compile-time
     /// fold removes from this node: the CASE-family arms a constant condition
     /// decides away, the same surviving-arm rule

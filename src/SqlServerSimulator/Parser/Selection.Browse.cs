@@ -134,13 +134,18 @@ internal sealed partial class Selection
         {
             if (body.IsSetOperationResult)
                 return (null, -1, true);
-            // A body's aggregate reads as no expression (probed 2026-10-06
-            // against SQL Server 2025), though the statement's own does.
+            // A view's aggregate reads as no expression (probed 2026-10-06
+            // against SQL Server 2025), though a derived table's or CTE's does
+            // (probed 2026-10-17), as the statement's own does.
             return body is { BrowseFlattened: true, BranchFromSources: { } inner, ProjectionExpressions: { } projections } && columnIndex < projections.Length
-                ? Unaliased(projections[columnIndex]) is AggregateExpression ? (null, -1, false) : BrowseBaseColumn(inner, projections[columnIndex])
+                ? Unaliased(projections[columnIndex]) is AggregateExpression ? (null, -1, source.BackingView is null) : BrowseBaseColumn(inner, body.DescribedProjections is { } described && columnIndex < described.Length ? described[columnIndex] : projections[columnIndex])
                 : (null, -1, false);
         }
-        return source.BackingTable is not null && !source.IsPlaceholder ? (source, columnIndex, false) : (null, -1, false);
+        // A VALUES constructor's or rowset constructor's column is an
+        // expression, as is a catalog view's or system function's computed one
+        // (probed 2026-10-17 against SQL Server 2025).
+        return source.BackingTable is not null && !source.IsPlaceholder ? (source, columnIndex, false)
+            : (null, -1, source.ComputedCatalogColumns() is { } computed ? columnIndex < computed.Length && computed[columnIndex] : source.ConstructsRows);
     }
 
     /// <summary>

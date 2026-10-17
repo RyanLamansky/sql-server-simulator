@@ -234,16 +234,17 @@ partial class Simulation
             nullName, nullName, nullName, nullName, nullName,
             SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),
             nullBit,
-            // The COLMETADATA flags trace a column through views, derived
-            // tables and inline functions to what it reads: updatable (0x08)
-            // or computed (0x20) (probed 2026-09-26 against SQL Server 2025).
+            // Describing reads a column's COLMETADATA character: updatable,
+            // computed, a sparse column set — a grouped query's grouping
+            // columns as updatable as any (probed 2026-10-17 against SQL
+            // Server 2025).
             SqlValue.FromBoolean(result.ColumnWireFlags is { } updatableFlags
-                ? !result.IsGrouped && (updatableFlags[index] & 0x08) != 0
+                ? ColumnCharacter.IsUpdatable(updatableFlags[index])
                 : !result.IsGrouped && origin is { Identity: null } && (origin.Computed is null || origin.GraphKind != GraphColumnKind.None) && type != SqlType.RowVersion),
             SqlValue.FromBoolean(result.ColumnWireFlags is { } computedFlags
-                ? (computedFlags[index] & 0x20) != 0
+                ? ColumnCharacter.IsComputed(computedFlags[index])
                 : origin is { Computed: not null, GraphKind: GraphColumnKind.None } || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
-            SqlValue.FromBoolean(false),
+            SqlValue.FromBoolean(result.ColumnWireFlags is { } setFlags && (setFlags[index] & ColumnCharacter.ColumnSet) != 0),
             nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),
             SqlValue.FromInt32(tdsLength),

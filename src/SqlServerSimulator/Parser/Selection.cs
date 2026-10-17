@@ -262,6 +262,23 @@ internal sealed partial class Selection
     internal byte[]? ColumnWireFlags;
 
     /// <summary>
+    /// Per column, the character an enclosing query reads it with when this
+    /// query is its derived table, CTE or <c>APPLY</c> body: a column read
+    /// passes its source's through, a view's or inline function's as its
+    /// catalog entry describes it, and anything else is
+    /// <see cref="ColumnCharacter.Derived"/>; null where
+    /// <see cref="ColumnWireFlags"/> stands for it.
+    /// </summary>
+    internal byte[]? ColumnDerivedWireFlags;
+
+    /// <summary>
+    /// Per projection column, what the result's metadata describes it as
+    /// (<see cref="Expression.DescribedOperand"/>): the column it reduces to
+    /// reading, or the projection itself; null for a shape that computes none.
+    /// </summary>
+    internal Expression[]? DescribedProjections;
+
+    /// <summary>
     /// Per-column significant-digit count for projection columns that are
     /// non-negative integer literals (<c>0</c> for non-literal columns); null
     /// when no column is an integer literal. Lets set-op column-type unification
@@ -4179,6 +4196,8 @@ internal sealed partial class Selection
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
             OrderColumns = orderBy.Count > 0 && scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, expressions, columnNames) : null,
+            ColumnWireFlags = WireFlagsOf(expressions, [], null, ColumnNullabilityContext([], [], groupingSetsWritten: false, parseBatch, TypeResolver), out var derivedWireFlags, out _),
+            ColumnDerivedWireFlags = derivedWireFlags,
         }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread,
             yieldsOneRow: excluders.Count == 0 && topCount is null && offsetCount is null && fetchCount is null && !isAssignmentOnly && intoTarget is null);
     }

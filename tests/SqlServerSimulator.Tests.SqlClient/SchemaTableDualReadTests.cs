@@ -26,8 +26,10 @@ public sealed class SchemaTableDualReadTests
                 c char(5), vc varchar(10), vcm varchar(max), nc nchar(4), nvc nvarchar(20) not null, nvm nvarchar(max), b binary(3), vb varbinary(7),
                 vbm varbinary(max), g uniqueidentifier, x xml, sv sql_variant, rv rowversion, tx text, ntx ntext, img image, comp as (ti + 1), h hierarchyid);
             create table w1 (id int identity primary key, name varchar(10), amt int, rv rowversion);
-            insert w1 (name, amt) values ('a', 1)
+            insert w1 (name, amt) values ('a', 1);
+            create table cst (k int primary key, sp int sparse null, cset xml column_set for all_sparse_columns)
             """);
+        Wire.ExecInProc(simulation, "create view vagg as select name, count(*) as n from w1 group by name");
         return simulation;
     }
 
@@ -51,6 +53,9 @@ public sealed class SchemaTableDualReadTests
     [DataRow("select name as n, amt * 2 as x, id from w1", CommandBehavior.KeyInfo)]
     [DataRow("select name from w1 for browse", CommandBehavior.Default)]
     [DataRow("select count(*), max(name) from w1", CommandBehavior.KeyInfo)]
+    [DataRow("select * from cst", CommandBehavior.Default)]
+    [DataRow("select 1 as k, (amt) as p, v from w1 cross join (values (1)) q(v)", CommandBehavior.Default)]
+    [DataRow("select * from vagg", CommandBehavior.Default)]
     public async Task InProcessSchemaTable_MatchesSqlClientsOverTheWire(string sql, CommandBehavior behavior)
     {
         var simulation = Seeded();

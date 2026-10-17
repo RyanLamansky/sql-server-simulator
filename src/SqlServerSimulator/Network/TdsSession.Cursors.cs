@@ -320,7 +320,7 @@ internal sealed partial class TdsSession
         }
         else
         {
-            TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags, browse: result.Browse, orderColumns: result.OrderColumns);
+            TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags, browse: result.Browse, orderColumns: result.OrderColumns, columnAliasTypes: result.ColumnAliasTypes);
         }
 
         if (rows is not null)

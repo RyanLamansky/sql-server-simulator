@@ -327,7 +327,7 @@ A table type's `CREATE TYPE … AS TABLE` accepts one.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **A sparse column set's client metadata**: SqlClient's `GetSchemaTable` reports `IsColumnSet` false, where real's COLMETADATA flags the column, and `OUTPUT … INTO`, `BULK INSERT` and a bulk load don't write through one (Msg 271 as a computed column).
+- **A sparse column set's writes**: `OUTPUT … INTO`, `BULK INSERT` and a bulk load don't write through one (Msg 271 as a computed column); its client metadata reads as real's, `fSparseColumnSet` and updatable ([`tds-endpoint.md`](tds-endpoint.md#type-wire-codec)).
 
 ## EF Core integration
 

@@ -427,8 +427,9 @@ internal sealed partial class Selection
             ColumnMasks = CombinedMasks(left.ColumnMasks, right.ColumnMasks, combinedSchema.Length),
             ColumnNullability = combinedNullability,
             // A set operation's columns read as neither updatable nor computed
-            // (captured 2026-09-26).
-            ColumnWireFlags = new byte[combinedSchema.Length],
+            // (captured 2026-09-26), and as updatability-unknown through a view.
+            ColumnWireFlags = DerivedColumns(combinedSchema.Length),
+            ColumnDerivedWireFlags = DerivedColumns(combinedSchema.Length),
         };
         combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
         // A predicate on a set operation's column reaches both branches, and a
@@ -1292,6 +1293,7 @@ internal sealed partial class Selection
             ColumnAliasTypes = inner.ColumnAliasTypes,
             ColumnXmlTypings = inner.ColumnXmlTypings,
             ColumnWireFlags = inner.ColumnWireFlags,
+            ColumnDerivedWireFlags = inner.ColumnDerivedWireFlags,
         };
     }
 }

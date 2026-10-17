@@ -406,6 +406,32 @@ internal sealed class FromSource(
     public Selection.TableHintInfo? ForcedViewIndexSeek;
 
     /// <summary>
+    /// For a view, its body's column character as the reading query expands
+    /// it (<c>Selection.ColumnWireFlags</c> of the body bound for this read),
+    /// which the reading query's result metadata follows; null for every
+    /// other source, and for a view whose body wasn't bound.
+    /// </summary>
+    public byte[]? ViewColumnWireFlags;
+
+    /// <summary>
+    /// For a system function's rowset, per column whether real's definition
+    /// computes it: such a source's columns read as a catalog view's do,
+    /// updatability-unknown unless computed, where a rowset constructor's
+    /// (<c>VALUES</c>, <c>OPENJSON</c>, <c>STRING_SPLIT</c> …) read as derived
+    /// values (captured 2026-10-17 against SQL Server 2025); null for every
+    /// other source.
+    /// </summary>
+    public bool[]? CatalogColumns;
+
+    /// <summary>
+    /// For a catalog view or a system function's rowset, per column whether
+    /// real's definition computes it (<see cref="CatalogColumns"/>,
+    /// <see cref="CatalogView.ComputedColumns"/>); null for every other source.
+    /// </summary>
+    public bool[]? ComputedCatalogColumns() =>
+        this.CatalogColumns ?? (this.BackingCatalogView is { } view ? view.ComputedColumns ?? [] : null);
+
+    /// <summary>
     /// For a multi-statement or CLR function's call in a writing statement's
     /// <c>FROM</c> clause, the function's name as written, which a joined write
     /// aliasing it refuses with Msg 270 (probed 2026-10-06 against SQL Server
@@ -619,6 +645,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ViewColumnWireFlags = this.ViewColumnWireFlags,
+            CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
             DeferredColumns = this.DeferredColumns,
@@ -646,6 +674,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ViewColumnWireFlags = this.ViewColumnWireFlags,
+            CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
             DeferredColumns = this.DeferredColumns,
@@ -675,6 +705,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ViewColumnWireFlags = this.ViewColumnWireFlags,
+            CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
             DeferredColumns = this.DeferredColumns,
@@ -702,6 +734,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ViewColumnWireFlags = this.ViewColumnWireFlags,
+            CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
             DeferredColumns = this.DeferredColumns,

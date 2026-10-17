@@ -73,6 +73,9 @@ public sealed class BrowseModeWireTests
     [DataRow("select name, amt from dbo.w1", "name:dbo.w1.name: amt:dbo.w1.amt: id:dbo.w1.id:kh rv:dbo.w1.rv:h visible=2")]
     [DataRow("select count(*) from w1", ":..:e visible=1")]
     [DataRow("select distinct name from w1", "name:.w1.name: visible=1")]
+    [DataRow("select (name) as p, cast(name as varchar(10)) as c from w1", "p:.w1.name:a c:.w1.name:a id:.w1.id:kh rv:.w1.rv:h visible=2")]
+    [DataRow("select v from (values (1)) q(v)", "v:..v:e visible=1")]
+    [DataRow("select [key] from openjson('[1]')", "key:..key:e visible=1")]
     [DataRow("select name from w1 union select name from w1", "name:..name:e visible=1")]
     public async Task KeyInfo_DescribesBaseColumnsAndCarriesHiddenKeys(string sql, string expected) =>
         AreEqual(expected, await this.KeyInfoSchema(sql));
@@ -118,6 +121,7 @@ public sealed class BrowseModeWireTests
     [DataRow("select name from v3", "name:.w1.name: id:.w1.id:kh rv:.w1.rv:h k1:.w2.k1:kh k2:.w2.k2:kh visible=1")]
     [DataRow("select a from v4", "a:.h1.a: visible=1")]
     [DataRow("select * from v5", "name:.w1.name: c:..c: visible=2")]
+    [DataRow("select n from (select name, count(*) n from w1 group by name) d", "n:..n:e visible=1")]
     [DataRow("select d.name, w2.v from (select name, id from w1) d join w2 on d.id = w2.k1", "name:.w1.name: v:.w2.v: id:.w1.id:kh rv:.w1.rv:h k1:.w2.k1:kh k2:.w2.k2:kh visible=2")]
     [DataRow("select name from (select name, id from w1) d where id > 0", "name:.w1.name: id:.w1.id:kh rv:.w1.rv:h visible=1")]
     [DataRow("select name from (select top 5 name, id from w1) d", "name:.w1.name: id:.w1.id:kh rv:.w1.rv:h visible=1")]

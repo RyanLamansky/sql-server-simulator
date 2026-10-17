@@ -65,9 +65,9 @@ internal static class ResultSchemaTable
             // resolves to in this process — null when Microsoft.SqlServer.Types
             // isn't loadable — as SqlClient resolves it.
             var udtType = info.UdtName is { } udtName ? Type.GetType(udtName, throwOnError: false) : null;
-            // A plain column is updatability-unknown (0x08); every other
-            // character — identity, computed, read-only — reads read-only.
-            var character = result.ColumnWireFlags is { } flags ? flags[i] : (byte)0x08;
+            // A plain column is updatability-unknown; every other character —
+            // identity, computed, read-only, derived — reads read-only.
+            var character = result.ColumnWireFlags is { } flags ? flags[i] : ColumnCharacter.UpdatableUnknown;
             var identity = (character & 0x10) != 0;
             var row = table.NewRow();
             row["ColumnName"] = result.ColumnNames[i];
@@ -85,12 +85,12 @@ internal static class ResultSchemaTable
             row["IsAutoIncrement"] = identity;
             row["IsRowVersion"] = type is RowVersionSqlType;
             row["IsLong"] = info.IsLong;
-            row["IsReadOnly"] = (character & 0x08) == 0;
+            row["IsReadOnly"] = !ColumnCharacter.IsUpdatable(character);
             row["ProviderSpecificDataType"] = (object?)(info.ProviderSpecificType ?? udtType) ?? DBNull.Value;
             row["DataTypeName"] = info.Name;
             row["UdtAssemblyQualifiedName"] = (object?)info.UdtName ?? DBNull.Value;
             row["NonVersionedProviderType"] = (int)info.ProviderType;
-            row["IsColumnSet"] = false;
+            row["IsColumnSet"] = (character & ColumnCharacter.ColumnSet) != 0;
             if (browse is not null)
             {
                 var (tableNumber, status, baseName) = browse.Columns[i];

@@ -283,6 +283,71 @@ internal sealed class TdsSessionFixture : IDisposable
         return tokens;
     }
 
+    /// <summary>
+    /// The response's first COLMETADATA as one <c>name:flags</c> entry per
+    /// column — the flags as four hex digits, then <c>:ut=n</c> for a nonzero
+    /// user type — for asserting the flag bits SqlClient folds into its schema
+    /// table.
+    /// </summary>
+    public static List<string> ColumnFlags(byte[] response)
+    {
+        var i = Array.IndexOf(response, Tds.TokenColMetadata);
+        if (i < 0)
+            throw new InvalidDataException("The response carries no COLMETADATA.");
+        var columns = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(++i));
+        i += 2;
+        var described = new List<string>();
+        for (var c = 0; c < columns; c++)
+        {
+            var userType = BinaryPrimitives.ReadUInt32LittleEndian(response.AsSpan(i));
+            var flags = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i + 4));
+            i += 6;
+            var type = response[i++];
+            switch (type)
+            {
+                case 0x30 or 0x32 or 0x34 or 0x38 or 0x3A or 0x3B or 0x3C or 0x3D or 0x3E or 0x7A or 0x7F: // fixed-length
+                    break;
+                case 0x24 or 0x26 or 0x68 or 0x6D or 0x6E or 0x6F or 0x29 or 0x2A or 0x2B: // a length or scale byte
+                    i++;
+                    break;
+                case 0x28: // date
+                    break;
+                case 0x6A or 0x6C: // DECIMALN, NUMERICN
+                    i += 3;
+                    break;
+                case 0xA5 or 0xAD: // the binary pair
+                    i += 2;
+                    break;
+                case 0xA7 or 0xAF or 0xE7 or 0xEF: // the string families, with their collation
+                    i += 7;
+                    break;
+                case 0x62: // sql_variant
+                    i += 4;
+                    break;
+                case 0xF1: // xml, with an optional schema collection
+                    if (response[i++] != 0)
+                    {
+                        i += 1 + (response[i] * 2);
+                        i += 1 + (response[i] * 2);
+                        i += 2 + (BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i)) * 2);
+                    }
+                    break;
+                case 0xF0: // CLR UDT: max size, three names, the assembly-qualified name
+                    i += 2;
+                    for (var part = 0; part < 3; part++)
+                        i += 1 + (response[i] * 2);
+                    i += 2 + (BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i)) * 2);
+                    break;
+                default:
+                    throw new InvalidDataException($"Unexpected column type 0x{type:X2}.");
+            }
+            var name = Encoding.Unicode.GetString(response, i + 1, response[i] * 2);
+            i += 1 + (response[i] * 2);
+            described.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{name}:{flags:x4}{(userType == 0 ? "" : $":ut={userType}")}"));
+        }
+        return described;
+    }
+
     public void Dispose()
     {
         this.connection.Dispose();

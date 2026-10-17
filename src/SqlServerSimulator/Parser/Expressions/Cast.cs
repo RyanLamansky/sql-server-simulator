@@ -381,6 +381,9 @@ internal sealed class Cast : Expression
 
     internal override SqlType? ConversionTarget => this.targetType;
 
+    internal override Expression DescribedOperand(NullabilityContext context) =>
+        this.TargetCollection is null && NoOpConversionOperand(this.source.DescribedOperand(context), context.TypeOf(this), context) is { } column ? column : this;
+
     internal override bool IsRowIndependent => this.source.IsRowIndependent;
 
     private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;

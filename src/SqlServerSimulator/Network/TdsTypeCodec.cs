@@ -43,7 +43,7 @@ internal static class TdsTypeCodec
     /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
     /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "", BrowseInfo? browse = null, ushort[]? orderColumns = null)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "", BrowseInfo? browse = null, ushort[]? orderColumns = null, Schemas.AliasType?[]? columnAliasTypes = null)
     {
         var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
@@ -52,15 +52,18 @@ internal static class TdsTypeCodec
         for (var i = 0; i < schema.Length; i++)
         {
             var type = schema[i];
-            // A native vector column carries vector's user type, 255.
-            writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : IsNativeVector(writer, type) ? 0xFFu : 0u);
+            writer.WriteUInt32(UserTypeOf(writer, type, columnAliasTypes?[i]));
             var notNull = columnNullability is not null && !columnNullability[i];
             // A cursor fetch's hidden ROWSTAT is read-only; browse mode's
             // hidden key and rowversion columns keep their own character.
             var hidden = i >= firstHidden && browse is null;
-            var character = hidden ? (byte)0x00 : columnWireFlags is { } flags ? flags[i] : (byte)0x08;
-            writer.WriteByte((byte)(character | (notNull ? 0 : 1)));
-            writer.WriteByte(0);
+            var character = hidden ? ColumnCharacter.ReadOnly : columnWireFlags is { } flags ? flags[i] : ColumnCharacter.UpdatableUnknown;
+            // fCaseSen follows the column's type: a case-sensitive or binary
+            // collation's string, and xml (captured 2026-10-17 against SQL
+            // Server 2025).
+            var caseSensitive = type is XmlSqlType || type.Collation is { CaseSensitive: true };
+            writer.WriteByte((byte)((character & 0x3F) | (caseSensitive ? 0x02 : 0) | (notNull ? 0 : 1)));
+            writer.WriteByte((character & ColumnCharacter.ColumnSet) != 0 ? (byte)0x04 : (byte)0);
             var reportsNumeric = columnReportsNumeric is not null && columnReportsNumeric[i];
             WriteTypeInfo(writer, type, notNull, reportsNumeric, databaseName);
             writer.WriteBVarchar(columnNames[i]);
@@ -388,6 +391,19 @@ internal static class TdsTypeCodec
         WriteValue(writer, wireType, sqlValue);
         writer.LeaveComposite();
     }
+
+    /// <summary>
+    /// A result column's COLMETADATA user type: a rowversion's 80, a native
+    /// vector's 255, <c>sysname</c>'s 256 and an alias type's own
+    /// <c>user_type_id</c>, 0 for the rest (captured 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static uint UserTypeOf(TdsTokenWriter writer, SqlType type, Schemas.AliasType? alias) =>
+        alias is not null ? (uint)alias.UserTypeId
+        : type is RowVersionSqlType ? 0x50u
+        : IsNativeVector(writer, type) ? 0xFFu
+        : type is SystemNameSqlType ? 0x100u
+        : 0u;
 
     /// <summary>Whether <paramref name="type"/> goes to this client as the native float32 vector type.</summary>
     private static bool IsNativeVector(TdsTokenWriter writer, SqlType type) =>

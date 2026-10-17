@@ -40,4 +40,6 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
     internal override bool ResultReportsNumeric => this.Wrapped.ResultReportsNumeric;
 
     internal override bool ResultIsNullable(NullabilityContext context) => this.Wrapped.ResultIsNullable(context);
+
+    internal override Expression DescribedOperand(NullabilityContext context) => this.Wrapped.DescribedOperand(context);
 }

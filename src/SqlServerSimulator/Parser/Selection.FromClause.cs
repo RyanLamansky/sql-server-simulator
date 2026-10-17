@@ -1117,14 +1117,14 @@ internal sealed partial class Selection
                 // Server's grammar, so dispatch fires before ParseObjectName
                 // / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseOpenJson(context, scope.OuterTypeResolver)), writtenName: null, qualified: false);
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseOpenJson(context, scope.OuterTypeResolver)), writtenName: null, qualified: false, constructsColumns: true);
 
                 if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseStringSplit(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseStringSplit(context, scope.OuterTypeResolver)), tableName.Value, qualified: false, constructsColumns: true);
 
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)), tableName.Value, qualified: false, constructsColumns: true);
 
                 if (IsChangeTableName(tableName.Value))
                     return InArgumentScope(context, scope, () => ParseChangeTableSource(context, scope));
@@ -1136,7 +1136,7 @@ internal sealed partial class Selection
                 {
                     return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
                         ? ParseRegexpMatches(context, scope.OuterTypeResolver)
-                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
+                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver)), tableName.Value, qualified: false, constructsColumns: true);
                 }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
@@ -1632,6 +1632,7 @@ internal sealed partial class Selection
                     {
                         ForPath = viewForPath,
                         BrowseBody = viewFlattens ? viewBody : null,
+                        ViewColumnWireFlags = viewBody?.ColumnWireFlags,
                         GraphIdentityTable = viewGraphIdentity ? viewBody!.GraphIdentityTable : null,
                         BodySeekShape = viewBody?.SeekShape,
                         ForcedSeekThrough = viewHints is { ForceSeek: true, NoExpand: false } ? viewHints : null,
@@ -2106,7 +2107,7 @@ internal sealed partial class Selection
             // reserved keywords, so they arrive here rather than in the Name
             // case that carries OPENJSON.
             case ReservedKeyword { Keyword: Keyword.ContainsTable or Keyword.FreeTextTable } ftRowset:
-                return BuiltInRowsetSource(context, ParseFullTextTable(context, ftRowset.Keyword == Keyword.FreeTextTable), writtenName: null, qualified: false);
+                return BuiltInRowsetSource(context, ParseFullTextTable(context, ftRowset.Keyword == Keyword.FreeTextTable), writtenName: null, qualified: false, constructsColumns: true);
 
             case ReservedKeyword
             {
@@ -2265,7 +2266,7 @@ internal sealed partial class Selection
     /// <c>CONTAINSTABLE</c>, <c>FREETEXTTABLE</c>), which
     /// <see cref="RejectRowsetColumnAliasList"/> reads apart.
     /// </summary>
-    private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan, string? writtenName, bool qualified)
+    private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan, string? writtenName, bool qualified, bool constructsColumns = false)
     {
         RejectRowsetFunctionWith(context);
         var columns = new HeapColumn[plan.Schema.Length];
@@ -2284,6 +2285,7 @@ internal sealed partial class Selection
             lateralPlan: plan)
         {
             ConstructsRows = true,
+            CatalogColumns = constructsColumns ? null : BuiltInResources.RealComputedColumns("sys." + writtenName, plan.ColumnNames),
         };
     }
 

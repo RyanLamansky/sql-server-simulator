@@ -189,6 +189,11 @@ internal sealed class CaseExpression : Expression
         _ = shape.Child(this.elseBranch);
     }
 
+    // A CASE its constant fold settles on one arm is that arm, when the arm
+    // needs no conversion to the CASE's type.
+    internal override Expression DescribedOperand(NullabilityContext context) =>
+        this.settledArm?.DescribedOperand(context) is Reference column && SameDescribedType(context.TypeOf(column), context.TypeOf(this)) ? column : this;
+
     // Non-null iff every surviving THEN and the ELSE (or the implicit
     // ELSE NULL) is non-null — proving exhaustive WHEN coverage is
     // intractable, so real's projection rule is the OR over arms.

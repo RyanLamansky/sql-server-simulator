@@ -373,4 +373,56 @@ internal static partial class BuiltInResources
                 views[key] = presented;
         }
     }
+
+    /// <summary>
+    /// Per catalog view or system function, by key (<c>sys.objects</c>,
+    /// <c>sys.dm_fts_parser</c>), the columns real's definition computes, from
+    /// <c>CatalogViewComputedColumns.tsv</c>: a key, a tab, then the computed
+    /// columns' names, comma-separated (captured 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static readonly Lazy<FrozenDictionary<string, string[]>> RealComputedColumnNames = new(static () =>
+    {
+        using var stream = typeof(BuiltInResources).Assembly.GetManifestResourceStream("SqlServerSimulator.CatalogViewComputedColumns.tsv")
+            ?? throw new InvalidOperationException("Embedded resource SqlServerSimulator.CatalogViewComputedColumns.tsv is missing.");
+        using var reader = new StreamReader(stream);
+        var names = new Dictionary<string, string[]>(BuiltInToken.Comparer);
+        while (reader.ReadLine() is { } line)
+        {
+            var tab = line.IndexOf('\t', StringComparison.Ordinal);
+            if (tab > 0)
+                names[line[..tab]] = line[(tab + 1)..].Split(',');
+        }
+        return names.ToFrozenDictionary(BuiltInToken.Comparer);
+    });
+
+    /// <summary>
+    /// Per column of <paramref name="columnNames"/>, whether real's definition
+    /// of the catalog view or system function <paramref name="key"/> computes
+    /// it.
+    /// </summary>
+    internal static bool[] RealComputedColumns(string key, string[] columnNames)
+    {
+        var computed = new bool[columnNames.Length];
+        if (RealComputedColumnNames.Value.TryGetValue(key, out var names))
+        {
+            foreach (var name in names)
+            {
+                var ordinal = Array.FindIndex(columnNames, column => BuiltInToken.Equals(column, name));
+                if (ordinal >= 0)
+                    computed[ordinal] = true;
+            }
+        }
+        return computed;
+    }
+
+    /// <summary>Marks each view's columns real's definition computes (<see cref="CatalogView.ComputedColumns"/>).</summary>
+    private static void ApplyRealComputedColumns(Dictionary<string, CatalogView> views)
+    {
+        foreach (var (key, view) in views)
+        {
+            if (RealComputedColumnNames.Value.ContainsKey(key))
+                view.ComputedColumns = RealComputedColumns(key, Array.ConvertAll(view.Columns, static column => column.Name));
+        }
+    }
 }

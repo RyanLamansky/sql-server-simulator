@@ -69,15 +69,14 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     internal Storage.IdentityState?[]? ColumnIdentitySources;
 
     /// <summary>
-    /// Per column, the COLMETADATA flag bits a column carries besides
-    /// fNullable, as SQL Server 2025 sets them (captured 2026-09-26): a column
-    /// read from a table — through views, joins and derived tables alike —
-    /// keeps its table's character, <c>0x10</c> (fIdentity, read-only) for an
-    /// identity column, <c>0x20</c> (fComputed, read-only) for a computed one,
-    /// <c>0x00</c> (read-only) for a rowversion and <c>0x08</c> (updatability
-    /// unknown) for the rest; a scalar expression is <c>0x20</c>; an aggregate,
-    /// a window function or a set operation's column is <c>0x00</c>. Null
-    /// means every column is <c>0x08</c>.
+    /// Per column, its character (<see cref="ColumnCharacter"/>): the
+    /// COLMETADATA flag bits SQL Server 2025 sets from what the column reads,
+    /// besides the fNullable and fCaseSen the TDS writer adds — a table
+    /// column's own character, traced through views, joins and derived tables,
+    /// <see cref="ColumnCharacter.Computed"/> for a scalar expression and
+    /// <see cref="ColumnCharacter.Derived"/> for an aggregate, a window
+    /// function or a set operation's column (see <c>Selection.WireFlagsOf</c>).
+    /// Null means every column is <see cref="ColumnCharacter.UpdatableUnknown"/>.
     /// </summary>
     public byte[]? ColumnWireFlags;
 

@@ -88,7 +88,7 @@ internal sealed partial class Selection
         {
             ColumnNullability = withColumns is null ? OpenJsonDefaultNullability : null,
             // No OPENJSON column is updatable (probed 2026-09-28 against SQL Server 2025).
-            ColumnWireFlags = new byte[schema.Length],
+            ColumnWireFlags = DerivedColumns(schema.Length),
         };
     }
 

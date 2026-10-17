@@ -272,6 +272,9 @@ internal sealed class ConvertExpression : Expression
 
     internal override SqlType? ConversionTarget => this.style is null ? this.targetType : null;
 
+    internal override Expression DescribedOperand(NullabilityContext context) =>
+        this.style is null && this.TargetCollection is null && NoOpConversionOperand(this.source.DescribedOperand(context), context.TypeOf(this), context) is { } column ? column : this;
+
     private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;
 
     private static string WithoutTrailingFractionZeros(string text) =>
