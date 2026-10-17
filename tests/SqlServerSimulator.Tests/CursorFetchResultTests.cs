@@ -96,6 +96,43 @@ public sealed class CursorFetchResultTests
             select concat(@@fetch_status, '|', @id, '|[', @a, ']|', isnull(str(@g), 'NULL'))
             """));
 
+    /// <summary>
+    /// A fetch's columns read as their table's key when the cursor was asked
+    /// for as KEYSET or DYNAMIC — named, through SCROLL or the forward-only
+    /// default — even where its shape converted it to a snapshot, and never
+    /// for STATIC, INSENSITIVE or FAST_FORWARD, a forward-only read-only one
+    /// included; the key is a clustered table's clustering key over any
+    /// nonclustered primary key, else that key (captured 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cursor dynamic for select id, v from pk", "id")]
+    [DataRow("cursor keyset for select id, v from pk", "id")]
+    [DataRow("cursor for select id, v from pk", "id")]
+    [DataRow("scroll cursor for select v, id from pk", "id")]
+    [DataRow("cursor dynamic for select distinct id, v from pk", "id")]
+    [DataRow("cursor static for select id, v from pk", "")]
+    [DataRow("insensitive cursor for select id, v from pk", "")]
+    [DataRow("cursor fast_forward for select id, v from pk", "")]
+    [DataRow("cursor local read_only for select id, v from pk", "")]
+    [DataRow("cursor dynamic for select id, v from nc", "v")]
+    [DataRow("cursor dynamic for select id, v from heap_pk", "id")]
+    [DataRow("cursor dynamic for select id, v from heap", "")]
+    public void Fetch_MarksTheKeyARequestedKeysetOrDynamicCursorIdentifiesRowsBy(string declaration, string keys)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table pk (id int primary key, v int);
+            create table nc (id int primary key nonclustered, v int);
+            create clustered index cx on nc (v);
+            create table heap_pk (id int primary key nonclustered, v int);
+            create table heap (id int, v int);
+            """).ExecuteNonQuery();
+        using var reader = connection.CreateCommand($"declare c {declaration}; open c; fetch c; close c; deallocate c").ExecuteReader();
+        var schema = reader.GetSchemaTable()!;
+        AreEqual(keys, string.Join(",", schema.Rows.Cast<System.Data.DataRow>().Where(static row => (bool)row["IsKey"]).Select(static row => (string)row["ColumnName"])));
+    }
+
     private sealed class ValueComparer : System.Collections.IComparer
     {
         public int Compare(object? x, object? y) => (x, y) switch

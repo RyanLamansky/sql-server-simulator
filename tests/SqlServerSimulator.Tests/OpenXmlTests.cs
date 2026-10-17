@@ -200,6 +200,18 @@ public sealed class OpenXmlTests
         AreEqual($"The error description is '{description}'.", all.Single(static e => e.Number == 6602).Message);
     }
 
+    /// <summary>
+    /// Where no reader raises Msg 6601 as an info message on its own, it
+    /// rides the exception after Msg 6602, as SqlClient lists them over the
+    /// wire (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void MalformedDocument_ExecuteNonQuery_ListsTheNoticeAfterTheError()
+    {
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("declare @h int; exec sp_xml_preparedocument @h output, N'<a><b></a>'"));
+        CollectionAssert.AreEqual(new[] { 6602, 6601 }, ex.Errors.Select(static error => error.Number).ToArray());
+    }
+
     /// <summary>An empty document, like a NULL one, allocates a handle.</summary>
     [TestMethod]
     public void EmptyDocument_StillAllocatesHandle()

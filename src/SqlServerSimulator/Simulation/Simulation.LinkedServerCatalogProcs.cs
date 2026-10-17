@@ -106,8 +106,11 @@ partial class Simulation
         string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "GRANTOR", "GRANTEE", "PRIVILEGE", "IS_GRANTABLE"];
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedSqlResultSet(schema, names, []);
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 34, returnCode: -1);
+            foreach (var step in ProcedureSteps(batch, MissingServerSteps(values[4])))
+                yield return step;
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 34);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, names, []), missing);
+            throw missing;
         }
         var rows = new List<SqlValue[]>();
         if (SchemaRowsetDatabase(server, values[3]) is { } database)
@@ -147,8 +150,9 @@ partial class Simulation
         string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "GRANTOR", "GRANTEE", "PRIVILEGE", "IS_GRANTABLE"];
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedSqlResultSet(schema, names, []);
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 11, returnCode: -1);
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 11);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, names, []), missing);
+            throw missing;
         }
         var rows = new List<SqlValue[]>();
         if (SchemaRowsetDatabase(server, values[3]) is { } database)
@@ -205,8 +209,9 @@ partial class Simulation
         };
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return listing;
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 12, returnCode: -1);
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 12);
+            yield return FailedListing(batch, listing, missing);
+            throw missing;
         }
         yield return listing;
         var uniqueOnly = !values[5].IsNull && values[5].CoerceTo(SqlType.Bit).AsBoolean;
@@ -246,8 +251,9 @@ partial class Simulation
         string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "KEY_SEQ", "PK_NAME"];
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedSqlResultSet(schema, names, []);
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 10);
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 10);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, names, []), missing);
+            throw missing;
         }
         var query = $"""
             SELECT DB_NAME(), s.name, o.name, c.name, ic.key_ordinal
@@ -296,8 +302,9 @@ partial class Simulation
         ];
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedSqlResultSet(schema, names, []);
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 13);
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 13);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, names, []), missing);
+            throw missing;
         }
         var query = $"""
             SELECT DB_NAME(), ps.name, po.name, pc.name, fs.name, fo.name, fc.name, k.constraint_column_id,
@@ -395,11 +402,12 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_catalogs", calledAs, arguments, CatalogsParameters);
-        var serverName = values[0].IsNull ? "" : values[0].AsString;
-        if (!batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName, out var server))
+        SqlType[] schema = [NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit)];
+        string[] columnNames = ["CATALOG_NAME", "DESCRIPTION"];
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            var missing = AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerNotFound(serverName), 1);
-            missing.EndedCalledBatch = false;
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 7);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, columnNames, []), missing);
             throw missing;
         }
         var target = server.Target;
@@ -411,10 +419,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>(names.Count);
         foreach (var name in names)
             rows.Add([SqlValue.FromNVarchar(name), description]);
-        yield return new SimulatedSqlResultSet(
-            [NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), NVarcharSqlType.Get(255, Collation.Catalog, Coercibility.Implicit)],
-            ["CATALOG_NAME", "DESCRIPTION"],
-            rows);
+        yield return new SimulatedSqlResultSet(schema, columnNames, rows);
     }
 
     /// <summary>
@@ -439,8 +444,11 @@ partial class Simulation
         // A server sys.servers doesn't hold lists nothing, then is Msg 7202.
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedSqlResultSet(schema, names, []);
-            throw MissingSchemaRowsetServer(calledAs, values[0], line: 41);
+            foreach (var step in ProcedureSteps(batch, MissingServerSteps(values[5])))
+                yield return step;
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 41);
+            yield return FailedListing(batch, new SimulatedSqlResultSet(schema, names, []), missing);
+            throw missing;
         }
         var rows = new List<SqlValue[]>();
         var usePattern = values[5].IsNull || values[5].CoerceTo(SqlType.Bit).AsBoolean;
@@ -496,16 +504,23 @@ partial class Simulation
             "CHAR_OCTET_LENGTH", "ORDINAL_POSITION", "IS_NULLABLE", "SS_DATA_TYPE",
         ];
         var nullability = new bool[] { true, true, false, true, false, true, true, true, true, true, false, true, true, true, true, true, true, false, true };
-        // A server sys.servers doesn't hold is Msg 7202 ending the statement
-        // that fills the procedure's work table, which it then lists empty.
+        // A server sys.servers doesn't hold is Msg 7202 ending the INSERT
+        // that fills the procedure's work table, which it then lists empty
+        // with no count on its DONE, returning -1; a TRY catching the error
+        // ends the procedure there (captured 2026-10-17 against SQL Server
+        // 2025).
         if (SchemaRowsetServer(batch, values[0]) is not { } server)
         {
-            yield return new SimulatedErrorOutcome(MissingSchemaRowsetServer(calledAs, values[0], line: 177));
+            var missing = MissingSchemaRowsetServer(calledAs, values[0], line: 177);
+            if (CaughtByTryFrame(batch, missing))
+                throw missing;
+            yield return new SimulatedErrorOutcome(missing) { DoneKind = StatementDoneKind.Insert, InModule = true };
             var terminated = SimulatedSqlException.StatementTerminatedMessage(batch);
             terminated.LineNumber = 177;
             terminated.Procedure = calledAs;
-            yield return new SimulatedInfoOutcome(terminated);
-            yield return new SimulatedSqlResultSet(schema, names, []) { ColumnNullability = nullability };
+            yield return new SimulatedInfoOutcome(terminated, followsRows: true);
+            batch.SystemProcedureStatus = -1;
+            yield return new SimulatedSqlResultSet(schema, names, []) { ColumnNullability = nullability, CountSuppressed = true };
             yield break;
         }
         var query = $"""
@@ -534,11 +549,40 @@ partial class Simulation
         batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName.IsNull ? "" : serverName.AsString, out var server) ? server : null;
 
     /// <summary>A schema-rowset procedure's Msg 7202, at its own line, leaving the calling batch running.</summary>
-    private static SimulatedSqlException MissingSchemaRowsetServer(string calledAs, SqlValue serverName, int line, int returnCode = 1)
+    /// <remarks>
+    /// The schema-rowset procedures return -1 after it, and a NULL server is
+    /// state 1 where a name is state 2 (captured 2026-10-17 against SQL Server
+    /// 2025).
+    /// </remarks>
+    private static SimulatedSqlException MissingSchemaRowsetServer(string calledAs, SqlValue serverName, int line)
     {
-        var missing = AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerNotFound(serverName.IsNull ? "" : serverName.AsString), line, returnCode);
+        var missing = AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerNotFound(serverName.IsNull ? "" : serverName.AsString, serverName.IsNull ? (byte)1 : (byte)2), line, returnCode: -1);
         missing.EndedCalledBatch = false;
         return missing;
+    }
+
+    /// <summary>
+    /// The statements <c>sp_tables_ex</c> and <c>sp_table_privileges_ex</c>
+    /// run ahead of a missing server's failed query (see
+    /// <see cref="ProcedureSteps"/>): two conditions, then an assignment and a
+    /// condition unless <c>@fUsePattern</c> is 0, whatever else they were
+    /// given (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    private static string MissingServerSteps(SqlValue usePattern) =>
+        usePattern.IsNull || usePattern.CoerceTo(SqlType.Bit).AsBoolean ? "IISI" : "II";
+
+    /// <summary>
+    /// <paramref name="listing"/> as a schema-rowset procedure's query that
+    /// <paramref name="error"/> fails before its first row: its metadata and
+    /// ORDER go out, then the error ahead of its DONE, as real's remote-rowset
+    /// query sends a missing server's Msg 7202 (captured 2026-10-17 against
+    /// SQL Server 2025); the caller throws the error after it.
+    /// </summary>
+    private static SimulatedSqlResultSet FailedListing(BatchContext batch, SimulatedSqlResultSet listing, SimulatedSqlException error)
+    {
+        listing.EndedByError = true;
+        listing.ErrorCaught = CaughtByTryFrame(batch, error);
+        return listing;
     }
 
     /// <summary>

@@ -276,4 +276,46 @@ public sealed class SystemProcedureTokenTests
         _ = fixture.RunBatch("create login l with password = 'Zz!passw0rd1', check_policy = off");
         CollectionAssert.AreEqual(new[] { "RET 0", "DONEPROC E0 FINAL 0" }, Batch(fixture, "exec('drop login l')"));
     }
+
+    /// <summary>
+    /// A schema-rowset procedure naming a server <c>sys.servers</c> doesn't
+    /// hold fails in its query, after the query's metadata and ORDER, closing
+    /// it with the error bit and returning -1 — <c>sp_tables_ex</c> and
+    /// <c>sp_table_privileges_ex</c> after the statements they run first, and
+    /// <c>sp_columns_ex</c> in the INSERT filling its work table, whose empty
+    /// listing then goes out with no count.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_catalogs 'nosuch'", "ROWS", "ORDER 1")]
+    [DataRow("exec sp_primarykeys 'nosuch'", "ROWS", "ORDER 1,2,3,5")]
+    [DataRow("exec sp_foreignkeys 'nosuch'", "ROWS", "ORDER 5,6,7,9")]
+    [DataRow("exec sp_indexes 'nosuch'", "ROWS", "ORDER 4,7,5,6,8")]
+    [DataRow("exec sp_column_privileges_ex 'nosuch'", "ROWS", "ORDER 1,2,3,4,7")]
+    [DataRow("exec sp_tables_ex 'nosuch'", "DONEINPROC C0 MORE 0", "DONEINPROC C0 MORE 0", "DONEINPROC C1 MORE|COUNT 1", "DONEINPROC C0 MORE 0", "ROWS", "ORDER 4,1,2,3")]
+    [DataRow("exec sp_table_privileges_ex 'nosuch', @fUsePattern = 0", "DONEINPROC C0 MORE 0", "DONEINPROC C0 MORE 0", "ROWS", "ORDER 1,2,3,6")]
+    public void SchemaRowset_MissingServer_FailsItsQuery(string sql, params string[] leading)
+        => AssertBatch(sql, [.. leading, "ERR 7202", "DONEINPROC C1 MORE|ERROR 0", "RET -1", "DONEPROC E0 FINAL 0"]);
+
+    [TestMethod]
+    public void ColumnsEx_MissingServer_FailsTheInsertFillingItsWorkTable()
+        => AssertBatch("exec sp_columns_ex 'nosuch'", "ERR 7202", "INFO 3621", "DONEINPROC C3 MORE|ERROR 0", "ROWS", "ORDER 1,2,3,17", "DONEINPROC C1 MORE 0", "RET -1", "DONEPROC E0 FINAL 0");
+
+    /// <summary>A TRY catching the failed query sees it close with no error bit and the procedure end with no status.</summary>
+    [TestMethod]
+    public void SchemaRowset_MissingServer_CaughtByATry()
+    {
+        using var fixture = new TdsSessionFixture();
+        CollectionAssert.AreEqual(
+            new[] { "DONE 15D MORE 0", "ROWS", "ORDER 1,2,3,5", "DONEINPROC C1 MORE|COUNT 0", "DONEPROC E0 MORE 0", "DONE 15E MORE 0", "ROWS", "DONE C1 MORE|COUNT 1", "DONE 15F FINAL 0" },
+            Batch(fixture, "begin try exec sp_primarykeys 'nosuch' end try begin catch select error_state() end catch"));
+        CollectionAssert.AreEqual(
+            new[] { "DONE 15D MORE 0", "DONEPROC E0 MORE 0", "DONE 15E MORE 0", "ROWS", "DONE C1 MORE|COUNT 1", "DONE 15F FINAL 0" },
+            Batch(fixture, "begin try exec sp_columns_ex 'nosuch' end try begin catch select error_state() end catch"));
+    }
+
+    /// <summary><c>sp_testlinkedserver</c>'s refusals end it as an extended procedure's do.</summary>
+    [TestMethod]
+    [DataRow("exec sp_testlinkedserver 'nosuch'", "ERR 214")]
+    [DataRow("exec sp_testlinkedserver N'nosuch'", "ERR 7202")]
+    public void TestLinkedServer_RefusalClosesItsDoneProc(string sql, string error) => AssertBatch(sql, error, "RET 1", "DONEPROC E0 ERROR 0");
 }

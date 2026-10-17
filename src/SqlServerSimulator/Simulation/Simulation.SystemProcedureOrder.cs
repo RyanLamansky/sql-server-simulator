@@ -59,6 +59,12 @@ partial class Simulation
         ["sp_tables_ex"] = [[4, 1, 2, 3]],
         ["sp_tables_rowset"] = [[4, 2, 3]],
         ["sp_who2"] = [[0]],
+        ["sp_column_privileges_ex"] = [[1, 2, 3, 4, 7]],
+        ["sp_columns_ex"] = [[1, 2, 3, 17]],
+        ["sp_foreignkeys"] = [[5, 6, 7, 9]],
+        ["sp_indexes"] = [[4, 7, 5, 6, 8]],
+        ["sp_primarykeys"] = [[1, 2, 3, 5]],
+        ["sp_table_privileges_ex"] = [[1, 2, 3, 6]],
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary><paramref name="result"/>, carrying <paramref name="columns"/> as its ORDER token's column list.</summary>

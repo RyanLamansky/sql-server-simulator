@@ -149,6 +149,9 @@ What the linked-server procedures check and report, probed 2026-10-05 against SQ
   An unknown server is Msg 7202 after an empty listing, at line 34 and 11, returning -1.
 - **`sp_indexes`** asks the provider for its INDEXES rowset, which SQL Server's own provider can't hand back: whenever a row would come — an index the exact, case-blind table, schema and index restrictions take (unique under `@is_unique = 1`), or a system base table's, which every database holds in `sys` — the empty listing is followed by Msg 7412 (`Binding information is invalid.`) and Msg 7346 naming a `(null)` linked server, which acts as under `XACT_ABORT`; with nothing to report the listing is empty, and an unknown server is Msg 7202 at line 12.
   **Divergence**: a system base table's indexes go unnamed here, so an `@index_name` restriction never finds one, where real's might.
+- **An unknown server fails the schema-rowset query itself**: each of the procedures above but `sp_columns_ex` sends its listing's metadata and ORDER, then Msg 7202 closing that result's DONEINPROC with the error bit, and returns -1; `sp_columns_ex` fails the INSERT filling its work table (Msg 7202, Msg 3621, a DONEINPROC of `0x00C3` with the error bit), then sends its empty listing with no count and returns -1 too, and a `TRY` catching either ends the procedure there (captured 2026-10-17 against SQL Server 2025).
+  A NULL server is state 1, a name state 2, and `sp_tables_ex` and `sp_table_privileges_ex` close two conditions ahead of the query, then an assignment and a condition unless `@fUsePattern` is 0.
+  Not modeled yet: the statements those two run ahead of a found server's query, which differ (three conditions for a named table).
 
 ## Server options
 

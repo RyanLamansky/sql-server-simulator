@@ -595,12 +595,13 @@ partial class Simulation
                 throw;
             }
             // A statement a procedure ran through dynamic SQL that failed ends the
-            // procedure with return code 1, though the batch went on.
-            if (enumerator.Current is SimulatedErrorOutcome && !OwnsReturnCode(systemProcName))
+            // procedure with return code 1, though the batch went on — or the
+            // code the procedure's own error names.
+            if (enumerator.Current is SimulatedErrorOutcome failed && !OwnsReturnCode(systemProcName))
             {
                 result.Failed = true;
                 if (returnCode is { } slot)
-                    slot.Value = SqlValue.FromInt32(1).CoerceTo(slot.DeclaredType);
+                    slot.Value = SqlValue.FromInt32(failed.Exception.SystemProcedureReturnCode).CoerceTo(slot.DeclaredType);
             }
             yield return enumerator.Current;
         }
@@ -617,7 +618,7 @@ partial class Simulation
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> AsExtendedProcedure(IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName)
     {
-        if (systemProcName is not ("sp_cursorclose" or "sp_execute" or "sp_getbindtoken" or "sp_set_session_context" or "sp_unprepare" or "sp_xml_preparedocument" or "sp_xml_removedocument"))
+        if (systemProcName is not ("sp_cursorclose" or "sp_execute" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_unprepare" or "sp_xml_preparedocument" or "sp_xml_removedocument"))
             return outcomes;
         return Marked(outcomes, systemProcName, calledName);
 

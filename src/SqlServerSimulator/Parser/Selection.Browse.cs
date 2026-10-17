@@ -180,7 +180,12 @@ internal sealed partial class Selection
     /// The browse metadata for a statement whose last <paramref name="hidden"/>
     /// columns are browse mode's own.
     /// </summary>
-    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden)
+    /// <remarks>
+    /// A cursor's (<paramref name="cursor"/>) key is the one its fetches
+    /// identify rows by (<see cref="CursorKeyOrdinals"/>) rather than browse
+    /// mode's.
+    /// </remarks>
+    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden, bool cursor = false)
     {
         var tables = new List<string[]>();
         var tableNumbers = new Dictionary<FromSource, int>(ReferenceEqualityComparer.Instance);
@@ -204,7 +209,7 @@ internal sealed partial class Selection
             var heap = table.BackingTable!;
             var baseName = heap.Columns[ordinal].Name;
             var renamed = !string.Equals(outputColumnNames[i], baseName, StringComparison.Ordinal);
-            var status = (Array.IndexOf(BrowseKeyOrdinals(heap), ordinal) >= 0 ? 0x08 : 0)
+            var status = (Array.IndexOf(cursor ? CursorKeyOrdinals(heap) : BrowseKeyOrdinals(heap), ordinal) >= 0 ? 0x08 : 0)
                 | (isHidden ? 0x10 : 0)
                 | (renamed ? 0x20 : 0);
             columns[i] = ((byte)tableNumber, (byte)status, renamed ? baseName : null);
@@ -243,6 +248,28 @@ internal sealed partial class Selection
                 return index.KeyFullOrdinals;
         }
         return [];
+    }
+
+    /// <summary>
+    /// The columns a cursor's COLINFO flags as its table's key: a clustered
+    /// table's clustering key, unique or not and whatever PRIMARY KEY sits
+    /// beside it, else browse mode's key (captured 2026-10-17 against SQL
+    /// Server 2025: a nonclustered primary key over a clustered index on
+    /// another column flags that column, over a heap the key itself).
+    /// </summary>
+    private static int[] CursorKeyOrdinals(HeapTable table)
+    {
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (constraint.IsClustered && !constraint.IsDisabled)
+                return constraint.FullOrdinals;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsClustered && !index.IsDisabled)
+                return index.KeyFullOrdinals;
+        }
+        return BrowseKeyOrdinals(table);
     }
 
     private static Expression Unaliased(Expression expression) =>

@@ -595,5 +595,5 @@ partial class Simulation
     /// 2026-10-11 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlResultSet ApiCursorResult(Cursor cursor, IEnumerable<SqlValue[]> rows) =>
-        cursor.FetchResult(rows, keyed: !cursor.FastForward && cursor.Sensitivity != CursorSensitivity.Static);
+        cursor.FetchResult(rows);
 }

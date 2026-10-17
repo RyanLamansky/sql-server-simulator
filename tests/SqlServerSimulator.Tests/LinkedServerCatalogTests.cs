@@ -334,6 +334,23 @@ public sealed class LinkedServerCatalogTests
         AreEqual(177, sim.AssertSqlError("exec sp_columns_ex 'nosuch'", 7202).LineNumber);
     }
 
+    /// <summary>
+    /// A NULL server is Msg 7202 state 1 where a name is state 2 (captured
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("sp_catalogs")]
+    [DataRow("sp_columns_ex")]
+    [DataRow("sp_indexes")]
+    [DataRow("sp_primarykeys")]
+    [DataRow("sp_tables_ex")]
+    public void SchemaRowsets_OfANullServer_RaiseState1(string procedure)
+    {
+        var sim = Loopback();
+        AreEqual((byte)1, sim.AssertSqlError($"exec {procedure} null", 7202).State);
+        AreEqual((byte)2, sim.AssertSqlError($"exec {procedure} 'nosuch'", 7202).State);
+    }
+
     private static Simulation PrivilegesLoopback()
     {
         var sim = Loopback("create database zzpriv");

@@ -339,6 +339,7 @@ partial class Simulation
             DeclaringStart = batch.CurrentStatement.StartIndex,
             DeclaringEnd = Math.Max(batch.CurrentStatement.StartIndex, batch.Parser.PreviousTokenEnd - 1),
             DeclaredLocal = localScope,
+            KeyedFetch = !fastForward && requested != CursorSensitivity.Static,
             PartitionedViewsRead = [.. reads.OfType<View>().Select(view => view.PartitionedBase).OfType<View>().Distinct()],
         };
         cursor.StatementIdentity = QueryStoreStatementIdentity(batch, cursor.DeclaringText[cursor.DeclaringStart..(cursor.DeclaringEnd + 1)]);

@@ -105,6 +105,16 @@ internal sealed class Cursor(
     /// </summary>
     public readonly bool FastForward = fastForward;
 
+    /// <summary>
+    /// The cursor was asked for as KEYSET or DYNAMIC — named, implied by
+    /// SCROLL or the forward-only default, or an API cursor's scroll option —
+    /// rather than STATIC, INSENSITIVE or FAST_FORWARD, so each fetch's COLINFO
+    /// flags its tables' key columns; a shape that converted it to a snapshot
+    /// keeps the flags (captured 2026-10-17 against SQL Server 2025, T-SQL and
+    /// API cursors alike).
+    /// </summary>
+    public bool KeyedFetch;
+
     /// <summary>The FROM shape this cursor re-folds per FETCH, resolved at
     /// DECLARE; null for a STATIC (non-navigable) cursor, which walks a
     /// snapshot instead.</summary>
@@ -615,10 +625,10 @@ internal sealed class Cursor(
     /// <c>FETCH</c> without <c>INTO</c> and every <c>sp_cursorfetch</c> carries
     /// on real, even when no row is fetched (probed 2026-09-25 against SQL
     /// Server 2025). Each row already ends in its ROWSTAT (see
-    /// <see cref="WithRowStat"/>). <paramref name="keyed"/> marks the base
-    /// tables' key columns, as an API cursor's metadata does.
+    /// <see cref="WithRowStat"/>). A <see cref="KeyedFetch"/> cursor's
+    /// COLINFO marks the base tables' key columns.
     /// </summary>
-    public SimulatedSqlResultSet FetchResult(IEnumerable<SqlValue[]> rows, bool keyed = false)
+    public SimulatedSqlResultSet FetchResult(IEnumerable<SqlValue[]> rows)
     {
         var selection = this.Selection;
         var width = selection.Schema.Length;
@@ -634,10 +644,10 @@ internal sealed class Cursor(
             // The browse tokens name each column's base table — every column
             // an expression when the query reads none — and the ROWSTAT
             // hidden and an expression (probed 2026-09-28 against SQL Server
-            // 2025); an API cursor that identifies its rows by key marks the
-            // key's columns (probed 2026-10-11).
+            // 2025); a cursor asked for as one that identifies its rows by key
+            // marks the key's columns (KeyedFetch).
             Browse = selection.CursorBrowse is { } browse
-                ? new BrowseInfo(browse.Tables, [.. keyed ? browse.Columns : browse.Columns.Select(static column => (column.Table, (byte)(column.Status & ~0x08), column.BaseName)), (0, 0x14, null)])
+                ? new BrowseInfo(browse.Tables, [.. this.KeyedFetch ? browse.Columns : browse.Columns.Select(static column => (column.Table, (byte)(column.Status & ~0x08), column.BaseName)), (0, 0x14, null)])
                 : new BrowseInfo([], [.. Parser.Selection.SetOperationBrowseInfo(width).Columns, (0, 0x14, null)]),
             // The cursor's ORDER BY reaches every fetch as its ORDER token
             // (probed 2026-10-17 against SQL Server 2025).

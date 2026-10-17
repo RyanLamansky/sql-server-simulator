@@ -2376,7 +2376,7 @@ internal sealed partial class Selection
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
         {
             parseBatch.Parser.CursorStatement = false;
-            selection.CursorBrowse = BrowseInfoFor(sources, expressions, outputColumnNames, 0);
+            selection.CursorBrowse = BrowseInfoFor(sources, expressions, outputColumnNames, 0, cursor: true);
         }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
