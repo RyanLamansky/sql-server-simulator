@@ -574,7 +574,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   - **`RECONFIGURE`** installs every staged value — the reason a `sp_configure` write alone changes nothing.
     Real validates the staged values against the running server and `WITH OVERRIDE` waives that; the simulator validates at `sp_configure` time, so the clause parses and makes no difference.
   - The values are **server-scoped** (`Simulation.ServerConfiguration`), so every connection into the simulation reads the same ones.
-    Only **`nested triggers`** carries behavior — see [`triggers.md`](triggers.md#nesting-and-recursion-options); the rest round-trip through the catalog.
+    An option carries behavior only where a feature reads its installed value (`Simulation.ConfigurationInUse`, whose callers are the list), and that feature's doc describes it — `nested triggers` and `disallow results from triggers` in [`triggers.md`](triggers.md#nesting-and-recursion-options); the rest round-trip through the catalog.
   - A write, and `RECONFIGURE`, take `ALTER SETTINGS` — see [`permissions.md`](permissions.md#statement-gates).
   - **Divergences.** Real returns the matching names as a `duplicate_options` result set alongside Msg 15124, which isn't modeled.
 - **The `sp_help` family** (`Simulation.HelpProcs.cs` + `Simulation.HelpProcs.SpHelp.cs`, dispatched like `sp_tables`): `sp_helptext`, `sp_help`, `sp_helpindex`, `sp_helpconstraint` — the formatted-metadata procs interactive sessions and scripting fall back on.

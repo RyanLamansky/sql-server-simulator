@@ -4479,12 +4479,16 @@ public sealed partial class Simulation
     /// or a DDL trigger of a database or the server, which a trigger body's
     /// definition change fires — may send rows
     /// (<see cref="TriggerBodyReach.SendsRows"/>), cached per
-    /// <see cref="SchemaVersion"/> and server-trigger set. While none may, no
+    /// <see cref="SchemaVersion"/> and server-trigger set — and none may while
+    /// <see cref="DisallowsResultsFromTriggers"/>, under which a result set a
+    /// trigger reaches is Msg 524. While none may, no
     /// statement's trigger, however it is reached — nested, cascaded, through
     /// a view or another database — has anything to send as its client reads.
     /// </summary>
     private static bool SomeTriggerMaySendRows(Simulation simulation)
     {
+        if (simulation.DisallowsResultsFromTriggers)
+            return false;
         var version = Volatile.Read(ref simulation.SchemaVersion);
         var serverTriggers = simulation.ServerTriggers.All;
         if (Volatile.Read(ref simulation.triggerRowsProbe) is { } probe && probe.SchemaVersion == version && ReferenceEquals(probe.ServerTriggers, serverTriggers))

@@ -204,13 +204,17 @@ The body's row counts travel the same way, ahead of the firing statement's own: 
 
 Several triggers contribute theirs in their firing order (see [Firing order](#firing-order)).
 
-**Not modeled yet: `sp_configure 'disallow results from triggers'`.**
-The option sets and reads back, but a body still sends its rows with it on.
-Real refuses them: probed 2026-10-17 against SQL Server 2025 with it at 1, an `INSERT` whose trigger's insert fired a second trigger that `EXEC`s a procedure selecting a constant raised Msg 524 (severity 16, state 1) attributed to that procedure's line 1, the first trigger's later `SELECT` never reached; a `CATCH` around the `INSERT` read it with `@@TRANCOUNT` 0, and without one the batch ended there.
-With it modeled, every trigger is row-less while the option is on, so no statement would need its own thread ([`data-reader.md`](data-reader.md#a-triggers-rows)).
-
 **This is why a trigger body shouldn't SELECT.** A body of `SELECT 1` interleaves an extra result set with whatever the caller expected, and that breaks EF Core's trigger-safe `SaveChanges` shape (`SET NOCOUNT ON; INSERT …; SELECT [Id] …`) on real SQL Server just as it does here — verified against SQL Server 2025, which returns four result sets for a two-entity batch under such a trigger.
 `EFCoreTriggers.HasTrigger_SaveChanges_RetrievesGeneratedIdentity` used exactly that body and passed only while the simulator was dropping body result sets; its trigger is now a no-op.
+
+### `disallow results from triggers` — Msg 524
+
+With the server option installed as 1 (`sp_configure` and `RECONFIGURE`; a staged value alone changes nothing), a statement that would send a result set while a trigger runs raises **Msg 524** (severity 16, state 1) in its place, at its own line and attributed to the module it is in: the trigger, a procedure the trigger (or a trigger it nests) calls, or no procedure for a dynamic batch (probed 2026-10-17 against SQL Server 2025).
+It is a body error like any other: what the body sent before it goes out first, the firing statement and the body's writes roll back, an explicit transaction is doomed (`XACT_STATE()` -1 in a `CATCH`), an auto-commit one is gone (`@@TRANCOUNT` 0), and without a `CATCH` the batch ends.
+DML triggers (`AFTER` and `INSTEAD OF`, on a table or a view), database DDL triggers, whose `CREATE` rolls back, and logon triggers, whose refusal logs Msg 524 where it logs Msg 575 without the option, all refuse.
+What counts is a result set reaching the client — an empty one included: a `SELECT` that sends, a `FETCH` without `INTO`, an `OUTPUT` without `INTO`, a `DBCC` with rows (`USEROPTIONS`), an `EXEC`'s or `sp_executesql`'s `SELECT`; not an untaken branch's `SELECT`, an assignment, `SELECT … INTO`, `FETCH … INTO`, `OUTPUT … INTO`, a `DBCC` that only prints (`CHECKIDENT`, with or without `NO_INFOMSGS`), or the rows of an `INSERT … EXEC`, which go to its table.
+The check sits where a statement's outcomes are gathered (`StatementLifecycle.ResultsDisallowed`), and with the option on no trigger sends rows, so no statement takes a thread of its own for one ([`data-reader.md`](data-reader.md#a-triggers-rows)).
+**Not modeled yet:** a CLR trigger's `SqlContext.Pipe.Send` under the option still sends.
 
 ## Trigger atomic scope
 

@@ -782,15 +782,20 @@ public sealed class ErrorLogTests
     [TestMethod]
     [DataRow("print 'before'; declare @x int = 1 / 0;", new[] { "before", "Error: 8134, Severity: 16, State: 1.", "Divide by zero error encountered." })]
     [DataRow("select 'a result';", new[] { "Error: 575, Severity: 16, State: 1.", "A LOGON trigger returned a resultset. Modify the LOGON trigger to not return resultsets." })]
+    // Under 'disallow results from triggers' the result set is Msg 524 instead
+    // (probed 2026-10-17 against SQL Server 2025).
+    [DataRow("print 'disallowed'; select 'a result';", new[] { "disallowed", "Error: 524, Severity: 16, State: 1.", "A trigger returned a resultset and the server option 'disallow results from triggers' is true." })]
     public void LogonTrigger_Failure_LogsItsErrorAndTheRefusal(string body, string[] sessionLines)
     {
         var simulation = new Simulation();
+        if (body.Contains("disallowed", StringComparison.Ordinal))
+            _ = simulation.ExecuteNonQuery("exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'disallow results from triggers', 1; reconfigure");
         simulation.ExecuteBatches(
             "create login lt with password = 'Pa55word!'",
             $"create trigger tr on all server for logon as begin if original_login() = N'lt' begin {body} end end");
         AreEqual(17892, Throws<SimulatedSqlException>(() => Login(simulation, "lt")).Number);
         var lines = EngineLines(simulation);
-        var sessionTexts = lines.FindAll(static line => line.StartsWith("spid", StringComparison.Ordinal));
+        var sessionTexts = lines.FindAll(static line => line.StartsWith("spid", StringComparison.Ordinal) && !line.Contains("Configuration option", StringComparison.Ordinal));
         CollectionAssert.AreEqual(sessionLines, sessionTexts.ConvertAll(static line => line[(line.IndexOf('|', StringComparison.Ordinal) + 1)..]));
         CollectionAssert.AreEqual(new[]
         {

@@ -508,7 +508,11 @@ partial class Simulation
                     if (connection.ImplicitTransactions && connection.CurrentTransaction is null && OpensImplicitTransactionAsDdl(batch.Parser))
                         batch.BeginImplicitTransaction();
                     foreach (var outcome in simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+                    {
+                        if (outcome is SimulatedSqlResultSet && ResultsDisallowed(connection))
+                            throw SimulatedSqlException.TriggerReturnedResultSet();
                         outcomes.Add(outcome);
+                    }
                     if (batch.CurrentStatement.PendingCompileRefusal is { } heldRefusal && !batch.CurrentStatement.BindsDeferredSource)
                         throw heldRefusal;
                     // Database-scope DDL triggers fire after the statement's own
@@ -543,6 +547,22 @@ partial class Simulation
                     this.Leave(batch);
             }
         }
+
+        /// <summary>
+        /// Whether a result set a statement produces is refused, Msg 524: while
+        /// a trigger runs under <c>disallow results from triggers</c>, in its
+        /// body or a procedure or dynamic batch it reaches — DML, DDL and
+        /// logon triggers alike, an <c>INSTEAD OF</c> one too — unless an
+        /// <c>INSERT … EXEC</c> takes the rows, which never reach the client.
+        /// An untaken branch's <c>SELECT</c>, an assignment, <c>SELECT …
+        /// INTO</c>, a <c>FETCH … INTO</c> and a <c>DBCC</c> that only prints
+        /// produce none, and an empty result set counts (probed 2026-10-17
+        /// against SQL Server 2025).
+        /// </summary>
+        private static bool ResultsDisallowed(SimulatedDbConnection connection) =>
+            connection.TriggerNestLevel > 0
+            && connection.InsertExecTargetTypes is null
+            && connection.Simulation.DisallowsResultsFromTriggers;
 
         /// <summary>
         /// Ends a statement whose rows went out as its client read them (see

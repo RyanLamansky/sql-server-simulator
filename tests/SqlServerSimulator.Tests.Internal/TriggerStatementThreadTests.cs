@@ -107,6 +107,18 @@ public sealed class TriggerStatementThreadTests
         => AreEqual(1, ThreadRuns(With("create trigger tr on t after insert as select id from inserted"), "insert t values (1, 1)"));
 
     /// <summary>
+    /// Under <c>disallow results from triggers</c> a body's result set is
+    /// Msg 524, so no trigger sends rows and no statement takes the thread.
+    /// </summary>
+    [TestMethod]
+    public void ResultsDisallowed_NoStatementTakesTheThread()
+        => AreEqual(0, ThreadRuns(
+            With(
+                "exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'disallow results from triggers', 1; reconfigure",
+                "create trigger tr on t after insert as begin set nocount on; insert l select id from inserted; if 1 = 0 select id from inserted end"),
+            "insert t values (1, 1)"));
+
+    /// <summary>
     /// With a row-sending trigger elsewhere, a statement keeps the thread
     /// wherever its trigger may write — that write may fire the other — and
     /// leaves it where its trigger can neither send nor write.

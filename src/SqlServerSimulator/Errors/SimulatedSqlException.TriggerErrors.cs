@@ -108,6 +108,14 @@ partial class SimulatedSqlException
         new($"Logon failed for login '{loginName}' due to trigger execution.", 17892, 14, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 524: a statement a trigger runs, or a procedure
+    /// or dynamic batch it reaches, would send a result set while the
+    /// <c>disallow results from triggers</c> server option is installed as 1.
+    /// </summary>
+    internal static SimulatedSqlException TriggerReturnedResultSet() =>
+        new("A trigger returned a resultset and the server option 'disallow results from triggers' is true.", 524, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 575: a logon trigger body produced a result set.
     /// Real writes it to the error log and refuses the login with Msg 17892,
     /// which is all the client sees.

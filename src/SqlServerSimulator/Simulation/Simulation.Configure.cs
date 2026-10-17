@@ -8,6 +8,9 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
+    /// <summary><c>configuration_id</c> of <c>disallow results from triggers</c>.</summary>
+    private const int DisallowResultsFromTriggersConfigurationId = 114;
+
     /// <summary><c>configuration_id</c> of <c>nested triggers</c>.</summary>
     private const int NestedTriggersConfigurationId = 115;
 
@@ -62,6 +65,14 @@ partial class Simulation
     /// is an AFTER trigger running under an AFTER trigger.
     /// </summary>
     internal bool NestedTriggersEnabled => this.ConfigurationInUse(NestedTriggersConfigurationId) != 0;
+
+    /// <summary>
+    /// The installed value of <c>disallow results from triggers</c>: while
+    /// on, a statement that would send a result set while a trigger runs — in
+    /// its body or in a procedure or dynamic batch it reaches — raises Msg 524
+    /// instead (<c>StatementLifecycle.Run</c>), so no trigger sends rows.
+    /// </summary>
+    internal bool DisallowsResultsFromTriggers => this.ConfigurationInUse(DisallowResultsFromTriggersConfigurationId) != 0;
 
     /// <summary>
     /// The installed value of <c>clr strict security</c>, 1 unless
@@ -125,7 +136,8 @@ partial class Simulation
     /// <para>
     /// The staged value lands in <see cref="ServerConfiguration"/> whatever the
     /// option, so every option round-trips through <c>sys.configurations</c>;
-    /// only <c>nested triggers</c> carries behavior. The two CLR rows are the
+    /// one carries behavior where a feature reads its installed value
+    /// (<see cref="ConfigurationInUse"/>). The two CLR rows are the
     /// exception — they keep reporting the <see cref="EnableClr"/> host opt-in,
     /// which is the simulator's actual gate on assembly registration.
     /// A write by a session without <c>ALTER SETTINGS</c> is Msg 15247.
