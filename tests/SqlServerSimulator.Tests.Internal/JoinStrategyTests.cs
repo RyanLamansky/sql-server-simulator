@@ -459,4 +459,56 @@ public sealed class JoinStrategyTests
                 while @i <= 4000 begin insert c values (@i, @i % 200 + 1, @i); set @i += 1; end
                 """,
                 "select p.label, c.amt from p join c on c.pid = p.id"));
+
+    // A 3,000-row clustered table and a few ids to pick from it, written
+    // second.
+    private const string SmallSecondSetup = """
+        create table o (id int not null primary key, amt int);
+        insert o select value, value from generate_series(1, 3000);
+        create table #ids (id int not null);
+        insert #ids values (2999), (17), (1234);
+        """;
+
+    /// <summary>
+    /// A small source written after a large one drives on its size alone and
+    /// seeks the large one per row, where its join hashed over it and probed
+    /// with every row of the large one.
+    /// </summary>
+    [TestMethod]
+    public void SmallSourceWrittenSecond_DrivesAndSeeksTheLargeOne()
+    {
+        var trace = CaptureStrategies(SmallSecondSetup, "select o.amt from o join #ids i on i.id = o.id");
+        AreEqual("Reorder(1,0)", ReorderOf(trace));
+        Contains("Inner:NestedLoopIndexSeek(keys=1)", trace);
+    }
+
+    /// <summary>
+    /// A table variable drives the same way.
+    /// </summary>
+    [TestMethod]
+    public void SmallTableVariableWrittenSecond_Drives()
+        => AreEqual("Reorder(1,0)", ReorderOf(CaptureStrategies(
+            "create table o (id int not null primary key, amt int); insert o select value, value from generate_series(1, 3000);",
+            "declare @ids table (id int not null); insert @ids values (2999), (17), (1234); select o.amt from o join @ids i on i.id = o.id")));
+
+    /// <summary>
+    /// A large source no key or index on the joined column lets the small one
+    /// seek keeps the written order: driving would only trade one hash for
+    /// another.
+    /// </summary>
+    [TestMethod]
+    public void SmallSourceWrittenSecond_UnindexedPartner_KeepsTheWrittenOrder()
+        => IsNull(ReorderOf(CaptureStrategies(
+            "create table o (id int not null, amt int); insert o select value, value from generate_series(1, 3000); create table #ids (id int not null); insert #ids values (17);",
+            "select o.amt from o join #ids i on i.id = o.id")));
+
+    /// <summary>
+    /// A source small in absolute terms but not against the written driver —
+    /// 50 rows against 3,000, where real merges — keeps the written order.
+    /// </summary>
+    [TestMethod]
+    public void SourceNotSmallEnoughAgainstTheDriver_KeepsTheWrittenOrder()
+        => IsNull(ReorderOf(CaptureStrategies(
+            "create table o (id int not null primary key, amt int); insert o select value, value from generate_series(1, 3000); create table #ids (id int not null); insert #ids select value * 7 from generate_series(1, 50);",
+            "select o.amt from o join #ids i on i.id = o.id")));
 }

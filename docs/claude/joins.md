@@ -226,6 +226,12 @@ A filtered source — the scan prefilter's or a seek's filter — counts once a 
 Several narrowed sources compete on the seek's own candidate count (ties break on the written order); a narrowed leftmost that seeks at least as few already drives, and a wider narrowing leaves the leftmost driving rather than trading a small outer's per-outer seeks for a large one's hash probes.
 A chain with a `Cross` level and no such driver drives from its leftmost source.
 
+**A source small on its own drives too**, narrowed or not, WHERE or no WHERE (`CountSmallSources`): a base table — a table variable or a `#temp` of a few ids included — of at most `SeekOuterRowCap` rows, the written driver at least `SmallSourceDriverRatio` (64) times larger, joined to a partner a key or index lets the join seek per row.
+Written second, its join hashed over it and probed with every row of the written driver; driving, it seeks the few rows its own name.
+The ratio is fitted to real's own choice, so the rows leave in the order real's plan returns them: joining a 3,000-row clustered table to a heap on its key, SQL Server 2025 looped over the heap's 40 rows and seeked the table, and merged at 50; over 30,000 rows it looped at 100 and hashed at 200 (probed 2026-10-17).
+A procedure's `SELECT … FROM Orders o JOIN @ids i ON i.Id = o.Id` with three ids against 3,000 orders written out of key order went from 459 to 38 µs a call, the `#temp` spelling from 457 to 58 µs (measured 2026-10-17, Release, load average 2–5).
+A partner nothing lets the join seek keeps the written order, since driving would only trade one hash for another.
+
 **A chain with a `Cross` level also reads the WHERE's equi-conjuncts as graph edges**, which is what connects a comma list written out of join order.
 A WHERE conjunct attached as an ON conjunct stays in the WHERE — the comma rewrite's residual invariant — so it can only drop tuples the WHERE drops anyway; a conjunct the comma rewrite already moved into an ON is one edge, not two.
 A pure INNER chain doesn't read its WHERE this way, so a shape that never had a `Cross` level keys exactly what it keyed before.
@@ -375,7 +381,7 @@ Parsing / type-promotion / error surface live in [`query.md`](query.md) (project
 
 Without an ORDER BY, a join's rows leave in the order of whichever input real drives, and real picks it by cost (probed 2026-09-29 against SQL Server 2025): for two small unindexed heaps it builds or loops on the **smaller** input — a hash join then returns rows in the larger (probe) input's scan order, a nested loop in the smaller (outer) one's, and which of the two real takes turns on its estimates (over the same two nine- and five-row heaps, `ON h.id = h2.id` hashed and `ON h.g = h2.g` looped).
 A seekable clustered inner gets a nested loop driven by the other input, and two clustered inputs joined on their keys come back in key order.
-The simulator drives from the written left input (or the reorder's driver), so its order matches real's where the left input is the one real drives — the common `FROM big JOIN small` shape and every `LEFT JOIN` over small tables — and differs otherwise; modeling real's choice would need its cost model, so arrival order stands.
+The simulator drives from the written left input (or the reorder's driver, which includes a [small source written second](#join-order-reorder) against a seekable large one, real's loop over the few rows), so its order matches real's where the left input is the one real drives — the common `FROM big JOIN small` shape real hashes, and every `LEFT JOIN` over small tables — and differs otherwise; modeling real's choice would need its cost model, so arrival order stands.
 **Settled — don't re-pitch:** real itself doesn't guarantee a join's row order — its cost model picks the driving input from estimates, so the same query's order moves with the data and statistics.
 
 ## EF Core mapping

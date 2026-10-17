@@ -2375,8 +2375,21 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
-        if (sources.Length < 2 || excluders.Count == 0)
+        if (sources.Length < 2)
             return (sources, joins);
+        if (excluders.Count == 0)
+        {
+            // Nothing to narrow, but a small source written after a large one
+            // may still drive.
+            if (!IsSeekNarrowingTarget(sources[0]))
+                return (sources, joins);
+            int[]? small = null;
+            long driverRows = sources[0].BackingTable!.Heap.RowCount;
+            CountSmallSources(sources, sources, joins, [], ref small, driverRows);
+            return small is not null && ReorderJoinChain(sources, joins, [], small, driverRows) is { } smallDriven
+                ? smallDriven
+                : (sources, joins);
+        }
 
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
@@ -2451,6 +2464,7 @@ internal sealed partial class Selection
             : -1;
         if (filtered is not null && writtenDriverRows > SeekOuterRowCap && !batch.IsSkipping)
             SampleFilteredCounts(current, joins, conjuncts, filtered, ref seekedCandidates, writtenDriverRows, batch);
+        CountSmallSources(current, sources, joins, conjuncts, ref seekedCandidates, writtenDriverRows);
         return ReorderJoinChain(current, joins, conjuncts, seekedCandidates, writtenDriverRows) ?? (current, joins);
     }
 
@@ -2495,6 +2509,58 @@ internal sealed partial class Selection
                 Array.Fill(seekedCandidates, -1);
             }
             seekedCandidates[i] = sampled;
+        }
+    }
+
+    /// <summary>
+    /// How many times larger than a small source the written driver has to be
+    /// for the small one to drive the chain on its size alone (see
+    /// <see cref="CountSmallSources"/>): fitted to SQL Server 2025's own
+    /// choice, which joining a 3,000-row clustered table to a heap on its key
+    /// looped over the heap's 40 rows and seeked the table, but merged at 50,
+    /// and over 30,000 rows looped at 100 and hashed at 200 (probed
+    /// 2026-10-17).
+    /// </summary>
+    private const int SmallSourceDriverRatio = 64;
+
+    /// <summary>
+    /// Counts the sources of the reorder's commuting prefix that nothing
+    /// narrowed but that are small on their own — a table variable or a
+    /// <c>#temp</c> of a few ids, written after the table it picks rows of —
+    /// so one can drive the chain as a narrowed source does: a base table
+    /// (one the pushdown could seek, or a table variable, which takes no
+    /// locks) of
+    /// at most <see cref="SeekOuterRowCap"/> rows, the written driver at least
+    /// <see cref="SmallSourceDriverRatio"/> times larger, joined to a partner
+    /// the join from it can seek per row (<see cref="SeeksAPartner"/>).
+    /// Written second, its join would hash over it and probe with every row
+    /// of the written driver; driving, it seeks the few partners its rows
+    /// name, the nested loop real runs, in the small source's order.
+    /// </summary>
+    private static void CountSmallSources(
+        FromSource[] current, FromSource[] written, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, ref int[]? seekedCandidates, long writtenDriverRows)
+    {
+        if (writtenDriverRows < SmallSourceDriverRatio)
+            return;
+        var count = CommutingPrefixLength(joins, out var hasCross);
+        List<JoinEdge>? edges = null;
+        for (var i = 1; i < count; i++)
+        {
+            if ((seekedCandidates is not null && seekedCandidates[i] >= 0)
+                || !ReferenceEquals(current[i], written[i])
+                || !(IsSeekNarrowingTarget(current[i]) || current[i] is { BackingTable.IsTableVariable: true, LateralPlan: null })
+                || (current[i].BackingTable!.Heap.RowCount is var rows && (rows > SeekOuterRowCap || (long)rows * SmallSourceDriverRatio > writtenDriverRows))
+                || !SeeksAPartner(i, edges ??= PrefixEdges(current[..count], joins, whereConjuncts, hasCross), current))
+            {
+                continue;
+            }
+
+            if (seekedCandidates is null)
+            {
+                seekedCandidates = new int[current.Length];
+                Array.Fill(seekedCandidates, -1);
+            }
+            seekedCandidates[i] = rows;
         }
     }
 

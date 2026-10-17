@@ -725,4 +725,31 @@ public sealed class JoinPredicatePushdownTests
         var rows = Rows(sim, "select a.tag, b.tag from a, b, m where a.k = m.k and b.k = m.k");
         CollectionAssert.AreEquivalent(new[] { "a1|b1", "a1|b1b", "a1b|b1", "a1b|b1b" }, rows);
     }
+
+    /// <summary>
+    /// A few ids written after the table they pick rows of drive the join, so
+    /// its rows come back in the ids' order, as real's nested loop over them
+    /// returns them (probed 2026-10-17 against SQL Server 2025, for a
+    /// <c>#temp</c> and a table variable alike), rather than in the table's
+    /// key order a hash probe of every row read them in.
+    /// </summary>
+    [TestMethod]
+    public void SmallSourceWrittenSecond_ReturnsItsRowsInItsOwnOrder()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table o (id int not null primary key, amt int not null);
+            insert o select value, value * 10 from generate_series(1, 3000)
+            """);
+        CollectionAssert.AreEqual(new[] { "2999|29990", "17|170", "1234|12340" }, Rows(sim, """
+            declare @ids table (id int not null);
+            insert @ids values (2999), (17), (1234);
+            select o.id, o.amt from o join @ids i on i.id = o.id
+            """));
+        CollectionAssert.AreEqual(new[] { "2999|29990", "17|170", "1234|12340" }, Rows(sim, """
+            create table #ids (id int not null);
+            insert #ids values (2999), (17), (1234);
+            select o.id, o.amt from o join #ids i on i.id = o.id
+            """));
+    }
 }
