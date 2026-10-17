@@ -314,6 +314,13 @@ internal static partial class BuiltInResources
         // sp_Blitz reads.
         "sp_MSgetalertinfo",
         "sp_validatelogins",
+        // The SSMS-era helpers tools and old scripts still call.
+        "sp_MStablespace",
+        "sp_MSindexspace",
+        "sp_MShelpindex",
+        "sp_MShelptype",
+        "sp_MShelpcolumns",
+        "sp_MSdependencies",
         // The Windows principals the Linux server is installed with: what the
         // server knows of one, and the legacy grant / deny / revoke trio.
         "xp_logininfo",

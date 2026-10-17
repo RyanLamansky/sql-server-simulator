@@ -199,6 +199,18 @@ partial class BuiltInResources
         return ApplyMetadataFilter(source, batch, database, source.RowGenerator(batch, database));
     }
 
+    /// <summary>
+    /// A catalog view's rows as the principal sees them, with the ordinal of
+    /// each column by name — what the system procedures that report over the
+    /// catalog read, as real's read the views.
+    /// </summary>
+    internal static IEnumerable<SqlValue[]> CatalogViewRows(BatchContext batch, Database database, string view, out Func<string, int> ordinal)
+    {
+        var rows = SourceRows(batch, database, view, out var source);
+        ordinal = name => OrdinalOf(source, name);
+        return rows;
+    }
+
     private static IEnumerable<SqlValue[]> Project(BatchContext batch, Database database, string sourceKey, Func<CatalogView, Func<SqlValue[], SqlValue[]>> bind)
     {
         var rows = SourceRows(batch, database, sourceKey, out var source);

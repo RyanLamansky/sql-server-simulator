@@ -1022,6 +1022,20 @@ The procedures over the [installed Windows logins](permissions.md#windows-logins
   Ahead of that: `ALTER ANY LOGIN` (Msg 15247, line 13), no transaction (Msg 15002, lines 21 / 25) and a `domain\` name (Msg 15407 at class 11, lines 28 / 32).
 - **`sp_revokelogin @loginame`** is `DROP LOGIN`, whose refusals come back from line 1 with return code 1, after its transaction (line 13), `sp_validname` and Msg 15407 (line 25) checks.
 
+### The SSMS-era `sp_MS*` helpers
+
+`Simulation.MsHelperProcs.cs` builds the six real still ships (probed 2026-10-17 against SQL Server 2025), each reading the catalog views as real's T-SQL does; a name each resolves as `OBJECT_ID` does in the current database.
+- **`sp_MStablespace @name [, @id]`**: a user table's `Rows`, `DataSpaceUsed` and `IndexSpaceUsed` in kilobytes, as `sp_spaceused` counts them; `@id` names the table in place of `@name`, an id no table has answering NULLs, and anything but a user table is Msg 15009 from line 13.
+- **`sp_MSindexspace @tablename [, @index_name]`**: each index's kilobytes, the clustered index's excluding its data (`Size excludes actual data.`, the rest `(None)`), or one index's alone — the clustered index's then the table's whole index space.
+- **`sp_MShelpindex @tablename [, @indexname [, @flags]]`**: each index with real's status bits (1 `IGNORE_DUP_KEY`, 2 unique, 16 clustered, 256 `PAD_INDEX`, 2048 primary key, 4096 unique constraint, 16777216 `STATISTICS_NORECOMPUTE`), fill factor, sixteen key-column slots, filegroup, full-text key, descending and computed key bitmasks and `IsTable`; a name that resolves to nothing lists nothing.
+- **`sp_MShelptype [@typename [, @flags]]`**: real's thirty-six system types, then the user-defined ones (`@flags` `sdt` / `uddt` sending one set), a type named answering its own set.
+- **`sp_MShelpcolumns @tablename [, @flags [, @orderby [, @flags2]]]`**: the twenty-nine-column description of each column but the CLR-typed ones, by `column_id` or, under `@orderby = 'name'`, by name; `@flags2 = 1` adds every numeric type's precision and scale, and `@flags` changes nothing observed.
+- **`sp_MSdependencies @objname [, @objtype [, @flags]]`**: one object's dependencies, transitively, or with flag `0x40000` its dependents, each with its SQL-DMO type and creation level, `0x80000` adding the object itself; the low word masks the types reported.
+
+A name the last five can't resolve trips real's own `RAISERROR` over its format: Msg 2786, at line 29 / 41 (`sp_MSindexspace`'s table / index), 57, 76 and 152.
+**Divergences**: sizes follow the simulator's page accounting (see [`backlog.md`](backlog.md)); `sp_MShelpindex` lists every index kind with its key columns, where only the rowstore kinds were probed.
+**Not modeled yet**: `sp_MSdependencies`' whole-database listing (no `@objname`, which real sends as more than one result set), `@objlist`, the paired-row form of flag `0x10000` and a dependents listing that includes the object, each `NotSupportedException`.
+
 ## The SQL Server error log
 
 `Simulation.ErrorLog` (`ErrorLog.cs`) holds the current log and up to six archives, readable through `xp_readerrorlog` / `sp_readerrorlog`, listed by `xp_enumerrorlogs` / `sp_enumerrorlogs` and cycled by `sp_cycle_errorlog` / `DBCC ERRORLOG` (`Simulation.ErrorLog.cs`).

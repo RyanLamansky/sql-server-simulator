@@ -76,6 +76,7 @@ partial class Simulation
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_table_type_columns_100" or "sp_table_type_pkeys" or "sp_table_types" or "sp_tablecollations" or "sp_tablecollations_90" or "sp_tablecollations_100"
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
         or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
+        or "sp_MStablespace" or "sp_MSindexspace" or "sp_MShelpindex" or "sp_MShelptype" or "sp_MShelpcolumns" or "sp_MSdependencies"
         or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_logininfo" or "xp_msver" or "xp_qv" or "xp_regread"
         or "xp_regenumvalues" or "xp_instance_regenumvalues" or "xp_regenumkeys" or "xp_instance_regenumkeys"
@@ -496,6 +497,12 @@ partial class Simulation
             "sp_enumerrorlogs" => InvokeSpEnumErrorLogs(batch, calledAs, returnCodeVar),
             "sp_MSgetalertinfo" => InvokeSpGetAlertInfo(batch, calledAs),
             "sp_validatelogins" => InvokeSpValidateLogins(batch, calledAs),
+            "sp_MStablespace" => InvokeSpMsTableSpace(batch, calledAs),
+            "sp_MSindexspace" => InvokeSpMsIndexSpace(batch, calledAs),
+            "sp_MShelpindex" => InvokeSpMsHelpIndex(batch, calledAs),
+            "sp_MShelptype" => InvokeSpMsHelpType(batch, calledAs),
+            "sp_MShelpcolumns" => InvokeSpMsHelpColumns(batch, calledAs),
+            "sp_MSdependencies" => InvokeSpMsDependencies(batch, calledAs),
             "sp_grantlogin" => this.InvokeSpGrantLogin(batch, calledAs),
             "sp_denylogin" => this.InvokeSpDenyLogin(batch, calledAs),
             "sp_revokelogin" => this.InvokeSpRevokeLogin(batch, calledAs),
