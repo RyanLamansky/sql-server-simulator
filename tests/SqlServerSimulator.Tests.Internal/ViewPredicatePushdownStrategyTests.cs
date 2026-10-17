@@ -158,10 +158,13 @@ public sealed class ViewPredicatePushdownStrategyTests
             "select ord_id from vt where cust_id = 10",
             "create view vt as select top 3 ord_id, cust_id from ord order by ord_id"));
 
-    /// <summary>DISTINCT reads the row set as a whole, so it declines.</summary>
+    /// <summary>
+    /// A filter on a DISTINCT body's column keeps or drops every duplicate of a
+    /// row together, so it pushes beneath the dedup.
+    /// </summary>
     [TestMethod]
-    public void DistinctBody_KeepsItsScan() =>
-        DoesNotContain("Seek(ord)", SeekTrace(
+    public void DistinctBody_SeeksTheBaseTable() =>
+        Contains("Seek(ord)", SeekTrace(
             "select cust_id from vd where cust_id = 10",
             "create view vd as select distinct cust_id from ord"));
 
@@ -184,12 +187,21 @@ public sealed class ViewPredicatePushdownStrategyTests
             "select ord_id from vw where cust_id = 10",
             "create view vw as select ord_id, cust_id, row_number() over (order by ord_id) as rn from ord"));
 
-    /// <summary>A set-operation body declines — the branch plans carry no pushdown at all.</summary>
+    /// <summary>A set-operation body takes the filter into each branch, which seeks.</summary>
     [TestMethod]
-    public void SetOperationBody_KeepsItsScan() =>
-        DoesNotContain("Seek(ord)", SeekTrace(
+    public void SetOperationBody_SeeksTheBaseTable() =>
+        Contains("Seek(ord)", SeekTrace(
             "select ord_id from vu where cust_id = 10",
             "create view vu as select ord_id, cust_id from ord where total > 100 union all select ord_id, cust_id from ord where total <= 100"));
+
+    /// <summary>
+    /// A set-operation body joined inside a body run per outer row keeps its
+    /// rows whole, materialized once and narrowed per run instead.
+    /// </summary>
+    [TestMethod]
+    public void SetOperationBodyJoinedInACorrelatedBody_KeepsItsScan() =>
+        DoesNotContain("Seek(ord)", SeekTrace(
+            "select x.n from cust c cross apply (select count(*) as n from cust c2 join (select ord_id, cust_id from ord union all select ord_id, cust_id from ord) u on u.cust_id = c2.cust_id where u.cust_id = 10) x"));
 
     /// <summary>An output column the body computes can't be written as a filter over the body's row.</summary>
     [TestMethod]

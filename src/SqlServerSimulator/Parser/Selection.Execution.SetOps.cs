@@ -388,37 +388,8 @@ internal sealed partial class Selection
         combined = new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
-            (batch, outerResolver) =>
-        {
-            var rows = kind switch
-            {
-                SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
-                SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
-                SetOpKind.Intersect => IntersectRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
-                SetOpKind.Except => ExceptRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
-                _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
-            };
-            if (kind != SetOpKind.UnionAll && readsStorage)
-                rows = SortSetOpRows(rows, combinedSchema);
-            else if (kind != SetOpKind.UnionAll)
-                rows = ConstantSetOpRows(combined, rows, combinedSchema, batch, outerResolver);
-            // Computed whole before the first row goes out; see IsBareConstantRow.
-            // A constant scan and a deduplication both read every row ahead of
-            // the first out, so neither raises past an INSERT's identity draw.
-            if (isBareConstantRows)
-            {
-                try
-                {
-                    return [.. rows];
-                }
-                catch (SimulatedSqlException constantError)
-                {
-                    constantError.RaisedInRowProjection = false;
-                    throw;
-                }
-            }
-            return kind == SetOpKind.UnionAll ? rows : AheadOfRowProjection(rows);
-        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema, updatabilityRejection: SetOperationRejection(kind, left, right))
+            (batch, outerResolver) => SetOpRows(combined, left, right, kind, combinedSchema, batch, outerResolver),
+            intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema, updatabilityRejection: SetOperationRejection(kind, left, right))
         {
             IntoDataSpace = left.IntoDataSpace,
             IsBareConstantRow = isBareConstantRows,
@@ -466,8 +437,79 @@ internal sealed partial class Selection
         if (left.SeekShape is { } leftShape && right.SeekShape is { } rightShape)
             combined.SeekShape = new SeekBodyShape([leftShape, rightShape]);
         combined.ForceSeekDeferred = left.ForceSeekDeferred || right.ForceSeekDeferred;
+        // A filter on a set operation's column filters each branch alike: a
+        // row it drops leaves every branch it came from, whichever rows the
+        // operator keeps, and the conjunct stays above to decide the rest.
+        if (readsStorage && (left.PredicatePushdown is not null || right.PredicatePushdown is not null))
+        {
+            combined.PredicatePushdown = templates => PushIntoBranches(combined, templates);
+            combined.PushdownReadsWholeRows = true;
+        }
         left.SetOperationParent = right.SetOperationParent = combined;
         return combined;
+    }
+
+    /// <summary>
+    /// The rows set operation <paramref name="combined"/> yields over
+    /// <paramref name="left"/> and <paramref name="right"/> — its own
+    /// branches, or the same branches with an enclosing filter pushed into
+    /// them (<see cref="PushIntoBranches"/>).
+    /// </summary>
+    private static IEnumerable<byte[]> SetOpRows(Selection combined, Selection left, Selection right, SetOpKind kind, SqlType[] combinedSchema, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var rows = kind switch
+        {
+            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
+            SetOpKind.Intersect => IntersectRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
+            SetOpKind.Except => ExceptRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
+            _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+        };
+        if (kind != SetOpKind.UnionAll && combined.ReadsStorage)
+            rows = SortSetOpRows(rows, combinedSchema);
+        else if (kind != SetOpKind.UnionAll)
+            rows = ConstantSetOpRows(combined, rows, combinedSchema, batch, outerResolver);
+        // Computed whole before the first row goes out; see IsBareConstantRow.
+        // A constant scan and a deduplication both read every row ahead of
+        // the first out, so neither raises past an INSERT's identity draw.
+        if (combined.IsBareConstantRow)
+        {
+            try
+            {
+                return [.. rows];
+            }
+            catch (SimulatedSqlException constantError)
+            {
+                constantError.RaisedInRowProjection = false;
+                throw;
+            }
+        }
+        return kind == SetOpKind.UnionAll ? rows : AheadOfRowProjection(rows);
+    }
+
+    /// <summary>
+    /// <paramref name="combined"/>'s <see cref="PredicatePushdown"/>: the set
+    /// operation over each branch that takes <paramref name="templates"/>
+    /// rebuilt with them, the others as they are; null when neither takes them.
+    /// Their slots name the same ordinals in every branch, whose columns line
+    /// up with the combined ones.
+    /// </summary>
+    private static Selection? PushIntoBranches(Selection combined, List<BooleanExpression> templates)
+    {
+        var (left, right, kind) = combined.SetOperands!.Value;
+        var pushedLeft = left.PredicatePushdown?.Invoke(templates);
+        var pushedRight = right.PredicatePushdown?.Invoke(templates);
+        if (pushedLeft is null && pushedRight is null)
+            return null;
+        var (branchLeft, branchRight) = (pushedLeft ?? left, pushedRight ?? right);
+        return new Selection(combined.Schema, combined.ColumnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: combined.HasTopOrOffsetOrFetch,
+            (batch, outerResolver) => SetOpRows(combined, branchLeft, branchRight, kind, combined.Schema, batch, outerResolver))
+        {
+            ReadsStorage = combined.ReadsStorage,
+            IsSetOperationResult = true,
+        };
     }
 
     /// <summary>

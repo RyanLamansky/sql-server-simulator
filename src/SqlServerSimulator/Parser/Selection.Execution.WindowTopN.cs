@@ -396,7 +396,7 @@ partial class Selection
                 hasTopOrOffsetOrFetch: false,
                 valueRowSource: (batch, outerResolver) =>
                 {
-                    var execSources = PushWhereIntoDeferredSources(shape.Sources, shape.Excluders, batch);
+                    var execSources = PushWhereIntoDeferredSources(shape.Sources, shape.Excluders, batch, nested: outerResolver is not null);
                     execSources = BoundRowNumberBodies(execSources, shape.Excluders, batch);
                     execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, shape.Excluders, batch, outerResolver);
                     execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);

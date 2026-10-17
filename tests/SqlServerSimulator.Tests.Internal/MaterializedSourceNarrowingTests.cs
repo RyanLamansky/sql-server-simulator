@@ -137,12 +137,13 @@ public sealed class MaterializedSourceNarrowingTests
     public void RaisingConjunct_KeepsTheRowForTheResidual()
     {
         // `o.code = 5` converts every code to int, and one code isn't numeric.
-        // The narrowing keeps that row rather than raising, so whether the
-        // statement raises stays the residual WHERE's decision over the tuples
-        // the join produces — and no line joins the bad order. (Real raises Msg
-        // 245 here, probed 2026-10-10 against SQL Server 2025: its plan
-        // evaluates the conjunct ahead of the join, as the simulator's written
-        // order never has.)
+        // Inside a body run per outer row the union isn't pushed into but
+        // materialized, and the narrowing keeps that row rather than raising,
+        // so whether the statement raises stays the residual WHERE's decision
+        // over the tuples the join produces — and no line joins the bad order.
+        // (Real raises Msg 245 here, probed 2026-10-10 against SQL Server 2025:
+        // its plan evaluates the conjunct ahead of the join, as the pushdown a
+        // statement's own query takes does.)
         using var connection = Open();
         using (var command = connection.CreateCommand())
         {
@@ -151,10 +152,15 @@ public sealed class MaterializedSourceNarrowingTests
         }
 
         var (seeks, _, rows) = Run(connection, $"""
-            select sum(l.qty) from line l join {OrdersUnion} o on l.ord_id = o.ord_id where o.code = 5
+            select sum(x.qty) from (select 1 as one) z cross apply (
+                select l.qty from line l join {OrdersUnion} o on l.ord_id = o.ord_id where o.code = 5) x
             """);
         Contains("MaterializedFilter(o,1,2)", seeks);
         AreEqual(1005, rows[0]);
+        var error = Throws<SimulatedSqlException>(() => Run(connection, $"""
+            select sum(l.qty) from line l join {OrdersUnion} o on l.ord_id = o.ord_id where o.code = 5
+            """));
+        AreEqual(245, error.Number);
     }
 
     [TestMethod]

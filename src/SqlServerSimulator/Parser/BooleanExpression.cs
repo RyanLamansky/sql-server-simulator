@@ -1475,8 +1475,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// <remarks>
     /// <para>
     /// The shapes are exactly the ones the pushdown's residual invariant needs:
-    /// a comparison (<c>=</c> / <c>&lt;</c> / <c>&lt;=</c> / <c>&gt;</c> /
-    /// <c>&gt;=</c>), a non-negated <c>BETWEEN</c>, and the equality family an
+    /// a comparison (<c>=</c> / <c>&lt;&gt;</c> / <c>&lt;</c> / <c>&lt;=</c> /
+    /// <c>&gt;</c> / <c>&gt;=</c>), a non-negated <c>BETWEEN</c>, and the equality family an
     /// <c>IN</c> list or an OR-of-equalities decomposes into. Every one of them
     /// is NULL-rejecting, so the rebuilt predicate reads UNKNOWN — never TRUE —
     /// over a row whose operand columns are all NULL. <c>IS NULL</c>,
@@ -1511,6 +1511,13 @@ internal abstract class BooleanExpression : ExpressionNode
                     RangeComparison.Less => new LessThanExpression(left, right),
                     _ => new LessThanOrEqualExpression(left, right),
                 };
+        }
+
+        if (predicate is InequalityExpression { Operands: var (unequalLeft, unequalRight) })
+        {
+            return rebind(unequalLeft) is { } left && rebind(unequalRight) is { } right
+                ? new InequalityExpression(left, right)
+                : null;
         }
 
         if (predicate.TryGetBetweenOperands(out var value, out var lower, out var upper))
@@ -3295,6 +3302,9 @@ internal abstract class BooleanExpression : ExpressionNode
 
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
+        /// <summary>The two sides, for <see cref="TryRebindOperands"/>.</summary>
+        internal (Expression Left, Expression Right) Operands => (this.left, this.right);
+
         internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
         {
             complement = new EqualityExpression(left, right);

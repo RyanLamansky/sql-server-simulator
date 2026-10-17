@@ -2271,7 +2271,7 @@ internal sealed partial class Selection
                 // the body produced every row. Before the materialization
                 // below, so a source that materializes materializes the
                 // narrowed rowset. Every pushed conjunct stays here as well.
-                var execSources = PushWhereIntoDeferredSources(sources, fromClause.Excluders, batch);
+                var execSources = PushWhereIntoDeferredSources(sources, fromClause.Excluders, batch, nested: outerResolver is not null);
                 // Hand a ROW_NUMBER()-only body the row-number window the WHERE
                 // above it leaves surviving, so it keeps a bounded per-partition
                 // selection instead of sorting every partition in full and
@@ -2399,24 +2399,27 @@ internal sealed partial class Selection
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
         // row and nothing else, so an extra filter there is the same filter one
-        // level up. Anything that reads the row set as a whole — DISTINCT, a row
-        // limit, a grouping, a window, an ORDER BY the limit would pair with —
-        // would see a different row set and declines.
-        if (!distinct && windows.Count == 0 && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
+        // level up. A DISTINCT one can too, since a filter on its columns keeps
+        // or drops every duplicate of a row together. Anything else that reads
+        // the row set as a whole — a row limit, a grouping, a window, an ORDER
+        // BY the limit would pair with — would see a different row set and
+        // declines.
+        if (windows.Count == 0 && orderBy.Count == 0 && !selection.HasTopOrOffsetOrFetch
             && intoTarget is null && !isAssignmentOnly && sources.Length > 0)
         {
             if (aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null)
             {
                 var pushdownShape = new ProjectionPushdown(
-                    outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders, orderBy);
+                    outputSchema, outputColumnNames, sources, joins, expressions, fromClause.Excluders, orderBy, distinct);
                 selection.PredicatePushdown = templates => BuildPushedProjection(pushdownShape, templates);
+                selection.PushdownReadsWholeRows = distinct;
             }
             // A GROUP BY body takes a conjunct on a column it groups by: such a
             // filter removes whole groups, and a group the enclosing statement
             // discards anyway feeds no other group's aggregate or HAVING. The
             // slots that qualify are computed once here; a body grouped only by
             // expressions offers none and carries no delegate at all.
-            else if (fromClause.GroupingSets.Count > 0 && !resultIsProvablyEmpty
+            else if (!distinct && fromClause.GroupingSets.Count > 0 && !resultIsProvablyEmpty
                 && GroupingColumnProjections(expressions, sources, fromClause) is { } groupingColumns)
             {
                 var groupedShape = new AggregatePushdown(

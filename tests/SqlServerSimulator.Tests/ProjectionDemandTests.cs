@@ -125,6 +125,23 @@ public sealed class ProjectionDemandTests
     public void ReadColumn_IsEvaluatedWhereItsReaderUsesIt(string expected, string query) => AreEqual(expected, Seeded().ExecuteScalar(query));
 
     /// <summary>
+    /// A filter on a body's plain column reaches beneath a body that computes
+    /// its columns itself — a <c>DISTINCT</c>, each branch of a set operation —
+    /// and beneath one whose failing column reads what the body doesn't
+    /// project, <c>&lt;&gt;</c> included, so the row it turns away never
+    /// computes its columns (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select distinct k, v, 10 / (k - 3) as x from src2) d where k <> 3")]
+    [DataRow("-5,-10,10,1", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src union all select 5, 1) d where k <> 3")]
+    [DataRow("-5,-10,10,1", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src2 union select 5, 1) d where k <> 3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src2 intersect select k, 10 / (k - 3) from src2 where k <> 3) d where k <> 3")]
+    [DataRow("3", "select cast(count(*) as varchar) from (select k, 10 / (k - 3) as x from src2 except select k, 0 from src2 where k = 1) d where k <> 3")]
+    [DataRow("1,3,4", "select string_agg(cast(c as varchar), ',') within group (order by c) from (select k, cast(s as int) as c from src) d where k <> 2")]
+    [DataRow("3", "select cast(count(*) as varchar) from v1 where x > -100 and k <> 3")]
+    public void Filter_ReachesBeneathTheBody(string expected, string query) => AreEqual(expected, Seeded().ExecuteScalar(query));
+
+    /// <summary>
     /// What the body reads of a column itself, or a column only it can
     /// compute, is computed for every body row, and the guard above it comes
     /// too late (probed 2026-10-17 against SQL Server 2025).

@@ -112,6 +112,9 @@ partial class Selection
             // grouping reaches the key collection and then declines the push.
             PushdownIsGrouped = view.RejectionReason
                 is ViewUpdatabilityRejection.Aggregate or ViewUpdatabilityRejection.GroupBy,
+            // The same classification names a body reading its rows whole.
+            PushdownReadsWholeRows = view.RejectionReason
+                is ViewUpdatabilityRejection.Distinct or ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll or ViewUpdatabilityRejection.SetOperationOverUnion,
             VolatileColumns = view.VolatileColumns,
         }.TakingReaderDemand(null);
         return self;

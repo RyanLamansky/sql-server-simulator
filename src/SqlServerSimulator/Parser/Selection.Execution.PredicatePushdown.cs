@@ -47,6 +47,17 @@ partial class Selection
     internal bool PushdownIsGrouped;
 
     /// <summary>
+    /// True when <see cref="PredicatePushdown"/> belongs to a body that reads
+    /// its rows as a whole — a <c>DISTINCT</c>, a set operation — which a
+    /// query run once per enclosing row leaves unpushed past its leftmost
+    /// source: there the body's rows, materialized once for the statement and
+    /// narrowed or looked up per run
+    /// (<see cref="MaterializeUncorrelatedDeferredSources"/>), cost less than
+    /// running it again filtered for every run.
+    /// </summary>
+    internal bool PushdownReadsWholeRows;
+
+    /// <summary>
     /// Pushes the enclosing statement's eligible WHERE conjuncts into every FROM
     /// source that reads through a query body — a view, a derived table or a CTE
     /// reference — so the filter reaches the base scan (where the index seek can
@@ -69,9 +80,14 @@ partial class Selection
     /// Recursion needs no loop: the rebuilt body runs this same pass over its own
     /// FROM, which is what carries a filter down a chain of views.
     /// </para>
+    /// <para>
+    /// <paramref name="nested"/> says the query runs once per enclosing row,
+    /// which leaves a body reading its rows whole unpushed (see
+    /// <see cref="PushdownReadsWholeRows"/>).
+    /// </para>
     /// </summary>
     private static FromSource[] PushWhereIntoDeferredSources(
-        FromSource[] sources, List<BooleanExpression> excluders, BatchContext batch)
+        FromSource[] sources, List<BooleanExpression> excluders, BatchContext batch, bool nested)
     {
         if (excluders.Count == 0)
             return sources;
@@ -80,7 +96,7 @@ partial class Selection
         FromSource[]? rewritten = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (sources[i].LateralPlan is not { } plan || plan.PredicatePushdown is not { } push)
+            if (sources[i].LateralPlan is not { } plan || plan.PredicatePushdown is not { } push || (nested && i > 0 && plan.PushdownReadsWholeRows))
                 continue;
             if (conjuncts is null)
             {
@@ -163,12 +179,13 @@ partial class Selection
 
     /// <summary>
     /// Records the pushdown shape of a plain SELECT-project-filter plan — no
-    /// DISTINCT, no TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no
-    /// window, no ORDER BY — which is the one shape an enclosing WHERE conjunct
-    /// can move into unchanged, since the body applies its projection and its
-    /// own WHERE to every row and nothing else. A join body qualifies: the
-    /// conjunct lands in the body's WHERE and the body's own narrowing passes
-    /// take it from there.
+    /// TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no window, no
+    /// ORDER BY — which is the one shape an enclosing WHERE conjunct can move
+    /// into unchanged, since the body applies its projection and its own WHERE
+    /// to every row and nothing else. A <c>DISTINCT</c> body qualifies, its
+    /// duplicates all kept or all dropped by a filter on its columns, and so
+    /// does a join body: the conjunct lands in the body's WHERE and the body's
+    /// own narrowing passes take it from there.
     /// </summary>
     private sealed class ProjectionPushdown(
         SqlType[] schema,
@@ -177,7 +194,8 @@ partial class Selection
         JoinSpec[] joins,
         List<Expression> expressions,
         List<BooleanExpression> excluders,
-        List<OrderBySpec> orderBy)
+        List<OrderBySpec> orderBy,
+        bool distinct)
     {
         public readonly SqlType[] Schema = schema;
         public readonly string[] ColumnNames = columnNames;
@@ -185,6 +203,9 @@ partial class Selection
         public readonly JoinSpec[] Joins = joins;
         public readonly List<Expression> Expressions = expressions;
         public readonly List<BooleanExpression> Excluders = excluders;
+
+        /// <summary>Whether the plan is a <c>SELECT DISTINCT</c>, which the rebuilt row source dedupes as the original does.</summary>
+        public readonly bool Distinct = distinct;
 
         /// <summary>The plan's own (empty, by the shape rule) ORDER BY, kept so the rebuilt row source calls <see cref="ProjectSqlRows"/> with the same argument the original does.</summary>
         public readonly List<OrderBySpec> OrderBy = orderBy;
@@ -221,13 +242,13 @@ partial class Selection
             hasTopOrOffsetOrFetch: false,
             valueRowSource: (batch, outerResolver) =>
             {
-                var execSources = PushWhereIntoDeferredSources(shape.Sources, excluders, batch);
+                var execSources = PushWhereIntoDeferredSources(shape.Sources, excluders, batch, nested: outerResolver is not null);
                 execSources = BoundRowNumberBodies(execSources, excluders, batch);
                 execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, excluders, batch, outerResolver);
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);
                 return ProjectSqlRows(
                     execSources, shape.Joins, ReferenceEquals(batch.RowAddressProbe, self) ? [.. shape.Expressions, new RowAddress(0)] : shape.Expressions, excluders, shape.ColumnNames, shape.OrderBy,
-                    distinct: false, top: default, offsetCount: null, fetchCount: null, batch: batch, outerResolver: outerResolver);
+                    shape.Distinct, top: default, offsetCount: null, fetchCount: null, batch: batch, outerResolver: outerResolver);
             })
         {
             CarriesRowAddresses = shape.Sources.Length == 1,
@@ -364,7 +385,7 @@ partial class Selection
             hasTopOrOffsetOrFetch: false,
             valueRowSource: (batch, outerResolver) =>
             {
-                var execSources = PushWhereIntoDeferredSources(shape.Sources, from.Excluders, batch);
+                var execSources = PushWhereIntoDeferredSources(shape.Sources, from.Excluders, batch, nested: outerResolver is not null);
                 execSources = BoundRowNumberBodies(execSources, from.Excluders, batch);
                 execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, from.Excluders, batch, outerResolver);
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);
