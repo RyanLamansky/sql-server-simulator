@@ -43,6 +43,23 @@ internal static class Wire
         }
     }
 
+    /// <summary>
+    /// Waits for <paramref name="spid"/>'s request to be waiting with
+    /// <paramref name="waitType"/>, read off <c>sys.dm_exec_requests</c>, so
+    /// whatever the batch ran ahead of that wait has run.
+    /// </summary>
+    public static async Task AwaitWaitTypeAsync(SqlConnection observer, short spid, string waitType, CancellationToken cancellationToken)
+    {
+        await using var probe = new SqlCommand($"select count(*) from sys.dm_exec_requests where session_id = {spid} and wait_type = @w", observer);
+        _ = probe.Parameters.AddWithValue("@w", waitType);
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while ((int)await probe.ExecuteScalarAsync(cancellationToken) == 0)
+        {
+            IsLessThan(10_000, waited.ElapsedMilliseconds, $"the request never waited on {waitType}");
+            await Task.Delay(10, cancellationToken);
+        }
+    }
+
     public static void ExecInProc(Simulation simulation, string sql)
     {
         using var connection = simulation.CreateDbConnection();

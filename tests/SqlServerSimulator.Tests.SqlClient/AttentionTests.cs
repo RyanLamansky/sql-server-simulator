@@ -264,14 +264,20 @@ public sealed class AttentionTests
         Wire.ExecInProc(simulation, "create table t (id int)");
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var observer = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var spidCommand = new SqlCommand("select @@spid", connection);
+        var spid = (short)(await spidCommand.ExecuteScalarAsync(TestContext.CancellationToken))!;
 
         // The first statement commits (autocommit); the cancel fires during the
         // WAITFOR, so the batch aborts at the statement boundary and the third
-        // statement never runs — statement-boundary atomicity.
+        // statement never runs — statement-boundary atomicity. The cancel waits
+        // for the WAITFOR itself, since one landing earlier would abort the
+        // first INSERT too.
         var batchText = $"insert t values (1); {LongWait}; insert t values (2)";
         await using (var batch = new SqlCommand(batchText, connection) { CommandTimeout = 0 })
         {
             var execution = batch.ExecuteNonQueryAsync(TestContext.CancellationToken);
+            await Wire.AwaitWaitTypeAsync(observer, spid, "WAITFOR", TestContext.CancellationToken);
             await CancelUntilComplete(batch, execution, TestContext.CancellationToken);
             _ = await ThrowsExactlyAsync<SqlException>(async () => await execution);
         }
