@@ -3559,6 +3559,9 @@ public sealed partial class Simulation
         batch.CurrentStatement.BeginExecution();
         if (connection.PinnedUtcNow is { } pinned)
             batch.CurrentStatement.UtcNow = pinned;
+        batch.LastCompiledLine = context.Token is ReservedKeyword { Keyword: Keyword.Goto } or UnquotedString { IsLabelDeclaration: true }
+            ? -1
+            : batch.CurrentStatement.StartLine;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings
@@ -3703,11 +3706,13 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.If }:
                 foreach (var o in ParseIfStatement(batch))
                     yield return o;
+                batch.LastCompiledLine = -1;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.While }:
                 foreach (var o in ParseWhileStatement(batch))
                     yield return o;
+                batch.LastCompiledLine = -1;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Break }:
@@ -3879,6 +3884,7 @@ public sealed partial class Simulation
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))
                                 yield return o;
+                            batch.LastCompiledLine = -1;
                             break;
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Catch }:
                             // A CATCH block opening where a statement belongs —

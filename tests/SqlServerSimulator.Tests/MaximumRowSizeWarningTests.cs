@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -19,7 +20,7 @@ public sealed class MaximumRowSizeWarningTests
         connection.InfoMessage += (_, e) =>
         {
             foreach (var error in e.Errors.Cast<SimulatedError>())
-                log.Add($"{error.Number} s{error.State} L{error.LineNumber} {error.Procedure}".TrimEnd());
+                log.Add(string.Create(CultureInfo.InvariantCulture, $"{error.Number} s{error.State} L{error.LineNumber} {error.Procedure}").TrimEnd());
         };
         _ = connection.CreateCommand(sql).ExecuteNonQuery();
         return log;
@@ -73,7 +74,7 @@ public sealed class MaximumRowSizeWarningTests
     {
         var simulation = new Simulation();
         CollectionAssert.AreEqual(
-            new[] { "1708 s2 L1", "1708 s2 L1" },
+            new[] { "1708 s2 L1", "1708 s2 L-1" },
             Messages(simulation, "if 1 = 0 begin declare @t table (a char(8000), b char(40), c varchar(10)) end"));
         CollectionAssert.AreEqual(
             new[] { "1708 s2 L1 p" },
@@ -81,4 +82,28 @@ public sealed class MaximumRowSizeWarningTests
         CollectionAssert.AreEqual(new[] { "1708 s2 L1 p", "1708 s2 L1 p" }, Messages(simulation, "exec p"));
         IsEmpty(Messages(simulation, "exec p"));
     }
+
+    private const string Oversized = "table (a char(8000), b char(40), c varchar(10))";
+
+    /// <summary>
+    /// The compile's second warning follows every first one and carries the
+    /// line the compile ends on: the batch's last statement's, or -1 when that
+    /// statement is control flow or a <c>DECLARE</c> without an initializer.
+    /// </summary>
+    [TestMethod]
+    [DataRow($"select 1\ndeclare @t {Oversized}", "L2 L2")]
+    [DataRow($"select 1\nwhile 1 = 0\nbegin\n declare @t {Oversized}\nend", "L4 L-1")]
+    [DataRow($"while 1 = 0\nbegin\n declare @t {Oversized}\nend\nselect 3", "L3 L5")]
+    [DataRow($"select 0\ndeclare @u {Oversized}\nselect 1\nwhile 1 = 0\nbegin\ndeclare @t {Oversized}\nend\nselect 3", "L2 L6 L8 L8")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\nbegin\nselect 5\nend", "L1 L3")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\ndeclare @x int", "L1 L-1")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\ndeclare @x int, @y int = 1", "L1 L2")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\ndeclare @c cursor", "L1 L-1")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\ndeclare c cursor for select 1", "L1 L2")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\nif 1 = 1 select 5", "L1 L-1")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\nbegin try select 1 end try begin catch end catch", "L1 L-1")]
+    [DataRow($"while 1 = 0 begin declare @t {Oversized} end\nselect 1\nlbl:", "L1 L-1")]
+    [DataRow($"begin try select 1 end try\nbegin catch\n declare @t {Oversized}\nend catch", "L3 L-1")]
+    public void TableVariable_SecondWarningCarriesTheCompilesLastLine(string sql, string lines) =>
+        AreEqual(lines, string.Join(" ", Messages(new Simulation(), sql).Select(static m => m.Split(' ')[2])));
 }

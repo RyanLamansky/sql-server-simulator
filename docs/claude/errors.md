@@ -65,6 +65,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 - **Msg 1708**, the warning a table whose largest row can pass 8060 bytes draws, goes out as `CREATE TABLE` (a `#temp` one included), `CREATE TYPE … AS TABLE` and `ALTER TABLE … ADD` complete, at state 2, and as `ALTER COLUMN` does at state 1, naming the table as written (probed 2026-10-06 against SQL Server 2025).
   The largest row is the smallest (Msg 1701's) plus, once there is a variable-length column, 2 bytes for their count, 2 per column and each one's largest value capped at 24 bytes — the pointer a value pushed off the row leaves, which a `max` or LOB type counts too — so two `varchar(8000)` columns draw nothing while `char(8000), char(50), varchar(10)` does; a sparse column adds nothing (`Simulation.MaximumRowExceedsLimit`).
   A table variable's goes out as its batch compiles, twice, ahead of anything the batch runs — once at a procedure's `CREATE` and twice as its first call compiles it, never from a plan it reuses (`BatchContext.CompileMessages`).
+  The compile's second copies follow all its first ones and carry the line real's compile ends on rather than the `DECLARE`'s: the batch's (or body's) last statement's, or -1 when that statement is an `IF`, a `WHILE`, a `TRY`, a `GOTO`, a label or a `DECLARE` without an initializer (`BatchContext.LastCompiledLine`, probed 2026-10-17 against SQL Server 2025).
 - **Msg 3607** (`Division by zero occurred.`) and **Msg 3606** (`Arithmetic overflow occurred.`), class 0 state 0, go out once each after the rows of a statement whose divide by zero or overflow answered NULL under `ARITHABORT OFF` with `ANSI_WARNINGS OFF` — a fresh session's `ARITHABORT` is off, so `SET ANSI_WARNINGS OFF` alone does it (probed 2026-09-25 against SQL Server 2025) — 3606 first whichever fault came first (probed 2026-09-26).
   The operators, `CAST` / `CONVERT` (a `real` target reads 0 rather than NULL) and the value an `INSERT` / `UPDATE` / `MERGE` writes take part; a conversion failure and an identity overflow still raise.
   So do `SUM` and `AVG`: an overflowing total NULLs only its own group, and a sliding window frame answers again once the overflowing row has left it.
@@ -75,7 +76,6 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 ### Not modeled yet
 
 - **Every diagnostic but Msg 5703 and DBCC's Msg 2528 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
-- **A table variable's second Msg 1708 inside a `WHILE`** reports line -1 on real; here both report the `DECLARE`'s line (probed 2026-10-06 against SQL Server 2025).
 
 ## A statement's whole binder report
 

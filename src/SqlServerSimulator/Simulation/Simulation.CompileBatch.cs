@@ -145,6 +145,12 @@ partial class Simulation
                 inliningFailures.Add(failure);
         }
 
+        if (compileBatch.CompileMessagesAfterWalk is { } afterWalk)
+        {
+            foreach (var message in afterWalk)
+                message.LineNumber = compileBatch.LastCompiledLine < 0 ? -1 : compileBatch.LastCompiledLine + compileBatch.LineOffset;
+            (compileBatch.CompileMessages ??= []).AddRange(afterWalk);
+        }
         if (compileBatch.CompileMessages is { } compileMessages)
         {
             foreach (var message in compileMessages)

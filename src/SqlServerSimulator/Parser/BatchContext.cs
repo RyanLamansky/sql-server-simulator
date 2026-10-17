@@ -295,6 +295,24 @@ internal sealed partial class BatchContext
     public List<SimulatedError>? CompileMessages;
 
     /// <summary>
+    /// The informational messages a compile walk sends after every one in
+    /// <see cref="CompileMessages"/> — a table variable's second Msg 1708 —
+    /// each carrying <see cref="LastCompiledLine"/> as the walk ends rather
+    /// than its own statement's line.
+    /// </summary>
+    public List<SimulatedError>? CompileMessagesAfterWalk;
+
+    /// <summary>
+    /// The line real's compile leaves set once it has read the batch: its last
+    /// statement's, or -1 when that statement is an <c>IF</c>, <c>WHILE</c>,
+    /// <c>TRY</c>, <c>GOTO</c>, label or a <c>DECLARE</c> without an
+    /// initializer, which set none — a <c>BEGIN … END</c> block reading as its
+    /// own last statement (probed 2026-10-17 against SQL Server 2025 through
+    /// the second Msg 1708 a table variable draws).
+    /// </summary>
+    public int LastCompiledLine = -1;
+
+    /// <summary>
     /// Where this batch's text names, with a database part, a temporary table
     /// its compile found missing — one the batch itself creates — whose
     /// statement real compiles again as it runs and so repeats its Msg 2701

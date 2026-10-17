@@ -23,6 +23,7 @@ partial class Simulation
     {
         var rowsAffected = (int?)null;
         var sawScalar = false;
+        var initialized = false;
         var variableIndex = 0;
         // Names this one DECLARE statement has already introduced, so a
         // repeat within the same statement stays Msg 134.
@@ -170,6 +171,7 @@ partial class Simulation
             var initialValue = SqlValue.Null(declaredType);
             Expression? initExpressionForMask = null;
             var hasInitializer = context.Token is Operator { Character: '=' };
+            initialized |= hasInitializer;
             if (hasInitializer)
             {
                 // A DECLARE that initializes is a SELECT-kind statement, the
@@ -264,6 +266,9 @@ partial class Simulation
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });
 
+        // A declaration with no initializer leaves real's compile no line.
+        if (!initialized)
+            context.Batch.LastCompiledLine = -1;
         return legacyLobRefusal is not null ? throw legacyLobRefusal : rowsAffected;
     }
 
@@ -568,11 +573,15 @@ partial class Simulation
             FunctionBodyShape.NoteSideEffect(context.Batch, "TIMESTAMP", FunctionBodyShape.TimestampColumnState);
         // A table variable's oversized row is reported as the batch compiles,
         // twice, and once more as a module body binds at CREATE — never as the
-        // DECLARE runs (probed 2026-10-06 against SQL Server 2025).
+        // DECLARE runs (probed 2026-10-06 against SQL Server 2025). The
+        // compile's second report follows every first one, at the line the
+        // compile ends on (probed 2026-10-17 against SQL Server 2025).
         if (context.Batch.CreateTimeBinding && MaximumRowExceedsLimit(columns))
         {
-            for (var i = context.Batch.CompilingForRun ? 2 : 1; i > 0; i--)
-                (context.Batch.CompileMessages ??= []).Add(SimulatedSqlException.MaximumRowSizeExceededMessage(context.Batch, fullName, state: 2));
+            var batch = context.Batch;
+            (batch.CompileMessages ??= []).Add(SimulatedSqlException.MaximumRowSizeExceededMessage(batch, fullName, state: 2));
+            if (batch.CompilingForRun)
+                (batch.CompileMessagesAfterWalk ??= []).Add(SimulatedSqlException.MaximumRowSizeExceededMessage(batch, fullName, state: 2));
         }
         var (objectId, internalName) = context.Connection.Simulation.AllocateTableVariableIdentity();
         RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, tempNamePadding: internalName.Length);
