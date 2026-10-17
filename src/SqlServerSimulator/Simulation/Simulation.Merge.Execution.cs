@@ -43,7 +43,7 @@ partial class Simulation
         return Execute();
 
         SimulatedStatementOutcome Execute() => ExecuteMerge(
-            context, destinationTable, plan.SourceView, plan.TargetAlias, plan.MaterializeSource, plan.SourceAlias, plan.SourceColumnNames, plan.SourceSchema,
+            context, destinationTable, plan.SourceView, plan.TargetAlias, plan.MaterializeSource, plan.SourceAlias, plan.SourceColumnNames, plan.SourceSchema, plan.SourceDeferred,
             plan.OnPredicate, plan.WhenClauses, DataMasking.Applying(context.Batch, plan.WriteMasks), plan.Output, plan.SerializableHint, viewRowsTarget, joinWrite, plan.Top);
     }
 
@@ -152,6 +152,15 @@ partial class Simulation
     }
 
     /// <summary>
+    /// A <c>MERGE</c> source row's column: the value the source computed, or
+    /// for a column it left to the clause reading it
+    /// (<paramref name="sourceDeferred"/>) the column's expression evaluated
+    /// over the row there.
+    /// </summary>
+    private static SqlValue ReadMergeSourceValue(SqlValue[] sourceValues, int ordinal, DeferredColumn?[]? sourceDeferred, BatchContext batch) =>
+        sourceDeferred is { } deferred && deferred[ordinal] is { } column ? column.EvaluateOver(sourceValues, batch) : sourceValues[ordinal];
+
+    /// <summary>
     /// Draws the identity values a <c>MERGE</c> whose <c>USING</c> source
     /// failed uses up. With an <c>ON</c> settled non-TRUE while compiling —
     /// EF Core's multi-row insert — real's plan joins nothing, so each source
@@ -171,7 +180,8 @@ partial class Simulation
         List<SqlValue[]> sourceRows,
         bool failingRowReached,
         string sourceAlias,
-        string[] sourceColumnNames)
+        string[] sourceColumnNames,
+        DeferredColumn?[]? sourceDeferred)
     {
         var batch = context.Batch;
         if (destinationTable.IdentityOrdinal < 0
@@ -207,7 +217,7 @@ partial class Simulation
                 var ordinal = MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames) is var qualified and >= 0
                     ? qualified
                     : MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true);
-                return ordinal >= 0 ? sourceValues[ordinal] : throw SimulatedSqlException.InvalidColumnName(name);
+                return ordinal >= 0 ? ReadMergeSourceValue(sourceValues, ordinal, sourceDeferred, batch) : throw SimulatedSqlException.InvalidColumnName(name);
             }
         }
         UseUpIdentityValues(batch, destinationTable, [], count);
@@ -230,6 +240,7 @@ partial class Simulation
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
+        DeferredColumn?[]? sourceDeferred,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
         MaskingFunction?[]? writeMasks,
@@ -283,7 +294,7 @@ partial class Simulation
             }
             catch (SimulatedSqlException sourceError) when (viewRowsTarget is null && joinWrite is null && sourceView is null)
             {
-                UseUpMergeIdentityValues(context, destinationTable, onPredicate, whenClauses, sourceRows, sourceError.RaisedInRowProjection, sourceAlias, sourceColumnNames);
+                UseUpMergeIdentityValues(context, destinationTable, onPredicate, whenClauses, sourceRows, sourceError.RaisedInRowProjection, sourceAlias, sourceColumnNames, sourceDeferred);
                 throw;
             }
         }
@@ -344,7 +355,7 @@ partial class Simulation
                     return derived;
             }
             if (MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames) is var sourceOrdinal and >= 0)
-                return sourceValues is null ? SqlValue.Null(sourceSchema[sourceOrdinal]) : sourceValues[sourceOrdinal];
+                return sourceValues is null ? SqlValue.Null(sourceSchema[sourceOrdinal]) : ReadMergeSourceValue(sourceValues, sourceOrdinal, sourceDeferred, context.Batch);
             if (name.Count == 1)
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
@@ -352,7 +363,7 @@ partial class Simulation
                 if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
                     return derived;
                 if (MergeSourceOrdinal(context.Batch.CurrentDatabase.Collation, name, sourceAlias, sourceColumnNames, unqualified: true) is var unqualifiedOrdinal and >= 0)
-                    return sourceValues is null ? SqlValue.Null(sourceSchema[unqualifiedOrdinal]) : sourceValues[unqualifiedOrdinal];
+                    return sourceValues is null ? SqlValue.Null(sourceSchema[unqualifiedOrdinal]) : ReadMergeSourceValue(sourceValues, unqualifiedOrdinal, sourceDeferred, context.Batch);
             }
             throw RowLocator.IsLocatorName(name)
                 ? new NotSupportedException("TEXTPTR in a MERGE isn't modeled: its target and source rows don't carry the address a text pointer names.")

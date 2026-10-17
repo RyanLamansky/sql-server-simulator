@@ -472,9 +472,36 @@ partial class Simulation
     /// limit or window applies exactly as a read of the view applies it. An
     /// address is null for a row that came from no heap row.
     /// </summary>
-    private static List<(SqlValue[] Row, (int Page, int Slot)? Address)> ViewRowsWithAddresses(BatchContext batch, View view)
+    private static List<(SqlValue[] Row, (int Page, int Slot)? Address)> ViewRowsWithAddresses(BatchContext batch, View view) =>
+        ViewRowsWithAddresses(batch, view, computes: null, out _, sources: [], targetIndex: -1);
+
+    /// <summary>
+    /// <see cref="ViewRowsWithAddresses(BatchContext, View)"/> for a joined
+    /// write's target at <paramref name="targetIndex"/> of
+    /// <paramref name="sources"/>, its body computing only the columns
+    /// <paramref name="computes"/> names (null: all of them). Of those, the
+    /// ones the body offers to its reader (<see cref="Selection.DeferrableColumns"/>)
+    /// come back in <paramref name="deferred"/>, which the statement evaluates
+    /// where it reads them, the body computing what they read instead; and
+    /// <paramref name="computes"/> loses them.
+    /// </summary>
+    private static List<(SqlValue[] Row, (int Page, int Slot)? Address)> ViewRowsWithAddresses(BatchContext batch, View view, bool[]? computes, out DeferredColumn?[]? deferred, FromSource[] sources, int targetIndex)
     {
         var body = batch.Connection.Simulation.ParseViewBodyPlan(batch, view);
+        deferred = null;
+        if (computes is not null)
+        {
+            if (body.DeferrableColumns() is { } offered)
+            {
+                for (var c = 0; c < computes.Length && c < offered.Length; c++)
+                {
+                    if (computes[c] && offered[c]?.BindAtReader(sources, targetIndex, lateral: false) is { ReadsOnlyItsRow: true } column)
+                        (deferred ??= new DeferredColumn?[computes.Length])[c] = column;
+                }
+                DeferredColumn.ComputeDependenciesInstead(computes, deferred);
+            }
+            _ = body.AcceptDemand(computes);
+        }
         var width = body.ColumnNames.Length;
         var rows = new List<(SqlValue[] Row, (int Page, int Slot)? Address)>();
         foreach (var row in body.ExecuteWithRowAddresses(batch))

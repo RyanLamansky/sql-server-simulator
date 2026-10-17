@@ -140,6 +140,99 @@ partial class Selection
     }
 
     /// <summary>
+    /// Per column of the target at <paramref name="targetIndex"/> that a
+    /// joined write reads its rows through (a view, CTE or derived table),
+    /// whether the statement reads it — <paramref name="reads"/>, its ON
+    /// predicates, what its other sources reach — so the body may leave the
+    /// rest uncomputed; null when something reads what no walk sees.
+    /// </summary>
+    internal static bool[]? TargetColumnReads(FromSource[] sources, JoinSpec[] joins, int targetIndex, List<ExpressionNode> reads)
+    {
+        var state = (Sources: sources, Target: targetIndex, Read: new bool[sources[targetIndex].ColumnNames.Length], Known: true);
+        static void Name(MultiPartName name, ref (FromSource[] Sources, int Target, bool[] Read, bool Known) state)
+        {
+            if (TryBindSourceColumn(state.Sources, name) is (var source, var column) && source == state.Target && column < state.Read.Length)
+                state.Read[column] = true;
+        }
+        static void Reach(MultiPartName[]? names, ref (FromSource[] Sources, int Target, bool[] Read, bool Known) state)
+        {
+            if (names is null)
+            {
+                state.Known = false;
+                return;
+            }
+            foreach (var name in names)
+                Name(name, ref state);
+        }
+        var roots = new List<ExpressionNode>(reads);
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                roots.Add(on);
+        }
+        for (var s = 0; s < sources.Length; s++)
+        {
+            if (s == targetIndex || sources[s] is not { LateralPlan: { } plan, IsPlaceholder: false, BackingView: null, BackingCatalogView: null } source)
+                continue;
+            if (source.InlineCall is var (_, arguments, _))
+            {
+                foreach (var argument in arguments)
+                {
+                    if (argument is not null)
+                        roots.Add(argument);
+                }
+            }
+            else
+            {
+                Reach(ReachOf(plan), ref state);
+            }
+        }
+        foreach (var root in roots)
+        {
+            root.Walk(ref state, static (node, shape, ref state) =>
+            {
+                if (shape.Column is { } name)
+                    Name(name, ref state);
+                foreach (var local in shape.Locals)
+                {
+                    if (local is Selection subquery)
+                        Reach(ReachOf(subquery), ref state);
+                }
+                return true;
+            });
+        }
+        return state.Known ? state.Read : null;
+    }
+
+    /// <summary>
+    /// Hands the sources of a <c>MERGE</c>'s joined <c>USING</c> clause the
+    /// columns the statement reads of them — <paramref name="read"/>, over
+    /// every source's columns in turn (null: all of them) — beside what its
+    /// ON predicates and its sources reach.
+    /// </summary>
+    internal static void NoteMergeSourceDemand(FromSource[] sources, JoinSpec[] joins, bool[]? read)
+    {
+        var collector = new ProjectionDemand.Collector(sources, 0, [], []);
+        var k = 0;
+        for (var s = 0; s < sources.Length; s++)
+        {
+            for (var c = 0; c < sources[s].ColumnNames.Length; c++, k++)
+            {
+                if (collector.Prunable[s] && (read is null || read[k]))
+                    collector.Reads.Add((ProjectionDemand.Always, s, c));
+            }
+        }
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                collector.Walk(on, ProjectionDemand.Always);
+        }
+        foreach (var source in sources)
+            collector.ReadReachOf(source);
+        _ = collector.Finish([], [], [], [], readsWholeRow: false, [], [], ownsStartupConstant: null, LateralSlots(sources, joins)).Apply(null);
+    }
+
+    /// <summary>
     /// The startup constants of the select-list columns this plan computes —
     /// <paramref name="constants"/> itself when it computes them all — each
     /// constant's column given by <paramref name="owners"/>.
@@ -505,17 +598,7 @@ internal sealed class ProjectionDemand
             if (mask[c] && offered[c]?.BindAtReader(this.sources, slot, this.lateral.Length > slot && this.lateral[slot]) is { } bound)
                 (deferred ??= new DeferredColumn?[mask.Length])[c] = bound;
         }
-        if (deferred is null)
-            return null;
-        for (var c = 0; c < deferred.Length; c++)
-        {
-            if (deferred[c] is { } column)
-            {
-                mask[c] = false;
-                foreach (var dependency in column.Dependencies)
-                    mask[dependency] = true;
-            }
-        }
+        DeferredColumn.ComputeDependenciesInstead(mask, deferred);
         return deferred;
     }
 

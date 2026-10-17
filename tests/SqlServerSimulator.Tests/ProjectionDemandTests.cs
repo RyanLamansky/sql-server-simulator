@@ -228,6 +228,68 @@ public sealed class ProjectionDemandTests
             8134);
     }
 
+    /// <summary>
+    /// Every kind of <c>USING</c> source leaves the columns no clause reads
+    /// uncomputed — a query, a view, a CTE, a <c>VALUES</c> list, a table's
+    /// computed column, a joined source — and a column only a <c>WHEN</c>
+    /// clause reads is evaluated where the clause reads it, so a guard the
+    /// failing row never passes keeps it from raising (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("-5,-10,0,10", "merge @t t using (select k, 10 / (k - 3) as x from src) s on t.k = s.k when matched then update set j = case when s.k = 3 then 0 else s.x end;")]
+    [DataRow("-5,-10,0,10", "merge @t t using (select k, 10 / (k - 3) as x from src) s on t.k = s.k when matched and s.k <> 3 then update set j = s.x;")]
+    [DataRow("-5,-10,0,10", "merge @t t using v1 s on t.k = s.k when matched and s.k <> 3 then update set j = s.x;")]
+    [DataRow("1,2,3,4", "merge @t t using v1 s on t.k = s.k when matched then update set j = s.k;")]
+    [DataRow("-5,-10,0,10", "with c as (select k, 10 / (k - 3) as x from src) merge @t t using c on t.k = c.k when matched and c.k <> 3 then update set j = c.x;")]
+    [DataRow("1,0,3,0", "merge @t t using (values (1, 10 / 1), (3, 10 / 0)) s(k, x) on t.k = s.k when matched then update set j = s.k;")]
+    [DataRow("1,2,3,4", "merge @t t using tc on t.k = tc.k when matched then update set j = tc.k;")]
+    [DataRow("-5,-10,0,10", "merge @t t using tc on t.k = tc.k and tc.k <> 3 when matched then update set j = tc.c;")]
+    [DataRow("1,2,3,4", "merge @t t using src z cross apply (values (z.k, 10 / (z.k - 3))) s(kk, x) on t.k = s.kk when matched then update set j = s.kk;")]
+    [DataRow("-5,-10,0,10", "merge @t t using src z cross apply (select z.k as kk, 10 / (z.k - 3) as x) s on t.k = s.kk when matched and s.kk <> 3 then update set j = s.x;")]
+    public void MergeSource_EvaluatesWhatOnlyAWhenClauseReadsThere(string expected, string merge)
+    {
+        var simulation = Seeded();
+        _ = simulation.ExecuteNonQuery("create table tc (k int, c as 10 / (k - 3))");
+        _ = simulation.ExecuteNonQuery("insert tc (k) values (1), (2), (3), (4)");
+        AreEqual(expected, simulation.ExecuteBatchesScalar($"""
+            declare @t table (k int primary key, j int);
+            insert @t values (1, 0), (2, 0), (3, 0), (4, 0);
+            {merge}
+            select string_agg(cast(j as varchar), ',') within group (order by k) from @t;
+            """));
+        _ = simulation.AssertSqlError(
+            """
+            declare @t table (k int primary key, j int);
+            insert @t values (1, 0), (2, 0), (3, 0), (4, 0);
+            merge @t t using tc on t.k = tc.k when matched then update set j = tc.c;
+            """,
+            8134);
+    }
+
+    /// <summary>
+    /// A joined write's target read through a view, CTE or derived table
+    /// computes only the columns the statement reads of it, and evaluates a
+    /// computed one where the statement reads it (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("5,5,5,5", "update vm set j = 5 from vm join src s on vm.k = s.k")]
+    [DataRow("9,9,0,9", "update vm set j = 9 from vm join src s on vm.k = s.k where vm.k <> 3 and vm.x > -100")]
+    [DataRow("7,7,7,7", "update d set j = 7 from (select k, j, 10 / (k - 3) as x from tm) d join src s on d.k = s.k")]
+    [DataRow("8,8,8,8", "with c as (select k, j, 10 / (k - 3) as x from tm) update c set j = 8 from c join src s on c.k = s.k")]
+    [DataRow("0,0,0", "delete vm from vm join src s on vm.k = s.k where s.k = 1")]
+    public void JoinedWriteThroughABody_ComputesOnlyWhatItReads(string expected, string write)
+    {
+        var simulation = Seeded();
+        simulation.ExecuteBatches(
+            "create table tm (k int primary key, j int); insert tm values (1, 0), (2, 0), (3, 0), (4, 0);",
+            "create view vm as select k, j, 10 / (k - 3) as x from tm");
+        _ = simulation.ExecuteNonQuery(write);
+        AreEqual(expected, simulation.ExecuteScalar("select string_agg(cast(j as varchar), ',') within group (order by k) from tm"));
+        _ = simulation.AssertSqlError("update vm set j = vm.x from vm join src s on vm.k = s.k", 8134);
+    }
+
     [TestMethod]
     public void JoinedUpdate_ComputesOnlyTheColumnsItReads()
     {

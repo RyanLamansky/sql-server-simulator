@@ -114,6 +114,27 @@ internal sealed class DeferredColumn
     }
 
     /// <summary>
+    /// Has the body behind <paramref name="computes"/> — the columns it
+    /// computes — compute what each <paramref name="deferred"/> column reads
+    /// in place of the column, which its reader evaluates.
+    /// </summary>
+    public static void ComputeDependenciesInstead(bool[] computes, DeferredColumn?[]? deferred)
+    {
+        if (deferred is null)
+            return;
+        foreach (var column in deferred)
+        {
+            foreach (var dependency in column?.Dependencies ?? [])
+                computes[dependency] = true;
+        }
+        for (var c = 0; c < deferred.Length && c < computes.Length; c++)
+        {
+            if (deferred[c] is not null)
+                computes[c] = false;
+        }
+    }
+
+    /// <summary>
     /// This column with every binding re-placed by <paramref name="map"/>,
     /// nested columns re-placed the same way; null when any binding can't be.
     /// </summary>
@@ -181,6 +202,31 @@ internal sealed class DeferredColumn
         frame.NextIdle = idleFrames;
         idleFrames = frame;
         return value;
+    }
+
+    /// <summary>
+    /// The column's value over a row already decoded into
+    /// <paramref name="values"/> — a <c>MERGE</c> source's — for a column
+    /// that reads nothing but its own row (<see cref="ReadsOnlyItsRow"/>).
+    /// </summary>
+    public SqlValue EvaluateOver(SqlValue[] values, BatchContext batch) =>
+        this.expression.Run(new RuntimeContext(name => this.ReadValue(name, values, batch), batch));
+
+    private SqlValue ReadValue(MultiPartName name, SqlValue[] values, BatchContext batch)
+    {
+        for (var i = 0; i < this.names.Length; i++)
+        {
+            if (!SameName(this.names[i], name))
+                continue;
+            var binding = this.bindings[i];
+            return binding.Kind switch
+            {
+                DeferredBindingKind.Output => values[binding.Column],
+                DeferredBindingKind.Nested => binding.Nested!.EvaluateOver(values, batch),
+                _ => throw new InvalidOperationException($"'{name}' in a deferred column reads outside the row it was handed."),
+            };
+        }
+        throw new InvalidOperationException($"'{name}' in a deferred column has no binding.");
     }
 
     [ThreadStatic]

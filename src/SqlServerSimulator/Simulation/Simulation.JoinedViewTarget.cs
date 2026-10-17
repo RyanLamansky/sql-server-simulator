@@ -148,8 +148,17 @@ partial class Simulation
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
+        // The columns the statement never reads of its sources, the target's
+        // included, go uncomputed.
+        List<ExpressionNode> reads = [.. rawAssignments.Select(static assignment => assignment.Expr), .. assignments.Select(static assignment => assignment.Expr)];
+        if (where is not null)
+            reads.Add(where);
+        output?.VisitExpressions(reads.Add);
+        Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
+        var targetReads = Selection.TargetColumnReads(sources, joins, targetIndex, reads);
+
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
-        var target = MaterializeViewTarget(batch, view, table, sources, targetIndex);
+        var target = MaterializeViewTarget(batch, view, table, sources, targetIndex, targetReads);
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -298,8 +307,15 @@ partial class Simulation
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 
+        // The columns the statement never reads of its sources, the target's
+        // included, go uncomputed.
+        List<ExpressionNode> reads = where is null ? [] : [where];
+        output?.VisitExpressions(reads.Add);
+        Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
+        var targetReads = Selection.TargetColumnReads(sources, joins, targetIndex, reads);
+
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
-        var target = MaterializeViewTarget(batch, view, table, sources, targetIndex);
+        var target = MaterializeViewTarget(batch, view, table, sources, targetIndex, targetReads);
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -634,6 +650,13 @@ partial class Simulation
         private Func<SqlValue[], int, BatchContext, SqlValue>? readDerived;
 
         /// <summary>
+        /// The derived columns a view row computes, the rest read as NULL —
+        /// unread, or evaluated where the statement reads them; null computes
+        /// every one.
+        /// </summary>
+        public bool[]? Computes;
+
+        /// <summary>
         /// An <c>APPLY</c>'s correlated body (<see cref="View.IsCorrelated"/>),
         /// whose rows the join yields as it runs the body against each left
         /// row, each recorded against its base address in the statement's
@@ -676,6 +699,7 @@ partial class Simulation
             {
                 values[i] = view.BaseColumnOrdinals[i] is var ordinal and >= 0 ? baseValues[ordinal]
                     : view.IsWindowed && this.Rows.TryGetValue(address, out var row) ? row[i]
+                    : this.Computes?[i] == false ? SqlValue.Null(source.Columns[i].Type)
                     : (this.readDerived ??= SingleBaseViewReader(batch, view, table))(baseValues, i, batch);
             }
             return EncodeFor(source, values);
@@ -698,7 +722,7 @@ partial class Simulation
     /// image the view shows — are waited out in U first, the same outcome as
     /// real's wait at the row's turn, moved earlier within the statement.
     /// </remarks>
-    private static ViewTargetRows MaterializeViewTarget(BatchContext batch, View view, HeapTable table, FromSource[] sources, int targetIndex)
+    private static ViewTargetRows MaterializeViewTarget(BatchContext batch, View view, HeapTable table, FromSource[] sources, int targetIndex, bool[]? targetReads)
     {
         if (!table.SupersededKeyImages.IsEmptyLockFree())
         {
@@ -725,8 +749,19 @@ partial class Simulation
             batch.CurrentStatement.RowAddresses ??= new();
             return target;
         }
+        // The body computes the columns the statement reads — each direct
+        // one, which a row is matched to its base image by — and leaves the
+        // ones it offers to evaluate where the statement reads them; a CTE
+        // narrows so only when no other reference to it reads its rows.
+        var computes = targetReads is null || (source.Cte is { } binding && !binding.Readers.TrueForAll(reader => ReferenceEquals(reader, source)))
+            ? null
+            : (bool[])targetReads.Clone();
+        for (var i = 0; computes is not null && i < computes.Length && i < view.BaseColumnOrdinals.Length; i++)
+            computes[i] |= view.BaseColumnOrdinals[i] >= 0;
         var rows = new List<byte[]>();
-        foreach (var (row, address) in ViewRowsWithAddresses(batch, view))
+        var bodyRows = ViewRowsWithAddresses(batch, view, computes, out var deferred, sources, targetIndex);
+        target.Computes = computes;
+        foreach (var (row, address) in bodyRows)
         {
             if (address is not { } at || table.Heap.ReadLiveRow(at.Page, at.Slot) is not { } image)
                 continue;
@@ -739,7 +774,9 @@ partial class Simulation
             target.Addresses[bytes] = at;
             rows.Add(bytes);
         }
-        sources[targetIndex] = source.WithMaterializedRows(rows);
+        var materialized = source.WithMaterializedRows(rows);
+        materialized.DeferredColumns = deferred;
+        sources[targetIndex] = materialized;
         return target;
     }
 

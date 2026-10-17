@@ -178,7 +178,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability, matchSources, matchJoins) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability, matchSources, matchJoins, sourceDemand) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -294,14 +294,17 @@ partial class Simulation
         if (context.Token is not Operator { Character: ';' })
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
 
-        // A USING query's columns no clause reads go uncomputed (probed
+        // A source's columns no clause reads go uncomputed, and one only a
+        // WHEN clause reads is evaluated as that clause reads it (probed
         // 2026-10-17 against SQL Server 2025: a source column dividing by zero
-        // that no action reads leaves the MERGE running).
-        if (matchSources is [{ LateralPlan: { } usingQuery, BackingView: null, BackingTable: null, Cte: null }])
-            _ = usingQuery.AcceptDemand(MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output));
+        // that no action reads, or that an action reads under a guard the
+        // failing row never passes, leaves the MERGE running).
+        var sourceDeferred = sourceDemand?.Invoke(
+            MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output),
+            MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, [], output));
 
         var plan = new MergePlan(
-            destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema,
+            destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceDeferred,
             onPredicate, whenClauses, writeMasks, output, serializableHint, viewRowsTarget, joinWrite, top);
         // Which INSTEAD OF triggers take the actions is settled above from
         // their enabled state, which no schema change records, so a target
@@ -331,6 +334,7 @@ partial class Simulation
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
+        DeferredColumn?[]? sourceDeferred,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
         DataMask?[]? writeMasks,
@@ -349,6 +353,13 @@ partial class Simulation
         public readonly string SourceAlias = sourceAlias;
         public readonly string[] SourceColumnNames = sourceColumnNames;
         public readonly SqlType[] SourceSchema = sourceSchema;
+
+        /// <summary>
+        /// Per source column, the expression a <c>WHEN</c> clause evaluates
+        /// the column with where it reads it, the source leaving it
+        /// uncomputed; null when the source computes every column it reads.
+        /// </summary>
+        public readonly DeferredColumn?[]? SourceDeferred = sourceDeferred;
         public readonly BooleanExpression OnPredicate = onPredicate;
         public readonly List<WhenClause> WhenClauses = whenClauses;
 
@@ -491,6 +502,42 @@ partial class Simulation
     }
 
     /// <summary>
+    /// What a <c>MERGE</c> source computes once the statement has bound: the
+    /// columns its clauses read (<paramref name="read"/>) and of those the
+    /// ones its <c>ON</c> or <c>OUTPUT</c> reads (<paramref name="fixedRead"/>),
+    /// each null when the clauses read what no walk sees. Answers, per column,
+    /// the expression a <c>WHEN</c> clause evaluates the column with where it
+    /// reads it, the source leaving it uncomputed.
+    /// </summary>
+    private delegate DeferredColumn?[]? MergeSourceDemand(bool[]? read, bool[]? fixedRead);
+
+    /// <summary>
+    /// Hands a <c>MERGE</c>'s <c>USING</c> body (a query, a view, a CTE) the
+    /// columns the statement reads (see <see cref="MergeSourceDemand"/>): the
+    /// ones only a <c>WHEN</c> clause reads that the body offers to its reader
+    /// (<see cref="Selection.DeferrableColumns"/>) are evaluated there, the
+    /// body computing what they read in their place.
+    /// </summary>
+    private static DeferredColumn?[]? HandMergeBody(Selection body, bool[]? read, bool[]? fixedRead)
+    {
+        if (read is null)
+            return null;
+        var mask = (bool[])read.Clone();
+        DeferredColumn?[]? deferred = null;
+        if (fixedRead is not null && body.DeferrableColumns() is { } offered)
+        {
+            for (var c = 0; c < mask.Length && c < offered.Length; c++)
+            {
+                if (read[c] && !fixedRead[c] && offered[c] is { ReadsOnlyItsRow: true } column)
+                    (deferred ??= new DeferredColumn?[mask.Length])[c] = column;
+            }
+            DeferredColumn.ComputeDependenciesInstead(mask, deferred);
+        }
+        _ = body.AcceptDemand(mask);
+        return deferred;
+    }
+
+    /// <summary>
     /// Parses the <c>USING (...)</c> source — either a <c>VALUES</c>
     /// tuple list or a parenthesized SELECT / set-op chain — followed
     /// by the required <c>[AS] alias</c> and the optional
@@ -505,7 +552,7 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseMergeSource(ParserContext context)
     {
         if (IsJoinedMergeSourceAhead(context))
             return ParseJoinedMergeSource(context);
@@ -520,9 +567,16 @@ partial class Simulation
     /// the scan's per-row locks, whole (<see cref="Materialize"/>) or as the
     /// statement's actions go (<see cref="Rows"/>).
     /// </summary>
-    private sealed class BareTableMergeSource(HeapTable table, PerExecutionRows scan)
+    private sealed class BareTableMergeSource(HeapTable table, PerExecutionRows scan, Collation collation)
     {
         public readonly HeapTable Table = table;
+
+        /// <summary>
+        /// The non-persisted computed columns each row computes, once the
+        /// statement has said which its clauses read; null computes every one,
+        /// a failing unread one reading NULL.
+        /// </summary>
+        private bool[]? computed;
 
         /// <summary>The source's rows as the scan reads them, in the table's key order.</summary>
         public IEnumerable<SqlValue[]> Rows(BatchContext batch)
@@ -531,9 +585,57 @@ partial class Simulation
             {
                 batch.PollCancellation();
                 var fullValues = DecodeFullRow(this.Table, rowBytes);
-                EvaluateComputedColumns(this.Table, fullValues, batch);
+                if (this.computed is not { } computed)
+                {
+                    EvaluateComputedColumns(this.Table, fullValues, batch);
+                }
+                else
+                {
+                    for (var c = 0; c < computed.Length; c++)
+                    {
+                        if (computed[c])
+                            fullValues[c] = EvaluateComputedColumn(this.Table, fullValues, c, batch);
+                    }
+                }
                 yield return fullValues;
             }
+        }
+
+        /// <summary>
+        /// Settles which computed columns each row computes: none the clauses
+        /// don't read, and of the ones only a <c>WHEN</c> clause reads, none
+        /// it can evaluate over the row where it reads them, which it answers.
+        /// </summary>
+        public DeferredColumn?[]? TakeDemand(bool[]? read, bool[]? fixedRead)
+        {
+            if (read is null)
+                return null;
+            var columns = this.Table.Columns;
+            var computed = new bool[columns.Length];
+            DeferredColumn?[]? deferred = null;
+            for (var c = 0; c < columns.Length; c++)
+            {
+                if (columns[c] is not { Computed: { } expression, IsPersisted: false } || !read[c])
+                    continue;
+                if (fixedRead?[c] == false && DeferredColumn.Of(expression, this.BindStored) is { ReadsOnlyItsRow: true } column)
+                    (deferred ??= new DeferredColumn?[columns.Length])[c] = column;
+                else
+                    computed[c] = true;
+            }
+            this.computed = computed;
+            return deferred;
+        }
+
+        /// <summary>The stored column a computed column's expression names.</summary>
+        private DeferredBinding? BindStored(MultiPartName name)
+        {
+            var columns = this.Table.Columns;
+            for (var c = 0; c < columns.Length; c++)
+            {
+                if (collation.Equals(columns[c].Name, name.Leaf))
+                    return columns[c].Computed is null || columns[c].IsPersisted ? DeferredBinding.OutputColumn(c) : null;
+            }
+            return null;
         }
 
         /// <summary>Reads every row into <paramref name="rows"/>, which holds those read if the scan fails partway.</summary>
@@ -646,7 +748,7 @@ partial class Simulation
     /// 2025). Cursor on entry: <c>USING</c>; on exit, the token past the
     /// source.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseJoinedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseJoinedMergeSource(ParserContext context)
     {
         var sourceList = new List<FromSource>();
         var joinList = new List<JoinSpec>();
@@ -669,6 +771,9 @@ partial class Simulation
             }
         }
         var types = schema.ToArray();
+        // The columns some clause reads, once the statement has said; null
+        // reads every one.
+        bool[]? read = null;
         List<SqlValue[]> Materialize(BatchContext batch, List<SqlValue[]> rows)
         {
             foreach (var tuple in Selection.EnumerateJoinedRows((FromSource[])sources.Clone(), joins, batch, outerResolver: null))
@@ -679,14 +784,50 @@ partial class Simulation
                 for (var s = 0; s < sources.Length; s++)
                 {
                     for (var c = 0; c < sources[s].ColumnNames.Length; c++, k++)
-                        values[k] = tuple[s] is not null ? Selection.ReadSourceColumn(sources, tuple, s, c, batch, outerResolver: null, memo: null) : SqlValue.Null(types[k]);
+                        values[k] = tuple[s] is not null && read?[k] != false ? Selection.ReadSourceColumn(sources, tuple, s, c, batch, outerResolver: null, memo: null) : SqlValue.Null(types[k]);
                 }
                 rows.Add(values);
             }
             return rows;
         }
         var alias = JoinedSourceMark + string.Join(JoinedSourceMark, sources.Select(static source => source.Qualifier));
-        return (Materialize, alias, [.. columnNames], types, Masks: null, Replayable: false, Nullability: null, sources, joins);
+        // A column only a WHEN clause reads that a source leaves to its reader
+        // is evaluated over the joined row, whose columns are every source's
+        // in turn, where the clause reads it.
+        var offsets = new int[sources.Length];
+        for (var s = 1; s < sources.Length; s++)
+            offsets[s] = offsets[s - 1] + sources[s - 1].ColumnNames.Length;
+        DeferredColumn?[]? TakeDemand(bool[]? clausesRead, bool[]? fixedRead)
+        {
+            Selection.NoteMergeSourceDemand(sources, joins, clausesRead);
+            if (clausesRead is null || fixedRead is null)
+            {
+                read = clausesRead;
+                return null;
+            }
+            var computes = (bool[])clausesRead.Clone();
+            DeferredColumn?[]? deferred = null;
+            for (var s = 0; s < sources.Length; s++)
+            {
+                for (var c = 0; c < (sources[s].DeferredColumns?.Length ?? 0); c++)
+                {
+                    var k = offsets[s] + c;
+                    if (clausesRead[k] && !fixedRead[k] && sources[s].DeferredColumns![c]?.Rebind((binding, _) => binding.Kind switch
+                    {
+                        DeferredBindingKind.Output => DeferredBinding.OutputColumn(offsets[s] + binding.Column),
+                        DeferredBindingKind.Sibling => DeferredBinding.OutputColumn(offsets[binding.Source] + binding.Column),
+                        _ => null,
+                    }) is { } flattened)
+                    {
+                        (deferred ??= new DeferredColumn?[computes.Length])[k] = flattened;
+                    }
+                }
+            }
+            DeferredColumn.ComputeDependenciesInstead(computes, deferred);
+            read = computes;
+            return deferred;
+        }
+        return (Materialize, alias, [.. columnNames], types, Masks: null, Replayable: false, Nullability: null, sources, joins, TakeDemand);
     }
 
     /// <summary>
@@ -712,7 +853,7 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
@@ -722,6 +863,9 @@ partial class Simulation
         DataMask?[]? masks = null;
         bool[]? nullability;
         Selection? body = null;
+        // The VALUES columns some clause reads, once the statement has said;
+        // null reads every one.
+        bool[]? valuesRead = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             var tuples = ParseValuesTuples(context);
@@ -744,7 +888,7 @@ partial class Simulation
                     batch.BumpRowStamp();
                     var values = new SqlValue[tuple.Length];
                     for (var i = 0; i < tuple.Length; i++)
-                        values[i] = tuple[i].Run(runtime);
+                        values[i] = valuesRead?[i] == false ? SqlValue.Null(sourceSchema[i]) : tuple[i].Run(runtime);
                     rows.Add(values);
                 }
                 return rows;
@@ -824,7 +968,13 @@ partial class Simulation
 
         // A query source is a nested query, which no cached plan holds (see
         // NoteDmlPlan); a VALUES list is replayable.
-        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true, nullability, [MergeMatchSource(alias, columnNames, sourceSchema, body)], []);
+        DeferredColumn?[]? TakeValuesDemand(bool[]? read, bool[]? _)
+        {
+            valuesRead = read;
+            return null;
+        }
+        MergeSourceDemand demand = body is null ? TakeValuesDemand : (read, fixedRead) => HandMergeBody(body, read, fixedRead);
+        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true, nullability, [MergeMatchSource(alias, columnNames, sourceSchema, body)], [], demand);
     }
 
     /// <summary>
@@ -840,7 +990,7 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins, MergeSourceDemand? Demand) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
@@ -851,6 +1001,7 @@ partial class Simulation
         bool[]? nullability = null;
         Selection? matchBody = null;
         View? matchView = null;
+        MergeSourceDemand? demand = null;
 
         // CTE binding shadows table / view resolution: `WITH c AS (…) MERGE …
         // USING c ON …` references the CTE, not any same-named base object.
@@ -874,7 +1025,10 @@ partial class Simulation
             };
             // A recursive binding marks the statement session-scoped, so a
             // plan holds only a CTE whose plan is read-only after its parse.
-            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: true, ctePlan.ColumnNullability, [MergeMatchSource(cteAlias, columnNames, sourceSchema, ctePlan)], []);
+            // Its body narrows to the MERGE's reads only when nothing else reads
+            // it: no FROM reference, nor the statement's target.
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: true, ctePlan.ColumnNullability, [MergeMatchSource(cteAlias, columnNames, sourceSchema, ctePlan)], [],
+                (read, fixedRead) => cteBinding.Readers.Count == 0 && cteBinding.DmlTarget is null ? HandMergeBody(ctePlan, read, fixedRead) : null);
         }
 
         // A linked server's table reads through the same remote query a FROM
@@ -905,7 +1059,7 @@ partial class Simulation
         }
         else if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
-            var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out _);
+            var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody);
             sourceSchema = new SqlType[viewColumns.Length];
             columnNames = new string[viewColumns.Length];
             for (var i = 0; i < viewColumns.Length; i++)
@@ -916,7 +1070,8 @@ partial class Simulation
                     (masks ??= new DataMask?[viewColumns.Length])[i] = viewMask;
             }
             nullability = Array.ConvertAll(viewColumns, static column => column.Nullable);
-            var viewSelection = Selection.ForView(resolvedView, viewColumns);
+            var viewSelection = Selection.ForView(resolvedView, viewColumns).DeferringAs(viewBody);
+            demand = (read, fixedRead) => HandMergeBody(viewSelection, read, fixedRead);
             (matchBody, matchView) = (viewSelection, resolvedView);
             materialize = (batch, rows) =>
             {
@@ -945,10 +1100,11 @@ partial class Simulation
             // another session is writing is waited on as a SELECT's scan waits
             // (probed 2026-10-17 against SQL Server 2025: LCK_M_S on it).
             var sourcePlan = context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
-            materialize = new BareTableMergeSource(sourceTable, sourcePlan.NoLockReader ? new UnlockedScanRows(sourceTable) : new LockCheckedScanRows(sourceTable, sourcePlan)).Materialize;
+            var tableSource = new BareTableMergeSource(sourceTable, sourcePlan.NoLockReader ? new UnlockedScanRows(sourceTable) : new LockCheckedScanRows(sourceTable, sourcePlan), context.Batch.CurrentDatabase.Collation);
+            materialize = tableSource.Materialize;
             // Another database's table answers permission checks the session's
             // standing here says nothing about.
-            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable), [MergeMatchSource(alias, columnNames, sourceSchema, table: sourceTable)], []);
+            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable), [MergeMatchSource(alias, columnNames, sourceSchema, table: sourceTable)], [], tableSource.TakeDemand);
         }
         else
         {
@@ -959,7 +1115,7 @@ partial class Simulation
 
         var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
         _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability, [MergeMatchSource(defaultAlias, columnNames, sourceSchema, matchBody, view: matchView)], []);
+        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability, [MergeMatchSource(defaultAlias, columnNames, sourceSchema, matchBody, view: matchView)], [], demand);
     }
 
     /// <summary>Which sides of a <c>MERGE</c> a clause's column names bind against.</summary>
