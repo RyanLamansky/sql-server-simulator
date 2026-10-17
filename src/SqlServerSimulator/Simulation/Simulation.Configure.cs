@@ -74,6 +74,18 @@ partial class Simulation
     /// </summary>
     internal bool DisallowsResultsFromTriggers => this.ConfigurationInUse(DisallowResultsFromTriggersConfigurationId) != 0;
 
+    /// <summary><c>configuration_id</c> of <c>default full-text language</c>.</summary>
+    private const int DefaultFullTextLanguageConfigurationId = 1126;
+
+    /// <summary>The installed <c>default full-text language</c>, an LCID: what a full-text index column given no <c>LANGUAGE</c> keeps.</summary>
+    internal int DefaultFullTextLanguage => this.ConfigurationInUse(DefaultFullTextLanguageConfigurationId);
+
+    /// <summary><c>configuration_id</c> of <c>server trigger recursion</c>.</summary>
+    private const int ServerTriggerRecursionConfigurationId = 116;
+
+    /// <summary>The installed <c>server trigger recursion</c>: whether a server-scope trigger re-fires for an event its own body raises.</summary>
+    internal bool ServerTriggerRecursion => this.ConfigurationInUse(ServerTriggerRecursionConfigurationId) != 0;
+
     /// <summary><c>configuration_id</c> of <c>two digit year cutoff</c>.</summary>
     private const int TwoDigitYearCutoffConfigurationId = 1127;
 
@@ -216,6 +228,19 @@ partial class Simulation
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (requested < option.Minimum || requested > option.Maximum)
             throw SimulatedSqlException.InvalidConfigurationValue(requested, option.Name);
+        // The Linux server takes no write to these, the value it already
+        // holds included, and stages nothing (probed 2026-10-17 against SQL
+        // Server 2025) — so xp_cmdshell and the OLE Automation procedures
+        // stay blocked.
+        switch (option.Id)
+        {
+            case 1517 or 1532 or 1580 or OleAutomationConfigurationId or XpCmdShellConfigurationId or 16403:
+                throw AtSystemProcedureLine(procedureName, SimulatedSqlException.ConfigurationOptionNotSupported(option.Name), 177);
+            case 1613:
+                throw AtSystemProcedureLine(procedureName, SimulatedSqlException.TieredMemoryNotSupported(), 177);
+            case 16400:
+                throw AtSystemProcedureLine(procedureName, SimulatedSqlException.ConfigurationChangeNotSupported(option.Name), 164);
+        }
 
         // Real reports the move from the option's staged value, and reports it
         // even when the value doesn't change ("changed from 1 to 1"), in the

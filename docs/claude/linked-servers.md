@@ -210,6 +210,8 @@ The query here runs on the caller's own thread, where the wait could never end, 
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`**.
   The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
+- **`remote query timeout (s)` and the server's `query timeout`**: a remote query here runs under the target simulation's own command timeout.
+  Real gives a remote query the server's `query timeout` when it isn't 0, else the `remote query timeout` option (600 as it ships, 0 for none), and ends one that runs past it — a loopback `OPENQUERY` of `WAITFOR DELAY '00:00:03'` under a 1-second option failed after a second with the provider's "Query timeout expired" message, Msg 7399 and Msg 7320 quoting the query, ending the batch (a `CATCH` reads 7320); a `query timeout` of 2 lengthened it to two; and an `EXEC … AT` timing out sent the provider's message alone, `@@ERROR` reading 0 and the batch running on (probed 2026-10-17 against SQL Server 2025).
 - **A remote call's DONE tokens**: real frames an `EXEC … AT`'s statements as a procedure scope's — DONEINPROC, then RETURNSTATUS and DONEPROC — where the simulator sends each a batch-level DONE (probed 2026-10-07 against SQL Server 2025).
 
 ## sys.servers shape

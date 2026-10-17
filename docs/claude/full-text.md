@@ -60,7 +60,7 @@ DROP FULLTEXT INDEX ON table
 - `AS DEFAULT` demotes any prior default before promoting the new catalog.
 - `AUTHORIZATION owner` resolves against `Database.Principals` (default `dbo`).
 - Multi-column lists supported; the `TYPE COLUMN` nested reference handles AW's `[Production].[Document]` shape (varbinary doc + extension-column pairing).
-- `LANGUAGE` accepts an LCID, a binary or a language name (`'German'`), resolved as the predicates' argument is (see [Languages](#languages)), an unknown LCID Msg 7696; a column without one gets 1033.
+- `LANGUAGE` accepts an LCID, a binary or a language name (`'German'`), resolved as the predicates' argument is (see [Languages](#languages)), an unknown LCID Msg 7696; a column without one keeps the server's `default full-text language` as the index is made (1033 as it ships), and Msg 7680 refuses the index while that names no full-text language (probed 2026-10-17 against SQL Server 2025).
 - Both paren and bare `ON catalog` forms work.
 - `WITH` takes `CHANGE_TRACKING [=] {MANUAL | AUTO | OFF [, NO POPULATION]}`, `STOPLIST [=] {OFF | SYSTEM | name}` and `SEARCH PROPERTY LIST [=] name`, parenthesized or bare.
   The tracking mode, `is_enabled` and the stoplist are kept on the `FullTextIndex` and reported by `sys.fulltext_indexes`; the tracking mode carries no search behavior — the simulator searches the live rows rather than a crawled index (see [the query pipeline](#no-index--the-rows-are-read-not-crawled)).
@@ -183,7 +183,7 @@ The rules below were fitted with a differential of 4,334 `CONTAINS` / `FREETEXT`
 
 ### Languages
 
-The column's `LANGUAGE` (1033 when the index names none, real's `default full-text language`) picks the stoplist its content is indexed under, and the condition is read in the first searched column's language unless the call names one.
+The column's `LANGUAGE` (the server's `default full-text language` when the index names none) picks the stoplist its content is indexed under, and the condition is read in the first searched column's language unless the call names one.
 `LANGUAGE n` takes an integer LCID, a binary such as `0x407`, or a name `sys.fulltext_languages` lists (`'German'`, `'Neutral'`, `'British English'`), and refuses an LCID without a full-text language (**Msg 7696**) and any other name (**Msg 7678**) — `sys.syslanguages` names such as `'Deutsch'` and `'us_english'` included, despite the message's wording (probed 2026-10-05 against SQL Server 2025).
 A number with a fraction (`1033.0`) is a syntax error.
 

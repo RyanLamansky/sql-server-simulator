@@ -364,4 +364,33 @@ public sealed class TriggerNestingOptionTests
         simulation.ExecuteBatches("exec p");
         AreEqual("tr1:1,tr2:2,tr1:1,tr1:1,tr1:1,tr2:2", FiredTrace(simulation));
     }
+
+    // === server trigger recursion ===
+
+    /// <summary>
+    /// A server-scope trigger re-fires for an event its own body raises while
+    /// <c>server trigger recursion</c> is on, as it ships, and not once it is
+    /// 0 (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(1, "r1:1,r2:2")]
+    [DataRow(0, "r1:1")]
+    public void ServerTriggerRecursion_DecidesWhetherAServerTriggerRefiresItself(int recursion, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            $"exec sp_configure 'server trigger recursion', {recursion}; reconfigure",
+            "create database d",
+            "create table d.dbo.log (seq int identity, login sysname, nest int)",
+            """
+            create trigger st on all server for create_login as
+            begin
+                declare @n sysname = eventdata().value('(/EVENT_INSTANCE/ObjectName)[1]', 'sysname');
+                insert d.dbo.log (login, nest) values (@n, trigger_nestlevel());
+                if @n = 'r1' create login r2 with password = 'Pa55word!';
+            end
+            """,
+            "create login r1 with password = 'Pa55word!'");
+        AreEqual(expected, simulation.ExecuteScalar("select string_agg(login + ':' + cast(nest as varchar(2)), ',') within group (order by seq) from d.dbo.log"));
+    }
 }

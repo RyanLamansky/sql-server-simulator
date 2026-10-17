@@ -70,6 +70,14 @@ partial class SimulatedSqlException
         new("Null or empty full-text predicate.", 7645, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 7680: a full-text index column given no
+    /// <c>LANGUAGE</c> while the server's <c>default full-text language</c>
+    /// names no full-text language (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DefaultFullTextLanguageUnsupported() =>
+        new("Default full-text index language is not a language supported by full-text search.", 7680, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 7696 state 10 — an LCID with no full-text
     /// language behind it, from a <c>LANGUAGE</c> argument or
     /// <c>sys.dm_fts_parser</c>.

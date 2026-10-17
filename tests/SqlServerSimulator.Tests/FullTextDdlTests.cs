@@ -356,6 +356,29 @@ public sealed class FullTextDdlTests
         _ = sim.AssertSqlError(statement, number);
     }
 
+    /// <summary>
+    /// A column given no language keeps the server's <c>default full-text
+    /// language</c> as the index is made, and an option naming no full-text
+    /// language refuses it (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Create_Index_Column_Without_Language_Takes_The_Server_Default()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            KeyTable,
+            "create fulltext catalog c as default",
+            "exec sp_configure 'show advanced options', 1; reconfigure; exec sp_configure 'default full-text language', 1031; reconfigure",
+            "create fulltext index on dbo.k (a, e language 1033) key index pk_k",
+            "exec sp_configure 'default full-text language', 1033; reconfigure");
+        AreEqual("a:1031,e:1033", sim.ExecuteScalar("""
+            select string_agg(c.name + ':' + cast(ic.language_id as varchar(9)), ',') within group (order by c.name)
+            from sys.fulltext_index_columns ic join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id
+            """));
+        _ = sim.ExecuteNonQuery("drop fulltext index on dbo.k; exec sp_configure 'default full-text language', 9999; reconfigure");
+        sim.AssertSqlError("create fulltext index on dbo.k (a) key index pk_k", 7680, "Default full-text index language is not a language supported by full-text search.");
+    }
+
     [TestMethod]
     public void Create_Index_Takes_A_Hex_Language_And_No_Column_List()
     {

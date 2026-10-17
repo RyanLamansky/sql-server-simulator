@@ -414,8 +414,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             var columnName = columnToken.Value;
             string? typeColumnName = null;
-            // Real's `default full-text language` server option is 1033.
-            var languageId = 1033;
+            int? languageId = null;
             context.MoveNextRequired();
 
             // Optional TYPE COLUMN typeCol
@@ -446,9 +445,18 @@ partial class Simulation
                     Literal { Value: var languageName } => Parser.FullText.FullTextLanguage.ResolveName(languageName.AsString),
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 };
-                if (!Parser.FullText.FullTextLanguage.IsKnown(languageId))
+                if (!Parser.FullText.FullTextLanguage.IsKnown(languageId.Value))
                     throw SimulatedSqlException.FullTextInvalidLocale();
                 context.MoveNextRequired();
+            }
+            // A column given no language takes the server's `default
+            // full-text language` as the index is made, which keeps it once
+            // the option moves (probed 2026-10-17 against SQL Server 2025).
+            if (languageId is null)
+            {
+                languageId = context.Batch.Connection.Simulation.DefaultFullTextLanguage;
+                if (!context.Batch.IsSkipping && !Parser.FullText.FullTextLanguage.IsKnown(languageId.Value))
+                    throw SimulatedSqlException.DefaultFullTextLanguageUnsupported();
             }
 
             var statisticalSemantics = false;
@@ -459,7 +467,7 @@ partial class Simulation
                 context.MoveNextRequired();
             }
 
-            columnSpecs.Add(new(columnName, typeColumnName, languageId, statisticalSemantics));
+            columnSpecs.Add(new(columnName, typeColumnName, languageId.Value, statisticalSemantics));
 
             if (context.Token is Operator { Character: ')' })
             {

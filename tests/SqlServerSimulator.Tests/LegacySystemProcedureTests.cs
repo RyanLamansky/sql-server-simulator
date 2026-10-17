@@ -438,13 +438,21 @@ public sealed class LegacySystemProcedureTests
                 (select rtrim(type) from master.sys.all_objects where name = 'sp_OACreate'))
             """));
 
+    /// <summary>
+    /// The Linux server can't turn <c>xp_cmdshell</c> on (Msg 15392), so the
+    /// call after the refused write is still blocked (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void EnabledComponent_RaisesNotSupported()
-        => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("""
-            exec sp_configure 'show advanced options', 1; reconfigure;
-            exec sp_configure 'xp_cmdshell', 1; reconfigure;
-            exec xp_cmdshell 'dir'
-            """));
+    public void Component_CannotBeEnabled()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec sp_configure 'show advanced options', 1; reconfigure");
+        var ex = simulation.AssertSqlError("exec sp_configure 'xp_cmdshell', 1; reconfigure; exec xp_cmdshell 'dir'", 15392);
+        AreEqual("sp_configure", ex.Procedure);
+        AreEqual(177, ex.LineNumber);
+        AreEqual(15281, ex.Errors[^1].Number);
+    }
 
     /// <summary>
     /// <c>sp_dbcmptlevel</c> sets, reports and lists compatibility levels with

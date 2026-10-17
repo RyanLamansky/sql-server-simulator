@@ -179,4 +179,29 @@ public sealed class ServerConfigurationTests
 
     private static object? InstalledValue(Simulation simulation) => simulation.ExecuteScalar(
         $"select convert(int, value_in_use) from sys.configurations where configuration_id = {NestedTriggers}");
+
+    /// <summary>
+    /// The options the Linux server takes no write to, the value already held
+    /// included, past the range check, staging nothing (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("xp_cmdshell", 0, 15392, 177)]
+    [DataRow("Ole Automation Procedures", 1, 15392, 177)]
+    [DataRow("priority boost", 0, 15392, 177)]
+    [DataRow("set working set size", 0, 15392, 177)]
+    [DataRow("filestream access level", 0, 15392, 177)]
+    [DataRow("external xtp dll gen util enabled", 0, 15392, 177)]
+    [DataRow("max server tiered memory (MB)", 0, 5876, 177)]
+    [DataRow("suppress recovery model errors", 0, 5870, 164)]
+    [DataRow("xp_cmdshell", 5, 15129, 0)]
+    public void Write_LinuxRefusedOption(string option, int value, int number, int line)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec sp_configure 'show advanced options', 1; reconfigure");
+        var ex = simulation.AssertSqlError(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"exec sp_configure '{option}', {value}"), number);
+        if (line != 0)
+            AreEqual(line, ex.LineNumber);
+        AreEqual(0, simulation.ExecuteScalar($"select count(*) from sys.configurations where name = '{option}' and value <> value_in_use"));
+    }
 }

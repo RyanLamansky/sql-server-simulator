@@ -1465,6 +1465,24 @@ partial class SimulatedSqlException
         new($"'{value}' is not a valid value for configuration option '{name}'.", 15129, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15392 (state 2): an <c>sp_configure</c> write
+    /// to an option the Linux server doesn't support — <c>xp_cmdshell</c>,
+    /// <c>Ole Automation Procedures</c>, <c>priority boost</c>, <c>set working
+    /// set size</c>, <c>filestream access level</c>, <c>external xtp dll gen
+    /// util enabled</c> (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConfigurationOptionNotSupported(string name) =>
+        new($"The specified option '{name}' is not supported by this edition of SQL Server and cannot be changed using sp_configure.", 15392, 16, 2);
+
+    /// <summary>Mimics SQL Server error 5876: an <c>sp_configure</c> write to <c>max server tiered memory (MB)</c> on the Linux server.</summary>
+    internal static SimulatedSqlException TieredMemoryNotSupported() =>
+        new("Tiered Memory is not supported on this platform or in this edition of SQL Server.", 5876, 16, 1);
+
+    /// <summary>Mimics SQL Server error 5870: an <c>sp_configure</c> write to <c>suppress recovery model errors</c> outside the edition that takes it.</summary>
+    internal static SimulatedSqlException ConfigurationChangeNotSupported(string name) =>
+        new($"Changes to server configuration option '{name}' are not supported in this edition of SQL Server.", 5870, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15015: <c>sp_dropserver</c> referenced a
     /// linked-server name that isn't registered. Wording probe-confirmed
     /// against SQL Server 2025 — the server name appears in single quotes;

@@ -299,19 +299,23 @@ partial class Simulation
     /// runs at <c>TRIGGER_NESTLEVEL()</c> 2 for a view a <c>CREATE_TABLE</c>
     /// body created) but doesn't re-fire itself for DDL its own body issues —
     /// the innermost-frame test the DML path uses, giving the same
-    /// default-<c>RECURSIVE_TRIGGERS</c>-off shape real showed.
+    /// default-<c>RECURSIVE_TRIGGERS</c>-off shape real showed. A server-scope
+    /// trigger does re-fire itself while <c>server trigger recursion</c> is on,
+    /// as it ships: a <c>CREATE_LOGIN</c> trigger creating a login ran again
+    /// for it, one level deeper, and didn't once the option was 0 (probed
+    /// 2026-10-17 against SQL Server 2025).
     /// </summary>
     /// <remarks>
     /// The <c>nested triggers</c> server option is deliberately not consulted:
-    /// it governs AFTER DML triggers, and DDL triggers carry their own
-    /// (unmodeled) <c>server trigger recursion</c> knob. DDL frames push
+    /// it governs AFTER DML triggers. DDL frames push
     /// <c>IsAfter = false</c> for the same reason, so a DDL trigger body's DML
     /// still reaches its own AFTER triggers with the option off.
     /// </remarks>
     private static bool CanFireDdlTrigger(BatchContext batch, DdlTrigger trigger)
     {
         var stack = batch.Connection.FiringTriggers;
-        return stack.Count == 0 || stack[^1].ObjectId != trigger.ObjectId;
+        return stack.Count == 0 || stack[^1].ObjectId != trigger.ObjectId
+            || (trigger.IsServerScoped && batch.Connection.Simulation.ServerTriggerRecursion);
     }
 
     /// <summary>

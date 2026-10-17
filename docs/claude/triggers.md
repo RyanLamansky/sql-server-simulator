@@ -366,7 +366,7 @@ Each lands in the event groups `sys.trigger_event_types` gives it, so `DDL_DATAB
 `StatementContext.DdlTriggerCreatedThisStatement` carries the one excluded object id.
 
 **Nesting.** DDL triggers nest: a `CREATE_VIEW` trigger runs at `TRIGGER_NESTLEVEL()` 2 for a view a `CREATE_TABLE` body created.
-A trigger doesn't re-fire itself for DDL its own body issues — `Simulation.CanFireDdlTrigger` is the innermost-frame test, matching real's default (`RECURSIVE_TRIGGERS` off).
+A trigger doesn't re-fire itself for DDL its own body issues — `Simulation.CanFireDdlTrigger` is the innermost-frame test, matching real's default (`RECURSIVE_TRIGGERS` off) — save a server-scope one while the `server trigger recursion` option is on, as it ships: a `CREATE_LOGIN` trigger creating a login runs again for it one level deeper, and doesn't at 0 (probed 2026-10-17 against SQL Server 2025).
 The 32-level nesting cap applies (Msg 217), and DDL frames push `IsAfter = false` so they don't count toward the AFTER-DML `nested triggers` rule.
 
 **Atomic scope.** The bodies run inside one `RunMutation` scope, so everything they wrote rolls back together when a later body throws — the same firing-statement-atomic unit DML triggers get.
