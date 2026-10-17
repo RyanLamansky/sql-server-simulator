@@ -617,7 +617,7 @@ partial class Simulation
             {
                 if (columns[c] is not { Computed: { } expression, IsPersisted: false } || !read[c])
                     continue;
-                if (fixedRead?[c] == false && DeferredColumn.Of(expression, this.BindStored) is { ReadsOnlyItsRow: true } column)
+                if (fixedRead?[c] == false && DeferredColumn.Of(expression, columns[c].Type, this.BindStored) is { ReadsOnlyItsRow: true } column)
                     (deferred ??= new DeferredColumn?[columns.Length])[c] = column;
                 else
                     computed[c] = true;

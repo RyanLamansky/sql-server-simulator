@@ -587,7 +587,7 @@ internal sealed partial class Selection
             VolatileColumns = VolatileProjection.Of([.. tuples.SelectMany(tuple => tuple)], fixesValues: tuples.Count > 1),
             IsSingleConstantRow = tuples.Count == 1,
             freeNames = ValuesReach(tuples),
-        }.TakingReaderDemand(null);
+        }.TakingReaderDemand(null).DeferringValues(tuples);
         return self;
     }
 

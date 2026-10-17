@@ -107,6 +107,8 @@ public sealed class ProjectionDemandTests
     [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select distinct k, 10 / (k - 3) as x from src) d")]
     [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x, row_number() over (order by k) as rn from src) d")]
     [DataRow("-5,-10,0,10", "select string_agg(cast(case when s.k = 3 then 0 else a.x end as varchar), ',') within group (order by s.k) from src s cross apply (select 10 / (s.k - 3) as x) a")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when v.kk = 3 then 0 else v.x end as varchar), ',') within group (order by s.k) from src s cross apply (values (s.k, 10 / (s.k - 3))) v(kk, x)")]
+    [DataRow("-5,-10,10", "select string_agg(cast(v.x as varchar), ',') within group (order by s.k) from src s cross apply (values (s.k, 10 / (s.k - 3))) v(kk, x) where v.kk <> 3")]
     [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from v1 where k <> 3")]
     [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from v2 where k <> 3")]
     [DataRow("-5,-10,10", "with c as (select k, 10 / (k - 3) as x from src) select string_agg(cast(x as varchar), ',') within group (order by k) from c where k <> 3")]

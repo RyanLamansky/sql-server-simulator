@@ -36,11 +36,13 @@ partial class Selection
     private MultiPartName[]? freeNames;
 
     /// <summary>
-    /// The deferred form of each select-list column of a view reference, taken
-    /// from the body the reference bound (see <see cref="DeferringAs"/>); null
-    /// for every other plan.
+    /// The deferred form of each select-list column of a plan whose body this
+    /// partial records no demand for — a view reference's, taken from the body
+    /// the reference bound (see <see cref="DeferringAs"/>), or a one-row
+    /// <c>VALUES</c> list's (see <see cref="DeferringValues"/>); null for every
+    /// other plan.
     /// </summary>
-    private DeferredColumn?[]? viewDeferrableColumns;
+    private DeferredColumn?[]? offeredColumns;
 
     /// <summary>
     /// Per select-list column, the form a query reading this plan as a FROM
@@ -53,7 +55,7 @@ partial class Selection
     {
         if (this.IsForClauseDocument)
             return null;
-        return this.projectionDemand is { } demand ? demand.Templates() : this.viewDeferrableColumns;
+        return this.projectionDemand is { } demand ? demand.Templates() : this.offeredColumns;
     }
 
     /// <summary>
@@ -284,7 +286,28 @@ partial class Selection
     internal Selection DeferringAs(Selection? body)
     {
         if (body?.DeferrableColumns() is { } columns && columns.Length == this.Schema.Length)
-            this.viewDeferrableColumns = columns;
+            this.offeredColumns = columns;
+        return this;
+    }
+
+    /// <summary>
+    /// Offers a one-row <c>VALUES</c> list's cells to its reader, which merges
+    /// the row into itself as it does a FROM-less <c>SELECT</c>: <c>CROSS
+    /// APPLY (VALUES (t.k, 10 / (t.k - 3))) v(kk, x) WHERE kk &lt;&gt; 3</c>
+    /// answers on real (probed 2026-10-17 against SQL Server 2025). A longer
+    /// list is a constant scan computing every row, which offers none.
+    /// </summary>
+    private Selection DeferringValues(List<Expression[]> tuples)
+    {
+        if (tuples is not [var row])
+            return this;
+        DeferredColumn?[]? offered = null;
+        for (var c = 0; c < row.Length && c < this.Schema.Length; c++)
+        {
+            if (DeferredColumn.Of(row[c], this.Schema[c], static _ => DeferredBinding.FreeName) is { } column)
+                (offered ??= new DeferredColumn?[this.Schema.Length])[c] = column;
+        }
+        this.offeredColumns = offered;
         return this;
     }
 
@@ -634,7 +657,7 @@ internal sealed class ProjectionDemand
                     continue;
                 var template = plain[i] is var (source, column)
                     ? this.Lift(source, column, plain)
-                    : DeferredColumn.Of(Unwrap(this.written[i]), name => this.BindInBody(name, plain));
+                    : DeferredColumn.Of(Unwrap(this.written[i]), this.schema[i], name => this.BindInBody(name, plain));
                 if (template is not null)
                     (result ??= new DeferredColumn?[count])[i] = template;
             }

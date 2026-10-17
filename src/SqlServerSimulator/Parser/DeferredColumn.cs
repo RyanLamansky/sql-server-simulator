@@ -30,6 +30,12 @@ internal sealed class DeferredColumn
     private readonly DeferredBinding[] bindings;
 
     /// <summary>
+    /// The column's type, which a value of another type the expression yields
+    /// is converted to, as the body converts what it computes.
+    /// </summary>
+    private readonly SqlType type;
+
+    /// <summary>
     /// The columns of the body row the evaluation reads, nested deferred
     /// columns' included, which the body must compute.
     /// </summary>
@@ -38,11 +44,12 @@ internal sealed class DeferredColumn
     /// <summary>Whether the evaluation reads nothing but its own row.</summary>
     public readonly bool ReadsOnlyItsRow;
 
-    private DeferredColumn(Expression expression, MultiPartName[] names, DeferredBinding[] bindings)
+    private DeferredColumn(Expression expression, MultiPartName[] names, DeferredBinding[] bindings, SqlType type)
     {
         this.expression = expression;
         this.names = names;
         this.bindings = bindings;
+        this.type = type;
         var dependencies = new List<int>();
         var readsOnlyItsRow = true;
         foreach (var binding in bindings)
@@ -71,15 +78,16 @@ internal sealed class DeferredColumn
     }
 
     /// <summary>
-    /// The deferred form of <paramref name="expression"/>, each name it reads
-    /// bound by <paramref name="bind"/>; null when the expression can't be
+    /// The deferred form of <paramref name="expression"/>, a column of
+    /// <paramref name="type"/>, each name it reads bound by
+    /// <paramref name="bind"/>; null when the expression can't be
     /// evaluated outside its body — it isn't pure (<see cref="Expression.ParallelSafe"/>
     /// declines a subquery, a function call, a per-call value), holds an
     /// aggregate or a window, reads no column at all (real evaluates such an
     /// expression once as its plan starts), or names something
     /// <paramref name="bind"/> can't place.
     /// </summary>
-    public static DeferredColumn? Of(Expression expression, Func<MultiPartName, DeferredBinding?> bind)
+    public static DeferredColumn? Of(Expression expression, SqlType type, Func<MultiPartName, DeferredBinding?> bind)
     {
         if (!expression.ParallelSafe)
             return null;
@@ -110,7 +118,7 @@ internal sealed class DeferredColumn
                 return null;
             bindings[i] = binding;
         }
-        return new DeferredColumn(expression, [.. names], bindings);
+        return new DeferredColumn(expression, [.. names], bindings, type);
     }
 
     /// <summary>
@@ -159,7 +167,7 @@ internal sealed class DeferredColumn
                 return null;
             }
         }
-        return new DeferredColumn(this.expression, this.names, bindings);
+        return new DeferredColumn(this.expression, this.names, bindings, this.type);
     }
 
     /// <summary>
@@ -197,7 +205,7 @@ internal sealed class DeferredColumn
         var frame = idleFrames ?? new Frame();
         idleFrames = frame.NextIdle;
         (frame.Column, frame.Sources, frame.Tuple, frame.Slot, frame.Batch, frame.OuterResolver, frame.Memo) = (this, sources, tuple, slot, batch, outerResolver, memo);
-        var value = this.expression.Run(new RuntimeContext(frame.Resolve, batch));
+        var value = this.Typed(this.expression.Run(new RuntimeContext(frame.Resolve, batch)));
         (frame.Column, frame.Sources, frame.Tuple, frame.Batch, frame.OuterResolver, frame.Memo) = (null, null, null, null, null, null);
         frame.NextIdle = idleFrames;
         idleFrames = frame;
@@ -210,23 +218,38 @@ internal sealed class DeferredColumn
     /// that reads nothing but its own row (<see cref="ReadsOnlyItsRow"/>).
     /// </summary>
     public SqlValue EvaluateOver(SqlValue[] values, BatchContext batch) =>
-        this.expression.Run(new RuntimeContext(name => this.ReadValue(name, values, batch), batch));
+        this.Typed(this.expression.Run(new RuntimeContext(name => this.ReadValue(name, values, batch), batch)));
+
+    private SqlValue Typed(SqlValue value) => value.IsNull || value.Type == this.type ? value : value.CoerceTo(this.type);
 
     private SqlValue ReadValue(MultiPartName name, SqlValue[] values, BatchContext batch)
     {
+        var binding = this.bindings[this.IndexOf(name)];
+        return binding.Kind switch
+        {
+            DeferredBindingKind.Output => values[binding.Column],
+            DeferredBindingKind.Nested => binding.Nested!.EvaluateOver(values, batch),
+            _ => throw new InvalidOperationException($"'{name}' in a deferred column reads outside the row it was handed."),
+        };
+    }
+
+    /// <summary>
+    /// The binding <paramref name="name"/> reads: its own, or — for a name a
+    /// later binding pass qualified with the source it settled on, as an
+    /// <c>APPLY</c> body's bare <c>x</c> becomes <c>a.x</c> — the one binding
+    /// whose name has its leaf.
+    /// </summary>
+    private int IndexOf(MultiPartName name)
+    {
+        var leafMatch = -1;
         for (var i = 0; i < this.names.Length; i++)
         {
-            if (!SameName(this.names[i], name))
-                continue;
-            var binding = this.bindings[i];
-            return binding.Kind switch
-            {
-                DeferredBindingKind.Output => values[binding.Column],
-                DeferredBindingKind.Nested => binding.Nested!.EvaluateOver(values, batch),
-                _ => throw new InvalidOperationException($"'{name}' in a deferred column reads outside the row it was handed."),
-            };
+            if (SameName(this.names[i], name))
+                return i;
+            if (string.Equals(this.names[i].Leaf, name.Leaf, StringComparison.OrdinalIgnoreCase))
+                leafMatch = leafMatch == -1 ? i : -2;
         }
-        throw new InvalidOperationException($"'{name}' in a deferred column has no binding.");
+        return leafMatch >= 0 ? leafMatch : throw new InvalidOperationException($"'{name}' in a deferred column has no binding.");
     }
 
     [ThreadStatic]
@@ -258,23 +281,17 @@ internal sealed class DeferredColumn
 
     private SqlValue Read(MultiPartName name, FromSource[] sources, byte[]?[] tuple, int slot, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, SourceColumnMemo? memo)
     {
-        for (var i = 0; i < this.names.Length; i++)
+        var binding = this.bindings[this.IndexOf(name)];
+        return binding.Kind switch
         {
-            if (!SameName(this.names[i], name))
-                continue;
-            var binding = this.bindings[i];
-            return binding.Kind switch
-            {
-                DeferredBindingKind.Output => Selection.DecodeOrCompute(sources[slot], binding.Column, tuple[slot]!, batch),
-                DeferredBindingKind.Nested => binding.Nested!.Evaluate(sources, tuple, slot, batch, outerResolver, memo),
-                // A sibling sits left of the APPLY slot in the reader's own
-                // source array; a narrower array never holds one.
-                DeferredBindingKind.Sibling when binding.Source < slot => Selection.ReadSourceColumn(sources, tuple, binding.Source, binding.Column, batch, outerResolver, memo),
-                DeferredBindingKind.Outer when outerResolver is not null => outerResolver(name),
-                _ => throw new InvalidOperationException($"'{name}' in a deferred column reads outside the row it was handed."),
-            };
-        }
-        throw new InvalidOperationException($"'{name}' in a deferred column has no binding.");
+            DeferredBindingKind.Output => Selection.DecodeOrCompute(sources[slot], binding.Column, tuple[slot]!, batch),
+            DeferredBindingKind.Nested => binding.Nested!.Evaluate(sources, tuple, slot, batch, outerResolver, memo),
+            // A sibling sits left of the APPLY slot in the reader's own
+            // source array; a narrower array never holds one.
+            DeferredBindingKind.Sibling when binding.Source < slot => Selection.ReadSourceColumn(sources, tuple, binding.Source, binding.Column, batch, outerResolver, memo),
+            DeferredBindingKind.Outer when outerResolver is not null => outerResolver(name),
+            _ => throw new InvalidOperationException($"'{name}' in a deferred column reads outside the row it was handed."),
+        };
     }
 
     /// <summary>
