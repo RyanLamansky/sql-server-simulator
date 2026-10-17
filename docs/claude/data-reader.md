@@ -181,7 +181,7 @@ The number is the same one `ExecuteNonQuery` reports for the same batch, in ever
 What contributes:
 
 - **DML contributes its rows-affected** — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, a `WHILE` body's every iteration, a `SELECT … INTO` (it writes rows), and a statement whose `OUTPUT` clause returns rows to the client (tabular, but its count is still a rows-affected count).
-  A statement matching nothing contributes `0`, which is distinct from `-1`.
+  A statement matching nothing contributes `0`, which is distinct from `-1`, and the writes a trigger body performs count too, as real's DONEINPROCs do (an `INSERT` firing a trigger that writes two rows reports 3).
 - **A SELECT contributes nothing**, however many rows it returned — including the assignment-only `SELECT @x = col FROM t`, which reads rows without returning them, and a cursor `FETCH`.
 - **DDL, `SET`, `DECLARE`, `PRINT` and an un-taken branch contribute nothing.**
 - **`SET NOCOUNT ON` suppresses the contribution** of every statement that runs while it is on, whatever the kind — the count is recorded per statement rather than read when the client consumes the outcome, because a procedure body's `SET NOCOUNT` reverts at the body's exit, before the caller pulls what the body produced.
@@ -204,7 +204,7 @@ The value accumulates as the reader is advanced and is final once it is closed: 
 The wire renderer answers the same question with the two DONE-token fields real uses, both captured off SQL Server 2025's wire.
 `CurCmd` names the kind of statement that produced the token and is what a client keys on to leave a SELECT's count out of the sum — real tags a plain SELECT and a cursor `FETCH` `0x00C1`, and `SELECT INTO` / `INSERT` / `DELETE` / `UPDATE` / `MERGE` their own kinds (`0x00C2` / `0x00C3` / `0x00C4` / `0x00C5` / `0x0117`).
 `DONE_COUNT` says whether there is a count at all, and NOCOUNT clears the flag while leaving the row count in the token.
-The simulator classifies SELECT and leaves every other kind `0`; see [`tds-endpoint.md`](tds-endpoint.md).
+The simulator sends each statement's kind as real does; see [`tds-endpoint.md`](tds-endpoint.md#per-statement-done-tokens).
 
 ### Divergences
 
@@ -213,9 +213,6 @@ The simulator classifies SELECT and leaves every other kind `0`; see [`tds-endpo
   A batch's final value agrees, and a single-statement batch is unaffected.
 - **A DML statement's `OUTPUT` count lands early.**
   A DML statement produces its `OUTPUT` rows whole before sending them, so `RecordsAffected` reports an `INSERT … OUTPUT`'s count the moment the reader parks on it; real learns it from the DONE that follows the rows, and reads `-1` until they are drained.
-- **A trigger's own DML doesn't contribute.**
-  Real counts the writes a trigger body performs into the firing statement's total (an INSERT firing a trigger that writes two rows reports 3); the simulator reports the firing statement's own count alone.
-  Both front doors agree with each other — the counts never reach the outcome stream.
 
 ## Batch-error surfacing (positional)
 

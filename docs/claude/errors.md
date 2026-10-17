@@ -75,7 +75,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 ### Not modeled yet
 
-- **Every diagnostic but Msg 5703 and DBCC's Msg 2528 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
+- **Deferred until requested** (with real's `sys.messages` rows, see [`backlog.md`](backlog.md#built-in-functions)): **every diagnostic but Msg 5703 and DBCC's Msg 2528 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
 
 ## A statement's whole binder report
 
