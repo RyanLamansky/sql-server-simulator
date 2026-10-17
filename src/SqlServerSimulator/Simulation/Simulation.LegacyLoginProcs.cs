@@ -89,7 +89,7 @@ partial class Simulation
         var statement = new StringBuilder("create login ").Append(QuoteIdentifier(name)).Append(" with password = ")
             .Append(QuoteText(values[1].IsNull ? "" : values[1].AsString))
             .Append(", default_database = ").Append(QuoteIdentifier(values[2].IsNull ? "master" : values[2].AsString))
-            .Append(", default_language = ").Append(QuoteIdentifier(values[3].IsNull ? "us_english" : values[3].AsString)).ToString();
+            .Append(", default_language = ").Append(QuoteIdentifier(values[3].IsNull ? this.DefaultLoginLanguage.Name : values[3].AsString)).ToString();
         if (ArgumentFor(arguments, 4, "sid") is { IsDefault: false, Value: { IsNull: false } sid })
         {
             var bytes = sid.CoerceTo(SqlType.Varbinary).AsBytes;
@@ -154,7 +154,7 @@ partial class Simulation
         var name = RequireValidName(values[0]);
         if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 34);
-        var statement = "alter login " + QuoteIdentifier(name) + " with default_language = " + QuoteIdentifier(values[1].IsNull ? "us_english" : values[1].AsString);
+        var statement = "alter login " + QuoteIdentifier(name) + " with default_language = " + QuoteIdentifier(values[1].IsNull ? this.DefaultLoginLanguage.Name : values[1].AsString);
         foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }

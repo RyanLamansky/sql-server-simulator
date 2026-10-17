@@ -47,6 +47,17 @@ The value-taking options refuse a value their grammar has no slot for (probed 20
 `sys.dm_exec_sessions` / `sys.dm_exec_requests` report `ansi_null_dflt_on`, `deadlock_priority`, and `ansi_defaults`, which reads 1 only while all seven options the bundle sets are on, so a SqlClient session — whose login turns `IMPLICIT_TRANSACTIONS` and `CURSOR_CLOSE_ON_COMMIT` back off — reads 0.
 For the session reading it, `sys.dm_exec_sessions`' `quoted_identifier` — and the `QUOTED_IDENTIFIER` part of `ansi_defaults` — is the value its batch began with, a `SET` inside the batch reaching only the next one (probed 2026-10-06 against SQL Server 2025).
 
+## What a session starts with: `user options` and the login's language
+
+Probed 2026-10-17 against SQL Server 2025, a session a login opens — in-process, over TDS, or again at a pooled reset — starts with two server-level defaults, which `SimulatedDbConnection.StartLoginSession` applies:
+
+- The `user options` bits the login doesn't settle itself: with it at 517 a SqlClient session reads `@@OPTIONS` 5944 (5432 + `NOCOUNT`), at 192 5624 and at 10240 13624, and sqlcmd's ODBC session the same bits over its own 5176 — so `ARITHABORT`, `ARITHIGNORE`, `NOCOUNT` and `NUMERIC_ROUNDABORT` join, `CURSOR_CLOSE_ON_COMMIT` and `ANSI_NULL_DFLT_OFF` don't, and bit 1 shows nowhere.
+  The ANSI group, `QUOTED_IDENTIFIER` and `IMPLICIT_TRANSACTIONS` are taken to be the login's like those two, and `XACT_ABORT` to join like `NOCOUNT`; neither was probed, a server-wide `IMPLICIT_TRANSACTIONS` or `XACT_ABORT` being too disruptive to the shared reference.
+  A session already open keeps what it had.
+- The language the client's login names (SqlClient's `Current Language`), else the login's default, with its `DATEFIRST` and `DATEFORMAT` as `SET LANGUAGE` moves them; a pooled reset starts it there again, and a language the server doesn't have refuses the login with Msg 4019 and Msg 18456 (the error log's state 17).
+  The login response's language ENVCHANGE and Msg 5703 name it.
+  A login made without `DEFAULT_LANGUAGE` — `CREATE LOGIN` or `sp_addlogin` — keeps the server's `default language` (a langid) as its default, as does `sp_defaultlanguage` without one, while a login made before keeps its own.
+
 ## `ARITHIGNORE` and `ARITHABORT`
 
 Probed 2026-09-28 against SQL Server 2025, a divide by zero or an arithmetic overflow (Msg 8134, 220, 232, 8115) under each pairing of `ANSI_WARNINGS` and `ARITHABORT`:

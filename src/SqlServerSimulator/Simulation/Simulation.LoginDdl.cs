@@ -79,7 +79,7 @@ partial class Simulation
         int? credentialId = options.Credential is { } credential ? simulation.ResolveCredentialId(credential) : null;
         var utcNow = context.Batch.CurrentStatement.UtcNow;
         var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow,
-            defaultDatabase: options.DefaultDatabase ?? "master", defaultLanguage: options.DefaultLanguage ?? "us_english",
+            defaultDatabase: options.DefaultDatabase ?? "master", defaultLanguage: options.DefaultLanguage ?? simulation.DefaultLoginLanguage.Name,
             isPolicyChecked: checkPolicy, isExpirationChecked: options.CheckExpiration ?? false, sid: options.Sid);
         if (!simulation.Logins.TryAdd(name, login))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);

@@ -589,7 +589,7 @@ Derived generatively per collation (cached by interned reference), validated aga
 
 ## Login response shape
 
-ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language `us_english`) → INFO 5703 → ENVCHANGE(SQL collation, type 7: the server collation's 5-byte structure) → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, ProgVersion `17.0` with build **4065** — big-endian `0x0FE1` — in the low 16 bits) → ENVCHANGE(packet size) → DONE.
+ENVCHANGE(database, old `master`) → INFO 5701 → ENVCHANGE(language: the session's, `us_english` unless the login's default or the client's LOGIN7 names another) → INFO 5703 in that language's words → ENVCHANGE(SQL collation, type 7: the server collation's 5-byte structure) → LOGINACK (TDS 0x74000004 big-endian on the wire, prog name `Microsoft SQL Server`, ProgVersion `17.0` with build **4065** — big-endian `0x0FE1` — in the low 16 bits) → ENVCHANGE(packet size) → DONE.
 Server name in every token is `SIMULATED` (matches `SERVERPROPERTY`).
 Build 4065 makes `SqlConnection.ServerVersion` report `"17.00.4065"`, and the prelogin VERSION option carries the same build — both mirror the SQL Server 2025 reference (17.0.4065.4) the simulator emulates.
 A real build number is load-bearing for SSMS's per-build client feature gates (Activity Monitor / report viewer), which stop immediately on the prior build-0 identity.

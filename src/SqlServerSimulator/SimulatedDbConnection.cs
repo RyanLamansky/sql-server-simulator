@@ -1160,6 +1160,50 @@ public sealed class SimulatedDbConnection : DbConnection
     internal Language Language = Language.Default;
 
     /// <summary>
+    /// The language the client's LOGIN7 named, empty when it named none, which
+    /// a pooled connection's reset starts the session in again.
+    /// </summary>
+    internal string ClientLanguage = "";
+
+    /// <summary>
+    /// What a login starts its session with, before anything it runs (probed
+    /// 2026-10-17 against SQL Server 2025):
+    /// <list type="bullet">
+    /// <item>the server's <c>user options</c> bits the client's login doesn't
+    /// settle itself — <c>ARITHABORT</c>, <c>ARITHIGNORE</c>, <c>NOCOUNT</c>,
+    /// <c>NUMERIC_ROUNDABORT</c> and, unprobed, <c>XACT_ABORT</c> — where the
+    /// ANSI group, <c>QUOTED_IDENTIFIER</c>, <c>CURSOR_CLOSE_ON_COMMIT</c>,
+    /// <c>IMPLICIT_TRANSACTIONS</c> and <c>ANSI_NULL_DFLT_OFF</c> keep what
+    /// the login sets, and bit 1 has no option;</item>
+    /// <item>the language <paramref name="clientLanguage"/> names, else the
+    /// login's default language, with its <c>DATEFIRST</c> and
+    /// <c>DATEFORMAT</c> as <c>SET LANGUAGE</c> moves them.</item>
+    /// </list>
+    /// </summary>
+    internal void StartLoginSession(string? loginName, string clientLanguage)
+    {
+        var options = this.Simulation.UserOptions;
+        if (options != 0)
+        {
+            this.Arithabort |= (options & 64) != 0;
+            this.ArithIgnore |= (options & 128) != 0;
+            this.NoCount |= (options & 512) != 0;
+            this.NumericRoundabort |= (options & 8192) != 0;
+            this.XactAbort |= (options & 16384) != 0;
+        }
+        this.ClientLanguage = clientLanguage;
+        var language = (clientLanguage.Length != 0 ? Language.Find(clientLanguage) : null)
+            ?? (loginName is not null && this.Simulation.Logins.TryGetValue(loginName, out var login) ? Language.Find(login.DefaultLanguage) : null)
+            ?? Language.Default;
+        if (!ReferenceEquals(language, this.Language))
+        {
+            this.Language = language;
+            this.DateFirst = language.DateFirst;
+            this.DateFormat = DateOrder.Find(language.DateFormat)!;
+        }
+    }
+
+    /// <summary>
     /// Set while the server's logon triggers run for this session opening,
     /// where <c>SET NOCOUNT OFF</c> has no effect (real writes a notice to its
     /// error log instead; probed 2026-09-28 against SQL Server 2025).
@@ -3121,6 +3165,7 @@ public sealed class SimulatedDbConnection : DbConnection
             }
             this.ChangeDatabase(catalog);
         }
+        this.StartLoginSession(this.pendingUserId, "");
         this.state = ConnectionState.Open;
     }
 

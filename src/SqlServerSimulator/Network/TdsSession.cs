@@ -546,6 +546,19 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         if (!Simulation.TryMapLoginToDatabaseUser(simulation, target, userName, out var principal))
             return this.FailLogin(writer, target.Name, userName, opened, requestedDatabase);
         opened.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userName);
+        if (login.Language.Length != 0 && Language.Find(login.Language) is null)
+        {
+            simulation.LogLoginFailure(userName, 18456, 17, "Unable to determine the initial language and date format.", ClientForErrorLog(socket));
+            var languageRefusal = SimulatedSqlException.LoginLanguageNotFound(login.Language);
+            writer.WriteErrorOrInfo(Tds.TokenError, languageRefusal.Number, languageRefusal.State, languageRefusal.Class, languageRefusal.Message, ServerName, "", 1);
+            writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{userName}'.", ServerName, "", 1);
+            writer.WriteEnvChange(Tds.EnvDatabase, opened.Database, "master");
+            writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{opened.Database}'.", ServerName, "", 1);
+            writer.WriteDone(Tds.DoneError, 0);
+            opened.Dispose();
+            return false;
+        }
+        opened.StartLoginSession(userName, login.Language);
 
         opened.FramesEveryStatement = true;
         opened.AbortTransport = this.CloseGracefully;
@@ -574,8 +587,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var database = opened.Database;
             writer.WriteEnvChange(Tds.EnvDatabase, database, "master");
             writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{database}'.", ServerName, "", 1);
-            writer.WriteEnvChange(Tds.EnvLanguage, "us_english", "");
-            writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", ServerName, "", 1);
+            writer.WriteEnvChange(Tds.EnvLanguage, opened.Language.Name, "");
+            writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, opened.Language.ChangedMessage, ServerName, "", 1);
             WriteErrors(writer, ex);
             writer.WriteDone(Tds.DoneError, 0);
             this.connection = null;
@@ -605,8 +618,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var database = this.connection!.Database;
         writer.WriteEnvChange(Tds.EnvDatabase, database, "master");
         writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{database}'.", "SIMULATED", "", 1);
-        writer.WriteEnvChange(Tds.EnvLanguage, "us_english", "");
-        writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", "SIMULATED", "", 1);
+        // The session starts in the language its login settled.
+        var language = this.connection.Language;
+        writer.WriteEnvChange(Tds.EnvLanguage, language.Name, "");
+        writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, language.ChangedMessage, "SIMULATED", "", 1);
+        this.announcedLanguage = language.Name;
         var serverCollation = TdsCollationCodec.For(Collation.Get(simulation.ServerCollationName));
         writer.WriteEnvChangeSqlCollation(serverCollation.Info, serverCollation.SortId);
         writer.WriteLoginAck(
@@ -1749,6 +1765,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         // login, only the session state is cleared).
         if (Simulation.TryMapLoginToDatabaseUser(simulation, fresh.CurrentDatabase, loginName, out var principal))
             fresh.Security = Simulation.BuildAuthenticatedSecurityContext(principal, loginName);
+        // A reset starts the session again as its login did.
+        fresh.StartLoginSession(loginName, previous.ClientLanguage);
 
         fresh.FramesEveryStatement = true;
         fresh.ScopesTransactionsToBatch = this.multiplexer is not null;

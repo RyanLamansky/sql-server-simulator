@@ -19,6 +19,9 @@ internal sealed class Login7Request
     public readonly string AppName;
     public readonly string Database;
 
+    /// <summary>The language the client asked to start in (SqlClient's <c>Current Language</c>), empty for the login's default.</summary>
+    public string Language = "";
+
     /// <summary>The client's process id, LOGIN7's <c>ClientPID</c>.</summary>
     public readonly int ClientProcessId;
 
@@ -67,9 +70,10 @@ internal sealed class Login7Request
         var userName = ReadField(payload, 40);
         var password = ReadPasswordField(payload, 44);
         var appName = ReadField(payload, 48);
+        var language = ReadField(payload, 64);
         var database = ReadField(payload, 68);
 
-        var request = new Login7Request(tdsVersion, packetSize, clientProcessId, hostName, userName, password, appName, database);
+        var request = new Login7Request(tdsVersion, packetSize, clientProcessId, hostName, userName, password, appName, database) { Language = language };
         ReadFeatureExtension(payload, request);
         return request;
     }

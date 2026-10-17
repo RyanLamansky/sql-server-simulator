@@ -84,6 +84,39 @@ partial class Simulation
             ? TwoDigitYearCutoff.For(setting.InUse)
             : TwoDigitYearCutoff.Default;
 
+    /// <summary><c>configuration_id</c> of <c>default language</c>.</summary>
+    private const int DefaultLanguageConfigurationId = 124;
+
+    /// <summary>
+    /// The installed <c>default language</c>, by langid: what a login created
+    /// without one — by <c>CREATE LOGIN</c> or <c>sp_addlogin</c> — keeps as
+    /// its default, and what <c>sp_defaultlanguage</c> without a language
+    /// sets; a login made earlier keeps its own (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal Language DefaultLoginLanguage
+    {
+        get
+        {
+            var langId = this.ConfigurationInUse(DefaultLanguageConfigurationId);
+            foreach (var language in Language.All)
+            {
+                if (language.LangId == langId)
+                    return language;
+            }
+            return Language.Default;
+        }
+    }
+
+    /// <summary><c>configuration_id</c> of <c>user options</c>.</summary>
+    private const int UserOptionsConfigurationId = 1534;
+
+    /// <summary>
+    /// The installed <c>user options</c>: the <c>@@OPTIONS</c> bits a session
+    /// starts with (<see cref="SimulatedDbConnection.StartLoginSession"/>).
+    /// </summary>
+    internal int UserOptions => this.ServerConfiguration.TryGetValue(UserOptionsConfigurationId, out var setting) ? setting.InUse : 0;
+
     /// <summary>
     /// The installed value of <c>clr strict security</c>, 1 unless
     /// <c>sp_configure</c> and <c>RECONFIGURE</c> turned it off: while on,

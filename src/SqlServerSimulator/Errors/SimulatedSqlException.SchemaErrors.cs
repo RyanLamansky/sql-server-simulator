@@ -3974,6 +3974,14 @@ partial class SimulatedSqlException
         new($"Login failed for user '{userName}'.", 18456, 14, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 4019 (class 11): the language a client's login
+    /// asked to start in names no language the server has; Msg 18456 follows
+    /// and the login fails (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException LoginLanguageNotFound(string language) =>
+        new($"Language requested in login '{language}' is not an official language name on this SQL Server. Login fails.", 4019, 11, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 18470: the right password for a login
     /// <c>ALTER LOGIN … DISABLE</c> turned off — a wrong one is still the
     /// plain Msg 18456 (probed 2026-09-29 against SQL Server 2025).
