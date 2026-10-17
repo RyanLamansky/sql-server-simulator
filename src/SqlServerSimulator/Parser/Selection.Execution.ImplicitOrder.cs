@@ -415,22 +415,38 @@ partial class Selection
         if (sorts.Count == 0)
             return null;
 
-        SqlValue ValueAt(int row, WindowSortEntry entry)
+        // Each row's keys in the order the comparison reads them — the last
+        // sort's first — laid out side by side in one array, so a comparison
+        // reads two runs of it rather than walking the sorts and every row's
+        // per-window buffers, which was most of a large sort's cost.
+        var width = 0;
+        foreach (var (sort, _) in sorts)
+            width += sort.Count;
+        var descendingAt = new bool[width];
+        var keys = new SqlValue[rowCount * width];
+        var column = 0;
+        for (var s = sorts.Count - 1; s >= 0; s--)
         {
-            var (partitionKeys, orderKeys) = perWindowKeys[row][entry.Window];
-            return entry.IsPartition ? partitionKeys[entry.Slot] : orderKeys[entry.Slot];
+            foreach (var entry in sorts[s].Sort)
+            {
+                descendingAt[column] = entry.Descending;
+                for (var row = 0; row < rowCount; row++)
+                {
+                    var (partitionKeys, orderKeys) = perWindowKeys[row][entry.Window];
+                    keys[(row * width) + column] = entry.IsPartition ? partitionKeys[entry.Slot] : orderKeys[entry.Slot];
+                }
+                column++;
+            }
         }
 
         int Compare(int a, int b)
         {
-            for (var s = sorts.Count - 1; s >= 0; s--)
+            var (left, right) = (a * width, b * width);
+            for (var i = 0; i < width; i++)
             {
-                foreach (var entry in sorts[s].Sort)
-                {
-                    var c = CompareSortValues(ValueAt(a, entry), ValueAt(b, entry));
-                    if (c != 0)
-                        return entry.Descending ? -c : c;
-                }
+                var c = CompareSortValues(keys[left + i], keys[right + i]);
+                if (c != 0)
+                    return descendingAt[i] ? -c : c;
             }
             return a.CompareTo(b);
         }
