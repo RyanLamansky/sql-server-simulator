@@ -60,6 +60,27 @@ public sealed class ScriptTableEngineFixTests
     public void CatalogDefault_PseudoCollation_Resolves()
         => AreEqual(1, new Simulation().ExecuteScalar<int>("select case when 'a' collate catalog_default = 'A' then 1 else 0 end"));
 
+    /// <summary>
+    /// <c>catalog_default</c> is the database's collation, a non-contained
+    /// database's catalog collation being its own, in a comparison, a result
+    /// and a column definition alike (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CatalogDefault_IsTheDatabasesCollation()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database cs collate Latin1_General_CS_AS");
+        AreEqual(0, sim.ExecuteScalar<int>("use cs; select case when 'a' = 'A' collate catalog_default then 1 else 0 end"));
+        AreEqual("Latin1_General_CS_AS", sim.ExecuteScalar("use cs; select sql_variant_property(cast('a' collate catalog_default as sql_variant), 'Collation')"));
+        AreEqual("Latin1_General_CS_AS|Latin1_General_CS_AS", sim.ExecuteScalar("""
+            use cs;
+            create table x (c varchar(5) collate catalog_default, e varchar(5));
+            alter table x alter column e varchar(5) collate catalog_default;
+            select string_agg(collation_name, '|') within group (order by column_id) from sys.columns where object_id = object_id('x')
+            """));
+        AreEqual("SQL_Latin1_General_CP1_CI_AS", sim.ExecuteScalar("select sql_variant_property(cast('a' collate catalog_default as sql_variant), 'Collation')"));
+    }
+
     [TestMethod]
     public void DatabaseDefault_PseudoCollation_Resolves()
         => AreEqual(1, new Simulation().ExecuteScalar<int>("select case when 'a' collate database_default = 'A' then 1 else 0 end"));

@@ -214,7 +214,7 @@ The list is computed as the query parses (`Selection.OrderTokenColumns`, carried
 A system procedure's results carry the ORDER its query has: one list per result for most (`Simulation.SystemProcedureResultOrder`), and where the order follows the arguments the procedure sets it itself — `sp_columns` and `sp_stored_procedures` order by position within the one object a name without a wildcard found and by owner and name otherwise — `sp_stored_procedures` by qualifier, owner and name under `@fUsePattern = 0`, where it matches exactly — `sp_fkeys` by the foreign key's side when a primary key table is named, `sp_configure`, `sp_lock` and `sp_helpfile` only when listing everything, `sp_help` without an object, `sp_helpindex` and `sp_helpconstraint` wherever they report.
 SqlClient and SMO read past the token, which none of them surfaces.
 
-**Divergence**: `catalog_default` resolves to the database's collation on real, so it is a no-op over such a column there, where it names the catalog collation here and reads as 0 (see `CollateExpression.ResolvePseudoCollationName`).
+`catalog_default` names the database's collation (see [`collations.md`](collations.md)), so it is a no-op over such a column too.
 
 ## Unexpected-fault handling
 

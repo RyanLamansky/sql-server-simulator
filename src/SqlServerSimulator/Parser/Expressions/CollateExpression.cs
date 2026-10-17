@@ -155,25 +155,28 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
     }
 
     /// <summary>
-    /// Expands the pseudo-collation keywords <c>database_default</c> (the active
-    /// database's collation) and <c>catalog_default</c> (the fixed metadata /
-    /// catalog collation) to their concrete collation name; any other name
-    /// passes through unchanged for the caller's own recognition check. The
-    /// keyword match is case-insensitive. Shared by the expression-level postfix
-    /// and the CREATE TABLE / ALTER COLUMN / table-variable / temp-table
-    /// column-definition parse sites, all of which resolve at bind time against
-    /// the session's active database (safe under the plan cache, which keys per
-    /// database). Real SQL Server records the resolved name in
-    /// <c>sys.columns.collation_name</c>; <c>catalog_default</c> resolves to the
-    /// database collation in a non-contained database (containment isn't
-    /// modeled) but is kept pinned to the catalog collation here to match the
-    /// simulator's catalog-column comparison contract. Probe-confirmed
-    /// (SQL Server 2025): <c>N'x' COLLATE database_default</c> reports the
-    /// active database's collation from <c>SQL_VARIANT_PROPERTY</c>, including
-    /// for <c>#temp</c> columns (the session database, not tempdb).
+    /// Expands the pseudo-collation keywords <c>database_default</c> and
+    /// <c>catalog_default</c> to the active database's collation name — a
+    /// non-contained database's catalog collation is its own, so the two are
+    /// one on real (probed 2026-10-17 against SQL Server 2025: in a
+    /// <c>Latin1_General_CS_AS</c> database <c>'a' = 'A' COLLATE
+    /// catalog_default</c> is false and a column declared <c>COLLATE
+    /// catalog_default</c> reports <c>Latin1_General_CS_AS</c>, master's
+    /// <c>SQL_Latin1_General_CP1_CI_AS</c> in master and tempdb) — and passes
+    /// any other name through unchanged for the caller's own recognition
+    /// check. The keyword match is case-insensitive. Shared by the
+    /// expression-level postfix and the CREATE TABLE / ALTER COLUMN /
+    /// table-variable / temp-table column-definition parse sites, all of which
+    /// resolve at bind time against the session's active database (safe under
+    /// the plan cache, which keys per database), and real records the resolved
+    /// name in <c>sys.columns.collation_name</c>. <c>N'x' COLLATE
+    /// database_default</c> reports the active database's collation from
+    /// <c>SQL_VARIANT_PROPERTY</c>, including for <c>#temp</c> columns (the
+    /// session database, not tempdb).
     /// </summary>
     internal static string ResolvePseudoCollationName(string collationName, BatchContext batch) =>
-        string.Equals(collationName, "database_default", StringComparison.OrdinalIgnoreCase) ? batch.CurrentDatabase.Collation.Name
-        : string.Equals(collationName, "catalog_default", StringComparison.OrdinalIgnoreCase) ? Collation.Catalog.Name
+        string.Equals(collationName, "database_default", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(collationName, "catalog_default", StringComparison.OrdinalIgnoreCase)
+            ? batch.CurrentDatabase.Collation.Name
         : collationName;
 }

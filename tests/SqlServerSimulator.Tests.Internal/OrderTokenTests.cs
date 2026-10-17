@@ -46,6 +46,7 @@ public sealed class OrderTokenTests
     [DataRow("select a, c from t order by (c) collate SQL_Latin1_General_CP1_CI_AS", "ORDER 2")]
     [DataRow("select a, c from t order by c collate Latin1_General_BIN", "ORDER 0")]
     [DataRow("select a, d from t order by d collate database_default", "ORDER 0")]
+    [DataRow("select a, c from t order by c collate catalog_default", "ORDER 2")]
     [DataRow("select a, d from t order by d collate Latin1_General_BIN", "ORDER 2")]
     public void OrderedResult_SendsTheTermsPositions(string sql, string order)
     {

@@ -211,10 +211,10 @@ The simulator reports Msg 4145 rather than Msg 156 / 102 for all three of those,
 
 The disambiguation's other guards are untouched: a top-level `,` inside the parens still routes to the boolean-group path so a row constructor reports its own Msg 4145 at the comma, and a second `COLLATE` is the Msg 156 above.
 
-The pseudo-collations **`catalog_default`** and **`database_default`** resolve before the name lookup: `catalog_default` → `Collation.Catalog` (the fixed metadata collation), `database_default` → `context.Batch.CurrentDatabase.Collation` (resolved at parse time to the active database).
-SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns.
+The pseudo-collations **`catalog_default`** and **`database_default`** resolve before the name lookup, both to `context.Batch.CurrentDatabase.Collation` (resolved at parse time to the active database): a non-contained database's catalog collation is its own, so `catalog_default` is not `Collation.Catalog`, the fixed collation of the `_desc` columns below (probed 2026-10-17 against SQL Server 2025: in a `Latin1_General_CS_AS` database `'a' = 'A' COLLATE catalog_default` is false, and in master or tempdb it is master's collation).
+SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns, an explicit collation that wins over the catalog's implicit one whatever it names.
 
-The **column-definition** COLLATE sites — CREATE TABLE / ALTER COLUMN / `DECLARE @t TABLE` / CREATE TYPE AS TABLE / `#temp` — resolve the same two keywords through the shared `CollateExpression.ResolvePseudoCollationName(name, batch)` seam, which expands `database_default` → the active database's collation *name* and `catalog_default` → the catalog collation name, storing the concrete name as the column's collation (so `sys.columns.collation_name` reports the resolved name, matching real).
+The **column-definition** COLLATE sites — CREATE TABLE / ALTER COLUMN / `DECLARE @t TABLE` / CREATE TYPE AS TABLE / `#temp` — resolve the same two keywords through the shared `CollateExpression.ResolvePseudoCollationName(name, batch)` seam, which expands both keywords to the active database's collation *name*, storing the concrete name as the column's collation (so `sys.columns.collation_name` reports the resolved name, matching real).
 Any other name passes through unchanged to the per-site `Collation.IsRecognized` gate, where a name it doesn't know is real's Msg 448 at state 2, as it is for a postfix `COLLATE` at state 1 (probed 2026-10-01 against SQL Server 2025).
 The keyword match is case-insensitive (`COLLATE DATABASE_DEFAULT` works).
 Resolution at bind time is plan-cache-safe: column DDL isn't plan-cached, and the cache keys per database regardless.
@@ -222,7 +222,8 @@ The SSMS Disk Usage report declares `nvarchar(…) COLLATE database_default` tab
 
 **Probed `database_default` semantics** (SQL Server 2025, distinctive-collation scratch database): `database_default` resolves to the **session** database's collation in *every* context, including `#temp` columns — real does **not** use tempdb's collation there (`SQL_VARIANT_PROPERTY(cast(#t.c as sql_variant), 'Collation')` reports the session DB's collation, not tempdb's).
 This matches the simulator's `CurrentDatabase.Collation` resolution exactly.
-`catalog_default` in a non-contained database resolves to the database collation on real (containment isn't modeled); the simulator keeps it pinned to `Collation.Catalog` for parity with the expression-level SMO catalog-comparison use — a documented, low-impact divergence for the astronomically-rare `catalog_default`-on-a-user-column case.
+`catalog_default` resolves the same way in every one of those contexts — a postfix, a comparison, a column definition, `ALTER COLUMN`, a table variable and a `#temp` column — and a `COLLATE catalog_default` over a database-collation column is the column itself in the ORDER token and the column metadata.
+Containment isn't modeled, so the contained-database catalog collation never applies.
 
 ## Database default and `#temp` inheritance
 
@@ -270,6 +271,7 @@ Sites that intentionally stay on `Collation.Baseline`:
 
 `Collation.Catalog` resolves to `Latin1_General_CI_AS_KS_WS`, the collation SQL Server 2025 reports on 425 of its catalog columns — the `_desc` enums, the type codes, `permission_name` — and the one its Msg 451 names when such a column meets a database-collation one (`sys.all_columns.collation_name` and `SQL_VARIANT_PROPERTY(…, 'Collation')`, probed 2026-09-25).
 The rest of real's collated catalog columns carry the server collation (`Collation.Baseline`) or a fixed one of their own — `Latin1_General_BIN` for the Service Broker and CLR-assembly names, `Latin1_General_CI_AI` for `sys.spatial_reference_systems`' text — and each declaration names whichever real reports, found by sweeping every view's `sp_describe_first_result_set` against real (2026-09-25); so not every `_desc` column is catalog-collated (the availability-group ones are the server's).
+Not modeled yet: in a database of another collation real's name columns carry the database's collation rather than the server's — `sys.objects.name` and `sys.columns.name` read `Latin1_General_CS_AS` in such a database, so a name comparison there is case-sensitive (observed 2026-10-17 against SQL Server 2025) — where the simulator's keep the server collation.
 The simulator once pinned `Latin1_General_100_CI_AS_KS_WS_SC` instead — the contained-database catalog collation Microsoft's "Contained Database Collations" doc names — but a non-contained instance never reports it, and the two sort some characters differently, so real's value is the one that matches both the metadata and the behavior.
 
 The catalog-view registrations (across the `BuiltInResources.<Topic>.cs` partials) share `nvarchar60Catalog` / `nvarchar128Catalog` / `charTwo` / `charOne` as `private static readonly` fields in root `BuiltInResources.cs`, all at `Collation.Catalog` + `Coercibility.Implicit`.
