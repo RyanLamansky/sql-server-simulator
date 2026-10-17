@@ -97,6 +97,15 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     internal BrowseInfo? Browse;
 
     /// <summary>
+    /// The columns a statement's <c>ORDER BY</c> sorts on, one per term — its
+    /// 1-based select-list position, or 0 for a term the select list doesn't
+    /// project — which the TDS endpoint sends as the ORDER token after
+    /// COLMETADATA (and after the browse tokens); null for a result whose
+    /// statement has no <c>ORDER BY</c>, or whose terms are all constants.
+    /// </summary>
+    internal ushort[]? OrderColumns;
+
+    /// <summary>
     /// Per column, the base-table column it reads directly, or null for an
     /// expression — set only by the <c>SET FMTONLY</c> metadata path, which
     /// is what <c>sp_describe_first_result_set</c> describes through.

@@ -326,30 +326,30 @@ partial class Simulation
     /// another trigger holds is Msg 15130 — probed 2026-09-28 against SQL
     /// Server 2025.
     /// </summary>
-    private static void SetScopedTriggerOrder(BatchContext batch, string triggerName, string order, string statementType, bool serverScope)
+    private static void SetScopedTriggerOrder(BatchContext batch, string calledAs, string? triggerName, string order, string statementType, bool serverScope, bool isFirst, bool isLast)
     {
-        var isFirst = BuiltInToken.Equals(order, "First");
-        var isLast = BuiltInToken.Equals(order, "Last");
-        if (!isFirst && !isLast && !BuiltInToken.Equals(order, "None"))
-            throw SimulatedSqlException.InvalidTriggerOrderParameter();
-
-        var leaf = triggerName.Trim('[', ']');
+        var leaf = triggerName?.Trim('[', ']');
         var simulation = batch.Connection.Simulation;
         DdlTrigger? trigger;
         IEnumerable<DdlTrigger> peers;
         if (serverScope)
         {
             peers = simulation.ServerTriggers.All;
-            trigger = simulation.ServerTriggers.TryGetValue(leaf, out var serverTrigger) ? serverTrigger : null;
+            trigger = leaf is not null && simulation.ServerTriggers.TryGetValue(leaf, out var serverTrigger) ? serverTrigger : null;
         }
         else
         {
             peers = batch.CurrentDatabase.DdlTriggers.EnumerateValues();
-            trigger = batch.CurrentDatabase.DdlTriggers.TryGetValue(leaf, out var databaseTrigger) ? databaseTrigger : null;
+            trigger = leaf is not null && batch.CurrentDatabase.DdlTriggers.TryGetValue(leaf, out var databaseTrigger) ? databaseTrigger : null;
         }
         if (trigger is null)
-            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName).AtSystemProcedureLine(142);
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName ?? "(null)"), 142);
 
+        // The order is set by a statement of the procedure's that fails as a
+        // statement — from its line 135, ending the caller's batch and rolling
+        // its transaction back, where a refusal the procedure raises itself
+        // ends only the call — and judges the event there (probed 2026-10-17
+        // against SQL Server 2025).
         // An event group or a name that isn't an event is a bad parameter; an
         // event the trigger doesn't fire on is Msg 15125.
         int eventType;
@@ -364,12 +364,17 @@ partial class Simulation
             eventType = entry.Type;
             covered = trigger.Covers(entry.TypeName);
         }
+        else if (BuiltInToken.Equals(statementType, "INSERT") || BuiltInToken.Equals(statementType, "UPDATE") || BuiltInToken.Equals(statementType, "DELETE"))
+        {
+            // A DML action is an event no scoped trigger fires on.
+            throw OrderStatementError(SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName!, statementType), calledAs);
+        }
         else
         {
-            throw SimulatedSqlException.InvalidTriggerOrderParameter();
+            throw OrderStatementError(SimulatedSqlException.InvalidSystemProcedureOptionAtStatement("sp_settriggerorder"), calledAs);
         }
         if (!covered)
-            throw SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName, statementType);
+            throw OrderStatementError(SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName!, statementType), calledAs);
 
         // Unlike a table trigger's, the conflict lowercases both words.
 #pragma warning disable CA1308 // Real's message spells them in lowercase.
@@ -378,7 +383,7 @@ partial class Simulation
             if (ReferenceEquals(peer, trigger))
                 continue;
             if ((isFirst && peer.FirstForEvents?.Contains(eventType) == true) || (isLast && peer.LastForEvents?.Contains(eventType) == true))
-                throw SimulatedSqlException.TriggerOrderAlreadyExists(order.ToLowerInvariant(), statementType.ToLowerInvariant());
+                throw OrderStatementError(SimulatedSqlException.TriggerOrderAlreadyExists(order.ToLowerInvariant(), statementType.ToLowerInvariant()), calledAs);
         }
 #pragma warning restore CA1308
 
@@ -389,5 +394,13 @@ partial class Simulation
             _ = (trigger.FirstForEvents ??= []).Add(eventType);
         else if (isLast)
             _ = (trigger.LastForEvents ??= []).Add(eventType);
+    }
+
+    /// <summary><paramref name="error"/> as the failed statement at line 135 of <c>sp_settriggerorder</c> that sets a scoped trigger's order.</summary>
+    private static SimulatedSqlException OrderStatementError(SimulatedSqlException error, string calledAs)
+    {
+        var aborting = error.AbortingAsUnderXactAbort();
+        aborting.RaisedByProcedureStatement = true;
+        return AtProcedureLine(aborting, calledAs, 135);
     }
 }

@@ -20,6 +20,15 @@ public sealed class SimulatedError
     /// <summary>Set once the message has fired <c>error_reported</c>, so a message queued again fires it once.</summary>
     internal bool ExtendedEventReported;
 
+    /// <summary>
+    /// Set on the Msg 5701 a rename of the session's own database sends: the
+    /// database ENVCHANGE goes out ahead of it but no collation ENVCHANGE after
+    /// it, where a <c>USE</c> sends both (probed 2026-10-17 against SQL Server
+    /// 2025, through <c>ALTER DATABASE … MODIFY NAME</c>, <c>sp_rename</c> and
+    /// <c>sp_renamedb</c>).
+    /// </summary>
+    internal bool RenamedDatabase;
+
     internal SimulatedError(byte @class, int lineNumber, string message, int number, string procedure, string server, string source, byte state)
     {
         this.Class = @class;

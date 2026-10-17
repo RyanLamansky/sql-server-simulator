@@ -258,6 +258,11 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpTablesRows);
+        if (tableType is null)
+        {
+            foreach (var step in ProcedureSteps(batch, SpTablesSteps(tableName, tableOwner, tableQualifier, rows.Count > 0)))
+                yield return step;
+        }
         yield return new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, rows);
     }
 
@@ -321,6 +326,17 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether an ODBC catalog procedure's name argument picked one object —
+    /// written without a wildcard (<c>%</c>, <c>_</c>, <c>[</c>) and found —
+    /// which real answers ordered by position within that object, where a
+    /// pattern or a miss orders by owner and name first (probed 2026-10-17
+    /// against SQL Server 2025, <c>sp_columns</c> and
+    /// <c>sp_stored_procedures</c>).
+    /// </summary>
+    private static bool NamesOneObject(string? name, bool found) =>
+        found && name is not null && !HasCatalogWildcard(name);
+
+    /// <summary>
     /// Handles <c>EXEC sp_columns_100 [@table_name] [, @table_owner]
     /// [, @table_qualifier] [, @column_name] [, @NameScope] [, @ODBCVer]</c> —
     /// the proc ODBC's <c>SQLColumns</c> / JDBC's <c>getColumns</c> call — and
@@ -352,12 +368,14 @@ partial class Simulation
         var columnPattern = CompileCatalogPattern(columnName);
 
         var rows = new List<SqlValue[]>();
+        var matchedObject = false;
         var visible = PermissionEnforcement.ObjectVisibility(batch, database);
         // In tempdb a #temp name finds the session's table, listed under its
         // name inside tempdb (probed 2026-10-06 against SQL Server 2025).
         if (database.Name == TempdbDatabaseName && tableName is ['#', ..] && !tableName.StartsWith("##", StringComparison.Ordinal)
             && batch.TryResolveTable(new MultiPartName(tableName), out var tempTable) && Matches(ownerPattern, Database.DefaultSchemaName))
         {
+            matchedObject = true;
             AppendColumnRows(rows, qualifier, SqlValue.FromSystemName(Database.DefaultSchemaName), tempTable.CatalogName, tempTable.Columns, byName, columnPattern, version, nameScope, odbcVer);
         }
         if (nameScope is 0 or 2 or 3 && (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name)))
@@ -370,13 +388,19 @@ partial class Simulation
                 foreach (var table in schema.HeapTables.EnumerateValues().OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, table.Name) && visible?.Invoke(table) != false)
+                    {
+                        matchedObject = true;
                         AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, version, nameScope, odbcVer);
+                    }
                 }
 
                 foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, view.Name) && visible?.Invoke(view) != false)
+                    {
+                        matchedObject = true;
                         AppendColumnRows(rows, qualifier, owner, view.Name, view.CatalogColumns(), byName, columnPattern, version, nameScope, odbcVer);
+                    }
                 }
 
                 // The schema's catalog views list their columns too (probed
@@ -389,12 +413,17 @@ partial class Simulation
             }
         }
 
-        yield return version switch
+        var result = version switch
         {
             SpColumnsVersion.Classic => new SimulatedSqlResultSet(ClassicSpColumnsSchema, ClassicSpColumnsColumnNames, rows),
             SpColumnsVersion.V90 => new SimulatedSqlResultSet(SpColumns90Schema, SpColumns90ColumnNames, rows),
             _ => new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows) { ColumnNullability = SpColumnsNullability },
         };
+        var oneObject = NamesOneObject(tableName, matchedObject);
+        foreach (var step in ProcedureSteps(batch, SpColumnsSteps(version, odbcVer, tableName, tableOwner, tableQualifier, columnName, oneObject)))
+            yield return step;
+        result.OrderColumns = oneObject ? [17] : [2, 3, 17];
+        yield return result;
     }
 
     private static void AppendColumnRows(
@@ -894,6 +923,8 @@ partial class Simulation
             }
         }
 
+        foreach (var step in ProcedureSteps(batch, SpPkeysSteps(tableOwner, tableQualifier)))
+            yield return step;
         yield return new SimulatedSqlResultSet(SpPkeysSchema, SpPkeysColumnNames, rows);
     }
 
@@ -1232,7 +1263,13 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpStoredProceduresRows);
-        yield return new SimulatedSqlResultSet(SpStoredProceduresSchema, SpStoredProceduresColumnNames, rows);
+        var oneObject = NamesOneObject(spName, rows.Count > 0);
+        foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, rows.Count > 0, oneObject)))
+            yield return step;
+        yield return new SimulatedSqlResultSet(SpStoredProceduresSchema, SpStoredProceduresColumnNames, rows)
+        {
+            OrderColumns = oneObject ? [1, 2, 3] : [2, 3],
+        };
     }
 
     // Sort by PROCEDURE_OWNER (cell 1) then PROCEDURE_NAME (cell 2), ordinal

@@ -272,7 +272,7 @@ partial class Simulation
         var simulation = batch.Connection.Simulation;
         if (configName is null)
         {
-            yield return new SimulatedSqlResultSet(SpConfigureSchema, SpConfigureColumnNames, ListConfigurationOptions(simulation));
+            yield return new SimulatedSqlResultSet(SpConfigureSchema, SpConfigureColumnNames, ListConfigurationOptions(simulation)) { OrderColumns = [0] };
             yield break;
         }
 

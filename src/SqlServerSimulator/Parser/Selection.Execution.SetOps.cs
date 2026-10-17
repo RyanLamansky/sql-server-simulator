@@ -133,6 +133,9 @@ internal sealed partial class Selection
     /// <summary>The browse-mode metadata the statement's result carries; see <see cref="SimulatedQueryResult.Browse"/>.</summary>
     internal BrowseInfo? Browse;
 
+    /// <summary>The column list of the ORDER token the statement's result carries; see <see cref="SimulatedQueryResult.OrderColumns"/>.</summary>
+    internal ushort[]? OrderColumns;
+
     /// <summary>
     /// For a cursor's query, what a <c>FETCH</c> result names its columns'
     /// base tables and columns as — the browse tokens real sends with every

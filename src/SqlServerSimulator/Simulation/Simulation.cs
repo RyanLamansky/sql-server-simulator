@@ -4383,6 +4383,7 @@ public sealed partial class Simulation
                 ColumnWireFlags = selection.ColumnWireFlags,
                 HiddenColumnCount = selection.HiddenColumnCount,
                 Browse = selection.Browse,
+                OrderColumns = selection.OrderColumns,
             };
             executed.EndedByError = true;
             executed.ErrorCaught = CaughtByTryFrame(batch, error);

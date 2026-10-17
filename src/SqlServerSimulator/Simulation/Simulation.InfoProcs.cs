@@ -245,7 +245,11 @@ partial class Simulation
         chosen.Sort(static (a, b) => a.Spid != b.Spid ? a.Spid.CompareTo(b.Spid) : a.DbId != b.DbId ? a.DbId.CompareTo(b.DbId) : a.ObjId.CompareTo(b.ObjId));
         yield return new SimulatedSqlResultSet(
             [SqlType.SmallInt, SqlType.SmallInt, SqlType.Int32, SqlType.SmallInt, SqlType.NVarchar, SqlType.NVarchar, SqlType.NVarchar, SqlType.NVarchar],
-            ["spid", "dbid", "ObjId", "IndId", "Type", "Resource", "Mode", "Status"], chosen.ConvertAll(static row => row.Row));
+            ["spid", "dbid", "ObjId", "IndId", "Type", "Resource", "Mode", "Status"], chosen.ConvertAll(static row => row.Row))
+        {
+            // Only the listing of every session orders by spid.
+            OrderColumns = first is null && second is null ? [1] : null,
+        };
     }
 
     /// <summary>

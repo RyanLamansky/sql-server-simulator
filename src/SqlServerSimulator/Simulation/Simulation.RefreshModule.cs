@@ -31,24 +31,31 @@ partial class Simulation
             yield break;
 
         var (objectName, _) = ParseHelpArgs(arguments, "sp_recompile", firstName: "objname");
-        if (objectName is null)
+
+        // An omitted name is the parameter missing; a NULL one is an object
+        // no name finds, reported as '(null)' (probed 2026-10-17 against SQL
+        // Server 2025).
+        if (objectName is null && !arguments.Exists(static argument => !argument.IsDefault && (argument.Name is null || BuiltInToken.Equals(argument.Name, "objname"))))
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_recompile", "objname");
         foreach (var outcome in InProcedureTransaction(batch, Marked(batch, objectName), ProcedureTransactionEnding.CommitFirst))
             yield return outcome;
-        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName));
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName!));
     }
 
     /// <summary><see cref="InvokeSpRecompile"/>'s work, once its transaction is open.</summary>
-    private static IEnumerable<SimulatedStatementOutcome> Marked(BatchContext batch, string objectName)
+    private static IEnumerable<SimulatedStatementOutcome> Marked(BatchContext batch, string? objectName)
     {
-        if (!Parser.Expressions.ObjectId.TryParseObjectName(objectName, out var name)
+        if (objectName is null
+            || !Parser.Expressions.ObjectId.TryParseObjectName(objectName, out var name)
             || !batch.TryResolveSchema(name, out var schema)
             || !schema.TryFindInSharedNamespace(name.Leaf, out var marked))
         {
             // The procedure returns the error's number (probed 2026-10-06
             // against SQL Server 2025).
-            var missing = SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
+            var missing = SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName ?? "(null)");
             missing.SystemProcedureReturnCode = missing.Number;
+            // A TRY catching it leaves the code unwritten (probed 2026-10-17).
+            missing.CaughtBeforeReturn = batch.Connection.OpenTryFrames > 0;
             throw missing;
         }
         switch (marked)

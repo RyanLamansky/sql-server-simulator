@@ -19,10 +19,9 @@ public partial class Simulation
     /// session handle, and writes that handle back through the OUTPUT slot.
     /// An omitted or NULL <c>@xmltext</c> still allocates a handle over an
     /// empty document (probe-confirmed). A document that won't parse is
-    /// <strong>Msg 6602</strong>, with the handle slot and the return code both
-    /// left untouched — matching what real leaves behind when the error is
-    /// caught (an uncaught one, which real reports without aborting the batch,
-    /// does set the code to 1).
+    /// <strong>Msg 6602</strong>, with the handle slot left untouched and the
+    /// return code 1 — or untouched too when a <c>TRY</c> catches the error
+    /// (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpXmlPrepareDocument(BatchContext batch, string? returnCodeVariableName)
     {
@@ -33,9 +32,19 @@ public partial class Simulation
         static string? DocumentText(SqlValue value) =>
             value.IsNull ? null : value.CoerceTo(SqlType.NVarcharMax).AsString;
 
-        var document = PreparedXmlDocument.Parse(
-            args.HasText ? DocumentText(args.Text) : null,
-            args.HasNamespaces ? DocumentText(args.Namespaces) : null);
+        PreparedXmlDocument document;
+        try
+        {
+            document = PreparedXmlDocument.Parse(
+                batch,
+                args.HasText ? DocumentText(args.Text) : null,
+                args.HasNamespaces ? DocumentText(args.Namespaces) : null);
+        }
+        catch (SimulatedSqlException) when (batch.Connection.OpenTryFrames == 0)
+        {
+            SetReturnCode(batch, returnCodeVariableName, 1);
+            throw;
+        }
 
         var handle = batch.Connection.NextPreparedXmlHandle();
         batch.Connection.PreparedXmlDocuments[handle] = document;
@@ -47,7 +56,8 @@ public partial class Simulation
     /// <summary>
     /// <c>EXEC @rc = sp_xml_removedocument @hdoc</c>. Releases the handle; one
     /// this session never held — including one it already released — is
-    /// <strong>Msg 8179</strong>, which leaves the return code unwritten.
+    /// <strong>Msg 8179</strong>, returning 1, or leaving the return code
+    /// unwritten when a <c>TRY</c> catches it.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpXmlRemoveDocument(BatchContext batch, string? returnCodeVariableName)
     {
@@ -64,6 +74,8 @@ public partial class Simulation
             // against SQL Server 2025).
             var missing = SimulatedSqlException.CouldNotFindPreparedStatement(handle);
             missing.PreserveDiagnostics(1, "sp_xml_removedocument");
+            if (batch.Connection.OpenTryFrames == 0)
+                SetReturnCode(batch, returnCodeVariableName, 1);
             throw missing;
         }
         SetReturnCode(batch, returnCodeVariableName, 0);

@@ -308,7 +308,7 @@ partial class Simulation
         }
 
         SortByFirstCell(rows, batch);
-        yield return new SimulatedSqlResultSet(SpHelpIndexSchema, SpHelpIndexColumnNames, rows) { ColumnNullability = SpHelpIndexNullability };
+        yield return new SimulatedSqlResultSet(SpHelpIndexSchema, SpHelpIndexColumnNames, rows) { ColumnNullability = SpHelpIndexNullability, OrderColumns = [1] };
     }
 
     // The attribute phrase, in real's fixed clause order: clustered-ness,
@@ -502,7 +502,7 @@ partial class Simulation
         var rows = table is not null ? BuildHelpConstraintRows(database, table) : [];
         yield return rows.Count == 0
             ? HelpNoConstraints(batch, procedureName, 340, objectName)
-            : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows) { ColumnNullability = SpHelpConstraintNullability };
+            : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows) { ColumnNullability = SpHelpConstraintNullability, OrderColumns = [0, 2] };
         yield return HelpBlankLine(batch, procedureName, 342);
 
         var referencing = new List<SqlValue[]>();
@@ -777,7 +777,6 @@ partial class Simulation
         ("sp_setapprole", 15422) => (38, null),
         ("sp_setapprole", 15431) => (22, null),
         ("sp_setapprole", 15600) => (31, null),
-        ("sp_settriggerorder", _) when exception.SystemProcedureLine is { } triggerOrderLine => (triggerOrderLine, null),
         ("sp_spaceused", 15009) => (153, null),
         ("sp_spaceused", 15143) => (105, null),
         ("sp_spaceused", 15234) => (160, null),

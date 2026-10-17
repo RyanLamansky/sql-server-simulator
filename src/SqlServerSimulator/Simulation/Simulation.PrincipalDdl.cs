@@ -398,7 +398,8 @@ partial class Simulation
     /// The membership change is the <c>ALTER ROLE</c> real runs as dynamic SQL,
     /// so its refusals close as that statement's, at line 1 of no procedure;
     /// <c>sp_addrolemember</c> runs it in a transaction of its own, rolled back
-    /// ahead of its own Msg 15410 (probed 2026-10-17 against SQL Server 2025).
+    /// ahead of its own Msg 15410, and a failure inside the caller's rolls the
+    /// caller's back (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpRoleMember(BatchContext batch, bool isAdd)
     {
@@ -432,7 +433,7 @@ partial class Simulation
             throw SimulatedSqlException.NameCannotBeNull();
 
         var change = Changed(batch, values[0]!.Value.CoerceTo(SqlType.SystemName).AsString, values[1]!.Value.CoerceTo(SqlType.SystemName).AsString, isAdd);
-        foreach (var outcome in isAdd ? InProcedureTransaction(batch, change) : change)
+        foreach (var outcome in isAdd ? InProcedureTransaction(batch, change, rollsBackCallerTransaction: true) : change)
             yield return outcome;
 
         static IEnumerable<SimulatedStatementOutcome> Changed(BatchContext batch, string role, string member, bool isAdd)

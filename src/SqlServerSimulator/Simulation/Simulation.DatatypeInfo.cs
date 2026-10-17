@@ -355,6 +355,9 @@ partial class Simulation
             }
         }
 
+        // Its steps are the same whatever it was given.
+        foreach (var step in ProcedureSteps(batch, "SISISS"))
+            yield return step;
         yield return new SimulatedSqlResultSet(DatatypeInfoSchema, DatatypeInfoColumnNames, rows)
         {
             ColumnNullability = version switch

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.XPath;
 using SqlServerSimulator.Parser;
@@ -40,17 +41,19 @@ internal sealed class PreparedXmlDocument
     /// Parses <paramref name="xmlText"/> and the optional
     /// <paramref name="namespaceDeclarations"/> wrapper element, whose
     /// <c>xmlns</c> attributes become the prefixes patterns may use. A
-    /// malformed document raises <strong>Msg 6602</strong> attributed to
+    /// malformed document sends <strong>Msg 6601</strong> naming MSXML's error
+    /// code and the line it stopped on, then raises <strong>Msg 6602</strong>
+    /// with MSXML's description, both attributed to
     /// <c>sp_xml_preparedocument</c>, and no handle is allocated.
     /// </summary>
-    public static PreparedXmlDocument Parse(string? xmlText, string? namespaceDeclarations)
+    public static PreparedXmlDocument Parse(BatchContext batch, string? xmlText, string? namespaceDeclarations)
     {
-        // An omitted or NULL document still gets a handle, over a document with
-        // no nodes at all — probe-confirmed that every rowpattern then answers
-        // zero rows.
-        var document = xmlText is null ? new XmlDocument() : LoadOrRaise(xmlText);
+        // An omitted, NULL or empty document still gets a handle, over a
+        // document with no nodes at all — probe-confirmed that every
+        // rowpattern then answers zero rows.
+        var document = string.IsNullOrEmpty(xmlText) ? new XmlDocument() : LoadOrRaise(batch, xmlText);
         var namespaces = new XmlNamespaceManager(document.NameTable);
-        if (namespaceDeclarations is not null && LoadOrRaise(namespaceDeclarations).DocumentElement is { } wrapper)
+        if (namespaceDeclarations is not null && LoadOrRaise(batch, namespaceDeclarations).DocumentElement is { } wrapper)
         {
             foreach (XmlAttribute attribute in wrapper.Attributes)
             {
@@ -64,7 +67,7 @@ internal sealed class PreparedXmlDocument
         return new PreparedXmlDocument(document, namespaces);
     }
 
-    private static XmlDocument LoadOrRaise(string text)
+    private static XmlDocument LoadOrRaise(BatchContext batch, string text)
     {
         var document = new XmlDocument { PreserveWhitespace = true };
         try
@@ -73,9 +76,118 @@ internal sealed class PreparedXmlDocument
         }
         catch (XmlException ex)
         {
-            throw SimulatedSqlException.XmlDocumentParseFailed(ex.Message);
+            var (code, description, line) = MsxmlError(ex, text);
+            var notice = SimulatedSqlException.XmlParseErrorNoticeMessage(batch, code, line, line == 0 ? "" : LineText(text, line));
+            batch.Connection.PendingMessages.Enqueue(notice);
+            throw SimulatedSqlException.XmlDocumentParseFailed(description);
         }
         return document;
+    }
+
+    /// <summary>The text of line <paramref name="line"/> (1-based) of <paramref name="text"/>, without its line break.</summary>
+    private static string LineText(string text, int line)
+    {
+        var start = 0;
+        for (var current = 1; current < line; current++)
+        {
+            var next = text.IndexOf('\n', start);
+            if (next < 0)
+                return "";
+            start = next + 1;
+        }
+        var end = text.IndexOf('\n', start);
+        return text[start..(end < 0 ? text.Length : end)].TrimEnd('\r');
+    }
+
+    /// <summary>
+    /// MSXML's error code, description and line for the failure .NET's reader
+    /// reported as <paramref name="error"/> — line 0 for an error found at the
+    /// end of the document — matching what real's
+    /// <c>sp_xml_preparedocument</c> sends for each kind of malformation
+    /// (probed 2026-10-17 against SQL Server 2025). A failure no probe
+    /// matched keeps .NET's message under <c>E_FAIL</c>.
+    /// </summary>
+    private static (uint Code, string Description, int Line) MsxmlError(XmlException error, string text)
+    {
+        var message = error.Message;
+        var line = error.LineNumber;
+        if (Matched(message, @"^Unexpected end of file has occurred\. The following elements are not closed: (.*?)\. Line") is { } unclosed)
+        {
+            // .NET lists the innermost element first, MSXML the outermost.
+            var names = unclosed[1].Value.Split(", ");
+            Array.Reverse(names);
+            return (0xC00CE553, $"The following tags were not closed: {string.Join(", ", names)}.", 0);
+        }
+        if (Matched(message, @"^The '(.+?)' start tag on line \d+ position \d+ does not match the end tag of '(.+?)'\.") is { } mismatch)
+            return (0xC00CE56D, $"End tag '{mismatch[2].Value}' does not match the start tag '{mismatch[1].Value}'.", line);
+        if (message.StartsWith("Data at the root level is invalid.", StringComparison.Ordinal))
+        {
+            // A start tag .NET refuses there is one MSXML reads to the end of
+            // the document: a tag never finished, or elements never closed.
+            if (Offset(text, error.LineNumber, error.LinePosition) is { } offset && offset < text.Length && text[offset] == '<')
+            {
+                var rest = text[offset..];
+                if (!rest.Contains('>', StringComparison.Ordinal))
+                    return (0xC00CE55E, "Element was not closed.", line);
+                var open = new List<string>();
+                foreach (Match tag in Regex.Matches(rest, @"<(/?)([^\s/>!?]+)[^>]*?(/?)>", RegexOptions.CultureInvariant))
+                {
+                    if (tag.Groups[1].Length != 0)
+                    {
+                        if (open.Count != 0)
+                            open.RemoveAt(open.Count - 1);
+                    }
+                    else if (tag.Groups[3].Length == 0)
+                    {
+                        open.Add(tag.Groups[2].Value);
+                    }
+                }
+                if (open.Count != 0)
+                    return (0xC00CE553, $"The following tags were not closed: {string.Join(", ", open)}.", 0);
+            }
+            return (0xC00CE556, "Invalid at the top level of the document.", line);
+        }
+        return message switch
+        {
+            _ when message.StartsWith("Root element is missing.", StringComparison.Ordinal) => (0xC00CE558, "XML document must have a top level element.", 0),
+            _ when Matched(message, @"^'.*' is an unexpected token\. The expected token is '""' or '\x27'\.") is not null => (0xC00CE502, "A string literal was expected, but no opening quote character was found.", line),
+            _ when Matched(message, @"^'.*' is an unexpected token\. The expected token is '='\.") is not null => (0xC00CE505, "A name contained an invalid character.", line),
+            _ when Matched(message, @"^'.*' is an unexpected token\. Expecting white ?space\.") is not null => (0xC00CE509, "Required white space was missing.", line),
+            _ when Matched(message, @"^'.+' is a duplicate attribute name\.") is not null => (0xC00CE554, "Duplicate attribute.", line),
+            _ when message.StartsWith("There are multiple root elements.", StringComparison.Ordinal) => (0xC00CE555, "Only one top level element is allowed in an XML document.", line),
+            _ when Matched(message, @"^Reference to undeclared entity '(.+?)'\.") is { } entity => (0xC00CE002, $"Reference to undefined entity '{entity[1].Value}'.", line),
+            _ when Matched(message, @"^'(.+?)' is an undeclared prefix\.") is { } prefix => (0xC00CE01D, $"Reference to undeclared namespace prefix: '{prefix[1].Value}'.", line),
+            _ when message.StartsWith("An XML comment cannot contain '--'", StringComparison.Ordinal) => (0xC00CE503, "Incorrect syntax was used in a comment.", line),
+            _ when message.StartsWith("']]>' is not allowed in character data.", StringComparison.Ordinal) => (0xC00CE55C, "The literal string ']]>' is not allowed in element content.", line),
+            _ when message.StartsWith("Name cannot begin with the ", StringComparison.Ordinal) => (0xC00CE504, "A name was started with an invalid character.", line),
+            _ when message.StartsWith("'<', hexadecimal value 0x3C, is an invalid attribute character.", StringComparison.Ordinal) => (0xC00CE506, "The character '<' cannot be used in an attribute value.", line),
+            _ when Matched(message, @"^Invalid syntax for a (hexadecimal|decimal) numeric entity reference\.") is not null => (0xC00CE50E, "An invalid character was found inside an entity reference.", line),
+            _ when Matched(message, @"^Version number '.*' is invalid\.") is not null => (0xC00CE57F, "Invalid version number.", line),
+            _ when message.StartsWith("Unexpected end of file while parsing CDATA has occurred.", StringComparison.Ordinal) => (0xC00CE564, "A CDATA section was not closed.", line),
+            _ when message.StartsWith("Unexpected end of file while parsing Comment has occurred.", StringComparison.Ordinal) => (0xC00CE561, "A comment was not closed.", line),
+            _ when message.StartsWith("Invalid namespace declaration.", StringComparison.Ordinal) => (0xC00CE027, "Only a default namespace can have an empty URI.", line),
+            _ when message.StartsWith("Unexpected end tag.", StringComparison.Ordinal) => (0xC00CE552, "End tag was not expected at this location.", line),
+            _ when message.StartsWith("An error occurred while parsing EntityName.", StringComparison.Ordinal) => (0xC00CE50D, "A semi colon character was expected.", line),
+            _ when message.StartsWith("There is an unclosed literal string.", StringComparison.Ordinal) => (0xC00CE560, "A string literal was not closed.", line),
+            _ => (0x80004005, message, line),
+        };
+
+        static GroupCollection? Matched(string message, string pattern) =>
+            Regex.Match(message, pattern, RegexOptions.CultureInvariant) is { Success: true } match ? match.Groups : null;
+    }
+
+    /// <summary>The character offset of a 1-based line and position in <paramref name="text"/>, or null past its end.</summary>
+    private static int? Offset(string text, int line, int position)
+    {
+        var start = 0;
+        for (var current = 1; current < line; current++)
+        {
+            var next = text.IndexOf('\n', start);
+            if (next < 0)
+                return null;
+            start = next + 1;
+        }
+        return position >= 1 ? start + position - 1 : null;
     }
 
     /// <summary>

@@ -67,19 +67,65 @@ partial class Simulation
     /// 2026-10-17 against SQL Server 2025). With
     /// <paramref name="sendsMessagesInside"/> the messages the body queued go
     /// out ahead of the commit (<c>sp_rename</c>'s caution), where otherwise
-    /// they follow it (<c>sp_recompile</c>'s).
+    /// they follow it (<c>sp_recompile</c>'s). Inside the caller's
+    /// transaction it nests, announcing nothing: <c>@@TRANCOUNT</c> is one
+    /// higher until it ends, which an error a <c>TRY</c> catches first never
+    /// reaches — the <c>CATCH</c> reads the caller's count plus one after a
+    /// failed statement or a refusal raised ahead of a commit (probed
+    /// 2026-10-17 against SQL Server 2025). With
+    /// <paramref name="rollsBackCallerTransaction"/> a failure there rolls the
+    /// caller's transaction back, whole, where its own would roll back
+    /// (<c>sp_addrolemember</c>, <c>sp_addsrvrolemember</c>; the call then
+    /// closes with Msg 266).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InProcedureTransaction(
         BatchContext batch,
         IEnumerable<SimulatedStatementOutcome> body,
         ProcedureTransactionEnding raisedEnding = ProcedureTransactionEnding.RollbackFirst,
         bool commitsAfterFailedStatement = false,
-        bool sendsMessagesInside = false)
+        bool sendsMessagesInside = false,
+        bool rollsBackCallerTransaction = false)
     {
         var connection = batch.Connection;
-        if (batch.IsSkipping || connection.CurrentTransaction is not null)
+        if (batch.IsSkipping)
             return body;
+        if (connection.CurrentTransaction is { } caller)
+            return Nested(connection, caller, body, raisedEnding, commitsAfterFailedStatement, rollsBackCallerTransaction);
         return Wrapped(connection, body, raisedEnding, commitsAfterFailedStatement, sendsMessagesInside);
+
+        // Inside the caller's transaction the procedure's BEGIN TRANSACTION
+        // nests, raising @@TRANCOUNT by one until its COMMIT, so an error a
+        // TRY catches before then leaves the count raised.
+        static IEnumerable<SimulatedStatementOutcome> Nested(SimulatedDbConnection connection, SimulatedDbTransaction caller, IEnumerable<SimulatedStatementOutcome> body, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement, bool rollsBackCaller)
+        {
+            caller.TranCount++;
+            var open = true;
+            using (var outcomes = body.GetEnumerator())
+            {
+                while (true)
+                {
+                    try
+                    {
+                        if (!outcomes.MoveNext())
+                            break;
+                    }
+                    catch (SimulatedSqlException error)
+                    {
+                        if (open)
+                            EndNestedAtError(connection, caller, error, raisedEnding, commitsAfterFailedStatement, rollsBackCaller);
+                        throw;
+                    }
+                    yield return outcomes.Current;
+                    if (open && outcomes.Current is SimulatedErrorOutcome && rollsBackCaller)
+                    {
+                        End(connection, caller, commit: false);
+                        open = false;
+                    }
+                }
+            }
+            if (open)
+                Unnest(connection, caller);
+        }
 
         static IEnumerable<SimulatedStatementOutcome> Wrapped(SimulatedDbConnection connection, IEnumerable<SimulatedStatementOutcome> body, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement, bool sendsMessagesInside)
         {
@@ -162,7 +208,8 @@ partial class Simulation
     /// procedure: before a raised one that follows its ending, after one
     /// raised ahead of it — a failed statement's included — whose error goes
     /// out first (<see cref="SimulatedSqlException.TransactionEventMark"/>),
-    /// unless a <c>TRY</c> catches it there and the ending never runs.
+    /// unless a <c>TRY</c> catches it there and the ending never runs. An
+    /// error that aborts as under <c>XACT_ABORT</c> always rolls back.
     /// </summary>
     private static void EndAtError(SimulatedDbConnection connection, SimulatedDbTransaction transaction, SimulatedSqlException error, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement)
     {
@@ -175,7 +222,46 @@ partial class Simulation
         }
         error.TransactionEventMark = connection.TransactionEventsRecorded;
         if (connection.OpenTryFrames == 0)
-            End(connection, transaction, commit: raised || commitsAfterFailedStatement);
+            End(connection, transaction, commit: (raised || commitsAfterFailedStatement) && !error.AbortsAsUnderXactAbort);
+    }
+
+    /// <summary>
+    /// <see cref="EndAtError"/> for the transaction a procedure nested inside
+    /// its caller's: its COMMIT takes the nesting level back, and its ROLLBACK
+    /// ends the caller's transaction whole when the procedure rolls back
+    /// (<c>sp_addrolemember</c>) — or, for the others, leaves it as a COMMIT
+    /// would.
+    /// </summary>
+    private static void EndNestedAtError(SimulatedDbConnection connection, SimulatedDbTransaction caller, SimulatedSqlException error, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement, bool rollsBackCaller)
+    {
+        var raised = !error.RaisedByProcedureStatement;
+        if (raised && raisedEnding != ProcedureTransactionEnding.CommitAfter)
+        {
+            if (raisedEnding == ProcedureTransactionEnding.RollbackFirst && rollsBackCaller)
+            {
+                error.FollowsTransactionEnd = true;
+                End(connection, caller, commit: false);
+            }
+            else
+            {
+                Unnest(connection, caller);
+            }
+            return;
+        }
+        error.TransactionEventMark = connection.TransactionEventsRecorded;
+        if (connection.OpenTryFrames != 0 || error.AbortsAsUnderXactAbort)
+            return;
+        if (!raised && !commitsAfterFailedStatement && rollsBackCaller)
+            End(connection, caller, commit: false);
+        else
+            Unnest(connection, caller);
+    }
+
+    /// <summary>The nested procedure transaction's COMMIT: <c>@@TRANCOUNT</c> falls back by one.</summary>
+    private static void Unnest(SimulatedDbConnection connection, SimulatedDbTransaction caller)
+    {
+        if (ReferenceEquals(connection.CurrentTransaction, caller) && caller.TranCount > 1)
+            caller.TranCount--;
     }
 
     private static void End(SimulatedDbConnection connection, SimulatedDbTransaction transaction, bool commit)

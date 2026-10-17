@@ -677,8 +677,8 @@ internal sealed partial class Selection
 
     private SimulatedSqlResultSet ExecuteRows(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse, OrderColumns = this.OrderColumns }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse, OrderColumns = this.OrderColumns };
 
     /// <summary>
     /// Runs this plan with the heap address of its first FROM source's row
@@ -730,7 +730,7 @@ internal sealed partial class Selection
             }
             return bytes;
         }))
-        { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
+        { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse, OrderColumns = this.OrderColumns };
     }
 
     /// <summary>
@@ -848,7 +848,9 @@ internal sealed partial class Selection
             // An ordered set operation inlines none of its branches' calls.
             if (combined.IsSetOperationResult)
                 context.Batch.InlinedCalls?.DropFrom(inlinedCallsBefore);
+            var orderColumns = scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, combined.ProjectionExpressions ?? [], combined.ColumnNames) : null;
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
+            combined.OrderColumns = orderColumns;
             bareProjectionStatement = false;
         }
 
@@ -4184,6 +4186,7 @@ internal sealed partial class Selection
             // (`select 1` → Int, not IntN). The resolver is never consulted
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
+            OrderColumns = orderBy.Count > 0 && scope.Position == QueryPosition.Statement ? OrderTokenColumns([], orderBy, expressions, columnNames) : null,
         }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread);
     }
 

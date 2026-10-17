@@ -1276,7 +1276,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // An informational message is an INFO token ahead of whatever the
             // next outcome writes, and carries no DONE of its own. A USE's
             // Msg 5701 follows the database ENVCHANGE and precedes the new
-            // database's collation, as real sends them.
+            // database's collation, as real sends them; a rename's sends no
+            // collation.
             if (outcome is SimulatedInfoOutcome info)
             {
                 if (info.Message.Number == 5701)
@@ -1287,8 +1288,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     this.databaseAtMessageStart = this.connection.Database;
                     var message = info.Message;
                     writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
-                    var collation = TdsCollationCodec.For(this.connection.CurrentDatabase.Collation);
-                    writer.WriteEnvChangeSqlCollation(collation.Info, collation.SortId);
+                    if (!message.RenamedDatabase)
+                    {
+                        var collation = TdsCollationCodec.For(this.connection.CurrentDatabase.Collation);
+                        writer.WriteEnvChangeSqlCollation(collation.Info, collation.SortId);
+                    }
                     closed = false;
                 }
                 // A SET LANGUAGE's Msg 5703 follows the language ENVCHANGE.
@@ -1386,7 +1390,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // hold a MARS session from their first.
                 if (query is SimulatedSqlResultSet { Stream.PendingWrite: not null })
                     writer.HoldSessionFromResultStart();
-                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse);
+                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse, query.OrderColumns);
                 long rows = 0;
                 using (var cursor = query.CreateClientCursor())
                 {

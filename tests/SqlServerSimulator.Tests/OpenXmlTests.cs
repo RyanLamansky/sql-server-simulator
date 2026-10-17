@@ -156,8 +156,7 @@ public sealed class OpenXmlTests
 
     /// <summary>
     /// A document that won't parse is Msg 6602 state 2, attributed to the
-    /// procedure. Real's detail sentence comes from MSXML and the simulator's
-    /// from .NET, so only the surrounding shape is pinned.
+    /// procedure, quoting MSXML's description of the failure.
     /// </summary>
     [TestMethod]
     public void MalformedDocument_RaisesMsg6602()
@@ -166,12 +165,68 @@ public sealed class OpenXmlTests
             "declare @h int; exec sp_xml_preparedocument @h output, '<r><a></r>'; select 1", 6602);
         AreEqual(2, exception.State);
         AreEqual("sp_xml_preparedocument", exception.Procedure);
-        StartsWith("The error description is '", exception.Message);
+        AreEqual("The error description is 'End tag 'r' does not match the start tag 'a'.'.", exception.Errors.Single(static error => error.Number == 6602).Message);
+    }
+
+    /// <summary>
+    /// Msg 6601 accompanies Msg 6602, ahead of it on the wire, naming MSXML's
+    /// error code, the line the parser stopped on and that line's text — line
+    /// 0 and no text for a failure found at the end of the document (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("<a>\n<b>\n</c></a>", "0xc00ce56d occurred on line number 3, near the XML text \"</c></a>\"", "End tag 'c' does not match the start tag 'b'.")]
+    [DataRow("<a><b>", "0xc00ce553 occurred on line number 0, near the XML text \"\"", "The following tags were not closed: a, b.")]
+    [DataRow("<?xml version='1.0'?><a>", "0xc00ce553 occurred on line number 0, near the XML text \"\"", "The following tags were not closed: a.")]
+    [DataRow("<a", "0xc00ce55e occurred on line number 1, near the XML text \"<a\"", "Element was not closed.")]
+    [DataRow("junk", "0xc00ce556 occurred on line number 1, near the XML text \"junk\"", "Invalid at the top level of the document.")]
+    [DataRow(" ", "0xc00ce558 occurred on line number 0, near the XML text \"\"", "XML document must have a top level element.")]
+    [DataRow("<a x=1/>", "0xc00ce502 occurred on line number 1, near the XML text \"<a x=1/>\"", "A string literal was expected, but no opening quote character was found.")]
+    [DataRow("<a\n b='1'\n c='1'\n b='2'/>", "0xc00ce554 occurred on line number 4, near the XML text \" b='2'/>\"", "Duplicate attribute.")]
+    [DataRow("<p:a/>", "0xc00ce01d occurred on line number 1, near the XML text \"<p:a/>\"", "Reference to undeclared namespace prefix: 'p'.")]
+    [DataRow("<a>&foo;</a>", "0xc00ce002 occurred on line number 1, near the XML text \"<a>&foo;</a>\"", "Reference to undefined entity 'foo'.")]
+    public void MalformedDocument_SendsMsg6601AheadOfMsg6602(string document, string notice, string description)
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors);
+        var sql = $"declare @h int; exec sp_xml_preparedocument @h output, N'{document.Replace("'", "''", StringComparison.Ordinal)}'";
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteNonQuery());
+        var all = messages.Concat(ex.Errors).ToList();
+        var info = all.Single(static e => e.Number == 6601);
+        AreEqual($"The XML parse error {notice}.", info.Message);
+        AreEqual((byte)0, info.Class);
+        AreEqual("sp_xml_preparedocument", info.Procedure);
+        AreEqual($"The error description is '{description}'.", all.Single(static e => e.Number == 6602).Message);
+    }
+
+    /// <summary>An empty document, like a NULL one, allocates a handle.</summary>
+    [TestMethod]
+    public void EmptyDocument_StillAllocatesHandle()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            declare @h int, @rc int;
+            exec @rc = sp_xml_preparedocument @h output, N'';
+            select @rc
+            """));
+
+    /// <summary>
+    /// An uncaught Msg 6602 or Msg 8179 returns 1 (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec @rc = sp_xml_preparedocument @h output, '<r>'")]
+    [DataRow("exec @rc = sp_xml_removedocument 77")]
+    public void FailedCall_Uncaught_ReturnsOne(string call)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table rc (v int)").ExecuteNonQuery();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand($"declare @h int, @rc int; {call}; insert rc values (@rc)").ExecuteNonQuery());
+        AreEqual(1, connection.CreateCommand("select v from rc").ExecuteScalar());
     }
 
     /// <summary>
     /// A caught Msg 6602 leaves both the handle and the return code unwritten
-    /// — probe-confirmed, and the reason the failure path doesn't stage a code.
+    /// — probe-confirmed.
     /// </summary>
     [TestMethod]
     public void MalformedDocument_LeavesHandleAndReturnCodeUnwritten()

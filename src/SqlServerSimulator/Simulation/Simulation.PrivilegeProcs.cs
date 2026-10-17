@@ -86,6 +86,8 @@ partial class Simulation
                 qualifierValue, SqlValue.FromSystemName(row.Schema), SqlValue.FromSystemName(row.Table), SqlValue.FromSystemName(row.Grantor),
                 SqlValue.FromSystemName(row.Grantee), SqlValue.FromVarchar(CatalogVarchar32, row.Privilege), SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
             });
+        foreach (var step in ProcedureSteps(batch, SpTablePrivilegesSteps(owner, qualifier, usePattern)))
+            yield return step;
         yield return new SimulatedSqlResultSet(SpTablePrivilegesSchema, SpTablePrivilegesColumnNames, rows);
     }
 
@@ -147,6 +149,8 @@ partial class Simulation
                 SqlValue.FromSystemName(row.Grantor), SqlValue.FromSystemName(row.Grantee), SqlValue.FromVarchar(CatalogVarchar32, row.Privilege),
                 SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
             });
+        foreach (var step in ProcedureSteps(batch, SpColumnPrivilegesSteps(owner, qualifier, column)))
+            yield return step;
         yield return new SimulatedSqlResultSet(SpColumnPrivilegesSchema, SpColumnPrivilegesColumnNames, rows);
     }
 

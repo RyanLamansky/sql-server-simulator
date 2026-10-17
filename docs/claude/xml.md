@@ -685,10 +685,11 @@ Probe-confirmed against SQL Server 2025:
 | reuse | never: releasing handle 3 still leaves the next allocation at 7 |
 | lifetime | survives batch boundaries and a `ROLLBACK` (the store isn't transactional) |
 | visibility | one session only — another session reading the same number is Msg 8179 |
-| NULL / omitted `@xmltext` | still allocates a handle, return code 0 |
+| NULL, empty or omitted `@xmltext` | still allocates a handle, return code 0 |
 
 A handle the session never held — including one it already released — is **Msg 8179** state 5, `Could not find prepared statement with handle 99.` (real's shared wording with the cursor-handle family), and a NULL handle reports handle `0`.
-A document that won't parse is **Msg 6602** state 2 attributed to `sp_xml_preparedocument`, message `The error description is '…'.`; real emits its second line (`The XML parse error 0x… occurred on line number 1, near the XML text "…"`) as a separate info message, so it isn't part of `ERROR_MESSAGE()`.
+A document that won't parse sends **Msg 6601**, an informational message naming MSXML's error code, the line it stopped on and that line's text whole (`The XML parse error 0xc00ce56d occurred on line number 3, near the XML text "</c></a>".`), then raises **Msg 6602** state 2, `The error description is '…'.` with MSXML's description, both attributed to `sp_xml_preparedocument` at line 1; an error found at the end of the document — an element never closed, no top-level element — reports line 0 and an empty text, and a `TRY` catches Msg 6602 with Msg 6601 already sent (probed 2026-10-17 against SQL Server 2025).
+The simulator parses with .NET's reader and translates each kind of failure it reports into MSXML's code and description (`PreparedXmlDocument.MsxmlError`, one arm per probed kind).
 
 The optional third argument is a wrapper element whose `xmlns` attributes declare the prefixes the patterns may use — they need not be the prefixes the document itself wrote, and a prefix bound to a URI reaches a document that declared it as the *default* namespace:
 
@@ -761,10 +762,10 @@ Node ids follow real's numbering, which is not plain document order (probe-confi
   Real can also hold an element's own text back past them: in `<root><c id="1" nm="a"><o n="10">x</o><o n="11"/></c><c id="2" nm="b &amp; c"><nm>inner</nm></c></root>` the first read numbers `x` 7 but `inner` 20, after the six attribute texts, where the simulator gives `inner` 14 (probed 2026-10-02 against SQL Server 2025).
 - **The XML declaration and the DTD are not edge-table nodes.**
   Real reports a declaration as a nodetype-7 node named `xml` holding its pseudo-attributes as attribute children (numbering from 1, ahead of the document element's descendants); the simulator drops both, so a document with a prolog numbers as if it had none.
-- **Msg 6602's and Msg 6603's detail sentences come from .NET's XML reader and XPath engine**, not MSXML, so the quoted complaint differs from real's while the message shape, number, severity, state and procedure attribution match.
-  Msg 6603's `-->x<--` marker also sits at the pattern's end rather than at the offending token, since .NET reports no position.
-- **An uncaught `sp_xml_preparedocument` / `sp_xml_removedocument` failure leaves the return code unwritten.**
-  Real reports Msg 6602 / 8179 without aborting the batch and still returns 1; the simulator raises, matching what real leaves behind when the error is *caught* (probe-confirmed: `@rc` and the handle both stay NULL inside `TRY` / `CATCH`).
+- **A malformation no probe classified keeps .NET's wording.**
+  Msg 6602 then quotes .NET's complaint and Msg 6601 names `0x80004005`; and the two parsers disagree on control characters — MSXML takes a raw `U+0001` in content and refuses `&#0;` (`0xc00ce51f`, `Invalid unicode character.`), where .NET does the reverse (probed 2026-10-17 against SQL Server 2025).
+- **Msg 6603's detail sentence comes from .NET's XPath engine**, not MSXML, so the quoted complaint differs from real's while the message shape, number, severity, state and procedure attribution match.
+  Its `-->x<--` marker also sits at the pattern's end rather than at the offending token, since .NET reports no position.
 - **XPath 1.0 is .NET's, not MSXML's.**
   The two agree across everything probed, but neither the function library nor the collation-sensitive string comparisons are byte-compared.
 

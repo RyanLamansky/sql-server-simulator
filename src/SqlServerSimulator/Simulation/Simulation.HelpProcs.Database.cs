@@ -231,13 +231,13 @@ partial class Simulation
         var database = batch.CurrentDatabase;
         if (fileName is null)
         {
-            yield return HelpFileResultSet(database);
+            yield return WithOrder(HelpFileResultSet(database), [2]);
             yield break;
         }
 
         var fileId = HelpFileIdOf(database, fileName)
             ?? throw SimulatedSqlException.HelpFileDoesNotExist(fileName);
-        yield return HelpFileResultSet(database, fileId);
+        yield return WithOrder(HelpFileResultSet(database, fileId), [0]);
     }
 
     // real's `file_id(@filename)`; null when no file carries the name.

@@ -385,7 +385,7 @@ partial class Simulation
         var values = BindSystemProcedureArguments("sp_addsrvrolemember", calledAs, arguments, ServerRoleMemberParameters);
         var login = RequireValidName(values[0]);
         var role = RequireValidName(values[1]);
-        foreach (var outcome in InProcedureTransaction(batch, Body()))
+        foreach (var outcome in InProcedureTransaction(batch, Body(), rollsBackCallerTransaction: true))
             yield return outcome;
 
         IEnumerable<SimulatedStatementOutcome> Body()

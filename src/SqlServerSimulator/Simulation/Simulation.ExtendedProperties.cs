@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -117,6 +118,61 @@ partial class Simulation
         if (unknownParameter is not null)
             throw SimulatedSqlException.NotAParameterForProcedure(unknownParameter, procLabel);
 
+        // Real's procedure runs a few statements, then makes the change in a
+        // transaction of its own inside a TRY, whose CATCH rolls back and
+        // raises the failure again (probed 2026-10-17 against SQL Server
+        // 2025); each statement closes in a DONEINPROC of its own.
+        foreach (var step in ProcedureSteps(batch, op == ExtendedPropertyOp.Drop ? "IIS" : "IIIS"))
+            yield return step;
+        yield return StatementDone(batch, StatementDoneKind.Execute);
+        yield return StatementDone(batch, StatementDoneKind.Condition);
+        var connection = batch.Connection;
+        var transaction = connection.CurrentTransaction;
+        if (transaction is null)
+            transaction = connection.StartTransaction(System.Data.IsolationLevel.Unspecified);
+        else
+            transaction.TranCount++;
+        yield return StatementDone(batch, StatementDoneKind.BeginTransaction);
+        yield return StatementDone(batch, StatementDoneKind.BeginTry);
+        SimulatedSqlException? failure = null;
+        try
+        {
+            ApplyExtendedProperty(batch, op, procLabel, name, value, level0Type, level0Name, level1Type, level1Name, level2Type, level2Name);
+        }
+        catch (SimulatedSqlException error)
+        {
+            failure = error;
+        }
+        if (failure is not null)
+        {
+            yield return StatementDone(batch, StatementDoneKind.BeginCatch);
+            yield return StatementDone(batch, StatementDoneKind.Condition);
+            if (ReferenceEquals(connection.CurrentTransaction, transaction))
+                transaction.EndRollback();
+            yield return StatementDone(batch, StatementDoneKind.Rollback);
+            // The statement raising it again closes as a caught RAISERROR
+            // when a TRY catches it.
+            if (connection.OpenTryFrames > 0)
+                yield return StatementDone(batch, StatementDoneKind.RaisError);
+            ExceptionDispatchInfo.Throw(failure);
+        }
+        yield return StatementDone(batch, StatementDoneKind.EndCatch);
+        if (ReferenceEquals(connection.CurrentTransaction, transaction))
+        {
+            if (transaction.TranCount > 1)
+                transaction.TranCount--;
+            else
+                transaction.EndCommit();
+        }
+        yield return StatementDone(batch, StatementDoneKind.Commit);
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+    }
+
+    /// <summary><see cref="InvokeSpExtendedProperty"/>'s change, made inside its transaction.</summary>
+    private static void ApplyExtendedProperty(
+        BatchContext batch, ExtendedPropertyOp op, string procLabel, string name, SqlValue value,
+        string? level0Type, string? level0Name, string? level1Type, string? level1Name, string? level2Type, string? level2Name)
+    {
         if (ResolveExtendedPropertyTarget(
             batch, procLabel,
             level0Type, level0Name,
@@ -124,7 +180,7 @@ partial class Simulation
             level2Type, level2Name,
             name) is not var (key, targetLabel))
         {
-            yield break;
+            return;
         }
 
         // The read-only refusal comes after the target resolves — an unknown
@@ -159,7 +215,6 @@ partial class Simulation
         });
         if (RaisesDdlEvents(batch.Parser))
             RecordExtendedPropertyEvent(batch, op, name, value, level0Type, level0Name, level1Type, level1Name, level2Type, level2Name);
-        yield break;
     }
 
     /// <summary>

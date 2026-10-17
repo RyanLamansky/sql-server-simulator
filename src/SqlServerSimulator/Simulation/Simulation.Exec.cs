@@ -43,7 +43,7 @@ partial class Simulation
         "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_addumpdevice" or "sp_cursor" or "sp_cursorclose" or "sp_cursorexecute" or "sp_cursorfetch" or "sp_cursoropen" or "sp_cursoroption" or "sp_cursorprepare" or "sp_cursorprepexec" or "sp_cursorunprepare" or "sp_dropdevice" or "sp_execute" or "sp_prepare" or "sp_prepexec" or "sp_procoption" or "sp_unprepare" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_server_diagnostics" or "sp_serveroption" or "sp_set_session_context"
-        or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_setapprole" or "sp_tableoption" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
@@ -464,7 +464,7 @@ partial class Simulation
             "sp_revokedbaccess" => this.InvokeSpRevokeDbAccess(batch, calledAs),
             "sp_rename" => this.InvokeSpRename(batch, CalledName(procName)),
             "sp_setapprole" => InvokeSpSetAppRole(batch),
-            "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
+            "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch, calledAs),
             "sp_server_diagnostics" => this.InvokeSpServerDiagnostics(batch, returnCodeVar),
             "sp_server_info" => InvokeSpServerInfo(batch),
             "sp_sequence_get_range" => InvokeSpSequenceGetRange(batch, calledAs, returnCodeVar),
@@ -541,6 +541,7 @@ partial class Simulation
         if (systemProc is not null)
         {
             RefuseProcedureFromFunctionBody(batch, systemProcName!);
+            systemProc = WithSystemResultOrder(systemProc, systemProcName!);
             if (OpensImplicitTransaction(systemProcName!))
                 batch.BeginImplicitTransaction();
             // A system procedure is a procedure scope like any other;
@@ -561,22 +562,65 @@ partial class Simulation
                 systemProc = ModuleDatabaseScope.Enumerate(batch.Connection, procedureDatabase, systemProc);
             }
             batch.SystemProcedureStatus = null;
+            var enteredTranCount = batch.Connection.CurrentTransaction?.TranCount ?? 0;
+            SimulatedSqlException? endedCallerTransaction = null;
             try
             {
                 var attributed = AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult);
-                foreach (var outcome in AsExtendedProcedure(attributed, systemProcName!, CalledName(procName)))
-                    yield return outcome;
+                using var produced = AsExtendedProcedure(attributed, systemProcName!, CalledName(procName)).GetEnumerator();
+                while (true)
+                {
+                    try
+                    {
+                        if (!produced.MoveNext())
+                            break;
+                    }
+                    catch (SimulatedSqlException error) when (error.RaisedBySystemProcedure && !error.AbortsAsUnderXactAbort && !batch.BatchAborted
+                        && batch.Connection.OpenTryFrames == 0 && enteredTranCount > 0 && batch.Connection.CurrentTransaction is null)
+                    {
+                        endedCallerTransaction = error;
+                        break;
+                    }
+                    yield return produced.Current;
+                }
             }
             finally
             {
                 if (!batch.IsSkipping && !LeavesCatalogUnchanged(systemProcName!))
                     this.CatalogRows.Invalidate();
             }
+
+            // An error that ended the procedure after it rolled the caller's
+            // transaction back closes inside the procedure, as its failed
+            // statement or its RAISERROR, and Msg 266 then ends the call.
+            if (endedCallerTransaction is not null)
+            {
+                procedureResult.Failed = true;
+                batch.SystemProcedureStatus = endedCallerTransaction.SystemProcedureReturnCode;
+                yield return new SimulatedErrorOutcome(endedCallerTransaction)
+                {
+                    DoneKind = endedCallerTransaction.RaisedByProcedureStatement ? StatementDoneKind.SecurityDdlFailed : StatementDoneKind.RaisError,
+                    InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null,
+                    TransactionEventMark = endedCallerTransaction.TransactionEventMark >= 0 ? endedCallerTransaction.TransactionEventMark : batch.Connection.TransactionEventsRecorded,
+                };
+            }
+
             // One whose statement failed returns 1 (probed 2026-10-06 against
             // SQL Server 2025: sp_addrole of a fixed role's name), and one
             // writing a code of its own sends that (sp_getapplock's -999).
+            var status = batch.SystemProcedureStatus ?? (procedureResult.Failed ? 1 : 0);
+
+            // One that rolled its caller's transaction back answers Msg 266
+            // after its status, as any procedure does (probed 2026-10-17
+            // against SQL Server 2025: sp_addrolemember's refusals).
+            if (!batch.IsSkipping && enteredTranCount > 0 && batch.Connection.CurrentTransaction is null && systemProcName is not ("sp_bindsession" or "sp_executesql" or "sp_execute" or "sp_prepexec"))
+            {
+                if (framesScope)
+                    yield return new SimulatedReturnStatus(status) { InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null };
+                throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, 0, CalledName(procName));
+            }
             if (framesScope)
-                yield return ScopeExit(batch, batch.SystemProcedureStatus ?? (procedureResult.Failed ? 1 : 0));
+                yield return ScopeExit(batch, status);
             // A system procedure that finishes answers 0 to `EXEC @rc = …`
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
             // extended-property procedures); the few with codes of their own

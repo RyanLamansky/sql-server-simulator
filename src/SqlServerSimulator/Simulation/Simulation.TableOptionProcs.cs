@@ -150,11 +150,17 @@ partial class Simulation
     /// <c>text in row</c> (ON is 256, OFF 0, or a size from 24 through 7000),
     /// <c>large value types out of row</c>, and <c>pintable</c> and
     /// <c>vardecimal storage format</c>, which are accepted and do nothing. The
-    /// checks run in real's order, each from its own line of the procedure: the
-    /// transaction, the option and its value, the table, then a <c>text in
-    /// row</c> table without a text column, turning it off included (probed
-    /// 2026-10-07 against SQL Server 2025). The catalog reports the options; the storage of a
-    /// <c>text</c> or LOB value doesn't follow them.
+    /// checks run in real's order, each from its own line of the procedure:
+    /// only <c>table lock on bulk load</c> refuses a transaction, ahead of the
+    /// option and its value, then the table; every option but <c>pintable</c>
+    /// then works in a transaction of the procedure's own, where a <c>text in
+    /// row</c> table without a text column — turning it off included — fails
+    /// the statement that sets it, ending the batch and rolling the
+    /// transaction back, and a <c>large value types out of row</c> table
+    /// without a large value column fails its statement and commits (probed
+    /// 2026-10-07 and 2026-10-17 against SQL Server 2025). Every refusal
+    /// returns its own number. The catalog reports the options; the storage of
+    /// a <c>text</c> or LOB value doesn't follow them.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpTableOption(BatchContext batch, string calledAs)
     {
@@ -164,10 +170,14 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments(procedure, calledAs, arguments, TableOptionParameters);
-        if (batch.Connection.CurrentTransaction is not null)
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureCannotRunInTransaction(procedure), 34);
+
+        // The procedure's first statement is an assignment.
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
 
         var option = values[1].IsNull ? "" : values[1].AsString.TrimEnd(' ').ToUpperInvariant();
+        if (option == "TABLE LOCK ON BULK LOAD" && batch.Connection.CurrentTransaction is not null)
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ProcedureCannotRunInTransaction(procedure), 34, 15002);
+
         var invalid = SimulatedSqlException.InvalidSystemProcedureOption(procedure);
         if (option is not ("TABLE LOCK ON BULK LOAD" or "TEXT IN ROW" or "LARGE VALUE TYPES OUT OF ROW" or "PINTABLE" or "VARDECIMAL STORAGE FORMAT"))
             throw AtSystemProcedureLine(calledAs, invalid, 50, 15600);
@@ -193,18 +203,37 @@ partial class Simulation
         var parts = values[0].IsNull ? null : SplitDottedName(written);
         var (table, _) = (parts is null ? null : FindUserTable(batch, parts))
             ?? throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NoUserTableMatching(written), 92, 15388);
-        if (option == "TEXT IN ROW" && !Array.Exists(table.Columns, static column => column.Type is TextSqlType or NTextSqlType or ImageSqlType))
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CannotSwitchToInRowText(table.Name), 102, 2599);
+        if (option == "PINTABLE")
+            yield break;
 
+        foreach (var outcome in InProcedureTransaction(batch, TableOptionSet(calledAs, table, option, toggle, textInRow), commitsAfterFailedStatement: true))
+            yield return outcome;
+    }
+
+    /// <summary><see cref="InvokeSpTableOption"/>'s work, once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> TableOptionSet(string calledAs, HeapTable table, string option, bool? toggle, int textInRow)
+    {
         switch (option)
         {
             case "LARGE VALUE TYPES OUT OF ROW":
+                if (!Array.Exists(table.Columns, static column => column.IsStored && (column.Type is XmlSqlType or JsonSqlType or SpatialSqlType || SqlType.IsMaxLength(column.Type))))
+                {
+                    var noLargeValue = ProcedureStatementError(SimulatedSqlException.NoLargeValueTypeColumns(), calledAs, 120);
+                    noLargeValue.SystemProcedureReturnCode = noLargeValue.Number;
+                    throw noLargeValue;
+                }
                 table.LargeValueTypesOutOfRow = toggle!.Value;
                 break;
             case "TABLE LOCK ON BULK LOAD":
                 table.LockOnBulkLoad = toggle!.Value;
                 break;
             case "TEXT IN ROW":
+                if (!Array.Exists(table.Columns, static column => column.Type is TextSqlType or NTextSqlType or ImageSqlType))
+                {
+                    var noText = ProcedureStatementError(SimulatedSqlException.CannotSwitchToInRowText(table.Name), calledAs, 102);
+                    noText.EndedCalledBatch = false;
+                    throw noText;
+                }
                 table.TextInRowLimit = textInRow;
                 break;
         }

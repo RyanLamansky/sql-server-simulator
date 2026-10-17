@@ -66,7 +66,18 @@ internal sealed class TdsSessionFixture : IDisposable
         var writer = new TdsTokenWriter(transport);
         request(writer);
         writer.FlushAsync(final: true, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        return stream.ToArray()[Tds.HeaderSize..];
+
+        // Every packet's header stripped, a response long enough to span
+        // several included.
+        var packets = stream.ToArray();
+        var tokens = new List<byte>();
+        for (var offset = 0; offset < packets.Length;)
+        {
+            var length = BinaryPrimitives.ReadUInt16BigEndian(packets.AsSpan(offset + 2));
+            tokens.AddRange(packets.AsSpan(offset + Tds.HeaderSize, length - Tds.HeaderSize));
+            offset += length;
+        }
+        return [.. tokens];
     }
 
     /// <summary>
@@ -123,13 +134,17 @@ internal sealed class TdsSessionFixture : IDisposable
     /// count — <c>DONE D4 MORE 0</c>, <c>DONEINPROC C1 MORE|COUNT 1</c>,
     /// <c>DONE FD ERROR|ATTN 0</c>,
     /// <c>DONEPROC E0 FINAL 0</c> — with <c>RET n</c> for a RETURNSTATUS,
-    /// <c>ENVn</c> for an ENVCHANGE, <c>ERR n</c> / <c>INFO n</c>, and
-    /// <c>ROWS</c> for a result set, which may carry only <c>int</c> columns.
+    /// <c>ENVn</c> for an ENVCHANGE, <c>ERR n</c> / <c>INFO n</c>,
+    /// <c>ROWS</c> for a result set — whose rows may carry fixed-width, integer,
+    /// decimal and non-MAX string or binary columns — and <c>ORDER 2,1</c> for
+    /// an ORDER token.
     /// </summary>
     public static List<string> Describe(byte[] response)
     {
         var tokens = new List<string>();
-        var fixedInt = new List<bool>();
+        // Per column, a fixed width (positive) or the width of the value's
+        // length prefix (negative).
+        var widths = new List<int>();
         var i = 0;
         while (i < response.Length)
         {
@@ -149,26 +164,78 @@ internal sealed class TdsSessionFixture : IDisposable
                 case Tds.TokenColInfo:
                     i += 2 + BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
                     break;
+                case Tds.TokenOrder:
+                    {
+                        var length = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                        var columns = new List<ushort>();
+                        for (var c = 0; c < length; c += 2)
+                            columns.Add(BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i + 2 + c)));
+                        tokens.Add("ORDER " + string.Join(',', columns));
+                        i += 2 + length;
+                        break;
+                    }
                 case Tds.TokenColMetadata:
                     {
                         var columns = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
                         i += 2;
-                        fixedInt.Clear();
+                        widths.Clear();
                         for (var c = 0; c < columns; c++)
                         {
                             i += 6; // user type, flags
-                            // INT4 (NOT NULL) is the type byte alone, INTN
-                            // carries its length.
-                            fixedInt.Add(response[i] == 0x38);
-                            i += response[i] == 0x26 ? 2 : 1;
+                            var type = response[i++];
+                            switch (type)
+                            {
+                                case 0x24: // GUID
+                                case 0x26: // INTN
+                                    widths.Add(-1);
+                                    i++;
+                                    break;
+                                case 0x30 or 0x32: // INT1, BIT
+                                    widths.Add(1);
+                                    break;
+                                case 0x34: // INT2
+                                    widths.Add(2);
+                                    break;
+                                case 0x38: // INT4
+                                    widths.Add(4);
+                                    break;
+                                case 0x68 or 0x6D or 0x6E or 0x6F: // BITN, FLTN, MONEYN, DATETIMN
+                                    widths.Add(-1);
+                                    i++;
+                                    break;
+                                case 0x6A or 0x6C: // DECIMALN, NUMERICN
+                                    widths.Add(-1);
+                                    i += 3;
+                                    break;
+                                case 0x7F: // INT8
+                                    widths.Add(8);
+                                    break;
+                                case 0xA5 or 0xAD: // the binary pair
+                                    widths.Add(-2);
+                                    i += 2;
+                                    break;
+                                case 0xA7 or 0xAF or 0xE7 or 0xEF: // the string families, with their collation
+                                    widths.Add(-2);
+                                    i += 7;
+                                    break;
+                                default:
+                                    throw new InvalidDataException($"Unexpected column type 0x{type:X2}.");
+                            }
                             i += 1 + (response[i] * 2); // name
                         }
                         tokens.Add("ROWS");
                         break;
                     }
                 case Tds.TokenRow:
-                    foreach (var isFixed in fixedInt)
-                        i += isFixed ? 4 : 1 + response[i];
+                    foreach (var width in widths)
+                    {
+                        i += width switch
+                        {
+                            > 0 => width,
+                            -1 => 1 + response[i],
+                            _ => BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i)) is var length && length == 0xFFFF ? 2 : 2 + length,
+                        };
+                    }
                     break;
                 case Tds.TokenReturnStatus:
                     tokens.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"RET {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i))}"));

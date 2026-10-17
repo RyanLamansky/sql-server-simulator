@@ -123,7 +123,9 @@ partial class Simulation
             return bySequence != 0 ? bySequence : collation.Compare(a[ownerSlot + 2].AsString, b[ownerSlot + 2].AsString);
         });
 
-        yield return new SimulatedSqlResultSet(SpFkeysSchema, SpFkeysColumnNames, rows) { ColumnNullability = SpFkeysNullability };
+        // Real orders by the foreign key's side when the primary key table
+        // is named, and by the primary key's when only the foreign one is.
+        yield return new SimulatedSqlResultSet(SpFkeysSchema, SpFkeysColumnNames, rows) { ColumnNullability = SpFkeysNullability, OrderColumns = byPrimaryKey ? [5, 6, 7, 9, 8] : [1, 2, 3, 9, 4] };
     }
 
     private static short SpFkeysRule(ReferentialAction action, bool byPrimaryKey) => action switch

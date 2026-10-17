@@ -955,13 +955,26 @@ partial class SimulatedSqlException
         new($"XML well-formedness check: Duplicate attribute '{attributeName}'. Rewrite your XQuery so it returns well-formed XML.", 6308, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
+    /// Msg 6601, the informational message <c>sp_xml_preparedocument</c> sends
+    /// ahead of its Msg 6602: MSXML's error code, the line it stopped on — 0
+    /// for an error found at the end of the document — and that line's text
+    /// whole (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError XmlParseErrorNoticeMessage(Parser.BatchContext batch, uint code, int line, string lineText)
+    {
+        var notice = batch.InfoMessage(@class: 0, state: 1, number: 6601, string.Create(CultureInfo.InvariantCulture, $"The XML parse error 0x{code:x8} occurred on line number {line}, near the XML text \"{lineText}\"."));
+        notice.Procedure = "sp_xml_preparedocument";
+        notice.LineNumber = 1;
+        return notice;
+    }
+
+    /// <summary>
     /// Msg 6602 state 2: <c>sp_xml_preparedocument</c> couldn't parse its
     /// document (or its <c>@xpath_namespaces</c> wrapper). Real attributes the
-    /// error to the procedure and quotes the XML parser's own complaint;
-    /// <paramref name="detail"/> is the reader's message, which the simulator
-    /// takes from .NET rather than MSXML. Probe-confirmed shape against SQL
-    /// Server 2025 — real emits the "The XML parse error 0x… occurred …" line
-    /// as a separate info message, so it is not part of this text.
+    /// error to the procedure and quotes MSXML's description of the failure,
+    /// <paramref name="detail"/>, after the Msg 6601 notice naming its code
+    /// (<see cref="XmlParseErrorNoticeMessage"/>). Probe-confirmed shape
+    /// against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException XmlDocumentParseFailed(string detail)
     {

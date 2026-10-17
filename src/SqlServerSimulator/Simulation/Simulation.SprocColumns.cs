@@ -80,6 +80,7 @@ partial class Simulation
             usePattern ? Matches(pattern, value) : written is null || collation.Equals(written, value);
 
         var rows = new List<SqlValue[]>();
+        var routineFound = false;
         if (qualifier is null || collation.Equals(qualifier, database.Name))
         {
             foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
@@ -99,6 +100,7 @@ partial class Simulation
                 {
                     if (!NameMatches(namePattern, name, routineName))
                         continue;
+                    routineFound = true;
                     var nameValue = SqlValue.FromString(CatalogNVarchar134, routineName + ";" + number.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     void Add(string columnName, short columnType, SqlValue[] row)
                     {
@@ -219,6 +221,8 @@ partial class Simulation
             }
         }
 
+        foreach (var step in ProcedureSteps(batch, SpSprocColumnsSteps(owner, qualifier, NamesOneObject(name, routineFound))))
+            yield return step;
         yield return version switch
         {
             SpColumnsVersion.Classic => new SimulatedSqlResultSet(SprocColumnsSchema, SprocColumnsColumnNames, rows),

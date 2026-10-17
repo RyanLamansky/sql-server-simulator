@@ -404,6 +404,75 @@ public sealed class TriggerTests
         AreEqual("An invalid parameter or option was specified for procedure 'sys.sp_settriggerorder'.", ex.Message);
     }
 
+    /// <summary>
+    /// Msg 15600 is the procedure's own class 15 refusal: it ends the call and
+    /// the caller's batch runs on — the order, the statement type's presence
+    /// and the namespace from line 56, an unknown DML statement type from line
+    /// 113 (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("@order='Middle', @stmttype='bogus'", 56)]
+    [DataRow("@order='First', @stmttype=NULL", 56)]
+    [DataRow("@order='First', @stmttype='INSERT', @namespace='bogus'", 56)]
+    [DataRow("@order='First', @stmttype='CREATE_TABLE'", 113)]
+    public void SetTriggerOrder_Msg15600_LeavesTheBatchRunning(string args, int line)
+    {
+        using var connection = SeededWithThreeTriggers();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand($"exec sp_settriggerorder @triggername='tr_a', {args}; insert fire_log(who) values ('after')").ExecuteNonQuery());
+        AreEqual(15600, ex.Number);
+        AreEqual(line, ex.LineNumber);
+        AreEqual(1, connection.CreateCommand("select count(*) from fire_log where who = 'after'").ExecuteScalar());
+    }
+
+    /// <summary>A NULL trigger name is Msg 15165 naming <c>(null)</c>.</summary>
+    [TestMethod]
+    public void SetTriggerOrder_NullName_RaisesMsg15165()
+    {
+        using var connection = SeededWithThreeTriggers();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand("exec sp_settriggerorder NULL, 'First', 'INSERT'").ExecuteNonQuery());
+        AreEqual("Could not find object '(null)' or you do not have permission.", ex.Message);
+    }
+
+    /// <summary>
+    /// A namespace sends the name to a database-scope trigger whatever the
+    /// statement type, and the order is set by a statement of the procedure,
+    /// whose refusal — an event group, an event the trigger doesn't fire on,
+    /// a DML action — ends the batch and rolls its transaction back (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'DDL_TABLE_EVENTS'", 15600)]
+    [DataRow("'DROP_TABLE'", 15125)]
+    [DataRow("'INSERT'", 15125)]
+    public void SetTriggerOrder_ScopedRefusal_EndsTheBatch(string statementType, int number)
+    {
+        using var connection = SeededWithThreeTriggers();
+        _ = connection.CreateCommand("create trigger tr_d on database for create_table as return").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() =>
+            connection.CreateCommand($"begin tran; exec sp_settriggerorder 'tr_d', 'First', {statementType}, 'DATABASE'; insert fire_log(who) values ('after')").ExecuteNonQuery());
+        AreEqual(number, ex.Number);
+        AreEqual(135, ex.LineNumber);
+        AreEqual(0, connection.CreateCommand("select @@trancount + (select count(*) from fire_log where who = 'after')").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Inside the caller's transaction the procedure's own nests, so a
+    /// refusal a TRY catches leaves <c>@@TRANCOUNT</c> one higher (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SetTriggerOrder_CaughtInsideACallersTransaction_LeavesItsLevelOpen()
+    {
+        using var connection = SeededWithThreeTriggers();
+        AreEqual(2, connection.CreateCommand("""
+            begin tran;
+            begin try exec sp_settriggerorder 'nope', 'First', 'INSERT' end try begin catch end catch;
+            select @@trancount
+            """).ExecuteScalar());
+    }
+
     /// <summary>Positional, schema-qualified and lowercase forms all bind.</summary>
     [TestMethod]
     public void SetTriggerOrder_AcceptsPositionalQualifiedAndLowercaseForms()

@@ -422,6 +422,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   A write runs locally against a stand-in of the remote table and replays on the remote inside one remote transaction; inside a local transaction it is real's out-of-the-box distributed-transaction refusal, never a commit, while a loopback's remote call runs in the caller's transaction → [`linked-servers.md`](docs/claude/linked-servers.md).
 - **TDS network endpoint** — `ListenLocalAsync` / `ListenNetworkAsync`, the SQLBatch / RPC / TM / BulkLoad families, API server cursors, attention, MARS, TDS 8.0, and the projection-nullability inference behind COLMETADATA's `fNullable`.
   Every statement closes with a DONE naming its kind, so a new statement kind needs its `StatementDoneKind` mapping; the engine sends the stand-in outcomes only on a TDS session's connection.
+  An ordered result carries the ORDER token's list (`SimulatedQueryResult.OrderColumns`), so a new path building a result from a `Selection` copies it as it copies `Browse`.
   Oracles are `*.Tests.SqlClient` + `*.Tests.Smo` → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
 ## Not modeled yet

@@ -144,10 +144,11 @@ partial class Simulation
         var database = batch.CurrentDatabase;
         if (objectName is null)
         {
-            yield return HelpObjectListResultSet(database);
+            yield return WithOrder(HelpObjectListResultSet(database), [2, 3, 1]);
             yield return HelpBlankLine(batch, procedureName, 35);
             yield return new SimulatedSqlResultSet(
-                SpHelpTypeSchema, SpHelpUserTypeColumnNames, HelpUserTypes(database));
+                SpHelpTypeSchema, SpHelpUserTypeColumnNames, HelpUserTypes(database))
+            { OrderColumns = [1] };
             yield break;
         }
 

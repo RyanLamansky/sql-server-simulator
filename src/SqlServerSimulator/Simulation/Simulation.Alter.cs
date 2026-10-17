@@ -247,7 +247,11 @@ partial class Simulation
         var messages = batch.Connection.PendingMessages;
         messages.Enqueue(SimulatedSqlException.DatabaseNameSetMessage(batch, newName));
         if (batch.CurrentDatabase == target)
-            messages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(batch, newName));
+        {
+            var changed = SimulatedSqlException.DatabaseContextChangedMessage(batch, newName);
+            changed.RenamedDatabase = true;
+            messages.Enqueue(changed);
+        }
     }
 
     /// <summary>

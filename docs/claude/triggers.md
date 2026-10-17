@@ -188,10 +188,12 @@ Rejections, all probe-confirmed against SQL Server 2025:
 | Slot already held by a *different* trigger | **Msg 15130** — `There already exists a 'First' trigger for 'INSERT'.`, echoing **both words as the caller wrote them** |
 | Trigger doesn't handle that action | **Msg 15125** — `Trigger 'tr_a' is not a trigger for 'update'.`, **lowercasing** the action |
 | INSTEAD OF trigger | **Msg 15133** — at most one exists per action, so ordering is meaningless |
-| Name doesn't resolve | **Msg 15165** — folds "missing" and "no permission" into one message |
-| `@order` / `@stmttype` outside the accepted set | **Msg 15600** |
+| Name doesn't resolve | **Msg 15165** — folds "missing" and "no permission" into one message, a NULL name reading `(null)` |
+| `@order` outside the accepted set, a NULL `@stmttype`, a `@namespace` other than `DATABASE` / `SERVER` | **Msg 15600** from line 56, ahead of the procedure's transaction |
+| `@stmttype` that is no DML action, without a `@namespace` | **Msg 15600** from line 113, inside it |
 
 Re-pinning the trigger that already holds a slot is not a conflict.
+Each is the procedure's own `RAISERROR`, so it ends the call and the caller's batch runs on, Msg 15600 at class 15 included; past its argument check the procedure works in a transaction of its own, committed after a refusal (probed 2026-10-17 against SQL Server 2025).
 
 ## Trigger-body result sets
 
@@ -461,7 +463,8 @@ A server-level event's document carries no `UserName`: a database event names it
 ### Ordering scoped triggers
 
 `sp_settriggerorder … @namespace = 'SERVER' | 'DATABASE'` pins a server- or database-scope trigger first or last among those one event fires, recorded on `DdlTrigger.FirstForEvents` / `LastForEvents` and read back as `is_first` / `is_last` in `sys.server_trigger_events` / `sys.trigger_events`.
-The name resolves in the named scope only (**Msg 15165**), the event must be a single event rather than a group (**Msg 15600**) and one the trigger fires on (**Msg 15125**), and a slot another trigger holds is **Msg 15130** — which, unlike a table trigger's, lowercases both words (probed 2026-09-28 against SQL Server 2025).
+The namespace decides the scope whatever the statement type, and the name resolves in that scope only (**Msg 15165**); the event must be a single event rather than a group (**Msg 15600**, class 16) and one the trigger fires on (**Msg 15125**, a DML action included), and a slot another trigger holds is **Msg 15130** — which, unlike a table trigger's, lowercases both words (probed 2026-09-28 against SQL Server 2025).
+Those three are a failed statement of the procedure's, raised from line 135: each ends the batch and rolls back the transaction, the caller's included (probed 2026-10-17 against SQL Server 2025).
 Unpinned triggers of one scope fire in creation order.
 
 ### Not modeled yet

@@ -639,6 +639,9 @@ internal sealed class Cursor(
             Browse = selection.CursorBrowse is { } browse
                 ? new BrowseInfo(browse.Tables, [.. keyed ? browse.Columns : browse.Columns.Select(static column => (column.Table, (byte)(column.Status & ~0x08), column.BaseName)), (0, 0x14, null)])
                 : new BrowseInfo([], [.. Parser.Selection.SetOperationBrowseInfo(width).Columns, (0, 0x14, null)]),
+            // The cursor's ORDER BY reaches every fetch as its ORDER token
+            // (probed 2026-10-17 against SQL Server 2025).
+            OrderColumns = selection.OrderColumns,
         };
     }
 

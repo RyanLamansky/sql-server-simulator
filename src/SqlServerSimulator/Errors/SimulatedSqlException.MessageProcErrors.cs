@@ -93,7 +93,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidSystemProcedureOption(string procedure) =>
         new($"An invalid parameter or option was specified for procedure 'sys.{procedure}'.", 15600, 15, 1);
 
-    /// <summary>Msg 15398: <c>sp_procoption 'startup'</c> on a procedure outside <c>master</c> or outside its <c>dbo</c> schema.</summary>
+    /// <summary>
+    /// Msg 15600 at class 16: the same refusal raised by a statement a
+    /// <c>sys.sp_*</c> procedure runs rather than by the procedure itself —
+    /// <c>sp_settriggerorder</c>'s event group or unknown event for a scoped
+    /// trigger — which ends the batch as under <c>XACT_ABORT</c> (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidSystemProcedureOptionAtStatement(string procedure) =>
+        new($"An invalid parameter or option was specified for procedure 'sys.{procedure}'.", 15600, 16, 1);
+
+    /// <summary>Msg 15398:<c>sp_procoption 'startup'</c> on a procedure outside <c>master</c> or outside its <c>dbo</c> schema.</summary>
     internal static SimulatedSqlException StartupOptionOutsideMasterDbo() =>
         new("Only objects in the master database owned by dbo can have the startup setting changed.", 15398, 11, 1);
 
@@ -163,9 +173,22 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException TextInRowValueInvalid() =>
         new("The third parameter for table option 'text in row' is invalid. It should be 'on', 'off', '0', '1' or a number from 24 through 7000.", 15112, 11, 1);
 
-    /// <summary>Msg 2599: <c>sp_tableoption 'text in row'</c> on a table with no <c>text</c>, <c>ntext</c> or <c>image</c> column.</summary>
+    /// <summary>
+    /// Msg 2599: <c>sp_tableoption 'text in row'</c> on a table with no
+    /// <c>text</c>, <c>ntext</c> or <c>image</c> column, which ends the batch
+    /// and dooms its transaction as under <c>XACT_ABORT</c> (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
     internal static SimulatedSqlException CannotSwitchToInRowText(string tableName) =>
-        new($"Cannot switch to in row text in table \"{tableName}\".", 2599, 16, 1);
+        new($"Cannot switch to in row text in table \"{tableName}\".", 2599, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 4992: <c>sp_tableoption 'large value types out of row'</c> on a
+    /// table with no stored large value column (probed 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoLargeValueTypeColumns() =>
+        new("Cannot use table option LARGE VALUE TYPES OUT OF ROW on a user table that does not have any of large value types varchar(max), nvarchar(max), varbinary(max), xml or large CLR type columns in it. This option can be applied to tables having large values computed column that are persisted.", 4992, 16, 1);
 
     /// <summary>Msg 14138: <c>sp_updatestats</c> given an option other than RESAMPLE, as its <c>char(8)</c> parameter holds it.</summary>
     internal static SimulatedSqlException InvalidUpdateStatsOption(string option) =>

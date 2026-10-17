@@ -23,6 +23,60 @@ internal sealed partial class Selection
             || BuiltInToken.Equals(source.ImmediateQualifier, term.ImmediateQualifier));
 
     /// <summary>
+    /// The ORDER token's column list for a statement's <c>ORDER BY</c>, as
+    /// real sends it (probed 2026-10-17 against SQL Server 2025): one entry per
+    /// term in written order — the select-list position an ordinal names, an
+    /// unqualified name names as an output column's name, or the first
+    /// projection whose expression has the term's shape (<c>b + 1</c> matches
+    /// <c>b + 1</c> but not <c>1 + b</c>, a column matches through any alias),
+    /// and 0 for a term the select list doesn't hold — leaving out a term
+    /// that is a constant, written or reached through its column's alias or
+    /// ordinal, so a list of constants sends no token at all. A variable,
+    /// <c>GETDATE()</c> or a subquery is no constant.
+    /// </summary>
+    internal static ushort[]? OrderTokenColumns(FromSource[] sources, List<OrderBySpec> orderBy, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    {
+        List<ushort>? columns = null;
+        foreach (var term in orderBy)
+        {
+            var column = OrderTermColumn(sources, term, projections, outputColumnNames);
+            var sorted = column == 0 ? term.Expr : column <= projections.Count ? projections[column - 1] : null;
+            if (sorted is Expressions.NamedExpression named)
+                sorted = named.Inner;
+            if (sorted is { IsWrittenConstant: true })
+                continue;
+            (columns ??= []).Add((ushort)column);
+        }
+        return columns?.ToArray();
+    }
+
+    /// <summary>The select-list position <see cref="OrderTokenColumns"/> reports for one term.</summary>
+    private static int OrderTermColumn(FromSource[] sources, OrderBySpec term, IReadOnlyList<Expression> projections, string[] outputColumnNames)
+    {
+        if (term.IsOrdinal)
+            return term.Ordinal >= 1 && term.Ordinal <= outputColumnNames.Length ? term.Ordinal : 0;
+        var written = term.Expr!;
+        while (written is Expressions.Parenthesized parenthesized)
+            written = parenthesized.Wrapped;
+        if (term.MayNameAlias && written is Expressions.Reference { ReferencedName: { ImmediateQualifier: null } name })
+        {
+            var named = Array.FindIndex(outputColumnNames, output => BuiltInToken.Equals(output, name.Leaf));
+            if (named >= 0)
+                return named + 1;
+        }
+        var key = GroupingKey(sources, written);
+        for (var i = 0; i < projections.Count; i++)
+        {
+            var projection = projections[i] is Expressions.NamedExpression alias ? alias.Inner : projections[i];
+            while (projection is Expressions.Parenthesized wrapped)
+                projection = wrapped.Wrapped;
+            if (key.Equals(GroupingKey(sources, projection)))
+                return i + 1;
+        }
+        return 0;
+    }
+
+    /// <summary>
     /// The column each projection reads, or null where it isn't a plain column
     /// reference. An alias wrapper is unwrapped first, so <c>c.name AS Col5</c>
     /// reports <c>c.name</c>.

@@ -43,7 +43,7 @@ internal static class TdsTypeCodec
     /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
     /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "", BrowseInfo? browse = null)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "", BrowseInfo? browse = null, ushort[]? orderColumns = null)
     {
         var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
@@ -82,6 +82,17 @@ internal static class TdsTypeCodec
                 writer.WriteByte(0);
                 writer.WriteByte(i >= firstHidden ? (byte)0x14 : (byte)0);
             }
+        }
+
+        // ORDER: the select-list position of each ORDER BY term, 0 for one
+        // the select list doesn't hold, after the browse tokens (captured from
+        // SQL Server 2025, 2026-10-17).
+        if (orderColumns is not null)
+        {
+            writer.WriteByte(Tds.TokenOrder);
+            writer.WriteUInt16(checked((ushort)(orderColumns.Length * 2)));
+            foreach (var column in orderColumns)
+                writer.WriteUInt16(column);
         }
 
         writer.LeaveComposite();

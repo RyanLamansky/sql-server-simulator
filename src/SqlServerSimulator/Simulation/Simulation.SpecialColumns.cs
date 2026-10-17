@@ -132,11 +132,21 @@ partial class Simulation
             }
         }
 
-        yield return resolved && collation.Equals(colType, "V")
+        // The object real looks up first: a table or a view of the owner.
+        var objectFound = name is not null && owner is not "" && database.Schemas.TryGetValue(owner ?? Database.DefaultSchemaName, out var named)
+            && ((named.HeapTables.TryGetValue(name, out var namedTable) && !namedTable.IsTableVariable) || named.Views.ContainsKey(name));
+        var rowVersions = collation.Equals(colType, "V");
+        foreach (var step in ProcedureSteps(batch, SpSpecialColumnsSteps(owner, qualifier, collation.Equals(scope, "C"), rowVersions, objectFound)))
+            yield return step;
+        yield return resolved && rowVersions
             ? new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows) { ColumnNullability = SpSpecialColumnsRowVersionNullability }
             : procedureName == "sp_special_columns_100" && !collation.Equals(colType, "V")
                 ? new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows) { ColumnNullability = SpSpecialColumns100Nullability }
                 : new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows);
+
+        // The row-version listing and a miss return after their result.
+        if (rowVersions || !objectFound)
+            yield return StatementDone(batch, StatementDoneKind.Return);
     }
 
     // Real's procedure raises these itself, so they carry its name and the

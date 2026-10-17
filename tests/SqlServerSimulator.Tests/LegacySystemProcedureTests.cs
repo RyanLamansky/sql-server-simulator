@@ -391,6 +391,107 @@ public sealed class LegacySystemProcedureTests
             AssertProcedureError(sim, $"exec sp_tableoption 'u', 'text in row', '{value}'", 2599, "sp_tableoption", 102, "Cannot switch to in row text in table \"u\".");
     }
 
+    /// <summary>
+    /// Only <c>table lock on bulk load</c> refuses a transaction, ahead of
+    /// its value; the other options run inside one, a missing large value
+    /// column failing its statement and returning Msg 4992's number (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TableOption_InATransaction_OnlyTheBulkLoadLockRefuses()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b text, m varchar(max)); create table n (a int)");
+        AreEqual(256, sim.ExecuteScalar("begin tran; exec sp_tableoption 't', 'text in row', 'on'; select text_in_row_limit from sys.tables where name = 't'; commit"));
+        IsTrue((bool)sim.ExecuteScalar("begin tran; exec sp_tableoption 't', 'large value types out of row', '1'; select large_value_types_out_of_row from sys.tables where name = 't'; commit")!);
+        var bulk = sim.AssertSqlError("begin tran; exec sp_tableoption 't', 'table lock on bulk load', 'bogus'", 15002);
+        AreEqual(34, bulk.LineNumber);
+        AreEqual(15600, sim.AssertSqlError("begin tran; exec sp_tableoption 't', 'insert row lock', '1'", 15600).Number);
+        AreEqual(4992, sim.ExecuteScalar("""
+            declare @rc int;
+            begin try exec @rc = sp_tableoption 'n', 'large value types out of row', '1' end try begin catch select @rc = error_number() end catch;
+            select @rc
+            """));
+    }
+
+    /// <summary>
+    /// Msg 2599 fails the statement that switches the option, ending the
+    /// batch and rolling back the transaction the procedure — or its caller
+    /// — opened (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TableOption_TextInRowWithoutText_EndsTheBatchAndRollsBack()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table u (a int); create table log (v int)");
+        using var connection = sim.CreateOpenConnection();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; insert log values (1); exec sp_tableoption 'u', 'text in row', 'on'; insert log values (2)").ExecuteNonQuery());
+        AreEqual(0, connection.CreateCommand("select @@trancount + (select count(*) from log)").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Under <c>IMPLICIT_TRANSACTIONS</c> the procedure opens none of the
+    /// caller's, so its own commits and leaves <c>@@TRANCOUNT</c> 0.
+    /// </summary>
+    [TestMethod]
+    public void TableOption_UnderImplicitTransactions_LeavesNoneOpen()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (a int);
+            set implicit_transactions on;
+            exec sp_tableoption 't', 'table lock on bulk load', '1';
+            select @@trancount
+            """));
+
+    /// <summary>
+    /// <c>sp_addrolemember</c> and <c>sp_addsrvrolemember</c> roll a caller's
+    /// transaction back when they fail inside it, whole, then close with Msg
+    /// 266; <c>sp_droprolemember</c> leaves it be (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_addrolemember 'zr', 'nosuch'", 15410)]
+    [DataRow("exec sp_addrolemember 'nosuch', 'zu'", 15151)]
+    [DataRow("exec sp_addsrvrolemember 'nosuch', 'sysadmin'", 15007)]
+    public void AddRoleMember_FailingInACallersTransaction_RollsItBack(string call, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user zu without login; create role zr; create table log (v int)");
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"begin tran; begin tran; insert log values (1); {call}; insert log values (2)").ExecuteNonQuery());
+        AreEqual(number, ex.Errors[0].Number);
+        var mismatch = ex.Errors[^1];
+        AreEqual(266, mismatch.Number);
+        AreEqual("Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT statements. Previous count = 2, current count = 0.", mismatch.Message);
+        // The statement after the call ran outside any transaction.
+        AreEqual("0 2", connection.CreateCommand("select concat(@@trancount, ' ', string_agg(v, ','))  from log").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void DropRoleMember_FailingInACallersTransaction_LeavesItOpen()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user zu without login");
+        using var connection = sim.CreateOpenConnection();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; exec sp_droprolemember 'nosuch', 'zu'").ExecuteNonQuery());
+        AreEqual(1, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A NULL <c>@objname</c> is an object no name finds, Msg 15165 naming
+    /// <c>(null)</c>, where only an omitted one is Msg 201; a TRY catching it
+    /// leaves the return code unwritten (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void Recompile_NullName_RaisesMsg15165()
+    {
+        var sim = new Simulation();
+        var ex = sim.AssertSqlError("exec sp_recompile NULL", 15165);
+        AreEqual("Could not find object '(null)' or you do not have permission.", ex.Errors[0].Message);
+        AreEqual(-1, sim.ExecuteScalar("declare @rc int; begin try exec @rc = sp_recompile @objname = NULL end try begin catch end catch; select isnull(@rc, -1)"));
+        _ = sim.AssertSqlError("exec sp_recompile default", 201);
+    }
+
     [TestMethod]
     public void AddType_Refusals()
     {

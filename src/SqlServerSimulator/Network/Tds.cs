@@ -49,6 +49,7 @@ internal static class Tds
     public const byte TokenColMetadata = 0x81;
     public const byte TokenTabName = 0xA4;
     public const byte TokenColInfo = 0xA5;
+    public const byte TokenOrder = 0xA9;
     public const byte TokenError = 0xAA;
     public const byte TokenInfo = 0xAB;
     public const byte TokenReturnValue = 0xAC;

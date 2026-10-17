@@ -30,38 +30,45 @@ partial class Simulation
     /// ordered per event by <see cref="SetScopedTriggerOrder"/>.
     /// </para>
     /// </remarks>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSetTriggerOrder(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSetTriggerOrder(BatchContext batch, string calledAs)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
         // The lines each refusal comes from in real's own procedure source
-        // (probed 2026-10-04 against SQL Server 2025) let the errors carry
-        // them, attributed to sp_settriggerorder.
+        // (probed 2026-10-04 and 2026-10-17 against SQL Server 2025) let the
+        // errors carry them. The order, the statement type's presence and the
+        // namespace are judged ahead of the procedure's transaction, as one
+        // check; a class 15 refusal ends the procedure and leaves the
+        // caller's batch running.
         var (triggerName, order, statementType, triggerNamespace) = ParseSetTriggerOrderArgs(arguments);
-        if (triggerName is null)
-            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission("(null)").AtSystemProcedureLine(142);
-        if (triggerName.Length == 0 || order is null || statementType is null)
-            throw SimulatedSqlException.InvalidTriggerOrderParameter();
+        var isFirst = order is not null && BuiltInToken.Equals(order, "First");
+        var isLast = order is not null && BuiltInToken.Equals(order, "Last");
+        var serverScope = triggerNamespace is not null && BuiltInToken.Equals(triggerNamespace, "SERVER");
+        var scoped = serverScope || (triggerNamespace is not null && BuiltInToken.Equals(triggerNamespace, "DATABASE"));
+        if (order is null || (!isFirst && !isLast && !BuiltInToken.Equals(order, "None")) || statementType is null || (triggerNamespace is not null && !scoped))
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InvalidTriggerOrderParameter(), 56);
 
-        // A database- or server-scope @namespace takes no schema prefix, a
-        // DML action's included.
-        if (triggerNamespace is not null && triggerName.Contains('.', StringComparison.Ordinal)
-            && (BuiltInToken.Equals(triggerNamespace, "DATABASE") || BuiltInToken.Equals(triggerNamespace, "SERVER")))
-        {
-            throw SimulatedSqlException.SchemaPrefixOnScopedTrigger().AtSystemProcedureLine(78);
-        }
+        // Past its argument checks the procedure works in a transaction of its
+        // own, committed after a refusal it raises.
+        foreach (var outcome in InProcedureTransaction(batch, Ordered(batch, calledAs, triggerName, order, statementType, scoped, serverScope, isFirst, isLast), ProcedureTransactionEnding.CommitAfter))
+            yield return outcome;
+    }
 
-        // @namespace selects a server- or database-scope trigger; a DML
-        // action keeps the table-trigger path whatever it says.
-        if (triggerNamespace is not null
-            && !BuiltInToken.Equals(statementType, "INSERT") && !BuiltInToken.Equals(statementType, "UPDATE") && !BuiltInToken.Equals(statementType, "DELETE"))
+    /// <summary><see cref="InvokeSpSetTriggerOrder"/>'s work once its transaction is open.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Ordered(BatchContext batch, string calledAs, string? triggerName, string order, string statementType, bool scoped, bool serverScope, bool isFirst, bool isLast)
+    {
+        // A database- or server-scope trigger takes no schema prefix.
+        if (scoped && triggerName is not null && triggerName.Contains('.', StringComparison.Ordinal))
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.SchemaPrefixOnScopedTrigger(), 78);
+
+        // @namespace selects a server- or database-scope trigger, a DML
+        // statement type's included; without one the statement type must be
+        // a DML action.
+        if (scoped)
         {
-            var serverScope = BuiltInToken.Equals(triggerNamespace, "SERVER");
-            if (!serverScope && !BuiltInToken.Equals(triggerNamespace, "DATABASE"))
-                throw SimulatedSqlException.InvalidTriggerOrderParameter();
-            SetScopedTriggerOrder(batch, triggerName, order, statementType, serverScope);
+            SetScopedTriggerOrder(batch, calledAs, triggerName, order, statementType, serverScope, isFirst, isLast);
             yield break;
         }
 
@@ -70,28 +77,14 @@ partial class Simulation
             var s when BuiltInToken.Equals(s, "INSERT") => TriggerActions.Insert,
             var s when BuiltInToken.Equals(s, "UPDATE") => TriggerActions.Update,
             var s when BuiltInToken.Equals(s, "DELETE") => TriggerActions.Delete,
-            _ => throw SimulatedSqlException.InvalidTriggerOrderParameter().AtSystemProcedureLine(113),
+            _ => throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InvalidTriggerOrderParameter(), 113),
         };
-        var isFirst = BuiltInToken.Equals(order, "First");
-        var isLast = BuiltInToken.Equals(order, "Last");
-        if (!isFirst && !isLast && !BuiltInToken.Equals(order, "None"))
-            throw SimulatedSqlException.InvalidTriggerOrderParameter().AtSystemProcedureLine(56);
 
-        // Past its argument checks the procedure works in a transaction of its
-        // own, committed after a refusal (probed 2026-10-17 against SQL Server
-        // 2025).
-        foreach (var outcome in InProcedureTransaction(batch, Ordered(batch, triggerName, order, statementType, action, isFirst, isLast), ProcedureTransactionEnding.CommitAfter))
-            yield return outcome;
-    }
-
-    /// <summary><see cref="InvokeSpSetTriggerOrder"/>'s work on a DML trigger, once its transaction is open.</summary>
-    private static IEnumerable<SimulatedStatementOutcome> Ordered(BatchContext batch, string triggerName, string order, string statementType, TriggerActions action, bool isFirst, bool isLast)
-    {
-        var trigger = ResolveTriggerForOrdering(batch, triggerName);
+        var trigger = ResolveTriggerForOrdering(batch, calledAs, triggerName);
         if (trigger.Timing == TriggerTiming.InsteadOf)
-            throw SimulatedSqlException.InsteadOfTriggerCannotBeOrdered(triggerName).AtSystemProcedureLine(153);
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.InsteadOfTriggerCannotBeOrdered(triggerName!), 153);
         if ((trigger.Actions & action) == 0)
-            throw SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName, statementType).AtSystemProcedureLine(151);
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName!, statementType), 151);
 
         // A slot is only contested when a *different* trigger on the same
         // parent already holds it; re-pinning the incumbent is a no-op move.
@@ -100,7 +93,7 @@ partial class Simulation
             if (ReferenceEquals(peer, trigger))
                 continue;
             if ((isFirst && (peer.FirstForActions & action) != 0) || (isLast && (peer.LastForActions & action) != 0))
-                throw SimulatedSqlException.TriggerOrderAlreadyExists(order, statementType).AtSystemProcedureLine(163);
+                throw AtSystemProcedureLine(calledAs, SimulatedSqlException.TriggerOrderAlreadyExists(order, statementType), 163);
         }
 
         // Setting one slot vacates the other: a trigger can't be both.
@@ -111,10 +104,13 @@ partial class Simulation
 
     /// <summary>
     /// Resolves <c>@triggername</c> (bare or schema-qualified) to a DML
-    /// trigger, raising <strong>Msg 15165</strong> when nothing matches.
+    /// trigger, raising <strong>Msg 15165</strong> when nothing matches, a NULL name
+    /// reported as <c>(null)</c>.
     /// </summary>
-    private static Trigger ResolveTriggerForOrdering(BatchContext batch, string triggerName)
+    private static Trigger ResolveTriggerForOrdering(BatchContext batch, string calledAs, string? triggerName)
     {
+        if (triggerName is null)
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CouldNotFindObjectOrNoPermission("(null)"), 142);
         var leaf = triggerName;
         var dot = triggerName.LastIndexOf('.');
         if (dot >= 0)
@@ -128,7 +124,7 @@ partial class Simulation
                     return candidate;
             }
         }
-        throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName).AtSystemProcedureLine(142);
+        throw AtSystemProcedureLine(calledAs, SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName), 142);
     }
 
     /// <summary>Every DML trigger attached to <paramref name="parent"/>.</summary>
