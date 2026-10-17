@@ -231,10 +231,16 @@ Real reads the installed value as a request begins, so a `RECONFIGURE` reaches t
 ### Not modeled yet
 
 - **Month names in other languages** — only the English names are recognized.
-- **`CONVERT(binary(3), '', 2)`** is an empty `0x` on real, unpadded although the type is fixed-length — in a variable too — while `'0x'` under style 1 and whitespace under style 2 pad (probed 2026-10-06 against SQL Server 2025).
-  The conversion yields the empty value here, which an expression over it reads (`… + 0x01` is `0x01`), but a projected column or a variable stores `binary(n)` at its fixed width and pads it.
-  Real hands SqlClient zero bytes for the projected column and a `CASE` over it, and a `binary(3)` variable it initializes keeps them, where one initialized from `0x` pads; a table column, a `#temp` one and `SELECT … INTO` pad it to three (probed 2026-10-17 against SQL Server 2025).
-  Building it means carrying a fixed-length value shorter than its type to every write path, each padding it again as the masked values' do (`DataMasking.ForStorage`).
+- **The empty `binary(n)` through an intermediate or result row** — `CONVERT(binary(3), '', 2)` is zero bytes long on real wherever no row stores it, below, and that includes a derived table, a CTE, a `UNION ALL` branch, `DISTINCT`, a sorted `TOP`, `MAX` over it and the column a client reads (SqlClient gets zero bytes).
+  Here those rows are encoded at the column's fixed width, so each of them reads three bytes (probed 2026-10-17 against SQL Server 2025).
+  An encoded fixed-width slot has no room for a length, so building it means a row layout that carries one for an intermediate row's `binary(n)` column.
+
+## The unpadded empty `binary(n)`
+
+`CONVERT(binary(n), '', 2)` is the one fixed-length value shorter than its type: zero bytes, where `'0x'` under style 1, whitespace under style 2, style 0 and an empty `varchar(max)` / `nvarchar(max)` source all pad (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
+It is a `binary(n)`-typed value with no bytes (`SqlValue.UnpaddedFixedLength`), so a coercion to the same `binary(n)` leaves it alone and it stays empty in a variable, a parameter, an output parameter, a `CAST` to its own type, `ISNULL` / `COALESCE` / `IIF` and a `sql_variant` (whose `MaxLength` is still `n`); a concatenation of it is as long as its other operand.
+A different `binary(m)` pads it to `m`, and a `varbinary` column stores zero bytes.
+Every row that stores it pads it — a table, a `#temp` table, a table variable, `SELECT … INTO` — and so does the column write itself, so an `OUTPUT inserted` or a trigger reads `n` bytes (`EnforceMaxLength`).
 
 ## A precision or scale past its type's range
 

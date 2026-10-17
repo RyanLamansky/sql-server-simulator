@@ -351,14 +351,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
-    /// A Dynamic Data Masking value of a string or binary type, carried at its
-    /// own length rather than padded to a fixed-length type's: real sends a
-    /// masked <c>char(6)</c> as <c>xxxx</c> and a masked <c>binary(4)</c> as
-    /// the single byte <c>0x30</c> (probed 2026-09-27 against SQL Server
-    /// 2025). A path that stores the value pads it again
-    /// (<c>DataMasking.ForStorage</c>).
+    /// A value of a fixed-length string or binary type carried at its own
+    /// length rather than padded to the type's. Two producers make one: Dynamic
+    /// Data Masking, as real sends a masked <c>char(6)</c> as <c>xxxx</c> and a
+    /// masked <c>binary(4)</c> as the single byte <c>0x30</c> (probed
+    /// 2026-09-27 against SQL Server 2025), and <c>CONVERT(binary(N), '', 2)</c>,
+    /// whose zero bytes survive every coercion to the same <c>binary(N)</c>.
+    /// A row that stores the value pads it: the fixed-length encoder writes
+    /// into a cleared slot, and a masked <c>char</c> pads through
+    /// <c>DataMasking.ForStorage</c>.
     /// </summary>
-    internal static SqlValue MaskedFixedLength(SqlType type, object value) => new(type, 0, value, isNull: false);
+    internal static SqlValue UnpaddedFixedLength(SqlType type, object value) => new(type, 0, value, isNull: false);
 
     /// <summary>
     /// Wraps the raw <see cref="long"/> counter of a <c>rowversion</c>

@@ -80,6 +80,12 @@ partial class Simulation
             if (source.Type is not (VarbinarySqlType or BinarySqlType))
                 return source;
             actual = source.AsBytes.Length;
+            // The unpadded empty binary(N) CONVERT's style 2 makes is padded
+            // by the column of its own type it is written to, so an OUTPUT
+            // or a trigger reads the stored width (probed 2026-10-17 against
+            // SQL Server 2025).
+            if (column.Type is BinarySqlType && source.Type == column.Type && actual < max)
+                return SqlValue.FromBinary(column.Type, source.AsBytes);
         }
         else if (column.Type is VarcharSqlType or CharSqlType or NVarcharSqlType or NCharSqlType or SystemNameSqlType)
         {

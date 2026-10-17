@@ -120,8 +120,12 @@ internal readonly partial struct SqlValue
         // image (the deprecated always-LOB type) shares the byte-bag shape,
         // so any binary source can land in an image target and image rebinds
         // back to varbinary/binary.
+        // A value already of the target binary(N) is left as it is, so the
+        // unpadded empty one CONVERT's style 2 makes stays empty through a
+        // variable, a parameter or a CAST to its own type (probed 2026-10-17
+        // against SQL Server 2025).
         if (this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType && target is BinarySqlType targetBinary)
-            return FromBinary(targetBinary, this.AsBytes);
+            return this.Type == targetBinary ? this : FromBinary(targetBinary, this.AsBytes);
         if (this.Type is VarbinarySqlType or BinarySqlType or ImageSqlType && target is VarbinarySqlType)
             return FromVarbinary((VarbinarySqlType)target, this.AsBytes);
         if (this.Type is VarbinarySqlType or BinarySqlType && target == SqlType.Image)

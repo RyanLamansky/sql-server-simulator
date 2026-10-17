@@ -61,6 +61,9 @@ internal sealed class DataLength(ParserContext context) : Expression
             XmlSqlType => XmlBinarySize.Measure(value.AsString),
             // json likewise reports real's binary form.
             JsonSqlType => JsonDocumentText.BinaryLength(value.AsString),
+            // A binary(N) is measured by its bytes, which CONVERT's style 2
+            // over '' leaves short of N.
+            BinarySqlType => value.AsBytes.Length,
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

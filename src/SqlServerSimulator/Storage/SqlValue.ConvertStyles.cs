@@ -531,12 +531,17 @@ internal readonly partial struct SqlValue
             _ => throw SimulatedSqlException.StyleNotSupported(style, sourceWord, "varbinary"),
         };
         // Style 2 over an empty string is real's one unpadded binary(N): it
-        // stays zero bytes long until a column stores it, where '0x' under
-        // style 1, whitespace under style 2 and style 0 all pad (probed
-        // 2026-10-06 against SQL Server 2025).
-        return target is BinarySqlType bin && !(style == 2 && s.Length == 0)
-            ? FromBinaryPadded(bin, bytes)
-            : target is VarbinarySqlType varbinaryTarget ? FromVarbinary(varbinaryTarget, bytes) : FromVarbinary(bytes);
+        // stays zero bytes long until a row stores it, where '0x' under
+        // style 1, whitespace under style 2, style 0 and an empty max-typed
+        // string all pad (probed 2026-10-06 and 2026-10-17 against SQL
+        // Server 2025).
+        if (target is BinarySqlType bin)
+        {
+            return style == 2 && s.Length == 0 && this.Type is not (VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel })
+                ? UnpaddedFixedLength(bin, Array.Empty<byte>())
+                : FromBinaryPadded(bin, bytes);
+        }
+        return target is VarbinarySqlType varbinaryTarget ? FromVarbinary(varbinaryTarget, bytes) : FromVarbinary(bytes);
     }
 
     /// <summary>

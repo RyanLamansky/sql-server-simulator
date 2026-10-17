@@ -41,8 +41,12 @@ internal sealed class Add : TwoSidedExpression
         var joined = new byte[leftBytes.Length + rightBytes.Length];
         leftBytes.CopyTo(joined, 0);
         rightBytes.CopyTo(joined, leftBytes.Length);
+        // Joined bytes short of a fixed result come from the unpadded empty
+        // binary(N) CONVERT's style 2 makes, and stay short: that operand
+        // plus a binary(1) is one byte long (probed 2026-10-17 against SQL
+        // Server 2025).
         return resultType is BinarySqlType binaryResult
-            ? SqlValue.FromBinary(binaryResult, joined)
+            ? joined.Length < binaryResult.length ? SqlValue.UnpaddedFixedLength(binaryResult, joined) : SqlValue.FromBinary(binaryResult, joined)
             : SqlValue.FromVarbinary((VarbinarySqlType)resultType, joined);
     }
 

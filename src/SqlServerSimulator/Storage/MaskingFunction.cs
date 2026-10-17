@@ -351,7 +351,7 @@ internal sealed class MaskingFunction
             case JsonSqlType:
                 return SqlValue.FromJson("{\"masked\":true}");
             case BinarySqlType or VarbinarySqlType or ImageSqlType:
-                return SqlValue.MaskedFixedLength(type, (byte[])[0x30]);
+                return SqlValue.UnpaddedFixedLength(type, (byte[])[0x30]);
             case RowVersionSqlType:
                 return SqlValue.FromRowVersion(0);
             case UniqueIdentifierSqlType:
@@ -400,7 +400,7 @@ internal sealed class MaskingFunction
         if (length > 0 && text.Length > length)
             text = text[..length];
         return type is CharSqlType or NCharSqlType
-            ? SqlValue.MaskedFixedLength(type, text)
+            ? SqlValue.UnpaddedFixedLength(type, text)
             : SqlValue.FromString(type, text);
     }
 

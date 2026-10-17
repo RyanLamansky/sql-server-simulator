@@ -885,6 +885,35 @@ public sealed class ConvertTests
     }
 
     /// <summary>
+    /// The empty value keeps its zero bytes through a variable, a parameter,
+    /// a CAST to its own type and the expressions over it, while a different
+    /// <c>binary(n)</c>, a max-typed source and every stored row pad it — the
+    /// stored row read back through <c>OUTPUT</c> too (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @a binary(3) = convert(binary(3), '', 2); select datalength(@a)", 0)]
+    [DataRow("declare @a binary(3); set @a = convert(binary(3), '', 2); declare @b binary(3) = @a; select datalength(@b)", 0)]
+    [DataRow("declare @a binary(3) = convert(binary(3), '', 2); exec sp_executesql N'select datalength(@p)', N'@p binary(3)', @a", 0)]
+    [DataRow("declare @o binary(3); exec sp_executesql N'set @o = convert(binary(3), '''', 2)', N'@o binary(3) output', @o output; select datalength(@o)", 0)]
+    [DataRow("select datalength(cast(convert(binary(3), '', 2) as binary(3)))", 0)]
+    [DataRow("select datalength(cast(convert(binary(3), '', 2) as binary(4)))", 4)]
+    [DataRow("declare @a binary(5) = convert(binary(3), '', 2); select datalength(@a)", 5)]
+    [DataRow("select datalength(convert(binary(3), N'', 2))", 0)]
+    [DataRow("select datalength(convert(binary(3), cast('' as varchar(max)), 2))", 3)]
+    [DataRow("select datalength(coalesce(convert(binary(3), '', 2), 0x01))", 0)]
+    [DataRow("select datalength(convert(binary(3), '', 2) + convert(binary(3), '', 2))", 0)]
+    [DataRow("select datalength(convert(binary(3), '', 2) + cast(0x01 as binary(1)))", 1)]
+    [DataRow("select sql_variant_property(convert(binary(3), '', 2), 'MaxLength')", 3)]
+    [DataRow("declare @t table (x binary(3)); insert @t values (convert(binary(3), '', 2)); select datalength(x) from @t", 3)]
+    [DataRow("create table #t (x binary(3), y varbinary(5)); insert #t output datalength(inserted.x) values (convert(binary(3), '', 2), null)", 3)]
+    [DataRow("create table #t (y varbinary(5)); insert #t values (convert(binary(3), '', 2)); select datalength(y) from #t", 0)]
+    [DataRow("create table #t (x binary(3)); insert #t values (0x01); update #t set x = convert(binary(3), '', 2) output datalength(inserted.x)", 3)]
+    [DataRow("select convert(binary(3), '', 2) x into #t; select datalength(x) from #t", 3)]
+    public void EmptyStringStyle2_IntoBinary_PadsOnlyWhereARowStoresIt(string batch, int expected)
+        => AreEqual(expected, ExecuteScalar(batch));
+
+    /// <summary>
     /// A <c>sql_variant</c> converts as the value it holds, so the style
     /// applies to that value (probed 2026-10-15 against SQL Server 2025).
     /// </summary>
