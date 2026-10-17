@@ -1116,6 +1116,17 @@ internal readonly partial struct SqlValue
             wrongWidthOnly = true;
             return false;
         }
+        // TryParseExact's own short-year pivot is 2049; the server's is the
+        // request's two digit year cutoff.
+        if (yearToken.Length <= 2 && TwoDigitYearCutoff.Current.Expand(parsed.Year % 100) is var year && year != parsed.Year)
+        {
+            if (year is < 1 or > 9999 || parsed.Day > DateTime.DaysInMonth(year, parsed.Month))
+            {
+                outOfRange = true;
+                return false;
+            }
+            parsed = new DateTime(year, parsed.Month, parsed.Day);
+        }
 
         if (TryAttachTime(parsed, timePart, allowsZoneSuffix, out result))
             return true;

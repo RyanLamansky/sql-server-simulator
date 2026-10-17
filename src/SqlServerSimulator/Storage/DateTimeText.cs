@@ -57,7 +57,8 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
     /// alone, and neither takes a lower-case <c>z</c> (probed 2026-09-25).
     /// Everything else is shared: numeric dates in the session's
     /// <c>SET DATEFORMAT</c> order (see <c>OrderNumericDate</c>), with a
-    /// one- or two-digit year pivoting at 50; year-first ISO forms; the six-
+    /// one- or two-digit year read through the <see cref="TwoDigitYearCutoff"/>;
+    /// year-first ISO forms; the six-
     /// and eight-digit unseparated forms; a bare four-digit year; English month
     /// names, three-letter or in full, around a day and year in the orders real
     /// takes; times of <c>h[:m[:s[.fraction | :milliseconds]]]</c> with an
@@ -776,9 +777,9 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
         return 0;
     }
 
-    /// <summary>A written year: one or two digits pivot at 50 (49 is 2049, 50 is 1950).</summary>
+    /// <summary>A written year: one or two digits read through the request's <see cref="TwoDigitYearCutoff"/>.</summary>
     private static int Year(int value, int digits) =>
-        digits > 2 ? value : value < 50 ? 2000 + value : 1900 + value;
+        digits > 2 ? value : TwoDigitYearCutoff.Current.Expand(value);
 
     private static DateTimeTextError Build(int year, int month, int day, out DateOnly date)
     {

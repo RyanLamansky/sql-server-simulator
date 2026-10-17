@@ -130,6 +130,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
             connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
             DateOrder.Current = connection.DateFormat;
             Language.Current = connection.Language;
+            TwoDigitYearCutoff.Current = connection.TwoDigitYearCutoffThisRequest;
             statement();
         }
         catch (StatementAbandonedException) when (this.abandoned)
@@ -183,6 +184,7 @@ internal sealed class StatementCoroutine(SimulatedDbConnection connection) : IDi
         // Another request may have run meanwhile, publishing its own.
         DateOrder.Current = connection.DateFormat;
         Language.Current = connection.Language;
+        TwoDigitYearCutoff.Current = connection.TwoDigitYearCutoffThisRequest;
         if (this.abandoned)
             throw new StatementAbandonedException();
     }

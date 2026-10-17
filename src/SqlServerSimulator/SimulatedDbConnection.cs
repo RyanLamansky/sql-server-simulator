@@ -2308,6 +2308,16 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NestedTriggersThisRequest = true;
 
     /// <summary>
+    /// The server's installed <c>two digit year cutoff</c> as the request
+    /// running on this session began, which each statement publishes as
+    /// <see cref="TwoDigitYearCutoff.Current"/>: like
+    /// <see cref="NestedTriggersThisRequest"/>, a <c>RECONFIGURE</c> reaches
+    /// a session's conversions from its next request, dynamic SQL the request
+    /// runs included (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal TwoDigitYearCutoff TwoDigitYearCutoffThisRequest = TwoDigitYearCutoff.Default;
+
+    /// <summary>
     /// Counts each time a statement on this session applies a row-level
     /// security predicate. A statement compares it with the count it started
     /// at, nested statements included, to tell whether its conversion errors

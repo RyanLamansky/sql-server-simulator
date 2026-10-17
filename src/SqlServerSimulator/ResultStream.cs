@@ -362,6 +362,7 @@ internal abstract class ResultStream
         // Another request's statements ran meanwhile, publishing their own.
         DateOrder.Current = connection.DateFormat;
         Language.Current = connection.Language;
+        TwoDigitYearCutoff.Current = connection.TwoDigitYearCutoffThisRequest;
     }
 
     /// <summary>The statement-scoped locks of the statement as it last suspended, which a definition change of the transaction meets (<see cref="HoldsStatementLock"/>).</summary>

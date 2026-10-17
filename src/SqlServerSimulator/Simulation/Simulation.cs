@@ -1833,7 +1833,10 @@ public sealed partial class Simulation
         command.Connection?.BeginExecutionScope(
             command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
         if (command.Connection is { } requestConnection)
+        {
             requestConnection.NestedTriggersThisRequest = this.NestedTriggersEnabled;
+            requestConnection.TwoDigitYearCutoffThisRequest = this.TwoDigitYearCutoffInUse;
+        }
 
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass

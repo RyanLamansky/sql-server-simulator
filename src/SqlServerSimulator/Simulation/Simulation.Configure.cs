@@ -74,6 +74,16 @@ partial class Simulation
     /// </summary>
     internal bool DisallowsResultsFromTriggers => this.ConfigurationInUse(DisallowResultsFromTriggersConfigurationId) != 0;
 
+    /// <summary><c>configuration_id</c> of <c>two digit year cutoff</c>.</summary>
+    private const int TwoDigitYearCutoffConfigurationId = 1127;
+
+    /// <summary>The installed <c>two digit year cutoff</c>, one instance per value.</summary>
+    /// <remarks>Read every request, so a server that never wrote it skips the stock-defaults scan.</remarks>
+    internal TwoDigitYearCutoff TwoDigitYearCutoffInUse =>
+        this.ServerConfiguration.TryGetValue(TwoDigitYearCutoffConfigurationId, out var setting)
+            ? TwoDigitYearCutoff.For(setting.InUse)
+            : TwoDigitYearCutoff.Default;
+
     /// <summary>
     /// The installed value of <c>clr strict security</c>, 1 unless
     /// <c>sp_configure</c> and <c>RECONFIGURE</c> turned it off: while on,
@@ -214,12 +224,14 @@ partial class Simulation
         var simulation = batch.Connection.Simulation;
         var configuration = simulation.ServerConfiguration;
         var adHocWas = simulation.AdHocDistributedQueriesEnabled;
+        var cutoffWas = simulation.ConfigurationInUse(TwoDigitYearCutoffConfigurationId);
         foreach (var entry in configuration)
             configuration[entry.Key] = (entry.Value.Configured, entry.Value.Configured);
         simulation.SettleDefaultTrace();
         // Compiled plans over an ad hoc rowset were checked against the option
-        // when they compiled, so a change retires them.
-        if (simulation.AdHocDistributedQueriesEnabled != adHocWas)
+        // when they compiled, and a plan's date literals were read through the
+        // cutoff, so a change to either retires them.
+        if (simulation.AdHocDistributedQueriesEnabled != adHocWas || simulation.ConfigurationInUse(TwoDigitYearCutoffConfigurationId) != cutoffWas)
             simulation.BumpSchemaVersion();
     }
 

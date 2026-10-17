@@ -246,6 +246,7 @@ partial class Simulation
             // for free.
             DateOrder.Current = batch.Connection.DateFormat;
             Language.Current = batch.Connection.Language;
+            TwoDigitYearCutoff.Current = batch.Connection.TwoDigitYearCutoffThisRequest;
             batch.CurrentStatement.BeginDispatch();
             batch.Parser.JoinHintSites = null;
             batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);

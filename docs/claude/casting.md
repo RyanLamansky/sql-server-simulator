@@ -223,6 +223,11 @@ The per-order rules, which differ between the legacy pair and the newer types, a
 The conversion runs inside `SqlValue.CoerceTo`, which has no session, so each statement publishes the session's order as `DateOrder.Current`, an `AsyncLocal` rather than a thread-static so it flows into the parallel grouped accumulation.
 The plan cache keys on the order too, as real's does.
 
+### `two digit year cutoff`
+
+A one- or two-digit year — in the default grammar, an unseparated six-digit date, a month-name form and the two-digit `CONVERT` styles alike — reads as the year ending in those digits among the hundred that end at the server's `two digit year cutoff` (2049 stock, so `49` is 2049 and `50` 1950; at 9999 `00` is 9900, at 1753 `54` is 1654 and out of `datetime`'s range), for all six types; `DATEFROMPARTS(31, 1, 1)` is year 31, and `PARSE` keeps .NET's own pivot (probed 2026-10-17 against SQL Server 2025).
+Real reads the installed value as a request begins, so a `RECONFIGURE` reaches the session's conversions from its next request — not its own later statements or the dynamic SQL they run — which `SimulatedDbConnection.TwoDigitYearCutoffThisRequest` snapshots and each statement publishes as `TwoDigitYearCutoff.Current`, the `DateOrder.Current` way; a `RECONFIGURE` that changes it retires cached plans, whose folded literals read the old one.
+
 ### Not modeled yet
 
 - **Month names in other languages** — only the English names are recognized.
