@@ -173,7 +173,21 @@ internal sealed class Permissions : Expression
             return SqlValue.Null(SqlType.Int32);
         var id = ScalarArguments.CoerceToInt(idValue);
         if (FindObject(database, id) is not { } target)
+        {
+            if (id < 0)
+                return this.SystemObjectBitmap(runtime, id, isDbo);
+            // A system base table shows to dbo alone, which holds every bit
+            // but SELECT ALL on it (probed 2026-10-17 against SQL Server 2025).
+            if (isDbo && this.columnArg is null)
+            {
+                foreach (var table in BuiltInResources.SystemTableObjects(database))
+                {
+                    if (table.ObjectId == id && !table.IsInternal)
+                        return SqlValue.FromInt32(0x74087000);
+                }
+            }
             return SqlValue.Null(SqlType.Int32);
+        }
         var server = ServerLoginRights.For(connection);
         if (!isDbo && !PermissionChecker.CanViewMetadata(database, principalId, target.ObjectId, target.SchemaId, server))
             return SqlValue.Null(SqlType.Int32);
@@ -189,6 +203,44 @@ internal sealed class Permissions : Expression
         if (ordinal == 0)
             return SqlValue.Null(SqlType.Int32);
         return SqlValue.FromInt32(isDbo ? ColumnMask : ColumnBitmap(database, PermissionChecker.BuildPrincipalClosure(database, principalId), target, ordinal, server));
+    }
+
+    /// <summary>
+    /// A shipped object's bitmap, which follows its kind alone, since every
+    /// principal holds <c>SELECT</c> or <c>EXECUTE</c> on it through
+    /// <c>public</c> and only <c>dbo</c> may grant (probed 2026-10-17 against
+    /// SQL Server 2025): a view or table function <c>SELECT</c>, a procedure
+    /// or scalar function <c>EXECUTE</c>, a column of a view <c>SELECT</c>;
+    /// NULL for an id no shipped object carries.
+    /// </summary>
+    private SqlValue SystemObjectBitmap(RuntimeContext runtime, int id, bool isDbo)
+    {
+        string? type = null;
+        foreach (var system in BuiltInResources.SystemObjects.Value)
+        {
+            if (system.ObjectId == id)
+            {
+                type = system.Type;
+                break;
+            }
+        }
+        if (this.columnArg is not null)
+        {
+            var columnValue = this.columnArg.Run(runtime);
+            if (columnValue.IsNull || !BuiltInResources.CatalogViewsById.Value.TryGetValue(id, out var entry))
+                return SqlValue.Null(SqlType.Int32);
+            var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
+            return Array.Exists(entry.View.Columns, column => runtime.Batch.CurrentDatabase.Collation.Equals(column.Name, columnName))
+                ? SqlValue.FromInt32(isDbo ? ColumnMask : 0x4001)
+                : SqlValue.Null(SqlType.Int32);
+        }
+        return type switch
+        {
+            "FN" or "FS" => SqlValue.FromInt32(isDbo ? 0x240024 : 0x20),
+            "IF" or "TF" or "V " => SqlValue.FromInt32(isDbo ? 0x74097001 : 0x4001001),
+            "P " or "PC" or "X " => SqlValue.FromInt32(isDbo ? 0x200020 : 0x20),
+            _ => SqlValue.Null(SqlType.Int32),
+        };
     }
 
     private static int StatementBitmap(Database database, int principalId, ServerLoginRights server)
@@ -451,6 +503,28 @@ internal sealed class HasPermsByName : Expression
                 };
                 if (!TryResolveKeyByName(database, securableClass, securableVal.CoerceTo(SqlType.NVarchar).AsString, out majorId))
                     return SqlValue.FromInt32(0);
+                break;
+            case "APPLICATION ROLE" or "ROLE" or "USER":
+                // Each class finds only its own kind of principal; another
+                // kind, or no principal, is 0 (probed 2026-10-17 against SQL
+                // Server 2025).
+                if (securableVal.IsNull)
+                    return SqlValue.Null(SqlType.Int32);
+                classDescription = classBuf switch
+                {
+                    "APPLICATION ROLE" => "APPLICATION ROLE",
+                    "ROLE" => "ROLE",
+                    _ => "USER",
+                };
+                securableClass = PermissionChecker.ClassDatabasePrincipal;
+                if (permission != "ANY" && !PermissionGraph.IsPermissionOf(classDescription, permission))
+                    return SqlValue.Null(SqlType.Int32);
+                if (!database.Principals.TryGetValue(securableVal.CoerceTo(SqlType.NVarchar).AsString, out var principal)
+                    || classDescription != principal.TypeCode switch { "A" => "APPLICATION ROLE", "R" => "ROLE", _ => "USER" })
+                {
+                    return SqlValue.FromInt32(0);
+                }
+                majorId = principal.PrincipalId;
                 break;
             default:
                 return SqlValue.Null(SqlType.Int32);

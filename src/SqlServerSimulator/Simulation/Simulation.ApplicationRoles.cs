@@ -128,10 +128,14 @@ partial class Simulation
         if (!TryGetApplicationRole(database, name, out var role))
             throw SimulatedSqlException.CannotDropApplicationRole(name);
         Ownership.RejectDropOfOwner(database, role.PrincipalId);
+        RejectDropOfGrantor(database, role.PrincipalId);
         RecordSecurityUndo(context, database);
         _ = database.Principals.TryRemove(name, out _);
         lock (database.RoleMembers)
             _ = database.RoleMembers.RemoveAll(m => m.RoleId == role.PrincipalId || m.MemberId == role.PrincipalId);
+        // The permissions it held go with it, as a user's do.
+        _ = database.Permissions.RemoveAll(p =>
+            p.GranteePrincipalId == role.PrincipalId || (p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == role.PrincipalId));
         RecordDdlEvent(context, "DROP_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE");
         return true;
     }

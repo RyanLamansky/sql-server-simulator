@@ -178,6 +178,42 @@ public sealed class PrincipalIdAndPermsTests
         AreEqual(1082605703, connection.CreateCommand("select permissions(object_id('dbo.t'), 'name')").ExecuteScalar());
     }
 
+    /// <summary>
+    /// A shipped object answers by its kind, every principal reading it
+    /// through <c>public</c> and only dbo granting; a system base table shows
+    /// to dbo alone (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Permissions_SystemObject_AnswersByKind()
+    {
+        const string Probe = """
+            select concat_ws('|', permissions(object_id('sys.objects')), permissions(object_id('sys.fn_helpcollations')), permissions(object_id('sys.sp_help')),
+                permissions(object_id('sys.xp_msver')), permissions(object_id('sys.fn_varbintohexstr')), permissions(object_id('sys.objects'), 'name'),
+                isnull(cast(permissions(object_id('sys.objects'), 'nosuch') as varchar(4)), 'NULL'), isnull(cast(permissions(object_id('sys.sysschobjs')) as varchar(12)), 'NULL'))
+            """;
+        var simulation = new Simulation();
+        AreEqual("1946775553|1946775553|2097184|2097184|2359332|1082605703|NULL|1946710016", simulation.ExecuteScalar(Probe));
+        _ = simulation.ExecuteNonQuery("create user u without login");
+        AreEqual("67112961|67112961|32|32|32|16385|NULL|NULL", simulation.ExecuteScalar("execute as user = 'u'; " + Probe + "; revert"));
+    }
+
+    /// <summary>
+    /// The objects real ships in its resource database show in
+    /// <c>sys.all_objects</c> to a principal holding nothing, while the
+    /// database's system base tables, internal tables and queues don't
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SystemObjects_ShowToEveryPrincipal()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create user u without login");
+        const string Count = "select count(*) from sys.all_objects where type not in ('S', 'IT', 'SQ')";
+        var all = simulation.ExecuteScalar(Count);
+        AreEqual(all, simulation.ExecuteScalar("execute as user = 'u'; " + Count + "; revert"));
+        AreEqual(0, simulation.ExecuteScalar("execute as user = 'u'; select count(*) from sys.all_objects where type in ('S', 'IT', 'SQ'); revert"));
+    }
+
     [TestMethod]
     public void Permissions_Column_UnknownColumn_ReturnsNull()
     {

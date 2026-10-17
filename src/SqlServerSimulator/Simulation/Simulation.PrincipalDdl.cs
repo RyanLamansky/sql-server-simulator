@@ -594,13 +594,7 @@ partial class Simulation
         // A principal that still owns anything can't be dropped; the refusals
         // name neither the principal nor what it owns (probe-confirmed).
         Ownership.RejectDropOfOwner(context.CurrentDatabase, removed.PrincipalId);
-        // Nor one that granted or denied a permission (probed 2026-10-04
-        // against SQL Server 2025).
-        if (context.CurrentDatabase.Permissions.Exists(p => p.GrantorPrincipalId == removed.PrincipalId && p.GranteePrincipalId != removed.PrincipalId
-            && !(p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == removed.PrincipalId)))
-        {
-            throw SimulatedSqlException.PrincipalHasGrantedPermissions();
-        }
+        RejectDropOfGrantor(context.CurrentDatabase, removed.PrincipalId);
         // Nor can one a module runs as — the OWNER sentinel names no principal.
         foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
@@ -620,6 +614,19 @@ partial class Simulation
             p.GranteePrincipalId == removed.PrincipalId || (p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == removed.PrincipalId));
         RecordDdlEvent(context, isRole ? "DROP_ROLE" : "DROP_USER", null, name, isRole ? "ROLE" : "SQL USER");
         return true;
+    }
+
+    /// <summary>
+    /// Refuses to drop a principal that granted or denied a permission, the
+    /// ones recorded on itself included: a user or application role owns
+    /// itself, so a grant on it records it as the grantor (probed 2026-10-04
+    /// and 2026-10-17 against SQL Server 2025: <c>GRANT ALTER ON USER::u3 TO
+    /// u</c> leaves <c>DROP USER u3</c> Msg 15284).
+    /// </summary>
+    internal static void RejectDropOfGrantor(Database database, int principalId)
+    {
+        if (database.Permissions.Exists(p => p.GrantorPrincipalId == principalId && p.GranteePrincipalId != principalId))
+            throw SimulatedSqlException.PrincipalHasGrantedPermissions();
     }
 
     /// <summary>

@@ -110,6 +110,14 @@ partial class Simulation
                 objectColumns = ParsePermissionColumnList(context);
             switch (explicitClass)
             {
+                case "APPLICATION ROLE":
+                    // An application role is a database principal too, and
+                    // this class finds only application roles (probed
+                    // 2026-10-17 against SQL Server 2025).
+                    permClass = PermissionChecker.ClassDatabasePrincipal;
+                    userSecurableName = securableName;
+                    principalClassWord = "application role";
+                    break;
                 case "ASSEMBLY":
                     permClass = PermissionChecker.ClassAssembly;
                     objectSecurableName = securableName;
@@ -344,13 +352,31 @@ partial class Simulation
             // USER::nosuch is Msg 102, not the missing user's Msg 15151).
             foreach (var (permName, _) in permissions)
             {
-                if (!IsAllPermission(permName) && !PermissionGraph.IsPermissionOf(principalClassWord == "role" ? "ROLE" : "USER", CanonicalPermissionName(permName)))
+                if (!IsAllPermission(permName) && !PermissionGraph.IsPermissionOf(principalClassWord switch { "application role" => "APPLICATION ROLE", "role" => "ROLE", _ => "USER" }, CanonicalPermissionName(permName)))
                     throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
             }
+            // A principal's name has one part; a qualified one names none, as
+            // written without its brackets (probed 2026-10-17 against SQL
+            // Server 2025: USER::[dbo].u is Msg 15151 naming 'dbo.u').
+            if (targetName.Count > 1)
+                throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.ToString());
             if (!database.Principals.TryGetValue(targetName.Leaf, out var targetPrincipal))
                 throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.Leaf);
-            if (targetPrincipal.TypeCode == "A" || targetPrincipal.IsFixedRole || principalClassWord == "role" != (targetPrincipal.TypeCode == "R"))
+            if (principalClassWord == "application role")
+            {
+                if (targetPrincipal.TypeCode != "A")
+                    throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.Leaf);
+            }
+            else if (principalClassWord == "role" && targetPrincipal.TypeCode != "R")
+            {
+                // ROLE:: naming a user or an application role misses the role
+                // by name (probed 2026-10-17 against SQL Server 2025).
+                throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.Leaf);
+            }
+            else if ((targetPrincipal.TypeCode is "A" or "R" && principalClassWord == "user") || targetPrincipal.IsFixedRole)
+            {
                 throw SimulatedSqlException.CannotFindObject(targetName.Leaf);
+            }
             permMajorId = targetPrincipal.PrincipalId;
             securablePrincipal = targetPrincipal;
         }

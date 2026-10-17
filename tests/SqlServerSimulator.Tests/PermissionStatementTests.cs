@@ -334,6 +334,59 @@ public sealed class PermissionStatementTests
     public void PrincipalSecurable_PermissionClassBeforeName(string sql, int number, string message)
         => new Simulation().AssertSqlError("create role r1; create user u1 without login; " + sql, number, message);
 
+    /// <summary>
+    /// <c>APPLICATION ROLE::</c> is a principal securable of its own: its
+    /// three permissions are class 4 rows on the role, granted as the role
+    /// itself, and the class finds application roles alone — as
+    /// <c>ROLE::</c> finds roles alone, a qualified name none (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ApplicationRoleSecurable_GrantsOnTheRole()
+    {
+        var sim = Granting();
+        _ = sim.ExecuteNonQuery("""
+            create application role ar with password = 'Pa55w0rd!!x';
+            grant view definition on application role::ar to u1;
+            grant alter on application role::ar to r1;
+            deny control on application role::ar to u2
+            """);
+        AreEqual("VIEW DEFINITION:GRANT:ar", Rows(sim, "u1"));
+        AreEqual("ALTER:GRANT:ar", Rows(sim, "r1"));
+        AreEqual("CONTROL:DENY:ar", Rows(sim, "u2"));
+        AreEqual((byte)4, sim.ExecuteScalar("select class from sys.database_permissions where major_id = user_id('ar') and grantee_principal_id = user_id('u1')"));
+        AreEqual("1|1|0|0|NULL", sim.ExecuteScalar("""
+            execute as user = 'u1';
+            select concat_ws('|', has_perms_by_name('ar', 'APPLICATION ROLE', 'VIEW DEFINITION'), has_perms_by_name('ar', 'APPLICATION ROLE', 'ALTER'),
+                has_perms_by_name('ar', 'APPLICATION ROLE', 'CONTROL'), has_perms_by_name('u2', 'APPLICATION ROLE', 'ALTER'),
+                isnull(cast(has_perms_by_name('ar', 'APPLICATION ROLE', 'SELECT') as varchar(4)), 'NULL'));
+            revert
+            """));
+        // Its grants on itself are recorded as granted by it, so it can't go.
+        _ = sim.AssertSqlError("drop application role ar", 15284);
+        _ = sim.ExecuteNonQuery("revoke view definition on application role::ar from u1; revoke alter on application role::ar from r1; revoke control on application role::ar from u2; drop application role ar");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_permissions where class = 4"));
+    }
+
+    [TestMethod]
+    [DataRow("grant alter on application role::u1 to r1", "Cannot find the application role 'u1', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on application role::r1 to u1", "Cannot find the application role 'r1', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on application role::dbo.ar to u1", "Cannot find the application role 'dbo.ar', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on role::ar to u1", "Cannot find the role 'ar', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on role::u1 to r1", "Cannot find the role 'u1', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on user::ar to u1", "Cannot find the object 'ar', because it does not exist or you do not have permission.")]
+    [DataRow("grant alter on user::[dbo].u1 to r1", "Cannot find the user 'dbo.u1', because it does not exist or you do not have permission.")]
+    public void PrincipalSecurable_FindsItsOwnKindByOneName(string sql, string message)
+        => Granting().AssertSqlError("create application role ar with password = 'Pa55w0rd!!x'; " + sql, 15151, message);
+
+    /// <summary>
+    /// A user owns itself, so a grant on it is granted by it and keeps it from
+    /// being dropped (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DroppingAUser_ThatAGrantOnItRecordsAsGrantor_Raises15284()
+        => Granting().AssertSqlError("grant alter on user::u2 to u1; drop user u2", 15284);
+
     [TestMethod]
     [Description("ALL is Msg 4623 on a securable other than the database or an object, once the securable resolves (probed 2026-10-07 against SQL Server 2025).")]
     [DataRow("grant all on schema::dbo to u1")]

@@ -334,7 +334,12 @@ internal static partial class BuiltInResources
         foreach (var row in rows)
         {
             var idCell = row[key.ObjectIdOrdinal];
-            if (!idCell.IsNull && visible.Contains(idCell.AsInt32))
+            // The objects real ships in its resource database — every system
+            // view, procedure and function, all under negative ids — show to
+            // every principal, where the system base tables, internal tables
+            // and shipped queues of the database itself (positive ids) don't
+            // (probed 2026-10-17 against SQL Server 2025).
+            if (!idCell.IsNull && (idCell.AsInt32 < 0 || visible.Contains(idCell.AsInt32)))
                 yield return definitions is null || definitions.Contains(idCell.AsInt32) ? row : WithoutDefinition(row, key);
         }
     }
