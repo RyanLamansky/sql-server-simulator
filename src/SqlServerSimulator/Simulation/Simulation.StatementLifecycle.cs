@@ -1064,6 +1064,28 @@ partial class Simulation
         }
 
         /// <summary>
+        /// Whether the recovery scan stopped a query or DML statement on a
+        /// keyword that statement can't hold at its own level — another query
+        /// or DML statement past the clauses the scan gives it, or a statement
+        /// of a kind no query holds — so the next statement certainly begins
+        /// there, as a separator would say. A deferral raised partway through
+        /// such a statement then lets the walk go on from it, as real's
+        /// compile does (probed 2026-10-17 against SQL Server 2025); a stop on
+        /// <c>WITH</c>, which a hint or a clause may lead, stays a guess.
+        /// </summary>
+        private readonly bool StoppedAtStatementStart(ParserContext parser) =>
+            this.StatementStart.Token is ReservedKeyword { Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete }
+            && parser.Token is ReservedKeyword
+            {
+                Keyword: Keyword.Alter or Keyword.Begin or Keyword.Break or Keyword.Close or Keyword.Commit or Keyword.Continue
+                    or Keyword.Create or Keyword.Dbcc or Keyword.Deallocate or Keyword.Declare or Keyword.Delete or Keyword.Deny
+                    or Keyword.Drop or Keyword.End or Keyword.Exec or Keyword.Execute or Keyword.Goto or Keyword.Grant or Keyword.If
+                    or Keyword.Insert or Keyword.Open or Keyword.Print or Keyword.RaisError or Keyword.Return or Keyword.Revoke
+                    or Keyword.Rollback or Keyword.Save or Keyword.Select or Keyword.Set or Keyword.Truncate or Keyword.Update
+                    or Keyword.Use or Keyword.While
+            };
+
+        /// <summary>
         /// Ends a <see cref="StatementEnding.Deferred"/> statement or one whose
         /// error a bind gathered: resumes at the next statement boundary and
         /// sends what the statement produced before it failed.
@@ -1089,7 +1111,7 @@ partial class Simulation
             var resumedCleanly = this.resumedAtStatementEnd || parser.Token is null or Operator { Character: ';' };
             if (this.Ending == StatementEnding.GatheredBindError)
                 batch.BindResumedCleanly = resumedCleanly;
-            else if (this.deferredMidStatement && !resumedCleanly)
+            else if (this.deferredMidStatement && !resumedCleanly && !this.StoppedAtStatementStart(parser))
                 batch.BatchAborted = true;
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;

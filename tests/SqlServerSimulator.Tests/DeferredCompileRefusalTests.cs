@@ -97,4 +97,29 @@ public sealed class DeferredCompileRefusalTests
         AreEqual(207, error.Number);
         AreEqual(5, error.LineNumber);
     }
+
+    /// <summary>
+    /// With no separator, the walk goes on past a deferral raised inside a
+    /// query or DML statement when the next keyword certainly starts another
+    /// statement — a query past the clauses the deferred one owns, or one no
+    /// query holds — so a later binder error still refuses the batch before
+    /// anything runs (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a from t where a = cast(1 as xml)\nprint 'x'\nselect nosuchcol from u")]
+    [DataRow("update t set a = 1 where a = cast(1 as xml)\nset @v = 1\nselect nosuchcol from u")]
+    [DataRow("delete t where a = cast(1 as xml)\nexec sp_who\nselect nosuchcol from u")]
+    [DataRow("select a from t where a = cast(1 as xml)\nselect 1 union select nosuchcol from u")]
+    [DataRow("insert u select a from t where a = cast(1 as xml)\nselect nosuchcol from u")]
+    [DataRow("select a from t where a = cast(1 as xml)\nif 1 = 1 select nosuchcol from u")]
+    [DataRow("select a from t where a = cast(1 as xml)\nbegin\nselect nosuchcol from u\nend")]
+    public void WalkResumesWhereTheNextStatementCertainlyStarts(string tail)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table u (b int)");
+        var (rows, error) = Run(simulation, "select 'first'\ndeclare @v int\ncreate table t (a int)\n" + tail);
+        IsEmpty(rows);
+        AreEqual(207, error.Number);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('t')"));
+    }
 }

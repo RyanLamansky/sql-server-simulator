@@ -275,11 +275,12 @@ A procedure's is the `EXEC`'s own error, as dynamic SQL's is: the caller goes on
 A trigger's ends the firing statement as its body's errors do under the body's `XACT_ABORT ON`, so the batch ends and the write rolls back unless a `TRY` around the statement catches it — as it also catches a missing object the body names when it runs.
 A body that doesn't compile keeps no plan, so the next call compiles and reports it again; one that compiles keeps its plan until an object it reads changes (see `ModulePlan`).
 
-A deferral raised partway through a statement — a binder error in one reading a table the batch creates, `CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml);`, whose Msg 529 real defers — leaves the walk going on from the statement's end when the recovery scan finds it for certain, at its `;` or the end of the text, so a later statement's binder error refuses the batch before anything runs, as on real (probed 2026-10-06 against SQL Server 2025).
+A deferral raised partway through a statement — a binder error in one reading a table the batch creates, `CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml);`, whose Msg 529 real defers — leaves the walk going on from the statement's end when the recovery scan finds it for certain, so a later statement's binder error refuses the batch before anything runs, as on real (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
+The scan is certain at the statement's `;` or the end of the text, and, for a `SELECT`, `INSERT`, `UPDATE` or `DELETE`, at a keyword that statement can't hold at its own level: another query or DML statement past the clauses the scan gives it, or a statement no query holds — `PRINT`, `DECLARE`, `SET`, `IF`, `BEGIN`, `EXEC` and the like (`StoppedAtStatementStart`).
 
 ### Not modeled yet
 
-- **The walk still stops at a deferral raised mid-statement that no `;` ends**, since the recovery scan can only guess where that statement stops, and resuming from a guess — tried — reports errors against the tail of the deferred statement (`ALTER TABLE … ADD … WITH VALUES`).
+- **The walk still stops at a deferral raised mid-statement whose end the recovery scan only guesses**: in another kind of statement, or at a `WITH`, which a hint or a clause may lead, since resuming from a guess — tried — reports errors against the tail of the deferred statement (`ALTER TABLE … ADD … WITH VALUES`).
   Real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run (probed 2026-10-01 and 2026-10-06 against SQL Server 2025).
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
 
