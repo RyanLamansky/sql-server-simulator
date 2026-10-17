@@ -1175,6 +1175,7 @@ The base-column half of the addressing is why `Selection` records `AutoColumnOrd
 
 Numeric/date formatting matches FOR JSON (scientific `float`/`real`, the all-zero-fraction drop, a `datetime`'s rounded milliseconds) **except** `bit` → `1`/`0` (not `true`/`false`), `uniqueidentifier` uppercases, `binary` / `varbinary` / `image` base64-encodes (always in PATH, under [`BINARY BASE64`](#binary-base64-and-autos-dbobject-references) in RAW / AUTO) as `rowversion` always does, and values are XML-escaped rather than JSON-escaped.
 A `json` value goes in as its text with nothing escaped, quotes and `<` included, and a spatial or CLR user-defined column is **Msg 6865** while binding (probed 2026-10-02 against SQL Server 2025).
+A `datetimeoffset` at a zero offset ends in `Z`, as FOR JSON's does (probed 2026-10-17 against SQL Server 2025).
 Escaping is position-dependent:
 
 | position | escaped |
@@ -1183,19 +1184,22 @@ Escaping is position-dependent:
 | attribute value | the above plus `"`→`&quot;`, tab→`&#x09;`, LF→`&#x0A;` (`'` stays literal) |
 | either | any other control character, an unpaired surrogate and U+FFFE / U+FFFF as a character reference (`&#x01;`, `&#xD83D;`) |
 
+### `XMLSCHEMA` and `XMLDATA`
+
+`ForXmlInlineSchema` (`Parser/ForXmlInlineSchema.cs`) compiles the inline schema RAW and AUTO send ahead of their rows, probed 2026-10-06 and 2026-10-17 against SQL Server 2025 across every column type, the collations and both modes, element- and attribute-centric.
+
+- **`XMLSCHEMA`** writes an `xsd:schema` whose `targetNamespace` is `urn:schemas-microsoft-com:sql:SqlRowSet<n>` — `n` counting the session's executions of an `XMLSCHEMA` that names no URI (`SimulatedDbConnection.XmlSchemaRowSetNumber`), so `XMLSCHEMA('urn:a')` takes `urn:a` and leaves the count alone — importing the `sqltypes` namespace, and puts each top-level row element in it with `xmlns`, a `ROOT` wrapper excepted.
+  A column maps to `sqltypes:<type>`; a string type restricts `sqltypes:varchar` and the like with its collation's `localeId`, `sqlCompareOptions` (`IgnoreCase IgnoreNonSpace IgnoreKanaType IgnoreWidth` as they apply, `None`, `BinarySort`, `BinarySort2`), `sqlCollationVersion`, a SQL collation's `sqlSortId` and `supplementaryCharacters`, plus `maxLength` unless `max`; `decimal` / `numeric` take `totalDigits` / `fractionDigits`, a bounded binary type `maxLength`, `time`, `datetime2` and `datetimeoffset` real's `pattern` and `maxInclusive` (its `12:59:59` hour included), `hierarchyid` the `nvarchar(4000)` it writes, and `xml` an element of `sqltypes:xml`.
+  A non-nullable attribute is `use="required"`, a nullable element `minOccurs="0"`, `ELEMENTS XSINIL` makes each `nillable="1"`, and AUTO declares each level after its parent, which names it by `<xsd:element ref="schema:c" minOccurs="0" maxOccurs="unbounded"/>` under an extra `xmlns:schema` prefix.
+  A `sql_variant` element is `xsd:anyType` with `sqltypes:sqlDbType="Variant"`, its row declaring `xsi` and `sqltypes` and each value naming its type (`xsi:type="sqltypes:int"`); as an attribute it is **Msg 6847**.
+- **`XMLDATA`** writes an XDR `Schema` named `Schema<n>` by a count of its own, with `ElementType` / `AttributeType` declarations carrying `dt:type` (`i4`, `string`, `number`, `fixed.14.4`, `bin.base64` …), a child level referenced first, and puts the rows in `x-schema:#Schema<n>`.
+  A type XDR has no mapping for — `date`, `time`, `datetime2`, `datetimeoffset`, a `max` type, `xml` — is **Msg 6848**, which still uses up a number, and a row tag name or `ROOT` beside it **Msg 6860**.
+- Either directive sends its schema over an empty rowset, and under `TYPE` returns it in the one `xml` value, its namespace declarations first; an embedded `xml` value's top-level elements undeclare the rows' namespace (`<q xmlns=""/>`).
+  Both on PATH are **Msg 6855**, `XMLSCHEMA('')` **Msg 6862**, the two together Msg 102.
+
 ### Not modeled yet
 
-The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625).
-`XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
-An `idrefs` / `nmtokens` column is declared `dt:type="idrefs"` / `"nmtokens"` there, its values merged as in the text form.
-
-What real sends for the two, probed 2026-10-06 against SQL Server 2025, for whoever builds them:
-
-- **`XMLSCHEMA`** prefixes the rows with an inline `xsd:schema` whose `targetNamespace` is `urn:schemas-microsoft-com:sql:SqlRowSet<n>` — `n` counting the session's `XMLSCHEMA` queries that name no URI, so `XMLSCHEMA('urn:a')` takes `urn:a` and leaves the count alone — importing the `sqltypes` namespace, and puts each row element in it with `xmlns`.
-  A column maps to `sqltypes:<type>` (`int`, `real`, `date`, `image` …); a string column restricts `sqltypes:varchar` and the like with its collation's `sqltypes:localeId`, `sqltypes:sqlCompareOptions` and, under a SQL collation, `sqltypes:sqlSortId` (`1033`, `IgnoreCase IgnoreKanaType IgnoreWidth`, `52` for `SQL_Latin1_General_CP1_CI_AS`), plus `maxLength` unless `max`; `decimal` takes `totalDigits` / `fractionDigits`, a binary type `maxLength`, `xml` an element of `sqltypes:xml`.
-  A non-nullable attribute is `use="required"`, an element-centric one has no `minOccurs="0"`, `ELEMENTS XSINIL` makes each `nillable="1"`, and AUTO nests a child level as `<xsd:element ref="schema:c" minOccurs="0" maxOccurs="unbounded"/>` declared after its parent, under an extra `xmlns:schema` prefix.
-  An empty rowset still sends the schema; `TYPE` returns it as one `xml` value; PATH is Msg 6855, and a `sql_variant` attribute Msg 6847.
-- **`XMLDATA`** prefixes an XDR `Schema` named `Schema<n>` by its own count, with `ElementType` / `AttributeType` declarations carrying `dt:type` (`i4`, `string` …), and puts the rows in `x-schema:#Schema<n>`; a type XDR has no mapping for (`datetime2`, `date`) is Msg 6848, and a row tag name or `ROOT` Msg 6860.
+- **`FOR XML EXPLICIT, XMLDATA`** — real writes an XDR for the universal table; it raises `NotSupportedException` here.
 
 ## Leading byte-order mark
 

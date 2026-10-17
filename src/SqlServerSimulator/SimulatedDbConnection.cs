@@ -2341,6 +2341,17 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly Parser.Expressions.RandGenerator Rand = new();
 
     /// <summary>
+    /// The last <c>SqlRowSet</c> number a <c>FOR XML … XMLSCHEMA</c> without a
+    /// target URI drew: each execution draws the next, so a session's inline
+    /// schemas are <c>urn:schemas-microsoft-com:sql:SqlRowSet1</c>, <c>2</c> …
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal int XmlSchemaRowSetNumber;
+
+    /// <summary>The last <c>Schema</c> number a <c>FOR XML … XMLDATA</c> drew; see <see cref="XmlSchemaRowSetNumber"/>.</summary>
+    internal int XmlDataSchemaNumber;
+
+    /// <summary>
     /// Current nesting depth of in-flight function / procedure / trigger /
     /// view bodies on this connection, incremented as each body is entered
     /// and decremented as it exits. Real SQL Server caps this combined depth

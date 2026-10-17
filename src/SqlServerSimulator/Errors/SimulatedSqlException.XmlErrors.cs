@@ -321,6 +321,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ForXmlExplicitInlineSchemaNotImplemented() =>
         new("'Inline XSD for FOR XML EXPLICIT' is not yet implemented.", 3625, 16, 17);
 
+    /// <summary>Msg 6855: <c>XMLSCHEMA</c> or <c>XMLDATA</c> on <c>FOR XML PATH</c> (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ForXmlPathInlineSchema() =>
+        new("Inline schema is not supported with FOR XML PATH.", 6855, 16, 1);
+
+    /// <summary>Msg 6860: <c>XMLDATA</c> beside <c>ROOT</c> or a <c>RAW('name')</c> row tag (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ForXmlXmlDataWithRootOrRowTag() =>
+        new("FOR XML directive XMLDATA is not allowed with ROOT directive or row tag name specified.", 6860, 16, 1);
+
+    /// <summary>Msg 6862: <c>XMLSCHEMA('')</c> (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ForXmlEmptyInlineSchemaUri() =>
+        new("Empty FOR XML target inline schema URI is not allowed.", 6862, 16, 1);
+
+    /// <summary>Msg 6847: a <c>sql_variant</c> column in attribute-centric <c>FOR XML … XMLSCHEMA</c> (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ForXmlVariantAttributeWithSchema(string columnName) =>
+        new($"The column '{columnName}' is of type sql_variant, which is not supported in attribute-centric FOR XML, with XML Schema.", 6847, 16, 1);
+
+    /// <summary>
+    /// Msg 6848: a column whose type XDR has no mapping for — the date-time
+    /// types newer than <c>datetime</c>, the <c>max</c> types and <c>xml</c> —
+    /// under <c>FOR XML … XMLDATA</c> (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForXmlXmlDataUnmappedType(string columnName) =>
+        new($"XMLDATA does not support the mapping of the type of column '{columnName}' to an XDR type. Please use XMLSCHEMA instead for AUTO and RAW mode.", 6848, 16, 1);
+
     /// <summary>
     /// Msg 6801: a <c>FOR XML EXPLICIT</c> projection is shorter than the
     /// universal table's minimum — <c>Tag</c>, <c>Parent</c> and one data

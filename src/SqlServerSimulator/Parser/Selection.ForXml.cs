@@ -51,6 +51,7 @@ partial class Selection
 
         ForXmlMode mode;
         string? rowElement;
+        var rowTagWritten = false;
         Span<char> upper = stackalloc char[modeName.Value.Length];
         _ = modeName.Value.AsSpan().ToUpperInvariant(upper);
         switch (upper)
@@ -69,11 +70,13 @@ partial class Selection
                 break;
             case "PATH":
                 mode = ForXmlMode.Path;
-                rowElement = ParseOptionalForXmlElementName(context, "row");
+                rowElement = ParseOptionalForXmlElementName(context) ?? "row";
                 break;
             case "RAW":
                 mode = ForXmlMode.Raw;
-                rowElement = ParseOptionalForXmlElementName(context, "row");
+                rowElement = ParseOptionalForXmlElementName(context);
+                rowTagWritten = rowElement is not null;
+                rowElement ??= "row";
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -85,6 +88,7 @@ partial class Selection
         var binaryBase64 = false;
         var rootSpecified = false;
         var rootName = "root";
+        (bool Xdr, string? Uri)? inlineSchema = null;
 
         // Real's option grammar admits each option once: a repeated TYPE / ROOT
         // / ELEMENTS / BINARY BASE64 is Msg 102 reported against the clause's
@@ -141,13 +145,37 @@ partial class Selection
                 typed = true;
                 context.MoveNextOptional();
             }
-            else if (Collation.Baseline.Equals(optionName.Value, "XMLSCHEMA"))
+            else if (Collation.Baseline.Equals(optionName.Value, "XMLSCHEMA") || Collation.Baseline.Equals(optionName.Value, "XMLDATA"))
             {
+                // One clause takes one inline schema: XMLDATA beside
+                // XMLSCHEMA reads as an option written twice (probed
+                // 2026-10-17 against SQL Server 2025).
+                var xdr = Collation.Baseline.Equals(optionName.Value, "XMLDATA");
+                RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.InlineSchema);
                 if (namespaces is not null)
                     throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
                 if (mode == ForXmlMode.Explicit)
-                    throw SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
-                throw new NotSupportedException("FOR XML XMLSCHEMA (inline XSD emission) isn't modeled.");
+                {
+                    throw xdr
+                        ? new NotSupportedException("FOR XML EXPLICIT, XMLDATA (an XDR schema for the universal table) isn't modeled.")
+                        : SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
+                }
+                if (mode == ForXmlMode.Path)
+                    throw SimulatedSqlException.ForXmlPathInlineSchema();
+                context.MoveNextOptional();
+                string? uri = null;
+                if (!xdr && context.Token is Operator { Character: '(' })
+                {
+                    if (context.GetNextRequired() is not Literal { Value.Type.Category: SqlTypeCategory.String } uriLiteral)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    uri = uriLiteral.Value.AsString;
+                    if (context.GetNextRequired() is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (uri.Length == 0)
+                        throw SimulatedSqlException.ForXmlEmptyInlineSchemaUri();
+                    context.MoveNextOptional();
+                }
+                inlineSchema = (xdr, uri);
             }
             else if (Collation.Baseline.Equals(optionName.Value, "RAW") || Collation.Baseline.Equals(optionName.Value, "AUTO")
                 || Collation.Baseline.Equals(optionName.Value, "PATH") || Collation.Baseline.Equals(optionName.Value, "EXPLICIT"))
@@ -172,6 +200,11 @@ partial class Selection
         if (xsinil && namespaces?.IsDeclared("xsi") == true)
             throw SimulatedSqlException.XmlNamespaceXsiRedefinedWithXsinil();
 
+        // XDR names its own row elements, so a row tag or ROOT can't stand
+        // beside it (probed 2026-10-17 against SQL Server 2025).
+        if (inlineSchema is { Xdr: true } && (rootSpecified || rowTagWritten))
+            throw SimulatedSqlException.ForXmlXmlDataWithRootOrRowTag();
+
         // The names written into the clause are validated rather than escaped —
         // the row tag first, then ROOT (real's order).
         if (rowElement is { Length: > 0 })
@@ -191,7 +224,8 @@ partial class Selection
         if (explicitPlan is not null)
             xsinil = explicitPlan.Xsinil;
 
-        var wrapped = WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan);
+        var wrapped = WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan,
+            inlineSchema is var (inlineXdr, inlineUri) ? (inlineXdr, inlineUri, context.Batch.Connection) : null);
         wrapped.ColumnMasks = ForClauseDocumentMasks(inner);
         if (!typed)
             wrapped.streamedDocumentType = SqlType.NText;
@@ -248,14 +282,13 @@ partial class Selection
 
     /// <summary>
     /// Reads the optional <c>('name')</c> argument of RAW / PATH, returning the
-    /// literal (empty string allowed for PATH) or <paramref name="fallback"/>
-    /// when absent. Advances to the first token past the mode / its argument.
+    /// literal (empty string allowed for PATH) or null when absent. Advances to the first token past the mode / its argument.
     /// </summary>
-    private static string ParseOptionalForXmlElementName(ParserContext context, string fallback)
+    private static string? ParseOptionalForXmlElementName(ParserContext context)
     {
         context.MoveNextOptional();
         if (context.Token is not Operator { Character: '(' })
-            return fallback;
+            return null;
         if (context.GetNextRequired() is not Literal { Value.Type.Category: SqlTypeCategory.String } literal)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = literal.Value.AsString;
@@ -265,7 +298,7 @@ partial class Selection
         return name;
     }
 
-    private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null)
+    private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null, (bool Xdr, string? Uri, SimulatedDbConnection Connection)? inlineSchema = null)
     {
         var innerSchema = inner.Schema;
 
@@ -300,6 +333,8 @@ partial class Selection
         if (options.Mode == ForXmlMode.Auto)
         {
             var levels = BuildAutoLevels(inner, forJson: false);
+            if (inlineSchema is var (autoXdr, autoUri, autoConnection))
+                options = options.WithInlineSchema(ForXmlInlineSchema.Compile(autoXdr, autoUri, inner, "row", levels, options.Elements, options.Xsinil, autoConnection));
             // Without BINARY BASE64, an AUTO binary column addresses a
             // dbobject URL instead of carrying its bytes; the builder fills a
             // slot per such column (and raises where no URL can be addressed).
@@ -327,6 +362,8 @@ partial class Selection
         }
 
         var rowElement = BuildForXmlRowElement(inner, options);
+        if (inlineSchema is var (rawXdr, rawUri, rawConnection))
+            options = options.WithInlineSchema(ForXmlInlineSchema.Compile(rawXdr, rawUri, inner, rowElement.Name, null, options.Elements, options.Xsinil, rawConnection));
 
         IEnumerable<string> pieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXml(inner, innerSchema, rowElement, options, batch, outerResolver);
         return new Selection(schema, columnNames,
@@ -612,10 +649,7 @@ partial class Selection
         // is outermost: the ROOT wrapper when there is one, else every
         // top-level element the rows produce (probe-confirmed, PATH('')'s
         // per-column elements included — its bare text carries none).
-        var topLevelDeclarations = options.RootName is null ? options.Declarations : "";
-
-        if (options.RootName is { } rootName)
-            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
+        var topLevelDeclarations = InlineSchemaDeclarations(sb, options, batch);
 
         var any = false;
         var prevAtomic = false;
@@ -635,13 +669,37 @@ partial class Selection
             yield return Drain(sb);
         }
 
-        if (!any)
+        if (!any && options.InlineSchema is null)
             yield break;
 
         if (options.RootName is { } closeName)
             _ = sb.Append("</").Append(closeName).Append('>');
 
         yield return Drain(sb);
+    }
+
+    /// <summary>
+    /// Opens a document: its <c>ROOT</c> start tag, then the inline schema
+    /// when the clause asks for one, drawing its number. Returns the
+    /// declarations each top-level row element carries — the schema's
+    /// namespace, which a <c>ROOT</c> wrapper leaves on the rows, ahead of
+    /// the clause's own declarations where no <c>ROOT</c> takes them.
+    /// </summary>
+    private static string InlineSchemaDeclarations(StringBuilder sb, ForXmlOptions options, BatchContext batch)
+    {
+        var declarations = options.RootName is null ? options.Declarations : "";
+        if (options.RootName is { } rootName)
+            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
+        if (options.InlineSchema is not { } inline)
+            return declarations;
+        var (rowNamespace, text) = inline.Render(batch.Connection, options.Typed);
+        _ = sb.Append(text);
+        // A sql_variant element names its value's type, from sqltypes, in
+        // the xsi namespace.
+        var variantDeclarations = !inline.TypesVariants ? ""
+            : (options.Declarations.Contains("xmlns:xsi=", StringComparison.Ordinal) ? "" : " xmlns:xsi=\"" + XsiNamespace + "\"")
+                + " xmlns:sqltypes=\"http://schemas.microsoft.com/sqlserver/2004/sqltypes\"";
+        return " xmlns=\"" + rowNamespace + "\"" + declarations + variantDeclarations;
     }
 
     /// <summary>
@@ -659,10 +717,7 @@ partial class Selection
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var sb = new StringBuilder();
-        var topLevelDeclarations = options.RootName is null ? options.Declarations : "";
-
-        if (options.RootName is { } rootName)
-            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
+        var topLevelDeclarations = InlineSchemaDeclarations(sb, options, batch);
 
         // The names of the elements left open, outermost first; the innermost
         // level is absent whenever it self-closed.
@@ -701,7 +756,7 @@ partial class Selection
             yield return Drain(sb);
         }
 
-        if (previous is null)
+        if (previous is null && options.InlineSchema is null)
             yield break;
 
         for (var i = open.Count - 1; i >= 0; i--)
@@ -795,6 +850,11 @@ partial class Selection
 
         _ = sb.Append('<').Append(element.Name).Append(declarations);
         AppendForXmlAttributes(sb, element, rowBytes, innerSchema, options);
+        if (options.InlineSchema is { TypesVariants: true } && element.Content is [ForXmlLeaf variantLeaf] && innerSchema[variantLeaf.Column] is SqlVariantSqlType
+            && RowDecoder.DecodeColumn(innerSchema, rowBytes, variantLeaf.Column) is { IsNull: false } variant)
+        {
+            _ = sb.Append(" xsi:type=\"sqltypes:").Append(ForXmlInlineSchema.VariantTypeName(variant.AsVariantInner)).Append('"');
+        }
 
         // An element closes itself only when nothing was written into it: an
         // empty string or an empty xml instance still opens and closes it
@@ -880,9 +940,15 @@ partial class Selection
                             // column, a CAST(… AS xml), and a nested FOR XML … TYPE
                             // subquery alike — the type is what decides, matching real.
                             if (innerSchema[leaf.Column] is XmlSqlType)
-                                _ = sb.Append(ScalarForXmlText(value));
+                            {
+                                // Under an inline schema's default namespace an
+                                // embedded instance's own elements undeclare it.
+                                _ = sb.Append(options.InlineSchema is null ? ScalarForXmlText(value) : ForXmlInlineSchema.WithoutDefaultNamespace(ScalarForXmlText(value)));
+                            }
                             else
+                            {
                                 AppendForXmlValueText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), innerSchema[leaf.Column], isAttribute: false);
+                            }
                             break;
                     }
                     // A comment or processing instruction breaks a run of
@@ -992,7 +1058,9 @@ partial class Selection
                     var sb = new StringBuilder();
                     _ = sb.Append(offset.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture));
                     AppendForJsonFraction(sb, offset.Ticks % TimeSpan.TicksPerSecond, dto.precision);
-                    _ = sb.Append(offset.ToString("zzz", CultureInfo.InvariantCulture));
+                    // A zero offset is written as UTC's Z (probed 2026-10-17
+                    // against SQL Server 2025).
+                    _ = offset.Offset == TimeSpan.Zero ? sb.Append('Z') : sb.Append(offset.ToString("zzz", CultureInfo.InvariantCulture));
                     return sb.ToString();
                 }
             default:
@@ -1037,12 +1105,13 @@ internal enum ForXmlOptionSeen
     Root = 2,
     BinaryBase64 = 4,
     Type = 8,
+    InlineSchema = 16,
 }
 
 /// <summary>Parsed FOR XML clause options. Immutable, so it rides the cached plan.</summary>
 internal sealed class ForXmlOptions(
     ForXmlMode mode, string? rowElement, bool elements, bool xsinil, bool typed, bool binaryBase64,
-    string? rootName, ForXmlNamespaces? namespaces, ForXmlBinaryUrl?[]? binaryUrls = null)
+    string? rootName, ForXmlNamespaces? namespaces, ForXmlBinaryUrl?[]? binaryUrls = null, ForXmlInlineSchema? inlineSchema = null)
 {
     public readonly ForXmlMode Mode = mode;
 
@@ -1082,6 +1151,9 @@ internal sealed class ForXmlOptions(
     /// </summary>
     public readonly ForXmlBinaryUrl?[]? BinaryUrls = binaryUrls;
 
+    /// <summary>The <c>XMLSCHEMA</c> / <c>XMLDATA</c> schema the document opens with, or null.</summary>
+    public readonly ForXmlInlineSchema? InlineSchema = inlineSchema;
+
     /// <summary>
     /// The declaration text the outermost element carries: the <c>xsi</c>
     /// binding XSINIL needs, then the statement's own, in real's reverse
@@ -1091,7 +1163,11 @@ internal sealed class ForXmlOptions(
 
     /// <summary>This clause's options with <paramref name="urls"/> attached.</summary>
     public ForXmlOptions WithBinaryUrls(ForXmlBinaryUrl?[] urls) =>
-        new(this.Mode, this.RowElement, this.Elements, this.Xsinil, this.Typed, this.BinaryBase64, this.RootName, this.Namespaces, urls);
+        new(this.Mode, this.RowElement, this.Elements, this.Xsinil, this.Typed, this.BinaryBase64, this.RootName, this.Namespaces, urls, this.InlineSchema);
+
+    /// <summary>This clause's options with <paramref name="schema"/> attached.</summary>
+    public ForXmlOptions WithInlineSchema(ForXmlInlineSchema schema) =>
+        new(this.Mode, this.RowElement, this.Elements, this.Xsinil, this.Typed, this.BinaryBase64, this.RootName, this.Namespaces, this.BinaryUrls, schema);
 }
 
 /// <summary>
