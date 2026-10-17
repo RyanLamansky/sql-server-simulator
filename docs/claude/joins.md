@@ -51,10 +51,9 @@ The `WHERE` and the clauses after it see every source, where the same `x` is Msg
 Everything after the parse — the output keys, the planner and its seeks, the per-row tuple resolver, a correlated body's outer resolver — resolves a name across the whole FROM clause, and giving each of them a scope of its own is the road not taken: `Selection.PartialScopeBinding` instead qualifies each name a source outside its scope also carries by the source that bound it, so reading it across the whole clause agrees.
 A new parse site binding against part of a FROM clause takes its resolver from `PartialScopeBinding.ResolverOver` and collects into `ParserContext.PartialScopeReferences`, or its names are read across the whole clause.
 
-**Divergences** — two bindings can't be written as a qualified name, so they still resolve across the whole FROM clause (probed 2026-10-08 against SQL Server 2025):
+A name bound to an unaliased rowset function, which exposes none, is qualified by a name `Pin` gives that source and no query can write, so `FROM OPENJSON(…) JOIN c ON value = '1' JOIN (SELECT 1 AS value) z ON 1 = 1` answers as on real (probed 2026-10-08 and 2026-10-17 against SQL Server 2025).
 
-- A name bound to an unaliased rowset function, which exposes none: `FROM OPENJSON(…) JOIN c ON value = '1' JOIN (SELECT 1 AS value) z ON 1 = 1` answers on real and is Msg 209 here.
-- An enclosing query's name qualified by an exposed name a later source of the subquery repeats: `o.oz` in `… ON a.id = o.oz JOIN e o ON …` reads the outer `o` on real and `e`'s column here.
+**Divergence** — an enclosing query's name qualified by an exposed name a later source of the subquery repeats can't be written as a qualified name, so it still resolves across the whole FROM clause: `o.oz` in `… ON a.id = o.oz JOIN e o ON …` reads the outer `o` on real and `e`'s column here (probed 2026-10-08 against SQL Server 2025).
 
 ## Parenthesized join groups
 

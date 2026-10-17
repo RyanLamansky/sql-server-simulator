@@ -68,6 +68,18 @@ public sealed class OnScopeBindingTests
     public void ApplyBody_BindsInItsLeftSide(string query, string expected)
         => AreEqual(expected, Rows(query));
 
+    /// <summary>A name an <c>ON</c> or <c>APPLY</c> body binds to an
+    /// unaliased rowset function, which exposes no name, keeps that binding
+    /// past a later source carrying it (probed 2026-10-08 and 2026-10-17
+    /// against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select a.id from a join b on a.id = b.id cross join openjson('[\"1\"]') join e on value = '1' join (select 1 as value) z on 1 = 1", "1,1,2,2")]
+    [DataRow("select a.id from string_split('1,2', ',') join a on value = cast(a.id as varchar(5)) join (select 9 as value) z on 1 = 1", "1,2")]
+    [DataRow("select v2 from string_split('a,b', ',') join a on value = 'b' and a.id = 1 cross apply (select value as v2) q join (select 'z' as value) z on 1 = 1", "b")]
+    [DataRow("select a.id from openjson('[1]') join a on [key] = 0 and value = cast(a.id as varchar(5)) join (select 2 as [key], 'z' as value) z on 1 = 1", "1")]
+    public void NameBoundToAnUnaliasedRowsetFunction_KeepsItsBinding(string query, string expected)
+        => AreEqual(expected, Rows(query));
+
     [TestMethod]
     [DataRow("select 1 from a, b cross apply (select ax as v) d", "ax")]
     [DataRow("select 1 from a, b cross apply string_split(cast(ax as varchar(5)), ',') s", "ax")]

@@ -42,14 +42,17 @@ internal sealed partial class Selection
     /// that bound it, in every reference parsed with it — the <c>ON</c>'s own,
     /// and those in subqueries and <c>APPLY</c> bodies, which correlate through
     /// the same scope. After that every later resolution agrees with the bind
-    /// by construction. A binding source that exposes no name (an unaliased
-    /// rowset function), or an enclosing query's source whose exposed name a
-    /// source of this clause repeats, can't be named this way and stays as
-    /// written.
+    /// by construction. A binding source of the clause that exposes no name (an
+    /// unaliased rowset function) is given one no query can write for it; an
+    /// enclosing query's source whose exposed name a source of this clause
+    /// repeats can't be named this way and stays as written.
     /// </para>
     /// </remarks>
     internal sealed class PartialScopeBinding(List<Reference>? enclosingReferences)
     {
+        /// <summary>Leads the exposed name <see cref="Pin"/> gives a source exposing none, a character no identifier holds.</summary>
+        private const char UnwritableQualifierMark = '\u001E';
+
         private readonly List<BoundName> names = [];
 
         /// <summary>
@@ -121,7 +124,15 @@ internal sealed partial class Selection
             }
             foreach (var bound in this.names)
             {
-                if (!CarriedOutside(sources, bound.Scope, bound.Name) || BindingSource(bound) is not { Qualifier: { } qualifier } source)
+                if (!CarriedOutside(sources, bound.Scope, bound.Name) || BindingSource(bound) is not { } source)
+                    continue;
+                // A source of this clause exposing no name — an unaliased
+                // rowset function, whose bound names real reads as its own
+                // (probed 2026-10-08 against SQL Server 2025) — takes one no
+                // query can write.
+                if (source.Qualifier is null && sources.Contains(source))
+                    source.Qualifier = $"{UnwritableQualifierMark}{sources.IndexOf(source)}";
+                if (source.Qualifier is not { } qualifier)
                     continue;
                 // An enclosing query's source can be named only where no
                 // source of this clause takes the name for itself.

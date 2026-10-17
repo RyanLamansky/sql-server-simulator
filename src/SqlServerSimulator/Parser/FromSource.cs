@@ -54,7 +54,13 @@ internal sealed class FromSource(
     CteBinding? cte = null,
     DerivedTableBinding? derivedTable = null)
 {
-    public readonly string? Qualifier = qualifier;
+    /// <summary>
+    /// The source's exposed name, which a qualified reference names it by;
+    /// null for one that exposes none — an unaliased rowset function — until
+    /// <see cref="Selection.PartialScopeBinding"/> gives such a source one no
+    /// query can write, to pin a name an <c>ON</c> bound to it.
+    /// </summary>
+    public string? Qualifier = qualifier;
 
     /// <summary>
     /// The body of a derived table, view or CTE a browse statement reads
