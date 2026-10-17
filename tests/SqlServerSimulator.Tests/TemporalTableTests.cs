@@ -1734,6 +1734,25 @@ public sealed class TemporalTableTests
         simulation.ValidateSyntaxError("select * from t a for system_time all", "for");
     }
 
+    /// <summary>
+    /// Msg 13590 reports line 12 of the view whose definition carries the
+    /// clause, wherever it sits there, and the Msg 4413 after it the
+    /// reference's line, or 12 for a qualified reference.
+    /// </summary>
+    [TestMethod]
+    public void ForSystemTimeAppliedTwice_ReportsLine12OfTheView()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            VersionedT,
+            "create view vs\nas\nselect id\nfrom dbo.t\nfor system_time all",
+            "create view vn as select id from dbo.vs");
+        var errors = simulation.AssertSqlError("select 1\n\nselect * from vn for system_time all", 13590).Errors;
+        AreEqual("13590 vs 12, 4413  3", string.Join(", ", errors.Cast<SimulatedError>().Select(static e => $"{e.Number} {e.Procedure} {e.LineNumber.ToInvariantString()}")));
+        errors = simulation.AssertSqlError("select 1\nselect * from dbo.vs for system_time all", 13590).Errors;
+        AreEqual("13590 vs 12, 4413  12", string.Join(", ", errors.Cast<SimulatedError>().Select(static e => $"{e.Number} {e.Procedure} {e.LineNumber.ToInvariantString()}")));
+    }
+
     [TestMethod]
     public void ForSystemTimeArguments_TakeWhatRealTakes()
     {

@@ -1793,11 +1793,13 @@ internal sealed partial class Selection
                 // A FOR SYSTEM_TIME a view reference carries applies to every
                 // system-versioned table its body reads, one of which may not
                 // carry its own (Msg 13590; probed 2026-10-04 against SQL
-                // Server 2025).
+                // Server 2025), reported at line 12 of the view that carries
+                // it wherever the clause sits in its definition (probed
+                // 2026-10-17).
                 if (context.Batch.InheritedSystemTime is { } inherited && heapTable is { SystemVersioning: { } inheritedHistory, PeriodColumns: { } inheritedPeriod })
                 {
                     if (clauseParsed)
-                        throw SimulatedSqlException.ForSystemTimeAppliedTwice(objectName.ToString());
+                        throw SimulatedSqlException.ForSystemTimeAppliedTwice(objectName.ToString()).PinLine(12);
                     inherited.Applied = true;
                     temporalRowSource = new TemporalRowSource(heapTable, inheritedHistory, inheritedPeriod, inherited.Kind,
                         inherited.Lower is { } inheritedLower ? new Value(inheritedLower) : null,
