@@ -203,6 +203,37 @@ public sealed class CursorClusteredIdentityTests
             "update t set b = 99 where a = 2; {next} {next}",
             query));
 
+    /// <summary>A <c>DISTINCT</c> over a key that determines every source, or
+    /// a <c>GROUP BY</c> with no aggregate whose groups hold one row each, is
+    /// dropped and the rows read live, as real's optimizer drops it; one over a
+    /// computed column, over a join to a non-key or under a sort still settles at
+    /// OPEN (probed 2026-10-17 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select distinct a, b from t", "0:1,10;0:2,99;0:4,40;")]
+    [DataRow("select distinct a, b from t order by a", "0:1,10;0:2,99;0:4,40;")]
+    [DataRow("select distinct t.a, t.b from t join u on u.x = t.a", "0:1,10;0:2,99;0:4,40;")]
+    [DataRow("select distinct a, b from (select a, b from t) d", "0:1,10;0:2,99;0:4,40;")]
+    [DataRow("select a, b from t group by a, b", "0:1,10;0:2,99;0:4,40;")]
+    [DataRow("select distinct a + 0, b from t", "0:1,10;0:2,20;0:3,30;")]
+    [DataRow("select distinct a, b from t order by b", "0:1,10;0:2,20;0:3,30;")]
+    [DataRow("select distinct t.a, t.b from t join u on u.y = t.a", "0:1,10;0:2,20;0:3,30;")]
+    public void FastForward_RedundantDistinctReadsLive(string query, string expected)
+        => AreEqual(expected, Trace(
+            "create table t (a int not null primary key, b int); insert t values (1, 10), (2, 20), (3, 30);" +
+            "create table u (x int not null primary key, y int); insert u values (1, 1), (2, 2), (3, 3), (4, 4);",
+            "fast_forward",
+            "update t set b = 99 where a = 2; delete t where a = 3; insert t values (4, 40); {next} {next} {next}",
+            query));
+
+    /// <summary>The same <c>DISTINCT</c> over a key leaves a DYNAMIC or
+    /// KEYSET cursor a snapshot.</summary>
+    [TestMethod]
+    [DataRow("dynamic")]
+    [DataRow("keyset")]
+    public void RedundantDistinct_StillConvertsOtherCursorsToASnapshot(string options)
+        => AreEqual("TSQL | Snapshot | Read Only | Global (0)", new Simulation().ExecuteScalar(
+            $"create table t (a int primary key, b int); declare c cursor {options} for select distinct a, b from t; select properties from sys.dm_exec_cursors(@@spid)"));
+
     /// <summary><c>@@CURSOR_ROWS</c> reads -1 and <c>CURSOR_STATUS</c> 1 for
     /// an open FAST_FORWARD cursor, a settled or empty one included.</summary>
     [TestMethod]

@@ -344,8 +344,8 @@ partial class Selection
     /// follow; the cost columns (<c>worker_time</c>, <c>reads</c>,
     /// <c>writes</c>, <c>dormant_duration</c>) read 0 and
     /// <c>plan_generation_num</c> 1, a cursor's plan never recompiling here.
-    /// The session's local cursors and cursor variables are reached only for
-    /// the querying session; another session shows its global ones.
+    /// Another session's local cursors and cursor variables are listed while
+    /// its batch holds them, as real lists them.
     /// </summary>
     public static Selection ParseExecCursors(ParserContext context, string functionName)
     {
@@ -376,15 +376,8 @@ partial class Selection
                 if (cursor is not null && seen.Add(cursor))
                     rows.Add((connection.Spid, cursor.Handle, RowEncoder.EncodeRow(ExecCursorsSchema, ExecCursorsRow(connection.Spid, cursor, cursor.OriginVariable ?? name))));
             }
-            // A session's local cursors and cursor variables live on the batch
-            // running, which only the querying session's own reach sees.
-            if (connection == batch.Connection)
-            {
-                foreach (var (name, cursor) in batch.LocalCursors ?? [])
-                    Add(cursor, name);
-                foreach (var (name, cursor) in batch.CursorVariables ?? [])
-                    Add(cursor, "@" + name);
-            }
+            foreach (var (cursor, name) in connection.FrameCursors)
+                Add(cursor, name);
             foreach (var (name, cursor) in connection.Cursors)
                 Add(cursor, name);
         }

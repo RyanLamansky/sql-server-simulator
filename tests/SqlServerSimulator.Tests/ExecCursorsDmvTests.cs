@@ -11,6 +11,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class ExecCursorsDmvTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     private const string Setup = "create table t (id int primary key, v int); insert t values (1, 1), (2, 2), (3, 3);\n";
 
     private const string Columns = "select string_agg(concat(name, ':', properties, ':', is_open, ':', fetch_status, ':', fetch_buffer_size, ':', fetch_buffer_start), ',') within group (order by name) from sys.dm_exec_cursors(@@spid)";
@@ -72,6 +74,45 @@ public sealed class ExecCursorsDmvTests
     [TestMethod]
     public void CursorVariable_IsNamedByItsVariable()
         => AreEqual("@cv:TSQL | Dynamic | Optimistic | Global (0)", new Simulation().ExecuteScalar(Setup + "declare @cv cursor; set @cv = cursor for select id from t; open @cv; select concat(name, ':', properties) from sys.dm_exec_cursors(@@spid)"));
+
+    /// <summary>Another session's local cursors and cursor variables are
+    /// listed while its batch holds them — here while it waits on a lock —
+    /// and only its global one once the batch ends (probed 2026-10-17 against
+    /// SQL Server 2025).</summary>
+    [TestMethod]
+    public async Task AnotherSession_ListsTheCursorsItsBatchHolds()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Setup);
+        using var holder = simulation.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update t set v = 9 where id = 1").ExecuteNonQuery();
+        using var blocked = simulation.CreateOpenConnection();
+        var spid = (short)blocked.CreateCommand("select @@spid").ExecuteScalar()!;
+        var running = await simulation.StartBlocked(blocked, """
+            declare lc cursor local for select 1 a;
+            declare gc cursor global for select 2 a;
+            declare @cv cursor;
+            set @cv = cursor for select 3 a;
+            open lc;
+            select v from t where id = 1
+            """, TestContext.CancellationToken);
+        var listing = $"select string_agg(concat(name, ':', properties, ':', is_open), ',') within group (order by name) from sys.dm_exec_cursors({spid})";
+        AreEqual("@cv:TSQL | Snapshot | Read Only | Global (0):0,gc:TSQL | Snapshot | Read Only | Global (0):0,lc:TSQL | Snapshot | Read Only | Local (0):1", holder.CreateCommand(listing).ExecuteScalar());
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+        _ = await running;
+        AreEqual("gc:TSQL | Snapshot | Read Only | Global (0):0", holder.CreateCommand(listing).ExecuteScalar());
+    }
+
+    /// <summary>A cursor a variable holds past its name's <c>DEALLOCATE</c>
+    /// goes when the variable lets it go.</summary>
+    [TestMethod]
+    public void DeallocatedNameHeldByAVariable_GoesWithTheVariable()
+        => AreEqual("k,0", new Simulation().ExecuteScalar("""
+            declare k cursor local for select 1 a; declare @cv cursor; set @cv = k; deallocate k;
+            declare @n sysname = (select name from sys.dm_exec_cursors(@@spid));
+            deallocate @cv;
+            select concat(@n, ',', (select count(*) from sys.dm_exec_cursors(@@spid)))
+            """));
 
     [TestMethod]
     public void Deallocated_IsGone()

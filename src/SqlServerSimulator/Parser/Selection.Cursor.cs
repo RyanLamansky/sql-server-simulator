@@ -41,8 +41,15 @@ internal sealed class CursorShape(
     JoinSpec[] joins,
     Expression[] projections,
     BooleanExpression[] excluders,
-    CursorRowLimit? rowLimit)
+    CursorRowLimit? rowLimit,
+    bool fastForwardOnly)
 {
+    /// <summary>
+    /// Whether only a <c>FAST_FORWARD</c> cursor navigates this shape: one
+    /// whose <c>DISTINCT</c> a projected key makes redundant, which real drops
+    /// for such a cursor alone.
+    /// </summary>
+    public readonly bool FastForwardOnly = fastForwardOnly;
     public readonly FromSource[] Sources = sources;
     public readonly JoinSpec[] Joins = joins;
     public readonly Expression[] Projections = projections;
@@ -708,12 +715,12 @@ internal sealed partial class Selection
     /// the <see cref="Selection"/>: a cached plan is shared across executions,
     /// and a view body parsed into it is not.
     /// </remarks>
-    internal static CursorSourcePlan? TryBuildCursorPlan(Selection selection, BatchContext batch, int depth = 0)
+    internal static CursorSourcePlan? TryBuildCursorPlan(Selection selection, BatchContext batch, bool fastForward, int depth = 0)
     {
         // A view that reads itself (creatable through deferred name resolution)
         // would recurse forever; real reports the nesting cap instead, and the
         // cursor falling back to STATIC surfaces that at OPEN.
-        if (depth >= SimulatedDbConnection.MaxNestingLevel || selection.CursorShape is not { } shape)
+        if (depth >= SimulatedDbConnection.MaxNestingLevel || selection.CursorShape is not { } shape || (shape.FastForwardOnly && !fastForward))
             return null;
 
         var slots = new CursorSlot[shape.Sources.Length];
@@ -725,7 +732,7 @@ internal sealed partial class Selection
                 slots[i] = CursorSlot.ForTable(table);
                 continue;
             }
-            if (TryBuildDeferredSlot(source, batch, depth) is not { } deferred)
+            if (TryBuildDeferredSlot(source, batch, fastForward, depth) is not { } deferred)
                 return null;
             slots[i] = deferred;
         }
@@ -747,7 +754,7 @@ internal sealed partial class Selection
     /// linked server — matching real SQL Server, which reports those cursors as
     /// read-only snapshots.
     /// </summary>
-    private static CursorSlot? TryBuildDeferredSlot(FromSource source, BatchContext batch, int depth)
+    private static CursorSlot? TryBuildDeferredSlot(FromSource source, BatchContext batch, bool fastForward, int depth)
     {
         if (source.IsPlaceholder || source.LateralPlan is null)
             return null;
@@ -756,7 +763,7 @@ internal sealed partial class Selection
         {
             if (batch.Connection.Simulation.TryParseViewBodyPlan(batch, view) is not { } body)
                 return null;
-            var viewPlan = TryBuildCursorPlan(body, batch, depth + 1);
+            var viewPlan = TryBuildCursorPlan(body, batch, fastForward, depth + 1);
             // A body whose projection count drifted from the columns captured
             // at CREATE VIEW (a `SELECT *` over a table that gained or lost a
             // column) can't be re-encoded to the source's declared layout.
@@ -767,7 +774,7 @@ internal sealed partial class Selection
 
         if (!source.LateralIsQueryBody)
             return null;
-        var bodyPlan = TryBuildCursorPlan(source.LateralPlan, batch, depth + 1);
+        var bodyPlan = TryBuildCursorPlan(source.LateralPlan, batch, fastForward, depth + 1);
         return bodyPlan is null ? null : CursorSlot.ForNested(bodyPlan, null);
     }
 

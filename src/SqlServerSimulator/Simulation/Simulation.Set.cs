@@ -1179,6 +1179,7 @@ partial class Simulation
                     return true; // skipping — tokens consumed
                 built.Cursor.IsUnnamed = true;
                 built.Cursor.OriginVariable = "@" + variableName;
+                context.Batch.Connection.FrameCursors[built.Cursor] = built.Cursor.OriginVariable;
                 newCursor = built.Cursor;
                 break;
             case AtPrefixedString sourceVar:

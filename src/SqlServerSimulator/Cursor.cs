@@ -153,6 +153,12 @@ internal sealed class Cursor(
     /// destroyed when its last variable reference is deallocated.</summary>
     public bool IsUnnamed;
 
+    /// <summary>True for a named cursor whose name a <c>DEALLOCATE</c> or its
+    /// frame's end dropped while a cursor variable still held it, so the last
+    /// variable reference going away destroys it as it would an unnamed
+    /// one.</summary>
+    public bool NameDropped;
+
     /// <summary>The variable (<c>@name</c>) whose <c>SET @c = CURSOR …</c>
     /// built this cursor, which <c>sp_cursor_list</c> names it by.</summary>
     public string? OriginVariable;

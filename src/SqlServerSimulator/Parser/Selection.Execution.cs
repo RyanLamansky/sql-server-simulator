@@ -2965,6 +2965,13 @@ internal sealed partial class Selection
     /// settled later by <see cref="TryBuildCursorPlan"/>, which is where a view
     /// body gets parsed; this pass only rejects the shapes no source set can
     /// rescue.
+    /// A <c>DISTINCT</c> projecting a key that determines every source, and a
+    /// <c>GROUP BY</c> with no aggregate whose groups each hold one row, leave
+    /// a shape only a <c>FAST_FORWARD</c> cursor follows
+    /// (<see cref="CursorShape.FastForwardOnly"/>): real's optimizer drops
+    /// the redundant operator and the cursor reads live rows, while a DYNAMIC
+    /// or KEYSET request over it is still a snapshot (probed 2026-10-17
+    /// against SQL Server 2025).
     /// </summary>
     private static CursorShape? ComputeCursorShape(
         FromSource[] sources,
@@ -2976,9 +2983,11 @@ internal sealed partial class Selection
         List<WindowExpression> windows,
         CursorRowLimit? rowLimit)
     {
-        if (distinct || aggregates.Count > 0 || windows.Count > 0
-            || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-            || sources.Length == 0)
+        var grouped = fromClause.GroupingSets.Count > 0;
+        if (aggregates.Count > 0 || windows.Count > 0 || fromClause.Having is not null
+            || sources.Length == 0
+            || (grouped && !GroupsHoldOneRow(sources, joins, fromClause))
+            || (distinct && DeriveOutputKeys(sources, joins, fromClause, expressions, distinct: false, aggregates: false) is null))
         {
             return null;
         }
@@ -2995,7 +3004,7 @@ internal sealed partial class Selection
             }
         }
 
-        return new CursorShape(sources, joins, [.. expressions], [.. fromClause.Excluders], rowLimit);
+        return new CursorShape(sources, joins, [.. expressions], [.. fromClause.Excluders], rowLimit, fastForwardOnly: distinct || grouped);
     }
 
     /// <summary>

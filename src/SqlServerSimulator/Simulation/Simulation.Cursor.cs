@@ -213,6 +213,15 @@ partial class Simulation
         if (batch.IsSkipping)
             return null;
 
+        // A forward-only read-only cursor naming no sensitivity is a
+        // FAST_FORWARD one, which sys.dm_exec_cursors reports it as (probed
+        // 2026-09-29 against SQL Server 2025) — READ_ONLY or FOR READ ONLY with
+        // neither SCROLL nor STATIC / INSENSITIVE / KEYSET / DYNAMIC.
+        // An API server cursor's FORWARD_ONLY READ_ONLY keeps its own
+        // negotiation (a sort converts it to KEYSET), so only the T-SQL form
+        // reads the pair that way.
+        var fastForward = reqFastForward || (readOnlyOption && !scroll && !reqStatic && !reqKeyset && !reqDynamic && !batch.ApiServerCursor);
+
         // Resolve updatability + effective sensitivity. A query whose FROM the
         // cursor can't re-fold (no CursorSourcePlan) is forced to STATIC, as is
         // an explicit STATIC / INSENSITIVE / FAST_FORWARD request. Building the
@@ -222,7 +231,7 @@ partial class Simulation
         // honor the requested type; an unspecified type defaults to KEYSET when
         // SCROLL was asked for and DYNAMIC for the forward-only default. A JOIN
         // is updatable exactly like a single table (probe-confirmed).
-        var cursorPlan = Selection.TryBuildCursorPlan(selection, batch);
+        var cursorPlan = Selection.TryBuildCursorPlan(selection, batch, fastForward);
         var updatable = cursorPlan is not null;
         // Two shapes cap sensitivity at KEYSET, both probe-confirmed against
         // sys.dm_exec_cursors and both applying to the bare forward-only
@@ -232,15 +241,6 @@ partial class Simulation
         // to walk. An ORDER BY no index delivers has to be sorted, and a sorted
         // result is a materialized one.
         var keysetOnly = cursorPlan is { HasRowLimit: true } or { OrderBySuppliedByIndex: false };
-
-        // A forward-only read-only cursor naming no sensitivity is a
-        // FAST_FORWARD one, which sys.dm_exec_cursors reports it as (probed
-        // 2026-09-29 against SQL Server 2025) — READ_ONLY or FOR READ ONLY with
-        // neither SCROLL nor STATIC / INSENSITIVE / KEYSET / DYNAMIC.
-        // An API server cursor's FORWARD_ONLY READ_ONLY keeps its own
-        // negotiation (a sort converts it to KEYSET), so only the T-SQL form
-        // reads the pair that way.
-        var fastForward = reqFastForward || (readOnlyOption && !scroll && !reqStatic && !reqKeyset && !reqDynamic && !batch.ApiServerCursor);
 
         // The type the keywords ask for, before the shape has its say: naming
         // one takes it, and naming none means KEYSET for SCROLL and DYNAMIC for
@@ -527,6 +527,8 @@ partial class Simulation
         // holds it (refcount keeps a variable-referenced cursor alive).
         if (removed.VariableRefCount == 0)
             DestroyCursor(batch, removed);
+        else
+            removed.NameDropped = true;
         batch.Connection.LastCursorRows = 0;
     }
 
@@ -745,7 +747,11 @@ partial class Simulation
         if (scope.ContainsKey(name))
             throw SimulatedSqlException.CursorAlreadyExists(name);
         scope[name] = cursor;
-        if (!local)
+        if (local)
+        {
+            batch.Connection.FrameCursors[cursor] = name;
+        }
+        else
         {
             (batch.Connection.CursorsDeclaredInExecution ??= []).Add(cursor);
             // One a trigger body leaves allocated reads its pseudo-tables past
@@ -756,22 +762,28 @@ partial class Simulation
 
     /// <summary>
     /// Tears a cursor down when its last reference goes away: releases any
-    /// SCROLL_LOCKS locks it holds. Closing the materialized state is implicit
-    /// (the object becomes unreachable). Idempotent for a closed cursor.
+    /// SCROLL_LOCKS locks it holds and leaves the session's
+    /// <see cref="SimulatedDbConnection.FrameCursors"/>. Closing the
+    /// materialized state is implicit (the object becomes unreachable).
+    /// Idempotent for a closed cursor.
     /// </summary>
-    private static void DestroyCursor(BatchContext batch, Cursor cursor) =>
+    private static void DestroyCursor(BatchContext batch, Cursor cursor)
+    {
         cursor.ReleaseScrollLocks(batch.Connection);
+        _ = batch.Connection.FrameCursors.TryRemove(cursor, out _);
+    }
 
     /// <summary>
     /// Drops one cursor-variable reference to <paramref name="cursor"/>: if the
     /// decrement leaves an unnamed cursor with no remaining references, the
     /// object is destroyed (SCROLL_LOCKS locks released). Named cursors persist
-    /// through their name binding regardless of the count.
+    /// through their name binding regardless of the count, until the name is
+    /// dropped.
     /// </summary>
     private static void ReleaseVariableReference(BatchContext batch, Cursor cursor)
     {
         cursor.VariableRefCount--;
-        if (cursor.VariableRefCount <= 0 && cursor.IsUnnamed)
+        if (cursor.VariableRefCount <= 0 && (cursor.IsUnnamed || cursor.NameDropped))
             DestroyCursor(batch, cursor);
     }
 
@@ -828,6 +840,8 @@ partial class Simulation
             {
                 if (cursor.VariableRefCount == 0)
                     DestroyCursor(batch, cursor);
+                else
+                    cursor.NameDropped = true;
             }
             locals.Clear();
         }

@@ -217,6 +217,7 @@ Cursors are the row-at-a-time slow path, and this matches the single-source desi
 A `FAST_FORWARD` cursor — named so, or one that is forward-only and read-only (`READ_ONLY` or `FOR READ ONLY`, with neither `SCROLL` nor a sensitivity keyword), which `sys.dm_exec_cursors` reports as `Fast_Forward` — runs its plan as the fetches go (probed 2026-09-29 against SQL Server 2025).
 Over a navigable shape whose ORDER BY an index delivers it reads live rows: an insert ahead appears, an update shows, a delete ahead vanishes, and a row whose clustered key moved ahead comes round again — `CursorSensitivity.Dynamic` with `Cursor.FastForward` set.
 A plan that has to finish a sort or a row limit first, and a non-navigable shape, settle every row and value at OPEN — `CursorSensitivity.Static` — and neither needs a row locator.
+A `DISTINCT` projecting a key that determines every source it reads — a primary key, unique constraint or unique index, through a derived table, a view or a join on the other side's key — and a `GROUP BY` with no aggregate whose groups hold one row each are dropped as real's optimizer drops them, so such a cursor reads live too; a DYNAMIC or KEYSET request over the same query is still a snapshot (`CursorShape.FastForwardOnly`, probed 2026-10-17 against SQL Server 2025).
 Either way `@@CURSOR_ROWS` reads -1 and `CURSOR_STATUS` 1 while open, an empty cursor included, TYPE_WARNING never fires, and `ABSOLUTE` is the forward-only Msg 16911 rather than the dynamic Msg 16925.
 An API server cursor's FORWARD_ONLY READ_ONLY request keeps its own negotiation and isn't read as FAST_FORWARD — see [`tds-endpoint.md`](tds-endpoint.md#api-server-cursors-sp_cursor-rpc-family).
 
@@ -412,6 +413,7 @@ A NULL or unknown source is Msg 16902 (state 40 / 42), a NULL identity Msg 16902
 ### `sys.dm_exec_cursors`
 
 `sys.dm_exec_cursors(session_id)` lists every cursor a session has declared, open or not, with real's 22 columns and shapes (probed 2026-09-30 against SQL Server 2025); 0 or NULL lists every session's, and a session id nobody holds none.
+Another session's local cursors and cursor variables are listed while its batch holds them — a blocked one's, for instance — through the session's `FrameCursors` (probed 2026-10-17).
 A session without `VIEW SERVER STATE` sees only its own, and the wrong argument count is Msg 313 / Msg 8144 at line 12, as for the other `sys.dm_exec_*` functions.
 
 - **`properties`** is `TSQL | <type> | <concurrency> | <scope> (0)`: `Dynamic`, `Keyset`, `Snapshot` or `Fast_Forward`, then `Read Only`, `Optimistic` or `Scroll Locks`, then `Local` for a `LOCAL` cursor and `Global` otherwise, a cursor variable's included, which is named by its variable (`@cv`).
@@ -421,12 +423,11 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
 - **`fetch_buffer_size`** is 1 while the last `FETCH` since `OPEN` landed on a row, else 0; an API server cursor's is the rows its last fetch buffered, `fetch_buffer_start` the first one's position (-1 when it buffered none, and for a DYNAMIC or FAST_FORWARD cursor) and `fetch_status` 0 once it has fetched (probed 2026-10-06).
 - **`name`** is NULL for an API server cursor, whose `properties` lead with `API` where a T-SQL cursor's lead with `TSQL` (probed 2026-10-06).
 - **`fetch_buffer_start`** is 0 before a `FETCH` since `OPEN`, before the first row and while closed, -1 past the last row, and on a row its 1-based position for a STATIC or KEYSET cursor and -1 for a DYNAMIC or FAST_FORWARD one.
-- **`is_open`** follows `OPEN` / `CLOSE`; `is_async_population` and `is_close_on_commit` read 0 — the latter for a cursor declared under `SET CURSOR_CLOSE_ON_COMMIT ON` too, as real reports one before its `OPEN` — and `ansi_position` 1.
+- **`is_open`** follows `OPEN` / `CLOSE`; `is_async_population` and `is_close_on_commit` read 0 — the former under any `cursor threshold` too, real populating a 200,000-row KEYSET synchronously with the option at 0 and at 1000 and reporting its full `@@CURSOR_ROWS` straight after `OPEN` (probed 2026-10-17 against SQL Server 2025) — the latter for a cursor declared under `SET CURSOR_CLOSE_ON_COMMIT ON` too, as real reports one before its `OPEN` — and `ansi_position` 1.
 
 ## Divergences from SQL Server (documented, not byte-identical)
 
 - **`sys.dm_exec_cursors`' cost and plan columns** — `worker_time`, `reads`, `writes` and `dormant_duration` read 0 and `plan_generation_num` 1, where real's count work done and recompiles (a cursor declared in the batch that created its table reports its statement's recompile count there); `cursor_id` is the simulator's own handle numbering, and `statement_context_id` the simulator's own store's id.
-- **`sys.dm_exec_cursors` for another session** lists only its global cursors: its local cursors and cursor variables live on the batch it is running, which only the querying session reaches — they exist only while that session is mid-batch, a blocked one for instance.
 - **A cursor declared in a module body** reports offsets into the body's text and a handle of it, where real's are into the module's whole definition.
 
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.
@@ -452,13 +453,7 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
   A fits-in-place rewrite returns the new bytes (conflict detected); an oversize rewrite that installs a forwarding pointer isn't followed by `ReadSlotBytes`, so such a change may go undetected.
   The common small-value case is exact.
 - **DECLARE CURSOR inside an un-taken `IF` branch** still parses (and resolves names in) its SELECT — the same eager-resolution quirk all statements share.
-- **FAST_FORWARD settles a DISTINCT at OPEN even when a key makes it redundant** — real's optimizer drops `DISTINCT` over a projection holding the table's key and then reads live, as it does a plain query.
-  An optimizer rewrite: not chased.
+- **FAST_FORWARD settles two more redundant operators at OPEN** that real's optimizer drops and then reads live: a `GROUP BY` over a key that carries an aggregate (`SELECT a, MAX(b) FROM t GROUP BY a`), and a set operation whose other branch a contradiction empties (`UNION … WHERE 1 = 0`) (probed 2026-10-17 against SQL Server 2025).
 - **Msg 1049's line** varies between runs on real (0 in most placements, a small number in others); the simulator reports 0.
 - **A cursor parameter missing `VARYING OUTPUT`** is Msg 1051 alone, where real goes on to report the body's uses of the parameter as undeclared variables (Msg 137).
 - **`sp_describe_cursor_tables`' server name** is the simulator's `@@SERVERNAME`, and object ids are the simulator's own.
-
-## Not modeled yet
-
-- **Asynchronous keyset population** under a non-default `cursor threshold` server option, where real reports a negative `@@CURSOR_ROWS` while it populates; the default (-1) populates synchronously, which is what the simulator always does.
-  How far population has got when a statement reads it is a matter of timing, so the simulator would match real only by populating synchronously anyway.

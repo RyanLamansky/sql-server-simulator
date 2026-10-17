@@ -2571,6 +2571,16 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal readonly Dictionary<string, Cursor> Cursors = new(BuiltInToken.Comparer);
 
+    /// <summary>
+    /// The session's live LOCAL cursors and cursor-variable cursors, each with
+    /// the name <c>sys.dm_exec_cursors</c> reports it by, from its creation
+    /// until it is destroyed. They live on the frames running, which another
+    /// session can't reach, so it reads them here — real lists them for a
+    /// session mid-batch, a blocked one for instance (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    internal readonly ConcurrentDictionary<Cursor, string> FrameCursors = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>The statements prepared on this session, by handle.</summary>
     internal readonly Dictionary<int, PreparedStatement> PreparedStatements = [];
 
@@ -3020,6 +3030,7 @@ public sealed class SimulatedDbConnection : DbConnection
             foreach (var cursor in this.Cursors.Values)
                 cursor.ReleaseScrollLocks(this);
             this.Cursors.Clear();
+            this.FrameCursors.Clear();
             // Global temp tables: drop every ##foo owned by this connection.
             // Probe-confirmed against SQL Server 2025 (pooling disabled) that
             // owner-disconnect drops ##foo unconditionally, regardless of

@@ -316,7 +316,6 @@ Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
 - **FAST_FORWARD** reads live rows over a navigable shape and settles them at OPEN over a sort, a row limit or a non-navigable one, as the T-SQL `FAST_FORWARD` does — see [`cursors.md`](cursors.md#fast_forward).
 - **sp_cursor @rownum = 0** (real: "apply to every buffered row" batch update) is not modeled — only 1-based single-row positioned DML.
 - **REFRESH fetchtype (0x80)** maps to a plain re-fetch rather than an in-place buffer refresh.
-- **Not modeled yet**: ccopt's CHECK_ACCEPTED_OPTS (0x10000) with its `*_ACCEPTABLE` bits, which refused nothing in the probes (an OPTIMISTIC request with only READ_ONLY acceptable opened OPTIMISTIC on both, probed 2026-10-06 against SQL Server 2025), is stripped.
 
 ### The procedures as `EXEC` text
 
@@ -334,6 +333,7 @@ An error any of them raises ends only the call: the caller's batch goes on and `
 
 - **PARAMETERIZED_STMT (0x1000)** on an `sp_cursoropen` carrying no parameter definition is **Msg 16902** state 22 (`sp_cursoropen: The value of the parameter 'scrollopt' is invalid.`), return status 1, a zero handle, both options echoed as sent and the row count as sent; an `sp_cursorprepexec` carrying definitions without it is state 50, with a zero handle and row count and nothing prepared (probed 2026-10-16).
 - **AUTO_FETCH (0x2000)** fetches the first rows with the open, in its result set — as many as the `@rowcount` sent, else 20 — and returns how many it fetched as `@rowcount`, whatever the cursor's type (a DYNAMIC cursor's included).
+- **ccopt's CHECK_ACCEPTED_OPTS (0x10000)** with its `*_ACCEPTABLE` bits refuses nothing, so it is stripped: an OPTIMISTIC request with only READ_ONLY acceptable opens OPTIMISTIC, and a SCROLL_LOCKS or OPTIMISTIC request over a `DISTINCT`, converted to READ_ONLY, opens with only its own concurrency acceptable or none (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
 - **CHECK_ACCEPTED_TYPES (0x8000)** accepts the open only when the type the cursor settled on carries its `*_ACCEPTABLE` bit (its type bit shifted 16: KEYSET 0x10000, DYNAMIC 0x20000, FORWARD_ONLY 0x40000, STATIC 0x80000, FAST_FORWARD 0x100000) — a KEYSET request over a `DISTINCT` needs STATIC acceptable — else it is **Msg 16955** (`Could not create an acceptable cursor.`) and Msg 16945, both state 2, return status 16955, a zero handle, the options echoed and a zero row count.
 
 ## Bulk load (SqlBulkCopy)
