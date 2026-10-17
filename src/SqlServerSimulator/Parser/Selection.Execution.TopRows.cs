@@ -155,10 +155,7 @@ partial class Selection
                 return new(this.entries, start, end - start);
             }
 
-            if (end < span.Length)
-                NthElement(span, end, this.order);
-            if (start > 0)
-                NthElement(span[..end], start, this.order);
+            SelectWindow(span, start, end, this.order);
             span[start..end].Sort(this.order);
 
             if (withTies && end > 0 && end < span.Length)
@@ -212,6 +209,59 @@ partial class Selection
         }
 
         /// <summary>
+        /// Rearranges <paramref name="span"/> so the rows ranked
+        /// <paramref name="start"/> up to (not including) <paramref name="end"/>
+        /// sit at those indexes, in no particular order, with every smaller row
+        /// before them and every larger one after: partitions narrow to
+        /// whichever side holds the whole window, and once a pivot lands inside
+        /// it each end is an <see cref="NthElement"/> of its own side.
+        /// Selecting the window's end over the whole span and then its start
+        /// over everything below the end read those rows twice: a 50-row window
+        /// at rank 100,001 of 150k paid for 250k rows rather than 150k
+        /// (measured 2026-10-17).
+        /// </summary>
+        private static void SelectWindow(Span<Entry> span, int start, int end, EntryOrder order)
+        {
+            var lo = 0;
+            var hi = span.Length - 1;
+            var passes = (2 * BitOperations.Log2((uint)Math.Max(span.Length, 1))) + 4;
+            while (hi - lo > 16 && passes-- > 0)
+            {
+                if (start == lo)
+                {
+                    if (end <= hi)
+                        NthElement(span[lo..(hi + 1)], end - lo, order);
+                    return;
+                }
+                if (end == hi + 1)
+                {
+                    NthElement(span[lo..(hi + 1)], start - lo, order);
+                    return;
+                }
+
+                var i = Partition(span, lo, hi, order);
+                if (end <= i)
+                {
+                    hi = i - 1;
+                }
+                else if (start > i)
+                {
+                    lo = i + 1;
+                }
+                else
+                {
+                    if (start < i)
+                        NthElement(span[lo..i], start - lo, order);
+                    if (end <= hi)
+                        NthElement(span[(i + 1)..(hi + 1)], end - (i + 1), order);
+                    return;
+                }
+            }
+
+            span[lo..(hi + 1)].Sort(order);
+        }
+
+        /// <summary>
         /// Rearranges <paramref name="span"/> so the row ranked
         /// <paramref name="nth"/> sits at that index with every smaller row
         /// before it and every larger one after — Hoare's selection, over a
@@ -229,33 +279,7 @@ partial class Selection
             {
                 if (passes-- == 0)
                     break;
-                var mid = lo + ((hi - lo) / 2);
-                if (order.Compare(span[mid], span[lo]) < 0)
-                    (span[mid], span[lo]) = (span[lo], span[mid]);
-                if (order.Compare(span[hi], span[lo]) < 0)
-                    (span[hi], span[lo]) = (span[lo], span[hi]);
-                if (order.Compare(span[hi], span[mid]) < 0)
-                    (span[hi], span[mid]) = (span[mid], span[hi]);
-
-                // span[lo] <= pivot <= span[hi] now bound both scans.
-                var pivot = span[mid];
-                (span[mid], span[hi - 1]) = (span[hi - 1], span[mid]);
-                var i = lo;
-                var j = hi - 1;
-                while (true)
-                {
-                    while (order.Compare(span[++i], pivot) < 0)
-                    {
-                    }
-                    while (order.Compare(pivot, span[--j]) < 0)
-                    {
-                    }
-                    if (i >= j)
-                        break;
-                    (span[i], span[j]) = (span[j], span[i]);
-                }
-                (span[i], span[hi - 1]) = (span[hi - 1], span[i]);
-
+                var i = Partition(span, lo, hi, order);
                 if (i == nth)
                     return;
                 if (nth < i)
@@ -265,6 +289,42 @@ partial class Selection
             }
 
             span[lo..(hi + 1)].Sort(order);
+        }
+
+        /// <summary>
+        /// One Hoare partition of <c>[lo, hi]</c> around a median-of-three
+        /// pivot, which lands at the index returned: every row before it is
+        /// smaller, every row after it larger.
+        /// </summary>
+        private static int Partition(Span<Entry> span, int lo, int hi, EntryOrder order)
+        {
+            var mid = lo + ((hi - lo) / 2);
+            if (order.Compare(span[mid], span[lo]) < 0)
+                (span[mid], span[lo]) = (span[lo], span[mid]);
+            if (order.Compare(span[hi], span[lo]) < 0)
+                (span[hi], span[lo]) = (span[lo], span[hi]);
+            if (order.Compare(span[hi], span[mid]) < 0)
+                (span[hi], span[mid]) = (span[mid], span[hi]);
+
+            // span[lo] <= pivot <= span[hi] now bound both scans.
+            var pivot = span[mid];
+            (span[mid], span[hi - 1]) = (span[hi - 1], span[mid]);
+            var i = lo;
+            var j = hi - 1;
+            while (true)
+            {
+                while (order.Compare(span[++i], pivot) < 0)
+                {
+                }
+                while (order.Compare(pivot, span[--j]) < 0)
+                {
+                }
+                if (i >= j)
+                    break;
+                (span[i], span[j]) = (span[j], span[i]);
+            }
+            (span[i], span[hi - 1]) = (span[hi - 1], span[i]);
+            return i;
         }
 
         /// <summary>The total order: ORDER BY keys, then arrival.</summary>

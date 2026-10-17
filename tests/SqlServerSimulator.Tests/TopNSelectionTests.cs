@@ -157,13 +157,24 @@ public sealed class TopNSelectionTests
         CollectionAssert.AreEqual(values.Order().ToList(), values);
     }
 
-    /// <summary>A bounded row number past the heap's ceiling selects rather than sorts, and numbers identically.</summary>
+    /// <summary>
+    /// A bounded row number past the heap's ceiling selects rather than sorts,
+    /// and numbers identically wherever its window sits among the 6,000 rows —
+    /// deep, at either end, one row wide, or past the last row.
+    /// </summary>
     [TestMethod]
-    public void BoundedRowNumber_PastTheHeapCeiling_MatchesTheUnboundedNumbering()
+    [DataRow(5001, 5010)]
+    [DataRow(1, 4200)]
+    [DataRow(4500, 6000)]
+    [DataRow(3000, 3000)]
+    [DataRow(2, 5999)]
+    [DataRow(5990, 6100)]
+    [DataRow(6001, 6200)]
+    public void BoundedRowNumber_PastTheHeapCeiling_MatchesTheUnboundedNumbering(int lower, int upper)
     {
         var simulation = Seeded();
         CollectionAssert.AreEqual(
-            Ids(simulation, "select id from (select id, row_number() over (order by s, k) rn from t) x where rn + 0 between 5001 and 5010 order by rn"),
-            Ids(simulation, "select id from (select id, row_number() over (order by s, k) rn from t) x where rn between 5001 and 5010 order by rn"));
+            Ids(simulation, $"select id from (select id, row_number() over (order by s, k) rn from t) x where rn + 0 between {lower} and {upper} order by rn"),
+            Ids(simulation, $"select id from (select id, row_number() over (order by s, k) rn from t) x where rn between {lower} and {upper} order by rn"));
     }
 }
