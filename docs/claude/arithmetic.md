@@ -269,6 +269,7 @@ Over a heap real raises as the simulator does.
 
 `Storage/Decimal38` is the exact-numeric value: a `UInt128` magnitude, a sign flag and a scale byte, normalized at construction so zero is never negative.
 That is `numeric`'s whole domain — 38 significant digits at any scale from 0 to 38 — so a value real represents has a representation here, and the storage encoder writes the magnitude little-endian behind a sign byte at SQL Server's own 5 / 9 / 13 / 17-byte precision tiers.
+A `SqlValue` holds a decimal whose magnitude fits a `long` inline and boxes only a wider one (`SqlValue.Decimal`); boxing every decoded decimal was a twentieth of the WWI report batteries' steady-state allocation (measured 2026-10-17, Release).
 
 Every operator is a `Try*` returning `false` on overflow rather than throwing, leaving the caller to name the error real names, and each computes through `Storage/UInt256` where 128 bits won't hold the intermediate: a multiply widens both operands, a division scales the dividend up front, and the reduction back to the result scale is a chain of at-most-19-digit `ulong` divisions (the first dropped digit settles the rounding, so no remainder wider than one digit is ever formed).
 `UInt256`'s own division is limb long division for a divisor inside 64 bits and Knuth algorithm D past it.

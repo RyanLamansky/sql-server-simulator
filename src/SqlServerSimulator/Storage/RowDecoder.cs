@@ -36,15 +36,12 @@ internal static class RowDecoder
     /// <c>text</c>/<c>ntext</c>/<c>image</c>, but MAX siblings of
     /// varchar/nvarchar/varbinary need the
     /// <see cref="DecodeRow(ReadOnlySpan{HeapColumn}, ReadOnlySpan{byte}, Heap?)"/>
-    /// overload to surface as LOB-eligible.
+    /// overload to surface as LOB-eligible. The columns come from
+    /// <see cref="ColumnsFor"/>, so a caller decoding a result set row by row
+    /// builds them once rather than once per row.
     /// </summary>
-    public static SqlValue[] DecodeRow(ReadOnlySpan<SqlType> schema, ReadOnlySpan<byte> bytes)
-    {
-        var columns = new HeapColumn[schema.Length];
-        for (var i = 0; i < schema.Length; i++)
-            columns[i] = new HeapColumn(string.Empty, schema[i], maxLength: null, nullable: true);
-        return DecodeRow(columns, bytes, lobStore: null);
-    }
+    public static SqlValue[] DecodeRow(SqlType[] schema, ReadOnlySpan<byte> bytes) =>
+        DecodeRow(ColumnsFor(schema), bytes, lobStore: null);
 
     /// <summary>
     /// Column-aware row decode. <paramref name="lobStore"/> resolves any

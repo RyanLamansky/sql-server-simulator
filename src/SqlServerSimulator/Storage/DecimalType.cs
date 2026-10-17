@@ -14,7 +14,8 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 /// <remarks>
 /// In-memory values are <see cref="Decimal38"/> — the full 38 significant
-/// digits real carries — boxed in <see cref="SqlValue"/>'s reference slot.
+/// digits real carries — held by <see cref="SqlValue"/> inline where the
+/// magnitude fits a <see cref="long"/> and boxed otherwise.
 /// The on-disk form is the probed one: a sign byte (0x00 negative, 0x01
 /// non-negative) then the absolute mantissa little-endian, scaled to the
 /// declared scale and zero-padded to the type's storage width.

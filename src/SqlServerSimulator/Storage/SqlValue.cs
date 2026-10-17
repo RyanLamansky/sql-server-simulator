@@ -676,7 +676,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
 
     /// <summary>
     /// Non-NULL SQL <c>decimal(p, s)</c> value. The <see cref="Decimal38"/>
-    /// payload is boxed in the reference slot; <paramref name="type"/> carries
+    /// payload is held as <see cref="Decimal"/> says; <paramref name="type"/> carries
     /// the precision and scale identity, and the payload is restated at that
     /// declared scale — SQL Server's value carries exactly the declared number
     /// of fractional digits, so <c>CAST(1 AS numeric(10, 2))</c> is
@@ -690,15 +690,30 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         if (type is not DecimalSqlType declared)
             throw new ArgumentException($"{type} is not a decimal type.", nameof(type));
         if (value.Scale == declared.scale)
-            return new(type, 0, value, isNull: false);
+            return Decimal(type, value);
 
         // Restating at the declared scale rounds half away from zero when it
         // narrows and pads zeros when it widens; only a value whose digits
         // then leave numeric's own 38 has nowhere to go.
         return Decimal38.TryRescale(value, Decimal38.MaxPrecision, declared.scale, out var scaled)
-            ? new(type, 0, scaled, isNull: false)
+            ? Decimal(type, scaled)
             : throw SimulatedSqlException.ArithmeticOverflowToNumeric();
     }
+
+    /// <summary>
+    /// A decimal value already at its type's scale. A magnitude that fits a
+    /// <see cref="long"/> — every <c>decimal(18, s)</c> and most wider ones —
+    /// is held signed in the primitive slot with no reference, and only a
+    /// wider one is boxed: decoding a decimal column boxed one per value read,
+    /// a twentieth of a report battery's allocated bytes. The form is settled
+    /// by the value alone, and every value of one type shares its scale, so
+    /// two equal values of a type always share a form, which is what lets
+    /// equality, hashing and ordering compare the primitive slot directly.
+    /// </summary>
+    private static SqlValue Decimal(SqlType type, in Decimal38 value) =>
+        value.Magnitude <= long.MaxValue
+            ? new(type, value.IsNegative ? -(long)(ulong)value.Magnitude : (long)(ulong)value.Magnitude, null, isNull: false)
+            : new(type, 0, value, isNull: false);
 
     /// <summary>
     /// Non-NULL SQL <c>decimal(p, s)</c> value from a .NET
@@ -949,9 +964,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// </summary>
     public Decimal38 AsDecimal38 => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
-        : this.Type is not DecimalSqlType
+        : this.Type is not DecimalSqlType declared
             ? throw new InvalidOperationException($"Value is {this.Type}, not a decimal type.")
-            : (Decimal38)this.reference!;
+            : this.reference is null
+            ? Decimal38.FromParts(this.primitive < 0 ? (ulong)-this.primitive : (ulong)this.primitive, this.primitive < 0, declared.scale)
+            : (Decimal38)this.reference;
 
     /// <summary>
     /// Returns the value as a .NET <see cref="decimal"/> — the client-boundary
@@ -1082,7 +1099,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     : this.Type == SqlType.UniqueIdentifier
                         ? (Guid)this.reference! == (Guid)other.reference!
                         : this.Type is DecimalSqlType
-                            ? (Decimal38)this.reference! == (Decimal38)other.reference!
+                            ? (this.reference is null || other.reference is null
+                                ? this.reference is null && other.reference is null && this.primitive == other.primitive
+                                : (Decimal38)this.reference == (Decimal38)other.reference)
                             : this.Type == SqlType.HierarchyId
                                 ? ((byte[])this.reference!).AsSpan().SequenceEqual((byte[])other.reference!)
                                 : IsBinaryString(this.Type)
@@ -1187,7 +1206,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             {
                 SqlTypeCategory.Integer or SqlTypeCategory.DateTime or SqlTypeCategory.Money
                     => this.primitive.CompareTo(other.primitive),
-                SqlTypeCategory.Decimal => this.AsDecimal38.CompareTo(other.AsDecimal38),
+                // One type shares one scale, so two inline values order by
+                // their scaled integers (see Decimal).
+                SqlTypeCategory.Decimal => this.reference is null && other.reference is null
+                    ? this.primitive.CompareTo(other.primitive)
+                    : this.AsDecimal38.CompareTo(other.AsDecimal38),
                 SqlTypeCategory.Approximate => this.Type == SqlType.Float
                     ? this.AsDouble.CompareTo(other.AsDouble)
                     : this.AsSingle.CompareTo(other.AsSingle),
@@ -1262,11 +1285,12 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public override int GetHashCode()
     {
         // Fast path for a non-NULL value whose whole identity is (type,
-        // primitive) — every integer, bit, date/time and approximate type.
-        // Equality for those ends at the same pair, and a value with a null
-        // reference can never be equal to one carrying a reference (equal
-        // values share a type, and a type's storage shape is fixed), so the
-        // split is consistent. The general path below runs three rounds of the
+        // primitive) — every integer, bit, date/time and approximate type, and
+        // a decimal narrow enough to sit inline (see Decimal). Equality for
+        // those ends at the same pair, and a value with a null reference can
+        // never be equal to one carrying a reference (equal values share a
+        // type, and a type's storage shape is fixed — a decimal's by its
+        // value, which equal values share), so the split is consistent. The general path below runs three rounds of the
         // combiner plus a type-test chain, once per row wherever a join, a
         // GROUP BY or a seek keys on the value.
         if (this.reference is null && !this.IsNull && this.Type is not SqlVariantSqlType)
@@ -1311,8 +1335,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         }
         else if (this.Type is DecimalSqlType)
         {
-            // Keyed on the canonical form, so a declared scale's trailing zeros
-            // don't split the hash the way they don't split equality.
+            // A value too wide to sit inline (see Decimal), keyed on the
+            // canonical form, so a declared scale's trailing zeros don't split
+            // the hash the way they don't split equality.
             hash.Add((Decimal38)this.reference!);
         }
         else if (this.Type == SqlType.HierarchyId)

@@ -30,6 +30,8 @@ internal sealed class JsonQuery : Expression
     /// </summary>
     private readonly Expression? pathInput;
 
+    private JsonPath.ParsedPath? parsedPath;
+
     /// <summary>
     /// Whether SQL Server 2025's <c>WITH ARRAY WRAPPER</c> closes the
     /// argument list, which gathers everything the path selects into one array.
@@ -96,7 +98,7 @@ internal sealed class JsonQuery : Expression
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_QUERY");
         if (jsonValue.IsNull)
             return SqlValue.Null(resultType);
-        var path = JsonPath.Parse(pathValue.AsString);
+        var path = JsonPath.Parse(pathValue.AsString, ref this.parsedPath);
         return this.arrayWrapper ? Wrap(jsonValue, path, resultType)
             : path.IsAdvanced ? ExtractAdvanced(jsonValue, path, resultType)
             : Extract(jsonValue, path, resultType);

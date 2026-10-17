@@ -901,10 +901,7 @@ internal sealed partial class Selection
         candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, recompute: () => SettledCandidates(
-                table,
-                () => AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds),
-                () => TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var current) ? current : []));
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, requery: new CandidateRequery(source, outerResolver, equalities: null, bounds));
         if (snapshotXid is null && (plan is { RowTxScoped: true, RowMode: not null } or { Pages.Held: true })
             && RangeSeekBounds(source, table, batch, outerResolver, bounds) is var (group, lower, lowerInclusive, upper, upperInclusive))
         {
@@ -3356,11 +3353,37 @@ internal sealed partial class Selection
         candidateCount = candidates.Count;
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates, seeks)
-            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks, recompute: () => SettledCandidates(
-                table,
-                () => AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities),
-                () => TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var current, out _, out _, out _, out _) ? current : []));
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks, requery: new CandidateRequery(source, outerResolver, equalities, bounds));
         return true;
+    }
+
+    /// <summary>
+    /// What a locking seek reads its candidates again by once one it listed
+    /// is lost (see <see cref="SettledCandidates"/>): the equalities and
+    /// bounds it probed, or the bounds alone for a range seek. A value rather
+    /// than the closures it stands for, which every seek allocated to cover a
+    /// read almost none of them makes.
+    /// </summary>
+    private readonly struct CandidateRequery(FromSource source, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]>? equalities, Dictionary<int, RangeBoundExprs> bounds)
+    {
+        public readonly FromSource Source = source;
+        public readonly Func<MultiPartName, SqlValue>? OuterResolver = outerResolver;
+        public readonly Dictionary<int, Expression[]>? Equalities = equalities;
+        public readonly Dictionary<int, RangeBoundExprs> Bounds = bounds;
+
+        public List<(int Page, int Slot)> Read(HeapTable table, BatchContext batch)
+        {
+            var (source, outer, bounds) = (this.Source, this.OuterResolver, this.Bounds);
+            return this.Equalities is { } equalities
+                ? SettledCandidates(
+                    table,
+                    () => AwaitUncommittedDeletesMatching(table, batch, outer, equalities),
+                    () => TryComputeEqualityCandidates(source, table, batch, outer, equalities, bounds, out var current, out _, out _, out _, out _) ? current : [])
+                : SettledCandidates(
+                    table,
+                    () => AwaitUncommittedDeletesInRange(table, batch, outer, bounds),
+                    () => TryComputeRangeCandidates(source, table, batch, outer, bounds, out var current) ? current : []);
+        }
     }
 
     /// <summary>
@@ -3697,32 +3720,38 @@ internal sealed partial class Selection
         ReferenceEquals(from, to)
         || (from.Category == to.Category && from.Category is SqlTypeCategory.Integer or SqlTypeCategory.String or SqlTypeCategory.UniqueIdentifier);
 
-    // Yields every cartesian-product tuple across the per-column probe arrays.
-    // For an N-column prefix where the i-th column has c_i probe values, the
-    // total tuple count is the product of the c_i; for the common single-value
-    // case (all c_i == 1) this yields exactly one tuple.
-    private static IEnumerable<SqlValue[]> CartesianProduct(SqlValue[][] perColumn)
+    // Every cartesian-product tuple across the per-column probe arrays, the
+    // last column varying fastest. For an N-column prefix where the i-th column
+    // has c_i probe values, the total tuple count is the product of the c_i;
+    // for the common single-value case (all c_i == 1) this is exactly one
+    // tuple, and a one-column prefix's one tuple is its probe array itself —
+    // a seek per outer row otherwise paid an enumerator, its index array and
+    // the tuple.
+    private static SqlValue[][] CartesianProduct(SqlValue[][] perColumn)
     {
+        var count = 1;
+        foreach (var probes in perColumn)
+            count *= probes.Length;
+        if (count == 1 && perColumn.Length == 1)
+            return perColumn;
+
+        var tuples = new SqlValue[count][];
         var indices = new int[perColumn.Length];
-        while (true)
+        for (var t = 0; t < count; t++)
         {
             var tuple = new SqlValue[perColumn.Length];
             for (var i = 0; i < perColumn.Length; i++)
                 tuple[i] = perColumn[i][indices[i]];
-            yield return tuple;
+            tuples[t] = tuple;
 
-            var carry = perColumn.Length - 1;
-            while (carry >= 0)
+            for (var carry = perColumn.Length - 1; carry >= 0; carry--)
             {
-                indices[carry]++;
-                if (indices[carry] < perColumn[carry].Length)
+                if (++indices[carry] < perColumn[carry].Length)
                     break;
                 indices[carry] = 0;
-                carry--;
             }
-            if (carry < 0)
-                yield break;
         }
+        return tuples;
     }
 
     // The most probe tuples a union seek fires across all its disjuncts before
@@ -3916,7 +3945,11 @@ internal sealed partial class Selection
         FromSource source, int storageOrdinal, Expression[] valueSides, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var columnType = source.StoredSchema[storageOrdinal].Type;
-        var raw = new List<SqlValue>(valueSides.Length);
+        // The values kept, coerced in place below into the probes themselves
+        // when every value side kept one — the one array a seek per outer row
+        // allocates here.
+        var raw = new SqlValue[valueSides.Length];
+        var kept = 0;
         SqlType? common = null;
 
         foreach (var valueSide in valueSides)
@@ -3960,18 +3993,18 @@ internal sealed partial class Selection
                 return null;
             }
 
-            raw.Add(value);
+            raw[kept++] = value;
         }
 
-        if (common is null || raw.Count == 0)
+        if (common is null || kept == 0)
             return null;
 
-        var probes = new SqlValue[raw.Count];
-        for (var i = 0; i < raw.Count; i++)
+        var probes = kept == raw.Length ? raw : raw[..kept];
+        for (var i = 0; i < kept; i++)
         {
             try
             {
-                probes[i] = raw[i].CoerceTo(common);
+                probes[i] = probes[i].CoerceTo(common);
             }
             catch (Exception ex) when (ex is NotSupportedException or SimulatedSqlException)
             {
@@ -3999,36 +4032,33 @@ internal sealed partial class Selection
     /// and waits on it (<see cref="BatchContext.RowsOfDeletedKey"/>):
     /// <paramref name="keys"/>, when given, names each candidate's key at the
     /// same index. One no key names sends the read to
-    /// <paramref name="recompute"/>, when given, for the candidates as they
+    /// <paramref name="requery"/>, when given, for the candidates as they
     /// stand, the rows it hasn't read yet read in turn.
     /// </remarks>
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
         HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null, int seeks = 1,
-        List<SqlValueKey>? keys = null, Func<List<(int Page, int Slot)>>? recompute = null, OrderedScanRest? rest = null)
+        List<SqlValueKey>? keys = null, CandidateRequery? requery = null, OrderedScanRest? rest = null)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += seeks;
         var lastPage = -1;
         // Hoisted per-row scaffolding for the qualifier, as the prefilter's.
-        var tuple = new byte[]?[1];
         var qualifying = qualifier is not null && plan.RowMode is not null;
+        var tuple = qualifying ? new byte[]?[1] : [];
         LockResource? rejected = null;
-        RuntimeContext runtime = default;
-        if (qualifying)
-        {
-            FromSource[] one = [qualifier!.Source];
-            var memo = new SourceColumnMemo();
-            var outer = qualifier!.OuterResolver;
-            SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(one, tuple, name, batch, outer, memo);
-            runtime = new RuntimeContext(resolve, batch);
-        }
+        var runtime = qualifying ? QualifierRuntime(qualifier!, tuple, batch) : default;
 
         // Dedup + tombstone-skip mirror the full scan's EnumerateRowsWithAddress
         // (which skips tombstoned / forward-target slots and yields each row once)
         // and neutralize the incrementally-maintained cache's only imprecision: a
         // not-yet-applied or mis-keyed Delete can leave a tombstoned address in a
         // bucket, and a double-applied Insert can list one twice.
-        var seen = new HashSet<(int, int)>();
+        // A short list read in one pass as listed has read exactly the
+        // addresses ahead of the one in hand, which looking back answers, so
+        // the set is built only when the read leaves that pass — a seek of a
+        // few rows per outer row built one per seek, a tenth of the bytes a
+        // seek-driven join allocated.
+        var seen = candidates.Count > LookBackDedupCap ? new HashSet<(int, int)>(candidates.Count) : null;
         var addresses = plan.WriteTargetAddresses ?? batch.CurrentStatement.RowAddresses;
         var heap = table.Heap;
         var work = candidates;
@@ -4046,12 +4076,13 @@ internal sealed partial class Selection
             {
                 if (rest is not null && rest.Moved())
                 {
+                    seen ??= ReadAhead(work, position);
                     work = rest.AfterInReadOrder(rest.LastRead, table, batch);
                     position = -1;
                     continue;
                 }
                 var (page, slot) = work[position];
-                if (!seen.Add((page, slot)))
+                if (seen is not null ? !seen.Add((page, slot)) : ListedAhead(work, position))
                     continue;
                 // A row another request of the statement's transaction wrote
                 // since the statement began reads as the statement found it.
@@ -4090,6 +4121,7 @@ internal sealed partial class Selection
                         }
                         // A delete the wait saw roll back put the row back at
                         // this very address.
+                        seen ??= ReadAhead(work, position + 1);
                         _ = seen.Remove((page, slot));
                     }
                     else
@@ -4112,11 +4144,48 @@ internal sealed partial class Selection
                 }
                 yield return bytes;
             }
-            if (!lost || recompute is null || round == Simulation.MaxTargetWalks)
+            if (!lost || requery is not { } again || round == Simulation.MaxTargetWalks)
                 break;
-            work = recompute();
+            seen ??= ReadAhead(work, work.Count);
+            work = again.Read(table, batch);
         }
-        tuple[0] = null;
+        if (qualifying)
+            tuple[0] = null;
+    }
+
+    // The most candidates MaterializeWithLockChecks dedups by looking back
+    // over the list rather than through a set.
+    private const int LookBackDedupCap = 8;
+
+    // Whether the address at `position` was listed ahead of it.
+    private static bool ListedAhead(List<(int Page, int Slot)> work, int position)
+    {
+        var address = work[position];
+        for (var i = 0; i < position; i++)
+        {
+            if (work[i] == address)
+                return true;
+        }
+        return false;
+    }
+
+    // The set of the addresses a pass has read: the first `count` listed.
+    private static HashSet<(int, int)> ReadAhead(List<(int Page, int Slot)> work, int count)
+    {
+        var read = new HashSet<(int, int)>(count);
+        for (var i = 0; i < count; i++)
+            _ = read.Add(work[i]);
+        return read;
+    }
+
+    // The qualifier's resolver over the one-slot tuple, apart so the closure
+    // it captures is allocated only by a read that qualifies its rows.
+    private static RuntimeContext QualifierRuntime(RowLockQualifier qualifier, byte[]?[] tuple, BatchContext batch)
+    {
+        FromSource[] one = [qualifier.Source];
+        var memo = new SourceColumnMemo();
+        var outer = qualifier.OuterResolver;
+        return new RuntimeContext(name => ResolveAcrossTuple(one, tuple, name, batch, outer, memo), batch);
     }
 
     // Whether every conjunct answers TRUE for the row the runtime reads; one

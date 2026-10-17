@@ -158,7 +158,16 @@ internal static class ClusteredScan
         }
         if (tracked && HeapSeekCache.For(heap).HeapInKeyOrder(heap, schema, ordinals, commons))
             return;
+        SortSeekCandidates(table, indexOrdinals, candidates, ordinals, descending);
+    }
 
+    // OrderSeekCandidates' sort, apart so the comparison's closure is
+    // allocated only by a seek whose candidates need it: it was allocated on
+    // entry, once per seek of a heap already in key order.
+    private static void SortSeekCandidates(HeapTable table, int[] indexOrdinals, List<(int Page, int Slot)> candidates, int[] ordinals, bool[] descending)
+    {
+        var schema = table.StoredColumns;
+        var heap = table.Heap;
         var leading = 0;
         while (leading < indexOrdinals.Length && indexOrdinals[leading] >= 0)
             leading++;

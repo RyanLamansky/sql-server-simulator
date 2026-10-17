@@ -17,6 +17,8 @@ internal sealed class JsonPathExists : Expression
     private readonly Expression jsonInput;
     private readonly Expression pathInput;
 
+    private JsonPath.ParsedPath? parsedPath;
+
     public JsonPathExists(ParserContext context)
     {
         this.jsonInput = Parse(context);
@@ -33,7 +35,7 @@ internal sealed class JsonPathExists : Expression
         var pv = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_PATH_EXISTS");
         if (jv.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var path = JsonPath.Parse(pv.AsString);
+        var path = JsonPath.Parse(pv.AsString, ref this.parsedPath);
         JsonText.RejectTextAccessors(path, jv.Type);
 
         // JSON_PATH_EXISTS is the one member of the family that never raises:

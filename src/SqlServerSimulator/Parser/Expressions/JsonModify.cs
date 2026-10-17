@@ -48,6 +48,8 @@ internal sealed class JsonModify : Expression
     private readonly Expression pathInput;
     private readonly Expression newValueInput;
 
+    private JsonPath.ParsedPath? parsedPath;
+
     /// <summary>
     /// Whether the third argument is JSON text (<see cref="NVarcharSqlType.jsonText"/>),
     /// which embeds raw rather than as a quoted string; settled while binding.
@@ -177,7 +179,7 @@ internal sealed class JsonModify : Expression
         if (jsonInputValue.IsNull)
             return SqlValue.Null(SqlType.JsonTextMax);
 
-        var path = JsonPath.Parse(pathValue.AsString, acceptAppend: true);
+        var path = JsonPath.Parse(pathValue.AsString, ref this.parsedPath, acceptAppend: true);
 
         // `$` on its own names the whole document, which leaves JSON_MODIFY
         // no slot to write into — real refuses the path rather than replacing

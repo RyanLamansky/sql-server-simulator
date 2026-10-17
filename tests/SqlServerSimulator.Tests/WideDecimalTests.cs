@@ -176,6 +176,31 @@ public sealed class WideDecimalTests
 
     // --- Aggregates ---
 
+    /// <summary>
+    /// Values either side of 2^63 group, join, order and count distinct as the
+    /// numbers they are, a negative zero folding onto zero (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ValuesEitherSideOfTwoToTheSixtyThird_GroupJoinAndOrderAsNumbers()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table s (v decimal(38, 0));
+            insert s values (9223372036854775807), (9223372036854775808), (-9223372036854775807), (-9223372036854775808), (9223372036854775808), (0), (-0)
+            """);
+        AreEqual(
+            "-9223372036854775808:1|-9223372036854775807:1|0:2|9223372036854775807:1|9223372036854775808:2",
+            (string)sim.ExecuteScalar("""
+                select string_agg(concat(cast(v as varchar(60)), ':', n), '|') within group (order by v)
+                from (select v, count(*) as n from s group by v) g
+                """)!);
+        AreEqual(11, sim.ExecuteScalar("select count(*) from s a join s b on a.v = b.v"));
+        AreEqual(
+            "5|-9223372036854775808|9223372036854775808|9223372036854775808",
+            (string)sim.ExecuteScalar("select concat(count(distinct v), '|', min(v), '|', max(v), '|', sum(v)) from s")!);
+    }
+
     [TestMethod]
     public void SumPastNinetySixBits()
     {

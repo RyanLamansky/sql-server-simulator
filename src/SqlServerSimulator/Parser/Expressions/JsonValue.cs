@@ -26,6 +26,8 @@ internal sealed class JsonValue : Expression
     private readonly Expression jsonInput;
     private readonly Expression pathInput;
 
+    private JsonPath.ParsedPath? parsedPath;
+
     /// <summary>The <c>RETURNING</c> clause's type, or null without one.</summary>
     private readonly SqlType? returningType;
     private readonly int? returningMaxLength;
@@ -117,7 +119,7 @@ internal sealed class JsonValue : Expression
         if (jsonValue.IsNull)
             return this.NullResult(jsonValue.Type, runtime.Batch);
 
-        var path = JsonPath.Parse(pathValue.AsString);
+        var path = JsonPath.Parse(pathValue.AsString, ref this.parsedPath);
         if (path.IsAdvanced)
             return this.RunAdvanced(jsonValue, path, runtime.Batch);
 

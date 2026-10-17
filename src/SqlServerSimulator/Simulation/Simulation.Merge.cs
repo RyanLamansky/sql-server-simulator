@@ -923,7 +923,7 @@ partial class Simulation
                 PermissionEnforcement.CheckSubqueryReads(batch, selection);
                 var rs = selection.Execute(batch);
                 foreach (var rowBytes in rs.RowBytes)
-                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema, rowBytes));
                 return rows;
             };
         }
@@ -1024,7 +1024,7 @@ partial class Simulation
             {
                 var rs = ctePlan.Execute(batch);
                 foreach (var rowBytes in rs.RowBytes)
-                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema, rowBytes));
                 return rows;
             };
             // A recursive binding marks the statement session-scoped, so a
@@ -1057,7 +1057,7 @@ partial class Simulation
             {
                 var rs = remoteSelection.Execute(batch);
                 foreach (var rowBytes in rs.RowBytes)
-                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema, rowBytes));
                 return rows;
             };
         }
@@ -1081,7 +1081,7 @@ partial class Simulation
             {
                 var rs = viewSelection.Execute(batch);
                 foreach (var rowBytes in rs.RowBytes)
-                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema, rowBytes));
                 return rows;
             };
         }

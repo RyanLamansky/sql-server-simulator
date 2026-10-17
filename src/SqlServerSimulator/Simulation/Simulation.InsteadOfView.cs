@@ -402,7 +402,7 @@ partial class Simulation
             schema[i] = columns[i].Type;
         var rows = new List<SqlValue[]>();
         foreach (var bytes in Selection.ForView(view, columns).Execute(batch).RowBytes)
-            rows.Add(RowDecoder.DecodeRow(schema.AsSpan(), bytes));
+            rows.Add(RowDecoder.DecodeRow(schema, bytes));
         return rows;
     }
 

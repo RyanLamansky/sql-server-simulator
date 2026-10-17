@@ -113,7 +113,7 @@ internal readonly struct JsonPath
     /// Whether the path carried the <c>append</c> prefix, which turns
     /// <c>JSON_MODIFY</c>'s write into an append onto the array the path
     /// names. Only <c>JSON_MODIFY</c> takes the prefix; everywhere else it is
-    /// Msg 13607, so <see cref="Parse"/> reads it only when asked to.
+    /// Msg 13607, so <see cref="Parse(string, bool)"/> reads it only when asked to.
     /// </summary>
     public readonly bool Append;
 
@@ -153,6 +153,31 @@ internal readonly struct JsonPath
     /// <c>JSON_QUERY(json)</c> form without re-parsing a literal per row.
     /// </summary>
     public static readonly JsonPath Root = Parse("$");
+
+    /// <summary>
+    /// <see cref="Parse(string, bool)"/> through the last text a call site
+    /// parsed, held in <paramref name="last"/>: a JSON function reading a
+    /// literal path is handed the same text for every row, and parsing it
+    /// again per row was most of what such a scan allocated beside the
+    /// document. A text that fails to parse raises as before and leaves the
+    /// memo alone; the memo is published whole, so the executions sharing a
+    /// cached plan's node may race on it harmlessly.
+    /// </summary>
+    public static JsonPath Parse(string text, ref ParsedPath? last, bool acceptAppend = false)
+    {
+        if (Volatile.Read(ref last) is { } memo && string.Equals(memo.Text, text, StringComparison.Ordinal))
+            return memo.Path;
+        var path = Parse(text, acceptAppend);
+        Volatile.Write(ref last, new ParsedPath(text, path));
+        return path;
+    }
+
+    /// <summary>A path text and its parse, as <see cref="Parse(string, ref ParsedPath?, bool)"/> keeps them.</summary>
+    internal sealed class ParsedPath(string text, JsonPath path)
+    {
+        public readonly string Text = text;
+        public readonly JsonPath Path = path;
+    }
 
     /// <summary>
     /// Parses the path text. Throws <see cref="SimulatedSqlException"/>

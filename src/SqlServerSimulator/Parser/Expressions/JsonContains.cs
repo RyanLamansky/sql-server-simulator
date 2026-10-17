@@ -35,6 +35,8 @@ internal sealed class JsonContains : Expression
     private readonly Expression? path;
     private readonly Expression? mode;
 
+    private JsonPath.ParsedPath? parsedPath;
+
     public JsonContains(ParserContext context)
     {
         var arguments = new List<Expression> { Parse(context) };
@@ -70,7 +72,7 @@ internal sealed class JsonContains : Expression
         }
 
         var search = this.value.Run(runtime);
-        var jsonPath = this.path is null ? DefaultPath : JsonPath.Parse(pathValue.AsString);
+        var jsonPath = this.path is null ? DefaultPath : JsonPath.Parse(pathValue.AsString, ref this.parsedPath);
         using var doc = JsonText.Parse(documentValue.AsString);
         var nodes = new List<JsonElement>();
         if (!jsonPath.Select(doc.RootElement, nodes, out _))

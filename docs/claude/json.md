@@ -123,6 +123,7 @@ A bare `NULL` literal is refused while compiling, `json_value` / `json_modify` a
 
 `['append'] ['lax' | 'strict'] '$' segment*`, where a segment is `.<name>` / `."<quoted name>"` / `[<index>]`.
 One parser (`Parser/JsonPath.cs`) serves every function, so a malformed path reports identically from `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_PATH_EXISTS` and an `OPENJSON … WITH` column.
+Each call site keeps the last path text it parsed with its parse, so a literal path parses once rather than once per row (`JSON_VALUE` over 70k rows: 100 → 83 MB allocated, measured 2026-10-17).
 Only `JSON_MODIFY` reads the `append` prefix; elsewhere it is Msg 13607 State 14 at its `a`.
 
 **Whitespace** separates the grammar's tokens and may sit between any two of them — around a keyword, either side of the `$`, either side of a `.`, inside an index's brackets, and trailing the path — so `'  lax  $ . a [ 0 ] '` resolves.
