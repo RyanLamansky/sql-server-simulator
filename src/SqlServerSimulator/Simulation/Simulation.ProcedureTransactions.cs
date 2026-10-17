@@ -76,7 +76,9 @@ partial class Simulation
     /// <paramref name="rollsBackCallerTransaction"/> a failure there rolls the
     /// caller's transaction back, whole, where its own would roll back
     /// (<c>sp_addrolemember</c>, <c>sp_addsrvrolemember</c>; the call then
-    /// closes with Msg 266).
+    /// closes with Msg 266). With <paramref name="rollsBack"/> the procedure's
+    /// own transaction rolls back when the body ends, a refused change's
+    /// (<c>sp_addlinkedserver</c> naming a server that exists).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InProcedureTransaction(
         BatchContext batch,
@@ -84,14 +86,15 @@ partial class Simulation
         ProcedureTransactionEnding raisedEnding = ProcedureTransactionEnding.RollbackFirst,
         bool commitsAfterFailedStatement = false,
         bool sendsMessagesInside = false,
-        bool rollsBackCallerTransaction = false)
+        bool rollsBackCallerTransaction = false,
+        bool rollsBack = false)
     {
         var connection = batch.Connection;
         if (batch.IsSkipping)
             return body;
         if (connection.CurrentTransaction is { } caller)
             return Nested(connection, caller, body, raisedEnding, commitsAfterFailedStatement, rollsBackCallerTransaction);
-        return Wrapped(connection, body, raisedEnding, commitsAfterFailedStatement, sendsMessagesInside);
+        return Wrapped(connection, body, raisedEnding, commitsAfterFailedStatement, sendsMessagesInside, rollsBack);
 
         // Inside the caller's transaction the procedure's BEGIN TRANSACTION
         // nests, raising @@TRANCOUNT by one until its COMMIT, so an error a
@@ -127,7 +130,7 @@ partial class Simulation
                 Unnest(connection, caller);
         }
 
-        static IEnumerable<SimulatedStatementOutcome> Wrapped(SimulatedDbConnection connection, IEnumerable<SimulatedStatementOutcome> body, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement, bool sendsMessagesInside)
+        static IEnumerable<SimulatedStatementOutcome> Wrapped(SimulatedDbConnection connection, IEnumerable<SimulatedStatementOutcome> body, ProcedureTransactionEnding raisedEnding, bool commitsAfterFailedStatement, bool sendsMessagesInside, bool rollsBack)
         {
             var transaction = connection.StartTransaction(IsolationLevel.Unspecified);
             var failed = false;
@@ -157,7 +160,7 @@ partial class Simulation
                     yield return message;
                 }
             }
-            End(connection, transaction, commit: !failed || commitsAfterFailedStatement);
+            End(connection, transaction, commit: (!failed || commitsAfterFailedStatement) && !rollsBack);
         }
     }
 

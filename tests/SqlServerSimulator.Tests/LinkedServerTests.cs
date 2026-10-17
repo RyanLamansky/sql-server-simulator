@@ -490,4 +490,33 @@ public class LinkedServerTests
             select concat((select string_agg(type_name(user_type_id), ';') within group (order by column_id) from tempdb.sys.columns where object_id = object_id('tempdb..#x')), '|', (select m from #x))
             """));
     }
+
+    /// <summary>
+    /// <c>sp_addlinkedserver</c> and <c>sp_dropserver</c> refuse with a
+    /// <c>RAISERROR</c> they go on past: <c>XACT_ABORT</c> leaves the batch
+    /// running, the call returns 1, the product is judged ahead of the name,
+    /// and a name <c>sys.sp_validname</c> refuses inside the procedure's own
+    /// transaction leaves it open to a <c>TRY</c> around the call (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void LinkedServerRefusals_GoOnPastTheirRaiserror()
+    {
+        var local = new Simulation();
+        local.AddRemoteSimulation("OTHER", new Simulation());
+        _ = local.AssertSqlError("set xact_abort on; exec sp_addlinkedserver 'OTHER', 'SQL Server', 'SQLNCLI'; exec sp_addlinkedserver 'OTHER'", 15428);
+        AreEqual(1, local.ExecuteScalar<int>("select count(*) from sys.servers where name = 'OTHER'"));
+        AreEqual(15428, local.AssertSqlError("exec sp_dropserver 'OTHER', 'droplogins'; exec sp_addlinkedserver null, 'SQL Server', 'SQLNCLI'", 15428).Number);
+        using var connection = local.CreateOpenConnection();
+        AreEqual("1|15004", connection.CreateCommand("""
+            begin try exec sp_addlinkedserver '' end try
+            begin catch select concat(@@trancount, '|', error_number()); rollback end catch
+            """).ExecuteScalar());
+        AreEqual(1, connection.CreateCommand("""
+            declare @rc int;
+            begin try exec @rc = sp_dropserver 'NOPE' end try begin catch end catch;
+            exec sp_addlinkedserver 'OTHER';
+            begin try exec @rc = sp_addlinkedserver 'OTHER' end try begin catch select 1 end catch
+            """).ExecuteScalar());
+    }
 }

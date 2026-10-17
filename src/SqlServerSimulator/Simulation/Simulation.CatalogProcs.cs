@@ -194,7 +194,7 @@ partial class Simulation
     /// <c>SQLTables</c> / JDBC's <c>getTables</c> call to enumerate the current
     /// database's tables and views. <c>@table_name</c> / <c>@table_owner</c>
     /// are LIKE patterns (NULL → all) unless <c>@fUsePattern</c> is 0; <c>@table_qualifier</c> restricts to a
-    /// database name (mismatch → empty); <c>@table_type</c> is a quoted
+    /// database name (another is Msg 15250); <c>@table_type</c> is a quoted
     /// comma-list (<c>"'TABLE','VIEW'"</c>). Rows sort by TABLE_TYPE,
     /// TABLE_QUALIFIER, TABLE_OWNER, TABLE_NAME (probe-confirmed).
     /// </summary>
@@ -267,6 +267,14 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpTablesRows);
+        // A qualifier of % with an empty name and owner enumerates the
+        // databases rather than naming one.
+        if (CatalogQualifierRefusal(batch, "sp_tables", tableQualifier is "%" && tableName is "" && tableOwner is "" ? null : tableQualifier, "IIIIII", 86) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         foreach (var step in ProcedureSteps(batch, SpTablesSteps(tableName, tableOwner, tableQualifier, tableType, usePattern, exactFound)))
             yield return step;
         yield return new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, rows);
@@ -427,6 +435,15 @@ partial class Simulation
             _ => new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows) { ColumnNullability = SpColumnsNullability },
         };
         var oneObject = NamesOneObject(tableName, matchedObject);
+        // The qualifier is checked after the version's and ODBC version's
+        // leading statements and two conditions.
+        var checkedAfter = (version is SpColumnsVersion.Classic or SpColumnsVersion.V170 ? "S" : "") + "I" + (odbcVer != 3 || version == SpColumnsVersion.V170 ? "S" : "") + "II";
+        if (CatalogQualifierRefusal(batch, procedure, tableQualifier, checkedAfter, version switch { SpColumnsVersion.Classic => 24, SpColumnsVersion.V90 => 22, SpColumnsVersion.V100 => 23, _ => 26 }) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         foreach (var step in ProcedureSteps(batch, SpColumnsSteps(version, odbcVer, tableName, tableOwner, tableQualifier, columnName, oneObject)))
             yield return step;
         result.OrderColumns = oneObject ? [17] : [2, 3, 17];
@@ -930,6 +947,12 @@ partial class Simulation
             }
         }
 
+        if (CatalogQualifierRefusal(batch, "sp_pkeys", tableQualifier, "II", 17) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         foreach (var step in ProcedureSteps(batch, SpPkeysSteps(tableOwner, tableQualifier)))
             yield return step;
         yield return new SimulatedSqlResultSet(SpPkeysSchema, SpPkeysColumnNames, rows);
@@ -1038,6 +1061,12 @@ partial class Simulation
             }
         }
 
+        if (CatalogQualifierRefusal(batch, procedureName, tableQualifier, "", 22, returns: false) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         yield return new SimulatedSqlResultSet(SpStatisticsSchema, SpStatisticsColumnNames, rows) { ColumnNullability = SpStatisticsNullability };
     }
 
@@ -1325,6 +1354,12 @@ partial class Simulation
         // A name without an owner picks one routine only when the lookup found
         // it; with an owner, when the owner holds it.
         var oneObject = usePattern && NamesOneObject(spName, exactOwner is null ? exactFound : userRows > 0);
+        if (CatalogQualifierRefusal(batch, "sp_stored_procedures", spQualifier, "III", 27) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, usePattern, exactFound, oneObject, listsSystem)))
             yield return step;
         // Real orders by owner and name, or by qualifier, owner and name for

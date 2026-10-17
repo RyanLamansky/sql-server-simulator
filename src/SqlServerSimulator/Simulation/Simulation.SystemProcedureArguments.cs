@@ -10,6 +10,9 @@ partial class Simulation
     internal sealed class SystemProcedureResult
     {
         public bool Failed;
+
+        /// <summary>The status a failed procedure returns, its error's (<see cref="SimulatedSqlException.SystemProcedureReturnCode"/>).</summary>
+        public int FailedStatus = 1;
     }
 
     /// <summary>

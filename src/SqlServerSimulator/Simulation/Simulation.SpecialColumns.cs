@@ -80,15 +80,23 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
-        if (colType is null || !(collation.Equals(colType, "R") || collation.Equals(colType, "V")))
-            throw RaisedAt(SimulatedSqlException.InvalidProcedureOption("col_type", "'R' or 'V'"), procedureName, 21);
+        // Each option is checked in turn among its leading statements, then
+        // the qualifier (captured 2026-10-17 against SQL Server 2025).
         var scopeOut = scope is not null && collation.Equals(scope, "C") ? (short)0
             : scope is not null && collation.Equals(scope, "T") ? (short)1
-            : throw RaisedAt(SimulatedSqlException.InvalidProcedureOption("scope", "'C' or 'T'"), procedureName, 31);
-        if (nullable is null || !(collation.Equals(nullable, "U") || collation.Equals(nullable, "O")))
-            throw RaisedAt(SimulatedSqlException.InvalidProcedureOption("nullable", "'U' or 'O'"), procedureName, 37);
-        if (qualifier is not null && !collation.Equals(qualifier, database.Name))
-            throw RaisedAt(SimulatedSqlException.HelpObjectNotInCurrentDatabase(), procedureName, 45);
+            : (short)-1;
+        var refused = colType is null || !(collation.Equals(colType, "R") || collation.Equals(colType, "V"))
+                ? CatalogRefusal(batch, procedureName, SimulatedSqlException.InvalidProcedureOption("col_type", "'R' or 'V'"), "I", 21)
+            : scopeOut < 0 ? CatalogRefusal(batch, procedureName, SimulatedSqlException.InvalidProcedureOption("scope", "'C' or 'T'"), "III", 31)
+            : nullable is null || !(collation.Equals(nullable, "U") || collation.Equals(nullable, "O"))
+                ? CatalogRefusal(batch, procedureName, SimulatedSqlException.InvalidProcedureOption("nullable", "'U' or 'O'"), "IIISI", 37)
+            : CatalogQualifierRefusal(batch, procedureName, qualifier, "IIISIII", 45);
+        if (refused is not null)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
 
         var rows = new List<SqlValue[]>();
         var resolved = false;

@@ -291,7 +291,9 @@ partial class Simulation
         {
             target = ResolveBindTarget(batch, targetName);
         }
-        catch (SimulatedSqlException missing)
+        // A missing column's refusal follows the transaction its statements
+        // open and commit (Simulation.RefusalSteps).
+        catch (SimulatedSqlException missing) when (missing.Number != 15148)
         {
             throw RaisedInProcedureTransaction(batch, missing, ProcedureTransactionEnding.CommitFirst);
         }

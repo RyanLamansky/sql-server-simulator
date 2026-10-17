@@ -566,7 +566,7 @@ partial class Simulation
             SimulatedSqlException? endedCallerTransaction = null;
             try
             {
-                var attributed = AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult);
+                var attributed = AttributedToSystemProcedure(batch, systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult);
                 using var produced = AsExtendedProcedure(attributed, systemProcName!, CalledName(procName)).GetEnumerator();
                 while (true)
                 {
@@ -608,7 +608,7 @@ partial class Simulation
             // One whose statement failed returns 1 (probed 2026-10-06 against
             // SQL Server 2025: sp_addrole of a fixed role's name), and one
             // writing a code of its own sends that (sp_getapplock's -999).
-            var status = batch.SystemProcedureStatus ?? (procedureResult.Failed ? 1 : 0);
+            var status = batch.SystemProcedureStatus ?? (procedureResult.Failed ? procedureResult.FailedStatus : 0);
 
             // One that rolled its caller's transaction back answers Msg 266
             // after its status, as any procedure does (probed 2026-10-17

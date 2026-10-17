@@ -8,11 +8,12 @@ namespace SqlServerSimulator;
 /// counting its row, <c>N</c> a count-less SELECT-kind statement (a cursor's
 /// <c>DECLARE</c> or <c>FETCH</c>), <c>O</c> a <c>SET … OFF</c>, <c>X</c> an
 /// <c>EXEC</c>, <c>P</c> a <c>PRINT</c>, <c>R</c> a <c>RAISERROR</c>,
-/// <c>D</c> a <c>DBCC</c>, <c>T</c> / <c>E</c> a <c>TRY</c>'s start and
+/// <c>D</c> a <c>DBCC</c>, <c>U</c> a <c>RETURN</c>, <c>T</c> / <c>E</c> a <c>TRY</c>'s start and
 /// end, <c>(</c> / <c>)</c> a cursor's <c>OPEN</c> and <c>DEALLOCATE</c>,
-/// <c>B</c> / <c>C</c> <c>BEGIN TRANSACTION</c> and <c>COMMIT</c>, <c>&lt;</c>
-/// / <c>&gt;</c> their ENVCHANGEs, <c>i</c> a message, <c>|</c> a result and
-/// <c>#</c> its DONE, <c>=n</c> the return status.
+/// <c>B</c> / <c>C</c> / <c>K</c> <c>BEGIN TRANSACTION</c>, <c>COMMIT</c> and
+/// <c>ROLLBACK</c>, <c>&lt;</c> / <c>&gt;</c> / <c>^</c> their ENVCHANGEs,
+/// <c>i</c> a message, <c>|</c> a result and <c>#</c> its DONE, <c>=n</c> the
+/// return status, and anything else in braces.
 /// </summary>
 [TestClass]
 public sealed class SystemProcedureStepTests
@@ -72,6 +73,78 @@ public sealed class SystemProcedureStepTests
         Assert.AreEqual(expected, Letters(tokens), string.Join(" / ", tokens));
     }
 
+    /// <summary>
+    /// <c>sp_addlinkedserver</c>'s statements follow the product — a SQL
+    /// Server one assigns its provider twice over — and its refusals: the
+    /// product's and the transaction's ahead of its own transaction, the
+    /// name's, the provider's and the style's inside it, rolled back, and a
+    /// name that exists after the rollback; <c>sp_dropserver</c> refuses a
+    /// missing server or one mapping logins after rolling its transaction
+    /// back. Each refusal goes on to the procedure's last statement
+    /// (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "exec sp_addlinkedserver 'ls'", "SIIISOIII<BISXIISISSIIISXI>CS=0")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', '', 'SQLNCLI', 'host', @catalog = 'c'", "SIIIOIII<BISXIISISIIISXI>CS=0")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedserver 'ls'", "SIIISOIII<BISXIISISSISXII^K{ERR 15028}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls', '', 'SQLNCLI'", "exec sp_addlinkedserver 'ls', '', 'SQLNCLI'", "SIIIOIII<BISXIISISISXII^K{ERR 15028}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', '', 'MSDASQL'", "SIIIOIII<BISXIISI{ERR 7222}{DONEINPROC AA MORE|ERROR 0}SIIISXII^KS=1")]
+    [DataRow("", "exec sp_addlinkedserver ''", "SIIISOIII<BII{ERR 15004}{DONEINPROC F6 MORE|ERROR 0}SXISXII^KS=1")]
+    [DataRow("", "exec sp_addlinkedserver null, '', 'SQLNCLI'", "SIIIOIII<BII{ERR 15004}{DONEINPROC F6 MORE|ERROR 0}SXISXII^KS=1")]
+    [DataRow("", "exec sp_addlinkedserver null, 'SQL Server', 'SQLNCLI'", "SII{ERR 15428}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', @datasrc = 'x'", "SII{ERR 15426}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', 'x'", "SIII{ERR 15427}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', null, 'SQLNCLI'", "SIII{ERR 15429}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("begin tran", "exec sp_addlinkedserver 'ls'", "SIIISOI{ERR 15002}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedserver 'ls', '', 'SQLNCLI', @linkedstyle = 0", "SIIIOIII<BISXIISI{ERR 15663}^{DONE FD ERROR 0}")]
+    [DataRow("", "exec sp_dropserver 'nope'", "SOIII<BI^K{ERR 15015}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls'; exec sp_addlinkedsrvlogin 'ls', 'false', 'sa', 'x', 'y'", "exec sp_dropserver 'ls'", "SOIII<BII^K{ERR 15190}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls'; begin tran", "exec sp_dropserver 'ls'", "SOI{ERR 15002}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    public void LinkedServerProcedures_CloseTheirStatementsAndRefusals(string arrange, string sql, string expected) =>
+        this.SystemProcedure_ClosesItsStatements(arrange, sql, expected);
+
+    /// <summary>
+    /// A refusal a system procedure raises with a <c>RAISERROR</c> follows
+    /// the statements ahead of its check and precedes those it goes on to;
+    /// an ODBC catalog procedure's then returns -6, most of them through a
+    /// <c>RETURN</c> (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "exec sp_spaceused 'nosuch'", "IIISIISI{ERR 15009}{DONEINPROC F6 MORE|ERROR 0}=1")]
+    [DataRow("", "exec sp_depends 'nosuch'", "SISIS{ERR 15009}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_droptype 'nosuch'", "SI{ERR 15036}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_autostats 'nosuch'", "SISSISI{ERR 15390}{DONEINPROC F6 MORE|ERROR 0}S=15390")]
+    [DataRow("exec sp_addmessage 77001, 16, 'm'", "exec sp_addmessage 77001, 16, 'm'", "IIIIISSSSSIIISI<BIIIII>C{ERR 15043}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addmessage 1, 16, 'm'", "III{ERR 15040}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_dropmessage 77992", "IIIISIIS<BI>C{ERR 15179}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_altermessage 77992, 'WITH_LOG', 'true'", "SSIISI<BI>C{ERR 15179}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addumpdevice 'nosuchtype', 'd', '/x.bak'", "SOIISI{ERR 15044}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_dropdevice 'nodev'", "SIOIII{ERR 15012}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_approlepassword 'nosuch', 'Zz!passw0rd2'", "IIOISSSS<B{ERR 15151}{DONEINPROC AA MORE|ERROR 0}XI^KS=1")]
+    [DataRow("", "exec sp_unbindefault 'z_t.nosuch'", "OSSIIIISSII<BISII>C{ERR 15148}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_unbindefault 'z_t.v'", "OSSIIIISSII{ERR 15236}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_unbindrule 'z_t.v'", "OSSIIIISSII{ERR 15238}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_refreshview 'nosuch'", "SIISII{ERR 15165}{DONEINPROC F6 MORE|ERROR 0}SXS=15165")]
+    [DataRow("", "exec sp_who 'nosuchlogin'", "SIIISI{ERR 15007}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_columns 'z_t', 'dbo', 'master'", "SISII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_columns 'z_t', 'dbo', 'master', @ODBCVer = 3", "SIII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_columns_90 'z_t', 'dbo', 'master'", "ISII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_tables null, null, 'master'", "IIIIII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_pkeys 'z_t', null, 'master'", "II{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_stored_procedures null, null, 'master'", "III{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_sproc_columns 'p', 'dbo', 'master'", "III{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_statistics 'z_t', 'dbo', 'master'", "{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}=-6")]
+    [DataRow("", "exec sp_fkeys", "{ERR 15252}{DONEINPROC F6 MORE|ERROR 0}=-6")]
+    [DataRow("", "exec sp_fkeys 'z_t', 'dbo', 'master'", "{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}=-6")]
+    [DataRow("", "exec sp_table_privileges 'z_t', 'dbo', 'master'", "II{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_column_privileges 'z_t', 'dbo', 'master'", "ISII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_special_columns 'z_t', 'dbo', 'master'", "IIISIII{ERR 15250}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_special_columns 'z_t', @col_type = 'Q'", "I{ERR 15251}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_special_columns 'z_t', @scope = 'Q'", "III{ERR 15251}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    [DataRow("", "exec sp_special_columns 'z_t', @nullable = 'Q'", "IIISI{ERR 15251}{DONEINPROC F6 MORE|ERROR 0}U=-6")]
+    public void SystemProcedureRefusals_CloseTheStatementsAroundThem(string arrange, string sql, string expected) =>
+        this.SystemProcedure_ClosesItsStatements(arrange, sql, expected);
+
     private static string Letters(List<string> tokens)
     {
         var letters = new System.Text.StringBuilder();
@@ -94,8 +167,11 @@ public sealed class SystemProcedureStepTests
                 "DONEINPROC 2C MORE 0" => ")",
                 "DONEINPROC D4 MORE 0" => "B",
                 "DONEINPROC D5 MORE 0" => "C",
+                "DONEINPROC D2 MORE 0" => "K",
+                "DONEINPROC DB MORE 0" => "U",
                 "ENV8" => "<",
                 "ENV9" => ">",
+                "ENV10" => "^",
                 "ROWS" => "|",
                 _ when token.StartsWith("ORDER", StringComparison.Ordinal) => "",
                 _ when token.StartsWith("INFO", StringComparison.Ordinal) => "i",

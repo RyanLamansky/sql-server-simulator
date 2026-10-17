@@ -54,15 +54,18 @@ partial class Simulation
             yield break;
 
         var (pkName, pkOwner, pkQualifier, fkName, fkOwner, fkQualifier) = ParseSpFkeysArgs(arguments);
-        if (pkName is null && fkName is null)
-            throw SimulatedSqlException.ForeignKeyTableNameRequired();
-
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
-        if ((fkQualifier is not null && !collation.Equals(fkQualifier, database.Name))
-            || (pkQualifier is not null && !collation.Equals(pkQualifier, database.Name)))
+        var refused = pkName is null && fkName is null
+            ? CatalogRefusal(batch, "sp_fkeys", SimulatedSqlException.ForeignKeyTableNameRequired(), "", 20, returns: false)
+            : (fkQualifier is not null && !collation.Equals(fkQualifier, database.Name)) || (pkQualifier is not null && !collation.Equals(pkQualifier, database.Name))
+                ? CatalogRefusal(batch, "sp_fkeys", SimulatedSqlException.HelpObjectNotInCurrentDatabase(), "", 37, returns: false)
+            : null;
+        if (refused is not null)
         {
-            throw SimulatedSqlException.HelpObjectNotInCurrentDatabase();
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
         }
 
         var pkTable = pkName is null ? null : ResolveSpFkeysTable(batch, pkOwner, pkName);

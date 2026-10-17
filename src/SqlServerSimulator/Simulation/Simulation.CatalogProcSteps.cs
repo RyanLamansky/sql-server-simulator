@@ -21,10 +21,16 @@ partial class Simulation
     /// option off, <c>X</c> an <c>EXEC</c>, <c>P</c> a <c>PRINT</c>, <c>R</c>
     /// a <c>RAISERROR</c> of a message, <c>D</c> a <c>DBCC</c> command,
     /// <c>T</c> and <c>E</c> a <c>BEGIN TRY</c> and the end of its
-    /// <c>CATCH</c>; any other character ignored.
+    /// <c>CATCH</c>, <c>U</c> a <c>RETURN</c>, and <c>B</c> and <c>C</c> the
+    /// <c>BEGIN TRANSACTION</c> and <c>COMMIT</c> of a transaction the
+    /// procedure opens and commits with nothing of its own inside — nested in
+    /// the caller's, whose count it raises meanwhile; any other character
+    /// ignored.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> ProcedureSteps(BatchContext batch, string program)
     {
+        SimulatedDbTransaction? own = null;
+        SimulatedDbTransaction? nested = null;
         foreach (var step in program)
         {
             switch (step)
@@ -34,6 +40,26 @@ partial class Simulation
                     break;
                 case ')':
                     yield return StatementDone(batch, StatementDoneKind.DeallocateCursor);
+                    break;
+                case 'B':
+                    if (batch.Connection.CurrentTransaction is { } caller)
+                    {
+                        caller.TranCount++;
+                        nested = caller;
+                    }
+                    else
+                    {
+                        own = batch.Connection.StartTransaction(System.Data.IsolationLevel.Unspecified);
+                    }
+                    yield return StatementDone(batch, StatementDoneKind.BeginTransaction);
+                    break;
+                case 'C':
+                    if (own is not null)
+                        End(batch.Connection, own, commit: true);
+                    else if (nested is not null)
+                        Unnest(batch.Connection, nested);
+                    own = nested = null;
+                    yield return StatementDone(batch, StatementDoneKind.Commit);
                     break;
                 case 'D':
                     yield return StatementDone(batch, StatementDoneKind.Dbcc);
@@ -62,6 +88,9 @@ partial class Simulation
                 case 'T':
                     yield return StatementDone(batch, StatementDoneKind.BeginTry);
                     break;
+                case 'U':
+                    yield return StatementDone(batch, StatementDoneKind.Return);
+                    break;
                 case 'X':
                     yield return StatementDone(batch, StatementDoneKind.Execute);
                     break;
@@ -73,13 +102,22 @@ partial class Simulation
     /// <paramref name="inside"/> between the <c>BEGIN TRANSACTION</c> and
     /// <c>COMMIT</c> real's procedure runs it in — a transaction of its own,
     /// whose ENVCHANGEs go out ahead of the two statements' DONEINPROCs, or
-    /// one nested in the caller's (see <see cref="InProcedureTransaction"/>).
+    /// one nested in the caller's (see <see cref="InProcedureTransaction"/>) —
+    /// or the <c>ROLLBACK</c> it ends its own with after a failed statement or,
+    /// with <paramref name="rollsBack"/>, a refused change (captured
+    /// 2026-10-17 against SQL Server 2025: <c>sp_approlepassword</c> of a
+    /// missing role).
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> ProcedureTransactionSteps(BatchContext batch, IEnumerable<SimulatedStatementOutcome> inside)
+    private static IEnumerable<SimulatedStatementOutcome> ProcedureTransactionSteps(BatchContext batch, IEnumerable<SimulatedStatementOutcome> inside, bool rollsBack = false)
     {
-        foreach (var outcome in InProcedureTransaction(batch, Begun(batch, inside)))
+        var own = batch.Connection.CurrentTransaction is null;
+        var failed = false;
+        foreach (var outcome in InProcedureTransaction(batch, Begun(batch, inside), rollsBack: rollsBack))
+        {
+            failed |= outcome is SimulatedErrorOutcome;
             yield return outcome;
-        yield return StatementDone(batch, StatementDoneKind.Commit);
+        }
+        yield return StatementDone(batch, rollsBack || (failed && own) ? StatementDoneKind.Rollback : StatementDoneKind.Commit);
 
         static IEnumerable<SimulatedStatementOutcome> Begun(BatchContext batch, IEnumerable<SimulatedStatementOutcome> inside)
         {
@@ -87,6 +125,80 @@ partial class Simulation
             foreach (var outcome in inside)
                 yield return outcome;
         }
+    }
+
+    /// <summary>
+    /// A refusal <paramref name="systemProcName"/> raises with a
+    /// <c>RAISERROR</c> and then goes on past, running
+    /// <paramref name="after"/>'s statements before it returns 1: the error
+    /// closes the <c>RAISERROR</c>'s DONEINPROC, and neither
+    /// <c>XACT_ABORT</c> nor the error ends the batch. Inside a <c>TRY</c> the
+    /// <c>RAISERROR</c>'s DONEINPROC goes out clear, then
+    /// <paramref name="caughtAfter"/>'s — the <c>EXEC</c>s an inner procedure
+    /// raising it returns through — and the error is caught there (captured
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> RaisedAndGoneOn(BatchContext batch, string systemProcName, SimulatedSqlException error, string after, string caughtAfter = "")
+    {
+        if (SystemProcedureErrorSite(systemProcName, error) is { } site)
+            AttributeToSystemProcedure(error, site, systemProcName, systemProcName);
+        return GoneOnPast(batch, error, after, caughtAfter);
+    }
+
+    /// <summary>
+    /// <see cref="RaisedAndGoneOn"/> for an <paramref name="error"/> already
+    /// attributed to its procedure.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> GoneOnPast(BatchContext batch, SimulatedSqlException error, string after, string caughtAfter = "")
+    {
+        error.RaisedBySystemProcedure = true;
+        if (batch.Connection.OpenTryFrames > 0)
+        {
+            yield return StatementDone(batch, StatementDoneKind.RaisError);
+            foreach (var step in ProcedureSteps(batch, caughtAfter))
+                yield return step;
+            // Caught there, it leaves the procedure's own transaction open, as
+            // a failed statement's error does.
+            error.RaisedByProcedureStatement = true;
+            throw error;
+        }
+        yield return new SimulatedErrorOutcome(error)
+        {
+            DoneKind = error.RaisedByProcedureStatement ? StatementDoneKind.SecurityDdlFailed : StatementDoneKind.RaisError,
+            InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null,
+            TransactionEventMark = batch.Connection.TransactionEventsRecorded,
+        };
+        foreach (var step in ProcedureSteps(batch, after))
+            yield return step;
+    }
+
+    /// <summary>
+    /// The qualifier check the ODBC catalog procedures make once
+    /// <paramref name="before"/>'s statements ran: a qualifier other than the
+    /// current database's name — compared as a name, so a pattern is refused
+    /// too — is Msg 15250 at <paramref name="line"/>, after which the procedure
+    /// returns -6, through a <c>RETURN</c> unless <paramref name="returns"/>
+    /// is false (captured 2026-10-17 against SQL Server 2025); null when the
+    /// qualifier passes.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome>? CatalogQualifierRefusal(BatchContext batch, string procedureName, string? qualifier, string before, int line, bool returns = true) =>
+        qualifier is null || batch.CurrentDatabase.Collation.Equals(qualifier, batch.CurrentDatabase.Name)
+            ? null
+            : CatalogRefusal(batch, procedureName, SimulatedSqlException.HelpObjectNotInCurrentDatabase(), before, line, returns);
+
+    /// <summary>
+    /// A catalog procedure's <paramref name="refusal"/>, raised at
+    /// <paramref name="line"/> once <paramref name="before"/>'s statements ran
+    /// and answered -6, through a <c>RETURN</c> when <paramref name="returns"/>.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> CatalogRefusal(BatchContext batch, string procedureName, SimulatedSqlException refusal, string before, int line, bool returns = true)
+    {
+        refusal.PreserveDiagnostics(line, procedureName);
+        refusal.SystemProcedureReturnCode = -6;
+        foreach (var step in ProcedureSteps(batch, before))
+            yield return step;
+        foreach (var outcome in GoneOnPast(batch, refusal, returns ? "U" : ""))
+            yield return outcome;
     }
 
     /// <summary>

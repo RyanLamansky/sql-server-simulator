@@ -72,8 +72,12 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
-        if (qualifier is not null && !collation.Equals(qualifier, database.Name))
-            throw SimulatedSqlException.HelpObjectNotInCurrentDatabase();
+        if (CatalogQualifierRefusal(batch, "sp_table_privileges", qualifier, "II", 17) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         var namePattern = CompileCatalogPattern(name ?? "%");
         var ownerPattern = CompileCatalogPattern(owner ?? "%");
         bool NameMatches(LikeMatcher? pattern, string? written, string value) =>
@@ -134,8 +138,12 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
-        if (qualifier is not null && !collation.Equals(qualifier, database.Name))
-            throw SimulatedSqlException.HelpObjectNotInCurrentDatabase();
+        if (CatalogQualifierRefusal(batch, "sp_column_privileges", qualifier, "ISII", 19) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         var columnPattern = CompileCatalogPattern(column ?? "%");
         var qualifierValue = SqlValue.FromSystemName(database.Name);
         var rows = ColumnPrivilegeRows(

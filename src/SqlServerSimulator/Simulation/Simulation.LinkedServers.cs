@@ -17,16 +17,17 @@ partial class Simulation
     /// <c>@server</c>, and the rest surface in <c>sys.servers</c>.
     /// </summary>
     /// <remarks>
-    /// What real checks, in its order (probed 2026-09-25 and 2026-10-05
-    /// against SQL Server 2025): the binding (Msg 8145, 8144, 201, and 8114
-    /// for a <c>@linkedstyle</c> that isn't a <c>bit</c>), a NULL or empty
-    /// name (Msg 15004); then the product — an omitted or NULL
-    /// <c>@srvproduct</c> with no provider is <c>SQL Server</c>, which takes
-    /// neither a provider (Msg 15428) nor properties without one (Msg 15426),
-    /// any other product needs a provider (Msg 15427), and a NULL product with
-    /// a provider is Msg 15429; then a transaction (Msg 15002); a provider other
-    /// than SQL Server's (Msg 7222) or <c>@linkedstyle = 0</c> (Msg 15663); and
-    /// a name already taken (Msg 15028). <c>SQLOLEDB</c> is recorded as
+    /// What real checks, in its order (probed 2026-09-25, 2026-10-05 and
+    /// 2026-10-17 against SQL Server 2025): the binding (Msg 8145, 8144, 201,
+    /// and 8114 for a <c>@linkedstyle</c> that isn't a <c>bit</c>); the
+    /// product — an omitted or NULL <c>@srvproduct</c> with no provider is
+    /// <c>SQL Server</c>, which takes neither a provider (Msg 15428) nor
+    /// properties without one (Msg 15426), any other product needs a provider
+    /// (Msg 15427), and a NULL product with a provider is Msg 15429; then a
+    /// transaction (Msg 15002); then, inside its own transaction, a NULL or
+    /// empty name (Msg 15004), <c>@linkedstyle = 0</c> (Msg 15663) and a
+    /// provider other than SQL Server's (Msg 7222); and a name already taken
+    /// (Msg 15028). <c>SQLOLEDB</c> is recorded as
     /// <c>SQLNCLI</c>, a product past 128 characters is cut, and every new
     /// server maps every login to itself (<c>sys.linked_logins</c>).
     /// Cursor on entry: first token after the procedure name (or the trailing
@@ -110,55 +111,139 @@ partial class Simulation
 
         if (!serverSupplied)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_addlinkedserver", "server");
-        if (string.IsNullOrEmpty(server))
-            throw SimulatedSqlException.NameCannotBeNull();
         RequireAlterAnyLinkedServer(batch);
 
         var hasProperties = dataSource is not null || location is not null || providerString is not null || catalog is not null;
         var isSqlServer = srvProduct is null ? provider is null : srvProduct.Equals("SQL Server", StringComparison.OrdinalIgnoreCase);
-        if (provider is null && hasProperties)
-            throw SimulatedSqlException.LinkedServerNeedsProvider();
-        if (isSqlServer && provider is not null)
-            throw SimulatedSqlException.LinkedServerSqlServerProductProperties();
-        if (provider is null && !isSqlServer)
-            throw SimulatedSqlException.LinkedServerUnknownProduct(srvProduct!);
-        if (srvProduct is null && provider is not null)
-            throw SimulatedSqlException.LinkedServerInvalidProduct("(null)");
-        if (batch.Connection.CurrentTransaction is not null)
-            throw SimulatedSqlException.ProcedureCannotRunInTransaction("sp_addlinkedserver");
-        if (provider is not null && !IsSqlServerProvider(provider))
-            throw SimulatedSqlException.OnlySqlServerProviderAllowed(state: 1);
-        if (linkedStyle == false)
-            throw SimulatedSqlException.AddServerNoLongerSupported();
+        var productRefusal = provider is null && hasProperties ? SimulatedSqlException.LinkedServerNeedsProvider()
+            : isSqlServer && provider is not null ? SimulatedSqlException.LinkedServerSqlServerProductProperties()
+            : null;
+        var namedProductRefusal = provider is null && !isSqlServer ? SimulatedSqlException.LinkedServerUnknownProduct(srvProduct!)
+            : srvProduct is null && provider is not null ? SimulatedSqlException.LinkedServerInvalidProduct("(null)")
+            : null;
+        var inTransaction = batch.Connection.CurrentTransaction is not null;
+        var nameRefused = string.IsNullOrEmpty(server);
+        var styleRefused = !nameRefused && linkedStyle == false;
+        var providerRefused = !nameRefused && !styleRefused && provider is not null && !IsSqlServerProvider(provider);
         var simulation = batch.Connection.Simulation;
-        if (simulation.ActiveLinkedServers.ContainsKey(server))
-            throw SimulatedSqlException.LinkedServerAlreadyExists(server);
-
-        if (!simulation.AvailableRemotes.TryGetValue(server, out var target))
-            throw new NotSupportedException($"sp_addlinkedserver '{server}' has no corresponding registered target Simulation; call Simulation.AddRemoteSimulation(\"{server}\", target) from the host code before activating the linked server.");
-
-        // A SQL Server product names the server itself as its data source.
-        string product;
-        if (isSqlServer)
+        var duplicate = !nameRefused && !styleRefused && !providerRefused && simulation.ActiveLinkedServers.ContainsKey(server!);
+        LinkedServer? added = null;
+        if (productRefusal is null && namedProductRefusal is null && !inTransaction && !nameRefused && !styleRefused && !providerRefused && !duplicate)
         {
-            product = "SQL Server";
-            provider = "SQLNCLI";
-            dataSource = server;
-        }
-        else
-        {
-            product = srvProduct!.Length > 128 ? srvProduct[..128] : srvProduct;
-            if (provider!.Equals("SQLOLEDB", StringComparison.OrdinalIgnoreCase))
+            if (!simulation.AvailableRemotes.TryGetValue(server!, out var target))
+                throw new NotSupportedException($"sp_addlinkedserver '{server}' has no corresponding registered target Simulation; call Simulation.AddRemoteSimulation(\"{server}\", target) from the host code before activating the linked server.");
+
+            // A SQL Server product names the server itself as its data source.
+            string product;
+            if (isSqlServer)
+            {
+                product = "SQL Server";
                 provider = "SQLNCLI";
+                dataSource = server;
+            }
+            else
+            {
+                product = srvProduct!.Length > 128 ? srvProduct[..128] : srvProduct;
+                if (provider!.Equals("SQLOLEDB", StringComparison.OrdinalIgnoreCase))
+                    provider = "SQLNCLI";
+            }
+            // The nvarchar(4000) properties keep what fits.
+            static string? Fit(string? text) => text is { Length: > 4000 } ? text[..4000] : text;
+            added = new LinkedServer(server!, target, product, provider, Fit(dataSource), Fit(location), Fit(providerString), catalog, batch.CurrentStatement.UtcNow);
         }
-        // The nvarchar(4000) properties keep what fits.
-        static string? Fit(string? text) => text is { Length: > 4000 } ? text[..4000] : text;
-        simulation.ActiveLinkedServers[server] = new LinkedServer(
-            server, target, product, provider, Fit(dataSource), Fit(location), Fit(providerString), catalog, batch.CurrentStatement.UtcNow);
-        // Activating (or re-activating) a linked server changes how
-        // four-part-name FROM clauses bind at parse time; cached plans
-        // parsed before this call must be invalidated.
-        simulation.BumpSchemaVersion();
+
+        // Its statements, which follow the product (a SQL Server one assigns
+        // its provider twice over), checking the product and the transaction
+        // ahead of its own and validating the name, the provider and the
+        // style inside it — the server added, or the transaction rolled back
+        // — and refusing a name that exists after the rollback (captured
+        // 2026-10-17 against SQL Server 2025).
+        const string Procedure = "sp_addlinkedserver";
+        foreach (var step in ProcedureSteps(batch, "SII"))
+            yield return step;
+        if (productRefusal is not null)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, productRefusal, "S"))
+                yield return outcome;
+            yield break;
+        }
+        yield return StatementDone(batch, StatementDoneKind.Condition);
+        if (namedProductRefusal is not null)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, namedProductRefusal, "S"))
+                yield return outcome;
+            yield break;
+        }
+        foreach (var step in ProcedureSteps(batch, isSqlServer ? "SOI" : "OI"))
+            yield return step;
+        if (inTransaction)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, SimulatedSqlException.ProcedureCannotRunInTransaction(Procedure), "S"))
+                yield return outcome;
+            yield break;
+        }
+        foreach (var step in ProcedureSteps(batch, "II"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Added(), rollsBack: added is null))
+            yield return outcome;
+        if (duplicate)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, SimulatedSqlException.LinkedServerAlreadyExists(server!), "S"))
+                yield return outcome;
+            yield break;
+        }
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Added()
+        {
+            yield return StatementDone(batch, StatementDoneKind.Condition);
+            if (nameRefused)
+            {
+                // sys.sp_validname refuses it, and both procedures return.
+                yield return StatementDone(batch, StatementDoneKind.Condition);
+                foreach (var outcome in RaisedAndGoneOn(batch, Procedure, SimulatedSqlException.NameCannotBeNull(), "SXISXII", caughtAfter: "XX"))
+                    yield return outcome;
+                yield break;
+            }
+            foreach (var step in ProcedureSteps(batch, "SXIISI"))
+                yield return step;
+            // sys.sp_MSaddserver_internal refuses the old remote-server form
+            // as XACT_ABORT would, ending the batch, and a provider other than
+            // SQL Server's in a statement that fails — one no TRY around the
+            // call sees, after which it goes on as it would have.
+            if (styleRefused)
+                throw ProcedureStatementError(SimulatedSqlException.AddServerNoLongerSupported().AbortingAsUnderXactAbort());
+            if (providerRefused)
+            {
+                if (batch.Connection.OpenTryFrames > 0)
+                {
+                    batch.SystemProcedureStatus = 1;
+                }
+                else
+                {
+                    foreach (var outcome in RaisedAndGoneOn(batch, Procedure, ProcedureStatementError(SimulatedSqlException.OnlySqlServerProviderAllowed(state: 1)), ""))
+                        yield return outcome;
+                }
+                foreach (var step in ProcedureSteps(batch, "SIIISXII"))
+                    yield return step;
+                yield break;
+            }
+            foreach (var step in ProcedureSteps(batch, isSqlServer ? "SS" : "S"))
+                yield return step;
+            if (added is null)
+            {
+                foreach (var step in ProcedureSteps(batch, "ISXII"))
+                    yield return step;
+                yield break;
+            }
+            simulation.ActiveLinkedServers[server!] = added;
+            // Activating (or re-activating) a linked server changes how
+            // four-part-name FROM clauses bind at parse time; cached plans
+            // parsed before this call must be invalidated.
+            simulation.BumpSchemaVersion();
+            foreach (var step in ProcedureSteps(batch, "IIISXI"))
+                yield return step;
+        }
     }
 
     /// <summary>Whether a linked server's provider is one of SQL Server's own, the only kind real allows on Linux (probed 2026-10-05).</summary>
@@ -213,24 +298,43 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_dropserver", "server");
         server ??= "(null)";
         RequireAlterAnyLinkedServer(batch);
-        if (batch.Connection.CurrentTransaction is not null)
-            throw SimulatedSqlException.ProcedureCannotRunInTransaction("sp_dropserver");
 
-        var servers = batch.Connection.Simulation.ActiveLinkedServers;
-        if (!servers.TryGetValue(server, out var linkedServer))
-            throw SimulatedSqlException.LinkedServerDoesNotExist(server);
-        if (!dropLogins && linkedServer.Logins.Exists(static login => !(login.LocalPrincipalId == 0 && login.UsesSelf)))
-            throw SimulatedSqlException.LinkedServerHasLogins(server);
-        // Its statements, the removal in a transaction of its own (captured
-        // 2026-10-17 against SQL Server 2025).
-        foreach (var step in ProcedureSteps(batch, "SOIII"))
+        // Its statements, the removal in a transaction of its own, which a
+        // missing server or one mapping logins rolls back ahead of the
+        // refusal (captured 2026-10-17 against SQL Server 2025).
+        const string Procedure = "sp_dropserver";
+        foreach (var step in ProcedureSteps(batch, "SOI"))
             yield return step;
-        foreach (var outcome in ProcedureTransactionSteps(batch, Dropped()))
+        if (batch.Connection.CurrentTransaction is not null)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, SimulatedSqlException.ProcedureCannotRunInTransaction(Procedure), "S"))
+                yield return outcome;
+            yield break;
+        }
+        foreach (var step in ProcedureSteps(batch, "II"))
+            yield return step;
+        var servers = batch.Connection.Simulation.ActiveLinkedServers;
+        var refusal = !servers.TryGetValue(server, out var linkedServer) ? SimulatedSqlException.LinkedServerDoesNotExist(server)
+            : !dropLogins && linkedServer.Logins.Exists(static login => !(login.LocalPrincipalId == 0 && login.UsesSelf)) ? SimulatedSqlException.LinkedServerHasLogins(server)
+            : null;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Dropped(), rollsBack: refusal is not null))
             yield return outcome;
+        if (refusal is not null)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, refusal, "S"))
+                yield return outcome;
+            yield break;
+        }
         yield return StatementDone(batch, StatementDoneKind.Select, 1);
 
         IEnumerable<SimulatedStatementOutcome> Dropped()
         {
+            if (refusal is not null)
+            {
+                foreach (var step in ProcedureSteps(batch, linkedServer is null ? "I" : "II"))
+                    yield return step;
+                yield break;
+            }
             _ = servers.TryRemove(server, out _);
             // Dropping a linked server removes a four-part-name binding;
             // cached plans referencing it would re-resolve incorrectly.

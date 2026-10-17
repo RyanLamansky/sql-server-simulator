@@ -558,11 +558,13 @@ partial class Simulation
     /// attribution.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> AttributedToSystemProcedure(
-        IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName, VariableSlot? returnCode, SystemProcedureResult result)
+        BatchContext batch, IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName, VariableSlot? returnCode, SystemProcedureResult result)
     {
         using var enumerator = outcomes.GetEnumerator();
         while (true)
         {
+            SimulatedSqlException? refused = null;
+            (string Before, string After, int Status)? refusalSteps = null;
             try
             {
                 if (!enumerator.MoveNext())
@@ -570,22 +572,23 @@ partial class Simulation
             }
             catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception) is { } site)
             {
-                exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
-                // An inner procedure named by the site raises it, whatever
-                // module the error first named — a refreshed view's binding
-                // error comes from sys.sp_refreshsqlmodule_internal (probed
-                // 2026-10-04 against SQL Server 2025).
-                if (site.Procedure is { Length: > 0 } inner)
+                AttributeToSystemProcedure(exception, site, systemProcName, calledName);
+                if (exception.RaisedBySystemProcedure && RefusalSteps(systemProcName, exception) is { } steps)
                 {
-                    foreach (var entry in exception.Errors)
-                        entry.Procedure = inner;
+                    refused = exception;
+                    refusalSteps = steps;
                 }
-                // sp_cursorunprepare's missing handle returns its number
-                // (probed 2026-10-16 against SQL Server 2025).
-                exception.RaisedBySystemProcedure = (exception.Number != 201 || systemProcName == "sp_cursorunprepare") && !exception.SystemProcedureBindingError;
-                if (returnCode is not null && exception.RaisedBySystemProcedure && !exception.CaughtBeforeReturn)
-                    returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
-                throw;
+                else
+                {
+                    if (returnCode is not null && exception.RaisedBySystemProcedure && !exception.CaughtBeforeReturn)
+                        returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
+                    throw;
+                }
+            }
+            catch (SimulatedSqlException exception) when (!exception.SystemProcedureBindingError && RefusalSteps(systemProcName, exception) is { } steps)
+            {
+                refused = exception;
+                refusalSteps = steps;
             }
             catch (SimulatedSqlException exception) when (returnCode is not null && !exception.SystemProcedureBindingError && !OwnsReturnCode(systemProcName))
             {
@@ -594,17 +597,88 @@ partial class Simulation
                 returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
                 throw;
             }
+            if (refused is not null && refusalSteps is { } around)
+            {
+                // A refusal real raises with a RAISERROR it goes on past.
+                refused.SystemProcedureReturnCode = around.Status;
+                foreach (var step in ProcedureSteps(batch, around.Before))
+                    yield return step;
+                foreach (var outcome in GoneOnPast(batch, refused, around.After))
+                {
+                    if (outcome is SimulatedErrorOutcome)
+                        Failed(refused);
+                    yield return outcome;
+                }
+                yield break;
+            }
             // A statement a procedure ran through dynamic SQL that failed ends the
             // procedure with return code 1, though the batch went on — or the
             // code the procedure's own error names.
             if (enumerator.Current is SimulatedErrorOutcome failed && !OwnsReturnCode(systemProcName))
-            {
-                result.Failed = true;
-                if (returnCode is { } slot)
-                    slot.Value = SqlValue.FromInt32(failed.Exception.SystemProcedureReturnCode).CoerceTo(slot.DeclaredType);
-            }
+                Failed(failed.Exception);
             yield return enumerator.Current;
         }
+
+        void Failed(SimulatedSqlException error)
+        {
+            result.Failed = true;
+            result.FailedStatus = error.SystemProcedureReturnCode;
+            if (returnCode is { } slot)
+                slot.Value = SqlValue.FromInt32(error.SystemProcedureReturnCode).CoerceTo(slot.DeclaredType);
+        }
+    }
+
+    /// <summary>
+    /// The statements a system procedure runs around a refusal it raises with
+    /// a <c>RAISERROR</c> and goes on past, for the ones that check their
+    /// arguments before any of their statements' DONEINPROCs went out: the
+    /// statements ahead of the check (<c>B</c> / <c>C</c> a transaction it
+    /// opens and commits on the way), those after the <c>RAISERROR</c>, and
+    /// the status it returns (captured 2026-10-17 against SQL Server 2025,
+    /// for each argument shape the probes named); null for any other error.
+    /// </summary>
+    private static (string Before, string After, int Status)? RefusalSteps(string systemProcName, SimulatedSqlException exception) => (systemProcName, exception.Number) switch
+    {
+        ("sp_addmessage", 15040) => ("III", "S", 1),
+        ("sp_addmessage", 15043) => ("IIIIISSSSSIIISIBIIIIIC", "S", 1),
+        ("sp_addumpdevice", 15044) => ("SOIISI", "S", 1),
+        ("sp_altermessage", 15179) => ("SSIISIBIC", "S", 1),
+        ("sp_autostats", 15390) => ("SISSISI", "S", 15390),
+        ("sp_depends", 15009) => ("SISIS", "S", 1),
+        ("sp_dropdevice", 15012) => ("SIOIII", "S", 1),
+        ("sp_dropmessage", 15179) => ("IIIISIISBIC", "S", 1),
+        ("sp_droptype", 15036) => ("SI", "S", 1),
+        ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => ("SIISII", "SXS", 15165),
+        ("sp_spaceused", 15009) => ("IIISIISI", "", 1),
+        ("sp_unbindefault", 15148) => ("OSSIIIISSIIBISIIC", "S", 1),
+        ("sp_unbindefault", 15236) => ("OSSIIIISSII", "S", 1),
+        ("sp_unbindrule", 15148) => ("OSSIIIISSIIBISIIC", "S", 1),
+        ("sp_unbindrule", 15238) => ("OSSIIIISSII", "S", 1),
+        ("sp_who", 15007) => ("SIIISI", "S", 1),
+        _ => null,
+    };
+
+    /// <summary>
+    /// Attributes <paramref name="exception"/>, raised by
+    /// <paramref name="systemProcName"/> from its own body, to the procedure
+    /// by the name it was called by, at <paramref name="site"/>'s line of
+    /// real's source.
+    /// </summary>
+    private static void AttributeToSystemProcedure(SimulatedSqlException exception, (int Line, string? Procedure) site, string systemProcName, string calledName)
+    {
+        exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
+        // An inner procedure named by the site raises it, whatever module the
+        // error first named — a refreshed view's binding error comes from
+        // sys.sp_refreshsqlmodule_internal (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (site.Procedure is { Length: > 0 } inner)
+        {
+            foreach (var entry in exception.Errors)
+                entry.Procedure = inner;
+        }
+        // sp_cursorunprepare's missing handle returns its number (probed
+        // 2026-10-16 against SQL Server 2025).
+        exception.RaisedBySystemProcedure = (exception.Number != 201 || systemProcName == "sp_cursorunprepare") && !exception.SystemProcedureBindingError;
     }
 
     /// <summary>

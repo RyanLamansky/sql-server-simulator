@@ -87,9 +87,29 @@ public sealed class CatalogProcTests
         AreEqual("fixt", rows[0]["TABLE_NAME"]);
     }
 
+    /// <summary>
+    /// A qualifier other than the current database's name — a pattern
+    /// included, its own name in another case not — is Msg 15250 in every
+    /// ODBC catalog procedure (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void SpTables_QualifierMismatch_ReturnsEmpty()
-        => IsEmpty(Run(NewFixture(), "exec sp_tables @table_qualifier='otherdb'"));
+    [DataRow("exec sp_tables @table_qualifier = 'otherdb'")]
+    [DataRow("exec sp_tables 'fixt', 'dbo', 'simulat%'")]
+    [DataRow("exec sp_columns 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_columns_100 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_pkeys 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_stored_procedures 'p', 'dbo', 'master'")]
+    [DataRow("exec sp_sproc_columns 'p', 'dbo', 'master'")]
+    [DataRow("exec sp_statistics 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_special_columns 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_table_privileges 'fixt', 'dbo', 'master'")]
+    [DataRow("exec sp_column_privileges 'fixt', 'dbo', 'master'")]
+    public void CatalogProcedures_ForeignQualifier_Msg15250(string sql)
+    {
+        var sim = NewFixture();
+        _ = sim.AssertSqlError(sql, 15250);
+        HasCount(1, Run(sim, "exec sp_tables 'fixt', 'dbo', 'SIMULATED'"));
+    }
 
     // ===== sp_columns_100: per-type values (probe-confirmed) =====
 

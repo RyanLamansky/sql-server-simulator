@@ -221,6 +221,12 @@ partial class Simulation
             }
         }
 
+        if (CatalogQualifierRefusal(batch, procedureName, qualifier, "III", 31) is { } refused)
+        {
+            foreach (var outcome in refused)
+                yield return outcome;
+            yield break;
+        }
         foreach (var step in ProcedureSteps(batch, SpSprocColumnsSteps(owner, qualifier, NamesOneObject(name, routineFound))))
             yield return step;
         yield return version switch
