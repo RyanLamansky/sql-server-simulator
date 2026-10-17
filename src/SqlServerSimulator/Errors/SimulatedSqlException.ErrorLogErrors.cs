@@ -17,6 +17,22 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ExtendedProcedureInvalidParameter() =>
         new("Error executing extended stored procedure: Invalid Parameter", 22004, 15, 1);
 
+    /// <summary>
+    /// Msg 22001 at severity 16: a registry key the registry procedures can't
+    /// open, with the registry's error — 2 for a key it lacks, 161 for a path
+    /// with a leading backslash (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RegistryKeyNotFound(int code, string reason) =>
+        new($"RegOpenKeyEx() returned error {code}, '{reason}'", 22001, 16, 1);
+
+    /// <summary>Msg 22001 at severity 15 (a wrong argument count) or 12 (a NULL subkey), state 0: the registry procedures' argument check.</summary>
+    internal static SimulatedSqlException RegistryInvalidParameter(byte level) =>
+        new("Error executing Read extended stored procedure: Invalid Parameter", 22001, level, 0);
+
+    /// <summary>Msg 22001 at severity 15, state 0: a hive that isn't one of the registry's predefined keys.</summary>
+    internal static SimulatedSqlException RegistryInvalidHive() =>
+        new("Error executing Read extended stored procedure: Invalid Predefined Registry system key", 22001, 15, 0);
+
     /// <summary>Msg 22004 at severity 16: <c>xp_readerrorlog</c> asked for a log there is no file for.</summary>
     internal static SimulatedSqlException ErrorLogFileNotFound() =>
         new("xp_readerrorlog() returned error 2, 'The system cannot find the file specified.'", 22004, 16, 1);

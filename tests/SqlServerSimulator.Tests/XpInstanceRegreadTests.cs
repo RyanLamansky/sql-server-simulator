@@ -108,4 +108,115 @@ public sealed class XpInstanceRegreadTests
         IsTrue(reader.Read());
         AreEqual("SIMULATED", reader.GetString(0));
     }
+
+    private static List<string> ResultSets(Simulation simulation, string commandText)
+    {
+        using var reader = simulation.ExecuteReader(commandText);
+        var sets = new List<string>();
+        do
+        {
+            if (reader.FieldCount == 0)
+                continue;
+            var rows = new List<string> { string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.GetName(i) + ":" + reader.GetDataTypeName(i))) };
+            while (reader.Read())
+                rows.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+            sets.Add(string.Join("~", rows));
+        }
+        while (reader.NextResult());
+        return sets;
+    }
+
+    /// <summary>
+    /// The enumerators send one result set per value, its data an int for a
+    /// DWORD and a string otherwise, a multi-string's strings a column each,
+    /// and the subkeys as one; the instance forms name the instance's key as
+    /// SOFTWARE\Microsoft\MSSQLServer (probed 2026-10-17 against SQL Server
+    /// 2025 on Linux).
+    /// </summary>
+    [TestMethod]
+    public void Enumerators_ListTheInstanceKeys()
+    {
+        var sim = new Simulation();
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "Value:nvarchar|Data:nvarchar~SQLArg0|-d/var/opt/mssql/data/master.mdf",
+                "Value:nvarchar|Data:nvarchar~SQLArg1|-l/var/opt/mssql/data/mastlog.ldf",
+                "Value:nvarchar|Data:nvarchar~SQLArg2|-e/var/opt/mssql/log/errorlog",
+            },
+            ResultSets(sim, @"exec xp_instance_regenumvalues N'hkey_local_machine', N'software\microsoft\mssqlserver\mssqlserver\parameters\'"));
+        CollectionAssert.AreEqual(
+            new[] { "Value:nvarchar|Data:int~Enabled|1", "Value:nvarchar|Data:int~ListenOnAllIPs|1", "Value:nvarchar|Data:int~NoDelay|0", "Value:nvarchar|Data:int~KeepAlive|30000", "Value:nvarchar|Data:nvarchar~DisplayName|TCP/IP" },
+            ResultSets(sim, @"exec master.dbo.xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib\Tcp'"));
+        Assert.Contains("Value:nvarchar|Value:nvarchar|Data:nvarchar~EditionType|Enterprise Developer Edition|NULL",
+            ResultSets(sim, @"exec xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup'"));
+        CollectionAssert.AreEqual(new[] { "Value:nvarchar|Data:nvarchar~NULL|MSSQLSERVER" }, ResultSets(sim, @"exec xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer'"));
+        CollectionAssert.AreEqual(
+            new[] { "SubKeyName:nvarchar~CPE~MSSearch~MSSQLServer~Providers~Replication~SQLServerAgent~Setup" },
+            ResultSets(sim, @"exec xp_instance_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer'"));
+        CollectionAssert.AreEqual(new[] { "SubKeyName:nvarchar~IP1~IPAll" }, ResultSets(sim, @"exec xp_instance_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib\Tcp'"));
+        // A key with no values or no subkeys sends no result set.
+        IsEmpty(ResultSets(sim, @"exec xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\HADR'"));
+        IsEmpty(ResultSets(sim, @"exec xp_instance_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup'"));
+        // The machine forms read the instance under its id.
+        CollectionAssert.AreEqual(new[] { "SubKeyName:nvarchar~170~Instance Names~MSSQL" }, ResultSets(sim, @"exec xp_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\Microsoft SQL Server'"));
+        CollectionAssert.AreEqual(new[] { "Value:nvarchar|Data:nvarchar~MSSQLSERVER|MSSQL" }, ResultSets(sim, @"exec xp_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'"));
+        CollectionAssert.AreEqual(new[] { "SubKeyName:nvarchar~Client~MSSQLServer" }, ResultSets(sim, @"exec xp_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer'"));
+        AreEqual(5, sim.ExecuteScalar("""
+            create table #v (value nvarchar(255), data nvarchar(255));
+            insert #v exec xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib\Tcp';
+            select count(*) from #v
+            """));
+    }
+
+    [TestMethod]
+    public void Enumerators_RefuseAsRealDoes()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError(@"exec xp_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\nosuch'", 22001, "RegOpenKeyEx() returned error 2, 'The system cannot find the file specified.'");
+        sim.AssertSqlError(@"exec xp_instance_regenumvalues N'HKEY_LOCAL_MACHINE', N'\SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\Parameters'", 22001, "RegOpenKeyEx() returned error 161, 'The specified path is invalid.'");
+        sim.AssertSqlError(@"exec xp_regenumvalues N'HKLM', N'SOFTWARE'", 22001, "Error executing Read extended stored procedure: Invalid Predefined Registry system key");
+        var count = sim.AssertSqlError(@"exec xp_regenumvalues N'HKEY_LOCAL_MACHINE'", 22001);
+        AreEqual("Error executing Read extended stored procedure: Invalid Parameter|15|0", $"{count.Errors[0].Message}|{count.Class}|{count.State}");
+        AreEqual(12, sim.AssertSqlError(@"exec xp_regenumvalues N'HKEY_LOCAL_MACHINE', null", 22001).Class);
+        _ = sim.AssertSqlError(@"exec xp_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer', N'x'", 22001);
+        // The batch goes on, the call returning 1.
+        using (var connection = sim.CreateOpenConnection())
+        {
+            _ = Throws<SimulatedSqlException>(() => connection.CreateCommand(@"create table #rc (r int); declare @r int; exec @r = xp_regenumvalues N'HKEY_LOCAL_MACHINE', N'SOFTWARE\nosuch'; insert #rc values (@r)").ExecuteNonQuery());
+            AreEqual(1, connection.CreateCommand("select r from #rc").ExecuteScalar());
+        }
+        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery(@"exec xp_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\Windows NT'"));
+        _ = sim.ExecuteNonQuery("create login lo with password = 'x', check_policy = off");
+        _ = sim.AssertSqlError(@"use master; execute as login = 'lo'; exec xp_instance_regenumkeys N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer'", 229);
+    }
+
+    /// <summary>
+    /// A value the key lacks, or a key the registry lacks, sends Msg 22001 at
+    /// severity 1, leaves the variable as it was and sends no result set
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void MissingValue_SendsTheRegistryMessage()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>().Select(static error => $"{error.Number}/{error.Class}: {error.Message}"));
+        AreEqual("zz", connection.CreateCommand("""
+            declare @v nvarchar(100) = 'zz';
+            exec xp_instance_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer', N'NoSuchValue', @v output;
+            select @v
+            """).ExecuteScalar());
+        using (var reader = connection.CreateCommand(@"exec xp_instance_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\NoSuchKey', N'x'").ExecuteReader())
+            AreEqual(0, reader.FieldCount);
+        CollectionAssert.AreEqual(
+            new[] { "22001/1: RegQueryValueEx() returned error 2, 'The system cannot find the file specified.'", "22001/1: RegOpenKeyEx() returned error 2, 'The system cannot find the file specified.'" },
+            messages);
+        AreEqual("guest|Enterprise Developer Edition", connection.CreateCommand("""
+            declare @login nvarchar(100), @edition nvarchar(100);
+            exec xp_instance_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\MSSQLServer', N'DefaultLogin', @login output;
+            exec xp_instance_regread N'HKEY_LOCAL_MACHINE', N'SOFTWARE\Microsoft\MSSQLServer\Setup', N'EditionType', @edition output;
+            select @login + '|' + @edition
+            """).ExecuteScalar());
+    }
 }

@@ -1,0 +1,2318 @@
+K	
+S	COMPONENTS
+S	HARDWARE
+S	SAM
+S	Software
+S	SYSTEM
+S	SECURITY
+K	SOFTWARE
+S	Classes
+S	DefaultUserEnvironment
+S	Description
+S	Microsoft
+S	ODBC
+S	OEM
+S	Policies
+S	RegisteredApplications
+S	Wow6432Node
+K	SOFTWARE\Microsoft
+S	.NETFramework
+S	AccountsControl
+S	Active Setup
+S	Advanced INF Setup
+S	ASP.NET
+S	Assistance
+S	BidInterface
+S	CallAndMessagingEnhancement
+S	Clipboard
+S	COM3
+S	CommsAPHost
+S	Composition
+S	Cryptography
+S	CspSchema
+S	CTF
+S	DataAccess
+S	DDDS
+S	Device Association Framework
+S	DiagnosticLogCSP
+S	DirectPlay8
+S	DirectPlayNATHelp
+S	DirectShow
+S	DirectX
+S	Driver Signing
+S	Enrollment
+S	Enrollments
+S	EnterpriseCertificates
+S	EventSystem
+S	FilePicker
+S	FingerKB
+S	Function Discovery
+S	FuzzyDS
+S	HgsClient
+S	IdentityStore
+S	IHDS
+S	ImageTimeSettings
+S	IME
+S	IMEKR
+S	InetStp
+S	InProcLogger
+S	Input
+S	InputMethod
+S	Internet Explorer
+S	LexiconUpdate
+S	MdmDiagnostics
+S	Microsoft SQL Server
+S	MMC
+S	MSADALSQL
+S	MSBuild
+S	MSDTC
+S	MSIME
+S	MSMQ
+S	MSSQLServer
+S	MTFFuzzyFactors
+S	MTFInputType
+S	MTFKeyboardMappings
+S	Multivariant
+S	NET Framework Setup
+S	NetSh
+S	Non-Driver Signing
+S	ODBC
+S	Ole
+S	Palm
+S	Phone
+S	PLA
+S	PointOfService
+S	Policies
+S	PolicyManager
+S	PowerShell
+S	Provisioning
+S	RADAR
+S	Ras
+S	RcsPresence
+S	Rpc
+S	SecurityManager
+S	ServicesForNFS
+S	Shell
+S	SQMClient
+S	StrongName
+S	Sync Framework
+S	SystemCertificates
+S	TabletTip
+S	TelemetryClient
+S	Terminal Services
+S	TouchPrediction
+S	Tpm
+S	Transaction Server
+S	WBEM
+S	WcmSvc
+S	Windows
+S	Windows Defender
+S	Windows Embedded
+S	Windows Identity Foundation
+S	Windows MultiPoint Server
+S	Windows NT
+S	Windows Search
+S	WindowsRuntime
+S	WindowsUpdate
+S	Wisp
+S	Wlpasvc
+S	WwanSvc
+S	XClusterApiImpl
+S	SQL Server Cryptographic Provider
+K	SYSTEM
+S	ActivationBroker
+S	ControlSet001
+S	ControlSet001
+S	DriverDatabase
+S	Input
+S	LibraryOS
+S	ResourcePolicyStore
+S	RNG
+S	Select
+S	Setup
+S	Software
+S	WPA
+K	SYSTEM\CurrentControlSet
+S	Control
+S	Hardware Profiles
+S	Policies
+S	Services
+K	SOFTWARE\Microsoft\Microsoft SQL Server
+S	170
+S	Instance Names
+S	MSSQL
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170
+V	SS	SharedCode	C:\Shared\
+V	SS	VerSpecificRootDir	C:\
+S	SSIS
+S	Tools
+K	SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names
+S	SQL
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL
+V	SS	\N	MSSQLSERVER
+S	CPE
+S	MSSearch
+S	MSSQLServer
+S	Providers
+S	Replication
+S	SQLServerAgent
+S	Setup
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\CPE
+V	SS	ErrorDumpDir	/var/opt/mssql/log/
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch
+S	CLSID
+S	Filters
+S	Language
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer
+V	SD	XCopyInstance	1
+V	SD	FirstStart	0
+V	SS	AssertLevel	2
+V	SD	AuditLevel	2
+V	SS	DefaultLogin	guest
+V	SD	LoginMode	2
+V	SS	Map_	\
+V	SS	Map#	-
+V	SS	Map$	\N
+V	SD	SetHostName	0
+V	SD	Tapeloadwaittime	-1
+V	SS	BackupDirectory	/var/opt/mssql/data
+V	SS	SysDb	1
+V	SS	uptime_pid	1000
+V	SD	NetProtDisabled	0
+V	SD	DistributedQueriesDisabled	0
+V	SD	XpAccessDisabled	0
+V	SD	ClrDisabled	0
+V	SD	UserInstancesDisabled	1
+V	SD	SqlMailDisabled	1
+V	SD	IsSOAPSupported	1
+S	BulkAdmin
+S	CurrentVersion
+S	EULA
+S	FederatedAuthentication
+S	Filestream
+S	HADR
+S	Licensing
+S	Parameters
+S	SQL
+S	SuperSocketNetLib
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers
+S	MSDASQL
+S	MSOLEDBSQL
+S	MSOLEDBSQL19
+S	SQLNCLI
+S	SQLNCLI11
+S	SQLOLEDB
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Replication
+V	SD	IsInstalled	1
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\SQLServerAgent
+V	SS	ErrorLogFile	/var/opt/mssql/log/sqlagent.out
+V	SS	WorkingDirectory	/var/opt/mssql/jobs/
+V	SS	RestartServer	1
+V	SD	ErrorLoggingLevel	7
+V	SD	JobHistoryMaxRows	1000
+V	SD	JobHistoryMaxRowsPerJob	100
+V	SS	NonAlertableErrors	1204,4002
+V	SS	MSXServerName	\N
+V	SS	SysAdminOnly	1
+V	SS	ServerHost	\N
+V	SD	DownloadedMaxRows	100
+V	SS	AlertFailSafeEmailAddress	\N
+V	SS	AlertFailSafeNetSendAddress	\N
+V	SS	AlertFailSafeOperator	\N
+V	SS	AlertFailSafePagerAddress	\N
+V	SD	AlertForwardAlways	0
+V	SS	AlertForwardingServer	\N
+V	SD	AlertForwardingSeverity	131
+V	SD	AlertNotificationMethod	0
+V	SS	AlertPagerCCTemplate	\N
+V	SD	AlertPagerSendSubjectOnly	0
+V	SD	AlertReplaceRuntimeTokens	0
+V	SD	AllowDownloadedJobsToMatchProxyName	0
+V	SD	AssertPopupMask	3
+V	SD	AutoRegistryRefresh	1
+V	SD	CrashHandlersEnabled	1
+V	SD	CrashHandlerJobList	1
+V	SD	CrashHandlerJobScheduleList	1
+V	SD	CrashHandlerScheduleList	1
+V	SD	CrashHandlerAlertsList	1
+V	SD	CrashHandlerAlertJobsList	1
+V	SD	CrashHandlerAlertMSXUploadList	1
+V	SD	CoreEngineMask	32
+V	SS	DatabaseMailProfile	\N
+V	SS	ErrorMonitor	\N
+V	SD	EventLogPeekInterval	20
+V	SD	EventWMILimit	5
+V	SD	EventWMIPeekInterval	30
+V	SD	EventlogSweeping	0
+V	SD	IdleCPUDuration	600
+V	SD	IdleCPUPercent	10
+V	SD	JobShutdownTimeout	15
+V	SD	JobStartDelay	768
+V	SD	LogTSQLStepErrors	0
+V	SD	LoginTimeout	30
+V	SD	MSXDownloadBatchSize	50
+V	SD	MSXPollInterval	60
+V	SD	MaxCachedOperations	0
+V	SD	MonitorAutoStart	1
+V	SD	MsxEncryptChannelOptions	2
+V	SD	OemErrorLog	0
+V	SD	PerformanceSamplingInterval	20
+V	SD	PersistentJMConnection	0
+V	SD	PingConnection	1
+V	SS	RecoveredDatabasesForAgentStartup - Item #1	ALL
+V	SD	RegularMSXConnections	0
+V	SD	RestartSQLServer	1
+V	SD	ShowFailedMSXJobSQL	0
+V	SD	ShutdownLoginTimeout	5
+V	SD	SkipScheduleCheck	0
+V	SD	SkipVersionCheck	0
+V	SD	TSQLRowBatchSize	50
+V	SD	TSQLWaitTime	10
+V	SD	TraceCritSecs	0
+V	SD	TraceMemory	0
+V	SD	UseDatabaseMail	1
+V	SD	UseUserLocale	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Setup
+V	SS	AGTGroup	S-1-5-32-544
+V	SS	SQLGroup	S-1-5-32-544
+V	SS	FTSGroup	S-1-5-32-544
+V	SS	ASGroup	S-1-5-32-544
+V	SS	FDHostGroup	S-1-5-19
+V	SS	SQLDataRoot	/var/opt/mssql/
+V	SS	SQLPath	C:\
+V	SS	SQLBinRoot	C:\binn
+V	SSS	EditionType	Enterprise Developer Edition	\N
+V	SS	Edition	Enterprise Developer Edition
+V	SS	ProductCode	{66414802-4423-4cf9-bba1-ec4948ca72c2}
+V	SS	FullTextDefaultPath	C:\var\opt\mssql\data\fulltext
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID
+S	{022B358F-06B8-4e0d-ADD9-655A8F1E9EDD}
+S	{04096682-6ECE-4E9E-90C1-52D81F0422ED}
+S	{04B37E30-C9A9-4A7D-8F20-792FC87DDF71}
+S	{04DA8451-7F63-4870-A4D7-F55BE66BFDFB}
+S	{05C9DA2B-6DFF-42c7-81CC-706DAE08BC7A}
+S	{095D3BE1-A874-46a5-B989-AE43E3427E3C}
+S	{0D5EBEA3-B982-46B9-9378-4C238262C12C}
+S	{0F0549A6-C2E0-442a-85D7-20E3DB9B6A1F}
+S	{0F7679E0-1386-493C-AF00-DAC67B1B16B1}
+S	{10A2BDBC-7130-420c-9320-A92CC1919206}
+S	{136E0057-D7ED-4b85-9F62-1318CFE1573B}
+S	{1A3ED173-B201-4470-9FC6-EC46CF8D56F1}
+S	{1C0D39B2-C788-40d2-B062-FDF8293D7BC6}
+S	{1D49F57D-47D2-4aee-A69B-593EC558773F}
+S	{1E69A8EB-0B11-40c3-AC27-906ED77CD946}
+S	{212ADF89-1F86-49d0-914A-DF6C5613C81E}
+S	{2652B813-2260-4ef3-A311-74A7AC6513D7}
+S	{26D868ED-CA80-481B-B138-3E8C661161B1}
+S	{2CB861BB-B1B4-4e14-A1A7-D3FB30C3F5CF}
+S	{3D0B8752-68F8-4f39-929D-DE20ED323F45}
+S	{3FAA93F3-79FB-4319-8387-B8FFE074FBDA}
+S	{41B9BE05-B3AF-460C-BF0B-2CDD44A093B1}
+S	{42001A23-ED2A-4582-8BCC-6320C543E102}
+S	{4495524E-2E54-472d-86D7-D671CA588F01}
+S	{4645F4F2-6359-4D81-BFB5-DAFBF89812B4}
+S	{468BFC77-3876-4A47-A6FF-F5F6E8EA7968}
+S	{49C69FAB-ED5E-4d48-9A65-E4816E5FE642}
+S	{52BE2F87-1638-408a-9A98-74239B0B7DB5}
+S	{530CC6A4-357F-49e2-AB11-3C481DBEDE31}
+S	{53DA1CBB-0F45-46a4-AA6E-47CAAD84C921}
+S	{54A12380-E78E-4980-BD96-2EF7076B5BB0}
+S	{5F104B61-7998-4049-A7BB-C99EFB6B4A4E}
+S	{610133F4-ED38-42e7-9C18-EB2A8F76B99A}
+S	{61DBD86A-8D1A-4eb0-907C-E4C1BBC8F09A}
+S	{68DC71DC-2327-4040-8F03-50D6A9805049}
+S	{69483C30-A9AF-4552-8F84-A0796AD5285B}
+S	{697E2FF0-7FA8-49f1-BB4A-E1D115AA2BBB}
+S	{69ED626B-904D-4def-B919-9EF7E4E339DD}
+S	{6C53A912-47C6-4959-B342-DF6C9DA9D494}
+S	{6D2D2C1D-5A3C-43C2-96D9-F3878D0A1B69}
+S	{70878DCD-56F6-4681-BC52-BC7F58EDF723}
+S	{712720F4-F4FF-46cf-B6EC-2CC24FC873A5}
+S	{737FC9B5-BC66-4953-B7DB-B79A72A592A5}
+S	{773229CD-D53C-4211-ACD8-8F2C7BF2AE7C}
+S	{776266FF-0DC5-4f45-BADA-39A7586FACE2}
+S	{7AE7416D-AD97-4a4b-B5AC-B3CA7865AFBE}
+S	{7E352021-69D6-4553-86AC-430B0D8FF913}
+S	{81442F68-A942-457e-9AF0-C6977E244A7C}
+S	{818C68B0-D4C9-475c-B2CF-AF4242F27C8D}
+S	{86781CF9-799C-4cff-9AA5-43F4C23FF866}
+S	{87824713-C8B0-4379-8556-1689764E4237}
+S	{89F38560-A0AE-4d8c-9E8F-83D4DB8A9F85}
+S	{8A474D89-6E2F-419C-8DD5-9B50EDC8C787}
+S	{8A899610-150A-40db-B57A-940EDB3203CE}
+S	{8B3302D7-95F6-4bc5-A06A-0D6DEF15DB69}
+S	{8E67B6EF-205D-490f-A004-7B04F8F65B62}
+S	{92F2118A-E813-4a4d-9DE2-F96A9DC02C53}
+S	{950E4995-301B-4613-8042-F041BC34F32B}
+S	{97E8EFC5-42DA-43ED-9CEC-84FDE3620F1A}
+S	{9D0EAB8C-8EF4-4020-B867-2B1E04E4B8E5}
+S	{9FAED859-0B30-4434-AE65-412E14A16FB8}
+S	{9FE6E853-B35F-4fe4-B006-33148455093E}
+S	{A0A5A274-A190-4a81-997B-9593D6F6D462}
+S	{A25A5CCD-80F4-4e02-AADD-7F39CC55E737}
+S	{A9C6B8DD-3CBB-44cb-AA44-4B1C0DBB404D}
+S	{AAA3D3BD-6DE7-4317-91A0-D25E7D3BABC3}
+S	{B675B948-FBA8-46a4-A4C7-D4291785127B}
+S	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+S	{C28DA8E5-39C2-4f62-82FA-C61D39A196DF}
+S	{C4BF21DA-F1E5-4c7f-A611-2698645B19EF}
+S	{C700F6EF-A80F-4b24-922A-32308B6FF0C3}
+S	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+S	{CF923CB5-1187-43AB-B053-3E44BED65FFA}
+S	{D0458F37-2228-4fc7-9E66-34133DF4C929}
+S	{D42C8B70-ADEB-4B81-A52F-C09F24F77DFA}
+S	{D9581C03-9766-45a6-B970-1EABBE985986}
+S	{DC4701DE-1014-44cc-85A6-253F2B30FB9E}
+S	{DFA00C33-BF19-482E-A791-3C785B0149B4}
+S	{E0831C90-BAB0-4ca5-B9BD-EA254B538DAC}
+S	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+S	{E1E0A883-AB68-4c6c-9C8C-808AF2BA4CBA}
+S	{E1E5EF84-C4A6-4E50-8188-99AEF3DE2659}
+S	{E58FA315-E206-4ca4-81CE-F34E18E672C9}
+S	{E5B2CB7A-FD35-4d4b-A147-176FEB42244B}
+S	{E7B6AEE0-84AE-46ce-B450-DEBF58C90889}
+S	{E9B1DF65-08F1-438b-8277-EF462B23A792}
+S	{EB6C9433-4AAB-4b71-8B18-8F7A3812E43A}
+S	{EE38A9FC-437F-4d03-A593-BB92AF0D153C}
+S	{F3AEB884-58C8-40cf-AED3-E7EEFFFAA04A}
+S	{F51B7203-9BF9-4C39-B655-18FAD8FA8A9A}
+S	{F70C0935-6E9F-4EF1-9F06-7876536DB900}
+S	{F7B02D8A-65DB-41cb-894D-5BBBF96C1B42}
+S	{FBA89535-BFAB-4ef7-804C-109186BF507B}
+S	{FD339D76-EA3E-435f-AC29-3FFCE55EB35B}
+S	{FD51544B-8050-4c68-ABAE-3E1F7A8C01D3}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters
+S	.a
+S	.ans
+S	.asc
+S	.ascx
+S	.asm
+S	.asp
+S	.aspx
+S	.asx
+S	.bas
+S	.bat
+S	.bcp
+S	.c
+S	.cc
+S	.cls
+S	.cmd
+S	.cpp
+S	.cs
+S	.csa
+S	.css
+S	.csv
+S	.cxx
+S	.dbs
+S	.def
+S	.dic
+S	.dos
+S	.dsp
+S	.dsw
+S	.ext
+S	.faq
+S	.fky
+S	.h
+S	.hhc
+S	.hpp
+S	.hta
+S	.htm
+S	.html
+S	.htt
+S	.htw
+S	.htx
+S	.hxx
+S	.i
+S	.ibq
+S	.ics
+S	.idl
+S	.idq
+S	.inc
+S	.inf
+S	.ini
+S	.inl
+S	.inx
+S	.jav
+S	.java
+S	.js
+S	.kci
+S	.lgn
+S	.log
+S	.lst
+S	.m3u
+S	.mak
+S	.mk
+S	.odc
+S	.odh
+S	.odl
+S	.pkgdef
+S	.pkgundef
+S	.pl
+S	.prc
+S	.rc
+S	.rc2
+S	.rct
+S	.reg
+S	.rgs
+S	.rtf
+S	.rul
+S	.s
+S	.scc
+S	.shtm
+S	.shtml
+S	.snippet
+S	.sol
+S	.sor
+S	.srf
+S	.stm
+S	.tab
+S	.tdl
+S	.tlh
+S	.tli
+S	.trg
+S	.txt
+S	.udf
+S	.udt
+S	.url
+S	.usr
+S	.vbs
+S	.viw
+S	.vsct
+S	.vsixlangpack
+S	.vsixmanifest
+S	.vspscc
+S	.vsscc
+S	.vssscc
+S	.wri
+S	.wtx
+S	.xml
+S	CLSID
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language
+S	ara
+S	ben
+S	bgr
+S	cat
+S	chs
+S	cht
+S	cze
+S	dan
+S	deu
+S	eng
+S	enu
+S	esn
+S	fra
+S	grk
+S	guj
+S	heb
+S	hin
+S	hrv
+S	ind
+S	isl
+S	ita
+S	jpn
+S	kan
+S	kor
+S	lth
+S	lvi
+S	mal
+S	mar
+S	msl
+S	Neutral
+S	nld
+S	nor
+S	pan
+S	plk
+S	ptb
+S	ptg
+S	rom
+S	rus
+S	sky
+S	slv
+S	srb
+S	srl
+S	sve
+S	tam
+S	tel
+S	tha
+S	trk
+S	ukr
+S	urd
+S	vit
+S	zh-hk
+S	zh-mo
+S	zh-sg
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\BulkAdmin
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\CurrentVersion
+V	SS	CurrentVersion	17.0
+V	SD	Language	1033
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\EULA
+V	SS	\N	Y
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\FederatedAuthentication
+V	SS	AADChannelMaxBufferedMessageSize	200000
+V	SS	AADGraphEndPoint	graph.windows.net
+V	SS	AADGroupLookupMaxRetryAttempts	10
+V	SS	AADGroupLookupMaxRetryDuration	30000
+V	SS	AADGroupLookupRetryInitialBackoff	100
+V	SS	AADServerAdminSid	00000000-0000-0000-0000-000000000000
+V	SS	AuthenticationEndpoint	login.microsoftonline.com
+V	SS	CacheMaxSize	300
+V	SS	ClientCertBlackList	\N
+V	SS	FederationMetadataEndpoint	login.windows.net
+V	SS	GraphAPIEndpoint	graph.windows.net
+V	SS	IssuerURL	https://sts.windows.net/
+V	SS	OnBehalfOfAuthority	https://login.windows.net/
+V	SS	STSURL	https://login.windows.net/
+V	SS	MsGraphEndPoint	graph.microsoft.com
+V	SS	SendX5c	false
+V	SS	ServicePrincipalName	https://database.windows.net/
+V	SS	ServicePrincipalNameForArcadia	https://sql.azuresynapse.net
+V	SS	ServicePrincipalNameForArcadiaDogfood	https://sql.azuresynapse-dogfood.net
+V	SS	ServicePrincipalNameNoSlash	https://database.windows.net
+V	SS	AADBecWSConnectionPoolMaxSize	500
+V	SS	ClientCertSubjectName	SQLServerAADCert
+V	SS	AADTenantSpecificSQLServicePrincipalCertSubjectName	SQLServerAADCert
+V	SS	ContextExpirationTime	1800
+V	SS	CacheCleanupTimerInterval	300000
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\Filestream
+V	SS	RsFxVersion	0100
+V	SS	InstanceGuid	{46f424ca-1395-43ee-873f-bebac26700b7}
+V	SS	ShareName	MSSQLSERVER
+V	SD	EnableLevel	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\HADR
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\Licensing
+V	SS	\N	Developer
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\Parameters
+V	SS	SQLArg0	-d/var/opt/mssql/data/master.mdf
+V	SS	SQLArg1	-l/var/opt/mssql/data/mastlog.ldf
+V	SS	SQLArg2	-e/var/opt/mssql/log/errorlog
+S	Network
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SQL
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib
+V	SD	ForceEncryption	0
+V	SD	ForceStrict	0
+V	SD	HideInstance	0
+V	SS	Certificate	\N
+V	SS	DisplayName	SQL Server Network Configuration
+V	SD	ExtendedProtection	0
+S	AdminConnection
+S	Np
+S	Sm
+S	Tcp
+S	Via
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\MSDASQL
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\MSOLEDBSQL
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\MSOLEDBSQL19
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\SQLNCLI
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\SQLNCLI11
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\Providers\SQLOLEDB
+V	SD	AllowInProcess	1
+V	SD	DisallowAdhocAccess	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{022B358F-06B8-4e0d-ADD9-655A8F1E9EDD}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{04096682-6ECE-4E9E-90C1-52D81F0422ED}
+V	SS	\N	MsWb70011.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{04B37E30-C9A9-4A7D-8F20-792FC87DDF71}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{04DA8451-7F63-4870-A4D7-F55BE66BFDFB}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{05C9DA2B-6DFF-42c7-81CC-706DAE08BC7A}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{095D3BE1-A874-46a5-B989-AE43E3427E3C}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{0D5EBEA3-B982-46B9-9378-4C238262C12C}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{0F0549A6-C2E0-442a-85D7-20E3DB9B6A1F}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{0F7679E0-1386-493C-AF00-DAC67B1B16B1}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{10A2BDBC-7130-420c-9320-A92CC1919206}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{136E0057-D7ED-4b85-9F62-1318CFE1573B}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{1A3ED173-B201-4470-9FC6-EC46CF8D56F1}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{1C0D39B2-C788-40d2-B062-FDF8293D7BC6}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{1D49F57D-47D2-4aee-A69B-593EC558773F}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{1E69A8EB-0B11-40c3-AC27-906ED77CD946}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{212ADF89-1F86-49d0-914A-DF6C5613C81E}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{2652B813-2260-4ef3-A311-74A7AC6513D7}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{26D868ED-CA80-481B-B138-3E8C661161B1}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{2CB861BB-B1B4-4e14-A1A7-D3FB30C3F5CF}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{3D0B8752-68F8-4f39-929D-DE20ED323F45}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{3FAA93F3-79FB-4319-8387-B8FFE074FBDA}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{41B9BE05-B3AF-460C-BF0B-2CDD44A093B1}
+V	SS	\N	xmlfilt.dll
+V	SS	ThreadingModel	Both
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{42001A23-ED2A-4582-8BCC-6320C543E102}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{4495524E-2E54-472d-86D7-D671CA588F01}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{4645F4F2-6359-4D81-BFB5-DAFBF89812B4}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{468BFC77-3876-4A47-A6FF-F5F6E8EA7968}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{49C69FAB-ED5E-4d48-9A65-E4816E5FE642}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{52BE2F87-1638-408a-9A98-74239B0B7DB5}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{530CC6A4-357F-49e2-AB11-3C481DBEDE31}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{53DA1CBB-0F45-46a4-AA6E-47CAAD84C921}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{54A12380-E78E-4980-BD96-2EF7076B5BB0}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{5F104B61-7998-4049-A7BB-C99EFB6B4A4E}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{610133F4-ED38-42e7-9C18-EB2A8F76B99A}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{61DBD86A-8D1A-4eb0-907C-E4C1BBC8F09A}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{68DC71DC-2327-4040-8F03-50D6A9805049}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{69483C30-A9AF-4552-8F84-A0796AD5285B}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{697E2FF0-7FA8-49f1-BB4A-E1D115AA2BBB}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{69ED626B-904D-4def-B919-9EF7E4E339DD}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{6C53A912-47C6-4959-B342-DF6C9DA9D494}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{6D2D2C1D-5A3C-43C2-96D9-F3878D0A1B69}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{70878DCD-56F6-4681-BC52-BC7F58EDF723}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{712720F4-F4FF-46cf-B6EC-2CC24FC873A5}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{737FC9B5-BC66-4953-B7DB-B79A72A592A5}
+V	SS	\N	korwbrkr.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{773229CD-D53C-4211-ACD8-8F2C7BF2AE7C}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{776266FF-0DC5-4f45-BADA-39A7586FACE2}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{7AE7416D-AD97-4a4b-B5AC-B3CA7865AFBE}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{7E352021-69D6-4553-86AC-430B0D8FF913}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{81442F68-A942-457e-9AF0-C6977E244A7C}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{818C68B0-D4C9-475c-B2CF-AF4242F27C8D}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{86781CF9-799C-4cff-9AA5-43F4C23FF866}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{87824713-C8B0-4379-8556-1689764E4237}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{89F38560-A0AE-4d8c-9E8F-83D4DB8A9F85}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{8A474D89-6E2F-419C-8DD5-9B50EDC8C787}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{8A899610-150A-40db-B57A-940EDB3203CE}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{8B3302D7-95F6-4bc5-A06A-0D6DEF15DB69}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{8E67B6EF-205D-490f-A004-7B04F8F65B62}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{92F2118A-E813-4a4d-9DE2-F96A9DC02C53}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{950E4995-301B-4613-8042-F041BC34F32B}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{97E8EFC5-42DA-43ED-9CEC-84FDE3620F1A}
+V	SS	\N	korwbrkr.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{9D0EAB8C-8EF4-4020-B867-2B1E04E4B8E5}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{9FAED859-0B30-4434-AE65-412E14A16FB8}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{9FE6E853-B35F-4fe4-B006-33148455093E}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{A0A5A274-A190-4a81-997B-9593D6F6D462}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{A25A5CCD-80F4-4e02-AADD-7F39CC55E737}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{A9C6B8DD-3CBB-44cb-AA44-4B1C0DBB404D}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{AAA3D3BD-6DE7-4317-91A0-D25E7D3BABC3}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{B675B948-FBA8-46a4-A4C7-D4291785127B}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+V	SS	\N	query.dll
+V	SS	ThreadingModel	Both
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{C28DA8E5-39C2-4f62-82FA-C61D39A196DF}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{C4BF21DA-F1E5-4c7f-A611-2698645B19EF}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{C700F6EF-A80F-4b24-922A-32308B6FF0C3}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+V	SS	\N	msfte.dll
+V	SS	ThreadingModel	Both
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{CF923CB5-1187-43AB-B053-3E44BED65FFA}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{D0458F37-2228-4fc7-9E66-34133DF4C929}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{D42C8B70-ADEB-4B81-A52F-C09F24F77DFA}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{D9581C03-9766-45a6-B970-1EABBE985986}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{DC4701DE-1014-44cc-85A6-253F2B30FB9E}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{DFA00C33-BF19-482E-A791-3C785B0149B4}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E0831C90-BAB0-4ca5-B9BD-EA254B538DAC}
+V	SS	\N	MsWb70804.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E0CA5340-4534-11CF-B952-00AA0051FE20}
+V	SS	\N	nlhtml.dll
+V	SS	ThreadingModel	Both
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E1E0A883-AB68-4c6c-9C8C-808AF2BA4CBA}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E1E5EF84-C4A6-4E50-8188-99AEF3DE2659}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E58FA315-E206-4ca4-81CE-F34E18E672C9}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E5B2CB7A-FD35-4d4b-A147-176FEB42244B}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E7B6AEE0-84AE-46ce-B450-DEBF58C90889}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{E9B1DF65-08F1-438b-8277-EF462B23A792}
+V	SS	\N	MsWb70404.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{EB6C9433-4AAB-4b71-8B18-8F7A3812E43A}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{EE38A9FC-437F-4d03-A593-BB92AF0D153C}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{F3AEB884-58C8-40cf-AED3-E7EEFFFAA04A}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{F51B7203-9BF9-4C39-B655-18FAD8FA8A9A}
+V	SS	\N	MsWb7.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{F70C0935-6E9F-4EF1-9F06-7876536DB900}
+V	SS	\N	MsWb7001e.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{F7B02D8A-65DB-41cb-894D-5BBBF96C1B42}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{FBA89535-BFAB-4ef7-804C-109186BF507B}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{FD339D76-EA3E-435f-AC29-3FFCE55EB35B}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\CLSID\{FD51544B-8050-4c68-ABAE-3E1F7A8C01D3}
+V	SS	\N	NaturalLanguage6.dll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.a
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ans
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.asc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ascx
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.asm
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.asp
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.aspx
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.asx
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.bas
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.bat
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.bcp
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.c
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cls
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cmd
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cpp
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cs
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.csa
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.css
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.csv
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.cxx
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.dbs
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.def
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.dic
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.dos
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.dsp
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.dsw
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ext
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.faq
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.fky
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.h
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.hhc
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.hpp
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.hta
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.htm
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.html
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.htt
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.htw
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.htx
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.hxx
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.i
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ibq
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ics
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.idl
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.idq
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.inc
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.inf
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.ini
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.inl
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.inx
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.jav
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.java
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.js
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.kci
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.lgn
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.log
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.lst
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.m3u
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.mak
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.mk
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.odc
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.odh
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.odl
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.pkgdef
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.pkgundef
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.pl
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.prc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rc
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rc2
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rct
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.reg
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rgs
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rtf
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.rul
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.s
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.scc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.shtm
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.shtml
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.snippet
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.sol
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.sor
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.srf
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.stm
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.tab
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.tdl
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.tlh
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.tli
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.trg
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.txt
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.udf
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.udt
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.url
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.usr
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vbs
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.viw
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vsct
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vsixlangpack
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vsixmanifest
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vspscc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vsscc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.vssscc
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.wri
+V	SS	\N	{C1243CA0-BF96-11CD-B579-08002B30BFEB}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.wtx
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\.xml
+V	SS	\N	{41B9BE05-B3AF-460C-BF0B-2CDD44A093B1}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID
+S	{00020810-0000-0000-C000-000000000046}
+S	{00020811-0000-0000-C000-000000000046}
+S	{00020820-0000-0000-C000-000000000046}
+S	{00020821-0000-0000-C000-000000000046}
+S	{00020900-0000-0000-C000-000000000046}
+S	{00020906-0000-0000-C000-000000000046}
+S	{25336920-03F9-11CF-8FD0-00AA00686F13}
+S	{59850400-6664-101B-B21C-00AA004BA90B}
+S	{5E941D80-BF96-11CD-B579-08002B30BFEB}
+S	{64818D10-4F9B-11CF-86EA-00AA00B929E8}
+S	{64818D11-4F9B-11CF-86EA-00AA00B929E8}
+S	{7F73B8F6-C19C-11D0-AA66-00C04FC2EDDC}
+S	{87DB1ADA-AA39-11D1-829F-00A0C906B239}
+S	{89BCB7A4-6119-101A-BCB7-00DD010655AF}
+S	{8C9E8E1C-90F0-11D1-BA0F-00A0C906B239}
+S	{95876EB0-90F0-11D1-BA0F-00A0C906B239}
+S	{961C1130-89AD-11CF-88A1-00AA004B9986}
+S	{9ED4692C-90F0-11D1-BA0F-00A0C906B239}
+S	{BD70C020-2D24-11D0-9110-00004C752752}
+S	{EA7BAE70-FB3B-11CD-A903-00AA00510EA3}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ara
+V	SD	Locale	1025
+V	SS	WBreakerClass	{04B37E30-C9A9-4A7D-8F20-792FC87DDF71}
+V	SS	TsaurusFile	tsara.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ben
+V	SD	Locale	1093
+V	SS	WBreakerClass	{05C9DA2B-6DFF-42c7-81CC-706DAE08BC7A}
+V	SS	StemmerClass	{89F38560-A0AE-4d8c-9E8F-83D4DB8A9F85}
+V	SS	TsaurusFile	tsben.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\bgr
+V	SD	Locale	1026
+V	SS	WBreakerClass	{B675B948-FBA8-46a4-A4C7-D4291785127B}
+V	SS	StemmerClass	{3FAA93F3-79FB-4319-8387-B8FFE074FBDA}
+V	SS	TsaurusFile	tsbgr.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\cat
+V	SD	Locale	1027
+V	SS	WBreakerClass	{3D0B8752-68F8-4f39-929D-DE20ED323F45}
+V	SS	StemmerClass	{697E2FF0-7FA8-49f1-BB4A-E1D115AA2BBB}
+V	SS	TsaurusFile	tscat.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\chs
+V	SD	Locale	2052
+V	SS	WBreakerClass	{E0831C90-BAB0-4ca5-B9BD-EA254B538DAC}
+V	SS	TsaurusFile	tschs.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\cht
+V	SD	Locale	1028
+V	SS	WBreakerClass	{E9B1DF65-08F1-438b-8277-EF462B23A792}
+V	SS	TsaurusFile	tscht.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\cze
+V	SD	Locale	1029
+V	SS	WBreakerClass	{468BFC77-3876-4A47-A6FF-F5F6E8EA7968}
+V	SS	StemmerClass	{F51B7203-9BF9-4C39-B655-18FAD8FA8A9A}
+V	SS	TsaurusFile	tscze.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\dan
+V	SD	Locale	1030
+V	SS	WBreakerClass	{4645F4F2-6359-4D81-BFB5-DAFBF89812B4}
+V	SS	StemmerClass	{950E4995-301B-4613-8042-F041BC34F32B}
+V	SS	TsaurusFile	tsdan.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\deu
+V	SD	Locale	1031
+V	SS	WBreakerClass	{DFA00C33-BF19-482E-A791-3C785B0149B4}
+V	SS	StemmerClass	{8A474D89-6E2F-419C-8DD5-9B50EDC8C787}
+V	SS	TsaurusFile	tsdeu.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\eng
+V	SD	Locale	2057
+V	SS	WBreakerClass	{9FAED859-0B30-4434-AE65-412E14A16FB8}
+V	SS	StemmerClass	{E1E5EF84-C4A6-4E50-8188-99AEF3DE2659}
+V	SS	TsaurusFile	tseng.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\enu
+V	SD	Locale	1033
+V	SS	WBreakerClass	{9FAED859-0B30-4434-AE65-412E14A16FB8}
+V	SS	StemmerClass	{E1E5EF84-C4A6-4E50-8188-99AEF3DE2659}
+V	SS	TsaurusFile	tsenu.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\esn
+V	SD	Locale	3082
+V	SS	WBreakerClass	{68DC71DC-2327-4040-8F03-50D6A9805049}
+V	SS	StemmerClass	{87824713-C8B0-4379-8556-1689764E4237}
+V	SS	TsaurusFile	tsesn.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\fra
+V	SD	Locale	1036
+V	SS	WBreakerClass	{92F2118A-E813-4a4d-9DE2-F96A9DC02C53}
+V	SS	StemmerClass	{10A2BDBC-7130-420c-9320-A92CC1919206}
+V	SS	TsaurusFile	tsfra.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\grk
+V	SD	Locale	1032
+V	SS	WBreakerClass	{0F7679E0-1386-493C-AF00-DAC67B1B16B1}
+V	SS	StemmerClass	{26D868ED-CA80-481B-B138-3E8C661161B1}
+V	SS	TsaurusFile	tsgrk.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\guj
+V	SD	Locale	1095
+V	SS	WBreakerClass	{04DA8451-7F63-4870-A4D7-F55BE66BFDFB}
+V	SS	StemmerClass	{42001A23-ED2A-4582-8BCC-6320C543E102}
+V	SS	TsaurusFile	tsguj.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\heb
+V	SD	Locale	1037
+V	SS	WBreakerClass	{E5B2CB7A-FD35-4d4b-A147-176FEB42244B}
+V	SS	StemmerClass	{E58FA315-E206-4ca4-81CE-F34E18E672C9}
+V	SS	TsaurusFile	tsheb.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\hin
+V	SD	Locale	1081
+V	SS	WBreakerClass	{0F0549A6-C2E0-442a-85D7-20E3DB9B6A1F}
+V	SS	StemmerClass	{FD51544B-8050-4c68-ABAE-3E1F7A8C01D3}
+V	SS	TsaurusFile	tshin.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\hrv
+V	SD	Locale	1050
+V	SS	WBreakerClass	{712720F4-F4FF-46cf-B6EC-2CC24FC873A5}
+V	SS	StemmerClass	{818C68B0-D4C9-475c-B2CF-AF4242F27C8D}
+V	SS	TsaurusFile	tshrv.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ind
+V	SD	Locale	1057
+V	SS	WBreakerClass	{F7B02D8A-65DB-41cb-894D-5BBBF96C1B42}
+V	SS	StemmerClass	{E7B6AEE0-84AE-46ce-B450-DEBF58C90889}
+V	SS	TsaurusFile	tsind.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\isl
+V	SD	Locale	1039
+V	SS	WBreakerClass	{53DA1CBB-0F45-46a4-AA6E-47CAAD84C921}
+V	SS	StemmerClass	{8E67B6EF-205D-490f-A004-7B04F8F65B62}
+V	SS	TsaurusFile	tsisl.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ita
+V	SD	Locale	1040
+V	SS	WBreakerClass	{7E352021-69D6-4553-86AC-430B0D8FF913}
+V	SS	StemmerClass	{52BE2F87-1638-408a-9A98-74239B0B7DB5}
+V	SS	TsaurusFile	tsita.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\jpn
+V	SD	Locale	1041
+V	SS	WBreakerClass	{04096682-6ECE-4E9E-90C1-52D81F0422ED}
+V	SS	TsaurusFile	tsjpn.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\kan
+V	SD	Locale	1099
+V	SS	WBreakerClass	{4495524E-2E54-472d-86D7-D671CA588F01}
+V	SS	StemmerClass	{095D3BE1-A874-46a5-B989-AE43E3427E3C}
+V	SS	TsaurusFile	tskan.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\kor
+V	SD	Locale	1042
+V	SS	WBreakerClass	{737FC9B5-BC66-4953-B7DB-B79A72A592A5}
+V	SS	StemmerClass	{97E8EFC5-42DA-43ED-9CEC-84FDE3620F1A}
+V	SS	TsaurusFile	tskor.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\lth
+V	SD	Locale	1063
+V	SS	WBreakerClass	{1C0D39B2-C788-40d2-B062-FDF8293D7BC6}
+V	SS	StemmerClass	{E1E0A883-AB68-4c6c-9C8C-808AF2BA4CBA}
+V	SS	TsaurusFile	tslth.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\lvi
+V	SD	Locale	1062
+V	SS	WBreakerClass	{C700F6EF-A80F-4b24-922A-32308B6FF0C3}
+V	SS	StemmerClass	{9D0EAB8C-8EF4-4020-B867-2B1E04E4B8E5}
+V	SS	TsaurusFile	tslvi.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\mal
+V	SD	Locale	1100
+V	SS	WBreakerClass	{69ED626B-904D-4def-B919-9EF7E4E339DD}
+V	SS	StemmerClass	{1A3ED173-B201-4470-9FC6-EC46CF8D56F1}
+V	SS	TsaurusFile	tsmal.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\mar
+V	SD	Locale	1102
+V	SS	WBreakerClass	{8B3302D7-95F6-4bc5-A06A-0D6DEF15DB69}
+V	SS	StemmerClass	{81442F68-A942-457e-9AF0-C6977E244A7C}
+V	SS	TsaurusFile	tsmar.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\msl
+V	SD	Locale	1086
+V	SS	WBreakerClass	{EB6C9433-4AAB-4b71-8B18-8F7A3812E43A}
+V	SS	StemmerClass	{A0A5A274-A190-4a81-997B-9593D6F6D462}
+V	SS	TsaurusFile	tsmsl.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\Neutral
+V	SD	Locale	0
+V	SS	WBreakerClass	{1D49F57D-47D2-4aee-A69B-593EC558773F}
+V	SS	TsaurusFile	tsglobal.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\nld
+V	SD	Locale	1043
+V	SS	WBreakerClass	{69483C30-A9AF-4552-8F84-A0796AD5285B}
+V	SS	StemmerClass	{CF923CB5-1187-43AB-B053-3E44BED65FFA}
+V	SS	TsaurusFile	tsnld.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\nor
+V	SD	Locale	1044
+V	SS	WBreakerClass	{A9C6B8DD-3CBB-44cb-AA44-4B1C0DBB404D}
+V	SS	StemmerClass	{86781CF9-799C-4cff-9AA5-43F4C23FF866}
+V	SS	TsaurusFile	tsnor.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\pan
+V	SD	Locale	1094
+V	SS	WBreakerClass	{9FE6E853-B35F-4fe4-B006-33148455093E}
+V	SS	StemmerClass	{5F104B61-7998-4049-A7BB-C99EFB6B4A4E}
+V	SS	TsaurusFile	tspan.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\plk
+V	SD	Locale	1045
+V	SS	WBreakerClass	{0D5EBEA3-B982-46B9-9378-4C238262C12C}
+V	SS	StemmerClass	{6D2D2C1D-5A3C-43C2-96D9-F3878D0A1B69}
+V	SS	TsaurusFile	tsplk.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ptb
+V	SD	Locale	1046
+V	SS	WBreakerClass	{A25A5CCD-80F4-4e02-AADD-7F39CC55E737}
+V	SS	StemmerClass	{DC4701DE-1014-44cc-85A6-253F2B30FB9E}
+V	SS	TsaurusFile	tsptb.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ptg
+V	SD	Locale	2070
+V	SS	WBreakerClass	{C4BF21DA-F1E5-4c7f-A611-2698645B19EF}
+V	SS	StemmerClass	{7AE7416D-AD97-4a4b-B5AC-B3CA7865AFBE}
+V	SS	TsaurusFile	tsptg.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\rom
+V	SD	Locale	1048
+V	SS	WBreakerClass	{D0458F37-2228-4fc7-9E66-34133DF4C929}
+V	SS	StemmerClass	{610133F4-ED38-42e7-9C18-EB2A8F76B99A}
+V	SS	TsaurusFile	tsrom.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\rus
+V	SD	Locale	1049
+V	SS	WBreakerClass	{AAA3D3BD-6DE7-4317-91A0-D25E7D3BABC3}
+V	SS	StemmerClass	{D42C8B70-ADEB-4B81-A52F-C09F24F77DFA}
+V	SS	TsaurusFile	tsrus.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\sky
+V	SD	Locale	1051
+V	SS	WBreakerClass	{2652B813-2260-4ef3-A311-74A7AC6513D7}
+V	SS	StemmerClass	{FBA89535-BFAB-4ef7-804C-109186BF507B}
+V	SS	TsaurusFile	tssky.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\slv
+V	SD	Locale	1060
+V	SS	WBreakerClass	{8A899610-150A-40db-B57A-940EDB3203CE}
+V	SS	StemmerClass	{022B358F-06B8-4e0d-ADD9-655A8F1E9EDD}
+V	SS	TsaurusFile	tsslv.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\srb
+V	SD	Locale	3098
+V	SS	WBreakerClass	{C28DA8E5-39C2-4f62-82FA-C61D39A196DF}
+V	SS	StemmerClass	{49C69FAB-ED5E-4d48-9A65-E4816E5FE642}
+V	SS	TsaurusFile	tssrb.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\srl
+V	SD	Locale	2074
+V	SS	WBreakerClass	{EE38A9FC-437F-4d03-A593-BB92AF0D153C}
+V	SS	StemmerClass	{212ADF89-1F86-49d0-914A-DF6C5613C81E}
+V	SS	TsaurusFile	tssrl.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\sve
+V	SD	Locale	1053
+V	SS	WBreakerClass	{2CB861BB-B1B4-4e14-A1A7-D3FB30C3F5CF}
+V	SS	StemmerClass	{61DBD86A-8D1A-4eb0-907C-E4C1BBC8F09A}
+V	SS	TsaurusFile	tssve.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\tam
+V	SD	Locale	1097
+V	SS	WBreakerClass	{6C53A912-47C6-4959-B342-DF6C9DA9D494}
+V	SS	StemmerClass	{1E69A8EB-0B11-40c3-AC27-906ED77CD946}
+V	SS	TsaurusFile	tstam.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\tel
+V	SD	Locale	1098
+V	SS	WBreakerClass	{136E0057-D7ED-4b85-9F62-1318CFE1573B}
+V	SS	StemmerClass	{530CC6A4-357F-49e2-AB11-3C481DBEDE31}
+V	SS	TsaurusFile	tstel.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\tha
+V	SD	Locale	1054
+V	SS	WBreakerClass	{F70C0935-6E9F-4EF1-9F06-7876536DB900}
+V	SS	TsaurusFile	tstha.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\trk
+V	SD	Locale	1055
+V	SS	WBreakerClass	{54A12380-E78E-4980-BD96-2EF7076B5BB0}
+V	SS	TsaurusFile	tstrk.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\ukr
+V	SD	Locale	1058
+V	SS	WBreakerClass	{773229CD-D53C-4211-ACD8-8F2C7BF2AE7C}
+V	SS	StemmerClass	{D9581C03-9766-45a6-B970-1EABBE985986}
+V	SS	TsaurusFile	tsukr.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\urd
+V	SD	Locale	1056
+V	SS	WBreakerClass	{F3AEB884-58C8-40cf-AED3-E7EEFFFAA04A}
+V	SS	StemmerClass	{776266FF-0DC5-4f45-BADA-39A7586FACE2}
+V	SS	TsaurusFile	tsurd.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\vit
+V	SD	Locale	1066
+V	SS	WBreakerClass	{70878DCD-56F6-4681-BC52-BC7F58EDF723}
+V	SS	StemmerClass	{FD339D76-EA3E-435f-AC29-3FFCE55EB35B}
+V	SS	TsaurusFile	tsvit.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\zh-hk
+V	SD	Locale	3076
+V	SS	WBreakerClass	{E9B1DF65-08F1-438b-8277-EF462B23A792}
+V	SS	TsaurusFile	tscht.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\zh-mo
+V	SD	Locale	5124
+V	SS	WBreakerClass	{E9B1DF65-08F1-438b-8277-EF462B23A792}
+V	SS	TsaurusFile	tscht.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Language\zh-sg
+V	SD	Locale	4100
+V	SS	WBreakerClass	{E0831C90-BAB0-4ca5-B9BD-EA254B538DAC}
+V	SS	TsaurusFile	tschs.xml
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\Parameters\Network
+V	SS	\N	\N
+V	SS	TlsProtocols	1.0 1.1 1.2 1.3
+V	SS	TlsCiphers	TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-ECDSA-
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\AdminConnection
+V	SS	DisplayName	Dedicated Administrative Connection
+S	Np
+S	Tcp
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Np
+V	SD	Enabled	0
+V	SS	PipeName	/.\pipe\sql\query
+V	SS	DisplayName	Named Pipes
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Sm
+V	SD	Enabled	0
+V	SS	DisplayName	Shared Memory
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Tcp
+V	SD	Enabled	1
+V	SD	ListenOnAllIPs	1
+V	SD	NoDelay	0
+V	SD	KeepAlive	30000
+V	SS	DisplayName	TCP/IP
+S	IP1
+S	IPAll
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Via
+V	SD	Enabled	0
+V	SS	DefaultServerPort	0:1433
+V	SS	ListenInfo	0:1433
+V	SS	DisplayName	VIA
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020810-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020811-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020820-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020821-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020900-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{00020906-0000-0000-C000-000000000046}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{25336920-03F9-11CF-8FD0-00AA00686F13}
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{59850400-6664-101B-B21C-00AA004BA90B}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{5E941D80-BF96-11CD-B579-08002B30BFEB}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{64818D10-4F9B-11CF-86EA-00AA00B929E8}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{64818D11-4F9B-11CF-86EA-00AA00B929E8}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{7F73B8F6-C19C-11D0-AA66-00C04FC2EDDC}
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{87DB1ADA-AA39-11D1-829F-00A0C906B239}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{89BCB7A4-6119-101A-BCB7-00DD010655AF}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{8C9E8E1C-90F0-11D1-BA0F-00A0C906B239}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{95876EB0-90F0-11D1-BA0F-00A0C906B239}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{961C1130-89AD-11CF-88A1-00AA004B9986}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{9ED4692C-90F0-11D1-BA0F-00A0C906B239}
+V	SS	\N	{C7310720-AC80-11D1-8DF3-00C04FB6EF4F}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{BD70C020-2D24-11D0-9110-00004C752752}
+V	SS	\N	{E0CA5340-4534-11CF-B952-00AA0051FE20}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSearch\Filters\CLSID\{EA7BAE70-FB3B-11CD-A903-00AA00510EA3}
+V	SS	\N	{F07F3920-7B8C-11CF-9BE8-00AA004B9986}
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\AdminConnection\Np
+V	SD	Enabled	0
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\AdminConnection\Tcp
+V	SS	TcpDynamicPorts	1434
+V	SS	DisplayName	TCP/IP
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Tcp\IP1
+V	SD	Enabled	1
+V	SD	Active	1
+V	SS	TcpPort	1433
+V	SS	TcpDynamicPorts	\N
+V	SS	IpAddress	\N
+V	SS	DisplayName	User Defined IP Address
+K	SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL\MSSQLServer\SuperSocketNetLib\Tcp\IPAll
+V	SS	TcpPort	1433
+V	SS	TcpDynamicPorts	\N
+V	SS	DisplayName	Any IP Address
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170\SSIS
+S	Setup
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170\Tools
+S	ClientSetup
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170\SSIS\Setup
+S	DTSPath
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170\Tools\ClientSetup
+V	SS	SQLPath	c:\Tools\
+K	SOFTWARE\Microsoft\Microsoft SQL Server\170\SSIS\Setup\DTSPath
+K	SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL
+V	SS	MSSQLSERVER	MSSQL
+K	SOFTWARE\Microsoft\MSSQLServer
+S	Client
+S	MSSQLServer
+K	SOFTWARE\Microsoft\MSSQLServer\Client
+S	ConnectTo
+S	SNI11.0
+S	SNI18.0
+S	SNI19.0
+S	SuperSocketNetLib
+K	SOFTWARE\Microsoft\MSSQLServer\MSSQLServer
+V	SS	\N	\N
+S	CurrentVersion
+S	SuperSocketNetLib
+K	SOFTWARE\Microsoft\MSSQLServer\Client\ConnectTo
+V	SS	(local),1433	DBMSSOCN,127.0.0.1
+V	SS	(local)	DBMSSOCN,127.0.0.1
+V	SS	.	DBMSSOCN,127.0.0.1
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0
+V	SS	ProtocolsSupported - Item #1	tcp
+V	SS	ProtocolOrder - Item #2	tcp
+S	GeneralFlags
+S	tcp
+S	VIA
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0
+S	GeneralFlags
+S	LastConnect
+S	np
+S	sm
+S	tcp
+S	VIA
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0
+S	GeneralFlags
+S	LastConnect
+S	np
+S	sm
+S	tcp
+S	VIA
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SuperSocketNetLib
+V	SS	ProtocolList - Item #1	tcp
+S	Np
+S	Tcp
+K	SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\CurrentVersion
+V	SS	CurrentVersion	13.0
+K	SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib
+V	SS	ProtocolList - Item #1	tcp
+S	Tcp
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\GeneralFlags
+V	SD	NumberOfFlags	2
+S	Flag1
+S	Flag2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\tcp
+V	SS	DLLname	SQLNCLI11
+V	SS	ProtocolName	TCP/IP
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	3
+S	Property1
+S	Property2
+S	Property3
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\VIA
+V	SS	DLLname	SQLNCLI11
+V	SS	ProtocolName	VIA
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	2
+S	Property1
+S	Property2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\GeneralFlags
+V	SD	NumberOfFlags	2
+S	Flag1
+S	Flag2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\LastConnect
+V	SS	\N	\N
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\np
+V	SS	DLLname	MSOLEDBSQL
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	1
+V	SS	ProtocolName	Named Pipes
+S	Property1
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\sm
+V	SS	DLLname	MSOLEDBSQL
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	0
+V	SS	ProtocolName	Shared Memory
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\tcp
+V	SS	DLLname	MSOLEDBSQL
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	3
+V	SS	ProtocolName	TCP/IP
+S	Property1
+S	Property2
+S	Property3
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\VIA
+V	SS	DLLname	MSOLEDBSQL
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	2
+V	SS	ProtocolName	VIA
+S	Property1
+S	Property2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\GeneralFlags
+V	SD	NumberOfFlags	2
+S	Flag1
+S	Flag2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\LastConnect
+V	SS	\N	\N
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\np
+V	SS	DLLname	MSOLEDBSQL19
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	1
+V	SS	ProtocolName	Named Pipes
+S	Property1
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\sm
+V	SS	DLLname	MSOLEDBSQL19
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	0
+V	SS	ProtocolName	Shared Memory
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\tcp
+V	SS	DLLname	MSOLEDBSQL19
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	3
+V	SS	ProtocolName	TCP/IP
+S	Property1
+S	Property2
+S	Property3
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\VIA
+V	SS	DLLname	MSOLEDBSQL19
+V	SD	NumberOfFlags	0
+V	SD	NumberOfProperties	2
+V	SS	ProtocolName	VIA
+S	Property1
+S	Property2
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SuperSocketNetLib\Np
+V	SS	PipeName	\\.\pipe\sql\query
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SuperSocketNetLib\Tcp
+V	SS	TcpPort	1433
+K	SOFTWARE\Microsoft\MSSQLServer\MSSQLServer\SuperSocketNetLib\Tcp
+V	SS	TcpPort	1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\GeneralFlags\Flag1
+V	SS	Label	Force protocol encryption
+V	SD	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\GeneralFlags\Flag2
+V	SS	Label	Trust Server Certificate
+V	SD	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\tcp\Property1
+V	SS	Name	Default Port
+V	SD	Value	1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\tcp\Property2
+V	SS	Name	KEEPALIVE (in milliseconds)
+V	SD	Value	30000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\tcp\Property3
+V	SS	Name	KEEPALIVEINTERVAL (in milliseconds)
+V	SD	Value	1000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\VIA\Property1
+V	SS	Name	Default Server Port
+V	SS	Value	0:1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI11.0\VIA\Property2
+V	SS	Name	Default Client NIC
+V	SS	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\GeneralFlags\Flag1
+V	SS	Label	Force protocol encryption
+V	SD	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\GeneralFlags\Flag2
+V	SS	Label	Trust Server Certificate
+V	SD	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\np\Property1
+V	SS	Name	Default Pipe
+V	SS	Value	sqlquery
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\tcp\Property1
+V	SS	Name	Default Port
+V	SD	Value	1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\tcp\Property2
+V	SS	Name	KEEPALIVE (in milliseconds)
+V	SD	Value	30000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\tcp\Property3
+V	SS	Name	KEEPALIVEINTERVAL (in milliseconds)
+V	SD	Value	1000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\VIA\Property1
+V	SS	Name	Default Server Port
+V	SS	Value	0:1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI18.0\VIA\Property2
+V	SS	Name	Default Client NIC
+V	SS	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\GeneralFlags\Flag1
+V	SS	Label	Force protocol encryption
+V	SD	Value	0
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\GeneralFlags\Flag2
+V	SS	Label	Trust Server Certificate
+V	SD	Value	1
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\np\Property1
+V	SS	Name	Default Pipe
+V	SS	Value	sqlquery
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\tcp\Property1
+V	SS	Name	Default Port
+V	SD	Value	1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\tcp\Property2
+V	SS	Name	KEEPALIVE (in milliseconds)
+V	SD	Value	30000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\tcp\Property3
+V	SS	Name	KEEPALIVEINTERVAL (in milliseconds)
+V	SD	Value	1000
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\VIA\Property1
+V	SS	Name	Default Server Port
+V	SS	Value	0:1433
+K	SOFTWARE\Microsoft\MSSQLServer\Client\SNI19.0\VIA\Property2
+V	SS	Name	Default Client NIC
+V	SS	Value	0
+K	SYSTEM\CurrentControlSet\Services
+S	.NET CLR Data
+S	.NET CLR Networking
+S	.NET CLR Networking 4.0.0.0
+S	.NET Data Provider for Oracle
+S	.NET Data Provider for SqlServer
+S	.NET Memory Cache 4.0
+S	.NETFramework
+S	AFD
+S	ASP.NET
+S	ASP.NET_4.0.30319
+S	aspnet_state
+S	CLFS
+S	clr_optimization_v4.0.30319_64
+S	CoreUI
+S	crypt32
+S	CryptSvc
+S	DcomLaunch
+S	Eventlog
+S	HTTP
+S	KtmRm
+S	LanmanServer
+S	MSDTC
+S	MSDTC Bridge 4.0.0.0
+S	MsDTCInit
+S	MSSQLFDLauncher
+S	MSSQLSERVER
+S	MsWmiInit
+S	Npfs
+S	PerfCollect
+S	RpcEptMapper
+S	RpcSs
+S	SharedAccess
+S	SMSvcHost 4.0.0.0
+S	SQLCEIP
+S	SQLSERVERAGENT
+S	Tcpip
+S	Tcpip6
+S	TSDDD
+S	W3SVC
+S	WAS
+S	Windows Workflow Foundation 4.0.0.0
+S	winmgmt
+S	WinRM
+S	Winsock
+S	WinSock2
+S	WmiApRpl
+S	wmiApSrv
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Data
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Networking
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Networking 4.0.0.0
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for Oracle
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for SqlServer
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NET Memory Cache 4.0
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\.NETFramework
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\AFD
+V	SS	PassivePortsList - Item #1	135
+V	SS	BackgroundOutboundAppList - Item #2	tablediff.exe
+V	SS	BackgroundOutboundAppList - Item #3	sqlservr.exe
+V	SS	BackgroundOutboundAppList - Item #4	distrib.exe
+V	SS	BackgroundOutboundAppList - Item #5	sqllogship.exe
+V	SS	BackgroundOutboundAppList - Item #6	snapshot.exe
+V	SS	BackgroundOutboundAppList - Item #7	replmerg.exe
+V	SS	BackgroundOutboundAppList - Item #8	simulator.exe
+V	SS	BackgroundOutboundAppList - Item #9	logread.exe
+V	SS	BackgroundOutboundAppList - Item #10	sqlceip.exe
+V	SS	BackgroundOutboundAppList - Item #11	sqlagent.exe
+V	SS	BackgroundOutboundAppList - Item #12	qrdrsvc.exe
+V	SS	BackgroundOutboundAppList - Item #13	blxserver.exe
+V	SS	BackgroundOutboundAppList - Item #14	wmiprvse.exe
+V	SS	BackgroundOutboundAppList - Item #15	msdtcinit.exe
+V	SS	BackgroundOutboundAppList - Item #16	msdtc.exe
+V	SS	BackgroundInboundAppList - Item #17	sqlservr.exe
+V	SS	BackgroundInboundAppList - Item #18	msdtc.exe
+V	SS	BackgroundInboundAppList - Item #19	wmiprvse.exe
+V	SS	BackgroundServicesList - Item #20	Winmgmt
+V	SS	BackgroundServicesList - Item #21	RPCSS
+K	SYSTEM\CurrentControlSet\Services\ASP.NET
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\ASP.NET_4.0.30319
+S	Linkage
+S	Names
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\aspnet_state
+S	Linkage
+S	Parameters
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\CLFS
+V	SS	Description	C:\system32\drivers\clfs.sys,-101
+V	SS	DisplayName	C:\system32\drivers\clfs.sys,-100
+V	SD	ErrorControl	3
+V	SS	Group	Filter
+V	SS	ImagePath	System32\drivers\CLFS.sys
+V	SD	Start	0
+V	SD	Tag	1
+V	SD	Type	1
+S	Parameters
+S	Security
+K	SYSTEM\CurrentControlSet\Services\clr_optimization_v4.0.30319_64
+V	SD	DelayedAutostart	1
+V	SSS	RequiredPrivileges - Item #1	SeCreateGlobalPrivilege	\N
+V	SSS	RequiredPrivileges - Item #2	SeChangeNotifyPrivilege	\N
+V	SSS	RequiredPrivileges - Item #3	SeIncreaseBasePriorityPrivilege	\N
+V	SSS	RequiredPrivileges - Item #4	SeIncreaseQuotaPrivilege	\N
+V	SSS	RequiredPrivileges - Item #5	SeTcbPrivilege	\N
+V	SSS	RequiredPrivileges - Item #6	SeAssignPrimaryTokenPrivilege	\N
+V	SSS	RequiredPrivileges - Item #7	SeShutdownPrivilege	\N
+K	SYSTEM\CurrentControlSet\Services\CoreUI
+S	Navigation
+K	SYSTEM\CurrentControlSet\Services\crypt32
+K	SYSTEM\CurrentControlSet\Services\CryptSvc
+V	SS	DisplayName	@%SystemRoot%\system32\cryptsvc.dll,-1001
+V	SD	ErrorControl	1
+V	SS	ImagePath	%SystemRoot%\system32\svchost.exe -k NetworkService
+V	SS	ObjectName	LocalSystem
+V	SD	Start	2
+V	SD	Type	32
+V	SS	Description	@%SystemRoot%\system32\cryptsvc.dll,-1002
+V	SS	DependOnService - Item #1	RpcSs
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\DcomLaunch
+V	SS	DisplayName	@oleres.dll,-5012
+V	SS	Group	COM Infrastructure
+V	SS	ImagePath	%SystemRoot%\system32\svchost.exe -k DcomLaunch
+V	SS	Description	@oleres.dll,-5013
+V	SS	ObjectName	LocalSystem
+V	SD	ErrorControl	1
+V	SD	Start	2
+V	SD	Type	32
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\Eventlog
+S	Application
+S	Security
+S	System
+K	SYSTEM\CurrentControlSet\Services\HTTP
+V	SS	Description	@%SystemRoot%\system32\drivers\http.sys,-2
+V	SS	DisplayName	@%SystemRoot%\system32\drivers\http.sys,-1
+V	SD	ErrorControl	1
+V	SS	ImagePath	system32\drivers\HTTP.sys
+V	SD	Start	3
+V	SD	Type	1
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\KtmRm
+V	SS	DisplayName	@comres.dll,-2946
+V	SD	ErrorControl	1
+V	SS	ImagePath	%SystemRoot%\System32\svchost.exe -k NetworkServiceAndNoImpersonation
+V	SD	Start	3
+V	SD	Type	32
+V	SS	Description	@comres.dll,-2947
+V	SS	DependOnService - Item #1	RPCSS
+V	SS	DependOnService - Item #2	SamSS
+V	SS	ObjectName	NT AUTHORITY\NetworkService
+V	SD	FailureActionsOnNonCrashFailures	1
+S	Parameters
+S	Security
+S	TriggerInfo
+K	SYSTEM\CurrentControlSet\Services\LanmanServer
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\MSDTC
+V	SD	Start	3
+V	SD	ErrorControl	1
+V	SS	ImagePath	C:\Windows\System32\msdtc.exe
+V	SD	Type	16
+V	SS	DependOnService - Item #1	RPCSS
+V	SS	DependOnService - Item #2	MsDtcInit
+V	SS	ObjectName	NT AUTHORITY\NetworkService
+V	SS	DisplayName	Distributed Transaction Coordinator
+V	SSS	Description	Coordinates transactions that span multiple resource managers, such as databases, message queues, and file systems. If this service is stopped, these transactions will fail. If this service is disabled, any services that explicitly depend on it will fail 	\N
+S	Security
+K	SYSTEM\CurrentControlSet\Services\MSDTC Bridge 4.0.0.0
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\MsDTCInit
+V	SD	Start	3
+V	SD	ErrorControl	1
+V	SS	ImagePath	C:\Windows\System32\msdtcinit.exe
+V	SD	Type	16
+V	SS	ObjectName	LocalSystem
+V	SS	DisplayName	MsDTCInit
+V	SS	Description	Initializes MSDTC Service
+K	SYSTEM\CurrentControlSet\Services\MSSQLFDLauncher
+V	SD	Type	16
+V	SD	Start	3
+V	SD	ErrorControl	1
+V	SS	ImagePath	"c:\binn\fdlauncher.exe" -s MSSQL -p c:\binn\
+V	SS	DisplayName	SQL Full-text Filter Daemon Launcher (MSSQL)
+V	SS	ObjectName	LocalSystem
+V	SS	Description	Service to launch full-text filter daemon process which will perform document filtering and word breaking for SQL Server full-text search. Disabling this service will make full-text search features of SQL Server unavailable.
+K	SYSTEM\CurrentControlSet\Services\MSSQLSERVER
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\MsWmiInit
+V	SS	DisplayName	WMI Initialization
+V	SD	ErrorControl	0
+V	SS	ImagePath	C:\windows\system32\MSWmiInit.exe
+V	SD	Start	2
+V	SD	Type	32
+V	SS	ObjectName	LocalSystem
+V	SS	Group	\N
+K	SYSTEM\CurrentControlSet\Services\Npfs
+S	Aliases
+K	SYSTEM\CurrentControlSet\Services\PerfCollect
+V	SD	Type	272
+V	SD	Start	2
+V	SD	ErrorControl	1
+V	SS	ImagePath	\Windows\System32\perfcollect.exe
+V	SS	ObjectName	LocalSystem
+V	SS	DisplayName	PerfCollect
+K	SYSTEM\CurrentControlSet\Services\RpcEptMapper
+V	SS	DisplayName	@%windir%\system32\RpcEpMap.dll,-1001
+V	SS	Group	COM Infrastructure
+V	SS	DependOnService - Item #1	DcomLaunch
+V	SS	ImagePath	%SystemRoot%\system32\svchost.exe -k RPCSS
+V	SS	Description	@%windir%\system32\RpcEpMap.dll,-1002
+V	SS	ObjectName	LocalSystem
+V	SD	ErrorControl	1
+V	SD	Start	2
+V	SD	Type	32
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\RpcSs
+V	SS	DisplayName	@oleres.dll,-5010
+V	SS	Group	COM Infrastructure
+V	SS	ImagePath	%SystemRoot%\system32\svchost.exe -k rpcss
+V	SS	Description	@oleres.dll,-5011
+V	SS	ObjectName	LocalSystem
+V	SD	ErrorControl	1
+V	SD	Start	2
+V	SD	Type	32
+V	SS	DependOnService - Item #1	RpcEptMapper
+V	SS	DependOnService - Item #2	DcomLaunch
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\SharedAccess
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\SMSvcHost 4.0.0.0
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\SQLCEIP
+V	SD	Type	16
+V	SD	Start	2
+V	SD	ErrorControl	1
+V	SS	ImagePath	"C:\binn\sqlceip.exe" -service
+V	SS	DisplayName	SQL CEIP
+V	SS	ObjectName	LocalSystem
+V	SS	Description	CEIP service for Sql server
+K	SYSTEM\CurrentControlSet\Services\SQLSERVERAGENT
+V	SD	Type	16
+V	SD	Start	2
+V	SD	ErrorControl	1
+V	SS	ImagePath	"C:\Binn\sqlagent.exe"
+V	SS	DisplayName	SQL Server Agent (MSSQLSERVER)
+V	SS	ObjectName	LocalSystem
+V	SS	Description	Executes jobs, monitors SQL Server, fires alerts, and allows automation of some administrative tasks.
+S	Linkage
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\Tcpip
+V	SD	BootFlags	1
+V	SS	DisplayName	TCP/IP Protocol Driver
+V	SS	Group	PNP_TDI
+V	SS	ImagePath	System32\drivers\tcpip.sys
+V	SD	ErrorControl	1
+V	SD	Start	1
+V	SD	Tag	3
+V	SD	Type	1
+V	SS	Description	@%SystemRoot%\system32\netres.dll,-50003
+S	Linkage
+S	Parameters
+S	Performance
+S	ServiceProvider
+K	SYSTEM\CurrentControlSet\Services\Tcpip6
+V	SD	Type	1
+V	SD	Start	3
+V	SD	ErrorControl	1
+V	SD	Tag	9
+V	SS	ImagePath	system32\DRIVERS\tcpip.sys
+V	SS	DisplayName	Microsoft IPv6 Protocol Driver
+V	SS	Group	PNP_TDI
+V	SS	DependOnService - Item #1	Tcpip
+V	SD	TextModeFlags	1
+S	Linkage
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\TSDDD
+S	Device0
+K	SYSTEM\CurrentControlSet\Services\W3SVC
+V	SD	SvcHostSplitDisable	1
+K	SYSTEM\CurrentControlSet\Services\WAS
+V	SD	SvcHostSplitDisable	1
+K	SYSTEM\CurrentControlSet\Services\Windows Workflow Foundation 4.0.0.0
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\winmgmt
+V	SD	SvcMemHardLimitInMB	28
+V	SD	SvcMemMidLimitInMB	20
+V	SD	SvcMemSoftLimitInMB	11
+V	SS	DisplayName	Windows Management Instrumentation
+V	SD	ErrorControl	0
+V	SS	ImagePath	C:\windows\system32\svchost.exe -k winmgmt
+V	SD	Start	4
+V	SD	Type	32
+V	SS	Description	c:\windows\system32\wbem\wmisvc.dll,-204
+V	SS	DependOnService - Item #1	RPCSS
+V	SS	ObjectName	LocalSystem
+V	SS	Group	\N
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\WinRM
+V	SD	DelayedAutoStart	1
+V	SD	Start	3
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\Winsock
+V	SD	ErrorControl	1
+V	SD	Start	3
+V	SD	Type	4
+S	Parameters
+S	Setup Migration
+K	SYSTEM\CurrentControlSet\Services\WinSock2
+S	Parameters
+K	SYSTEM\CurrentControlSet\Services\WmiApRpl
+S	Performance
+K	SYSTEM\CurrentControlSet\Services\wmiApSrv
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Data\Performance
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSS	Library	%systemroot%\system32\netfxperf.dll	\N	\N
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Networking\Performance
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSS	Library	%systemroot%\system32\netfxperf.dll	\N	\N
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Networking 4.0.0.0\Linkage
+V	SS	Export - Item #1	\N
+V	SS	Export - Item #2	.NET CLR Networking 4.0.0.0
+K	SYSTEM\CurrentControlSet\Services\.NET CLR Networking 4.0.0.0\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SS	Counter Names - Item #1	Connections Established
+V	SS	Counter Names - Item #2	Bytes Received
+V	SS	Counter Names - Item #3	Bytes Sent
+V	SS	Counter Names - Item #4	Datagrams Received
+V	SS	Counter Names - Item #5	Datagrams Sent
+V	SS	Counter Names - Item #6	HttpWebRequests Created/Sec
+V	SS	Counter Names - Item #7	HttpWebRequests Average Lifetime
+V	SS	Counter Names - Item #8	HttpWebRequests Average Lifetime Base
+V	SS	Counter Names - Item #9	HttpWebRequests Queued/Sec
+V	SS	Counter Names - Item #10	HttpWebRequests Average Queue Time
+V	SS	Counter Names - Item #11	HttpWebRequests Average Queue Time Base
+V	SS	Counter Names - Item #12	HttpWebRequests Aborted/Sec
+V	SS	Counter Names - Item #13	HttpWebRequests Failed/Sec
+V	SSD	FileMappingSize	\N	131072
+V	SD	IsMultiInstance	1
+V	SS	Library	%systemroot%\system32\netfxperf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for Oracle\Linkage
+V	SS	Export	2e,00,4e,00,45,00,54,00,20,00,44,00,61,00,74,00,61,00,20,00,50,00,72,00,6f,00,76,00,69,00,64,00,65,00,72,00,20,00,66,00,6f,00,72,00,20,00,4f,00,72,00,61,00,63,00,6c,00,65,00,00,00,00,00
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for Oracle\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	FileMappingSize	\N	\N	131072
+V	SD	IsMultiInstance	1
+V	SS	Library	%systemroot%\system32\netfxperf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for SqlServer\Linkage
+V	SS	Export	2e,00,4e,00,45,00,54,00,20,00,44,00,61,00,74,00,61,00,20,00,50,00,72,00,6f,00,76,00,69,00,64,00,65,00,72,00,20,00,66,00,6f,00,72,00,20,00,53,00,71,00,6c,00,53,00,65,00,72,00,76,00,65,00,72,00,00,00,00,00
+K	SYSTEM\CurrentControlSet\Services\.NET Data Provider for SqlServer\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	FileMappingSize	\N	\N	131072
+V	SD	IsMultiInstance	1
+V	SS	Library	%systemroot%\system32\netfxperf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NET Memory Cache 4.0\Linkage
+V	SS	Export	\N
+K	SYSTEM\CurrentControlSet\Services\.NET Memory Cache 4.0\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	FileMappingSize	\N	\N	131072
+V	SD	IsMultiInstance	1
+V	SS	Library	%systemroot%\system32\netfxperf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\.NETFramework\Performance
+V	SS	Close	CloseCtrs
+V	SS	Collect	CollectCtrs
+V	SS	Library	%systemroot%\system32\mscoree.dll
+V	SS	Open	OpenCtrs
+K	SYSTEM\CurrentControlSet\Services\ASP.NET\Linkage
+V	SS	Export	4.0.30319.0
+K	SYSTEM\CurrentControlSet\Services\ASP.NET\Performance
+V	SS	Close	CloseGenericCounters
+V	SS	Collect	CollectGenericCounters
+V	SS	Library	c:\Windows\System32\aspnet_counters.dll
+V	SS	Open	OpenGenericCounters
+K	SYSTEM\CurrentControlSet\Services\ASP.NET_4.0.30319\Linkage
+V	SS	Export	4.0.30319.0
+K	SYSTEM\CurrentControlSet\Services\ASP.NET_4.0.30319\Names
+K	SYSTEM\CurrentControlSet\Services\ASP.NET_4.0.30319\Performance
+V	SS	Close	CloseVersion4Counters
+V	SS	Collect	CollectVersion4Counters
+V	SS	Library	c:\Windows\System32\aspnet_counters.dll
+V	SS	Open	OpenVersion4Counters
+K	SYSTEM\CurrentControlSet\Services\aspnet_state\Linkage
+V	SS	Export	4.0.30319.0
+K	SYSTEM\CurrentControlSet\Services\aspnet_state\Parameters
+V	SD	AllowRemoteConnection	0
+V	SD	Port	42424
+K	SYSTEM\CurrentControlSet\Services\aspnet_state\Performance
+V	SS	Close	CloseStateCounters
+V	SS	Collect	CollectStateCounters
+V	SS	Library	c:\Windows\System32\aspnet_counters.dll
+V	SS	Open	OpenStateCounters
+K	SYSTEM\CurrentControlSet\Services\CLFS\Parameters
+V	SD	EventLogLevel	2
+V	SD	FlushThreshold	40000
+V	SS	MasterFilePath	\SystemRoot\System32\config
+K	SYSTEM\CurrentControlSet\Services\CLFS\Security
+K	SYSTEM\CurrentControlSet\Services\CoreUI\Navigation
+S	Timeouts
+K	SYSTEM\CurrentControlSet\Services\CryptSvc\Parameters
+V	SD	ServiceDllUnloadOnStop	1
+V	SS	ServiceMain	CryptServiceMain
+V	SS	ServiceDll	%SystemRoot%\system32\cryptsvc.dll
+K	SYSTEM\CurrentControlSet\Services\DcomLaunch\Parameters
+V	SS	ServiceDll	%SystemRoot%\system32\rpcss.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application
+S	.NET Runtime
+S	.NET Runtime Optimization Service
+S	ASP.NET 4.0.30319.0
+S	CardSpace 4.0.0.0
+S	CertCa
+S	CertCli
+S	Microsoft.Transactions.Bridge 4.0.0.0
+S	ServiceModel Audit 4.0.0.0
+S	System.IdentityModel 4.0.0.0
+S	System.IO.Log 4.0.0.0
+S	System.Runtime.Serialization 4.0.0.0
+S	System.ServiceModel 4.0.0.0
+S	WinMgmt
+S	WMI.NET Provider Extension
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Security
+S	ServiceModel 4.0.0.0
+K	SYSTEM\CurrentControlSet\Services\Eventlog\System
+S	SMSvcHost 4.0.0.0
+S	WinRM
+K	SYSTEM\CurrentControlSet\Services\HTTP\Parameters
+S	UrlAclInfo
+K	SYSTEM\CurrentControlSet\Services\KtmRm\Parameters
+V	SD	ServiceDllUnloadOnStop	1
+V	SS	ServiceMain	KtmRmServiceMain
+V	SS	ServiceDll	%systemroot%\system32\msdtckrm.dll
+K	SYSTEM\CurrentControlSet\Services\KtmRm\Security
+K	SYSTEM\CurrentControlSet\Services\KtmRm\TriggerInfo
+S	0
+K	SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+V	SD	SMB1	0
+V	SD	SMB2	0
+K	SYSTEM\CurrentControlSet\Services\MSDTC\Security
+K	SYSTEM\CurrentControlSet\Services\MSDTC Bridge 4.0.0.0\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	IsMultiInstance	\N	\N	0
+V	SS	Library	%systemroot%\system32\NETFXPerf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\MSSQLSERVER\Linkage
+V	SS	\N	\N
+V	SS	Export - Item #1	MSSQLSERVER
+K	SYSTEM\CurrentControlSet\Services\MSSQLSERVER\Performance
+V	SS	\N	\N
+V	SS	Open	OpenSQLPerformanceData
+V	SS	Collect	CollectSQLPerformanceData
+V	SS	Close	CloseSQLPerformanceData
+V	SS	Library	C:\binn\sqlctr130.dll
+V	SS	PerfIniFile	sqlctr.ini
+V	SD	First Counter	0
+K	SYSTEM\CurrentControlSet\Services\Npfs\Aliases
+V	SS	lsass - Item #1	protected_storage
+V	SS	lsass - Item #2	netlogon
+V	SS	lsass - Item #3	lsarpc
+V	SS	lsass - Item #4	samr
+V	SS	ntsvcs - Item #5	svcctl
+K	SYSTEM\CurrentControlSet\Services\RpcEptMapper\Parameters
+V	SS	ServiceDll	%SystemRoot%\System32\RpcEpMap.dll
+K	SYSTEM\CurrentControlSet\Services\RpcSs\Parameters
+V	SS	ServiceDll	%SystemRoot%\system32\rpcss.dll
+K	SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters
+S	FirewallPolicy
+K	SYSTEM\CurrentControlSet\Services\SMSvcHost 4.0.0.0\Performance
+V	SD	CategoryOptions	3
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	IsMultiInstance	\N	\N	0
+V	SS	Library	%systemroot%\system32\NETFXPerf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\SQLSERVERAGENT\Linkage
+V	SS	Export - Item #1	MSSQLSERVER
+K	SYSTEM\CurrentControlSet\Services\SQLSERVERAGENT\Performance
+V	SS	Library	SQLAGENTCTR130.dll
+V	SS	Open	OpenSQLPerformanceData
+V	SS	Collect	CollectSQLPerformanceData
+V	SS	Close	CloseSQLPerformanceData
+V	SS	PerfIniFile	sqlagtctr.ini
+V	SD	First Counter	0
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Linkage
+V	SS	Bind - Item #1	\Device\{1AC20174-4201-41F4-874D-92986E2EB88D}
+V	SS	Route - Item #2	"{1AC20174-4201-41F4-874D-92986E2EB88D}"
+V	SS	Export - Item #3	\Device\Tcpip_{1AC20174-4201-41F4-874D-92986E2EB88D}
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
+V	SD	SyncDomainWithMembership	1
+V	SS	DataBasePath	%SystemRoot%\System32\drivers\etc
+V	SS	NameServer	\N
+V	SD	ForwardBroadcasts	0
+V	SD	IPEnableRouter	0
+V	SS	Domain	DOMAIN
+V	SS	Hostname	0c8999f4d434
+V	SS	NV Hostname	0c8999f4d434
+V	SS	SearchList	\N
+V	SD	UseDomainNameDevolution	1
+V	SD	EnableICMPRedirect	1
+V	SD	DeadGWDetectDefault	1
+V	SD	DontAddDefaultGatewayDefault	0
+S	Adapters
+S	DNSRegisteredAdapters
+S	Interfaces
+S	PersistentRoutes
+S	Winsock
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Performance
+V	SS	Close	CloseTcpIpPerformanceData
+V	SS	Collect	CollectTcpIpPerformanceData
+V	SS	Library	Perfctrs.dll
+V	SS	Object List	502 510 546 548 582 638 658 1530 1532 1534
+V	SS	Open	OpenTcpIpPerformanceData
+K	SYSTEM\CurrentControlSet\Services\Tcpip\ServiceProvider
+V	SD	Class	8
+V	SD	DnsPriority	2000
+V	SD	HostsPriority	500
+V	SD	LocalPriority	499
+V	SS	Name	TCP/IP
+V	SD	NetbtPriority	2001
+V	SS	ProviderPath	%SystemRoot%\System32\wsock32.dll
+K	SYSTEM\CurrentControlSet\Services\Tcpip6\Linkage
+V	SS	Bind - Item #1	\Device\{1AC20174-4201-41F4-874D-92986E2EB88D}
+V	SS	Route - Item #2	"{1AC20174-4201-41F4-874D-92986E2EB88D}"
+V	SS	Export - Item #3	\Device\Tcpip6_{1AC20174-4201-41F4-874D-92986E2EB88D}
+K	SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters
+S	Interfaces
+S	Winsock
+K	SYSTEM\CurrentControlSet\Services\TSDDD\Device0
+V	SS	InstalledDisplayDrivers - Item #1	nulldd.dll
+V	SD	VgaCompatible	0
+K	SYSTEM\CurrentControlSet\Services\Windows Workflow Foundation 4.0.0.0\Performance
+V	SD	CategoryOptions	1
+V	SS	Close	ClosePerformanceData
+V	SS	Collect	CollectPerformanceData
+V	SSSD	IsMultiInstance	\N	\N	1
+V	SS	Library	%systemroot%\system32\NETFXPerf.dll
+V	SS	Open	OpenPerformanceData
+K	SYSTEM\CurrentControlSet\Services\winmgmt\Parameters
+V	SD	legacycombehavior	1
+V	SS	servicedll	%SystemRoot%\system32\wbem\WMIsvc.dll
+V	SD	ServiceDllUnloadOnStop	1
+V	SS	servicemain	ServiceMain
+K	SYSTEM\CurrentControlSet\Services\WinRM\Parameters
+V	SS	ServiceDll	%SystemRoot%\system32\WsmSvc.dll
+V	SD	ServiceDllUnloadOnStop	1
+V	SS	ServiceMain	ServiceMain
+K	SYSTEM\CurrentControlSet\Services\Winsock\Parameters
+V	SS	Transports - Item #1	Tcpip6
+V	SS	Transports - Item #2	Tcpip
+K	SYSTEM\CurrentControlSet\Services\Winsock\Setup Migration
+V	SD	Setup Version	4105
+V	SS	Provider List - Item #1	NetBIOS
+V	SS	Provider List - Item #2	Tcpip6
+V	SS	Provider List - Item #3	Tcpip
+V	SS	Known Static Providers - Item #4	Tcpip
+V	SS	Known Static Providers - Item #5	Tcpip6
+V	SS	Known Static Providers - Item #6	NwlnkIpx
+V	SS	Known Static Providers - Item #7	NwlnkSpx
+V	SS	Known Static Providers - Item #8	AppleTalk
+V	SS	Known Static Providers - Item #9	IsoTp
+V	SS	Known Static Providers - Item #10	Psched
+S	Providers
+S	Well Known Guids
+K	SYSTEM\CurrentControlSet\Services\WinSock2\Parameters
+V	SS	WinSock_Registry_Version	2.0
+V	SS	Current_Protocol_Catalog	Protocol_Catalog9
+V	SS	Current_NameSpace_Catalog	NameSpace_Catalog5
+S	NameSpace_Catalog5
+S	Protocol_Catalog9
+K	SYSTEM\CurrentControlSet\Services\WmiApRpl\Performance
+V	SS	Close	WmiClosePerfData
+V	SS	Collect	WmiCollectPerfData
+V	SS	Library	%systemroot%\system32\wbem\wmiaprpl.dll
+V	SS	Open	WmiOpenPerfData
+V	SS	PerfIniFile	WmiApRpl.ini
+K	SYSTEM\CurrentControlSet\Services\CoreUI\Navigation\Timeouts
+V	SD	Activation	18000
+V	SD	BeginHide	600000
+V	SD	BeginShow	600000
+V	SD	CloseTask	12000
+V	SD	EndHide	600000
+V	SD	EndShow	600000
+V	SD	FirstPartyAnimation	600000
+V	SD	FirstPartyHideAnimation	120000
+V	SD	FirstPartyQuickSwitching	600000
+V	SD	FirstPartySystemKeyPressed	600000
+V	SD	FirstPartyTargetState	600000
+V	SD	Validation	600000
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\.NET Runtime
+V	SS	eventmessagefile	c:\Windows\System32\mscoree.dll
+V	SD	TypesSupported	7
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\.NET Runtime Optimization Service
+V	SS	eventmessagefile	c:\Windows\System32\mscoree.dll
+V	SD	TypesSupported	7
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\ASP.NET 4.0.30319.0
+V	SD	CategoryCount	5
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\aspnet_rc.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\aspnet_rc.dll
+V	SD	TypesSupported	7
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\CardSpace 4.0.0.0
+V	SD	CategoryCount	1
+V	SS	CategoryMessageFile	c:\Windows\System32\icardres.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll;c:\Windows\System32\icardres.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\CertCa
+V	SS	ProviderGuid	{98BF1CD3-583E-4926-95EE-A61BF3F46470}
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\CertCli
+V	SS	ProviderGuid	{98BF1CD3-583E-4926-95EE-A61BF3F46470}
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\Microsoft.Transactions.Bridge 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\ServiceModel Audit 4.0.0.0
+V	SD	CategoryCount	2
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SD	TypesSupported	31
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\System.IdentityModel 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\System.IO.Log 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\System.Runtime.Serialization 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\System.ServiceModel 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\WinMgmt
+V	SS	ProviderGuid	{1edeee53-0afe-4609-b846-d8c0b2075b1f}
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Application\WMI.NET Provider Extension
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\EventLogMessages.dll
+V	SD	TypesSupported	7
+K	SYSTEM\CurrentControlSet\Services\Eventlog\Security\ServiceModel 4.0.0.0
+V	SD	CategoryCount	3
+V	SS	CategoryMessageFile	%SystemRoot%\System32\MsAuditE.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SD	EventSourceFlags	1
+V	SS	ParameterMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SD	TypesSupported	31
+K	SYSTEM\CurrentControlSet\Services\Eventlog\System\SMSvcHost 4.0.0.0
+V	SD	CategoryCount	15
+V	SS	CategoryMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+V	SS	EventMessageFile	c:\Windows\Microsoft.NET\Framework64\v4.0.30319\ServiceModelEvents.dll
+K	SYSTEM\CurrentControlSet\Services\Eventlog\System\WinRM
+V	SS	ProviderGuid	{A7975C8F-AC13-49F1-87DA-5A984A4AB417}
+K	SYSTEM\CurrentControlSet\Services\HTTP\Parameters\UrlAclInfo
+K	SYSTEM\CurrentControlSet\Services\KtmRm\TriggerInfo\0
+V	SD	Type	20
+V	SD	Action	1
+K	SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy
+S	RestrictedServices
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Adapters
+S	{1AC20174-4201-41F4-874D-92986E2EB88D}
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\DNSRegisteredAdapters
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces
+S	{CAE6B1D3-BCD5-4B55-9F42-2A496CFF0864}
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\PersistentRoutes
+K	SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Winsock
+V	SD	UseDelayedAcceptance	0
+V	SS	HelperDllName	%SystemRoot%\System32\wshtcpip.dll
+V	SD	MaxSockAddrLength	16
+V	SD	MinSockAddrLength	16
+K	SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces
+S	{1ac20174-4201-41f4-874d-92986e2eb88d}
+K	SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Winsock
+V	SD	UseDelayedAcceptance	0
+V	SS	HelperDllName	%SystemRoot%\System32\wship6.dll
+V	SD	MaxSockAddrLength	28
+V	SD	MinSockAddrLength	28
+K	SYSTEM\CurrentControlSet\Services\Winsock\Setup Migration\Providers
+S	NetBIOS
+S	Tcpip
+S	Tcpip6
+K	SYSTEM\CurrentControlSet\Services\Winsock\Setup Migration\Well Known Guids
+K	SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\NameSpace_Catalog5
+V	SD	Num_Catalog_Entries	2
+V	SD	Serial_Access_Num	5
+V	SD	Num_Catalog_Entries64	2
+S	Catalog_Entries
+S	Catalog_Entries64
+K	SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9
+V	SD	Next_Catalog_Entry_ID	1015
+V	SD	Num_Catalog_Entries	6
+V	SD	Serial_Access_Num	7
+V	SD	Num_Catalog_Entries64	6
+S	Catalog_Entries
+S	Catalog_Entries64

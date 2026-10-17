@@ -44,6 +44,7 @@ partial class Simulation
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
         or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "xp_regenumvalues" or "xp_instance_regenumvalues" or "xp_regenumkeys" or "xp_instance_regenumkeys"
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_flush_log")
@@ -77,6 +78,7 @@ partial class Simulation
         or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
         or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_logininfo" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "xp_regenumvalues" or "xp_instance_regenumvalues" or "xp_regenumkeys" or "xp_instance_regenumkeys"
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
@@ -511,6 +513,10 @@ partial class Simulation
             "xp_msver" => InvokeXpMsver(batch),
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
             "xp_regread" => InvokeXpInstanceRegread(batch, instanceMapped: false),
+            "xp_regenumvalues" => InvokeXpRegEnum(batch, "xp_regenumvalues", calledAs, instanceMapped: false, values: true),
+            "xp_instance_regenumvalues" => InvokeXpRegEnum(batch, "xp_instance_regenumvalues", calledAs, instanceMapped: true, values: true),
+            "xp_regenumkeys" => InvokeXpRegEnum(batch, "xp_regenumkeys", calledAs, instanceMapped: false, values: false),
+            "xp_instance_regenumkeys" => InvokeXpRegEnum(batch, "xp_instance_regenumkeys", calledAs, instanceMapped: true, values: false),
             "sp_getschemalock" => InvokeSpGetSchemaLock(batch, CalledName(procName)),
             "sp_reset_connection" => InvokeSpResetConnection(batch, CalledName(procName)),
             "sp_releaseschemalock" => InvokeSpReleaseSchemaLock(batch, CalledName(procName)),

@@ -52,6 +52,7 @@
     <EmbeddedResource Include="Storage/PerformanceCounters.tsv" LogicalName="SqlServerSimulator.PerformanceCounters.tsv" />
     <EmbeddedResource Include="WindowsTimeZones.tsv" LogicalName="SqlServerSimulator.WindowsTimeZones.tsv" />
     <EmbeddedResource Include="Schemas/SystemTables.txt" LogicalName="SqlServerSimulator.SystemTables.txt" />
+    <EmbeddedResource Include="Registry.tsv" LogicalName="SqlServerSimulator.Registry.tsv" />
     <!-- The Extended Events catalog is some 3 MB of text, zipped by the target
          below so the assembly carries a tenth of that. -->
     <XeMetadataFile Include="ExtendedEvents/Metadata/*.tsv" />

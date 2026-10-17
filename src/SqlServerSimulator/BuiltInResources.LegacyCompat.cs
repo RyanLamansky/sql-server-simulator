@@ -243,6 +243,11 @@ internal static partial class BuiltInResources
         "xp_qv",
         "xp_instance_regread",
         "xp_regread",
+        // ...and enumerate, over the registry real's Linux server presents.
+        "xp_regenumvalues",
+        "xp_instance_regenumvalues",
+        "xp_regenumkeys",
+        "xp_instance_regenumkeys",
         // xp_getnetname: SMO's fully-qualified server name read.
         "xp_getnetname",
         // The server's disk, as backup tooling reads and tidies it.
