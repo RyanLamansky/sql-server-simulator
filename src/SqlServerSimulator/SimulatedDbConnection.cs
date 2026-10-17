@@ -182,6 +182,14 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool QuotedIdentifiers = true;
 
     /// <summary>
+    /// The session's <c>SET FIPS_FLAGGER</c> level (<see cref="Parser.FipsLevel"/>),
+    /// which applies as a batch parses, so a statement after the <c>SET</c> in
+    /// its own batch is flagged, and the warnings go out as a batch compiles
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal byte FipsFlagger;
+
+    /// <summary>
     /// Session-scoped <c>ANSI_NULLS</c> setting, surfaced by
     /// <c>SESSIONPROPERTY('ANSI_NULLS')</c>. Defaults to <see langword="true"/>
     /// (a fresh SqlClient session reports 1 — probe-confirmed). A comparison

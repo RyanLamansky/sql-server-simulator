@@ -313,6 +313,96 @@ internal sealed partial class BatchContext
     public int LastCompiledLine = -1;
 
     /// <summary>
+    /// The <c>FIPS_FLAGGER</c> warnings the walk met, each under the key it
+    /// goes out in order of: twice the position real's parser meets it at,
+    /// plus one for a warning raised once the token after it is read; null
+    /// when there are none (see <see cref="FipsFlagger"/>).
+    /// </summary>
+    public List<(long Key, SimulatedError Warning)>? FipsWarnings;
+
+    /// <summary>What <see cref="FipsWarnings"/> holds, by number and key, so a re-read adds nothing.</summary>
+    private HashSet<(int Number, long Key)>? fipsSeen;
+
+    /// <summary>
+    /// Where each statement the walk flagged for starts, and its line, in the
+    /// order met: an identifier's Msg 1025 reports the line of the statement
+    /// holding it, which the parser may read ahead of that statement.
+    /// </summary>
+    private List<(int Start, int Line)>? fipsStatements;
+
+    /// <summary>The identifiers' Msg 1025 among <see cref="FipsWarnings"/>, by position, whose line <see cref="SendFipsWarnings"/> settles.</summary>
+    private List<(int Position, SimulatedError Warning)>? fipsIdentifiers;
+
+    /// <summary>
+    /// Adds <paramref name="warning"/> to <see cref="FipsWarnings"/> under
+    /// <paramref name="key"/> unless the same number is there already.
+    /// </summary>
+    internal void FlagNonAnsi(long key, SimulatedError warning)
+    {
+        if ((this.fipsSeen ??= []).Add((warning.Number, key)))
+            (this.FipsWarnings ??= []).Add((key, warning));
+    }
+
+    /// <summary>Flags an identifier written at <paramref name="position"/> (Msg 1025).</summary>
+    internal void FlagNonAnsiIdentifier(int position, SimulatedError warning)
+    {
+        if ((this.fipsSeen ??= []).Add((warning.Number, position * 2L)))
+        {
+            (this.FipsWarnings ??= []).Add((position * 2L, warning));
+            (this.fipsIdentifiers ??= []).Add((position, warning));
+        }
+    }
+
+    /// <summary>The statements whose Msg 1021 waits for them to be read, by start: its key and the warning.</summary>
+    private Dictionary<int, (long Key, SimulatedError Warning)>? fipsAtEnd;
+
+    /// <summary>Holds the statement at <paramref name="start"/>'s Msg 1021 until it has been read (<see cref="SettleNonAnsiStatement"/>).</summary>
+    internal void FlagStatementAtEnd(int start, long key, SimulatedError warning) => (this.fipsAtEnd ??= [])[start] = (key, warning);
+
+    /// <summary>
+    /// Flags the statement at <paramref name="start"/> once read, when its Msg
+    /// 1021 waits for that — unless an error stopped it, which leaves it
+    /// unflagged (probed 2026-10-17 against SQL Server 2025:
+    /// <c>SET ROWCOUNT</c> or <c>CHECKPOINT</c> followed by a name).
+    /// </summary>
+    internal void SettleNonAnsiStatement(int start, bool read)
+    {
+        if (this.fipsAtEnd is { } waiting && waiting.Remove(start, out var flag) && read)
+            this.FlagNonAnsi(flag.Key, flag.Warning);
+    }
+
+    /// <summary>Notes the statement starting at <paramref name="start"/>, on <paramref name="line"/>, for <see cref="SendFipsWarnings"/>.</summary>
+    internal void NoteFipsStatement(int start, int line) => (this.fipsStatements ??= []).Add((start, line));
+
+    /// <summary>
+    /// Sends <see cref="FipsWarnings"/> in the order real's parser met them,
+    /// each identifier's at the line of the statement holding it, and forgets
+    /// them.
+    /// </summary>
+    internal void SendFipsWarnings()
+    {
+        if (this.FipsWarnings is not { } warnings)
+            return;
+        if (this.fipsIdentifiers is { } identifiers && this.fipsStatements is { } statements)
+        {
+            foreach (var (position, warning) in identifiers)
+            {
+                var (_, line) = statements.FindLast(statement => statement.Start <= position);
+                warning.LineNumber = (line > 0 ? line : Token.LineAt(this.Parser.Command.CommandText, position)) + this.LineOffset;
+            }
+        }
+        else if (this.fipsIdentifiers is { } unplaced)
+        {
+            foreach (var (position, warning) in unplaced)
+                warning.LineNumber = Token.LineAt(this.Parser.Command.CommandText, position) + this.LineOffset;
+        }
+        foreach (var (_, warning) in warnings.OrderBy(static entry => entry.Key))
+            this.Connection.PendingMessages.Enqueue(warning);
+        this.FipsWarnings = null;
+        this.fipsIdentifiers = null;
+    }
+
+    /// <summary>
     /// Where this batch's text names, with a database part, a temporary table
     /// its compile found missing — one the batch itself creates — whose
     /// statement real compiles again as it runs and so repeats its Msg 2701

@@ -1961,6 +1961,9 @@ public sealed partial class Simulation
                         yield break;
                     }
                     batch.Connection.LastErrorNumber = compileError.Number;
+                    // What FIPS_FLAGGER flagged as the walk read goes out first.
+                    foreach (var message in DrainPendingMessages(batch.Connection))
+                        yield return message;
                     yield return new SimulatedErrorOutcome(compileError);
                     yield break;
                 }
@@ -3562,6 +3565,8 @@ public sealed partial class Simulation
         batch.LastCompiledLine = context.Token is ReservedKeyword { Keyword: Keyword.Goto } or UnquotedString { IsLabelDeclaration: true }
             ? -1
             : batch.CurrentStatement.StartLine;
+        if (context.FlagsNonAnsi)
+            FlagNonAnsiStatement(batch);
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings
@@ -3713,6 +3718,11 @@ public sealed partial class Simulation
                 foreach (var o in ParseWhileStatement(batch))
                     yield return o;
                 batch.LastCompiledLine = -1;
+                // FIPS_FLAGGER flags a WHILE once its body is read, at the line
+                // the parser reads on at, naming line -1 (probed 2026-10-17
+                // against SQL Server 2025).
+                if (context.FlagsNonAnsi && (context.Token ?? context.LastToken) is { } past)
+                    batch.FlagNonAnsi(context.PreviousTokenEnd * 2L, SimulatedSqlException.FipsNonAnsiWarning(batch, 1021, 1, "statement", "WHILE", past.LineNumber, textLine: -1));
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Break }:

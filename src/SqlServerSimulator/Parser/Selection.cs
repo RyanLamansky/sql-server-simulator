@@ -1816,9 +1816,15 @@ internal sealed partial class Selection
     /// that follows it. The parentheses are mandatory — a bare <c>TOP 2</c>
     /// raises Msg 102 (the legacy no-paren form is SELECT-only).
     /// </summary>
-    internal static DmlTopLimit? ParseDmlTopClause(ParserContext context)
+    /// <param name="context">The parser, on the token after the verb.</param>
+    /// <param name="flaggedByFips">
+    /// Whether <c>FIPS_FLAGGER</c> flags the clause, as it does an
+    /// <c>INSERT</c>'s and an <c>UPDATE</c>'s but not a <c>DELETE</c>'s or a
+    /// <c>MERGE</c>'s (probed 2026-10-17 against SQL Server 2025).
+    /// </param>
+    internal static DmlTopLimit? ParseDmlTopClause(ParserContext context, bool flaggedByFips = false)
     {
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Top })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Top } top)
             return null;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1830,6 +1836,8 @@ internal sealed partial class Selection
         {
             expression = Expression.Parse(context);
         }
+        if (flaggedByFips)
+            FipsFlagger.FlagTop(context, top);
         var percent = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
         {
@@ -2020,6 +2028,7 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 topExpression = Expression.ParsePrimary(context);
             }
+            FipsFlagger.FlagTop(context, firstToken);
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
             // reserved keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })

@@ -387,6 +387,8 @@ partial class Simulation
         private readonly void Leave(BatchContext batch)
         {
             var connection = batch.Connection;
+            if (this.StatementStart.Token is { } read)
+                batch.SettleNonAnsiStatement(read.StartIndex, this.Error is null);
             // A statement read whole records where it ends; one an error
             // stopped inside leaves its end to the batch's run.
             var placed = this.xeStatement;

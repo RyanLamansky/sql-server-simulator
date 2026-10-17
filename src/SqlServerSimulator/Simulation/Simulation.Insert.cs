@@ -15,7 +15,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ParseInsert(ParserContext context)
     {
         context.MoveNextRequired();
-        var top = Selection.ParseDmlTopClause(context);
+        var top = Selection.ParseDmlTopClause(context, flaggedByFips: true);
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
@@ -481,8 +481,12 @@ partial class Simulation
                 return InsertSourceRows(context, selectPlan, sourceStamps);
             }
 
-            if (context.Token is not ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } execute)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            // FIPS_FLAGGER flags the source as the EXECUTE statement it is
+            // (probed 2026-10-17 against SQL Server 2025).
+            if (context.FlagsNonAnsi)
+                context.Batch.FlagNonAnsi(execute.StartIndex * 2L, SimulatedSqlException.FipsNonAnsiWarning(context.Batch, 1021, 1, "statement", "EXECUTE", execute.LineNumber, execute.LineNumber));
             var sourceRows = ExecuteExecSource(context, destinationColumns, out var endedBody, out var holdsSession);
             var written = InsertRows(
                 context,

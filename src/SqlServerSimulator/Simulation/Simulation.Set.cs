@@ -354,17 +354,33 @@ partial class Simulation
         return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
     }
 
-    /// <summary><c>SET FIPS_FLAGGER 'ENTRY' | 'FULL' | 'INTERMEDIATE' | OFF</c>; its warnings aren't sent.</summary>
+    /// <summary>
+    /// <c>SET FIPS_FLAGGER 'ENTRY' | 'FULL' | 'INTERMEDIATE' | OFF</c>, which
+    /// applies as the batch parses (see <see cref="SimulatedDbConnection.FipsFlagger"/>):
+    /// a level other than off flags the <c>SET</c> itself, naming its own line
+    /// at the next statement's (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
     private static bool TryParseSetFipsFlagger(ParserContext context)
     {
         var value = context.GetNextRequired();
-        if (value is ReservedKeyword { Keyword: Keyword.Off }
-            || (value is Literal { Value: { IsNull: false } level } && BuiltInToken.EqualsAny(level.AsString, "ENTRY", "FULL", "INTERMEDIATE")))
+        byte flagger;
+        if (value is ReservedKeyword { Keyword: Keyword.Off })
+            flagger = FipsLevel.Off;
+        else if (value is Literal { Value: { IsNull: false } level } && BuiltInToken.EqualsAny(level.AsString, "ENTRY", "FULL", "INTERMEDIATE"))
+            flagger = BuiltInToken.Equals(level.AsString, "ENTRY") ? FipsLevel.Entry : BuiltInToken.Equals(level.AsString, "FULL") ? FipsLevel.Full : FipsLevel.Intermediate;
+        else
+            throw SimulatedSqlException.SyntaxErrorNear(value, state: 3);
+        var batch = context.Batch;
+        context.Connection.FipsFlagger = flagger;
+        context.FlagsNonAnsi = batch.CreateTimeBinding && flagger != FipsLevel.Off;
+        if (context.FlagsNonAnsi)
         {
-            context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
-            return true;
+            var own = batch.CurrentStatement.StartLine;
+            var next = Peek(context);
+            batch.FlagNonAnsi(value.StartIndex * 2L, SimulatedSqlException.FipsNonAnsiWarning(batch, 1021, 1, "statement", "SET", next is { } following ? following.LineNumber : own, own));
         }
-        throw SimulatedSqlException.SyntaxErrorNear(value, state: 3);
+        context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
+        return true;
     }
 
     /// <summary>

@@ -103,6 +103,11 @@ partial class Simulation
             hadElse = TryConsumeSeparatorsBeforeElse(context);
             if (hadElse)
             {
+                // FIPS_FLAGGER flags an IF at its ELSE, naming line -1; one
+                // without an ELSE isn't flagged (probed 2026-10-17 against SQL
+                // Server 2025).
+                if (context.FlagsNonAnsi && context.Token is { } elseToken)
+                    batch.FlagNonAnsi(elseToken.StartIndex * 2L, SimulatedSqlException.FipsNonAnsiWarning(batch, 1021, 1, "statement", "IF", elseToken.LineNumber, textLine: -1));
                 context.MoveNextRequired(); // consume ELSE
                 // ELSE skips iff: outer was IF-skipping initially, cond was
                 // true (THEN ran), or THEN's body set a LoopControl signal.

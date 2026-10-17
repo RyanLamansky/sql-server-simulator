@@ -8,7 +8,7 @@ The option-specific behavior lives with its feature: `IMPLICIT_TRANSACTIONS` in 
 
 Two clocks, probed against SQL Server 2025:
 
-- **Parse time** — `QUOTED_IDENTIFIER`, the `ANSI_DEFAULTS` bundle's share of it, and `PARSEONLY`.
+- **Parse time** — `QUOTED_IDENTIFIER`, the `ANSI_DEFAULTS` bundle's share of it, `PARSEONLY` and `FIPS_FLAGGER` ([below](#fips_flagger)).
   These apply as the batch parses, so they reach statements textually after them whatever the control flow, and a `SET` in a never-taken branch still counts.
   Because a whole batch parses before any of it runs, what the batch's `@@OPTIONS` reads for `QUOTED_IDENTIFIER` is the value its **last** such `SET` leaves, even at a read written ahead of it, and the last `SET PARSEONLY` decides whether any of the batch runs (probed 2026-09-28).
   The simulator parses and runs statement by statement, so `Simulation.ScanParseTimeOptions` reads the batch's tokens ahead of running it, for a batch whose text names one of the options.
@@ -35,7 +35,7 @@ The value-taking options refuse a value their grammar has no slot for (probed 20
 - `LOCK_TIMEOUT` takes an `int` literal alone, a sign allowed, and `QUERY_GOVERNOR_COST_LIMIT` a number alone; anything else — a string, NULL, a variable, a value past `int` — is Msg 102 state 3 near the option's name in upper case.
 - `TEXTSIZE` takes no variable (Msg 102 at it); `ROWCOUNT` takes an integer variable, any other type — a string holding a number, a decimal — being Msg 507.
 - `DATEFIRST` given a string or NULL is Msg 2743 state 3, `DATEFORMAT` and `LANGUAGE` given a number or NULL Msg 2743 state 2, and `DEADLOCK_PRIORITY` given NULL or a string other than its three names Msg 2755; each ends only the statement.
-- `SET OFFSETS keyword [, …] ON | OFF` and `SET FIPS_FLAGGER 'ENTRY' | 'FULL' | 'INTERMEDIATE' | OFF` parse and are discarded, another flagger level being Msg 102 state 3 at it.
+- `SET OFFSETS keyword [, …] ON | OFF` parses and is discarded; `SET FIPS_FLAGGER` takes `'ENTRY'`, `'FULL'`, `'INTERMEDIATE'` or `OFF`, another level being Msg 102 state 3 at it.
 - A `SET SHOWPLAN_*` in a procedure, function or trigger body refuses the `CREATE` with Msg 1067 state 1 at line 0, and turning one on must be the batch's only statement — Msg 1067 state 1 at line 0 after another statement or in a list, state 2 ahead of one — while turning one off may sit anywhere else.
 - `SET IDENTITY_INSERT`'s refusals (Msg 1088, 8105, 8106, 8107) name the table as written and end the batch (`EndingBatch`).
 
@@ -107,6 +107,20 @@ It applies as the batch parses, so the batch that sets it runs none of its state
 
 Takes `LOW` (-5), `NORMAL` (0), `HIGH` (5) or an integer in -10..10, from a literal, a quoted string or a variable of an integer or string type, a NULL variable reading as `NORMAL`; anything else — 11, `MEDIUM`, 2.5 — is Msg 2755.
 
+## `FIPS_FLAGGER`
+
+A level other than `OFF` makes a batch's compile send a warning, class 0, for each non-ANSI construct it reads, in the order real's parser meets them and ahead of anything the batch runs or a compile error it raises (probed 2026-10-17 against SQL Server 2025 at all three levels).
+The level applies as the batch parses, so the statements after the `SET` in its own batch are flagged, a `SET` turning it on flags itself — naming its own line, sent at the next statement's — and one turning it off nothing; a batch running on a plan it compiled before sends nothing again.
+The warnings are collected on the walk's `BatchContext.FipsWarnings`, each under the position real's lexer meets it at, and sent as the walk ends.
+
+- **Msg 1021** names a statement: `PRINT`, `RAISERROR`, `THROW`, `RETURN`, `GOTO`, `WAITFOR`, `USE`, `CHECKPOINT`, `KILL`, `DBCC`, `RECONFIGURE`, `READTEXT`, `BREAK`, `CONTINUE`, `EXECUTE` (an `INSERT … EXEC`'s source among it), `EXECUTE AS`, `WITH`, `SET` (state 50 for an on/off option, 1 for the rest, never `SET @x`), `BEGIN` / `SAVE TRANSACTION`, `TRUNCATE TABLE`, `DROP` and `DROP INDEX`, `UPDATE STATISTICS`, `ENABLE` / `DISABLE TRIGGER`, `BACKUP DATABASE`, `CREATE` (`CREATE OR ALTER` among it) and `ALTER` of a database, procedure or function, `ALTER TABLE` / `INDEX`, and `CREATE INDEX`, `TRIGGER`, `SCHEMA`, `TYPE`, `SEQUENCE`, `SYNONYM`, `ROLE`, `USER` and `LOGIN` — and above `ENTRY`, `DEALLOCATE`.
+  `SELECT`, the DML verbs, `CREATE TABLE` / `VIEW`, `DECLARE`, `COMMIT` / `ROLLBACK`, `GRANT` / `REVOKE` / `DENY`, a block, a `TRY` and an `IF` without `ELSE` aren't flagged; an `IF` is flagged at its `ELSE` and a `WHILE` once its body is read, at the line the parser reads on at, both naming line -1.
+  A statement's warning goes out at its start, or — for the ones whose warning follows the name they read (`SET`, `DROP` — `DROP INDEX t.ix` after the `t` —, `TRUNCATE`, `EXECUTE` of a procedure, `GOTO`, `WITH`, `CHECKPOINT`, `ALTER INDEX`, `BACKUP`, `CREATE` and `ALTER DATABASE`, and the `CREATE`s of a sequence, synonym, role, user or login) — after that name, and then only if the statement reads without error.
+- **Msg 1022** names a clause: `TOP` on a `SELECT`, `INSERT` or `UPDATE` (state 62, every level; a `DELETE`'s or `MERGE`'s isn't flagged), following the token after its count, and under `ENTRY` `CASE`, which `COALESCE` and `NULLIF` count as (state 6).
+- **Msg 1024** names a function in lower case: `convert` and `try_convert` below `FULL` (state 5), `current_timestamp` and `current_date` under `ENTRY` (state 6); `CAST`, `ISNULL`, `IIF` and the rest aren't flagged.
+- **Msg 1025** names an identifier longer than 18 characters at every level — state 1, or 2 bracketed, a double-quoted one unflagged, a variable never — at the line of the statement holding it (`ParserContext.NoteNonAnsiIdentifier`).
+  Each occurrence is flagged, a name a module's `CREATE` gives included, and a module body's warnings at its `CREATE` name the module.
+
 ## `STATISTICS IO`
 
 Probed 2026-09-28 against SQL Server 2025 through the `.vs/edge-probe` differential harness, whose `diffcase.py` blanks the figures: the message shape, presence and order match real, and the figures are the simulator's own.
@@ -145,7 +159,8 @@ While either option is on the session skips the plan cache and the compiled-batc
 
 ## Not modeled yet
 
-- `FIPS_FLAGGER`'s warnings: real sends Msg 1021 (`FIPS Warning: Line 1 has the non-ANSI statement 'SET'.`) for each statement outside the level, where the simulator sends none.
+- `FIPS_FLAGGER`'s warnings real's own internal statements send: a second `ALTER TABLE` at line 1 after one adding a `CHECK` constraint, the `TOP` / `ORDER` of an `UPDATE STATISTICS`'s sampling queries, the second `CONVERT` or `TOP` of a statement real parameterizes or inserts into a table variable from, and a procedure's `CREATE PROCEDURE` and name as its first call compiles it — only the body's own statements are flagged then.
+  Statements outside the probed set (`DROP DATABASE`, `RESTORE`, `ALTER SCHEMA` …) aren't flagged, and a select-list alias repeated across a set operation's branches is flagged per occurrence where real flags the first (probed 2026-10-17 against SQL Server 2025).
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
   Not chased: the plan rows are the optimizer's (`|--Table Scan(OBJECT:(…), WHERE:(… = CONVERT_IMPLICIT(int,[@1],0)))`, costs and estimates in `SHOWPLAN_ALL` / `_XML`); only the statement-text rows — one per statement holding a query, the statements without one gathered in one result set — and `SHOWPLAN_ALL`'s `SELECT WITHOUT QUERY` rows are deterministic, which leaves the plan result sets real interleaves with them out (probed 2026-10-06 against SQL Server 2025).
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).

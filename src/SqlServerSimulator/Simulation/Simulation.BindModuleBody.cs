@@ -196,6 +196,7 @@ partial class Simulation
         // against SQL Server 2025).
         if (!outerContext.Batch.IsSkipping)
         {
+            bindBatch.SendFipsWarnings();
             foreach (var message in bindBatch.CompileMessages ?? [])
                 connection.PendingMessages.Enqueue(message);
             foreach (var missing in bindBatch.MissingProcedureReferences)
@@ -220,6 +221,7 @@ partial class Simulation
     {
         bindBatch.SkipModeFlag = true;
         bindBatch.CreateTimeBinding = true;
+        bindBatch.Parser.FlagsNonAnsi = bindBatch.Connection.FipsFlagger != FipsLevel.Off;
         bindBatch.CreateTimeBindErrors = bindErrors;
 
         // Nesting counts while the bind walks so a text that calls back into

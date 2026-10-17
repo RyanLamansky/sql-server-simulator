@@ -778,6 +778,36 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <summary>True while a query's <c>TOP</c> count parses; a reference there is judged after every other one (<see cref="DeferredNextValueRef.InTop"/>).</summary>
     public bool InTopCount;
 
+    /// <summary>
+    /// Whether the walk reading this text reports what the session's
+    /// <c>FIPS_FLAGGER</c> level flags — a compile or bind walk
+    /// (<see cref="BatchContext.CreateTimeBinding"/>) under a level other than
+    /// off (see <see cref="FipsFlagger"/>).
+    /// </summary>
+    public bool FlagsNonAnsi;
+
+    /// <summary>
+    /// Flags <paramref name="name"/>, a token just read, when it is an
+    /// identifier longer than 18 characters: Msg 1025 at every level, state 1,
+    /// or 2 bracketed — a double-quoted one isn't flagged — at the line of the
+    /// statement holding it, each written occurrence once (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    private void NoteNonAnsiIdentifier(Name name)
+    {
+        var value = name.Value;
+        if (value.Length <= 18)
+            return;
+        byte state = 1;
+        if (name is DelimitedIdentifier)
+        {
+            if (this.commandText[name.StartIndex] == '"')
+                return;
+            state = 2;
+        }
+        this.Batch.FlagNonAnsiIdentifier(name.StartIndex, SimulatedSqlException.FipsLongIdentifier(this.Batch, value, state));
+    }
+
     /// <summary>Every reference parsed under <see cref="DeferNextValueRefusals"/>, in parse order; null until the first.</summary>
     public List<DeferredNextValueRef>? DeferredNextValueRefs;
 
@@ -1345,6 +1375,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
                 tokens.Add(memoized);
 #endif
                 this.Token = memoized;
+                if (this.FlagsNonAnsi && memoized is Name memoizedName)
+                    this.NoteNonAnsiIdentifier(memoizedName);
                 return true;
             }
 
@@ -1377,6 +1409,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
                 if (this.Token is { } previous)
                     this.PreviousTokenEnd = previous.EndIndex;
                 this.Token = token;
+                if (this.FlagsNonAnsi && token is Name name)
+                    this.NoteNonAnsiIdentifier(name);
                 return true;
             }
         }

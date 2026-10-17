@@ -52,7 +52,7 @@ partial class Simulation
         bindErrors?.SetBarriers(BindClause.SetTarget, BindClause.SetValue);
         using var inUpdate = ParserScope.Enter(ref context.InUpdateOrMerge, true);
         context.MoveNextRequired();
-        var top = Selection.ParseDmlTopClause(context);
+        var top = Selection.ParseDmlTopClause(context, flaggedByFips: true);
         // A name that resolves to nothing is the alias of the FROM clause
         // that follows (multi-table form), which must then provide the binding
         // via alias-matching; aliases are always single-segment, so a

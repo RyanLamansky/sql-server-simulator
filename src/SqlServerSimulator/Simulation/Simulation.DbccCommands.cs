@@ -331,7 +331,8 @@ partial class Simulation
     /// <c>CHECKPOINT [duration]</c>: flushes nothing — every write is already
     /// in the simulator's heap — but checks real's permission (<c>db_owner</c>
     /// or <c>db_backupoperator</c>, else Msg 3505) and resets <c>@@ROWCOUNT</c>.
-    /// The duration is a positive integer literal, anything else a syntax error.
+    /// The duration is a positive integer literal, anything else — a name
+    /// included — a syntax error.
     /// </summary>
     private static bool ParseCheckpoint(ParserContext context, BatchContext batch)
     {
@@ -341,7 +342,9 @@ partial class Simulation
             if (!SqlType.IsIntegerCategory(duration.Type) || duration.Type != SqlType.Int32 || duration.AsInt32 <= 0)
                 throw SimulatedSqlException.SyntaxErrorNear(numeric);
         }
-        else if (context.Token is Operator { Character: '-' or '+' } or Literal or AtPrefixedString)
+        // A name after it is no duration either (probed 2026-10-17 against SQL
+        // Server 2025), save a label and a word that may open a statement.
+        else if (context.Token is Operator { Character: '-' or '+' } or Literal or AtPrefixedString or DelimitedIdentifier or UnquotedString { IsLabelDeclaration: false, ContextualKeyword: ContextualKeyword.NotAKeyword })
         {
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }

@@ -245,6 +245,23 @@ internal abstract class Expression : ExpressionNode
         return ParseBinaryContinuation(ParsePrimary(context.MoveNextRequiredReturnSelf()), minTightness: 2, context);
     }
 
+    /// <summary>Flags the keyword atom <paramref name="keyword"/> for <c>FIPS_FLAGGER</c> (<see cref="FipsFlagger"/>), passing <paramref name="atom"/> through.</summary>
+    private static Expression FlaggedAtom(ParserContext context, ReservedKeyword keyword, string upperName, Expression atom)
+    {
+        FipsFlagger.FlagFunction(context, upperName, keyword.StartIndex);
+        return atom;
+    }
+
+    /// <summary>Flags the keyword <paramref name="keyword"/> opening an atom for <c>FIPS_FLAGGER</c> (<see cref="FipsFlagger"/>), passing the parser through.</summary>
+    private static ParserContext FlaggedAtomContext(ParserContext context, ReservedKeyword keyword, string upperName)
+    {
+        if (upperName == "CASE")
+            FipsFlagger.FlagCase(context, keyword.StartIndex);
+        else
+            FipsFlagger.FlagFunction(context, upperName, keyword.StartIndex);
+        return context;
+    }
+
     /// <summary>
     /// Dispatches the leading token of a primary to its atom expression.
     /// Extracted (and kept off the hot postfix / binary path) so its large
@@ -283,15 +300,15 @@ internal abstract class Expression : ExpressionNode
             _ => new Value(doubleAtPrefixedString),
         },
         ReservedKeyword { Keyword: Keyword.Null } => new Value(),
-        ReservedKeyword { Keyword: Keyword.Case } => ParseConditional(context, static c => CaseExpression.ParseCase(c)),
+        ReservedKeyword { Keyword: Keyword.Case } caseKeyword => ParseConditional(FlaggedAtomContext(context, caseKeyword, "CASE"), static c => CaseExpression.ParseCase(c)),
         // CURRENT_TIMESTAMP is a parens-less function in SQL Server's
         // grammar — it sits in the reserved-keyword space but never takes
         // an argument list. CURRENT_TIMESTAMP() with parens raises Msg 102
         // in SQL Server (probe-confirmed 2026-05-09); the simulator
         // inherits the same Msg-102 path from the surrounding parser
         // catching the unexpected `(`.
-        ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
-        ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
+        ReservedKeyword { Keyword: Keyword.Current_Timestamp } timestamp => FlaggedAtom(context, timestamp, "CURRENT_TIMESTAMP", new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp)),
+        ReservedKeyword { Keyword: Keyword.Current_Date } date => FlaggedAtom(context, date, "CURRENT_DATE", new CurrentTimeFunction(CurrentTimeKind.CurrentDate)),
         ReservedKeyword { Keyword: Keyword.Current_User } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("CURRENT_USER")),
         ReservedKeyword { Keyword: Keyword.Session_User } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("SESSION_USER")),
         ReservedKeyword { Keyword: Keyword.System_user } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("SYSTEM_USER", isLogin: true)),
@@ -2037,6 +2054,8 @@ internal abstract class Expression : ExpressionNode
             context.SimpleParameterizationBlocked = true;
         BuiltInArity.Check(uppercaseName, name, context);
         BuiltInArity.CheckWindowClauses(uppercaseName, context);
+        if (context.FlagsNonAnsi)
+            FipsFlagger.FlagFunction(context, uppercaseName, context.PreviousTokenEnd - name.Length);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
             return ResolveBuiltInCore(uppercaseName, name, context);
 

@@ -43,6 +43,29 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 1945, $"Warning! The maximum key length for a {(clustered ? "clustered" : "nonclustered")} index is {limit} bytes. The index '{indexName}' has maximum length of {length} bytes. For some combination of large values, the insert/update operation will fail.");
 
     /// <summary>
+    /// Msg 1021, 1022 or 1024, class 0: a <c>FIPS_FLAGGER</c> warning naming
+    /// the non-ANSI <paramref name="kind"/> (statement, clause or function)
+    /// <paramref name="name"/>, sent at <paramref name="line"/> and naming
+    /// <paramref name="textLine"/> — both lines of the batch, which a module
+    /// body's offset moves — or -1 (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError FipsNonAnsiWarning(BatchContext batch, int number, byte state, string kind, string name, int line, int textLine)
+    {
+        var named = textLine < 0 ? -1 : textLine + batch.LineOffset;
+        var warning = batch.InfoMessage(@class: 0, state: state, number: number, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"FIPS Warning: Line {named} has the non-ANSI {kind} '{name}'."));
+        warning.LineNumber = line + batch.LineOffset;
+        return warning;
+    }
+
+    /// <summary>
+    /// Msg 1025, class 0: a <c>FIPS_FLAGGER</c> warning for an identifier
+    /// longer than 18 characters, at the statement's line (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError FipsLongIdentifier(BatchContext batch, string name, byte state) =>
+        batch.InfoMessage(@class: 0, state: state, number: 1025, $"FIPS Warning: The length of identifier '{name}' exceeds 18.");
+
+    /// <summary>
     /// Msg 1708: a table created, or altered, whose largest row can pass the
     /// in-row limit; named as written.
     /// </summary>

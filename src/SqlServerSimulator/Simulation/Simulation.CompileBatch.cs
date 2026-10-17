@@ -92,6 +92,7 @@ partial class Simulation
         catch (SimulatedSqlException parsePhase)
         {
             connection.CurrentDatabase = enteredDatabase;
+            compileBatch.SendFipsWarnings();
             return IsRecoverableSyntaxError(parsePhase) && compileBatch.Parser.Token is { } errorToken
                 ? this.WithRecoveredSyntaxErrors(compileBatch, parsePhase, errorToken, command =>
                 {
@@ -109,6 +110,8 @@ partial class Simulation
             connection.CurrentDatabase = enteredDatabase;
         }
 
+        // What FIPS_FLAGGER flags goes out ahead of the compile's errors too.
+        compileBatch.SendFipsWarnings();
         if (SettleSilentCompileEnd(compileBatch, errors) is { } silent)
             return silent;
         var failures = this.InliningFailuresOf(compileBatch, inlined);
