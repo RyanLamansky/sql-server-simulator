@@ -1,5 +1,3 @@
-using System.Text;
-
 namespace SqlServerSimulator.Parser.FullText;
 
 /// <summary>One row of <c>sys.dm_fts_parser</c>.</summary>
@@ -20,15 +18,17 @@ internal readonly struct FullTextParserRow(byte[] keyword, int groupId, int occu
 /// group, numbered in the order written, listing the terms the word breaker
 /// produced at their occurrences, the sentence and paragraph markers between
 /// them, and an inflectional leaf's expansions ahead of each word they grow
-/// from. Probed 2026-09-29 against SQL Server 2025.
+/// from, each under the keyword and display term <see cref="FullTextKeyword"/>
+/// encodes it to under <paramref name="accentSensitive"/>. Probed 2026-09-29
+/// against SQL Server 2025.
 /// </summary>
-internal sealed class FullTextParserReport
+internal sealed class FullTextParserReport(bool accentSensitive)
 {
     public readonly List<FullTextParserRow> Rows = [];
     private int groupId;
 
     /// <summary>The keyword real reports for a sentence or paragraph marker.</summary>
-    private static readonly byte[] MarkerKeyword = [0xFF];
+    private static readonly byte[] MarkerKeyword = FullTextKeyword.EndOfFile;
 
     public void AddLeaf(string source, List<FullTextTerm> terms, bool expand, FullTextLanguage? stoplist)
     {
@@ -50,9 +50,13 @@ internal sealed class FullTextParserReport
             if (expand && (!noise || FullTextLexicon.ExpandsAsNoise(term.Text)))
             {
                 foreach (var form in FullTextLexicon.InflectionalForms(term.Text))
-                    this.Rows.Add(new FullTextParserRow(Encoding.BigEndianUnicode.GetBytes(form), this.groupId, term.Position, "Exact Match", form, 2, source));
+                {
+                    var (formKeyword, formDisplay) = FullTextKeyword.Encode(form, accentSensitive);
+                    this.Rows.Add(new FullTextParserRow(formKeyword, this.groupId, term.Position, "Exact Match", formDisplay, 2, source));
+                }
             }
-            this.Rows.Add(new FullTextParserRow(Encoding.BigEndianUnicode.GetBytes(term.Text), this.groupId, term.Position, noise ? "Noise Word" : "Exact Match", term.Text, 0, source));
+            var (keyword, display) = FullTextKeyword.Encode(term.Text, accentSensitive);
+            this.Rows.Add(new FullTextParserRow(keyword, this.groupId, term.Position, noise ? "Noise Word" : "Exact Match", display, 0, source));
         }
     }
 }

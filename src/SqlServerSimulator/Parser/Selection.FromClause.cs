@@ -1266,6 +1266,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, InDatabase(ParseXeFileTargetReadFile(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString(), sysRowsetDatabase) is { } indexDmv)
                         return BuiltInRowsetSource(context, indexDmv, objectName.Leaf, qualified: objectName.Count > 1);
+                    if (ParseFullTextKeywordDmv(context, objectName.Leaf, objectName.ToString(), sysRowsetDatabase) is { } keywordDmv)
+                        return BuiltInRowsetSource(context, keywordDmv, objectName.Leaf, qualified: objectName.Count > 1);
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -2128,7 +2130,7 @@ internal sealed partial class Selection
             && BuiltInToken.EqualsAny(name.Leaf, "fn_builtin_permissions", "fn_my_permissions", "fn_trace_geteventinfo", "fn_trace_getfilterinfo", "fn_trace_getinfo", "fn_trace_gettable", "fn_validate_plan_guide", "fn_virtualfilestats"))
         || (name.Count is 2 or 3
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_database_page_allocations", "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_file_exists", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats", "fn_xe_file_target_read_file"));
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_database_page_allocations", "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_log_info", "dm_db_log_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_plan_attributes", "dm_exec_query_plan", "dm_exec_query_statistics_xml", "dm_exec_sql_text", "dm_exec_text_query_plan", "dm_fts_index_keywords", "dm_fts_index_keywords_by_document", "dm_fts_index_keywords_by_property", "dm_fts_index_keywords_position_by_document", "dm_fts_parser", "dm_io_virtual_file_stats", "dm_os_file_exists", "dm_os_volume_stats", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats", "fn_xe_file_target_read_file"));
 
     /// <summary>
     /// A <c>WITH</c> right after a rowset function's call, no alias between,

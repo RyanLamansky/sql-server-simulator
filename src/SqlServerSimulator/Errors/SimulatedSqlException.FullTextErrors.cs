@@ -14,6 +14,22 @@ partial class SimulatedSqlException
         new("Full-Text Search is not enabled for the current database. Use sp_fulltext_database to enable Full-Text Search. "
             + "The functionality to disable and enable full-text search for a database is deprecated. Please change your application.", 15601, 16, 1);
 
+    /// <summary>Mimics SQL Server's Msg 30007: an index keyword TVF given a NULL database or object id.</summary>
+    internal static SimulatedSqlException FullTextKeywordViewNullArgument() =>
+        new("Parameters of dm_fts_index_keywords, dm_fts_index_keywords_by_document, dm_fts_index_keywords_by_property, and dm_fts_index_keywords_position_by_document cannot be null.", 30007, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 30003: an index keyword TVF given a database id no database has.</summary>
+    internal static SimulatedSqlException FullTextViewDatabaseNotFound(int databaseId) =>
+        new($"A fulltext system view or stvf cannot open database id {databaseId}.", 30003, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 30004: an index keyword TVF given an object id that is no user table in its database.</summary>
+    internal static SimulatedSqlException FullTextViewTableNotFound(int objectId) =>
+        new($"A fulltext system view or stvf cannot open user table object id {objectId}.", 30004, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 30006: an index keyword TVF over a table without a full-text index.</summary>
+    internal static SimulatedSqlException FullTextViewIndexNotFound(int objectId) =>
+        new($"A fulltext system view or stvf cannot open fulltext index for user table object id {objectId}.", 30006, 16, 1);
+
     /// <summary>Mimics SQL Server's Msg 9966: <c>sp_fulltext_database</c> in master, tempdb or model.</summary>
     internal static SimulatedSqlException FullTextInSystemDatabase() =>
         new("Cannot use full-text search in master, tempdb, or model database.", 9966, 16, 1);

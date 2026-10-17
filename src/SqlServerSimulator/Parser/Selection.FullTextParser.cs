@@ -66,7 +66,7 @@ partial class Selection
             throw SimulatedSqlException.FullTextNullOrEmptyPredicate();
         var accentSensitive = accent.CoerceTo(SqlType.Int32).AsInt32 != 0;
 
-        var report = new FullTextParserReport();
+        var report = new FullTextParserReport(accentSensitive);
         _ = FullTextSearchCondition.ParseContains(text, accentSensitive, language, useStoplist, report);
         List<byte[]> rows = new(report.Rows.Count);
         foreach (var row in report.Rows)

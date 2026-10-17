@@ -195,7 +195,21 @@ Every language breaks words by the English rules; how far the real breakers diff
 `sys.dm_fts_parser('condition', lcid, stoplist_id, accent_sensitivity)` (`Parser/Selection.FullTextParser.cs`) parses a condition the way `CONTAINS` does and lists what the engine makes of it: one group per leaf in written order (a word, a phrase, each `FORMSOF` argument), each term at its occurrence with its noise flag, the markers, an inflectional leaf's expansions ahead of the word they grow from, and the leaf's source text.
 The stoplist argument is 0 for the language's system stoplist or NULL for none (anything else is **Msg 30092**); an accent sensitivity of 0 folds accents; a NULL condition, LCID or accent sensitivity is **Msg 7645** at severity 16 with states 201, 202 and 203.
 A differential over 44 conditions matched real in every column but `keyword` for 43; the other lists verb forms real's lexicon withholds (see [The stemmer](#the-stemmer)).
-`keyword` is the term in UTF-16 big-endian, which is real's too except for an accented term, whose keyword real encodes its own way.
+`keyword` and `display_term` are the [index keyword](#the-index-keyword-dmvs) a term is stored under and what real reads back from it.
+
+### The index keyword DMVs
+
+`sys.dm_fts_index_keywords(database_id, object_id)` lists each keyword per column with its document count, `…_by_document` each keyword per column and document with its occurrence count, `…_position_by_document` each occurrence, and `…_by_property` nothing, as no search property list is modeled (`Parser/Selection.FullTextKeywords.cs`, probed 2026-10-17 against SQL Server 2025).
+With no persisted index they break the table's live rows as a search does, so they list exactly the terms a search matches — noise words left out at the positions they keep, a number's `nn` companion, a compound's composite at its first part's position.
+Rows come in real's index order: keyword bytes, column, document, position.
+
+- **The keyword** (`FullTextKeyword`) is the term's letters with their accents taken off, in UTF-16 big-endian, followed when any letter carried one by `0x0000` and a byte per letter up to the last accented one — 2 for none, else the accent's code (14 acute, 15 grave, 18 circumflex, 19 diaeresis, 25 tilde, 26 ring, 28 cedilla, a two-mark letter a code of its own): `café` is `0x0063006100660065` + `0x00000202020E`.
+  Some letters fold to others there (`þ` to `th`, `ð` to `d` with code 104, `ς` to `σ`) and combining marks and the characters real's table lacks drop out; the per-character table was read off `sys.dm_fts_parser` for every BMP character between two letters and is embedded as `KeywordAccents.tsv`.
+  An accent-insensitive catalog keeps the folded letters and no codes.
+- **The display term** reads each accented letter back from its base and code, so letters sharing both read back alike (`ṹ` as `ǚ`), an expanding one as its letters (`ǣ` as `āē`), and some in upper case (`ÿ` as `Ÿ`, `ά` as `Ά`).
+- **`END OF FILE`** (`0xFF`): each non-NULL, non-empty value holds one a position past its last word, noise words counted, or at 1 when it has none (`'!!'`, `'   '`); a row with no such value holds one at position 1 of its highest-numbered indexed column.
+- **`document_id`** is the key's value for an integer key, and otherwise the key's rank in key order — the id real's initial crawl assigns.
+- Real refuses a NULL argument with **Msg 30007**, an unknown database with **Msg 30003**, an object that isn't a user table there with **Msg 30004** and a table without a full-text index with **Msg 30006**.
 
 ### The `contains_search_condition` grammar
 
@@ -314,7 +328,9 @@ State 3 is what an operator keyword standing in *operand* position produces — 
   Every language breaks by the English rules with its own stoplist, which real matches only for neutral and British English.
   The rest carry locale rules — German reads `33,667.95` with a decimal comma, splits `d'angelo`, and knows no English month or meridiem — so on 400 English-text inputs per language the parser's output matched real's for 24–33% of them (German, French, Spanish, Italian, Dutch, Brazilian Portuguese, Russian); searched as a German column, the same differential's conditions returned real's rows for 94.7% of 505.
 - **Other languages' morphology** — see [Languages](#languages).
-- **`sys.dm_fts_parser` for an accented term** reports the lower-cased term, where real's `display_term` reconstructs it from its keyword (`σοφΊα`) and its `keyword` encodes the accents apart.
+- **The keyword table's case gaps** — a handful of capitals real's tables don't lower-case (`Ș`, `Ț`, `Ѐ`, the Cyrillic `Ӑ` family) keep their case in real's keyword and fold here, so they are one keyword with their small letter where real holds two; the table is keyed by the small letter the breaker emits.
+- **A word over 64 characters** — real cuts it into 64-character terms at successive positions (an accented one sooner), and the breaker here keeps it whole.
+- **The document id of a row written after the crawl**, for a key that isn't an integer: real gives it the next id past a reserved block (`1002` after three rows), where the rank in key order here renumbers every row after it.
 - **`RANK` values** — see above.
 - **No crawl lag** — see above.
 - A phrase or `NEAR` can't span two columns of a multi-column index in either engine; the simulator gets that by leaving a wide position gap between columns rather than by tracking column identity.
@@ -374,9 +390,6 @@ A table named in another database lists nothing; one that doesn't resolve, or a 
 - **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column is real's Msg 41209, as no semantic language statistics database is ever registered.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one.
-- **The index keyword DMVs** — `sys.dm_fts_index_keywords`, `…_by_document`, `…_position_by_document` and `…_by_property` (Msg 208 here).
-  The breaker has the terms and positions they list, but not the `keyword` column's whole encoding: real writes the term without its accents as UTF-16BE and appends the accents after `0x0000` in a code of its own (`café` is `0x0063006100660065` + `0x00000202020E`, `über` `0x0075006200650072` + `0x000013`), alongside the `nn` forms of a number (`nn42`, `nn3d5` for `3.5`) and one `END OF FILE` row (`0xFF`) per document and column at the position after its last term, a NULL column none; `document_id` is the key value (probed 2026-10-17 against SQL Server 2025).
-  The accent code is what reverse-engineering would cost; the unaccented rest is direct.
 - **A populated thesaurus** — a thesaurus of one's own is XML edited into the server's install tree, which no statement reaches and no probe here may write, so its expansion and replacement sets have no oracle.
 - **Document filters beyond the plain-text, HTML and XML ones** — an Office or PDF document, which real on Windows filters through its installed iFilters, contributes nothing; `sys.fulltext_document_types` and `sp_help_fulltext_system_components 'filter'` list real's 110 registered filters all the same.
 - **Other languages' breakers and morphologies** — see [Divergences](#divergences).
