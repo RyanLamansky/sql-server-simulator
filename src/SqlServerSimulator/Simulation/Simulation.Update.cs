@@ -1294,7 +1294,8 @@ partial class Simulation
         // Hoisted per-row scaffolding: one mutable tuple slot, one cached
         // delegate and one runtime, so the per-row loop allocates none.
         byte[]?[] currentTuple = [];
-        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        var memo = new SourceColumnMemo();
+        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, memo);
         Func<MultiPartName, SqlValue> resolveTuple = resolveAcrossTuple;
         var runtime = new RuntimeContext(resolveTuple, context.Batch);
 
@@ -2859,12 +2860,14 @@ partial class Simulation
     /// computed column evaluates its expression the way the SELECT path's
     /// resolver does — which is what lets AdventureWorks'
     /// <c>Sales.iduSalesOrderDetail</c> read <c>inserted.LineTotal</c>, a
-    /// column with no storage slot of its own.
+    /// column with no storage slot of its own. <paramref name="memo"/>, when
+    /// set, binds each name once for a walk whose <paramref name="sources"/>
+    /// stay one array across its rows.
     /// </summary>
     private static SqlValue ResolveAcrossMutationTuple(
-        FromSource[] sources, byte[]?[] tuple, MultiPartName name, BatchContext batch)
+        FromSource[] sources, byte[]?[] tuple, MultiPartName name, BatchContext batch, SourceColumnMemo? memo = null)
     {
-        var (s, c) = Selection.FindSourceColumn(sources, name);
+        var (s, c) = memo is not null && !RowLocator.IsLocatorName(name) ? memo.Find(sources, name) : Selection.FindSourceColumn(sources, name);
         if (s == -1)
         {
             throw RowLocator.IsLocatorName(name)

@@ -113,13 +113,58 @@ internal static class RowLocator
 /// one row). Installed on <see cref="StatementContext.RowAddresses"/> only
 /// while something will ask; see <see cref="RowLocator"/>.
 /// </summary>
+/// <remarks>
+/// A record is an append, and the dictionary over the instances is built only
+/// as far as a lookup that misses the newest record needs it. A consumer
+/// streaming a producer asks for the row just yielded — a joined write's
+/// target scanned as the probe side asks only for that — where a dictionary
+/// insert per scanned row, with the identity hash it stamps on each array,
+/// measured about a third of a joined UPDATE scanning 200k target rows to
+/// rewrite 11k (2026-10-17). A later record of one instance wins: the newest
+/// record is the last, and the dictionary takes the records in order.
+/// </remarks>
 internal sealed class RowAddressMap
 {
-    private readonly Dictionary<byte[], (int Page, int Slot)> addresses = new(ReferenceEqualityComparer.Instance);
+    /// <summary>A segment's length: a power of two, and its array below the large-object heap's threshold.</summary>
+    private const int SegmentLength = 4096;
 
-    public void Record(byte[] row, int page, int slot) => this.addresses[row] = (page, slot);
+    private readonly List<(byte[] Row, int Page, int Slot)[]> segments = [];
+    private (byte[] Row, int Page, int Slot)[] tail = [];
+    private int count;
 
-    public bool TryGet(byte[] row, out (int Page, int Slot) address) => this.addresses.TryGetValue(row, out address);
+    /// <summary>The records <see cref="indexed"/> covers, built on the first lookup missing the newest record.</summary>
+    private Dictionary<byte[], (int Page, int Slot)>? byRow;
+    private int indexed;
+
+    public void Record(byte[] row, int page, int slot)
+    {
+        var at = this.count & (SegmentLength - 1);
+        if (at == 0)
+            this.segments.Add(this.tail = new (byte[], int, int)[SegmentLength]);
+        this.tail[at] = (row, page, slot);
+        this.count++;
+    }
+
+    public bool TryGet(byte[] row, out (int Page, int Slot) address)
+    {
+        if (this.count != 0)
+        {
+            ref var newest = ref this.tail[(this.count - 1) & (SegmentLength - 1)];
+            if (ReferenceEquals(newest.Row, row))
+            {
+                address = (newest.Page, newest.Slot);
+                return true;
+            }
+        }
+
+        var byRow = this.byRow ??= new(ReferenceEqualityComparer.Instance);
+        for (; this.indexed < this.count; this.indexed++)
+        {
+            var (recorded, page, slot) = this.segments[this.indexed / SegmentLength][this.indexed & (SegmentLength - 1)];
+            byRow[recorded] = (page, slot);
+        }
+        return byRow.TryGetValue(row, out address);
+    }
 }
 
 /// <summary>

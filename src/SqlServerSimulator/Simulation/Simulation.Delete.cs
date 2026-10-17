@@ -598,7 +598,8 @@ partial class Simulation
 
         // Hoisted per-row scaffolding — see ExecuteJoinedUpdate.
         byte[]?[] currentTuple = [];
-        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        var memo = new SourceColumnMemo();
+        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch, memo);
         var runtime = new RuntimeContext(resolveAcrossTuple, context.Batch);
 
         if (!table.SupersededKeyImages.IsEmptyLockFree())
