@@ -162,6 +162,42 @@ public sealed class AtAtKeywordExpansionTests
         AreEqual(($"Must declare the scalar variable \"{name}\".", (byte)15, state, 1), (error.Errors[0].Message, error.Class, error.State, error.Errors.Count));
     }
 
+    /// <summary>
+    /// Such a name is an ordinary variable once declared — a local, a table
+    /// variable, a cursor variable, a procedure's, function's or dynamic
+    /// batch's parameter — while a built-in's name is Msg 102 where a variable
+    /// is declared (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @@x int = 5; set @@x += 1; select @@X", 6)]
+    [DataRow("declare @@x int; select @@x = 9; select @@x", 9)]
+    [DataRow("declare @@ int = 3; select @@", 3)]
+    [DataRow("declare @@@x int = 4; select @@@x", 4)]
+    [DataRow("declare @@t table (a int); insert @@t values (7); select a from @@t", 7)]
+    [DataRow("declare c cursor for select 8; declare @@c cursor; set @@c = c; open @@c; declare @v int; fetch @@c into @v; select @v", 8)]
+    [DataRow("exec sp_executesql N'select @@p', N'@@p int', @@p = 4", 4)]
+    public void AtAt_DeclaredUnknownName_IsAVariable(string sql, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    public void AtAt_UnknownName_NamesAParameter()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create procedure p @@p int, @q int = 2 as select @@p * @q",
+            "create function f (@@a int) returns int as begin return @@a * 2 end");
+        AreEqual(6, simulation.ExecuteScalar("exec p 3"));
+        AreEqual(16, simulation.ExecuteScalar("exec p @@p = 8"));
+        AreEqual(8, simulation.ExecuteScalar("select dbo.f(4)"));
+    }
+
+    [TestMethod]
+    [DataRow("declare @@rowcount int")]
+    [DataRow("declare @@SPID int = 7")]
+    [DataRow("declare @@lock_timeout int")]
+    public void AtAt_BuiltInName_IsNoVariable(string sql)
+        => _ = new Simulation().AssertSqlError(sql, 102);
+
     [TestMethod]
     public void AtAt_UnderscoredBuiltIn_ReadsAsRealSpellsIt()
         => AreEqual(-1, new Simulation().ExecuteScalar("select @@LOCK_TIMEOUT"));

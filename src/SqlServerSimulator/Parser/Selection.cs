@@ -2319,29 +2319,6 @@ internal sealed partial class Selection
                     context.MoveNextOptional();
                     break;
 
-                // An `@@` name no built-in function claims is an undeclared
-                // variable, so standing alone as an item before the string
-                // or comment the batch ends inside, it reports as `@a` does.
-                // An assignment to one is refused once its value has parsed.
-                case DoubleAtPrefixedString { IsBuiltIn: false } undeclared:
-                    {
-                        var checkpoint = context.SaveCheckpoint();
-                        var afterVariable = context.GetNextOptional();
-                        if (afterVariable is Operator { Character: '=' }
-                            || (afterVariable is Operator { Character: '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } compound
-                                && context.GetNextOptional() is Operator { Character: '=' } equals && equals.StartIndex == compound.EndIndex))
-                        {
-                            context.MoveNextRequired();
-                            _ = Expression.Parse(context);
-                            throw UndeclaredAssignmentTarget(context, undeclared.ErrorText[1..]);
-                        }
-                        if (afterVariable is UnterminatedToken unterminated && scope.Position is QueryPosition.Statement or QueryPosition.InsertSource && !scope.Parenthesized)
-                            throw UndeclaredItemBeforeUnterminated(SimulatedSqlException.MustDeclareScalarVariable(undeclared.ErrorText[1..]), undeclared, unterminated);
-                        context.RestoreCheckpoint(checkpoint);
-                        expressions.Add(Expression.Parse(context));
-                    }
-                    break;
-
                 // SELECT-assign disambiguation: `@v = expr` at projection-
                 // element-start position is variable assignment;
                 // `@v` followed by anything else (`+`, `,`, AS, etc.) is just

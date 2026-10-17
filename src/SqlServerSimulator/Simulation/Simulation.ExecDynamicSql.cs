@@ -620,7 +620,7 @@ partial class Simulation
             return (SqlValue.Null(SqlType.Int32), null);
         }
         if (context.Token is AtPrefixedString tableRef
-            && batch.TryGetTableVariable(tableRef.Value.TrimStart('@'), out var tableVariable))
+            && batch.TryGetTableVariable(tableRef.Value, out var tableVariable))
         {
             table = tableVariable;
             context.MoveNextOptional();
@@ -889,7 +889,7 @@ partial class Simulation
                 : number.Value,
             Literal { Value: var literal } => literal,
             ReservedKeyword { Keyword: Keyword.Null or Keyword.Default } => SqlValue.Null(SqlType.Int32),
-            AtPrefixedString variable => throw SimulatedSqlException.MustDeclareScalarVariable(variable.Value.TrimStart('@')),
+            AtPrefixedString variable => throw SimulatedSqlException.MustDeclareScalarVariable(variable.Value),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
     }

@@ -34,9 +34,8 @@ The initializer is execution-scoped, so it must not run under `IsSkipping` — t
 `DECLARE @v INT NOT NULL` and `DECLARE @v INT = DEFAULT` raise Msg 102 / 156 respectively (DECLARE doesn't accept column-style constraints — falls out of grammar mismatch).
 The optional `AS` before the type (`DECLARE @v AS INT`) is accepted, and an initializer-less DECLARE may end the batch (`DECLARE @x int`, `DECLARE @x varchar(20)`) — the type-spec parse tolerates end-of-input rather than requiring a following token.
 
-**Not modeled yet: variables and parameters named with `@@`.**
-Real declares, assigns and reads any `@@` name no built-in claims as a variable (`DECLARE @@x int = 5; SELECT @@x`, a procedure parameter `@@p` and its named argument), while a built-in's name is Msg 102 where a variable's is declared (`DECLARE @@version int`, probed 2026-10-16 against SQL Server 2025).
-Here such a name reads only as an undeclared variable ([`errors.md`](errors.md)), and declaring one is Msg 102.
+**An `@@` name no built-in claims is an ordinary variable** whose name starts with `@` — a local, a table or cursor variable, a procedure's, function's or dynamic batch's parameter and its named argument (`DECLARE @@x int = 5; SELECT @@x`, `@@`, `@@@x`) — while a built-in's name is Msg 102 where a variable is declared (`DECLARE @@version int`, probed 2026-10-16 and 2026-10-17 against SQL Server 2025).
+The tokenizer settles it: such a name is an `AtPrefixedString` whose value keeps the second `@`, so the `Variables` key of `@@x` is `@x`, and only a built-in is a `DoubleAtPrefixedString`.
 
 **Output-parameter write-back**: at end of batch, the dispatch walks the parameter list and copies each `InputOutput` / `Output` direction parameter's final slot value back to `DbParameter.Value`.
 Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate parameters.

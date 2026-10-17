@@ -35,7 +35,7 @@ internal sealed class TableValuedArgument : Expression
             context.MoveNextRequired();
         }
         if (context.Token is AtPrefixedString variable
-            && context.Batch.TryGetTableVariable(VariableKey(variable.Value), out var table))
+            && context.Batch.TryGetTableVariable(variable.Value, out var table))
         {
             context.MoveNextRequired();
             var closed = 0;
@@ -47,7 +47,7 @@ internal sealed class TableValuedArgument : Expression
             if (closed == depth && context.Token is Operator { Character: ',' or ')' })
             {
                 return ReferenceEquals(table.DeclaredTableType, tableType)
-                    ? new TableValuedArgument(VariableKey(variable.Value))
+                    ? new TableValuedArgument(variable.Value)
                     : throw SimulatedSqlException.OperandTypeClash(table.DeclaredTableType?.Name ?? "table", tableType.Name);
             }
         }
@@ -58,8 +58,6 @@ internal sealed class TableValuedArgument : Expression
             IsUntypedNullLiteral(argument) ? "NULL" : SimulatedSqlException.FamilyRootName(argument.GetSqlType(context.Batch, name => throw SimulatedSqlException.InvalidColumnName(name.Leaf))),
             tableType.Name);
     }
-
-    private static string VariableKey(string written) => written.StartsWith('@') ? written[1..] : written;
 
     /// <summary>The table the argument passes, in the batch the call runs in.</summary>
     public HeapTable Resolve(RuntimeContext runtime) => runtime.Batch.TableVariables![this.variableName];

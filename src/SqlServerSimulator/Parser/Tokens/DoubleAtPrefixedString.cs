@@ -5,10 +5,11 @@ sealed class DoubleAtPrefixedString(string command, int index, int length) : Str
     public override ReadOnlySpan<char> Span => Source[2..];
 
     /// <summary>
-    /// Whether this names one of the built-in <c>@@</c> functions; any other
-    /// <c>@@</c> name is a variable.
+    /// Whether <paramref name="name"/>, the text after <c>@@</c>, names one of
+    /// the built-in <c>@@</c> functions; the tokenizer reads any other
+    /// <c>@@</c> name as a variable, so every instance of this token is one.
     /// </summary>
-    public bool IsBuiltIn => TryParse(this.Span, out _);
+    public static bool NamesBuiltIn(ReadOnlySpan<char> name) => TryParse(name, out _);
 
     public AtAtKeyword Parse() => !TryParse(this.Span, out var result)
         ? throw new NotSupportedException($"Simulated command processor doesn't know what to do with `{this.Span}`.")

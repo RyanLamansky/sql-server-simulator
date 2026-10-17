@@ -239,7 +239,12 @@ static class Tokenizer
             index++;
         }
 
-        return doubleAt ?
+        // An `@@` name no built-in function claims is an ordinary variable
+        // whose name starts with `@`, so DECLARE, a parameter list, SET and
+        // every read take it as `@a` (probed 2026-10-17 against SQL Server
+        // 2025: `DECLARE @@x int = 5; SELECT @@x` is 5, `DECLARE @@ROWCOUNT
+        // int` Msg 102).
+        return doubleAt && DoubleAtPrefixedString.NamesBuiltIn(command.AsSpan(start + 2, index - start - 2)) ?
             new DoubleAtPrefixedString(command, start, index - start) :
             new AtPrefixedString(command, start, index - start);
     }

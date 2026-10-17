@@ -38,11 +38,9 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
             AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
-            // `SET @@x = …` names a variable no DECLARE can make, and a built-in
-            // @@ function no SET can assign (probed 2026-10-02 and 2026-10-04
+            // A built-in @@ function no SET can assign (probed 2026-10-04
             // against SQL Server 2025: SET @@ROWCOUNT is Msg 102 at it).
-            DoubleAtPrefixedString { IsBuiltIn: true } builtIn => throw SimulatedSqlException.SyntaxErrorNear(builtIn),
-            DoubleAtPrefixedString global => throw SimulatedSqlException.MustDeclareSetTarget(global.ErrorText[1..]),
+            DoubleAtPrefixedString builtIn => throw SimulatedSqlException.SyntaxErrorNear(builtIn),
             _ => TryParseSetSessionOption(context, afterSet),
         };
     }

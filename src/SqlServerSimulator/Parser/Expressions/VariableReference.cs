@@ -30,9 +30,10 @@ internal sealed class VariableReference : Expression
 
     public VariableReference(AtPrefixedString atPrefixed, ParserContext context)
     {
-        // Strip the leading '@' to match the Variables-dict key convention.
+        // The token's value leaves out the leading '@', as the Variables-dict
+        // key does; a second one (`@@x`) is part of the name.
         var raw = atPrefixed.Value;
-        this.VariableName = raw.StartsWith('@') ? raw[1..] : raw;
+        this.VariableName = raw;
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
         var slot = context.Batch.GetVariableSlot(raw);
