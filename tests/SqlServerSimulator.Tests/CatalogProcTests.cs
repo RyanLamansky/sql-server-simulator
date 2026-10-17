@@ -674,7 +674,47 @@ public sealed class CatalogProcTests
     {
         var sim = new Simulation();
         sim.ExecuteBatches("create function fs () returns int as begin return 1 end", "create procedure pp as select 1");
-        AreEqual("fs;0,pp;1", string.Join(",", Run(sim, "exec sp_stored_procedures").Select(r => r["PROCEDURE_NAME"])));
+        AreEqual("fs;0,pp;1", string.Join(",", Run(sim, "exec sp_stored_procedures @sp_owner = 'dbo'").Select(r => r["PROCEDURE_NAME"])));
+    }
+
+    /// <summary>
+    /// The listing holds the system procedures and functions the simulator
+    /// models, under the database's name and owned by sys after the database's
+    /// own — a procedure numbered 1, a function 0, an extended procedure never —
+    /// and a name brings them in only when it begins as sp_, xp_ or fn_ do
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpStoredProcedures_ListsTheModeledSystemRoutines()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure sp_mine as select 1", "create procedure dm_mine as select 1");
+        var all = Run(sim, "exec sp_stored_procedures");
+        AreEqual("dbo.dm_mine;1|dbo.sp_mine;1", string.Join("|", all.Take(2).Select(static r => $"{r["PROCEDURE_OWNER"]}.{r["PROCEDURE_NAME"]}")));
+        var names = all.Select(static r => (string)r["PROCEDURE_NAME"]!).ToHashSet();
+        IsTrue(names.IsSupersetOf(["sp_help;1", "sp_who;1", "dm_exec_sql_text;0", "fn_varbintohexstr;0", "fn_listextendedproperty;0"]));
+        DoesNotContain("sp_executesql;1", names);
+        IsTrue(all.All(r => (string)r["PROCEDURE_QUALIFIER"]! == "simulated"));
+        AreEqual("sys.sp_help;1", string.Join("|", Run(sim, "exec sp_stored_procedures 'sp_help'").Select(static r => $"{r["PROCEDURE_OWNER"]}.{r["PROCEDURE_NAME"]}")));
+        AreEqual("sys.fn_varbintohexstr;0", string.Join("|", Run(sim, "exec sp_stored_procedures 'FN_VARBINTOHEXSTR'").Select(static r => $"{r["PROCEDURE_OWNER"]}.{r["PROCEDURE_NAME"]}")));
+        IsEmpty(Run(sim, "exec sp_stored_procedures 'dm_exec_sql_text'"));
+        AreEqual("dbo.dm_mine;1", string.Join("|", Run(sim, "exec sp_stored_procedures 'dm%'").Select(static r => $"{r["PROCEDURE_OWNER"]}.{r["PROCEDURE_NAME"]}")));
+        AreEqual("dbo.sp_mine;1", string.Join("|", Run(sim, "exec sp_stored_procedures 's%'").Select(static r => $"{r["PROCEDURE_OWNER"]}.{r["PROCEDURE_NAME"]}")));
+        IsGreaterThan(100, Run(sim, "exec sp_stored_procedures 'sp%'").Count);
+    }
+
+    /// <summary>
+    /// A session that can't see a database routine doesn't list it, where
+    /// every system routine lists (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpStoredProcedures_ListsOnlyTheRoutinesTheSessionSees()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create user lo without login", "create procedure pp as select 1");
+        var rows = Run(sim, "execute as user = 'lo'; exec sp_stored_procedures");
+        IsTrue(rows.All(static r => (string)r["PROCEDURE_OWNER"]! == "sys"));
+        IsGreaterThan(100, rows.Count);
     }
 
     private static Simulation SpecialColumnsFixture()

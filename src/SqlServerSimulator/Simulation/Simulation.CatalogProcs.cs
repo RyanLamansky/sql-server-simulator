@@ -1208,9 +1208,14 @@ partial class Simulation
     /// carries the trailing <c>;1</c> group number, the three param/result
     /// counts report <c>-1</c> (real doesn't compute them), and
     /// <c>PROCEDURE_TYPE</c> is 2 (SQL_PT_PROCEDURE). <c>@sp_name</c> /
-    /// <c>@sp_owner</c> are LIKE patterns unless <c>@fUsePattern</c> is 0. The simulator has no system-procedure
-    /// catalog, so (unlike real, which also lists the ~1600 <c>sys</c> procs)
-    /// only user procedures are projected.
+    /// <c>@sp_owner</c> are LIKE patterns unless <c>@fUsePattern</c> is 0.
+    /// Beside the database's own routines it lists the <c>sys</c> procedures
+    /// and functions the simulator models — the <c>sys.system_objects</c>
+    /// rows of a SQL procedure (<c>;1</c>) or a SQL function (<c>;0</c>), an
+    /// extended procedure never — under the database's name, as real does
+    /// (captured 2026-10-17 against SQL Server 2025, whose listing holds some
+    /// sixteen hundred), ordered by owner and name under the database's
+    /// collation.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpStoredProcedures(BatchContext batch)
     {
@@ -1234,21 +1239,33 @@ partial class Simulation
         var nullRemarks = SqlValue.Null(CatalogVarchar254);
         var procedureType = SqlValue.FromInt16(2);
 
+        // A user routine lists when the session can see it, a system one
+        // always — but under a name only when the name begins as a system
+        // routine's does, sp_, xp_ or fn_ as a LIKE pattern reads them — and
+        // the lookup by exact name searches the default schema and dbo alone
+        // (probed 2026-10-17 against SQL Server 2025).
+        var visible = PermissionEnforcement.ObjectVisibility(batch, database);
+        var listsSystem = exactName is null || Array.Exists(SystemRoutinePrefixes, prefix => prefix.IsMatch(exactName, trailingSpaceSlack: false));
+        var defaultSchema = batch.DefaultSchemaName;
         var rows = new List<SqlValue[]>();
+        var userRows = 0;
         if (spQualifier is null || database.Collation.Equals(spQualifier, database.Name))
         {
             foreach (var (_, schema) in database.Schemas)
             {
-                foreach (var (_, procedure) in schema.Procedures)
-                    exactFound |= exactName is not null && database.Collation.Equals(exactName, procedure.Name);
-                foreach (var (_, function) in schema.Functions)
-                    exactFound |= exactName is not null && database.Collation.Equals(exactName, function.Name);
+                if (exactName is not null && (database.Collation.Equals(schema.Name, defaultSchema) || database.Collation.Equals(schema.Name, "dbo")))
+                {
+                    foreach (var (_, procedure) in schema.Procedures)
+                        exactFound |= database.Collation.Equals(exactName, procedure.Name);
+                    foreach (var (_, function) in schema.Functions)
+                        exactFound |= database.Collation.Equals(exactName, function.Name);
+                }
                 if (!OwnerMatches(schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var (_, procedure) in schema.Procedures)
                 {
-                    if (!NameMatches(procedure.Name))
+                    if (!NameMatches(procedure.Name) || visible?.Invoke(procedure) == false)
                         continue;
                     rows.Add([
                         qualifier, owner,
@@ -1269,7 +1286,7 @@ partial class Simulation
                 // (probed 2026-09-26 against SQL Server 2025).
                 foreach (var (_, function) in schema.Functions)
                 {
-                    if (!NameMatches(function.Name))
+                    if (!NameMatches(function.Name) || visible?.Invoke(function) == false)
                         continue;
                     rows.Add([
                         qualifier, owner,
@@ -1278,11 +1295,37 @@ partial class Simulation
                     ]);
                 }
             }
+
+            userRows = rows.Count;
+            if (listsSystem && OwnerMatches("sys"))
+            {
+                var sys = SqlValue.FromSystemName("sys");
+                foreach (var system in BuiltInResources.SystemObjects.Value)
+                {
+                    var number = system.Type switch
+                    {
+                        "FN" or "IF" or "TF" => ";0",
+                        "P " => ";1",
+                        _ => null,
+                    };
+                    if (number is null || system.SchemaId != Database.SysSchemaId)
+                        continue;
+                    if (!NameMatches(system.Name))
+                        continue;
+                    rows.Add([
+                        qualifier, sys,
+                        SqlValue.FromString(CatalogNVarchar134, system.Name + number),
+                        negativeOne, negativeOne, negativeOne, nullRemarks, procedureType,
+                    ]);
+                }
+            }
         }
 
-        rows.Sort(CompareSpStoredProceduresRows);
-        var oneObject = usePattern && NamesOneObject(spName, rows.Count > 0);
-        foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, usePattern, exactFound, oneObject)))
+        rows.Sort((a, b) => database.Collation.Compare(a[1].AsString, b[1].AsString) is var owner and not 0 ? owner : database.Collation.Compare(a[2].AsString, b[2].AsString));
+        // A name without an owner picks one routine only when the lookup found
+        // it; with an owner, when the owner holds it.
+        var oneObject = usePattern && NamesOneObject(spName, exactOwner is null ? exactFound : userRows > 0);
+        foreach (var step in ProcedureSteps(batch, SpStoredProceduresSteps(spName, spOwner, spQualifier, usePattern, exactFound, oneObject, listsSystem)))
             yield return step;
         // Real orders by owner and name, or by qualifier, owner and name for
         // one routine a name picked and whenever it matches exactly (captured
@@ -1290,16 +1333,17 @@ partial class Simulation
         yield return new SimulatedSqlResultSet(SpStoredProceduresSchema, SpStoredProceduresColumnNames, rows)
         {
             OrderColumns = oneObject || !usePattern ? [1, 2, 3] : [2, 3],
+            ColumnWireFlags = Parser.Selection.DerivedColumns(SpStoredProceduresColumnNames.Length),
         };
     }
 
-    // Sort by PROCEDURE_OWNER (cell 1) then PROCEDURE_NAME (cell 2), ordinal
-    // case-insensitive.
-    private static int CompareSpStoredProceduresRows(SqlValue[] a, SqlValue[] b)
-    {
-        var cmp = string.Compare(a[1].AsString, b[1].AsString, StringComparison.OrdinalIgnoreCase);
-        return cmp != 0 ? cmp : string.Compare(a[2].AsString, b[2].AsString, StringComparison.OrdinalIgnoreCase);
-    }
+    /// <summary>
+    /// The name prefixes that bring <c>sp_stored_procedures</c>' listing the
+    /// system routines, matched as LIKE patterns against the name argument
+    /// under the baseline collation, so <c>sp%</c> and <c>SP_HELP</c> qualify
+    /// and <c>sp</c> doesn't.
+    /// </summary>
+    private static readonly LikeMatcher[] SystemRoutinePrefixes = [CompileCatalogPattern("fn_%")!, CompileCatalogPattern("sp_%")!, CompileCatalogPattern("xp_%")!];
 
     private static (string? Name, string? Owner, string? Qualifier, bool UsePattern) ParseSpStoredProceduresArgs(
         List<ProcArgument> arguments)

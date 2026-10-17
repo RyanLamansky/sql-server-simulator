@@ -223,9 +223,11 @@ partial class Simulation
     /// conditions for a name that picked one routine, four conditions for
     /// another name, or a condition, an assignment, two conditions, an
     /// assignment and a condition for none, closing with one more assignment
-    /// unless an owner was given or the lookup found the routine.
+    /// unless an owner was given or the lookup found the routine; a name that
+    /// brings in the system routines (<paramref name="listsSystem"/>) takes a
+    /// condition, an assignment and three conditions in place of the four.
     /// </summary>
-    private static string SpStoredProceduresSteps(string? name, string? owner, string? qualifier, bool usePattern, bool exactFound, bool oneRoutine)
+    private static string SpStoredProceduresSteps(string? name, string? owner, string? qualifier, bool usePattern, bool exactFound, bool oneRoutine, bool listsSystem)
     {
         var program = new StringBuilder("II");
         if (name == "%")
@@ -255,7 +257,7 @@ partial class Simulation
             return program.Append("II").ToString();
         _ = program.Append("IIS");
         return (oneRoutine ? program.Append("SII")
-            : name is not null ? program.Append("IIII")
+            : name is not null ? program.Append(listsSystem ? "ISIII" : "IIII")
             : program.Append("ISIISI")).Append(lookedUp || owner is not null ? "" : "S").ToString();
     }
 }

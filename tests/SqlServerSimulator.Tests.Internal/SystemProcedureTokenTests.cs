@@ -345,4 +345,37 @@ public sealed class SystemProcedureTokenTests
         });
         Assert.AreEqual(steps, string.Join(' ', ahead), string.Join(" / ", tokens));
     }
+
+    /// <summary>
+    /// A name beginning as a system routine's does (<c>sp_</c>, <c>xp_</c>,
+    /// <c>fn_</c> as LIKE patterns) brings the system routines in and a
+    /// condition and an assignment with them, and the lookup by exact name
+    /// searches the default schema and dbo alone, so a routine of another
+    /// schema neither stops the closing assignment nor picks one routine
+    /// (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_stored_procedures 'sp_help'", "I I I I I I S S I I S I S I I I S")]
+    [DataRow("exec sp_stored_procedures 'sp_mine'", "I I I I I I S S S I I S I S I I I")]
+    [DataRow("exec sp_stored_procedures 'sp_help%'", "I I I I I S S I I S I S I I I S")]
+    [DataRow("exec sp_stored_procedures 'xp_cmdshell'", "I I I I I I S S I I S I S I I I S")]
+    [DataRow("exec sp_stored_procedures 'sp_help', 'sys'", "I I I I I S S I I S I S I I I")]
+    [DataRow("exec sp_stored_procedures 'sp'", "I I I I I I S S I I S I I I I S")]
+    [DataRow("exec sp_stored_procedures 'zp'", "I I I I I I S S I I S I I I I S")]
+    [DataRow("exec sp_stored_procedures 'zp', 'zzs'", "I I I I I S S I I S S I I")]
+    public void StoredProcedures_SystemRoutinesAndTheDefaultSchemaLookup(string sql, string steps)
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create procedure sp_mine as select 1");
+        _ = fixture.RunBatch("create schema zzs");
+        _ = fixture.RunBatch("create procedure zzs.zp as select 1");
+        var tokens = Batch(fixture, sql);
+        var ahead = tokens.TakeWhile(static token => token != "ROWS").Select(static token => token switch
+        {
+            "DONEINPROC C0 MORE 0" => "I",
+            "DONEINPROC C1 MORE|COUNT 1" => "S",
+            _ => token,
+        });
+        Assert.AreEqual(steps, string.Join(' ', ahead), string.Join(" / ", tokens));
+    }
 }
