@@ -157,6 +157,24 @@ internal sealed class HeapSeekCache
     }
 
     /// <summary>
+    /// The rows an ordered scan pinned on a leading run of
+    /// <paramref name="ordinals"/> and bounded nowhere else reads
+    /// (<c>WHERE a = @x ORDER BY b</c> over <c>(a, b)</c>): the
+    /// <paramref name="prefixKey"/> group of the entry, which lists its keys in
+    /// key order and each key's addresses ascending — the sequence
+    /// <see cref="OrderedSeek"/> walks between two bounds equal to the prefix,
+    /// read from the group the equality seek memoizes rather than walked over
+    /// the sorted keys on every probe, which is what a correlated
+    /// <c>TOP (1) … ORDER BY</c> pays once per outer row.
+    /// </summary>
+    public (int Page, int Slot)[] OrderedGroup(
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, SqlValueKey prefixKey)
+    {
+        lock (this.gate)
+            return this.ResolveEntry(heap, schema, lobStore, ordinals, commons).EqualityCandidates(prefixKey).ToArray();
+    }
+
+    /// <summary>
     /// The live row addresses in ascending key order for a scan that has to
     /// follow the key (see <c>ClusteredScan</c>), or <see langword="null"/>
     /// when ascending heap addresses already read the rows in that order — the

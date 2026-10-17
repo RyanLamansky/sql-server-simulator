@@ -1672,9 +1672,11 @@ internal sealed partial class Selection
         if (plan.RowTxScoped && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
         var cache = HeapSeekCache.For(table.Heap);
-        var candidates = cache.OrderedSeek(
-            table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
-            lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
+        var candidates = pinnedLength > 0 && !hasLower && !hasUpper && lowerKey is { } pinnedKey
+            ? cache.OrderedGroup(table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, pinnedKey)
+            : cache.OrderedSeek(
+                table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
+                lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
         // The ordered scan replaces the source's own enumerable, so a

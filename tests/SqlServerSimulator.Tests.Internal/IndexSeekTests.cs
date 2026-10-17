@@ -1937,6 +1937,46 @@ public sealed class IndexSeekTests
         AreEqual("5,10,15", Seq(rows));
     }
 
+    /// <summary>
+    /// A correlated <c>TOP (1) … ORDER BY</c> the clustered key, pinned on a
+    /// nonclustered index's column, reads the pinned group of that index —
+    /// ordered by the clustered key the index continues with — once per outer
+    /// row, and keeps reading it in order after writes land in the middle of a
+    /// group, move a row between groups and empty one.
+    /// </summary>
+    [TestMethod]
+    public void CorrelatedTopOrderedByClusteredKey_ReadsTheIndexGroupInOrderAcrossWrites()
+    {
+        var c = new Simulation().CreateDbConnection();
+        c.Open();
+        Exec(c, """
+            create table cust (id int not null primary key);
+            create table ord (id int not null primary key, cust int not null, total int not null);
+            create index ix_cust on ord (cust);
+            insert cust values (1), (2), (3);
+            insert ord values (10, 1, 100), (20, 2, 200), (30, 1, 300), (40, 3, 400), (50, 2, 500)
+            """);
+        const string First = "select concat(c.id, ':', x.total) from cust c cross apply (select top (1) o.total from ord o where o.cust = c.id order by o.id) x order by c.id";
+        const string Last = "select concat(c.id, ':', x.total) from cust c cross apply (select top (1) o.total from ord o where o.cust = c.id order by o.id desc) x order by c.id";
+        AreEqual("1:100,2:200,3:400", Seq(ReadRows(c, First)));
+        AreEqual("1:300,2:500,3:400", Seq(ReadRows(c, Last)));
+
+        Exec(c, "insert ord values (5, 2, 50), (35, 1, 350), (25, 3, 250)");
+        Exec(c, "delete ord where id = 10");
+        Exec(c, "update ord set cust = 1 where id = 50");
+        Exec(c, "delete ord where cust = 3");
+        AreEqual("1:300,2:50", Seq(ReadRows(c, First)));
+        AreEqual("1:500,2:200", Seq(ReadRows(c, Last)));
+
+        var (trace, rows) = Run("""
+            create table ord (id int not null primary key, cust int not null, total int not null);
+            create index ix_cust on ord (cust);
+            insert ord values (30, 1, 300), (10, 1, 100), (20, 2, 200), (5, 1, 50)
+            """, "select total from ord where cust = 1 order by id");
+        Contains("OrderedScan(ord)", trace);
+        AreEqual("50,100,300", Seq(rows));
+    }
+
     [TestMethod]
     public void MultiColumnOrderByDifferential_MatchesIndependentSort()
     {
