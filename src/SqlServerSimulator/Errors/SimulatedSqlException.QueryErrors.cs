@@ -341,6 +341,16 @@ partial class SimulatedSqlException
         new("Invalid usage of the option next in the FETCH statement.", 153, 15, 2);
 
     /// <summary>
+    /// Msg 153 at state 2 for a cursor <c>FETCH</c> whose <c>NEXT</c>,
+    /// <c>PRIOR</c>, <c>FIRST</c> or <c>LAST</c> is followed by a number or a
+    /// variable rather than <c>FROM</c>, naming the direction as written —
+    /// which is how real reads an <c>ORDER BY … FETCH NEXT</c> its recovering
+    /// parser restarts inside (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FetchDirectionWithoutFrom(string direction) =>
+        new($"Invalid usage of the option {direction} in the FETCH statement.", 153, 15, 2) { ParserReadsOnPast = true };
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10741 — fired when both <c>TOP</c> and
     /// <c>OFFSET</c> appear on the same SELECT (or subquery). Wording
     /// verbatim, including the "can not" two-word form and the

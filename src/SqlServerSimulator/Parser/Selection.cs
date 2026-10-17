@@ -1062,8 +1062,11 @@ internal sealed partial class Selection
             return;
         if (BranchesOrderThemselves(context, scope))
         {
+            // Refused at the set operator, it leaves real's parser reading on
+            // from there, which reports what the rest of the chain then can't
+            // take (probed 2026-10-17 against SQL Server 2025).
             if (!branch.HasTopOrOffsetOrFetch)
-                throw SimulatedSqlException.OrderByInvalidInCte();
+                throw setOperator is null ? SimulatedSqlException.OrderByInvalidInCte() : SimulatedSqlException.OrderByInvalidInCte().ReadOnPast();
             branch.OrdersOwnRows = true;
         }
         else if (setOperator is not null)

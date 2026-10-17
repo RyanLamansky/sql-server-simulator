@@ -303,7 +303,7 @@ partial class Simulation
     private static bool IsAssignmentTargetRefusal(SimulatedSqlException error) => error.Number == 137 && error.State == 1;
 
     /// <summary>The parse-phase errors real's parser recovers from and parses on past.</summary>
-    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 173 or 178 or 181 or 319 or 1054 or 4145;
+    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 173 or 178 or 181 or 319 or 1054 or 4145 || error.ParserReadsOnPast;
 
     /// <summary>
     /// Whether <paramref name="error"/> is one the grammar's own actions raise
@@ -312,10 +312,11 @@ partial class Simulation
     /// (Msg 178), a table column without a data type (Msg 173, raised on its
     /// name), a <c>WITH</c> after an unterminated statement (Msg 319), a
     /// schema-bound body's select-list star or <c>GROUP BY ALL</c> (Msg 1054),
-    /// a non-boolean expression where a condition belongs (Msg 4145) — which
+    /// a non-boolean expression where a condition belongs (Msg 4145), and one
+    /// marked <see cref="SimulatedSqlException.ParserReadsOnPast"/> — which
     /// recovery reports however few tokens have parsed since the last.
     /// </summary>
-    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 173 or 178 or 319 or 1054 or 4145;
+    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 173 or 178 or 319 or 1054 or 4145 || error.ParserReadsOnPast;
 
     /// <summary>
     /// <paramref name="first"/> followed by the syntax errors real's parser

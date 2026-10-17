@@ -858,4 +858,20 @@ public sealed class CursorTests
         else
             AreEqual(2, cursorSession.CreateCommand("fetch next from c").ExecuteScalar());
     }
+
+    /// <summary>
+    /// A direction without <c>FROM</c>: a cursor name after it is Msg 102 at
+    /// the direction, a count or a variable after a plain one Msg 153 naming
+    /// it as written, a string or anything after <c>ABSOLUTE n</c> Msg 102 at
+    /// that token (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("fetch next c", 102, "Incorrect syntax near 'next'.")]
+    [DataRow("fetch NEXT 1 rows only", 153, "Invalid usage of the option NEXT in the FETCH statement.")]
+    [DataRow("fetch prior 1", 153, "Invalid usage of the option prior in the FETCH statement.")]
+    [DataRow("declare @c cursor; fetch first @c", 153, "Invalid usage of the option first in the FETCH statement.")]
+    [DataRow("fetch last 'x'", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("fetch absolute 1 c", 102, "Incorrect syntax near 'c'.")]
+    public void Fetch_DirectionWithoutFrom_RefusesAsRealDoes(string batch, int number, string message)
+        => new Simulation().AssertSqlError(batch, number, message);
 }

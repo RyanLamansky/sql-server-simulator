@@ -454,6 +454,22 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool IsClrTypeParseFailure;
 
     /// <summary>
+    /// Set on a parse-phase error real's recovering parser reads on past
+    /// however few tokens it has parsed — a set operation's branch
+    /// <c>ORDER BY</c> refused at the operator (Msg 1033) and a <c>FETCH</c>
+    /// direction followed by a count (Msg 153) — so a batch's report goes on
+    /// to the syntax errors after it (<c>Simulation.WithRecoveredSyntaxErrors</c>).
+    /// </summary>
+    internal bool ParserReadsOnPast;
+
+    /// <summary>This error, marked <see cref="ParserReadsOnPast"/>.</summary>
+    internal SimulatedSqlException ReadOnPast()
+    {
+        this.ParserReadsOnPast = true;
+        return this;
+    }
+
+    /// <summary>
     /// Set on the error that ends the session (a <c>RAISERROR … WITH LOG</c> at
     /// severity 20 or more), whose last entry is the severity-20 Msg 0 SqlClient
     /// adds on its own side when the server severs the connection — on the

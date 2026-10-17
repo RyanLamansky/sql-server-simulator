@@ -582,6 +582,20 @@ public sealed class BatchCompilationTests
     [DataRow("select x = @@nope 'x", "137@1 105@1")]
     [DataRow("select @@nope = 1 'x", "105@1 137@1")]
     [DataRow("select @@nope; select @@nope2", "137@1 137@1")]
+    [DataRow("select * from (select 1 a order by 1 union all select 2) d", "1033@1")]
+    [DataRow("select * from (select 1 a order by 1 union all select 1 = 1) d", "1033@1")]
+    [DataRow("select * from (select c from t order by c union select c from t) d", "1033@1 102@1")]
+    [DataRow("select * from (select c from t order by c\nunion\nselect c from t) d", "1033@2 102@3")]
+    [DataRow("select * from (select 1 a order by 1 union all select 2 union all select 3) d", "1033@1 102@1")]
+    [DataRow("select * from (select 1 a order by 1 union all select 2 offset 0 rows) d", "1033@1 102@1")]
+    [DataRow("select * from (select 1 a order by 1 union all select 2 from t) d, (select 3 b) e", "1033@1 102@1 102@1")]
+    [DataRow("with x as (select c from t order by c union all select 2) select * from x", "1033@1")]
+    [DataRow("with x as (select c from t order by c union all select c from t) select * from x", "1033@1 102@1")]
+    [DataRow("select 1 where 1 in (select c from t order by c union select c from t)", "1033@1 102@1")]
+    [DataRow("select * from (select c from t order by c intersect select c from t) d", "1033@1 102@1")]
+    [DataRow("select * from (select top 1 c from t order by c union all select c from t order by c) d", "1033@1")]
+    [DataRow("(select c from t order by c offset 0 rows fetch next 1 rows only) union all select 2", "156@1 153@1")]
+    [DataRow("(select c from t order by c) union all select 2", "156@1")]
     public void SyntaxErrors_ReportThoseRecoveryReaches(string batch, string expected)
     {
         var sim = new Simulation();

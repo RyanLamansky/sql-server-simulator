@@ -571,9 +571,24 @@ partial class Simulation
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+        {
             context.MoveNextRequired();
+        }
         else if (directionToken is not null)
-            throw SimulatedSqlException.SyntaxErrorNear(directionToken); // a direction takes FROM (probed 2026-10-02)
+        {
+            // A direction takes FROM (probed 2026-10-02): a cursor name after
+            // a plain one is Msg 102 at the direction, a count or a variable
+            // Msg 153 naming it, and a string — or anything after ABSOLUTE or
+            // RELATIVE and its count — Msg 102 at that token (probed
+            // 2026-10-17 against SQL Server 2025).
+            throw context.Token switch
+            {
+                _ when direction is FetchDirection.Absolute or FetchDirection.Relative => SimulatedSqlException.SyntaxErrorNear(context),
+                Numeric or AtPrefixedString => SimulatedSqlException.FetchDirectionWithoutFrom(directionToken.Value),
+                Literal => SimulatedSqlException.SyntaxErrorNear(context),
+                _ => SimulatedSqlException.SyntaxErrorNear(directionToken),
+            };
+        }
 
         var reference = ReadCursorReference(context);
 
