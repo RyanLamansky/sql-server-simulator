@@ -217,6 +217,9 @@ partial class BuiltInResources
             ["sp_tablecollations"] = [new("@object", 231, 8000, 0, 0)],
             ["sp_tablecollations_90"] = [new("@object", 231, 8000, 0, 0)],
             ["sp_foreignkeys"] = [new("@table_server", 256, 256, 0, 0), new("@pktab_name", 256, 256, 0, 0), new("@pktab_schema", 256, 256, 0, 0), new("@pktab_catalog", 256, 256, 0, 0), new("@fktab_name", 256, 256, 0, 0), new("@fktab_schema", 256, 256, 0, 0), new("@fktab_catalog", 256, 256, 0, 0)],
+            ["sp_table_privileges_ex"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0), new("@fUsePattern", 104, 1, 1, 0)],
+            ["sp_column_privileges_ex"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0), new("@column_name", 256, 256, 0, 0)],
+            ["sp_indexes"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0), new("@index_name", 256, 256, 0, 0), new("@is_unique", 104, 1, 1, 0)],
             ["sp_primarykeys"] = [new("@table_server", 256, 256, 0, 0), new("@table_name", 256, 256, 0, 0), new("@table_schema", 256, 256, 0, 0), new("@table_catalog", 256, 256, 0, 0)],
         }.ToFrozenDictionary(StringComparer.Ordinal);
 

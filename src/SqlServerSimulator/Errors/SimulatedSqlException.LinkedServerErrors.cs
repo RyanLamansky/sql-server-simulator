@@ -366,6 +366,15 @@ partial class SimulatedSqlException
         new($"Cannot process the object \"{quotedName}\". The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" indicates that either the object has no columns or the current user does not have permissions on that object.", 7357, 16, 2);
 
     /// <summary>
+    /// Msg 7346 as <c>sp_indexes</c> meets it: SQL Server's provider can't hand
+    /// back an INDEXES rowset row, naming a NULL linked server, after its Msg
+    /// 7412. It acts as under <c>XACT_ABORT</c> (probed 2026-10-17 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexesRowsetUnavailable(LinkedServer server) =>
+        new($"Cannot get the data of the row from the OLE DB provider \"{server.ProviderInMessages}\" for linked server \"(null)\". ", 7346, 16, 2) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
     /// Msg 7346: a row a four-part name reads carries a value the provider
     /// exposes but can't convert — a non-NULL <c>vector</c>, which it lists as
     /// <c>varbinary</c>. Raised as the row is reached, after the rows before

@@ -80,40 +80,13 @@ partial class Simulation
             usePattern ? Matches(pattern, value) : written is null || collation.Equals(written, value);
 
         var qualifierValue = SqlValue.FromSystemName(database.Name);
-        List<(string Owner, string Table, string Privilege, string Grantee, SqlValue[] Row)> rows = [];
-        foreach (var (schemaName, ownerName, objectId, tableName) in PrivilegeObjects(database))
-        {
-            if (!NameMatches(ownerPattern, owner, schemaName) || !NameMatches(namePattern, name, tableName))
-                continue;
-            var ownerValue = SqlValue.FromSystemName(schemaName);
-            var tableValue = SqlValue.FromSystemName(tableName);
-            void Add(string grantor, string grantee, string privilege, bool grantable) =>
-                rows.Add((schemaName, tableName, privilege, grantee, [qualifierValue, ownerValue, tableValue, SqlValue.FromSystemName(grantor), SqlValue.FromSystemName(grantee),
-                    SqlValue.FromVarchar(CatalogVarchar32, privilege), SqlValue.FromVarchar(CatalogVarchar3, grantable ? "YES" : "NO")]));
-            foreach (var privilege in OwnerTablePrivileges)
-                Add(Database.DefaultSchemaName, ownerName, privilege, true);
-            var seen = new HashSet<(string, string, string)>();
-            foreach (var (grantor, grantee, privilege, grantable, _) in ObjectGrants(database, objectId))
+        var rows = TablePrivilegeRows(database, (schemaName, tableName) => NameMatches(ownerPattern, owner, schemaName) && NameMatches(namePattern, name, tableName))
+            .ConvertAll(row => new SqlValue[]
             {
-                if (privilege is not null && seen.Add((grantor, grantee, privilege)))
-                    Add(grantor, grantee, privilege, grantable);
-            }
-        }
-
-        // Names sort under the catalog's collation, which puts '_' ahead of
-        // the letters.
-        rows.Sort((a, b) =>
-        {
-            var byOwner = collation.Compare(a.Owner, b.Owner);
-            if (byOwner != 0)
-                return byOwner;
-            var byTable = collation.Compare(a.Table, b.Table);
-            if (byTable != 0)
-                return byTable;
-            var byPrivilege = string.CompareOrdinal(a.Privilege, b.Privilege);
-            return byPrivilege != 0 ? byPrivilege : collation.Compare(a.Grantee, b.Grantee);
-        });
-        yield return new SimulatedSqlResultSet(SpTablePrivilegesSchema, SpTablePrivilegesColumnNames, [.. rows.Select(r => r.Row)]);
+                qualifierValue, SqlValue.FromSystemName(row.Schema), SqlValue.FromSystemName(row.Table), SqlValue.FromSystemName(row.Grantor),
+                SqlValue.FromSystemName(row.Grantee), SqlValue.FromVarchar(CatalogVarchar32, row.Privilege), SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
+            });
+        yield return new SimulatedSqlResultSet(SpTablePrivilegesSchema, SpTablePrivilegesColumnNames, rows);
     }
 
     /// <summary>
@@ -163,15 +136,83 @@ partial class Simulation
             throw SimulatedSqlException.HelpObjectNotInCurrentDatabase();
         var columnPattern = CompileCatalogPattern(column ?? "%");
         var qualifierValue = SqlValue.FromSystemName(database.Name);
+        var rows = ColumnPrivilegeRows(
+            database,
+            (schemaName, tableName) => (owner is null ? collation.Equals(schemaName, Database.DefaultSchemaName) : collation.Equals(owner, schemaName))
+                && name is not null && collation.Equals(name, tableName),
+            columnPattern)
+            .ConvertAll(row => new SqlValue[]
+            {
+                qualifierValue, SqlValue.FromSystemName(row.Schema), SqlValue.FromSystemName(row.Table), SqlValue.FromSystemName(row.Column),
+                SqlValue.FromSystemName(row.Grantor), SqlValue.FromSystemName(row.Grantee), SqlValue.FromVarchar(CatalogVarchar32, row.Privilege),
+                SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
+            });
+        yield return new SimulatedSqlResultSet(SpColumnPrivilegesSchema, SpColumnPrivilegesColumnNames, rows);
+    }
 
-        List<(string Column, string Privilege, string Grantee, SqlValue[] Row)> rows = [];
+    /// <summary>One row <c>sp_table_privileges</c> or <c>sp_column_privileges</c> (and their linked-server pair) reports; <see cref="Column"/> is empty for a table's.</summary>
+    private readonly struct PrivilegeRow(string schema, string table, string column, string grantor, string grantee, string privilege, bool grantable)
+    {
+        public readonly string Schema = schema;
+        public readonly string Table = table;
+        public readonly string Column = column;
+        public readonly string Grantor = grantor;
+        public readonly string Grantee = grantee;
+        public readonly string Privilege = privilege;
+        public readonly bool Grantable = grantable;
+    }
+
+    /// <summary>
+    /// The table privileges of every table and view <paramref name="include"/>
+    /// takes (by schema and name): the owner's five granted by <c>dbo</c>, then
+    /// every standing GRANT on the object or one of its columns, grantable when
+    /// given WITH GRANT OPTION; sorted by schema, table, privilege and grantee
+    /// under the database's collation, which puts '_' ahead of the letters.
+    /// </summary>
+    private static List<PrivilegeRow> TablePrivilegeRows(Database database, Func<string, string, bool> include)
+    {
+        var rows = new List<PrivilegeRow>();
         foreach (var (schemaName, ownerName, objectId, tableName) in PrivilegeObjects(database))
         {
-            var schemaMatches = owner is null ? collation.Equals(schemaName, Database.DefaultSchemaName) : collation.Equals(owner, schemaName);
-            if (!schemaMatches || name is null || !collation.Equals(name, tableName))
+            if (!include(schemaName, tableName))
                 continue;
-            var ownerValue = SqlValue.FromSystemName(schemaName);
-            var tableValue = SqlValue.FromSystemName(name);
+            foreach (var privilege in OwnerTablePrivileges)
+                rows.Add(new(schemaName, tableName, "", Database.DefaultSchemaName, ownerName, privilege, true));
+            var seen = new HashSet<(string, string, string)>();
+            foreach (var (grantor, grantee, privilege, grantable, _) in ObjectGrants(database, objectId))
+            {
+                if (privilege is not null && seen.Add((grantor, grantee, privilege)))
+                    rows.Add(new(schemaName, tableName, "", grantor, grantee, privilege, grantable));
+            }
+        }
+        var collation = database.Collation;
+        rows.Sort((a, b) =>
+        {
+            var order = collation.Compare(a.Schema, b.Schema);
+            if (order == 0)
+                order = collation.Compare(a.Table, b.Table);
+            if (order == 0)
+                order = string.CompareOrdinal(a.Privilege, b.Privilege);
+            return order != 0 ? order : collation.Compare(a.Grantee, b.Grantee);
+        });
+        return rows;
+    }
+
+    /// <summary>
+    /// The column privileges of every table and view <paramref name="include"/>
+    /// takes, for each column <paramref name="columnPattern"/> matches: the
+    /// owner's INSERT / REFERENCES / SELECT / UPDATE granted by <c>dbo</c>, then
+    /// each standing GRANT on the object or that column, a permission other
+    /// than the four DML ones reading as REFERENCES; sorted by schema, table,
+    /// column, privilege and grantee.
+    /// </summary>
+    private static List<PrivilegeRow> ColumnPrivilegeRows(Database database, Func<string, string, bool> include, LikeMatcher? columnPattern)
+    {
+        var rows = new List<PrivilegeRow>();
+        foreach (var (schemaName, ownerName, objectId, tableName) in PrivilegeObjects(database))
+        {
+            if (!include(schemaName, tableName))
+                continue;
             var grants = ObjectGrants(database, objectId).ToList();
             var columns = Parser.Expressions.ColumnProperty.ColumnsOf(database, objectId) ?? [];
             for (var i = 0; i < columns.Length; i++)
@@ -180,15 +221,11 @@ partial class Simulation
                 if (!Matches(columnPattern, columnName))
                     continue;
                 var columnId = columns[i].ColumnId == 0 ? i + 1 : columns[i].ColumnId;
-                var columnValue = SqlValue.FromSystemName(columnName);
                 var seen = new HashSet<(string, string, string)>();
                 void Add(string grantor, string grantee, string privilege, bool grantable)
                 {
                     if (seen.Add((grantor, grantee, privilege)))
-                    {
-                        rows.Add((columnName, privilege, grantee, [qualifierValue, ownerValue, tableValue, columnValue, SqlValue.FromSystemName(grantor), SqlValue.FromSystemName(grantee),
-                            SqlValue.FromVarchar(CatalogVarchar32, privilege), SqlValue.FromVarchar(CatalogVarchar3, grantable ? "YES" : "NO")]));
-                    }
+                        rows.Add(new(schemaName, tableName, columnName, grantor, grantee, privilege, grantable));
                 }
                 foreach (var privilege in OwnerColumnPrivileges)
                     Add(Database.DefaultSchemaName, ownerName, privilege, true);
@@ -199,16 +236,19 @@ partial class Simulation
                 }
             }
         }
-
+        var collation = database.Collation;
         rows.Sort((a, b) =>
         {
-            var byColumn = collation.Compare(a.Column, b.Column);
-            if (byColumn != 0)
-                return byColumn;
-            var byPrivilege = string.CompareOrdinal(a.Privilege, b.Privilege);
-            return byPrivilege != 0 ? byPrivilege : collation.Compare(a.Grantee, b.Grantee);
+            var order = collation.Compare(a.Schema, b.Schema);
+            if (order == 0)
+                order = collation.Compare(a.Table, b.Table);
+            if (order == 0)
+                order = collation.Compare(a.Column, b.Column);
+            if (order == 0)
+                order = string.CompareOrdinal(a.Privilege, b.Privilege);
+            return order != 0 ? order : collation.Compare(a.Grantee, b.Grantee);
         });
-        yield return new SimulatedSqlResultSet(SpColumnPrivilegesSchema, SpColumnPrivilegesColumnNames, [.. rows.Select(r => r.Row)]);
+        return rows;
     }
 
     /// <summary>

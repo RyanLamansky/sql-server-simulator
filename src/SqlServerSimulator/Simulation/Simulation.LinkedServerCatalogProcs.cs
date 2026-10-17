@@ -5,8 +5,10 @@ namespace SqlServerSimulator;
 
 // The catalog procedures that describe linked servers rather than reach
 // through one: sp_linkedservers, sp_testlinkedserver and sp_catalogs, and the
-// provider's schema rowsets sp_tables_ex, sp_columns_ex, sp_primarykeys and
-// sp_foreignkeys (probed 2026-10-06 and 2026-10-16 against SQL Server 2025).
+// provider's schema rowsets sp_tables_ex, sp_columns_ex, sp_primarykeys,
+// sp_foreignkeys, sp_table_privileges_ex, sp_column_privileges_ex and
+// sp_indexes (probed 2026-10-06, 2026-10-16 and 2026-10-17 against SQL Server
+// 2025).
 partial class Simulation
 {
     private static readonly SystemProcedureParameter[] CatalogsParameters =
@@ -52,6 +54,178 @@ partial class Simulation
         new("fktab_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
         new("fktab_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
     ];
+
+    private static readonly SystemProcedureParameter[] TablePrivilegesExParameters =
+    [
+        new("table_server", SqlType.NVarchar, 128),
+        new("table_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("fUsePattern", SqlType.Bit, 0, SqlValue.FromBoolean(true)),
+    ];
+
+    private static readonly SystemProcedureParameter[] ColumnPrivilegesExParameters =
+    [
+        new("table_server", SqlType.NVarchar, 128),
+        new("table_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("column_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+    ];
+
+    private static readonly SystemProcedureParameter[] IndexesParameters =
+    [
+        new("table_server", SqlType.NVarchar, 128),
+        new("table_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_schema", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("table_catalog", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("index_name", SqlType.NVarchar, 128, SqlValue.Null(SqlType.NVarchar)),
+        new("is_unique", SqlType.Bit, 0, SqlValue.Null(SqlType.Bit)),
+    ];
+
+    /// <summary>
+    /// <c>sp_table_privileges_ex</c> lists the table privileges of a linked
+    /// server's tables and views in one of its databases — its catalog views
+    /// beside the user's objects — as that server's own
+    /// <c>sp_table_privileges</c> reports them, under the provider's
+    /// <c>TABLE_CAT</c> / <c>TABLE_SCHEM</c> names and with a
+    /// <c>nvarchar(128)</c> <c>PRIVILEGE</c>. The name and schema match as
+    /// <c>LIKE</c> patterns unless <c>@fUsePattern</c> is 0, a database the
+    /// server lacks lists nothing, and an unknown server is Msg 7202 after an
+    /// empty listing, returning -1.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpTablePrivilegesEx(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var values = BindSystemProcedureArguments("sp_table_privileges_ex", calledAs, arguments, TablePrivilegesExParameters);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        SqlType[] schema = [name, name, name, name, name, name, CatalogVarchar3];
+        string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "GRANTOR", "GRANTEE", "PRIVILEGE", "IS_GRANTABLE"];
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
+        {
+            yield return new SimulatedSqlResultSet(schema, names, []);
+            throw MissingSchemaRowsetServer(calledAs, values[0], line: 34, returnCode: -1);
+        }
+        var rows = new List<SqlValue[]>();
+        if (SchemaRowsetDatabase(server, values[3]) is { } database)
+        {
+            var usePattern = values[4].IsNull || values[4].CoerceTo(SqlType.Bit).AsBoolean;
+            var tableMatches = SchemaRowsetNameMatch(database, values[1], usePattern);
+            var schemaMatches = SchemaRowsetNameMatch(database, values[2], usePattern);
+            var catalog = SqlValue.FromString(name, database.Name);
+            foreach (var row in TablePrivilegeRows(database, (schemaName, tableName) => schemaMatches(schemaName) && tableMatches(tableName)))
+            {
+                rows.Add([
+                    catalog, SqlValue.FromString(name, row.Schema), SqlValue.FromString(name, row.Table), SqlValue.FromString(name, row.Grantor),
+                    SqlValue.FromString(name, row.Grantee), SqlValue.FromString(name, row.Privilege), SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
+                ]);
+            }
+        }
+        yield return new SimulatedSqlResultSet(schema, names, rows);
+    }
+
+    /// <summary>
+    /// <c>sp_column_privileges_ex</c> lists the column privileges of a linked
+    /// server's tables and views as that server's <c>sp_column_privileges</c>
+    /// reports them, under the provider's names: the table and schema are exact
+    /// names (every one when NULL) and the column a <c>LIKE</c> pattern. A
+    /// database the server lacks lists nothing, and an unknown server is Msg
+    /// 7202 after an empty listing, returning -1.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpColumnPrivilegesEx(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var values = BindSystemProcedureArguments("sp_column_privileges_ex", calledAs, arguments, ColumnPrivilegesExParameters);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        SqlType[] schema = [name, name, name, name, name, name, name, CatalogVarchar3];
+        string[] names = ["TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "COLUMN_NAME", "GRANTOR", "GRANTEE", "PRIVILEGE", "IS_GRANTABLE"];
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
+        {
+            yield return new SimulatedSqlResultSet(schema, names, []);
+            throw MissingSchemaRowsetServer(calledAs, values[0], line: 11, returnCode: -1);
+        }
+        var rows = new List<SqlValue[]>();
+        if (SchemaRowsetDatabase(server, values[3]) is { } database)
+        {
+            var tableMatches = SchemaRowsetNameMatch(database, values[1], usePattern: false);
+            var schemaMatches = SchemaRowsetNameMatch(database, values[2], usePattern: false);
+            var catalog = SqlValue.FromString(name, database.Name);
+            foreach (var row in ColumnPrivilegeRows(database, (schemaName, tableName) => schemaMatches(schemaName) && tableMatches(tableName), CompileCatalogPattern(values[4].IsNull ? "%" : values[4].AsString)))
+            {
+                rows.Add([
+                    catalog, SqlValue.FromString(name, row.Schema), SqlValue.FromString(name, row.Table), SqlValue.FromString(name, row.Column),
+                    SqlValue.FromString(name, row.Grantor), SqlValue.FromString(name, row.Grantee), SqlValue.FromString(name, row.Privilege),
+                    SqlValue.FromVarchar(CatalogVarchar3, row.Grantable ? "YES" : "NO"),
+                ]);
+            }
+        }
+        yield return new SimulatedSqlResultSet(schema, names, rows);
+    }
+
+    /// <summary>
+    /// <c>sp_indexes</c> asks a linked server's provider for its INDEXES rowset,
+    /// which SQL Server's own provider can't hand back: whenever the rowset
+    /// would hold a row — an index of a table or view the exact, case-blind
+    /// name, schema and index arguments take (a unique one under
+    /// <c>@is_unique = 1</c>), or a system base table's, which every database
+    /// carries in <c>sys</c> — the procedure sends its empty listing, the
+    /// provider's Msg 7412 (<c>Binding information is invalid.</c>) and Msg
+    /// 7346, which ends the batch and rolls the transaction back as under
+    /// <c>XACT_ABORT</c>. With nothing to report the listing is empty. An
+    /// unknown server is Msg 7202 after an empty listing, returning -1.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpIndexes(BatchContext batch, string calledAs)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var values = BindSystemProcedureArguments("sp_indexes", calledAs, arguments, IndexesParameters);
+        var name = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        SqlType[] schema =
+        [
+            name, name, name, SqlType.SmallInt, name, name, SqlType.Int32, SqlType.Int32, name,
+            VarcharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit), SqlType.Int32, SqlType.Int32,
+            NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit),
+        ];
+        string[] names =
+        [
+            "TABLE_CAT", "TABLE_SCHEM", "TABLE_NAME", "NON_UNIQUE", "INDEX_QUALIFIER", "INDEX_NAME", "TYPE", "ORDINAL_POSITION", "COLUMN_NAME",
+            "ASC_OR_DESC", "CARDINALITY", "PAGES", "FILTER_CONDITION",
+        ];
+        var listing = new SimulatedSqlResultSet(schema, names, [])
+        {
+            ColumnNullability = [true, true, true, true, true, true, false, true, true, true, true, true, true],
+        };
+        if (SchemaRowsetServer(batch, values[0]) is not { } server)
+        {
+            yield return listing;
+            throw MissingSchemaRowsetServer(calledAs, values[0], line: 12, returnCode: -1);
+        }
+        yield return listing;
+        var uniqueOnly = !values[5].IsNull && values[5].CoerceTo(SqlType.Bit).AsBoolean;
+        var query = $"""
+            SELECT TOP (1) 1 FROM sys.indexes AS i JOIN sys.objects AS o ON o.object_id = i.object_id JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+            WHERE i.index_id > 0 AND o.type IN ('U', 'V'){(uniqueOnly ? " AND i.is_unique = 1" : "")}{SchemaRowsetFilter("o.name", values[1], usePattern: false)}{SchemaRowsetFilter("s.name", values[2], usePattern: false)}{SchemaRowsetFilter("i.name", values[4], usePattern: false)}
+            UNION ALL
+            SELECT TOP (1) 1 FROM sys.all_objects AS o
+            WHERE o.type = 'S' AND o.name <> N'sysfiles1'{(values[4].IsNull ? "" : " AND 1 = 0")}{SchemaRowsetFilter("o.name", values[1], usePattern: false)}{SchemaRowsetFilter("SCHEMA_NAME(o.schema_id)", values[2], usePattern: false)}
+            """;
+        if (SchemaRowsetQuery(server, values[3], query) is { } found && found.RowValues.Any())
+        {
+            var provider = batch.InfoMessage(@class: 0, state: 2, number: 7412, $"OLE DB provider \"{server.ProviderInMessages}\" for linked server \"(null)\" returned message \"Binding information is invalid.\".");
+            provider.LineNumber = 12;
+            provider.Procedure = calledAs;
+            yield return new SimulatedInfoOutcome(provider);
+            throw AtProcedureLine(SimulatedSqlException.IndexesRowsetUnavailable(server), calledAs, 12);
+        }
+    }
 
     /// <summary>
     /// <c>sp_primarykeys</c> lists the primary-key columns of a linked
@@ -360,9 +534,9 @@ partial class Simulation
         batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName.IsNull ? "" : serverName.AsString, out var server) ? server : null;
 
     /// <summary>A schema-rowset procedure's Msg 7202, at its own line, leaving the calling batch running.</summary>
-    private static SimulatedSqlException MissingSchemaRowsetServer(string calledAs, SqlValue serverName, int line)
+    private static SimulatedSqlException MissingSchemaRowsetServer(string calledAs, SqlValue serverName, int line, int returnCode = 1)
     {
-        var missing = AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerNotFound(serverName.IsNull ? "" : serverName.AsString), line);
+        var missing = AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerNotFound(serverName.IsNull ? "" : serverName.AsString), line, returnCode);
         missing.EndedCalledBatch = false;
         return missing;
     }
@@ -378,6 +552,24 @@ partial class Simulation
         return server.Target.Databases.ContainsKey(database)
             ? RemoteWrite.RunRemoteQuery(server, query, database, browse: false)
             : null;
+    }
+
+    /// <summary>The database of a linked server a schema rowset reads — the one its sessions start in when <paramref name="catalog"/> is NULL — or null for one it lacks.</summary>
+    private static Database? SchemaRowsetDatabase(LinkedServer server, SqlValue catalog) =>
+        server.Target.Databases.TryGetValue(catalog.IsNull ? server.SessionDatabaseName : catalog.AsString, out var database) ? database : null;
+
+    /// <summary>A schema-rowset name restriction: everything for NULL, else a <c>LIKE</c> pattern or an exact name under the database's collation.</summary>
+    private static Func<string, bool> SchemaRowsetNameMatch(Database database, SqlValue restriction, bool usePattern)
+    {
+        if (restriction.IsNull)
+            return static _ => true;
+        var written = restriction.AsString;
+        if (usePattern)
+        {
+            var pattern = CompileCatalogPattern(written);
+            return value => Matches(pattern, value);
+        }
+        return value => database.Collation.Equals(written, value);
     }
 
     /// <summary>A catalog query's condition on <paramref name="column"/>, empty when <paramref name="value"/> is NULL.</summary>

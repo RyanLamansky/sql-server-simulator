@@ -333,4 +333,109 @@ public sealed class LinkedServerCatalogTests
         AreEqual(41, sim.AssertSqlError("exec sp_tables_ex 'nosuch'", 7202).LineNumber);
         AreEqual(177, sim.AssertSqlError("exec sp_columns_ex 'nosuch'", 7202).LineNumber);
     }
+
+    private static Simulation PrivilegesLoopback()
+    {
+        var sim = Loopback("create database zzpriv");
+        sim.ExecuteBatches(
+            "use zzpriv",
+            "create schema s2",
+            """
+            create table dbo.t (id int primary key, a int, b nvarchar(10));
+            create index ix_a on dbo.t (a);
+            create table dbo.h (x int);
+            create user zzu without login;
+            grant select on dbo.t to zzu;
+            grant update (a) on dbo.t to zzu;
+            deny insert on dbo.t to zzu;
+            create table s2.t2 (k int not null, j int, constraint pk2 primary key nonclustered (k));
+            create clustered index cx on s2.t2 (k desc, j);
+            grant select on s2.t2 to zzu with grant option;
+            grant insert on s2.t2 to public;
+            grant references on s2.t2 to zzu;
+            grant control on s2.t2 to zzu;
+            grant update (j) on s2.t2 to zzu with grant option;
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// <c>sp_table_privileges_ex</c> and <c>sp_column_privileges_ex</c> list a
+    /// linked server's privileges as its own <c>sp_table_privileges</c> and
+    /// <c>sp_column_privileges</c> do — the owner's implicit set, then each
+    /// standing GRANT, a DENY or CONTROL never listing — the first by
+    /// <c>LIKE</c> patterns unless <c>@fUsePattern</c> is 0, the second by
+    /// exact table and schema and a column pattern (probed 2026-10-17 against
+    /// SQL Server 2025 through a loopback).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_table_privileges_ex 'SELF', 't2', 's2', 'zzpriv'",
+        "zzpriv|s2|t2|dbo|dbo|DELETE|YES~zzpriv|s2|t2|dbo|dbo|INSERT|YES~zzpriv|s2|t2|dbo|public|INSERT|NO~zzpriv|s2|t2|dbo|dbo|REFERENCES|YES~zzpriv|s2|t2|dbo|zzu|REFERENCES|NO~zzpriv|s2|t2|dbo|dbo|SELECT|YES~zzpriv|s2|t2|dbo|zzu|SELECT|YES~zzpriv|s2|t2|dbo|dbo|UPDATE|YES~zzpriv|s2|t2|dbo|zzu|UPDATE|YES")]
+    [DataRow("exec sp_table_privileges_ex 'SELF', 'T_', 'S2', 'zzpriv', 1", "zzpriv|s2|t2|dbo|dbo|DELETE|YES~zzpriv|s2|t2|dbo|dbo|INSERT|YES~zzpriv|s2|t2|dbo|public|INSERT|NO~zzpriv|s2|t2|dbo|dbo|REFERENCES|YES~zzpriv|s2|t2|dbo|zzu|REFERENCES|NO~zzpriv|s2|t2|dbo|dbo|SELECT|YES~zzpriv|s2|t2|dbo|zzu|SELECT|YES~zzpriv|s2|t2|dbo|dbo|UPDATE|YES~zzpriv|s2|t2|dbo|zzu|UPDATE|YES")]
+    [DataRow("exec sp_table_privileges_ex 'SELF', 't%', null, 'zzpriv', 0", "")]
+    [DataRow("exec sp_table_privileges_ex 'SELF', 't', null, 'zzpriv'", "zzpriv|dbo|t|dbo|dbo|DELETE|YES~zzpriv|dbo|t|dbo|dbo|INSERT|YES~zzpriv|dbo|t|dbo|dbo|REFERENCES|YES~zzpriv|dbo|t|dbo|dbo|SELECT|YES~zzpriv|dbo|t|dbo|zzu|SELECT|NO~zzpriv|dbo|t|dbo|dbo|UPDATE|YES~zzpriv|dbo|t|dbo|zzu|UPDATE|NO")]
+    [DataRow("exec sp_table_privileges_ex @table_server = 'SELF', @table_name = 'h', @table_catalog = 'zzpriv', @fUsePattern = null", "zzpriv|dbo|h|dbo|dbo|DELETE|YES~zzpriv|dbo|h|dbo|dbo|INSERT|YES~zzpriv|dbo|h|dbo|dbo|REFERENCES|YES~zzpriv|dbo|h|dbo|dbo|SELECT|YES~zzpriv|dbo|h|dbo|dbo|UPDATE|YES")]
+    [DataRow("exec sp_table_privileges_ex 'SELF', 't', 'dbo', 'nosuchdb'", "")]
+    [DataRow("exec sp_column_privileges_ex 'SELF', 't%', 's2', 'zzpriv'", "")]
+    [DataRow("exec sp_column_privileges_ex 'SELF', 't', null, 'zzpriv', 'a'", "zzpriv|dbo|t|a|dbo|dbo|INSERT|YES~zzpriv|dbo|t|a|dbo|dbo|REFERENCES|YES~zzpriv|dbo|t|a|dbo|dbo|SELECT|YES~zzpriv|dbo|t|a|dbo|zzu|SELECT|NO~zzpriv|dbo|t|a|dbo|dbo|UPDATE|YES~zzpriv|dbo|t|a|dbo|zzu|UPDATE|NO")]
+    [DataRow("exec sp_column_privileges_ex 'SELF', null, 's2', 'zzpriv', 'k'", "zzpriv|s2|t2|k|dbo|dbo|INSERT|YES~zzpriv|s2|t2|k|dbo|public|INSERT|NO~zzpriv|s2|t2|k|dbo|dbo|REFERENCES|YES~zzpriv|s2|t2|k|dbo|zzu|REFERENCES|NO~zzpriv|s2|t2|k|dbo|dbo|SELECT|YES~zzpriv|s2|t2|k|dbo|zzu|SELECT|YES~zzpriv|s2|t2|k|dbo|dbo|UPDATE|YES")]
+    [DataRow("exec sp_column_privileges_ex 'SELF', 't2', 'S2', 'zzpriv', 'J%'", "zzpriv|s2|t2|j|dbo|dbo|INSERT|YES~zzpriv|s2|t2|j|dbo|public|INSERT|NO~zzpriv|s2|t2|j|dbo|dbo|REFERENCES|YES~zzpriv|s2|t2|j|dbo|zzu|REFERENCES|NO~zzpriv|s2|t2|j|dbo|dbo|SELECT|YES~zzpriv|s2|t2|j|dbo|zzu|SELECT|YES~zzpriv|s2|t2|j|dbo|dbo|UPDATE|YES~zzpriv|s2|t2|j|dbo|zzu|UPDATE|YES")]
+    public void PrivilegeRowsets_ListTheServersPrivileges(string sql, string expected) =>
+        AreEqual(expected, Rows(PrivilegesLoopback(), sql));
+
+    [TestMethod]
+    public void PrivilegeRowsets_ListTheCatalogViewsToo()
+    {
+        var sim = PrivilegesLoopback();
+        AreEqual("zzpriv|sys|tables|dbo|public|SELECT|NO~zzpriv|sys|tables|dbo|sys|SELECT|YES", Rows(sim, "exec sp_table_privileges_ex 'SELF', 'tables', 'sys', 'zzpriv'")
+            .Split('~').Where(static row => row.Contains("|SELECT|", StringComparison.Ordinal)).Aggregate(static (a, b) => a + "~" + b));
+        using var reader = sim.ExecuteReader("exec sp_column_privileges_ex 'SELF', 'h', null, 'zzpriv'");
+        AreEqual("TABLE_CAT|TABLE_SCHEM|TABLE_NAME|COLUMN_NAME|GRANTOR|GRANTEE|PRIVILEGE|IS_GRANTABLE", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName)));
+        AreEqual("nvarchar|varchar", reader.GetDataTypeName(6) + "|" + reader.GetDataTypeName(7));
+    }
+
+    /// <summary>
+    /// <c>sp_indexes</c> can't read SQL Server's INDEXES rowset through its own
+    /// provider: any row the restrictions take — a system base table's
+    /// included — is Msg 7412 then Msg 7346, which ends the batch; with none
+    /// the listing is empty (probed 2026-10-17 against SQL Server 2025 through
+    /// a loopback).
+    /// </summary>
+    [TestMethod]
+    public void SpIndexes_RefusesAnyRowItWouldList()
+    {
+        var sim = PrivilegesLoopback();
+        AreEqual("", Rows(sim, "exec sp_indexes 'SELF', 'h', 'dbo', 'zzpriv'"));
+        AreEqual("", Rows(sim, "exec sp_indexes 'SELF', 't2', 's2', 'zzpriv', 'nosuch'"));
+        AreEqual("", Rows(sim, "exec sp_indexes 'SELF', 't', 'dbo', 'zzpriv', 'ix_a', 1"));
+        AreEqual("", Rows(sim, "exec sp_indexes 'SELF', null, 'dbo', 'nosuchdb'"));
+        using var connection = sim.CreateOpenConnection();
+        var messages = Messages((SimulatedDbConnection)connection);
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_indexes 'SELF', 'T2', 'S2', 'zzpriv', 'CX'; select 1";
+        var refusal = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual("7346|16|2|sp_indexes|12", $"{refusal.Number}|{refusal.Class}|{refusal.State}|{refusal.Errors[0].Procedure}|{refusal.LineNumber}");
+        AreEqual("Cannot get the data of the row from the OLE DB provider \"MSOLEDBSQL19\" for linked server \"(null)\". ", refusal.Errors[0].Message);
+        IsTrue(messages.Contains(7412) || refusal.Errors.Cast<SimulatedError>().Any(static error => error.Number == 7412));
+        _ = sim.AssertSqlError("use zzpriv; exec sp_indexes 'SELF', null, 'sys'", 7346);
+        // Caught, it dooms the transaction.
+        using var doomed = sim.ExecuteBatchesReader("use zzpriv", "declare @x int; begin tran; begin try exec sp_indexes 'SELF', 't', 'dbo', 'zzpriv' end try begin catch end catch; set @x = xact_state(); rollback; select @x");
+        IsTrue(doomed.NextResult() && doomed.Read());
+        AreEqual(-1, doomed.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void PrivilegeAndIndexRowsets_RefuseAServerTheInstanceDoesntHave()
+    {
+        var sim = Loopback();
+        foreach (var (procedure, line) in new[] { ("sp_table_privileges_ex", 34), ("sp_column_privileges_ex", 11), ("sp_indexes", 12) })
+        {
+            var missing = sim.AssertSqlError($"exec {procedure} 'nope'", 7202).Errors[0];
+            AreEqual((line, procedure, (byte)11), (missing.LineNumber, missing.Procedure, missing.Class));
+            // Uncaught, the call returns -1 and the batch goes on.
+            using var connection = sim.CreateOpenConnection();
+            _ = Throws<SimulatedSqlException>(() => connection.CreateCommand($"create table #rc (r int); declare @r int; exec @r = {procedure} 'nope'; insert #rc values (@r)").ExecuteNonQuery());
+            AreEqual(-1, connection.CreateCommand("select r from #rc").ExecuteScalar());
+        }
+    }
 }
