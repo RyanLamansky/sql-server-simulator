@@ -186,7 +186,13 @@ partial class Simulation
         /// transaction ended, Msg 3991 or 3992 when it returned so.
         /// </summary>
         /// <param name="report">The report of what the routine threw, or <see langword="null"/> when it returned.</param>
-        public SimulatedSqlException? Leave(string? report)
+        /// <param name="resultsRefused">
+        /// Whether the server refused a result set the routine sent
+        /// (<see cref="ClrProcedurePipe.ResultsRefused"/>), which ends the
+        /// context transaction whatever the routine held on entry — the
+        /// firing statement's own included.
+        /// </param>
+        public SimulatedSqlException? Leave(string? report, bool resultsRefused = false)
         {
             var connection = this.connection;
             connection.ClrContext = this.enclosing;
@@ -197,6 +203,16 @@ partial class Simulation
                 connection.RemoveTempTable(this.tempTables[i]);
 
             var current = connection.CurrentTransaction;
+            if (resultsRefused)
+            {
+                if (connection.OpenTryFrames > 0 && current is not null)
+                    current.Doomed = true;
+                else
+                    current?.EndRollback();
+                return report is not null ? SimulatedSqlException.ClrRoutineThrewEndingTransaction(this.routineName, report)
+                    : SimulatedSqlException.ClrContextTransactionEnded(this.routineName);
+            }
+
             if (!this.HasEntryTransaction)
             {
                 // A transaction the routine began and left open goes quietly.

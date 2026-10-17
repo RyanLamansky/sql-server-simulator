@@ -84,7 +84,7 @@ partial class Simulation
         }
         finally
         {
-            failure = contextConnection?.Leave(report);
+            failure = contextConnection?.Leave(report, pipe.ResultsRefused);
         }
 
         pipe.Settle(completed: report is null);

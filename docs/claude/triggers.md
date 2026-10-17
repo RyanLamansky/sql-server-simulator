@@ -214,7 +214,7 @@ It is a body error like any other: what the body sent before it goes out first, 
 DML triggers (`AFTER` and `INSTEAD OF`, on a table or a view), database DDL triggers, whose `CREATE` rolls back, and logon triggers, whose refusal logs Msg 524 where it logs Msg 575 without the option, all refuse.
 What counts is a result set reaching the client — an empty one included: a `SELECT` that sends, a `FETCH` without `INTO`, an `OUTPUT` without `INTO`, a `DBCC` with rows (`USEROPTIONS`), an `EXEC`'s or `sp_executesql`'s `SELECT`; not an untaken branch's `SELECT`, an assignment, `SELECT … INTO`, `FETCH … INTO`, `OUTPUT … INTO`, a `DBCC` that only prints (`CHECKIDENT`, with or without `NO_INFOMSGS`), or the rows of an `INSERT … EXEC`, which go to its table.
 The check sits where a statement's outcomes are gathered (`StatementLifecycle.ResultsDisallowed`), and with the option on no trigger sends rows, so no statement takes a thread of its own for one ([`data-reader.md`](data-reader.md#a-triggers-rows)).
-**Not modeled yet:** a CLR trigger's `SqlContext.Pipe.Send` under the option still sends.
+A CLR routine's own pipe refuses its result sets too, inside the routine — see [`clr-assemblies.md`](clr-assemblies.md#triggers).
 
 ## Trigger atomic scope
 

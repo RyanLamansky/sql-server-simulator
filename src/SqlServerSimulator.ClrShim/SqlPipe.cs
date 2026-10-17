@@ -14,7 +14,11 @@ namespace Microsoft.SqlServer.Server;
 /// counts, messages and errors — going to the client, and
 /// <see cref="Send(SqlDataReader)"/> sends what a reader has left to read. The
 /// public members are never inlined, so a stack trace a routine's exception
-/// carries names them as the server's does.
+/// carries names them as the server's does. A result set the server refuses —
+/// any, while <c>disallow results from triggers</c> is on and a trigger is
+/// firing — is a <see cref="SqlException"/> carrying Msg 524 at line 0 naming
+/// no procedure, raised before anything is sent (probed 2026-10-17 against SQL
+/// Server 2025).
 /// </summary>
 public sealed class SqlPipe
 {
@@ -44,6 +48,8 @@ public sealed class SqlPipe
             throw new ArgumentNullException(nameof(record));
         if (this.sending is not null)
             throw new InvalidOperationException("A result set is currently being sent to the pipe. End the current result set before calling Send.");
+        if (this.sink.RefuseResults() is { } server)
+            throw ResultsRefused(server);
         this.sink.Start(Describe(record.MetaData));
         this.sink.Row(record.SnapshotValues());
         this.sink.End();
@@ -56,6 +62,8 @@ public sealed class SqlPipe
             throw new ArgumentNullException(nameof(reader));
         if (this.sending is not null)
             throw new InvalidOperationException("A result set is currently being sent to the pipe. End the current result set before calling Send.");
+        if (this.sink.RefuseResults() is { } server)
+            throw ResultsRefused(server);
         reader.SendRemaining();
     }
 
@@ -76,6 +84,8 @@ public sealed class SqlPipe
             throw new ArgumentNullException(nameof(record));
         if (this.sending is not null)
             throw new InvalidOperationException("A result set is currently being sent to the pipe. End the current result set before calling SendResultsStart.");
+        if (this.sink.RefuseResults() is { } server)
+            throw ResultsRefused(server);
         this.sending = record.MetaData;
         this.sink.Start(Describe(record.MetaData));
     }
@@ -100,6 +110,10 @@ public sealed class SqlPipe
         this.sending = null;
         this.sink.End();
     }
+
+    // Built here and thrown by the public member, so the stack trace starts there.
+    private static SqlException ResultsRefused(string server) =>
+        new(new SqlErrorCollection([new SqlError(524, 16, 1, 0, "", "A trigger returned a resultset and the server option 'disallow results from triggers' is true.", server)]));
 
     private static (string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[] Describe(SqlMetaData[] metaData)
     {

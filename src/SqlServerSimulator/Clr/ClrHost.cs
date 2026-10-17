@@ -93,8 +93,8 @@ internal static class ClrHost
                 ? null
                 : (contextConnection.Execute, contextConnection.Send, contextConnection.DatabaseName, contextConnection.ServerVersion, contextConnection.Safe);
             this.previous = pipe is null
-                ? context.Enter(null, null, null, null, null, data)
-                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End, trigger, data);
+                ? context.Enter(null, null, null, null, null, null, data)
+                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End, pipe.RefuseResults, trigger, data);
         }
 
         public void Dispose() => this.context.Exit(this.previous);
@@ -113,6 +113,7 @@ internal static class ClrHost
             Action<(string, SqlDbType, long, byte, byte)[]>?,
             Action<object?[]>?,
             Action?,
+            Func<string?>?,
             (int, bool[], string?)?,
             (Func<ContextCommand, ContextResult>, Action<object, int>, Func<string>, string, bool)?,
             object?> Enter;
@@ -144,6 +145,7 @@ internal static class ClrHost
                     Action<(string, SqlDbType, long, byte, byte)[]>?,
                     Action<object?[]>?,
                     Action?,
+                    Func<string?>?,
                     (int, bool[], string?)?,
                     (Func<ContextCommand, ContextResult>, Action<object, int>, Func<string>, string, bool)?,
                     object?>>();
@@ -283,10 +285,18 @@ internal sealed class ClrPipeSink(
     Action<string> message,
     Action<(string, SqlDbType, long, byte, byte)[]> start,
     Action<object?[]> row,
-    Action end)
+    Action end,
+    Func<string?> refuseResults)
 {
     public readonly Action<string> Message = message;
     public readonly Action<(string, SqlDbType, long, byte, byte)[]> Start = start;
     public readonly Action<object?[]> Row = row;
     public readonly Action End = end;
+
+    /// <summary>
+    /// Asked as a result set is about to go out: the server name the shim
+    /// raises its Msg 524 under when the server refuses the set, null when it
+    /// takes it.
+    /// </summary>
+    public readonly Func<string?> RefuseResults = refuseResults;
 }

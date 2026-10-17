@@ -261,6 +261,11 @@ The trigger fires where a T-SQL one would (`Simulation.ClrTrigger.cs`, reached f
 A procedure reads a null `TriggerContext` and a function the no-data-access refusal, as `Pipe`, save one marked to read data, which reads both as null.
 A throw is Msg 6522 state 1 at line 1 naming the trigger, followed by Msg 3621 at line 1, and ends the firing statement and batch and its transaction as a T-SQL body's error does (a TRY block catches it with `XACT_STATE()` 0).
 
+**Under `disallow results from triggers`** a result set a CLR routine's pipe starts while a trigger fires — the trigger's own, or a CLR procedure's a trigger called — is refused before anything is sent: `Send(SqlDataRecord)`, `Send(SqlDataReader)` and `SendResultsStart` throw a `SqlException` carrying **Msg 524** (`A trigger returned a resultset and the server option 'disallow results from triggers' is true.`) at class 16, state 1 and line 0, naming no procedure, with no result set begun (probed 2026-10-17 against SQL Server 2025).
+The refusal ends the context transaction, the firing statement's own included, so the routine throwing it is **Msg 6549** over its report — the batch ended and the transaction rolled back, or doomed under a `TRY`, which reads `XACT_STATE()` -1 inside a transaction — and one catching it and returning is **Msg 3991**; `Send(string)` still sends.
+Real's report also shows `SmiEventSink_Default.DispatchMessages` under the pipe's frame, an internal frame with no counterpart here.
+`ExecuteAndSend`'s command is refused by the T-SQL rule instead ([`triggers.md`](triggers.md#disallow-results-from-triggers--msg-524)): its Msg 524 at line 1, naming no procedure, reaches the client ahead of the routine's Msg 6549, as real sends them (probed 2026-10-17 against SQL Server 2025).
+
 ## The context connection
 
 `new SqlConnection("context connection=true")` opens the calling session to the routine: each command's text is a batch of its own there (`Simulation.ClrContextConnection`), inside the caller's transaction and security context, one level deeper in `@@NESTLEVEL` than the routine, with no procedure frame (a value-form `RETURN` is Msg 178).

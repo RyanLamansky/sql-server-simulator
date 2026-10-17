@@ -174,7 +174,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
-            ending = contextConnection?.Leave(report);
+            ending = contextConnection?.Leave(report, pipe.ResultsRefused);
         }
 
         if (report is not null)
@@ -251,7 +251,31 @@ partial class Simulation
             this.attributionName = attributionName;
             this.outcomes = outcomes;
             this.lineNumber = lineNumber;
-            this.Sink = new ClrPipeSink(this.Message, this.Start, this.Row, this.End);
+            this.Sink = new ClrPipeSink(this.Message, this.Start, this.Row, this.End, this.RefuseResults);
+        }
+
+        /// <summary>
+        /// Set once the server refused a result set the routine sent, which
+        /// ends the context transaction (see <see cref="RefuseResults"/>).
+        /// </summary>
+        public bool ResultsRefused;
+
+        /// <summary>
+        /// The server's answer as a result set is about to go out: refused
+        /// while <c>disallow results from triggers</c> is on and a trigger is
+        /// firing — a CLR trigger's own pipe, or a CLR procedure's a trigger
+        /// called — which the routine meets as a <c>SqlException</c> carrying
+        /// Msg 524 and which ends the context transaction, so the routine
+        /// throwing it is Msg 6549 and returning past it Msg 3991 (probed
+        /// 2026-10-17 against SQL Server 2025).
+        /// </summary>
+        private string? RefuseResults()
+        {
+            var connection = this.batch.Connection;
+            if (!connection.Simulation.DisallowsResultsFromTriggers || connection.FiringTriggers.Count == 0)
+                return null;
+            this.ResultsRefused = true;
+            return connection.DataSource;
         }
 
         /// <summary>

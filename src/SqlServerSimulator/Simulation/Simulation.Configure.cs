@@ -73,7 +73,8 @@ partial class Simulation
     /// The installed value of <c>disallow results from triggers</c>: while
     /// on, a statement that would send a result set while a trigger runs — in
     /// its body or in a procedure or dynamic batch it reaches — raises Msg 524
-    /// instead (<c>StatementLifecycle.Run</c>), so no trigger sends rows.
+    /// instead (<c>StatementLifecycle.Run</c>), so no trigger sends rows; a
+    /// CLR routine's pipe refuses its own (<see cref="ClrProcedurePipe"/>).
     /// </summary>
     internal bool DisallowsResultsFromTriggers => this.ConfigurationInUse(DisallowResultsFromTriggersConfigurationId) != 0;
 

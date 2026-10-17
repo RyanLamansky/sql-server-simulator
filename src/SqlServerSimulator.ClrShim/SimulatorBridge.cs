@@ -26,19 +26,23 @@ internal static class SimulatorBridge
     /// through: the command executor, the result-set sender
     /// <see cref="SqlPipe.Send(SqlDataReader)"/> uses, the current
     /// database's name, the server version the connection reports, and
-    /// whether the routine's assembly is <c>SAFE</c>.
+    /// whether the routine's assembly is <c>SAFE</c>. A pipe's
+    /// <paramref name="refuseResults"/> answers, as a result set is about to
+    /// go out, the server name to raise the refusal under when the server
+    /// refuses it, or <see langword="null"/> when it takes it.
     /// </summary>
     internal static object? Enter(
         Action<string>? message,
         Action<(string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[]>? start,
         Action<object?[]>? row,
         Action? end,
+        Func<string?>? refuseResults,
         (int Action, bool[] UpdatedColumns, string? EventData)? trigger,
         (Func<ContextCommand, ContextResult> Execute, Action<object, int> Send, Func<string> Database, string ServerVersion, bool Safe)? data)
     {
         var previous = Current;
         Current = new Frame(
-            message is null ? null : new SqlPipe(new Sink(message, start!, row!, end!)),
+            message is null ? null : new SqlPipe(new Sink(message, start!, row!, end!, refuseResults!)),
             trigger is { } fired ? new SqlTriggerContext((TriggerAction)fired.Action, fired.UpdatedColumns, fired.EventData) : null,
             data is { } access ? new ContextAccess(access.Execute, access.Send, access.Database, access.ServerVersion, access.Safe) : null);
         return previous;
@@ -69,12 +73,14 @@ internal static class SimulatorBridge
         Action<string> message,
         Action<(string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[]> start,
         Action<object?[]> row,
-        Action end)
+        Action end,
+        Func<string?> refuseResults)
     {
         public readonly Action<string> Message = message;
         public readonly Action<(string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[]> Start = start;
         public readonly Action<object?[]> Row = row;
         public readonly Action End = end;
+        public readonly Func<string?> RefuseResults = refuseResults;
     }
 
     internal sealed class ContextAccess(

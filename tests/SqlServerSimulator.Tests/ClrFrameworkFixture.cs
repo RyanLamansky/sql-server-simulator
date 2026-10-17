@@ -561,6 +561,13 @@ internal static class ClrFrameworkFixture
                 SqlContext.Pipe.Send(rec);
             }
 
+            public static void RowsCaught()
+            {
+                SqlDataRecord rec = new SqlDataRecord(new SqlMetaData("n", SqlDbType.Int));
+                try { SqlContext.Pipe.SendResultsStart(rec); }
+                catch (SqlException e) { SqlContext.Pipe.Send("caught " + e.Number + "|" + e.Class + "|" + e.State + "|" + e.LineNumber + "|" + e.Procedure + "|" + SqlContext.Pipe.IsSendingResults); }
+            }
+
             public static void Ddl()
             {
                 SqlTriggerContext tc = SqlContext.TriggerContext;
