@@ -134,8 +134,17 @@ public sealed class StreamedResultWireTests
         {
             for (var i = 0; i < read; i++)
                 IsTrue(await rows.ReadAsync(TestContext.CancellationToken));
+            // The window the client's reads opened reaches the endpoint on
+            // frames of their own, so the request can be seen suspended on the
+            // window before them, holding fewer rows than it settles on once
+            // they arrive: wait for it to settle, which no other state the
+            // observer can read marks.
             await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
-            AreEqual(held, await this.HeldKeysAsync(other, spid, mode));
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            int keys;
+            while ((keys = await this.HeldKeysAsync(other, spid, mode)) != held && waited.ElapsedMilliseconds < 10_000)
+                await Task.Delay(10, TestContext.CancellationToken);
+            AreEqual(held, keys);
             command.Cancel();
         }
         await transaction.RollbackAsync(TestContext.CancellationToken);
