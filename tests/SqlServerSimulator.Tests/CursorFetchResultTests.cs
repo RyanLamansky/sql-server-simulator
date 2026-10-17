@@ -133,6 +133,39 @@ public sealed class CursorFetchResultTests
         AreEqual(keys, string.Join(",", schema.Rows.Cast<System.Data.DataRow>().Where(static row => (bool)row["IsKey"]).Select(static row => (string)row["ColumnName"])));
     }
 
+    /// <summary>
+    /// A fetch names the tables its select list reads, in the order it first
+    /// reads them, reading a derived table, CTE or APPLY body through to the
+    /// table or view behind each column — an expression, an aggregate or a set
+    /// operation's column there an expression — while a view is named itself
+    /// (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cursor for select * from (select k1, v from ct) q", "k1:ct.k1:k v:ct.v:")]
+    [DataRow("cursor static for select q.v, q.e from (select v, v + 1 as e from ct) q", "v:ct.v: e:.e:e")]
+    [DataRow("cursor for with w as (select k1 as kk from ct) select * from w", "kk:ct.k1:k")]
+    [DataRow("cursor for select * from cv", "k1:cv.k1:k e:cv.e:")]
+    [DataRow("cursor for select q.e from (select * from cv) q", "e:cv.e:")]
+    [DataRow("cursor for select ch.b, q.v from (select k1, v from ct) q join ch on ch.a = q.k1", "b:ch.b: v:ct.v:")]
+    [DataRow("cursor for select x.v from ct x cross join ch", "v:ct.v:")]
+    [DataRow("cursor for select q.n from (select count(*) as n from ct) q", "n:.n:e")]
+    [DataRow("cursor for select q.k1 from (select k1 from ct union all select a from ch) q", "k1:.k1:e")]
+    [DataRow("cursor for select y.v, x.k1 from ct x cross apply (select v from ct where ct.k1 = x.k1) y", "v:ct.v: k1:ct.k1:k")]
+    public void Fetch_NamesTheTablesItsColumnsRead(string declaration, string columns)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table ct (k1 int primary key, v int);
+            create table ch (a int, b int);
+            insert ct values (1, 10);
+            insert ch values (1, 2);
+            """).ExecuteNonQuery();
+        _ = connection.CreateCommand("create view cv as select k1, v + 1 as e from ct").ExecuteNonQuery();
+        using var reader = connection.CreateCommand($"declare c {declaration}; open c; fetch c; close c; deallocate c").ExecuteReader();
+        AreEqual(columns, string.Join(" ", reader.GetSchemaTable()!.Rows.Cast<System.Data.DataRow>().Where(static row => !(bool)row["IsHidden"]).Select(static row =>
+            $"{row["ColumnName"]}:{row["BaseTableName"]}.{row["BaseColumnName"]}:{((bool)row["IsKey"] ? "k" : "")}{(row["IsExpression"] is true ? "e" : "")}")));
+    }
+
     private sealed class ValueComparer : System.Collections.IComparer
     {
         public int Compare(object? x, object? y) => (x, y) switch

@@ -185,12 +185,7 @@ internal sealed partial class Selection
     /// The browse metadata for a statement whose last <paramref name="hidden"/>
     /// columns are browse mode's own.
     /// </summary>
-    /// <remarks>
-    /// A cursor's (<paramref name="cursor"/>) key is the one its fetches
-    /// identify rows by (<see cref="CursorKeyOrdinals"/>) rather than browse
-    /// mode's.
-    /// </remarks>
-    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden, bool cursor = false)
+    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden)
     {
         var tables = new List<string[]>();
         var tableNumbers = new Dictionary<FromSource, int>(ReferenceEqualityComparer.Instance);
@@ -214,13 +209,88 @@ internal sealed partial class Selection
             var heap = table.BackingTable!;
             var baseName = heap.Columns[ordinal].Name;
             var renamed = !string.Equals(outputColumnNames[i], baseName, StringComparison.Ordinal);
-            var status = (Array.IndexOf(cursor ? CursorKeyOrdinals(heap) : BrowseKeyOrdinals(heap), ordinal) >= 0 ? 0x08 : 0)
+            var status = (Array.IndexOf(BrowseKeyOrdinals(heap), ordinal) >= 0 ? 0x08 : 0)
                 | (isHidden ? 0x10 : 0)
                 | (renamed ? 0x20 : 0);
             columns[i] = ((byte)tableNumber, (byte)status, renamed ? baseName : null);
         }
 
         return new BrowseInfo([.. tables], columns);
+    }
+
+    /// <summary>
+    /// The browse metadata a cursor's every fetch sends: each column's table
+    /// and name and whether it is an expression, the tables in TABNAME being
+    /// those the select list reads, in the order it first reads them.
+    /// </summary>
+    /// <remarks>
+    /// A derived table, CTE or <c>APPLY</c> body is read through to the table
+    /// or view its column reads, at any depth — an expression, an aggregate
+    /// or a set operation's column there an expression — while a view is
+    /// named itself, its columns its own and none of them an expression, its
+    /// key the base table's key it passes through (captured 2026-10-17
+    /// against SQL Server 2025: <c>SELECT * FROM (SELECT k1, v FROM t) q</c>
+    /// names <c>t</c>, <c>SELECT x.v FROM t x CROSS JOIN u</c> names no
+    /// <c>u</c>, <c>SELECT u.b, t.v …</c> names <c>u</c> first).
+    /// </remarks>
+    private static BrowseInfo CursorBrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames)
+    {
+        var tables = new List<string[]>();
+        var tableNumbers = new Dictionary<FromSource, int>(ReferenceEqualityComparer.Instance);
+        var columns = new (byte Table, byte Status, string? BaseName)[expressions.Count];
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            var (table, baseName, key, isExpression) = CursorBaseColumn(sources, expressions[i]);
+            if (table is null || baseName is null)
+            {
+                columns[i] = (0, (byte)(isExpression ? 0x04 : 0), null);
+                continue;
+            }
+            if (!tableNumbers.TryGetValue(table, out var tableNumber))
+            {
+                tables.Add((table.WrittenObjectName ?? table.BackingTable?.Name ?? table.BackingView!.Name).Split('.'));
+                tableNumbers[table] = tableNumber = tables.Count;
+            }
+            var renamed = !string.Equals(outputColumnNames[i], baseName, StringComparison.Ordinal);
+            columns[i] = ((byte)tableNumber, (byte)((key ? 0x08 : 0) | (renamed ? 0x20 : 0)), renamed ? baseName : null);
+        }
+        return new BrowseInfo([.. tables], columns);
+    }
+
+    /// <summary>
+    /// The table or view a cursor's fetch names for <paramref name="expression"/>
+    /// (<see cref="CursorBrowseInfoFor"/>), the column's name there and
+    /// whether it is the table's cursor key; or, reading none, whether it is
+    /// an expression.
+    /// </summary>
+    private static (FromSource? Table, string? BaseName, bool Key, bool IsExpression) CursorBaseColumn(FromSource[] sources, Expression expression)
+    {
+        if (Unaliased(expression) is not Reference reference)
+            return (null, null, false, true);
+        var (sourceIndex, columnIndex) = FindSourceColumn(sources, reference.ReferencedName);
+        if (sourceIndex < 0)
+            return (null, null, false, false);
+        var source = sources[sourceIndex];
+        if (source is { BackingTable: { } heap, IsPlaceholder: false })
+            return (source, heap.Columns[columnIndex].Name, Array.IndexOf(CursorKeyOrdinals(heap), columnIndex) >= 0, false);
+        if (source.BackingView is { } view)
+        {
+            var key = view is { BaseTable: { } baseTable } && view.BaseColumnOrdinals[columnIndex] is >= 0 and var baseOrdinal
+                && Array.IndexOf(CursorKeyOrdinals(baseTable), baseOrdinal) >= 0;
+            return (source, source.ColumnNames[columnIndex], key, false);
+        }
+        if (source is { LateralIsQueryBody: true, LateralPlan: { } body })
+        {
+            if (body.IsSetOperationResult)
+                return (null, null, false, true);
+            if (body is { BranchFromSources: { } inner, ProjectionExpressions: { } projections } && columnIndex < projections.Length)
+            {
+                return Unaliased(projections[columnIndex]) is AggregateExpression
+                    ? (null, null, false, true)
+                    : CursorBaseColumn(inner, body.DescribedProjections is { } described && columnIndex < described.Length ? described[columnIndex] : projections[columnIndex]);
+            }
+        }
+        return (null, null, false, false);
     }
 
     // The key browse mode identifies a table's rows by — its PRIMARY KEY,
