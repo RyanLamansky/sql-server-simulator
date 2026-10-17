@@ -210,6 +210,16 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     public int ConnectTimeout, QueryTimeout;
 
     /// <summary>
+    /// How long, in seconds, the provider of <paramref name="local"/> lets a
+    /// query or call on the server run before giving up, 0 for no limit: the
+    /// server's <c>query timeout</c> when set, else the instance's
+    /// <c>remote query timeout (s)</c> (probed 2026-10-17 against SQL Server
+    /// 2025, where a server's 6 outlasted the instance's 3, and with the
+    /// server's 0 the instance's 3 ended a 5-second call).
+    /// </summary>
+    public int QueryTimeoutSeconds(Simulation local) => this.QueryTimeout > 0 ? this.QueryTimeout : local.RemoteQueryTimeoutSeconds;
+
+    /// <summary>
     /// The login mappings <c>sys.linked_logins</c> lists: <c>sp_addlinkedserver</c>
     /// adds the self-mapping for every login (principal 0), and
     /// <c>sp_addlinkedsrvlogin</c> / <c>sp_droplinkedsrvlogin</c> replace and

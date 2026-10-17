@@ -176,7 +176,7 @@ internal sealed class RemoteWrite
         };
         batch.CurrentStatement.RemoteWrite = write;
         if (kind != RemoteWriteKind.Insert && !batch.IsSkipping)
-            write.Load($"SELECT {ColumnList(remoteColumns)} FROM {write.TargetText}", database.Name);
+            write.Load(batch, $"SELECT {ColumnList(remoteColumns)} FROM {write.TargetText}", database.Name);
         return write;
     }
 
@@ -207,7 +207,7 @@ internal sealed class RemoteWrite
         if (!batch.IsSkipping)
             RequireNoTransaction(batch, server);
 
-        var result = RunRemoteQuery(server, query, database: null, browse: true)
+        var result = RunRemoteQuery(server, query, database: null, browse: true, requester: batch)
             ?? throw new NotSupportedException($"OPENQUERY pass-through query on linked server '{server.Name}' returned no result set. Only queries that produce a result set are supported.");
         _ = RequireNoXmlColumn(result.Schema, "OPENQUERY");
         var browse = result.Browse;
@@ -447,13 +447,19 @@ internal sealed class RemoteWrite
     /// loopback server, outside its caller's transaction — is the provider's
     /// timeout (<see cref="SimulatedSqlException.ProviderQueryTimeout"/>), and
     /// one of a loopback server a remote call of <paramref name="caller"/>'s
-    /// transaction ran on is Msg 3971.
+    /// transaction ran on is Msg 3971. The query runs under the provider's
+    /// query timeout (<see cref="LinkedServer.QueryTimeoutSeconds"/>) of
+    /// <paramref name="caller"/>'s instance, or of
+    /// <paramref name="requester"/>'s, which reads the server outside the
+    /// caller's transaction rules — a write's stand-in load — and running past
+    /// it is the same provider timeout.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query is the caller's own pass-through text or a SELECT over identifiers the parser validated, bracket-escaped; it runs against a sibling in-process Simulation.")]
-    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false, bool ownTransaction = false, BatchContext? caller = null)
+    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false, bool ownTransaction = false, BatchContext? caller = null, BatchContext? requester = null)
     {
         if (caller is not null)
             RequireResumableTransaction(caller, server);
+        var timed = caller ?? requester;
         using var session = server.OpenSession(database);
         var connection = session.Connection;
         connection.NoBrowseTable = browse;
@@ -464,6 +470,8 @@ internal sealed class RemoteWrite
         using var command = connection.CreateCommand();
         command.Transaction = own;
         command.CommandText = query;
+        if (timed is not null)
+            command.CommandTimeout = server.QueryTimeoutSeconds(timed.Connection.Simulation);
         SimulatedSqlResultSet? first = null;
         byte[][] rows = [];
         try
@@ -481,6 +489,8 @@ internal sealed class RemoteWrite
                         return Buffered(first, rows, failure: null);
                     case SimulatedErrorOutcome { Exception.WaitsOnOwnThread: true } when caller is not null:
                         throw SimulatedSqlException.ProviderQueryTimeout(caller, server, query);
+                    case SimulatedErrorOutcome when timed is not null && connection.ExecutionTimedOut:
+                        throw SimulatedSqlException.ProviderQueryTimeout(timed, server, query);
                     case SimulatedErrorOutcome error when first is null:
                         throw error.Exception;
                     case SimulatedErrorOutcome error:
@@ -495,6 +505,14 @@ internal sealed class RemoteWrite
         {
             throw SimulatedSqlException.ProviderQueryTimeout(caller, server, query);
         }
+        catch (SimulatedSqlException expired) when (expired.Number == -2 && timed is not null && connection.ExecutionTimedOut)
+        {
+            throw SimulatedSqlException.ProviderQueryTimeout(timed, server, query);
+        }
+        // A timeout seen between two of the query's statements ends its batch
+        // without an error of its own.
+        if (timed is not null && connection.ExecutionTimedOut)
+            throw SimulatedSqlException.ProviderQueryTimeout(timed, server, query);
         return first is null ? null : Buffered(first, rows, failure: null);
     }
 
@@ -561,9 +579,9 @@ internal sealed class RemoteWrite
         throw error ?? failure;
     }
 
-    private void Load(string query, string database)
+    private void Load(BatchContext batch, string query, string database)
     {
-        if (RunRemoteQuery(this.Server, query, database, browse: true) is { } result)
+        if (RunRemoteQuery(this.Server, query, database, browse: true, requester: batch) is { } result)
             this.Fill(result);
         else
             this.Proxy.Heap.TouchedSlots = [];
@@ -647,12 +665,26 @@ internal sealed class RemoteWrite
         using var session = this.Server.OpenSession(this.DatabaseName);
         var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
+        var timeout = this.Server.QueryTimeoutSeconds(batch.Connection.Simulation);
+        var sending = "";
         try
         {
             foreach (var (text, parameters) in statements)
-                Execute(connection, transaction, text, parameters);
+            {
+                sending = text;
+                Execute(connection, transaction, text, parameters, timeout);
+            }
             if (transaction.Connection is not null)
                 transaction.Commit();
+        }
+        catch (SimulatedSqlException) when (connection.ExecutionTimedOut)
+        {
+            // The provider gives up on the server's write as on a query, an
+            // INSERT naming the table it couldn't open (probed 2026-10-17
+            // against SQL Server 2025).
+            throw this.Kind == RemoteWriteKind.Insert && this.WrittenName is { } written
+                ? SimulatedSqlException.ProviderTableOpenTimeout(batch, this.Server, QuotedName(written))
+                : SimulatedSqlException.ProviderQueryTimeout(batch, this.Server, sending);
         }
         catch (SimulatedSqlException remote)
         {
@@ -661,10 +693,11 @@ internal sealed class RemoteWrite
     }
 
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The statement is built from bracket-escaped identifiers the remote table's metadata supplied; every value travels as a parameter.")]
-    private static void Execute(SimulatedDbConnection connection, SimulatedDbTransaction transaction, string text, List<SqlValue> parameters)
+    private static void Execute(SimulatedDbConnection connection, SimulatedDbTransaction transaction, string text, List<SqlValue> parameters, int timeout)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
+        command.CommandTimeout = timeout;
         command.CommandText = text;
         for (var i = 0; i < parameters.Count; i++)
         {
@@ -674,6 +707,8 @@ internal sealed class RemoteWrite
             _ = command.Parameters.Add(parameter);
         }
         _ = command.ExecuteNonQuery();
+        if (connection.ExecutionTimedOut)
+            throw SimulatedSqlException.ExecutionTimeoutExpired();
     }
 
     /// <summary>

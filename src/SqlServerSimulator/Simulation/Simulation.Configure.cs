@@ -153,6 +153,17 @@ partial class Simulation
     private const int BlockedProcessThresholdConfigurationId = 1569;
 
     /// <summary>
+    /// The installed value of <c>remote query timeout (s)</c>, 600 unless
+    /// <c>sp_configure</c> and <c>RECONFIGURE</c> changed it: how long the
+    /// provider lets a query or call on a linked server run before giving up,
+    /// 0 for no limit, unless the server's own <c>query timeout</c> option
+    /// names one (<see cref="LinkedServer.QueryTimeoutSeconds"/>).
+    /// </summary>
+    internal int RemoteQueryTimeoutSeconds => this.ConfigurationInUse(RemoteQueryTimeoutConfigurationId);
+
+    private const int RemoteQueryTimeoutConfigurationId = 1520;
+
+    /// <summary>
     /// The installed value of <paramref name="configurationId"/>, falling back
     /// to the stock default when <c>sp_configure</c> never wrote it.
     /// </summary>

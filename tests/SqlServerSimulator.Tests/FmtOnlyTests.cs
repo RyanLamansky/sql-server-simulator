@@ -5,6 +5,20 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class FmtOnlyTests
 {
+    /// <summary>
+    /// <c>WAITFOR</c> doesn't wait under FMTONLY (probed 2026-10-17 against
+    /// SQL Server 2025, a three-second delay returning at once), so a command
+    /// timeout shorter than the delay never fires.
+    /// </summary>
+    [TestMethod]
+    public void WaitFor_DoesNotWait()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var command = connection.CreateCommand("set fmtonly on; waitfor delay '00:01:00'; set fmtonly off; select 1");
+        command.CommandTimeout = 1;
+        AreEqual(1, command.ExecuteScalar());
+    }
+
     [TestMethod]
     [DataRow("insert t values (2)")]
     [DataRow("update t set a = 3")]

@@ -52,11 +52,13 @@ partial class Simulation
                 outputs.Add((parameter, slot));
         }
 
-        var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, enlisting, out var refusal);
-        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: true, endsInRefusal: refusal is not null, insertExecSource))
+        var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, enlisting, out var refusal, out var timedOut);
+        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: true, endsInRefusal: refusal is not null, timedOut, insertExecSource))
             yield return outcome;
         if (refusal is not null)
             throw refusal;
+        if (timedOut)
+            yield break;
         foreach (var (parameter, slot) in outputs)
             slot.Value = (parameter.OutputSqlValue ?? SqlValue.Null(slot.DeclaredType)).CoerceTo(slot.DeclaredType);
     }
@@ -120,11 +122,20 @@ partial class Simulation
         // The session starts in the procedure's database, where real runs its
         // body whatever database the call arrives in.
         var database = procName[1].Length > 0 ? procName[1] : null;
-        var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), enlisting, out var refusal);
-        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: false, endsInRefusal: refusal is not null, insertExecSource))
+        var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), enlisting, out var refusal, out var timedOut);
+        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: false, endsInRefusal: refusal is not null, timedOut, insertExecSource))
             yield return outcome;
         if (refusal is not null)
             throw refusal;
+        // A call the provider gave up on leaves its OUTPUT variables as they
+        // were and its return code NULL (probed 2026-10-17 against SQL Server
+        // 2025).
+        if (timedOut)
+        {
+            if (returnCodeVar is not null)
+                batch.GetVariableSlot(returnCodeVar).Value = SqlValue.Null(SqlType.Int32);
+            yield break;
+        }
         foreach (var (parameter, slot) in outputs)
             slot.Value = (parameter.OutputSqlValue ?? SqlValue.Null(slot.DeclaredType)).CoerceTo(slot.DeclaredType);
         if (returnCodeVar is not null)
@@ -157,10 +168,12 @@ partial class Simulation
     /// server's last outcome was an error, which then closes in that DONEPROC
     /// alone; a call ending in an error of its own
     /// (<paramref name="endsInRefusal"/>) leaves its scope for that error to
-    /// close.
+    /// close, and one the provider gave up on (<paramref name="timedOut"/>)
+    /// sends its message and closes in a count-less DONEPROC alone (captured
+    /// 2026-10-17 against SQL Server 2025).
     /// An <c>INSERT … EXEC</c>'s call hands its outcomes over as they are.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> ProviderRelayed(BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool executeAt, bool endsInRefusal, bool insertExecSource)
+    private static IEnumerable<SimulatedStatementOutcome> ProviderRelayed(BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool executeAt, bool endsInRefusal, bool timedOut, bool insertExecSource)
     {
         // An INSERT … EXEC takes the call's outcomes as they come.
         if (insertExecSource)
@@ -215,7 +228,7 @@ partial class Simulation
         if (endsInRefusal)
             yield break;
         var endedByError = outcomes is [.., SimulatedErrorOutcome];
-        if (!endedByError && (messageSinceResult || !anyResult))
+        if (!endedByError && !timedOut && (messageSinceResult || !anyResult))
             yield return Completed(batch, -1);
         if (framed)
         {
@@ -313,11 +326,22 @@ partial class Simulation
     /// ends with, which comes back as <paramref name="refusal"/>, as does a
     /// rowset with an <c>xml</c> column, which stops the call; the caller
     /// raises it after the outcomes ahead of it.
+    /// <para>
+    /// A call running past the provider's query timeout
+    /// (<see cref="LinkedServer.QueryTimeoutSeconds"/>) is
+    /// <paramref name="timedOut"/>: the provider sends only its own
+    /// <c>Query timeout expired</c> message, what the call produced ahead of it
+    /// discarded, and the caller goes on with <c>@@ERROR</c> 0 and its
+    /// <c>@@ROWCOUNT</c> as it was, whatever the server's batch had done by
+    /// then — inside a <c>TRY</c>, under <c>XACT_ABORT</c> or a transaction
+    /// alike (probed 2026-10-17 against SQL Server 2025).
+    /// </para>
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "EXEC … AT sends the caller's own text by design; a procedure call's text is built from bracket-escaped identifiers. It runs against a sibling in-process Simulation.")]
-    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, SimulatedDbTransaction? enlisting, out SimulatedSqlException? refusal)
+    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, SimulatedDbTransaction? enlisting, out SimulatedSqlException? refusal, out bool timedOut)
     {
         refusal = null;
+        timedOut = false;
         var outcomes = new List<SimulatedStatementOutcome>();
         // The caller's @@ROWCOUNT reads the last count the provider saw: the
         // rows of the last rowset, or the last DML count, NOCOUNT or not and
@@ -338,6 +362,7 @@ partial class Simulation
             connection.ScopesTransactionsToBatch = true;
             using var command = connection.CreateCommand();
             command.CommandText = text;
+            command.CommandTimeout = server.QueryTimeoutSeconds(batch.Connection.Simulation);
             foreach (var parameter in parameters)
                 _ = command.Parameters.Add(parameter);
             // The call runs in the caller's transaction, as a session of its own.
@@ -397,6 +422,11 @@ partial class Simulation
                             break;
                     }
                 }
+                timedOut = connection.ExecutionTimedOut;
+            }
+            catch (SimulatedSqlException) when (connection.ExecutionTimedOut)
+            {
+                timedOut = true;
             }
             finally
             {
@@ -410,6 +440,11 @@ partial class Simulation
         {
             if (enlisting is null || !enlisting.KeepEnlistedSession(server, connection))
                 server.ReleaseSession(connection);
+        }
+        if (timedOut)
+        {
+            refusal = null;
+            return [new SimulatedInfoOutcome(SimulatedSqlException.ProviderMessage(batch, server, "Query timeout expired"))];
         }
         if (lastCount is int count)
             batch.Connection.LastStatementRowCount = count;

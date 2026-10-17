@@ -184,15 +184,31 @@ partial class SimulatedSqlException
     /// Msg 7412, then Msg 7399 and Msg 7320 quoting the query, ending the
     /// batch and rolling the transaction back as under <c>XACT_ABORT</c>
     /// (probed 2026-10-07 against SQL Server 2025, after the server's
-    /// <c>query timeout</c> elapsed).
+    /// <c>query timeout</c> elapsed). A query that runs past the provider's
+    /// timeout (<see cref="LinkedServer.QueryTimeoutSeconds"/>) ends the same
+    /// way, and so does an <c>UPDATE</c> or <c>DELETE</c> through a four-part
+    /// name, quoting the statement the provider sent (probed 2026-10-17).
     /// </summary>
-    internal static SimulatedSqlException ProviderQueryTimeout(BatchContext batch, LinkedServer server, string query)
+    internal static SimulatedSqlException ProviderQueryTimeout(BatchContext batch, LinkedServer server, string query) =>
+        ProviderTimeout(batch, server, new($"Cannot execute the query \"{query}\" against OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". ", 7320, 16, 2));
+
+    /// <summary>
+    /// An <c>INSERT</c> through a four-part name whose rows the server didn't
+    /// take within the provider's timeout: <see cref="ProviderQueryTimeout"/>'s
+    /// shape with Msg 7306 naming the table in place of Msg 7320 (probed
+    /// 2026-10-17 against SQL Server 2025, the table held under another
+    /// session's <c>TABLOCKX</c>).
+    /// </summary>
+    internal static SimulatedSqlException ProviderTableOpenTimeout(BatchContext batch, LinkedServer server, string quotedName) =>
+        ProviderTimeout(batch, server, new($"Cannot open the table \"{quotedName}\" from OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". ", 7306, 16, 2));
+
+    private static SimulatedSqlException ProviderTimeout(BatchContext batch, LinkedServer server, SimulatedSqlException failure)
     {
         batch.Connection.PendingMessages.Enqueue(ProviderMessage(batch, server, "Query timeout expired"));
         List<SimulatedError> entries =
         [
             .. new SimulatedSqlException($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" reported an error. Execution terminated by the provider because a resource limit was reached.", 7399, 16, 1).Errors,
-            .. new SimulatedSqlException($"Cannot execute the query \"{query}\" against OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". ", 7320, 16, 2).Errors,
+            .. failure.Errors,
         ];
         return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
         {

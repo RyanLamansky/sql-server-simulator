@@ -41,8 +41,8 @@ partial class Simulation
     /// <c>Cancel()</c>) — the wait wakes early and the batch aborts.
     /// <c>@@ROWCOUNT</c> resets to 0
     /// (probe-confirmed; applied by the dispatcher after this parser returns).
-    /// Skip-mode (un-taken IF, after BREAK/CONTINUE/RETURN) suppresses the
-    /// sleep entirely.
+    /// Skip-mode (un-taken IF, after BREAK/CONTINUE/RETURN) and
+    /// <c>SET FMTONLY ON</c> suppress the sleep entirely.
     /// </para>
     /// </remarks>
     private static void ParseWaitForStatement(BatchContext batch)
@@ -95,7 +95,9 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        if (timeOfDay is not { } value)
+        // SET FMTONLY ON skips the wait (probed 2026-10-17 against SQL Server
+        // 2025), which a linked server's describe of an OPENQUERY runs under.
+        if (timeOfDay is not { } value || batch.Connection.FmtOnly)
             return;
         var delay = untilTimeOfDay ? WaitForTimeDelay(value, DateTime.UtcNow) : value;
         if (delay.Ticks > 0)

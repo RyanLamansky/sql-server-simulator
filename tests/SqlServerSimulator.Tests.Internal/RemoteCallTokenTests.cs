@@ -39,6 +39,22 @@ public sealed class RemoteCallTokenTests
         Assert.AreEqual(expected, string.Join(" / ", TdsSessionFixture.Describe(fixture.RunBatch(sql))));
     }
 
+    /// <summary>
+    /// A call the provider's query timeout ended sends its message alone and
+    /// closes in a count-less DONEPROC, whatever the server had sent ahead of
+    /// it (captured 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec ('print ''x''; waitfor delay ''00:00:01.500''; select 1 as a') at SELF", "INFO 7412 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec ('waitfor delay ''00:00:01.500''') at SELF; select 2 as b", "INFO 7412 / DONEPROC E0 MORE 0 / ROWS / DONE C1 COUNT 1")]
+    [DataRow("exec SELF.master.sys.sp_executesql N'waitfor delay ''00:00:01.500'''", "INFO 7412 / DONEPROC E0 FINAL 0")]
+    public void RemoteCall_PastTheQueryTimeout_ClosesInADoneProcAlone(string sql, string expected)
+    {
+        using var fixture = Loopback();
+        _ = fixture.RunBatch("exec sp_serveroption 'SELF', 'query timeout', '1'");
+        Assert.AreEqual(expected, string.Join(" / ", TdsSessionFixture.Describe(fixture.RunBatch(sql))));
+    }
+
     [TestMethod]
     public void RemoteCall_InsideAProcedure_ClosesInADoneInProc()
     {

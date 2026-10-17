@@ -152,10 +152,24 @@ What the linked-server procedures check and report, probed 2026-10-05 against SQ
 
 ## Server options
 
-`sp_serveroption` keeps every option real takes, which `sys.servers` projects: `rpc out`, `data access` (off: four-part names and `OPENQUERY` are Msg 7411 `… not configured for DATA ACCESS.`, while remote calls still run) and `remote proc transaction promotion`, which behavior reads, and `rpc` (`is_remote_login_enabled`), `collation compatible`, `use remote collation`, `collation name`, `lazy schema validation`, `pub`, `sub`, `dist`, `system`, `connect timeout` and `query timeout`, which only the catalog reports (probed 2026-10-05).
+`sp_serveroption` keeps every option real takes, which `sys.servers` projects: `rpc out`, `data access` (off: four-part names and `OPENQUERY` are Msg 7411 `… not configured for DATA ACCESS.`, while remote calls still run), `remote proc transaction promotion` and `query timeout` (see [The provider's query timeout](#the-providers-query-timeout)), which behavior reads, and `rpc` (`is_remote_login_enabled`), `collation compatible`, `use remote collation`, `collation name`, `lazy schema validation`, `pub`, `sub`, `dist`, `system` and `connect timeout`, which only the catalog reports (probed 2026-10-05).
 An on/off option takes `true` / `on` / `false` / `off`, `system` only the first two; a timeout takes a whole number of seconds and `collation name` a known collation or NULL.
 Any other value, or an unknown name, is Msg 15600, an unknown server Msg 15015.
 Msg 7411 ends the batch and rolls back an open transaction.
+
+### The provider's query timeout
+
+A query or call on the server runs under the provider's timeout: the server's `query timeout` when it is set, else the instance's `remote query timeout (s)` — 600 as installed, 0 for no limit (`LinkedServer.QueryTimeoutSeconds`, probed 2026-10-17 against SQL Server 2025 through a loopback, a server's 6 outlasting the instance's 3 and the instance's 3 ending a five-second call while the server's was 0).
+What running past it does depends on what was running:
+
+- **A read** — `OPENQUERY` or a four-part name — is the provider's Msg 7412 (`Query timeout expired`), then Msg 7399 and Msg 7320 quoting the query, ending the batch and rolling an open transaction back as under `XACT_ABORT`; a `TRY` catches Msg 7320 (`SimulatedSqlException.ProviderQueryTimeout`).
+- **A four-part write** ends the same way, an `UPDATE` or `DELETE` quoting the statement the provider sent and an `INSERT` with Msg 7306 (`Cannot open the table ""db"."schema"."t"" …`, the name quoted twice over) in Msg 7320's place.
+- **A remote call** — `EXEC … AT` or a procedure call — sends only the provider's message: the rows, messages and counts the call produced ahead of it are discarded, and the caller's batch goes on with `@@ERROR` 0 and `@@ROWCOUNT` as it was, inside a `TRY`, under `XACT_ABORT` and in a transaction alike.
+  `OUTPUT` variables keep their values and a return code variable reads NULL; what the server's batch wrote before it gave up stays written, in the caller's transaction when the call was enlisted in it.
+  On the wire the call's scope holds the provider's message alone and closes in a DONEPROC with no count — no DONEINPROC, no RETURNSTATUS (captured 2026-10-17 against SQL Server 2025).
+
+The pooled session's batch ends as an attention would, so the wait ends at the engine's safe points (a lock wait, a `WAITFOR`, a row loop), and the session goes back to the pool, or closes when the batch left a transaction open in it.
+`OPENQUERY` describes its query under `SET FMTONLY ON`, under which `WAITFOR` doesn't wait, here as on real.
 
 ## Transactions
 
@@ -181,7 +195,7 @@ Probed 2026-10-07 against SQL Server 2025, all modeled:
   A read ahead of the transaction's first call, or once it has ended, runs as any does.
 
 **A loopback read doesn't enlist**, so an `OPENQUERY` or four-part read of a row the caller's open transaction holds waits on the caller's lock, which real sits out until the provider's query timeout and then ends with the provider's Msg 7412 (`Query timeout expired`), Msg 7399 and Msg 7320 quoting the query, ending the batch and rolling the transaction back as under `XACT_ABORT` (probed 2026-10-07 against SQL Server 2025).
-The query here runs on the caller's own thread, where the wait could never end, so it raises the same errors at once (`SimulatedSqlException.ProviderQueryTimeout`).
+The query here runs on the caller's own thread, where the wait could never end, so it raises the same errors at once, whatever the timeout.
 
 **`OPENQUERY`'s query runs in a transaction of its own**, which the provider rolls back once the rows are read: it reads `@@TRANCOUNT` 1 and `XACT_STATE()` 1 inside or outside the caller's transaction, `sys.dm_tran_active_transactions` names it `user_transaction`, and a write the query makes doesn't last (probed 2026-10-07 against SQL Server 2025).
 
@@ -202,7 +216,7 @@ The query here runs on the caller's own thread, where the wait could never end, 
 - **A conversion a four-part read's query applies** (`CAST(a AS int)`) fails locally at the statement's line, where real remotes it and relays the error at line 1 (probed 2026-10-06 against SQL Server 2025); which expressions real sends to the server is its optimizer's choice — not chased.
 - **The system objects a schema rowset lists are the simulator's own**: real's `sp_tables_ex` lists 74 system tables and 628 system views in a user database, and `master`'s `spt_*` objects, which `sys.all_objects` here doesn't carry (see [`catalog-views.md`](catalog-views.md)).
 - **Msg 3971's `Desc`** is real's opaque transaction handle; here it is the enlisted session's id and the transaction's, in hex.
-- **The provider's timeout of a loopback read** follows an empty result set's metadata here, where real sends none, and quotes the simulator's own query text for a four-part read, where real's provider sends its own (`SELECT … "Tbl1002"`).
+- **The provider's timeout** of a read follows an empty result set's metadata here, where real sends none, and quotes the simulator's own query text for a four-part read, `UPDATE` or `DELETE`, where real's provider sends its own (`SELECT "Tbl1002"."a" "Col1004" FROM …`, `UPDATE … set "a" = (5)`); a lock on the rows of a four-part `UPDATE` or `DELETE` stops it in the read that loads its stand-in, so its Msg 7320 quotes that `SELECT`.
 
 ## Not modeled yet
 
