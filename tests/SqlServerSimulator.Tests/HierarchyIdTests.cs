@@ -337,6 +337,33 @@ public sealed class HierarchyIdTests
         AreEqual(2, ex.State);
     }
 
+    /// <summary>
+    /// A written <c>varchar</c> constant converted to <c>hierarchyid</c> fails
+    /// at state 1 where real folds it as the batch compiles — a statement over
+    /// a permanent table — and at state 2 elsewhere: a Unicode constant, a
+    /// variable, a statement over no table or a temporary one, a subquery's
+    /// constant and <c>Parse</c> (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert hh (h) select 'bad'", 1)]
+    [DataRow("insert hh values (2, 'bad')", 1)]
+    [DataRow("select cast('bad' as hierarchyid) from hh", 1)]
+    [DataRow("select convert(hierarchyid, 'bad') from hh", 1)]
+    [DataRow("update hh set h = 'bad'", 1)]
+    [DataRow("insert hh values (2, N'bad')", 2)]
+    [DataRow("select cast(N'bad' as hierarchyid) from hh", 2)]
+    [DataRow("select cast('bad' as hierarchyid)", 2)]
+    [DataRow("declare @s varchar(10) = 'bad'; insert hh (h) select @s", 2)]
+    [DataRow("select hierarchyid::Parse('bad') from hh", 2)]
+    [DataRow("select * from hh where 1 = (select count(*) from hh where h = 'bad')", 2)]
+    [DataRow("create table #th (h hierarchyid); insert #th values ('bad')", 2)]
+    public void StringConversionFailure_FoldedAtCompile_IsState1(string statement, int state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table hh (id int, h hierarchyid); insert hh values (1, '/1/')");
+        AreEqual(state, simulation.AssertSqlError(statement, 6522).State);
+    }
+
     // Ordering still equals depth-first traversal across the wide tiers, which
     // is the property the prefix-free tier codes exist to preserve.
     [TestMethod]

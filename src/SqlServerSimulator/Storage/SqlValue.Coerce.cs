@@ -331,6 +331,15 @@ internal readonly partial struct SqlValue
             {
                 throw SimulatedSqlException.HierarchyIdParseFailed(this.AsString, state: 1);
             }
+            // An ANSI string's failure is real's at state 1 where it folds a
+            // written constant as the batch compiles, as a CLR type's Parse
+            // is (ConstantFolding.FoldsClrParseFailure); a Unicode one stays
+            // at 2 even there (probed 2026-10-17 against SQL Server 2025).
+            catch (SimulatedSqlException failure) when (this.Type is VarcharSqlType or CharSqlType)
+            {
+                failure.IsClrTypeParseFailure = true;
+                throw;
+            }
         }
 
         // An ANSI string reaches image as its code-page bytes; a Unicode one is

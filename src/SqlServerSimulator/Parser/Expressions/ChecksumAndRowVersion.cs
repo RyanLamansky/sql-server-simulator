@@ -265,6 +265,10 @@ internal sealed class Checksum : Expression
             }
             return hash;
         }
+        // A SQL name's varchar data over code page 850 or 437 folds its own
+        // sort order's weights.
+        if (!national && !isBinary && ChecksumWeights.TryFoldSqlSortOrder(collation, text, out var sorted))
+            return sorted;
         // Data a Latin1-General table compares folds its primary weights —
         // a SQL name's varchar data excepted, which its own sort order weighs.
         if (!isBinary

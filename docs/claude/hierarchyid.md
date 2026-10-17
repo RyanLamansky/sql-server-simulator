@@ -101,7 +101,8 @@ The text stops at the repeated exception-type line, before the stack frames real
 
 `.Read` / `.Write` raise `NotSupportedException` if encountered.
 
-**Not modeled yet**: a written string converted into a `hierarchyid` column of a permanent table (`INSERT t (h) SELECT 'bad'`) fails at state 1 on real, which folds the written constant as the batch compiles, as a spatial or CLR type's `Parse` does ([`clr-assemblies.md`](clr-assemblies.md)); it is state 2 here (probed 2026-10-06 against SQL Server 2025).
+A written `varchar` constant converted to `hierarchyid` in a statement over a permanent table — `INSERT t (h) SELECT 'bad'`, `VALUES`, `UPDATE … SET`, `CAST` or `CONVERT` in a select list — fails at state 1, real folding the constant as the batch compiles as it does a CLR type's `Parse` ([`clr-assemblies.md`](clr-assemblies.md)); a Unicode constant stays at state 2 even there, as do a variable, a statement over no table or a temporary one, a subquery's constant and `hierarchyid::Parse` (probed 2026-10-17 against SQL Server 2025).
+**Not modeled yet**: a comparison's conversion (`WHERE h = 'bad'`) is state 1 on real and 2 here, and so is `CAST(CAST('bad' AS varchar(10)) AS hierarchyid)` the other way round, state 2 on real and 1 here.
 A `hierarchyid` column's member in an `UPDATE`'s SET list (`SET n.Foo = 1`) is Msg 4104 here, where real reads it as the CLR type's member and reports Msg 6592 for a name the type lacks, as it does for a spatial column's (probed 2026-10-06 against SQL Server 2025).
 
 The conversion from bytes refuses one ending in a zero byte (`0x00`, `0x0000`, `0x5800`) with that 24000 failure — a variable, a column write, `DATALENGTH` alike — and `TRY_CAST` answers NULL; other malformed bytes (`0xFF`, `0x01`) pass the conversion and fail when a method or the client decodes them (probed 2026-10-06 against SQL Server 2025).

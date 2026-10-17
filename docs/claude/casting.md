@@ -233,6 +233,8 @@ Real reads the installed value as a request begins, so a `RECONFIGURE` reaches t
 - **Month names in other languages** — only the English names are recognized.
 - **`CONVERT(binary(3), '', 2)`** is an empty `0x` on real, unpadded although the type is fixed-length — in a variable too — while `'0x'` under style 1 and whitespace under style 2 pad (probed 2026-10-06 against SQL Server 2025).
   The conversion yields the empty value here, which an expression over it reads (`… + 0x01` is `0x01`), but a projected column or a variable stores `binary(n)` at its fixed width and pads it.
+  Real hands SqlClient zero bytes for the projected column and a `CASE` over it, and a `binary(3)` variable it initializes keeps them, where one initialized from `0x` pads; a table column, a `#temp` one and `SELECT … INTO` pad it to three (probed 2026-10-17 against SQL Server 2025).
+  Building it means carrying a fixed-length value shorter than its type to every write path, each padding it again as the masked values' do (`DataMasking.ForStorage`).
 
 ## A precision or scale past its type's range
 

@@ -106,6 +106,40 @@ public sealed class ChecksumAndRowVersionTests
     public void Checksum_MatchesRealsFold(string arguments, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select checksum({arguments})"));
 
+    /// <summary>
+    /// <c>varchar</c> data under the SQL collations over code pages 850 and 437
+    /// folds each byte's weight under the name's sort order — æ, Æ and ß taking
+    /// two places where it expands them, a binary name's bytes as signed bytes —
+    /// strings probed against SQL Server 2025 (2026-10-17), written as their
+    /// code points.
+    /// </summary>
+    [TestMethod]
+    [DataRow("SQL_1xCompat_CP850_CI_AS", "10,23,112,108", 45644)]
+    [DataRow("SQL_AltDiction_CP850_CI_AI", "97,39,250,65,167,89,248,94,122,32", -610079097)]
+    [DataRow("SQL_AltDiction_CP850_CI_AS", "221,201,213,8215,52", 26917591)]
+    [DataRow("SQL_AltDiction_CP850_CS_AS", "1,117,9552,18,9492", 5985916)]
+    [DataRow("SQL_AltDiction_Pref_CP850_CI_AS", "223,230,32,32,65,230,223,32,223,230,223,230,230", 127611075)]
+    [DataRow("SQL_Latin1_General_CP437_BIN", "9557,9618,82,966,71,77,1,9571,9516,214,948,9575", 1028754502)]
+    [DataRow("SQL_Latin1_General_CP437_BIN2", "70,105,178,73,189,79,107,8993,14,80,9488,198", -163495170)]
+    [DataRow("SQL_Latin1_General_CP437_CI_AI", "51,9554,122,47,230,56,11,103,177,224,41,99,92,32", -926841741)]
+    [DataRow("SQL_Latin1_General_CP437_CI_AS", "35,53,94,225,9554,122,41,35,4,8801", 970305901)]
+    [DataRow("SQL_Latin1_General_CP437_CS_AS", "44,98,8319,960,243,60,8805,118,33", 1746910500)]
+    [DataRow("SQL_Latin1_General_CP850_BIN", "6,225,9604,105,224,161,172,180", 1029633856)]
+    [DataRow("SQL_Latin1_General_CP850_BIN2", "77,28,2,12,49,203,253", 1287844819)]
+    [DataRow("SQL_Latin1_General_CP850_CI_AI", "115,18,4,187,100,214,255", -1642039019)]
+    [DataRow("SQL_Latin1_General_CP850_CI_AS", "206,76,86,9580,43,67,126,28,82,117", 1245392003)]
+    [DataRow("SQL_Latin1_General_CP850_CS_AS", "233,188,6,58", 7953232)]
+    [DataRow("SQL_Latin1_General_Pref_CP437_CI_AS", "65,223,65,32", 38158)]
+    [DataRow("SQL_Latin1_General_Pref_CP850_CI_AS", "9472,247,12,113,14,402,62,64,58,12", 1571255157)]
+    [DataRow("SQL_Scandinavian_CP850_CI_AS", "198,97,198,65,223,198,230,198,223,223,32,230,198", 1017937921)]
+    [DataRow("SQL_Scandinavian_CP850_CS_AS", "305,65,62,15,11,28,198,9580,237,253,202,193,104,222", 990968401)]
+    [DataRow("SQL_Scandinavian_Pref_CP850_CI_AS", "173,91,81,2,86,242,124", 1894685438)]
+    public void Checksum_OfVarcharUnderACodePage850Or437SortOrder_MatchesReal(string collation, string codePoints, int expected)
+    {
+        var text = string.Join(" + ", codePoints.Split(',').Select(static point => $"nchar({point})"));
+        AreEqual(expected, new Simulation().ExecuteScalar($"select checksum(cast({text} collate {collation} as varchar(20)))"));
+    }
+
     [TestMethod]
     public void ChecksumStar_HashesEveryColumn()
         => AreEqual("181|104", new Simulation().ExecuteScalar("""
