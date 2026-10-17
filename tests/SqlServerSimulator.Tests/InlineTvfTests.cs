@@ -437,6 +437,24 @@ public sealed class InlineTvfTests
     [DataRow("select * from dbo.f() (1)", 102, "Incorrect syntax near '1'.")]
     [DataRow("select * from string_split('a,b', ',') with (index(ix_a))", 1018, null)]
     [DataRow("select * from openjson('[1]') with (index(ix_a))", 1018, null)]
+    // After a built-in function the list is Msg 195 naming it as written, or
+    // Msg 317 when qualified; after a keyword rowset a table hint is Msg 1018
+    // and anything else Msg 102 (probed 2026-10-17 against SQL Server 2025).
+    [DataRow("select * from STRING_Split('a,b', ',') (nolock)", 195, "'STRING_Split' is not a recognized function name.")]
+    [DataRow("select * from string_split('a,b', ',') s (value)", 195, null)]
+    [DataRow("select * from string_split('a,b', ',') (a, b)", 195, null)]
+    [DataRow("select * from string_split('a,b', ',') (holdlock)", 1018, null)]
+    [DataRow("select * from string_split('a,b', ',') (@x)", 102, "Incorrect syntax near '@x'.")]
+    [DataRow("select * from generate_series(1, 3) g (x)", 195, "'generate_series' is not a recognized function name.")]
+    [DataRow("select * from fn_helpcollations() as f (x)", 195, "'fn_helpcollations' is not a recognized function name.")]
+    [DataRow("select * from fn_my_permissions(null, 'server') (nolock)", 195, null)]
+    [DataRow("select * from SYS.FN_HELPCOLLATIONS() (x)", 317, "Table-valued function 'FN_HELPCOLLATIONS' cannot have a column alias.")]
+    [DataRow("select * from sys.fn_builtin_permissions('') (nolock)", 317, "Table-valued function 'fn_builtin_permissions' cannot have a column alias.")]
+    [DataRow("select * from sys.fn_helpcollations() (index(1))", 1018, null)]
+    [DataRow("select * from sys.fn_helpcollations() (1)", 102, null)]
+    [DataRow("select * from openjson('[1]') (nolock)", 1018, "Incorrect syntax near 'nolock'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.")]
+    [DataRow("select * from openjson('[1]') o (readpast)", 1018, null)]
+    [DataRow("select * from openjson('[1]') o (x)", 102, "Incorrect syntax near 'x'.")]
     public void TableHintAfterTheCall_IsRefused(string query, int number, string? message)
     {
         var sim = new Simulation();

@@ -1117,14 +1117,14 @@ internal sealed partial class Selection
                 // Server's grammar, so dispatch fires before ParseObjectName
                 // / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseOpenJson(context, scope.OuterTypeResolver)));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseOpenJson(context, scope.OuterTypeResolver)), writtenName: null, qualified: false);
 
                 if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseStringSplit(context, scope.OuterTypeResolver)));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseStringSplit(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
 
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
 
                 if (IsChangeTableName(tableName.Value))
                     return InArgumentScope(context, scope, () => ParseChangeTableSource(context, scope));
@@ -1136,14 +1136,14 @@ internal sealed partial class Selection
                 {
                     return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
                         ? ParseRegexpMatches(context, scope.OuterTypeResolver)
-                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver)));
+                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver)), tableName.Value, qualified: false);
                 }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
                 // (objtype, objname, name, value) tuples for extended
                 // properties matching the filter.
                 if (string.Equals(tableName.Value, "fn_listextendedproperty", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseListExtendedProperty(context));
+                    return BuiltInRowsetSource(context, ParseListExtendedProperty(context), tableName.Value, qualified: false);
 
                 // Multi-part name parse: advances the cursor past the last
                 // dotted segment, leaving Token on the first non-name token
@@ -1190,7 +1190,7 @@ internal sealed partial class Selection
                     && (objectName.Count == 1
                         || (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))))
                 {
-                    return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
+                    return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()), objectName.Leaf, qualified: objectName.Count > 1);
                 }
 
                 // The two permission functions take the same bare or `sys.`
@@ -1198,19 +1198,19 @@ internal sealed partial class Selection
                 if (objectName.Count == 1 || (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys")))
                 {
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_builtin_permissions"))
-                        return BuiltInRowsetSource(context, ParseBuiltinPermissions(context, objectName.Leaf));
+                        return BuiltInRowsetSource(context, ParseBuiltinPermissions(context, objectName.Leaf), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_my_permissions"))
-                        return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf));
+                        return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_validate_plan_guide"))
-                        return BuiltInRowsetSource(context, ParseValidatePlanGuide(context, objectName.ToString()));
+                        return BuiltInRowsetSource(context, ParseValidatePlanGuide(context, objectName.ToString()), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_gettable"))
-                        return BuiltInRowsetSource(context, ParseTraceGetTable(context, "sys.fn_trace_gettable"));
+                        return BuiltInRowsetSource(context, ParseTraceGetTable(context, "sys.fn_trace_gettable"), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_getinfo"))
-                        return BuiltInRowsetSource(context, ParseTraceGetInfo(context, "sys.fn_trace_getinfo"));
+                        return BuiltInRowsetSource(context, ParseTraceGetInfo(context, "sys.fn_trace_getinfo"), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_geteventinfo"))
-                        return BuiltInRowsetSource(context, ParseTraceGetEventInfo(context, "sys.fn_trace_geteventinfo"));
+                        return BuiltInRowsetSource(context, ParseTraceGetEventInfo(context, "sys.fn_trace_geteventinfo"), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_trace_getfilterinfo"))
-                        return BuiltInRowsetSource(context, ParseTraceGetFilterInfo(context, "sys.fn_trace_getfilterinfo"));
+                        return BuiltInRowsetSource(context, ParseTraceGetFilterInfo(context, "sys.fn_trace_getfilterinfo"), objectName.Leaf, qualified: objectName.Count > 1);
                 }
 
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text,
@@ -1231,41 +1231,41 @@ internal sealed partial class Selection
                 if ((objectName.Count == 2 || sysRowsetDatabase is not null) && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referencing_entities"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencingEntities(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencingEntities(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referenced_entities"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencedEntities(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlReferencedEntities(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_describe_first_result_set"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseDescribeFirstResultSet(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseDescribeFirstResultSet(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_sql_text"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseSqlText(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseSqlText(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_plan_attributes"))
-                        return BuiltInRowsetSource(context, InDatabase(ParsePlanAttributes(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParsePlanAttributes(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_query_plan"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseQueryPlan(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseQueryPlan(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_text_query_plan"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseTextQueryPlan(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseTextQueryPlan(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_query_statistics_xml"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseQueryStatisticsXml(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseQueryStatisticsXml(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseInputBuffer(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseInputBuffer(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_cursors"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseExecCursors(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseExecCursors(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_fts_parser"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseFtsParser(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseFtsParser(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_io_virtual_file_stats"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseVirtualFileStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseVirtualFileStatsDmv(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_info"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseLogInfoDmv(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseLogInfoDmv(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_db_log_stats"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseLogStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseLogStatsDmv(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_os_file_exists"))
-                        return BuiltInRowsetSource(context, ParseSystemTvf(context, objectName.ToString(), sysRowsetDatabase, 1, Simulation.FileExistsColumns, static (batch, args) => Simulation.FileExistsRows(batch, args[0])));
+                        return BuiltInRowsetSource(context, ParseSystemTvf(context, objectName.ToString(), sysRowsetDatabase, 1, Simulation.FileExistsColumns, static (batch, args) => Simulation.FileExistsRows(batch, args[0])), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_os_volume_stats"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseVolumeStatsDmv(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseVolumeStatsDmv(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (BuiltInToken.Equals(objectName.Leaf, "fn_xe_file_target_read_file"))
-                        return BuiltInRowsetSource(context, InDatabase(ParseXeFileTargetReadFile(context, objectName.ToString()), sysRowsetDatabase));
+                        return BuiltInRowsetSource(context, InDatabase(ParseXeFileTargetReadFile(context, objectName.ToString()), sysRowsetDatabase), objectName.Leaf, qualified: objectName.Count > 1);
                     if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString(), sysRowsetDatabase) is { } indexDmv)
-                        return BuiltInRowsetSource(context, indexDmv);
+                        return BuiltInRowsetSource(context, indexDmv, objectName.Leaf, qualified: objectName.Count > 1);
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -1518,8 +1518,12 @@ internal sealed partial class Selection
                     }
 
                     var catalogAlias = ConsumeOptionalAlias(context);
-                    if (catalogAlias is null && catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
-                        RejectRowsetFunctionWith(context);
+                    if (catalogView.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (catalogAlias is null)
+                            RejectRowsetFunctionWith(context);
+                        RejectRowsetColumnAliasList(context, objectName.Leaf, qualified: objectName.Count > 1);
+                    }
                     // Catalog views are read-only metadata so the hints have no
                     // semantic effect, but the name-validation gate must still
                     // run (probe-confirmed against SQL Server 2025: Msg 321 on
@@ -2024,7 +2028,7 @@ internal sealed partial class Selection
                 // in the Name case that carries OPENJSON. ParseOpenXml consumes
                 // the argument list and the optional WITH clause, leaving the
                 // cursor one past the source (BuiltInRowsetSource's contract).
-                return BuiltInRowsetSource(context, ParseOpenXml(context));
+                return BuiltInRowsetSource(context, ParseOpenXml(context), writtenName: null, qualified: false);
 
             // A schema-bound body may reach none of the three ad hoc rowsets,
             // refused as the parser meets the keyword (probed 2026-10-04
@@ -2098,7 +2102,7 @@ internal sealed partial class Selection
             // reserved keywords, so they arrive here rather than in the Name
             // case that carries OPENJSON.
             case ReservedKeyword { Keyword: Keyword.ContainsTable or Keyword.FreeTextTable } ftRowset:
-                return BuiltInRowsetSource(context, ParseFullTextTable(context, ftRowset.Keyword == Keyword.FreeTextTable));
+                return BuiltInRowsetSource(context, ParseFullTextTable(context, ftRowset.Keyword == Keyword.FreeTextTable), writtenName: null, qualified: false);
 
             case ReservedKeyword
             {
@@ -2172,6 +2176,35 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Refuses a parenthesized list after a built-in rowset function and its
+    /// alias, which real reads as neither a column alias list nor the legacy
+    /// no-<c>WITH</c> hint form (probed 2026-10-17 against SQL Server 2025):
+    /// after a function a name (a hint's included) is Msg 195 at state 15
+    /// naming the function as written, unqualified, or Msg 317 qualified, and
+    /// <c>INDEX</c> or <c>HOLDLOCK</c> is Msg 1018; after a keyword rowset
+    /// (<paramref name="writtenName"/> null) a table hint is Msg 1018, as
+    /// after a table variable; anything else is Msg 102 at it. Cursor on
+    /// entry: the token after the alias, left alone unless it is <c>(</c>.
+    /// </summary>
+    private static void RejectRowsetColumnAliasList(ParserContext context, string? writtenName, bool qualified)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return;
+        if (writtenName is null)
+        {
+            RejectTableVariableHints(context);
+            return;
+        }
+        throw context.GetNextRequired() switch
+        {
+            ReservedKeyword { Keyword: Keyword.Index or Keyword.HoldLock } hint => SimulatedSqlException.TableHintNeedsWithKeyword(hint.Source),
+            Name when qualified => SimulatedSqlException.TableValuedFunctionColumnAlias(writtenName),
+            Name => SimulatedSqlException.UnrecognizedSystemFunction(writtenName, state: 15),
+            _ => SimulatedSqlException.SyntaxErrorNear(context),
+        };
+    }
+
+    /// <summary>
     /// The function name after the legacy <c>::</c> prefix, which takes only
     /// the SQL Server 2000 system functions — <c>::fn_virtualfilestats(…)</c>
     /// reads as <c>fn_virtualfilestats(…)</c> — and refuses another name with
@@ -2222,16 +2255,22 @@ internal sealed partial class Selection
     /// storage-backed constraints), consumes the optional alias, and defers
     /// execution to the plan via <see cref="FromSource.LateralPlan"/>. Entered
     /// with the cursor just past the function's closing <c>)</c> (each parser
-    /// consumes through its own argument list).
+    /// consumes through its own argument list). <c>writtenName</c> is the
+    /// function's name as written — its last part when <c>qualified</c> — or
+    /// null for a keyword rowset (<c>OPENJSON</c>, <c>OPENXML</c>,
+    /// <c>CONTAINSTABLE</c>, <c>FREETEXTTABLE</c>), which
+    /// <see cref="RejectRowsetColumnAliasList"/> reads apart.
     /// </summary>
-    private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
+    private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan, string? writtenName, bool qualified)
     {
         RejectRowsetFunctionWith(context);
         var columns = new HeapColumn[plan.Schema.Length];
         for (var ci = 0; ci < columns.Length; ci++)
             columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
+        var qualifier = ConsumeOptionalAliasAtCurrent(context);
+        RejectRowsetColumnAliasList(context, writtenName, qualified);
         return new FromSource(
-            qualifier: ConsumeOptionalAliasAtCurrent(context),
+            qualifier: qualifier,
             columnNames: plan.ColumnNames,
             columns: columns,
             storedSchema: columns,
