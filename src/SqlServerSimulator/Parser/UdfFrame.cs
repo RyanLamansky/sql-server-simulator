@@ -32,4 +32,11 @@ internal sealed class UdfFrame(SqlType returnType)
 
     /// <summary>What the analysis walk's <c>RETURN</c>s read, merged; see <see cref="AnalyzesReturnMask"/>.</summary>
     public DataMask? ReturnMask;
+
+    /// <summary>
+    /// The function a call runs the body of, whose values and conditions its
+    /// parse keeps for the next call (<see cref="Schemas.ScalarFunction.BodyExpressions"/>);
+    /// null for a walk of the body that isn't a call.
+    /// </summary>
+    public Schemas.ScalarFunction? Function;
 }

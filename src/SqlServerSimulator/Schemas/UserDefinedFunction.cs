@@ -165,6 +165,22 @@ internal sealed class ScalarFunction(
     /// </summary>
     public bool? InlineOption;
 
+    /// <summary>
+    /// The body's values and conditions as a call's parse built them, by the
+    /// token ordinal each starts at (see <c>Simulation.ParseBodyExpression</c>).
+    /// Copy-on-write: a call reads whichever dictionary is published without
+    /// locking.
+    /// </summary>
+    public volatile Dictionary<int, Parser.BodyExpressionPlan> BodyExpressions = [];
+
+    private readonly Lock keepingBodyExpressions = new();
+
+    /// <summary>Files <paramref name="plan"/> for the expression starting at <paramref name="start"/>, replacing any stale one.</summary>
+    public void KeepBodyExpression(int start, Parser.BodyExpressionPlan plan)
+    {
+        lock (this.keepingBodyExpressions)
+            this.BodyExpressions = new Dictionary<int, Parser.BodyExpressionPlan>(this.BodyExpressions) { [start] = plan };
+    }
 }
 
 /// <summary>

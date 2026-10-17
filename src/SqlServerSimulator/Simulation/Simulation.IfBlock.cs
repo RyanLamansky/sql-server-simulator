@@ -144,7 +144,7 @@ partial class Simulation
         batch.Parser.ConditionDepth++;
         try
         {
-            return BooleanExpression.Parse(batch.Parser);
+            return ParseBodyExpression(batch.Parser, BooleanExpression.Parse);
         }
         finally
         {
@@ -552,7 +552,7 @@ partial class Simulation
             // draw as nested (probed 2026-10-04 against SQL Server 2025).
             Expression valueExpr;
             using (context.EnterNextValueForScope(NextValueForScope.Nested))
-                valueExpr = Expression.Parse(context);
+                valueExpr = ParseBodyExpression(context, Expression.Parse);
             if (batch.UdfFrame is { AnalyzesReturnMask: true } analyzed)
                 analyzed.ReturnMask = DataMask.Merge(analyzed.ReturnMask, DataMask.Of(valueExpr, static _ => null, typeOf: null));
             // A scalar function's result takes its value as an assignment

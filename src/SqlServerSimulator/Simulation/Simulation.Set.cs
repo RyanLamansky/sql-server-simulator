@@ -1008,7 +1008,7 @@ partial class Simulation
             return false;
 
         context.MoveNextRequired();
-        var rhs = Expression.Parse(context);
+        var rhs = ParseBodyExpression(context, Expression.Parse);
         // A scalar UDF body's analysis walk carries what the value read to the
         // variable, a compound assignment keeping what it held before.
         if (context.Batch.UdfFrame is { AnalyzesReturnMask: true })

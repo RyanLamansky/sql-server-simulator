@@ -45,6 +45,39 @@ public sealed class ScalarFunctionTests
     }
 
     [TestMethod]
+    [Description("A body's values and conditions, kept from one call's parse for the next, answer each call's own arguments, and an ALTER's body replaces them.")]
+    public void BodyExpressions_AnswerEveryCall_AndAlterReplacesThem()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.n (v int); declare @i int = 1; while @i <= 300 begin insert dbo.n values (@i); set @i += 1 end",
+            """
+            create function dbo.f(@x int) returns int as begin
+                declare @r int = @x * 2
+                if @x % 2 = 0
+                    set @r = @x / 2
+                else
+                    set @r = @x * 3 + 1
+                while @r > 100
+                    set @r -= 100
+                return @r
+            end
+            """);
+        using var connection = sim.CreateOpenConnection();
+        var expected = 0L;
+        for (var x = 1; x <= 300; x++)
+        {
+            var r = x % 2 == 0 ? x / 2 : (x * 3) + 1;
+            while (r > 100)
+                r -= 100;
+            expected += r;
+        }
+        AreEqual(expected, Convert.ToInt64(connection.CreateCommand("select sum(cast(dbo.f(v) as bigint)) from dbo.n").ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        _ = connection.CreateCommand("alter function dbo.f(@x int) returns int as begin return @x - 1 end").ExecuteNonQuery();
+        AreEqual(4, connection.CreateCommand("select dbo.f(5)").ExecuteScalar());
+    }
+
+    [TestMethod]
     public void Body_WithWhileLoop_ExecutesIteration()
     {
         using var connection = Open();

@@ -183,7 +183,7 @@ partial class Simulation
                 Expression initExpression;
                 try
                 {
-                    initExpression = Expression.Parse(context);
+                    initExpression = ParseBodyExpression(context, Expression.Parse);
                 }
                 catch (SimulatedSqlException failure) when (!reExecution && (!context.Batch.IsSkipping || failure.Class != 15))
                 {

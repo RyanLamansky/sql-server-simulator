@@ -33,6 +33,34 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Whether <paramref name="parsed"/> is built of nodes whose parse does
+    /// nothing but build them — literals, variables of a built-in scalar type,
+    /// arithmetic, comparisons and the logical connectives — so a later parse
+    /// of the same text in the same body can take the tree again rather than
+    /// read its tokens (see <c>Simulation.ParseBodyExpression</c>). Anything
+    /// else may take a lock, check a permission, bind an object, queue a
+    /// message or mark the statement as it parses, and isn't taken again.
+    /// </summary>
+    internal static bool ParsesWithoutEffects(ExpressionNode parsed)
+    {
+        var plain = true;
+        parsed.Walk(ref plain, static (node, _, ref plain) =>
+        {
+            plain = node switch
+            {
+                VariableReference variable => variable.Mask is null
+                    && variable.DeclaredType is not (HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType or XmlSqlType or JsonSqlType or VectorSqlType),
+                Value or Parenthesized or Negate or Add or Subtract or Multiply or Divide or Modulus or BitwiseAnd or BitwiseOr or BitwiseExclusiveOr => true,
+                AndExpression or OrExpression or NotExpression or IsNullExpression or BetweenExpression => true,
+                EqualityExpression or InequalityExpression or GreaterThanExpression or GreaterThanOrEqualExpression or LessThanExpression or LessThanOrEqualExpression => true,
+                _ => false,
+            };
+            return plain;
+        });
+        return plain;
+    }
+
+    /// <summary>
     /// Renders this predicate into the normalized form SQL Server stores in
     /// <c>sys.indexes.filter_definition</c> for a filtered index — columns
     /// bracketed, numeric constants parenthesized, strings quoted, operators

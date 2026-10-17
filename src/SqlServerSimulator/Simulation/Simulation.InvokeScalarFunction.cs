@@ -85,7 +85,7 @@ partial class Simulation
         // stored body.
         // Handed back to the session with ReturnBodyCommand, never disposed.
         var bodyCommand = connection.RentBodyCommand(function.BodyText);
-        var udfFrame = new UdfFrame(function.ReturnType);
+        var udfFrame = new UdfFrame(function.ReturnType) { Function = function };
         // The body binds and runs in the function's own database.
         var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);
         // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
