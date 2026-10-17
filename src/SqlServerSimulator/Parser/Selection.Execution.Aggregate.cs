@@ -242,9 +242,9 @@ internal sealed partial class Selection
                 }
             }
 
-            if (parallel is not null && !parallel.TryComplete(streamedGroups!))
+            if (parallel is not null && !parallel.TryComplete(streamedGroups!, out var workerFaulted))
             {
-                AggregateDiagnostics.Sink?.Add("Aggregate:SerialRerun(merge)");
+                AggregateDiagnostics.Sink?.Add(workerFaulted ? "Aggregate:SerialRerun(error)" : "Aggregate:SerialRerun(merge)");
                 return null;
             }
 

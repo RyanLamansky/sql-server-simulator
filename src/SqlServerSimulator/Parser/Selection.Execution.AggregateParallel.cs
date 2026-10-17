@@ -496,12 +496,19 @@ internal sealed partial class Selection
         /// their group maps into <paramref name="target"/> — the coordinator's
         /// own map, holding the groups the serial prefix built.
         /// </summary>
+        /// <param name="target">The coordinator's group map.</param>
+        /// <param name="faulted">
+        /// Whether a worker raised. A worker can raise after the producer's last
+        /// <see cref="Offer"/> went through, when nothing reaches the producer's
+        /// own exception path and only this join observes the fault, so the
+        /// caller reads the reason here rather than inferring a merge.
+        /// </param>
         /// <returns>
         /// <see langword="false"/> when a worker faulted or a merge proved
         /// inexact, in which case <paramref name="target"/> is not usable and
         /// the statement must re-run serially.
         /// </returns>
-        public bool TryComplete(Dictionary<SqlValueKey, GroupState> target)
+        public bool TryComplete(Dictionary<SqlValueKey, GroupState> target, out bool faulted)
         {
             try
             {
@@ -519,7 +526,8 @@ internal sealed partial class Selection
             }
 
             this.Join();
-            return !this.faulted && MergeInto(target, this.WorkerGroups, this.aggregates.Length);
+            faulted = this.faulted;
+            return !faulted && MergeInto(target, this.WorkerGroups, this.aggregates.Length);
         }
 
         /// <summary>
