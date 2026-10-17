@@ -3413,6 +3413,7 @@ internal sealed partial class Selection
                 catch (SimulatedSqlException projectionError)
                 {
                     projectionError.RaisedInRowProjection = true;
+                    batch.FailingRowIdentity?.Read(expressions, rowRuntime);
                     throw;
                 }
 
@@ -3504,6 +3505,7 @@ internal sealed partial class Selection
             {
                 // Above the spool, as real's projection is.
                 projectionError.RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, rowRuntime);
                 throw;
             }
             yield return projected;

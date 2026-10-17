@@ -631,11 +631,23 @@ partial class Simulation
             batch.SequenceValuesByRow = [];
         try
         {
+            var evaluated = new List<SqlValue[]>(plan.ValueTuples!.Count);
             try
             {
                 sourceRows = batch.IsSkipping
                     ? []
-                    : EvaluateParsedTuples(plan.ValueTuples!, batch, out valueTupleStamps);
+                    : EvaluateParsedTuples(plan.ValueTuples!, batch, out valueTupleStamps, evaluated);
+            }
+            catch (SimulatedSqlException) when (ExplicitIdentityOrdinal(batch, plan.DestinationTable, plan.DestinationColumns) is var explicitIdentity and >= 0)
+            {
+                // Each row's explicit identity moves the table's as the row
+                // reaches the insert, the failing one's included whichever of
+                // its cells failed (probed 2026-10-17 against SQL Server 2025:
+                // `VALUES (115, 1), (116, 1/0), (117, 1)` leaves it at 116).
+                var failingRow = new FailingRowIdentity(null);
+                failingRow.Read(plan.ValueTuples![evaluated.Count][explicitIdentity], new RuntimeContext(static name => throw SimulatedSqlException.UnboundColumnReference(name), batch));
+                ObserveExplicitIdentities(batch, plan.DestinationTable, explicitIdentity, evaluated, failingRow.Value);
+                throw;
             }
             catch (SimulatedSqlException) when (plan.ValueTuples!.Count == 1)
             {
@@ -1319,11 +1331,13 @@ partial class Simulation
     /// gets a throwaway NULL placeholder here — the INSERT row encoder detects
     /// the sentinel by position and resolves it against the target column's
     /// default before this placeholder is ever read.
+    /// The rows land in <paramref name="rows"/> when given, so a caller sees
+    /// those computed ahead of a failing one.
     /// </summary>
-    private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch, out long[] tupleStamps)
+    private static List<SqlValue[]> EvaluateParsedTuples(List<Expression[]> tuples, BatchContext batch, out long[] tupleStamps, List<SqlValue[]>? rows = null)
     {
         var runtime = new RuntimeContext(name => throw SimulatedSqlException.UnboundColumnReference(name), batch);
-        var rows = new List<SqlValue[]>(tuples.Count);
+        rows ??= new List<SqlValue[]>(tuples.Count);
         tupleStamps = new long[tuples.Count];
         var tupleIndex = 0;
         var declaresMasks = batch.Connection.Simulation.DeclaresDataMasks;
@@ -1830,6 +1844,11 @@ partial class Simulation
         }
 
         var rows = new List<SqlValue[]>();
+        var explicitIdentity = destinationTable is null ? -1 : ExplicitIdentityOrdinal(context.Batch, destinationTable, destinationColumns);
+        var failingRow = explicitIdentity >= 0
+            ? new FailingRowIdentity(selection.ProjectionExpressions is { } cells && explicitIdentity < cells.Length ? cells[explicitIdentity] : null)
+            : null;
+        using var capture = ParserScope.Enter(ref context.Batch.FailingRowIdentity, failingRow);
         try
         {
             return ReadSelectSourceRows(context, selection, destinationColumns, rows, rowLimit, rowStamps);
@@ -1841,8 +1860,65 @@ partial class Simulation
             // so a source failing partway draws nothing (probed 2026-10-11
             // against SQL Server 2025).
             var readsWhole = context.Batch.SourceTopPercent is { Plan: var percentPlan } && ReferenceEquals(percentPlan, selection);
-            UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+            if (failingRow is not null)
+            {
+                if (!readsWhole)
+                    ObserveExplicitIdentities(context.Batch, destinationTable, explicitIdentity, rows, sourceError.RaisedInRowProjection ? failingRow.Value : null);
+            }
+            else
+            {
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+            }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The position in <paramref name="destinationColumns"/> of an identity an
+    /// <c>INSERT</c> supplies under <c>IDENTITY_INSERT</c>, or -1 when it
+    /// supplies none, the option is off for the table, or an <c>INSTEAD OF</c>
+    /// trigger stands in for the write.
+    /// </summary>
+    private static int ExplicitIdentityOrdinal(BatchContext batch, HeapTable table, HeapColumn[] destinationColumns)
+    {
+        if (batch.IsSkipping || table.IdentityOrdinal < 0
+            || batch.Connection.IdentityInsertTable is not string activeTable
+            || !batch.CurrentDatabase.Collation.Equals(activeTable, table.Name)
+            || HasInsteadOfTrigger(batch, table, TriggerActions.Insert))
+        {
+            return -1;
+        }
+        return Array.IndexOf(destinationColumns, table.Columns[table.IdentityOrdinal]);
+    }
+
+    /// <summary>
+    /// Moves the identity of a failing <c>INSERT</c> under
+    /// <c>IDENTITY_INSERT</c> as far as real's does: real writes each row's
+    /// explicit value into the identity as the row reaches the insert, its
+    /// identity cell computed ahead of its others, so the rows the source
+    /// produced before the failure move it, and so does the failing row's own
+    /// value when its error came from its select list (probed 2026-10-17
+    /// against SQL Server 2025). A value that can't convert moves nothing.
+    /// </summary>
+    private static void ObserveExplicitIdentities(BatchContext batch, HeapTable table, int ordinal, List<SqlValue[]> rows, SqlValue? failingRowValue)
+    {
+        var identityColumn = table.Columns[table.IdentityOrdinal];
+        foreach (var row in rows)
+            Observe(row[ordinal]);
+        if (failingRowValue is { } value)
+            Observe(value);
+
+        void Observe(SqlValue value)
+        {
+            try
+            {
+                if (CoerceForWrite(value, identityColumn, batch) is { IsNull: false } coerced)
+                    identityColumn.Identity!.ObserveExplicit(IdentityState.FromSqlValue(coerced));
+            }
+            catch (SimulatedSqlException)
+            {
+                // The row fails converting its identity before it moves it.
+            }
         }
     }
 

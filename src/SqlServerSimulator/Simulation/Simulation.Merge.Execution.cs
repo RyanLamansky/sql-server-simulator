@@ -152,6 +152,68 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Draws the identity values a <c>MERGE</c> whose <c>USING</c> source
+    /// failed uses up. With an <c>ON</c> settled non-TRUE while compiling —
+    /// EF Core's multi-row insert — real's plan joins nothing, so each source
+    /// row streams to the <c>WHEN NOT MATCHED</c> insert, which draws the
+    /// row's value ahead of computing its values: the rows the source produced
+    /// before the failure use one each where the clause's condition takes
+    /// them, and so does the failing row when its error came from the source's
+    /// select list (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
+    /// Over a join to the target real reads the source whole first, so a
+    /// failing source uses none up (probed over an empty and a two-row heap).
+    /// </summary>
+    private static void UseUpMergeIdentityValues(
+        ParserContext context,
+        HeapTable destinationTable,
+        BooleanExpression onPredicate,
+        List<WhenClause> whenClauses,
+        List<SqlValue[]> sourceRows,
+        bool failingRowReached,
+        string sourceAlias,
+        string[] sourceColumnNames)
+    {
+        var batch = context.Batch;
+        if (destinationTable.IdentityOrdinal < 0
+            || whenClauses.Find(static c => c.Kind == WhenClauseKind.NotMatchedByTarget) is not { InsertColumns: { } insertColumns } clause
+            || Array.IndexOf(insertColumns, destinationTable.Columns[destinationTable.IdentityOrdinal]) >= 0
+            || whenClauses.Exists(static c => c.Kind == WhenClauseKind.NotMatchedBySource)
+            || !(onPredicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(onPredicate, context, out var onConstant) && onConstant != true))
+            || HasInsteadOfTrigger(batch, destinationTable, TriggerActions.Insert))
+        {
+            return;
+        }
+
+        var count = failingRowReached ? 1 : 0;
+        foreach (var sourceValues in sourceRows)
+        {
+            try
+            {
+                if (clause.SearchCondition is not { } condition
+                    || condition.Run(new RuntimeContext(ResolveSource, batch)) == true)
+                {
+                    count++;
+                }
+            }
+            catch (SimulatedSqlException)
+            {
+                // The condition fails for the row before it reaches the insert.
+            }
+
+            // A NOT MATCHED condition reads the source alone.
+            SqlValue ResolveSource(MultiPartName name)
+            {
+                var collation = batch.CurrentDatabase.Collation;
+                var ordinal = MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames) is var qualified and >= 0
+                    ? qualified
+                    : MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true);
+                return ordinal >= 0 ? sourceValues[ordinal] : throw SimulatedSqlException.InvalidColumnName(name);
+            }
+        }
+        UseUpIdentityValues(batch, destinationTable, [], count);
+    }
+
+    /// <summary>
     /// Runs the prepared MERGE plan against the live target heap. The
     /// source <see cref="Selection"/> materializes into a list once;
     /// each target row is scanned, its action chosen via the first
@@ -164,7 +226,7 @@ partial class Simulation
         HeapTable destinationTable,
         View? sourceView,
         string targetAlias,
-        Func<BatchContext, List<SqlValue[]>> materializeSource,
+        Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> materializeSource,
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
@@ -186,13 +248,22 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
 
-        var sourceRows = materializeSource(context.Batch);
+        var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
+        var sourceRows = new List<SqlValue[]>();
+        try
+        {
+            _ = materializeSource(context.Batch, sourceRows);
+        }
+        catch (SimulatedSqlException sourceError) when (viewRowsTarget is null && joinWrite is null && sourceView is null)
+        {
+            UseUpMergeIdentityValues(context, destinationTable, onPredicate, whenClauses, sourceRows, sourceError.RaisedInRowProjection, sourceAlias, sourceColumnNames);
+            throw;
+        }
         // A statement whose client reads its OUTPUT rows as they come writes
         // each action as it sends it, its matched rows held in U meanwhile.
         var writesAsSent = sourceView is null && viewRowsTarget is null && joinWrite is null
             && WritesAsItSends(context.Batch, output) && MergeWritesAsSent(context.Batch, destinationTable, whenClauses);
         var sourceMatched = new bool[sourceRows.Count];
-        var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 
         // A non-persisted computed column of the target is evaluated only where
         // the statement reads it for a row — the ON, a WHEN condition, an action

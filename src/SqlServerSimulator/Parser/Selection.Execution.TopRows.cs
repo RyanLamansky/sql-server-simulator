@@ -481,6 +481,7 @@ partial class Selection
             {
                 // Above the sort, as real's projection is.
                 projectionError.RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, rowRuntime);
                 throw;
             }
             yield return projected;

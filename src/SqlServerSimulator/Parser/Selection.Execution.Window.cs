@@ -160,6 +160,7 @@ internal sealed partial class Selection
             catch (SimulatedSqlException projectionError) when (streams)
             {
                 projectionError.RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, rowRuntime);
                 throw;
             }
             if (streams)
@@ -370,6 +371,7 @@ internal sealed partial class Selection
             catch (SimulatedSqlException projectionError)
             {
                 projectionError.RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, rowRuntime);
                 throw;
             }
             yield return projected;

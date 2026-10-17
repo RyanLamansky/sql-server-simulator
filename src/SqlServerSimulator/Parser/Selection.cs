@@ -4085,6 +4085,7 @@ internal sealed partial class Selection
             {
                 // The row's value is computed past an INSERT's identity draw.
                 ((SimulatedSqlException)bakeFailure.SourceException).RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, new RuntimeContext(Resolve, batch));
                 bakeFailure.Throw();
             }
             if (scope.ProjectionUnread || !referencesOuterColumns)
@@ -4104,6 +4105,7 @@ internal sealed partial class Selection
             catch (SimulatedSqlException projectionError)
             {
                 projectionError.RaisedInRowProjection = true;
+                batch.FailingRowIdentity?.Read(expressions, runtime);
                 throw;
             }
 

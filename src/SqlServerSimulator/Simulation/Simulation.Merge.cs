@@ -321,7 +321,7 @@ partial class Simulation
         HeapTable destinationTable,
         View? sourceView,
         string targetAlias,
-        Func<BatchContext, List<SqlValue[]>> materializeSource,
+        Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> materializeSource,
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
@@ -339,7 +339,7 @@ partial class Simulation
         public readonly HeapTable DestinationTable = destinationTable;
         public readonly View? SourceView = sourceView;
         public readonly string TargetAlias = targetAlias;
-        public readonly Func<BatchContext, List<SqlValue[]>> MaterializeSource = materializeSource;
+        public readonly Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> MaterializeSource = materializeSource;
         public readonly string SourceAlias = sourceAlias;
         public readonly string[] SourceColumnNames = sourceColumnNames;
         public readonly SqlType[] SourceSchema = sourceSchema;
@@ -499,7 +499,7 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseMergeSource(ParserContext context)
     {
         if (IsJoinedMergeSourceAhead(context))
             return ParseJoinedMergeSource(context);
@@ -576,7 +576,7 @@ partial class Simulation
     /// 2025). Cursor on entry: <c>USING</c>; on exit, the token past the
     /// source.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseJoinedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseJoinedMergeSource(ParserContext context)
     {
         var sourceList = new List<FromSource>();
         var joinList = new List<JoinSpec>();
@@ -599,9 +599,8 @@ partial class Simulation
             }
         }
         var types = schema.ToArray();
-        List<SqlValue[]> Materialize(BatchContext batch)
+        List<SqlValue[]> Materialize(BatchContext batch, List<SqlValue[]> rows)
         {
-            var rows = new List<SqlValue[]>();
             foreach (var tuple in Selection.EnumerateJoinedRows((FromSource[])sources.Clone(), joins, batch, outerResolver: null))
             {
                 batch.PollCancellation();
@@ -643,11 +642,11 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
-        Func<BatchContext, List<SqlValue[]>> materialize;
+        Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> materialize;
         SqlType[] sourceSchema;
         string[] selectionColumnNames;
         DataMask?[]? masks = null;
@@ -667,10 +666,9 @@ partial class Simulation
                     nullability[i] |= tuple[i].ResultIsNullable(valuesNullability);
             }
             selectionColumnNames = new string[tuples[0].Length];
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
                 var runtime = new RuntimeContext(name => throw SimulatedSqlException.UnboundColumnReference(name), batch);
-                var rows = new List<SqlValue[]>(tuples.Count);
                 foreach (var tuple in tuples)
                 {
                     batch.BumpRowStamp();
@@ -699,14 +697,13 @@ partial class Simulation
             selectionColumnNames = selection.ColumnNames;
             masks = selection.ColumnMasks;
             nullability = selection.ColumnNullability;
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
                 // The USING source is its own query expression, so it owns the
                 // securable list of its reads and reaches none of the statement
                 // check sites the MERGE target's own permissions run through.
                 PermissionEnforcement.CheckSubqueryReads(batch, selection);
                 var rs = selection.Execute(batch);
-                var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in rs.RowBytes)
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
@@ -773,11 +770,11 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability, FromSource[] MatchSources, JoinSpec[] MatchJoins) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
-        Func<BatchContext, List<SqlValue[]>> materialize;
+        Func<BatchContext, List<SqlValue[]>, List<SqlValue[]>> materialize;
         SqlType[] sourceSchema;
         string[] columnNames;
         DataMask?[]? masks = null;
@@ -798,10 +795,9 @@ partial class Simulation
             sourceSchema = ctePlan.Schema;
             columnNames = cteBinding.ColumnNames;
             var cteAlias = Selection.ConsumeOptionalAlias(context) ?? cteBinding.Name;
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
                 var rs = ctePlan.Execute(batch);
-                var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in rs.RowBytes)
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
@@ -829,10 +825,9 @@ partial class Simulation
                 columnNames[i] = remoteColumns[i].Name;
             }
             var remoteSelection = Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteName, remoteColumns);
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
                 var rs = remoteSelection.Execute(batch);
-                var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in rs.RowBytes)
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
@@ -853,10 +848,9 @@ partial class Simulation
             nullability = Array.ConvertAll(viewColumns, static column => column.Nullable);
             var viewSelection = Selection.ForView(resolvedView, viewColumns);
             (matchBody, matchView) = (viewSelection, resolvedView);
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
                 var rs = viewSelection.Execute(batch);
-                var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in rs.RowBytes)
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
@@ -879,9 +873,8 @@ partial class Simulation
             // Phase 1b: MERGE bare-table source is a READ — table-IS plus
             // per-row probe (or hint-driven row-S / row-U / row-X).
             _ = context.Batch.AcquireDataLockIfApplicable(sourceTable, sourceHints, isWrite: false);
-            materialize = batch =>
+            materialize = (batch, rows) =>
             {
-                var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in RowSecurity.FilterRows(sourceTable, ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo), batch))
                 {
                     batch.PollCancellation();

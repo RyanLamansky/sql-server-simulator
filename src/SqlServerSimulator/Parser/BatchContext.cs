@@ -407,6 +407,13 @@ internal sealed partial class BatchContext
     public (Selection Plan, Selection.DmlTopLimit Limit)? SourceTopPercent;
 
     /// <summary>
+    /// The identity cell an <c>INSERT</c> under <c>IDENTITY_INSERT</c> asks
+    /// of the row its source fails on, while it reads that source; null
+    /// otherwise.
+    /// </summary>
+    public FailingRowIdentity? FailingRowIdentity;
+
+    /// <summary>
     /// Set while a write through a level over a partitioned view reads that
     /// level's rows for one member, which real evaluates per member: a
     /// reference to the partitioned view then yields only that member's rows,

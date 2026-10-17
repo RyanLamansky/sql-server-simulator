@@ -67,6 +67,8 @@
   EF emits `ISNULL` only for `??` with a CAST; bare `??` emits `COALESCE`.
   Neither IIF nor NULLIF is EF-emitted (LINQ ternary → CASE) — load-bearing for `FromSqlInterpolated`.
 
+**Not modeled yet**: a derived table's, view's or CTE's select-list column the enclosing query never reads is computed anyway, so `SELECT COUNT(*) FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` — or a `MERGE` source column no action reads — is Msg 8134 here, where real's plan never computes it and answers (probed 2026-10-17 against SQL Server 2025).
+
 ## Compile-time predicate folding
 
 Real SQL Server settles some predicates while compiling, and an operand it settled is never evaluated — so the error that operand would have raised never appears.

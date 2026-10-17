@@ -685,6 +685,67 @@ public sealed class IdentityTests
     }
 
     /// <summary>
+    /// Under <c>IDENTITY_INSERT</c> a failing <c>INSERT</c> still moves the
+    /// identity to the explicit values of the rows it reached — those its
+    /// source produced before the failure, a multi-row <c>VALUES</c> list's
+    /// included, and the failing row's own when its error came from its select
+    /// list, whichever of its cells failed — and to none a filter, a
+    /// <c>DISTINCT</c> or the identity cell itself stopped (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert ti (id, v) values (10, 1), (11, 1/0)", 11)]
+    [DataRow("insert ti (id, v) values (10, 1), (1/0, 1)", 10)]
+    [DataRow("insert ti (id, v) values (15, 1), (16, 1/0), (17, 1)", 16)]
+    [DataRow("insert ti (v, id) values (1/0, 20)", 20)]
+    [DataRow("insert ti (id, v) values (50, 'abc')", 50)]
+    [DataRow("insert ti (id, v) select k + 30, v from (select k, 1 v from src) s where 10 / (3 - k) > 0", 32)]
+    [DataRow("insert ti (id, v) select k + 60, k * 40 from src", 63)]
+    [DataRow("insert ti (id, v) select top 10 k + 70, 10 / (k - 3) from src order by k desc", 75)]
+    [DataRow("insert ti (id, v) select k + 80, 10 / (k - 3) from src order by k", 83)]
+    [DataRow("insert ti (id, v) select k + 90, 10 / (k - 3) from src union all select 99, 1", 93)]
+    [DataRow("insert ti (id, v) select distinct k + 130, 10 / (k - 3) from src", 1)]
+    [DataRow("insert ti (v, id) select 10 / (k - 3), k + 140 from src", 143)]
+    [DataRow("insert ti (id, v) select 160 - k, 10 / (k - 3) from src", 159)]
+    public void FailingIdentityInsert_MovesTheIdentityToTheRowsItReached(string insert, int expected)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table src (k int); insert src values (1), (2), (3), (4), (5);
+            create table ti (id int identity, v int check (v < 100));
+            set identity_insert ti on
+            """).ExecuteNonQuery();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand(insert).ExecuteNonQuery());
+        AreEqual(expected, Convert.ToInt32(connection.CreateCommand("select ident_current('ti')").ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// A <c>MERGE</c> whose <c>ON</c> settles non-TRUE streams its source
+    /// rows to the <c>WHEN NOT MATCHED</c> insert, so a failing source uses
+    /// up a value per row the clause took before the failure and one for the
+    /// failing row; over a join to the target the source is read whole first
+    /// and uses none (probed 2026-10-06 and 2026-10-17 against SQL Server
+    /// 2025). The table holds one row, so the next value reads how many were
+    /// used up.
+    /// </summary>
+    [TestMethod]
+    [DataRow("merge t using (select 1/0 as x) s on 1 = 0 when not matched then insert (v) values (s.x);", 3)]
+    [DataRow("merge t using (select 10 / (k - 3) as x from src) s on 1 = 0 when not matched then insert (v) values (s.x);", 5)]
+    [DataRow("merge t using (select k from src where 10 / (3 - k) > 0) s on 1 = 0 when not matched then insert (v) values (s.k);", 4)]
+    [DataRow("merge t using (select k, 10 / (k - 3) as x from src) s on 1 = 0 when not matched and s.k <> 2 then insert (v) values (s.x);", 4)]
+    [DataRow("merge t using (select 10 / (k - 3) as x from src) s on t.v = s.x when not matched then insert (v) values (s.x);", 2)]
+    public void FailingMergeSource_UsesUpTheRowsTheInsertReached(string merge, int expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table src (k int); insert src values (1), (2), (3), (4), (5)",
+            "create table t (id int identity, v int); insert t (v) values (-1)");
+        _ = simulation.AssertSqlError(merge, 8134);
+        _ = simulation.ExecuteNonQuery("insert t (v) values (0)");
+        AreEqual(expected, simulation.ExecuteScalar("select max(id) from t"));
+    }
+
+    /// <summary>
     /// A FROM-less source's value meets its column only once the row exists:
     /// under a WHERE that doesn't fold TRUE, a HAVING or TOP (0) nothing
     /// converts, while a table source converts it as its plan starts (probed
