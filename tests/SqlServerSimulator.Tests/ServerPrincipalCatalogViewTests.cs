@@ -15,8 +15,9 @@ public sealed class ServerPrincipalCatalogViewTests
     public void FreshSimulation_HasSaPublicAndFixedServerRoles()
     {
         var sim = new Simulation();
-        // sa (1) + public (2) + the 18 fixed server roles (ids 3–20).
-        AreEqual(20, sim.ExecuteScalar("select count(*) from sys.server_principals"));
+        // sa (1) + public (2) + the 18 fixed server roles (ids 3–20) + the
+        // three installed Windows logins (259–261).
+        AreEqual(23, sim.ExecuteScalar("select count(*) from sys.server_principals"));
         AreEqual("sysadmin", sim.ExecuteScalar("select name from sys.server_principals where principal_id = 3"));
         IsTrue((bool)sim.ExecuteScalar("select is_fixed_role from sys.server_principals where name = 'sysadmin'")!);
 
@@ -38,8 +39,8 @@ public sealed class ServerPrincipalCatalogViewTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login app_login with password = 'P@ssw0rd1'");
-        // User server principals start at 258 (ids 3–20 are the fixed roles).
-        AreEqual(258, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'app_login'"));
+        // User server principals start at 262, past the installed Windows logins.
+        AreEqual(262, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'app_login'"));
         AreEqual("SQL_LOGIN", sim.ExecuteScalar("select type_desc from sys.server_principals where name = 'app_login'"));
         AreEqual("master", sim.ExecuteScalar("select default_database_name from sys.server_principals where name = 'app_login'"));
         AreEqual("us_english", sim.ExecuteScalar("select default_language_name from sys.server_principals where name = 'app_login'"));
@@ -65,8 +66,8 @@ public sealed class ServerPrincipalCatalogViewTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login login_a with password = 'P@ssw0rd1'; create login login_b with password = 'P@ssw0rd2'");
-        AreEqual(258, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_a'"));
-        AreEqual(259, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_b'"));
+        AreEqual(262, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_a'"));
+        AreEqual(263, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'login_b'"));
         var sidA = Convert.ToHexString((byte[])sim.ExecuteScalar("select sid from sys.server_principals where name = 'login_a'")!);
         var sidB = Convert.ToHexString((byte[])sim.ExecuteScalar("select sid from sys.server_principals where name = 'login_b'")!);
         AreNotEqual(sidA, sidB);

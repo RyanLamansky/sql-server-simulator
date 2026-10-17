@@ -310,18 +310,18 @@ public sealed class ServerPermissionEnforcementTests
         var sim = WithLogin("grant view server state to other");
         AreEqual("CONNECT SQL,CONNECT SQL,VIEW ANY DATABASE", sim.ExecuteScalar(
             "use master; execute as login = 'app'; select string_agg(permission_name, ',') within group (order by permission_name) from sys.server_permissions; revert"));
-        AreEqual(5, sim.ExecuteScalar("select count(*) from sys.server_permissions"));
+        AreEqual(12, sim.ExecuteScalar("select count(*) from sys.server_permissions"));
     }
 
     [TestMethod]
     public void ServerRoleMembers_HideAnInvisibleCustomRole()
     {
         var sim = WithLogin("create server role r; alter server role r add member other; alter server role dbcreator add member other");
-        // sa's sysadmin row and other's dbcreator row: a fixed role's members show whoever they are.
-        AreEqual(2, sim.ExecuteScalar("use master; execute as login = 'app'; select count(*) from sys.server_role_members; revert"));
+        // The three seeded sysadmin rows and other's dbcreator row: a fixed role's members show whoever they are.
+        AreEqual(4, sim.ExecuteScalar("use master; execute as login = 'app'; select count(*) from sys.server_role_members; revert"));
         sim.ExecuteBatches("use master; alter server role r add member app");
         // The custom role shows now, but only the member app can see.
-        AreEqual(3, sim.ExecuteScalar("use master; execute as login = 'app'; select count(*) from sys.server_role_members; revert"));
+        AreEqual(5, sim.ExecuteScalar("use master; execute as login = 'app'; select count(*) from sys.server_role_members; revert"));
     }
 
     [TestMethod]

@@ -27,14 +27,14 @@ internal readonly struct ServerLoginRights(Simulation simulation, string login)
     public static ServerLoginRights For(SimulatedDbConnection connection)
     {
         var effective = connection.Security.Effective;
-        return effective.IsDatabaseScoped || connection.Simulation.Logins.IsEmptyLockFree()
+        return effective.IsDatabaseScoped || connection.Simulation.HasNoSqlLogins()
             ? default
             : new(connection.Simulation, effective.LoginName);
     }
 
     /// <summary>The rights of the login <paramref name="loginName"/> — the authenticator a <c>TRUSTWORTHY</c> crossing asks about.</summary>
     public static ServerLoginRights ForLogin(Simulation simulation, string loginName) =>
-        simulation.Logins.IsEmptyLockFree() ? default : new(simulation, loginName);
+        simulation.HasNoSqlLogins() ? default : new(simulation, loginName);
 
     /// <summary>Whether the login holds the SERVER-class <paramref name="permission"/>.</summary>
     public bool Holds(Permission permission) =>

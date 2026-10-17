@@ -6,8 +6,8 @@ namespace SqlServerSimulator.Network;
 /// <summary>
 /// The fields of a client LOGIN7 message the listener acts on. The session
 /// validates <see cref="UserName"/> / <see cref="Password"/> against
-/// <see cref="Simulation.Logins"/> when that registry is non-empty (Msg 18456
-/// on mismatch); an empty registry accepts any credentials.
+/// <see cref="Simulation.Logins"/> once that registry holds a SQL login (Msg 18456
+/// on mismatch); until then any credentials are accepted.
 /// </summary>
 internal sealed class Login7Request
 {

@@ -755,12 +755,23 @@ internal static partial class BuiltInResources
         }
         var login = effective.LoginName;
         var loginId = simulation.TryResolveServerPrincipalId(login, out var id) ? id : 1;
-        yield return TokenRow(loginId, Simulation.LoginSid(simulation, login), login, "SQL LOGIN", "GRANT OR DENY");
+        var windows = simulation.IsWindowsUserLogin(login);
+        yield return TokenRow(loginId, Simulation.LoginSid(simulation, login), login, windows ? "WINDOWS LOGIN" : "SQL LOGIN", "GRANT OR DENY");
         yield return TokenRow(2, [0x02], "public", "SERVER ROLE", "GRANT OR DENY");
         foreach (var (roleId, roleName) in Simulation.FixedServerRoles)
         {
             if (simulation.IsServerPrincipalInRole(loginId, roleId))
                 yield return TokenRow(roleId, [(byte)roleId], roleName, "SERVER ROLE", "GRANT OR DENY");
+        }
+        // A Windows login's token carries its groups after its roles, each
+        // under the principal id of the login holding its SID, else 0 (probed
+        // 2026-10-17 against SQL Server 2025).
+        if (!windows)
+            yield break;
+        foreach (var groupSid in Simulation.WindowsTokenGroups(loginId))
+        {
+            var group = simulation.LoginWithSid(groupSid);
+            yield return TokenRow(group?.PrincipalId ?? 0, groupSid, group?.Name ?? Simulation.WellKnownWindowsAccountName(groupSid) ?? "", "WINDOWS GROUP", "GRANT OR DENY");
         }
     }
 
@@ -884,11 +895,21 @@ internal static partial class BuiltInResources
             ]));
         }
 
+        var windowsLogin = SqlValue.FromNVarchar("WINDOWS_LOGIN");
+        var windowsGroup = SqlValue.FromNVarchar("WINDOWS_GROUP");
+        var windowsLoginType = SqlValue.FromChar(charOne, "U");
+        var windowsGroupType = SqlValue.FromChar(charOne, "G");
         foreach (var (_, login) in simulation.Logins)
         {
+            var (type, typeDesc) = login.TypeCode switch
+            {
+                "G" => (windowsGroupType, windowsGroup),
+                "U" => (windowsLoginType, windowsLogin),
+                _ => (loginType, sqlLogin),
+            };
             rows.Add((login.PrincipalId, [
                 SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(login.Sid),
-                loginType, sqlLogin, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
+                type, typeDesc, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
                 SqlValue.FromSystemName(login.DefaultDatabase), SqlValue.FromSystemName(login.DefaultLanguage), simulation.CredentialIdOf(login.PrincipalId), nullOwningId, falseBit, zeroTenant,
             ]));
         }
@@ -1062,7 +1083,7 @@ internal static partial class BuiltInResources
         var visibility = ServerPrincipalVisibility(batch);
         foreach (var login in simulation.Logins.EnumerateValues().OrderBy(l => l.PrincipalId))
         {
-            if (visibility is not null && !visibility(login.PrincipalId))
+            if (login.IsWindows || (visibility is not null && !visibility(login.PrincipalId)))
                 continue;
             yield return [
                 SqlValue.FromSystemName(login.Name),

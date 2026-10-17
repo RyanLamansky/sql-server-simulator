@@ -545,7 +545,7 @@ internal sealed class HasPermsByName : Expression
         }
         var effective = connection.Security.Effective;
         var holds = !effective.IsDatabaseScoped
-            && (simulation.Logins.IsEmptyLockFree()
+            && (simulation.HasNoSqlLogins()
                 || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, permission, serverWide));
         return SqlValue.FromInt32(holds ? 1 : 0);
     }
@@ -782,6 +782,14 @@ internal sealed class RoleMemberCheck : Expression
 
         var database = runtime.Batch.CurrentDatabase;
         var effectiveId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
+        // A Windows group's name asks the session's Windows token.
+        if (roleName.Contains('\\', StringComparison.Ordinal) && !database.Principals.ContainsKey(roleName))
+        {
+            var effective = connection.Security.Effective;
+            return effective.IsDatabaseScoped || connection.Simulation.WindowsGroupMembership(effective.LoginName, roleName) is not { } member
+                ? SqlValue.Null(SqlType.Int32)
+                : SqlValue.FromInt32(member);
+        }
         if (database.Principals.TryGetValue(roleName, out var principal) && principal.TypeCode == "R")
         {
             if (effectiveId == Database.DboPrincipalId && DboBelongsTo(principal))

@@ -66,20 +66,23 @@ partial class Simulation
 
     /// <summary>
     /// Server-role membership records: each entry is a (role_principal_id,
-    /// member_principal_id) pair, seeded with <c>sa</c>'s <c>sysadmin</c>
-    /// membership real lists. Populated by <c>ALTER SERVER ROLE … ADD
-    /// MEMBER</c>; drained by <c>… DROP MEMBER</c>; surfaced by
-    /// <c>sys.server_role_members</c>.
+    /// member_principal_id) pair, seeded with the <c>sysadmin</c> memberships
+    /// real lists — <c>sa</c>'s, <c>BUILTIN\Administrators</c>' and
+    /// <c>NT AUTHORITY\NETWORK SERVICE</c>'s (<see cref="InstalledWindowsLogins"/>).
+    /// Populated by <c>ALTER SERVER ROLE … ADD MEMBER</c>; drained by
+    /// <c>… DROP MEMBER</c>; surfaced by <c>sys.server_role_members</c>.
     /// </summary>
-    internal readonly List<(int RoleId, int MemberId)> ServerRoleMembers = [(SysadminRoleId, 1)];
+    internal readonly List<(int RoleId, int MemberId)> ServerRoleMembers =
+        [(SysadminRoleId, 1), (SysadminRoleId, AdministratorsPrincipalId), (SysadminRoleId, NetworkServicePrincipalId)];
 
     /// <summary>
     /// Server-scope permission grants / denies (class 100) and <c>ON LOGIN::</c>
-    /// ones (class 101). Seeded with the two class-100 rows every instance
-    /// starts with — <c>sa</c>'s <c>CONNECT SQL</c> and <c>public</c>'s
-    /// <c>VIEW ANY DATABASE</c> (probed 2026-09-29 against SQL Server 2025;
-    /// its per-endpoint <c>CONNECT</c> rows name endpoints the simulator
-    /// doesn't carry); extended by server-scope <c>GRANT</c> / <c>DENY</c> and
+    /// ones (class 101). Seeded with the class-100 rows every instance
+    /// starts with — <c>sa</c>'s <c>CONNECT SQL</c>, <c>public</c>'s
+    /// <c>VIEW ANY DATABASE</c>, each installed Windows login's <c>CONNECT
+    /// SQL</c> and the four more <c>NT AUTHORITY\SYSTEM</c> holds (probed
+    /// 2026-09-29 and 2026-10-17 against SQL Server 2025; its per-endpoint
+    /// <c>CONNECT</c> rows name endpoints the simulator doesn't carry); extended by server-scope <c>GRANT</c> / <c>DENY</c> and
     /// <c>CREATE LOGIN</c>'s auto-seeded <c>CONNECT SQL</c>; drained by
     /// <c>REVOKE</c>; surfaced by <c>sys.server_permissions</c>. Server scope
     /// outlives any database, hence the <see cref="Simulation"/>-level home.
@@ -88,6 +91,13 @@ partial class Simulation
     [
         new(1, 1, "CONNECT SQL", Permission.ConnectSql.CanonicalTypeCode, PermissionState.Grant),
         new(2, 1, "VIEW ANY DATABASE", Permission.ViewAnyDatabase.CanonicalTypeCode, PermissionState.Grant),
+        new(AdministratorsPrincipalId, 1, "CONNECT SQL", Permission.ConnectSql.CanonicalTypeCode, PermissionState.Grant),
+        new(NetworkServicePrincipalId, 1, "CONNECT SQL", Permission.ConnectSql.CanonicalTypeCode, PermissionState.Grant),
+        new(SystemPrincipalId, 1, "ALTER ANY EVENT SESSION", Permission.AlterAnyEventSession.CanonicalTypeCode, PermissionState.Grant),
+        new(SystemPrincipalId, 1, "CONNECT ANY DATABASE", Permission.ConnectAnyDatabase.CanonicalTypeCode, PermissionState.Grant),
+        new(SystemPrincipalId, 1, "CONNECT SQL", Permission.ConnectSql.CanonicalTypeCode, PermissionState.Grant),
+        new(SystemPrincipalId, 1, "VIEW ANY DEFINITION", Permission.ViewAnyDefinition.CanonicalTypeCode, PermissionState.Grant),
+        new(SystemPrincipalId, 1, "VIEW SERVER STATE", Permission.ViewServerState.CanonicalTypeCode, PermissionState.Grant),
     ];
 
     /// <summary>
@@ -167,10 +177,17 @@ partial class Simulation
         return false;
     }
 
-    /// <summary>Whether <paramref name="principalId"/> is a transitive member of the server role <paramref name="roleId"/> (walking <see cref="ServerRoleMembers"/>).</summary>
-    internal bool IsServerPrincipalInRole(int principalId, int roleId)
+    /// <summary>
+    /// Whether <paramref name="principalId"/> is a transitive member of the server
+    /// role <paramref name="roleId"/> (walking <see cref="ServerRoleMembers"/>),
+    /// through the group logins in a Windows login's token unless
+    /// <paramref name="throughWindowsGroups"/> is false.
+    /// </summary>
+    internal bool IsServerPrincipalInRole(int principalId, int roleId, bool throughWindowsGroups = true)
     {
         var closure = new HashSet<int> { principalId };
+        if (throughWindowsGroups)
+            this.AddWindowsGroupLogins(closure);
         bool grew;
         lock (this.ServerRoleMembers)
         {
@@ -200,6 +217,7 @@ partial class Simulation
         var closure = new HashSet<int> { 2 };
         if (this.TryResolveServerPrincipalId(loginName, out var id))
             _ = closure.Add(id);
+        this.AddWindowsGroupLogins(closure);
         bool grew;
         lock (this.ServerRoleMembers)
         {
@@ -343,7 +361,7 @@ partial class Simulation
         var effective = connection.Security.Effective;
         return !effective.IsDatabaseScoped
             && (BuiltInToken.Comparer.Equals(effective.LoginName, "sa")
-                || this.Logins.IsEmptyLockFree()
+                || this.HasNoSqlLogins()
                 || this.HoldsServerPermission(effective.LoginName, permission));
     }
 
@@ -554,7 +572,7 @@ partial class Simulation
         if (!isFixed)
             return this.SessionHoldsServerPermission(connection, Permission.AlterAnyServerRole);
         return !effective.IsDatabaseScoped
-            && (this.Logins.IsEmptyLockFree()
+            && (this.HasNoSqlLogins()
                 || this.IsLoginSysadmin(effective.LoginName)
                 || this.IsLoginInServerRole(effective.LoginName, roleId));
     }

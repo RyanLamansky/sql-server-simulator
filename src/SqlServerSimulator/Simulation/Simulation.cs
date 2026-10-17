@@ -36,6 +36,7 @@ public sealed partial class Simulation
         // The lock manager sweeps abandoned sessions before every acquisition,
         // which is what unblocks a live session waiting on a leaked one's lock.
         this.LockManager.OwningSimulation = this;
+        this.SeedWindowsLogins();
         // Every instance ships with the four SQL Server system databases
         // (master = 1, tempdb = 2, model = 3, msdb = 4), present from
         // construction so `USE master`, `master.sys.*` three-part reads,
@@ -788,10 +789,12 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// SQL-authentication server logins created via <c>CREATE LOGIN</c>, keyed
-    /// by name. Empty by default, in which case the TDS endpoint
-    /// (<see cref="ListenLocalAsync(int, CancellationToken)"/>) accepts any credentials; once at least one
-    /// login exists, the endpoint enforces LOGIN7 credentials against this
+    /// Server logins, keyed by name: the installed Windows logins
+    /// (<see cref="InstalledWindowsLogins"/>) and the SQL-authentication ones
+    /// <c>CREATE LOGIN</c> adds. While it holds no SQL login
+    /// (<see cref="HasNoSqlLogins"/>) the TDS endpoint
+    /// (<see cref="ListenLocalAsync(int, CancellationToken)"/>) accepts any credentials; once one
+    /// exists, the endpoint enforces LOGIN7 credentials against this
     /// registry (mismatch → Msg 18456 and disconnect). In-process
     /// <see cref="CreateDbConnection"/> sessions never authenticate — that's
     /// how logins are seeded. <c>ALTER LOGIN … WITH PASSWORD</c> replaces the
@@ -802,13 +805,13 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Per-Simulation monotonic counter for user server-principal ids (created
-    /// logins + custom server roles). Seeded at 257 so the first allocation
-    /// returns 258 — ids 1 / 2 are the synthetic <c>sa</c> / <c>public</c> rows,
-    /// 3–20 are the fixed server roles (<see cref="FixedServerRoles"/>), and real
-    /// SQL Server allocates user server principals past that reserved block
-    /// (observed 258+).
+    /// logins + custom server roles). Seeded past the installed Windows logins
+    /// (259–261) so the first allocation returns 262 — ids 1 / 2 are the
+    /// synthetic <c>sa</c> / <c>public</c> rows, 3–20 are the fixed server roles
+    /// (<see cref="FixedServerRoles"/>), and real SQL Server allocates user server
+    /// principals past the principals its install creates, never reusing one.
     /// </summary>
-    private int nextPrincipalId = 257;
+    private int nextPrincipalId = SystemPrincipalId;
 
     /// <summary>
     /// Allocates the next server-principal id for a freshly-created

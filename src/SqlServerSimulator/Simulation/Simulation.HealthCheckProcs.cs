@@ -6,10 +6,10 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// <c>sp_validatelogins</c>: the Windows logins whose accounts no longer
-    /// resolve, as <c>(SID, NT Login)</c>. The simulator models SQL logins
-    /// alone, so the list is empty where real's Linux server lists
-    /// <c>BUILTIN\Administrators</c>. Any argument is Msg 8146 and a caller
+    /// <c>sp_validatelogins</c>: the Windows logins whose accounts the server's
+    /// lookup can't find, as <c>(SID, NT Login)</c> in name order — on the
+    /// Linux server <c>BUILTIN\Administrators</c>, which no name lookup
+    /// finds (see <see cref="WellKnownWindowsAccounts"/>). Any argument is Msg 8146 and a caller
     /// outside <c>sysadmin</c> and <c>securityadmin</c> Msg 15247 at the
     /// procedure's line 6 (probed 2026-10-16 against SQL Server 2025).
     /// </summary>
@@ -32,13 +32,19 @@ partial class Simulation
         {
             throw SimulatedSqlException.UserDoesNotHavePermission().AtSystemProcedureLine(6);
         }
-        yield return new SimulatedSqlResultSet([VarbinarySqlType.Get(85), SqlType.SystemName], ["SID", "NT Login"], NoValidatedLogins)
+        var orphaned = new List<ServerLogin>();
+        foreach (var (_, login) in simulation.Logins)
+        {
+            if (login.IsWindows && !TryResolveWindowsAccount(login.Name, out _, out _))
+                orphaned.Add(login);
+        }
+        orphaned.Sort((a, b) => simulation.ServerCollation.Compare(a.Name, b.Name));
+        yield return new SimulatedSqlResultSet([VarbinarySqlType.Get(85), SqlType.SystemName], ["SID", "NT Login"],
+            orphaned.ConvertAll(static login => new[] { SqlValue.FromVarbinary(VarbinarySqlType.Get(85), login.Sid), SqlValue.FromSystemName(login.Name) }))
         {
             ColumnNullability = [true, false],
         };
     }
-
-    private static readonly SqlValue[][] NoValidatedLogins = [];
 
     private static readonly SystemProcedureParameter[] SpGetAlertInfoParameters =
     [

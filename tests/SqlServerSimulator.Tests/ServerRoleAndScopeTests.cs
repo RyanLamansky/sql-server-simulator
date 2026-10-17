@@ -3,7 +3,7 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Server roles and server-scope grants: fixed-role seeding, the 258+ user id
+/// Server roles and server-scope grants: fixed-role seeding, the 262+ user id
 /// space, CREATE / ALTER / DROP SERVER ROLE, IS_SRVROLEMEMBER truth, the
 /// sysadmin → dbo mapping (incl. DENY bypass), server-scope GRANT / DENY /
 /// REVOKE (master-only, CONNECT SQL auto-seed). Probe-confirmed against SQL
@@ -29,7 +29,7 @@ public sealed class ServerRoleAndScopeTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create server role customsrv");
-        AreEqual(258, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'customsrv'"));
+        AreEqual(262, sim.ExecuteScalar("select principal_id from sys.server_principals where name = 'customsrv'"));
         AreEqual("R", ((string)sim.ExecuteScalar("select type from sys.server_principals where name = 'customsrv'")!).Trim());
         IsFalse((bool)sim.ExecuteScalar("select is_fixed_role from sys.server_principals where name = 'customsrv'")!);
     }
@@ -43,10 +43,11 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("create login srvlogin with password = 'P@ss1word'");
         _ = sim.ExecuteNonQuery("alter server role sysadmin add member srvlogin");
         AreEqual(1, sim.ExecuteScalar(
-            "select count(*) from sys.server_role_members where role_principal_id = 3 and member_principal_id = 258"));
+            "select count(*) from sys.server_role_members where role_principal_id = 3 and member_principal_id = 262"));
         _ = sim.ExecuteNonQuery("alter server role sysadmin drop member srvlogin");
-        // sa's own sysadmin membership, which every instance lists, remains.
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
+        // The sysadmin memberships every instance lists — sa's and two
+        // installed Windows logins' — remain.
+        AreEqual(3, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
     }
 
     [TestMethod]
@@ -134,9 +135,9 @@ public sealed class ServerRoleAndScopeTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create login app with password = 'P@ss1word'");
         AreEqual(1, sim.ExecuteScalar(
-            "select count(*) from sys.server_permissions where grantee_principal_id = 258 and type = 'COSQ' and state = 'G'"));
+            "select count(*) from sys.server_permissions where grantee_principal_id = 262 and type = 'COSQ' and state = 'G'"));
         AreEqual("SERVER", ((string)sim.ExecuteScalar(
-            "select class_desc from sys.server_permissions where grantee_principal_id = 258")!).Trim());
+            "select class_desc from sys.server_permissions where grantee_principal_id = 262")!).Trim());
     }
 
     [TestMethod]
@@ -146,7 +147,7 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("create login app with password = 'P@ss1word'");
         _ = sim.ExecuteNonQuery("use master; grant view server state to app");
         AreEqual(1, sim.ExecuteScalar(
-            "select count(*) from sys.server_permissions where grantee_principal_id = 258 and type = 'VWSS' and state = 'G'"));
+            "select count(*) from sys.server_permissions where grantee_principal_id = 262 and type = 'VWSS' and state = 'G'"));
     }
 
     [TestMethod]
@@ -166,8 +167,8 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("use master; grant view server state to app");
         _ = sim.ExecuteNonQuery("use master; deny view server state to app");
         // Server-scope DENY replaces the prior G row (no coexisting G + D).
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'VWSS'"));
-        AreEqual("D", ((string)sim.ExecuteScalar("select state from sys.server_permissions where type = 'VWSS'")!).Trim());
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'VWSS' and grantee_principal_id = 262"));
+        AreEqual("D", ((string)sim.ExecuteScalar("select state from sys.server_permissions where type = 'VWSS' and grantee_principal_id = 262")!).Trim());
     }
 
     [TestMethod]
@@ -177,9 +178,9 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("create login app with password = 'P@ss1word'");
         _ = sim.ExecuteNonQuery("use master; grant view server state to app");
         _ = sim.ExecuteNonQuery("use master; revoke view server state from app");
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'VWSS'"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'VWSS' and grantee_principal_id = 262"));
         // The auto-seeded CONNECT SQL row survives an unrelated revoke.
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where grantee_principal_id = 258 and type = 'COSQ'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where grantee_principal_id = 262 and type = 'COSQ'"));
     }
 
     [TestMethod]
@@ -200,7 +201,7 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("create login app with password = 'P@ss1word'");
         _ = sim.ExecuteNonQuery("use master; grant view server state on server::anything to app");
         AreEqual(1, sim.ExecuteScalar(
-            "select count(*) from sys.server_permissions where class = 100 and major_id = 0 and type = 'VWSS' and state = 'G'"));
+            "select count(*) from sys.server_permissions where class = 100 and major_id = 0 and type = 'VWSS' and state = 'G' and grantee_principal_id = 262"));
     }
 
     [TestMethod]
@@ -407,7 +408,7 @@ public sealed class ServerRoleAndScopeTests
         var sim = ThreeLogins();
         _ = sim.ExecuteNonQuery("use master; grant view any definition to caller");
         AreEqual(3, sim.ExecuteScalar(
-            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id > 20"));
+            "execute as user = 'ucaller'; select count(*) from sys.server_principals where principal_id > 261"));
     }
 
     [TestMethod]
@@ -448,7 +449,7 @@ public sealed class ServerRoleAndScopeTests
 
     [TestMethod]
     public void DboSession_SeesEveryServerPrincipal()
-        => AreEqual(3, ThreeLogins().ExecuteScalar("select count(*) from sys.server_principals where principal_id > 20"));
+        => AreEqual(3, ThreeLogins().ExecuteScalar("select count(*) from sys.server_principals where principal_id > 261"));
 
     // ---- Login DDL gating ----
 

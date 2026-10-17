@@ -55,10 +55,10 @@ public sealed class LoginDdlTests
         => new Simulation().AssertSqlError("drop login if exists app", 156, "Incorrect syntax near the keyword 'if'.");
 
     [TestMethod]
-    public void CreateLogin_FromWindows_NotSupported()
+    public void CreateLogin_FromCertificate_NotSupported()
     {
         var ex = Throws<NotSupportedException>(
-            () => new Simulation().ExecuteNonQuery("create login w from windows"));
+            () => new Simulation().ExecuteNonQuery("create login w from certificate c"));
         Assert.Contains("SQL-authentication", ex.Message);
     }
 

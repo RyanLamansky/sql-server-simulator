@@ -6,7 +6,7 @@ partial class Simulation
 {
     /// <summary>
     /// The refusal a SQL-authentication login meets at either front door, or
-    /// <see langword="null"/> when it may connect. An empty registry accepts
+    /// <see langword="null"/> when it may connect. A registry with no SQL login accepts
     /// anything (the zero-configuration default the TDS endpoint and the whole
     /// test corpus rely on); once <c>CREATE LOGIN</c> has populated it, the
     /// name must resolve and the password verify (Msg 18456), the login must
@@ -21,10 +21,14 @@ partial class Simulation
     /// </summary>
     internal SimulatedSqlException? RefuseLogin(string userName, string password, string client)
     {
-        if (this.Logins.IsEmptyLockFree())
+        if (this.HasNoSqlLogins())
             return null;
         if (!this.Logins.TryGetValue(userName, out var login))
             return this.LoggedLoginFailure(userName, 5, "Could not find a login matching the name provided.", client);
+        // A Windows login's name can't sign in with a password (probed
+        // 2026-10-17 against SQL Server 2025).
+        if (login.IsWindows)
+            return this.LoggedLoginFailure(userName, 6, "Attempting to use an NT account name with SQL Server Authentication.", client);
         if (!PasswordHash.Verify(password, login.PasswordHash))
             return this.LoggedLoginFailure(userName, 8, "Password did not match that for the login provided.", client);
         if (login.IsDisabled)
@@ -56,7 +60,7 @@ partial class Simulation
     /// a mid-session <c>USE</c>) when the login has no access. Resolution order
     /// (probe-confirmed against SQL Server 2025, PROBE_NOTES_HARDENING bundle 1):
     /// <list type="number">
-    /// <item>An <b>empty login registry</b> is the zero-configuration dev mode:
+    /// <item>A <b>login registry with no SQL login</b> is the zero-configuration dev mode:
     /// any credentials map to <c>dbo</c> everywhere. This is the honest
     /// "no authentication configured ⇒ open" default and the back-compat
     /// invariant the whole no-login test corpus rides on.</item>
@@ -84,9 +88,9 @@ partial class Simulation
     /// </summary>
     internal static bool TryMapLoginToDatabaseUser(Simulation simulation, Database target, string loginName, out DatabasePrincipal principal)
     {
-        // Empty login registry => open dev mode: any credentials, dbo everywhere
+        // No SQL login => open dev mode: any credentials, dbo everywhere
         // (the zero-configuration back-compat invariant).
-        if (simulation.Logins.IsEmptyLockFree())
+        if (simulation.HasNoSqlLogins())
         {
             principal = target.Principals["dbo"];
             return true;

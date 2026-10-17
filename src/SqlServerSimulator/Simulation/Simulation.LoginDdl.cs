@@ -14,8 +14,9 @@ partial class Simulation
     /// land in <see cref="Logins"/>, which the TDS endpoint enforces once
     /// non-empty. The option tail is read by <see cref="ConsumeLoginOptions"/>
     /// (<c>CREDENTIAL</c> maps the login to a credential, Msg 15151 for a
-    /// missing one); the <c>FROM</c> forms (WINDOWS /
-    /// CERTIFICATE / ASYMMETRIC KEY / EXTERNAL PROVIDER) and the hashed-
+    /// missing one); <c>FROM WINDOWS</c> is refused as the Linux server refuses
+    /// it (<see cref="TryParseCreateWindowsLogin"/>), and the other <c>FROM</c> forms
+    /// (CERTIFICATE / ASYMMETRIC KEY / EXTERNAL PROVIDER) and the hashed-
     /// password form (<c>PASSWORD = 0x… HASHED</c>) raise
     /// <see cref="NotSupportedException"/>.
     /// </summary>
@@ -28,7 +29,15 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var name = ParseLoginName(context);
-        var password = ParseLoginPasswordClause(context, required: true, out var passwordStart, out var passwordEnd);
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+        {
+            if (context.GetNextRequired() is not UnquotedString { Value: var source } || !source.Equals("WINDOWS", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException("Only SQL-authentication and Windows logins (CREATE LOGIN name WITH PASSWORD = '…' / FROM WINDOWS) are modeled; certificate, asymmetric-key, and external-provider logins are not.");
+            context.MoveNextOptional();
+            return TryParseCreateWindowsLogin(context, name);
+        }
+        var password = ParsePasswordClauseHere(context, required: true, out var passwordStart, out var passwordEnd);
         var options = ConsumeLoginOptions(context, takesSid: true);
         if (context.Batch.IsSkipping)
             return true;
@@ -83,6 +92,49 @@ partial class Simulation
             simulation.ServerPermissions.Add(new ServerPermission(login.PrincipalId, 1, "CONNECT SQL", "COSQ", PermissionState.Grant));
         RecordServerDdlEvent(context, "CREATE_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
+    }
+
+    /// <summary>
+    /// <c>CREATE LOGIN name FROM WINDOWS [WITH DEFAULT_DATABASE = …, DEFAULT_LANGUAGE = …]</c>,
+    /// cursor past <c>WINDOWS</c>. The Linux server makes no Windows login, so
+    /// once the caller's <c>ALTER ANY LOGIN</c> and the default database and
+    /// language are checked the statement is refused as
+    /// <see cref="WindowsLoginCreationRefusal"/> describes.
+    /// </summary>
+    private static bool TryParseCreateWindowsLogin(ParserContext context, string name)
+    {
+        // The WITH list takes DEFAULT_DATABASE and DEFAULT_LANGUAGE alone: any
+        // other option is a syntax error at its value (probed 2026-10-17
+        // against SQL Server 2025).
+        string? database = null, language = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            do
+            {
+                if (context.GetNextRequired() is not UnquotedString { Value: var option })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var isDatabase = option.Equals("DEFAULT_DATABASE", StringComparison.OrdinalIgnoreCase);
+                var isLanguage = option.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase);
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var value = context.GetNextRequired();
+                if (value is ReservedKeyword keyword)
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
+                if (value is not Name written || !(isDatabase || isLanguage))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (isDatabase)
+                    database = written.Value;
+                else
+                    language = written.Value;
+            }
+            while (context.GetNextOptional() is Operator { Character: ',' });
+        }
+        if (context.Batch.IsSkipping)
+            return true;
+        RequireCreateLoginPermission(context);
+        var simulation = context.Batch.Connection.Simulation;
+        ValidateLoginDefaults(simulation, database, language);
+        throw simulation.WindowsLoginCreationRefusal(name);
     }
 
     /// <summary>Whether a server principal — a login, <c>sa</c>, <c>public</c> or a server role — holds a SID matching <paramref name="sid"/>.</summary>
@@ -175,9 +227,9 @@ partial class Simulation
         if (!simulation.Logins.TryGetValue(name, out var existing))
         {
             // `sa` is a fixed login, and the catalog views synthesize its row
-            // rather than holding it in Logins — that registry has to stay
-            // empty in a simulation nobody created a login in, because the TDS
-            // endpoint reads an empty registry as "accept any credentials".
+            // rather than holding it in Logins — that registry has to hold no
+            // SQL login in a simulation nobody created one in, because the TDS
+            // endpoint reads that as "accept any credentials".
             // So it resolves by name here, the way EXECUTE AS, the GRANT
             // family, sp_addsrvrolemember and the server-role paths already
             // resolve it. Real accepts ALTER LOGIN [sa] (probe-confirmed via
@@ -206,6 +258,17 @@ partial class Simulation
             AlterLoginCredential(simulation, principalId: 1, options);
             RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
             return true;
+        }
+        // A Windows login takes no password and no password policy (probed
+        // 2026-10-17 against SQL Server 2025).
+        if (existing.IsWindows)
+        {
+            var refused = password is not null ? "PASSWORD"
+                : options.CheckPolicy is not null ? "CHECK_POLICY"
+                : options.CheckExpiration is not null ? "CHECK_EXPIRATION"
+                : null;
+            if (refused is not null)
+                throw SimulatedSqlException.OptionNotForWindowsLogin(refused);
         }
         // An OLD_PASSWORD that isn't the login's is refused as a login the caller can't alter.
         if (options.OldPassword is { } oldPassword && !PasswordHash.Verify(oldPassword, existing.PasswordHash))
@@ -262,7 +325,7 @@ partial class Simulation
         }
         RecordServerSecurityUndo(context.Batch);
         if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out var dropped))
-            throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+            throw MissingLoginDropRefusal(name);
         simulation.MapLoginCredential(dropped.PrincipalId, credentialId: null);
         RecordServerDdlEvent(context, "DROP_LOGIN", databaseName: null, name);
         // Real's DROP LOGIN runs two internal procedures whose return statuses
@@ -481,10 +544,16 @@ partial class Simulation
     /// </summary>
     private static string? ParseLoginPasswordClause(ParserContext context, bool required, out int literalStart, out int literalEnd)
     {
-        literalStart = literalEnd = -1;
         context.MoveNextRequired();
+        return ParsePasswordClauseHere(context, required, out literalStart, out literalEnd);
+    }
+
+    /// <summary><see cref="ParseLoginPasswordClause"/> with the cursor already on the token after the login name.</summary>
+    private static string? ParsePasswordClauseHere(ParserContext context, bool required, out int literalStart, out int literalEnd)
+    {
+        literalStart = literalEnd = -1;
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-            throw new NotSupportedException("Only SQL-authentication logins (CREATE LOGIN name WITH PASSWORD = '…') are modeled; Windows, certificate, asymmetric-key, and external-provider logins are not.");
+            throw new NotSupportedException("Only SQL-authentication and Windows logins (CREATE LOGIN name WITH PASSWORD = '…' / FROM WINDOWS) are modeled; certificate, asymmetric-key, and external-provider logins are not.");
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
         {
             return required ? throw SimulatedSqlException.SyntaxErrorNear(context) : null;

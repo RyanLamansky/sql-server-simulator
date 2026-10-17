@@ -3866,12 +3866,51 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 15025: <c>CREATE LOGIN name</c> when a server
-    /// principal of that name already exists. Wording is docs-derived (the
-    /// reference instance's login lacks the server permission to reach this
-    /// check, reporting Msg 15247 instead).
+    /// principal of that name already exists — state 1 for a SQL login's
+    /// statement, 2 for a Windows login's (probed 2026-10-17 against SQL
+    /// Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ServerPrincipalAlreadyExists(string name) =>
-        new($"The server principal '{name}' already exists.", 15025, 16, 1);
+    internal static SimulatedSqlException ServerPrincipalAlreadyExists(string name, byte state = 1) =>
+        new($"The server principal '{name}' already exists.", 15025, 16, state);
+
+    /// <summary>
+    /// Msg 15151 state 4: <c>CREATE LOGIN … FROM WINDOWS</c> of a well-known
+    /// account the Linux server finds but can't make a login for (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotCreateLogin(string name) =>
+        new($"Cannot create the login '{name}', because it does not exist or you do not have permission.", 15151, 16, 4);
+
+    /// <summary>
+    /// Msg 15401: a Windows principal the server's account lookup can't find —
+    /// class 16 from <c>CREATE</c> / <c>DROP LOGIN</c>, class 11 from
+    /// <c>sp_grantlogin</c> and <c>sp_denylogin</c>'s own check (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WindowsPrincipalNotFound(string name, byte level) =>
+        new($"Windows NT user or group '{name}' not found. Check the name again.", 15401, level, 1);
+
+    /// <summary>
+    /// Msg 15407: a Windows login named without its <c>domain\</c> part —
+    /// class 16 from <c>CREATE LOGIN … FROM WINDOWS</c>, class 11 from the
+    /// Windows-login procedures (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidWindowsName(string name, byte level) =>
+        new($"'{name}' is not a valid Windows NT name. Give the complete name: <domain\\username>.", 15407, level, 1);
+
+    /// <summary>
+    /// Msg 15404: <c>xp_logininfo</c> (or <c>EXECUTE AS LOGIN</c> of a group)
+    /// failing to look a Windows account up, with the lookup's error code and a
+    /// state per cause. It acts as under <c>XACT_ABORT</c>: uncaught it ends the
+    /// batch and rolls the transaction back, caught it dooms it (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WindowsPrincipalLookupFailed(string name, byte state, string code) =>
+        new($"Could not obtain information about Windows NT group/user '{name}', error code {code}.", 15404, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 15080: an <c>ALTER LOGIN</c> option a Windows login doesn't take (probed 2026-10-17 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException OptionNotForWindowsLogin(string option) =>
+        new($"Cannot use parameter {option} for a Windows login.", 15080, 16, 1);
 
     /// <summary>Msg 15419: a <c>CREATE LOGIN … SID</c> of another length than sixteen bytes.</summary>
     internal static SimulatedSqlException LoginSidWrongLength() =>

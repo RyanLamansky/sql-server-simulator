@@ -306,6 +306,12 @@ internal static partial class BuiltInResources
         // sp_Blitz reads.
         "sp_MSgetalertinfo",
         "sp_validatelogins",
+        // The Windows principals the Linux server is installed with: what the
+        // server knows of one, and the legacy grant / deny / revoke trio.
+        "xp_logininfo",
+        "sp_grantlogin",
+        "sp_denylogin",
+        "sp_revokelogin",
         "sp_readerrorlog",
         "xp_enumerrorlogs",
         "xp_logevent",
@@ -1159,10 +1165,11 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Whether real types a system procedure as an extended procedure — every
-    /// <c>xp_</c> one, and some named <c>sp_</c> (probed 2026-09-24).
+    /// <c>xp_</c> one but <c>xp_logininfo</c>, and some named <c>sp_</c>
+    /// (probed 2026-09-24 and 2026-10-17).
     /// </summary>
     internal static bool IsExtendedProcedure(string proc) =>
-        proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
+        (proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase) && proc != "xp_logininfo")
         || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
         || proc.StartsWith("sp_OA", StringComparison.Ordinal)
         || proc.StartsWith("sp_trace_", StringComparison.Ordinal)

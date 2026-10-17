@@ -114,6 +114,10 @@ partial class Simulation
         {
             if (!LoginExists(connection.Simulation, targetName))
                 throw SimulatedSqlException.CannotExecuteAsServerPrincipal(targetName);
+            // A Windows group is no identity to impersonate: the account
+            // lookup behind it fails (probed 2026-10-17 against SQL Server 2025).
+            if (connection.Simulation.Logins.TryGetValue(targetName, out var targetLogin) && targetLogin.TypeCode == "G")
+                throw SimulatedSqlException.WindowsPrincipalLookupFailed(targetName, 11, "0x54f");
             // A login with no way into the current database is refused as the
             // database access it would need, state 4, ending the batch and
             // rolling back (probed 2026-09-27 against SQL Server 2025).

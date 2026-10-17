@@ -76,7 +76,7 @@ partial class Simulation
         or "sp_tables" or "sp_procedure_params_100_managed" or "sp_procedure_params_managed" or "sp_columns_managed" or "sp_indexes_managed" or "sp_indexcolumns_managed"
         or "sp_unprepare" or "xp_fixeddrives" or "xp_loginconfig" or "xp_servicecontrol" or "sp_srvrolepermission" or "sp_flush_log"
         or "sp_resetstatus" or "sp_clean_db_free_space" or "sp_clean_db_file_free_space" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
-        or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
+        or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_logininfo" or "xp_msver" or "xp_qv" or "xp_regread"
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
@@ -491,6 +491,10 @@ partial class Simulation
             "sp_enumerrorlogs" => InvokeSpEnumErrorLogs(batch, calledAs, returnCodeVar),
             "sp_MSgetalertinfo" => InvokeSpGetAlertInfo(batch, calledAs),
             "sp_validatelogins" => InvokeSpValidateLogins(batch, calledAs),
+            "sp_grantlogin" => this.InvokeSpGrantLogin(batch, calledAs),
+            "sp_denylogin" => this.InvokeSpDenyLogin(batch, calledAs),
+            "sp_revokelogin" => this.InvokeSpRevokeLogin(batch, calledAs),
+            "xp_logininfo" => InvokeXpLoginInfo(batch, calledAs),
             "sp_readerrorlog" => InvokeSpReadErrorLog(batch, calledAs, returnCodeVar),
             "xp_enumerrorlogs" => InvokeXpEnumErrorLogs(batch, calledAs),
             "xp_logevent" => InvokeXpLogEvent(batch, calledAs, returnCodeVar),

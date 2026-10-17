@@ -859,8 +859,10 @@ public sealed class HelpProcTests
         AreEqual("9,9,11|9,6,8", noneWidths);
 
         var (all, _) = HelpLoginsRun(sim, "exec sp_helplogins");
-        CollectionAssert.AreEqual(new[] { "sa|yes  ", "zzlg|yes  " }, all[0].ConvertAll(static row => $"{row[0]}|{row[4]}"));
-        CollectionAssert.AreEqual(new byte[] { 1 }, (byte[])all[0][0][1]!);
+        CollectionAssert.AreEqual(
+            new[] { @"BUILTIN\Administrators|NO   ", @"NT AUTHORITY\NETWORK SERVICE|NO   ", @"NT AUTHORITY\SYSTEM|NO   ", "sa|yes  ", "zzlg|yes  " },
+            all[0].ConvertAll(static row => $"{row[0]}|{row[4]}"));
+        CollectionAssert.AreEqual(new byte[] { 1 }, (byte[])all[0][3][1]!);
         CollectionAssert.Contains(all[1].ConvertAll(static row => $"{row[0]}|{row[1]}|{row[2]}"), "sa|tempdb|dbo");
     }
 

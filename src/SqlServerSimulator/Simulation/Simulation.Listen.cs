@@ -98,7 +98,7 @@ public sealed partial class Simulation
     /// The port is unavailable, or binding failed for another reason.
     /// </exception>
     public Task<SimulatedNetworkListener> ListenNetworkAsync(int port = 1433, CancellationToken cancellationToken = default)
-        => this.Logins.IsEmptyLockFree()
+        => this.HasNoSqlLogins()
             ? throw NetworkListenerRequiresLogin()
             : this.ListenCoreAsync(IPAddress.Any, IPAddress.IPv6Any, port, suppliedCertificate: null, cancellationToken);
 
@@ -132,7 +132,7 @@ public sealed partial class Simulation
     public Task<SimulatedNetworkListener> ListenNetworkAsync(SimulatedNetworkListenerOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        if (this.Logins.IsEmptyLockFree())
+        if (this.HasNoSqlLogins())
             throw NetworkListenerRequiresLogin();
 
         var primaryAddress = options.BindAddress ?? IPAddress.Any;

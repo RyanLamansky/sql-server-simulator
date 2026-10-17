@@ -106,22 +106,12 @@ internal sealed class SUserName : Expression
             if (sid is not null ? !row[2].IsNull && Simulation.SidsMatch(row[2].AsBytes, sid) : row[1].AsInt32 == id)
                 return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), row[0].AsString);
         }
-        if (sid is not null && WellKnownWindowsAccount(sid) is { } account)
+        // The built-in Windows accounts are named by SID though no login maps
+        // them (probed 2026-09-30 and 2026-10-17 against SQL Server 2025).
+        if (sid is not null && Simulation.WellKnownWindowsAccountName(sid) is { } account)
             return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), account);
         return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
-
-    /// <summary>
-    /// The built-in Windows accounts <c>SUSER_SNAME</c> names by SID though no
-    /// login maps them (probed 2026-09-30 against SQL Server 2025).
-    /// </summary>
-    private static string? WellKnownWindowsAccount(byte[] sid) => Convert.ToHexString(sid) switch
-    {
-        "010100000000000512000000" => @"NT AUTHORITY\SYSTEM",
-        "01020000000000052000000020020000" => @"BUILTIN\Administrators",
-        "01020000000000052000000021020000" => @"BUILTIN\Users",
-        _ => null,
-    };
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
@@ -180,9 +170,13 @@ internal sealed class SUserSid : Expression
         var name = nameValue.CoerceTo(SqlType.SystemName).AsString;
         return Collation.Baseline.Equals(name, "sa")
             ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, [0x01])
-            : runtime.Batch.Connection.Simulation.Logins.TryGetValue(name, out var login)
+            : runtime.Batch.Connection.Simulation.Logins.TryGetValue(name.TrimEnd(' '), out var login)
                 ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, login.Sid)
-                : SqlValue.Null(PrincipalPlaceholders.SidType);
+                // A Windows account the server's lookup finds has a SID though
+                // no login holds it (probed 2026-10-17 against SQL Server 2025).
+                : Simulation.WindowsAccountSid(name) is { } accountSid
+                    ? SqlValue.FromVarbinary(PrincipalPlaceholders.SidType, accountSid)
+                    : SqlValue.Null(PrincipalPlaceholders.SidType);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => PrincipalPlaceholders.SidType;

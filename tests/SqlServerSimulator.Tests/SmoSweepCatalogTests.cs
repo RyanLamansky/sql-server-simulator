@@ -78,8 +78,8 @@ public sealed class SmoSweepCatalogTests
             AreEqual(0, sim.ExecuteScalar($"select count(*) from sys.{view}"), view);
         }
         AreEqual(5, sim.ExecuteScalar("select count(*) from sys.endpoints"));
-        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.server_permissions"));
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
+        AreEqual(9, sim.ExecuteScalar("select count(*) from sys.server_permissions"));
+        AreEqual(3, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
         // Login / User scripting reaches certificates / asymmetric_keys through
         // three-part master.sys names too.
         AreEqual(0, sim.ExecuteScalar("select count(*) from master.sys.certificates"));

@@ -3078,7 +3078,7 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         this.OriginalDatabaseName = this.pendingInitialCatalog ?? "";
         // Connection-string authentication. A User ID validates against the
-        // CREATE LOGIN registry (empty registry accepts anything, mirroring the
+        // CREATE LOGIN registry (one with no SQL login accepts anything, mirroring the
         // TDS endpoint) and stamps the session principal to the login's mapped
         // database user in the target database; failures raise the Msg 18456 /
         // 4060 shapes. No User ID keeps exactly today's behavior — the default

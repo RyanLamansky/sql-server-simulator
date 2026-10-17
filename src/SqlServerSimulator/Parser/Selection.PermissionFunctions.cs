@@ -155,7 +155,7 @@ partial class Selection
                     _ => Permission.ControlServer,
                 };
                 return !effective.IsDatabaseScoped
-                    && (simulation.Logins.IsEmptyLockFree() || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, requested, serverWide));
+                    && (simulation.HasNoSqlLogins() || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, requested, serverWide));
             };
         }
         else if (ResolveMyPermissionsSecurable(batch, securable.Run(runtime), className.ToUpperInvariant()) is { } resolved)

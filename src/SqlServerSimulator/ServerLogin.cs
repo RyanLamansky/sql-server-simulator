@@ -1,14 +1,26 @@
 namespace SqlServerSimulator;
 
 /// <summary>
-/// One SQL-authentication server login created by <c>CREATE LOGIN name WITH
-/// PASSWORD = '…'</c>, held in <see cref="Simulation.Logins"/>. The password
+/// One server login, held in <see cref="Simulation.Logins"/>: a
+/// SQL-authentication login created by <c>CREATE LOGIN name WITH PASSWORD =
+/// '…'</c>, or one of the Windows logins the server is installed with
+/// (<see cref="TypeCode"/> <c>U</c> or <c>G</c>, no password). The password
 /// is stored only as a PWDCOMPARE-verifiable hash (never clear text),
 /// verified by the TDS endpoint at LOGIN7 time. Instances are immutable;
 /// <c>ALTER LOGIN … WITH PASSWORD</c> swaps in a replacement entry.
 /// </summary>
-internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false, string defaultDatabase = "master", string defaultLanguage = "us_english", bool isPolicyChecked = true, bool isExpirationChecked = false, byte[]? sid = null)
+internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false, string defaultDatabase = "master", string defaultLanguage = "us_english", bool isPolicyChecked = true, bool isExpirationChecked = false, byte[]? sid = null, string typeCode = "S")
 {
+    /// <summary>
+    /// <c>sys.server_principals.type</c>: <c>S</c> for a SQL login, <c>U</c>
+    /// for a Windows login and <c>G</c> for a Windows group. A Windows login
+    /// carries an empty <see cref="PasswordHash"/>, so no password verifies it.
+    /// </summary>
+    public readonly string TypeCode = typeCode;
+
+    /// <summary>Whether this is a Windows login or group rather than a SQL login.</summary>
+    public bool IsWindows => this.TypeCode != "S";
+
     /// <summary>
     /// Server-level principal id, allocated once at <c>CREATE LOGIN</c> and
     /// preserved across the wholesale replacement <c>ALTER LOGIN</c> performs.
@@ -76,5 +88,5 @@ internal sealed class ServerLogin(int principalId, string name, byte[] passwordH
         string? defaultLanguage = null, bool? isPolicyChecked = null, bool? isExpirationChecked = null) =>
         new(this.PrincipalId, this.Name, passwordHash ?? this.PasswordHash, this.CreateDate, passwordLastSetTime ?? this.PasswordLastSetTime,
             isDisabled ?? this.IsDisabled, defaultDatabase ?? this.DefaultDatabase, defaultLanguage ?? this.DefaultLanguage,
-            isPolicyChecked ?? this.IsPolicyChecked, isExpirationChecked ?? this.IsExpirationChecked, this.Sid);
+            isPolicyChecked ?? this.IsPolicyChecked, isExpirationChecked ?? this.IsExpirationChecked, this.Sid, this.TypeCode);
 }

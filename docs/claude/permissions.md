@@ -83,7 +83,7 @@ An unauthenticated in-process connection uses `CreateDefault()` — dbo as login
 
 **Authentication.** A login validates against `Simulation.Logins` at TDS connect and at in-process `Open()` when the connection string carries `User ID=`, then maps to a database user via `Simulation.TryMapLoginToDatabaseUser`.
 The mapping is faithful (probe-confirmed against SQL Server 2025, PROBE_NOTES_HARDENING bundle 1) — resolution order for an authenticated login `l` in database `D`:
-1. **Empty login registry ⇒ open dev mode.** When `Simulation.Logins.IsEmpty` the front doors accept any credentials and the session is **dbo** in every `D` — the honest "no authentication configured ⇒ open" default and the back-compat invariant the whole no-login test corpus rides on. The strict path below engages only once the registry is non-empty.
+1. **No SQL login ⇒ open dev mode.** While `Simulation.HasNoSqlLogins()` — the registry holds only the [installed Windows logins](#windows-logins) — the front doors accept any credentials and the session is **dbo** in every `D` — the honest "no authentication configured ⇒ open" default and the back-compat invariant the whole no-login test corpus rides on. The strict path below engages once a SQL login exists.
 2. A **sysadmin-member login** (`sa`, or any login added to the `sysadmin` fixed server role) → **dbo** in every `D`, overriding any `FOR LOGIN` mapping (the dbo effective principal then bypasses every check, including explicit DENY).
    The login that owns `D` is its `dbo` too.
 3. An explicit `CREATE USER … FOR LOGIN l` user in `D` → **that (restricted) user**.
@@ -515,13 +515,13 @@ The hash uses the legacy `0x0200` single-pass-SHA-512 format (`PasswordHash.Encr
 In-process connections never authenticate — login DDL through one is how the registry is seeded.
 
 - `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; `CREDENTIAL` maps the login to a credential (see [Credentials](#credentials)), and `SID` gives the login its SID (see [Login SIDs](#login-sids)), and the rest of the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE) is kept as the login's catalog rows show it or read without effect.
-  `FROM WINDOWS` / certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
+  `FROM WINDOWS` is refused as the Linux server refuses it (see [Windows logins](#windows-logins)); the certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
   A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
   `ALTER LOGIN name DISABLE` / `ENABLE` set the login's `IsDisabled`, which `is_disabled` projects and the [login gate](#the-login-gate) refuses; the other `WITH` options parse-and-discard after the existence check.
 - `DROP LOGIN name` — **no `IF EXISTS` clause**: real SQL Server's DROP LOGIN grammar rejects it (probe-confirmed Msg 156 near 'IF'), reproduced verbatim — a reserved keyword in any of the three login-name positions raises the keyword-flavored Msg 156, not the generic Msg 102.
 - **`sa` resolves without being in the registry.**
-  The registry has to stay *empty* in a simulation nobody created a login in, because the TDS endpoint reads an empty registry as "accept any credentials" — so `sa` is a fixed login the catalog views synthesize rather than a `Logins` entry, the way `EXECUTE AS`, the GRANT family, `sp_addsrvrolemember` and the server-role paths already resolve it by name.
+  The registry has to hold *no SQL login* in a simulation nobody created one in, because the TDS endpoint reads that as "accept any credentials" — so `sa` is a fixed login the catalog views synthesize rather than a `Logins` entry, the way `EXECUTE AS`, the GRANT family, `sp_addsrvrolemember` and the server-role paths already resolve it by name.
   `ALTER LOGIN [sa]` therefore resolves by name too (real accepts it — probe-confirmed with `DEFAULT_LANGUAGE`), and every option parses and discards for it, `DISABLE` included.
   `ALTER LOGIN [sa] WITH PASSWORD` raises `NotSupportedException`: recording it would mean adding `sa` to the registry, which flips the endpoint from accepting any credentials to enforcing them — a large behavioural change to fall out of a password change.
   `CREATE LOGIN` collides against every *server principal*, not just a previously created login, so `CREATE LOGIN [sa]` / `[public]` / a fixed server-role name is Msg 15025 rather than a second row the catalog views would project alongside the built-in.
@@ -529,8 +529,25 @@ In-process connections never authenticate — login DDL through one is how the r
 
 | Msg | When | Provenance |
 |---|---|---|
-| 15025 | Duplicate `CREATE LOGIN` name: `The server principal 'x' already exists.` | Docs-derived — the reference login lacks the server permission to reach the duplicate check (Msg 15247 fires first). |
+| 15025 | Duplicate `CREATE LOGIN` name: `The server principal 'x' already exists.` — state 1, or 2 from `FROM WINDOWS` | Probed 2026-10-17 against SQL Server 2025. |
 | 15151 | `ALTER LOGIN` / `DROP LOGIN` on a missing login: `Cannot {alter\|drop} the login 'x', because it does not exist or you do not have permission.` | Probe-confirmed — distinct wording from the database-principal 15151 (`CannotFindPrincipal`). |
+
+### Windows logins
+
+Real's Linux install carries three Windows logins, which `Simulation.InstalledWindowsLogins` seeds into `Simulation.Logins` at their probed ids, SIDs and memberships (probed 2026-10-17 against SQL Server 2025): `BUILTIN\Administrators` (259, a group, in `sysadmin`), `NT AUTHORITY\NETWORK SERVICE` (260, in `sysadmin`) and `NT AUTHORITY\SYSTEM` (261), each with `CONNECT SQL` and `SYSTEM` with `ALTER ANY EVENT SESSION`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `VIEW SERVER STATE` too.
+So user principals take ids from 262, and every login surface — `sys.server_principals`, `syslogins`, `sys.server_role_members`, `sys.server_permissions`, `sp_helplogins`, `sp_helpsrvrolemember`, the identity functions — lists them, while `sys.sql_logins` doesn't; no password signs one in (Msg 18456, logged at state 6).
+They don't count toward [authentication's open mode](#session-principal--impersonation).
+
+The Linux PAL resolves only the well-known accounts by name (`WellKnownWindowsAccounts`): the `NT AUTHORITY` ones (`SYSTEM`, `LOCAL SERVICE`, `NETWORK SERVICE`, `Authenticated Users`, `NETWORK`, `SERVICE`, `This Organization`), which `SUSER_SID` answers without a login, while `\Everyone` and the `BUILTIN` groups resolve only by SID (`SUSER_SNAME`) — `BUILTIN\Administrators` included, reached by name only through its login.
+A token carries its groups: `SYSTEM`'s holds `BUILTIN\Administrators`, which makes it a `sysadmin` to `IS_SRVROLEMEMBER` and the permission checks, and `sys.login_token` lists each group after the server roles (`Simulation.WindowsTokenGroups`).
+`IS_MEMBER` of a Windows group answers from that token for a Windows login's session and NULL for a SQL login's, or for a name no lookup finds.
+`EXECUTE AS LOGIN` takes a Windows user login; a group is Msg 15404.
+
+No new Windows login can be made: `CREATE LOGIN … FROM WINDOWS` checks the caller and the default database and language, then refuses — Msg 15407 for a name with no `domain\` part, Msg 15025 state 2 for a login that exists, Msg 15151 state 4 for a well-known account no login holds, Msg 15401 for anything else — and its `WITH` list takes `DEFAULT_DATABASE` and `DEFAULT_LANGUAGE` alone, any other option a syntax error at its value.
+`ALTER LOGIN` refuses `PASSWORD`, `CHECK_POLICY` and `CHECK_EXPIRATION` on one (Msg 15080) and takes `DISABLE`; `DROP LOGIN` drops one, and of a name no login holds is Msg 15401 when no lookup finds it.
+`sp_grantlogin` / `sp_denylogin` grant and deny `CONNECT SQL` (in `master`, whatever the caller's database) and `sp_revokelogin` is `DROP LOGIN`, each with its procedure's own refusals; `xp_logininfo` reports the logins and an account's access paths; `sp_validatelogins` lists the logins no lookup finds — see [`catalog-views.md`](catalog-views.md#the-windows-principals).
+
+**Not modeled yet**: real's certificate-mapped and policy logins (`##MS_…##`, ids 101–106 and 256–258) aren't seeded, and whether a dropped `SYSTEM` or `NETWORK SERVICE` login can be created again is unprobed — here it is Msg 15151 state 4 like every other well-known account.
 
 ### Credentials
 
@@ -546,13 +563,13 @@ The error factories (`SimulatedSqlException.CredentialErrors.cs`) carry the refu
 ### Server roles + server-scope permissions (`Simulation/Simulation.ServerRoles.cs`)
 
 Server scope outlives any database, so its registries live on `Simulation`.
-- **Fixed server roles** (`Simulation.FixedServerRoles`, probe6 N1) seed `sys.server_principals` at their real ids 3–20 (`sysadmin`=3 … `##MS_ServerPerformanceStateReader##`=20; `public` stays id 2 with `is_fixed_role 0`). User server principals — created logins **and** custom server roles — take ids from **258** via `AllocatePrincipalId` (real reserves the block past the fixed roles; observed 258+).
+- **Fixed server roles** (`Simulation.FixedServerRoles`, probe6 N1) seed `sys.server_principals` at their real ids 3–20 (`sysadmin`=3 … `##MS_ServerPerformanceStateReader##`=20; `public` stays id 2 with `is_fixed_role 0`). User server principals — created logins **and** custom server roles — take ids from **262** via `AllocatePrincipalId`, past the [installed Windows logins](#windows-logins) (real allocates past every principal its install created and never reuses an id).
 - `CREATE SERVER ROLE x` (→ `Simulation.ServerRoles`, `type R`, `is_fixed 0`), `ALTER SERVER ROLE r { ADD | DROP } MEMBER l` (→ `Simulation.ServerRoleMembers`, works for fixed and custom roles), `DROP SERVER ROLE x` (dropping a fixed role → **Msg 15150**). `SERVER` isn't a reserved keyword, so the CREATE / ALTER / DROP dispatchers match a `Name`-guard case. Errors are the 15151 family: unknown role `Cannot alter the server role '<r>'…`; unknown member `Cannot add the server principal '<l>'…`; unknown grantee login `Cannot find the login '<l>'…`.
-- **sysadmin semantics** (probe6 N3): a sysadmin-member login (incl. `sa`) maps to dbo in every database (see [Authentication](#session-principal--impersonation)); `IsLoginSysadmin` walks the `ServerRoleMembers` closure, which starts with `sa`'s own `sysadmin` row as real's does.
+- **sysadmin semantics** (probe6 N3): a sysadmin-member login (incl. `sa`) maps to dbo in every database (see [Authentication](#session-principal--impersonation)); `IsLoginSysadmin` walks the `ServerRoleMembers` closure, which starts with the `sysadmin` rows real's install lists — `sa`'s and two Windows logins' — and reaches a Windows login's group logins first.
   What every other fixed role carries is in [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).
 - **`IS_SRVROLEMEMBER`** reads the registry: `public` → 1; a sysadmin member → 1 for **every fixed** server role (N2); real membership → 1/0; a non-role name → NULL; the 2-arg form looks up the named login (an unknown named login → NULL).
 - **Server-scope GRANT / DENY / REVOKE** — three routes into `ApplyServerScopeGrant`: an ON-less GRANT whose permissions are all recognized SERVER-class names (`CONNECT SQL`, `VIEW SERVER STATE`, …), an explicit `ON SERVER::<name>`, or an `ON LOGIN::<name>`.
-  Legal only when the current database is `master` (**Msg 4621**, severity 16 **state 10**, no trailing period — elsewhere), stored in `Simulation.ServerPermissions`, which starts with real's two class-100 rows, `sa`'s `CONNECT SQL` and `public`'s `VIEW ANY DATABASE`.
+  Legal only when the current database is `master` (**Msg 4621**, severity 16 **state 10**, no trailing period — elsewhere), stored in `Simulation.ServerPermissions`, which starts with real's class-100 rows: `sa`'s `CONNECT SQL`, `public`'s `VIEW ANY DATABASE` and the [Windows logins'](#windows-logins) seven.
   `CREATE LOGIN` auto-seeds a `CONNECT SQL` G row (N4b).
   **Server-scope DENY replaces the prior G row** (N4 — divergent from database scope, where G + D coexist); REVOKE removes the rows.
   Every stored row is enforced — see [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).

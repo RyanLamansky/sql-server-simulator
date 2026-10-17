@@ -163,14 +163,11 @@ public sealed class HealthCheckSurfaceTests
     }
 
     [TestMethod]
-    public void ValidateLogins_ListsNoOrphanedWindowsLogin()
+    public void ValidateLogins_RefusesArgumentsAndTheUnprivileged()
     {
         var sim = new Simulation();
         using (var reader = sim.ExecuteReader("exec sp_validatelogins"))
-        {
             AreEqual("NT Login", reader.GetName(1));
-            IsFalse(reader.Read());
-        }
         _ = sim.AssertSqlError("exec sp_validatelogins 1", 8146);
         _ = sim.ExecuteNonQuery("create login lo with password = 'x', check_policy = off; create user lo for login lo");
         _ = sim.AssertSqlError("execute as login = 'lo'; exec sp_validatelogins", 15247);
