@@ -2065,13 +2065,13 @@ partial class Simulation
     private static SqlValue[] ProjectThroughView(BatchContext? batch, HeapTable? table, View view, SqlValue[] baseRow)
     {
         var projected = new SqlValue[view.OutputColumns.Length];
-        Func<SqlValue[], int, SqlValue>? readDerived = null;
+        Func<SqlValue[], int, BatchContext, SqlValue>? readDerived = null;
         for (var i = 0; i < view.OutputColumns.Length; i++)
         {
             var baseOrd = view.BaseColumnOrdinals[i];
             projected[i] = baseOrd >= 0 ? baseRow[baseOrd]
                 : batch is null || table is null || view.IsWindowed ? SqlValue.Null(view.OutputColumns[i].Type)
-                : (readDerived ??= SingleBaseViewReader(batch, view, table))(baseRow, i);
+                : (readDerived ??= SingleBaseViewReader(batch, view, table))(baseRow, i, batch);
         }
         return projected;
     }

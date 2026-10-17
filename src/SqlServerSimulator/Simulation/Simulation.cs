@@ -3503,6 +3503,37 @@ public sealed partial class Simulation
     private static bool EndsBatch(SimulatedSqlException ex)
         => ((IsDeferredCompileError(ex) || (ex.Class == 15 && !ex.RaisedByRaiserror)) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted || ex.IsAttention;
 
+    /// <summary>
+    /// Parses a statement's <c>WITH</c> prefix from its keyword, leaving the
+    /// cursor on the statement it leads; a recording armed ahead of it
+    /// (<see cref="PrepareCtePrefixPlan"/>) is let go if the prefix fails.
+    /// </summary>
+    private static void ParseCtePrefix(ParserContext context)
+    {
+        var batch = context.Batch;
+        var withToken = context.Token!;
+        var beforeCtes = context.SaveCheckpoint();
+        try
+        {
+            ParseCteBindings(context);
+            // A SELECT under SET NO_BROWSETABLE is a browse statement, which
+            // reads its CTEs flattened: their bodies parse again knowing it.
+            if (context.Connection.NoBrowseTable && context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' })
+            {
+                context.RestoreCheckpoint(beforeCtes);
+                using var flattenCtes = ParserScope.Enter(ref context.BrowseFlattenCtes, true);
+                ParseCteBindings(context);
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            DisarmCtePrefixPlan(context, TakeCtePrefixPlan(context));
+            throw;
+        }
+        batch.BindErrors?.AddCtePrefix(withToken, context.Token);
+        context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
+    }
+
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
         var context = batch.Parser;
@@ -3513,6 +3544,7 @@ public sealed partial class Simulation
         // repopulates.
         context.CteBindings = null;
         context.CtePrefixLeadsSelectStatement = false;
+        DisarmCtePrefixPlan(context, TakeCtePrefixPlan(context));
         context.XmlNamespaces = null;
         batch.CurrentStatement.BeginExecution();
         if (connection.PinnedUtcNow is { } pinned)
@@ -3526,19 +3558,10 @@ public sealed partial class Simulation
         {
             if (requireSemicolonBeforeCte)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
-            var withToken = context.Token;
-            var beforeCtes = context.SaveCheckpoint();
-            ParseCteBindings(context);
-            // A SELECT under SET NO_BROWSETABLE is a browse statement, which
-            // reads its CTEs flattened: their bodies parse again knowing it.
-            if (connection.NoBrowseTable && context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' })
-            {
-                context.RestoreCheckpoint(beforeCtes);
-                using var flattenCtes = ParserScope.Enter(ref context.BrowseFlattenCtes, true);
-                ParseCteBindings(context);
-            }
-            batch.BindErrors?.AddCtePrefix(withToken, context.Token);
-            context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
+            // A statement replaying its cached plan leaves its prefix unparsed,
+            // the cursor already on the statement's keyword.
+            if (this.PrepareCtePrefixPlan(context))
+                ParseCtePrefix(context);
         }
 
         // Inside a module body a query or DML statement binds its unqualified
@@ -4202,9 +4225,13 @@ public sealed partial class Simulation
         context.ForBrowseSeen = false;
         // A statement plan replays where the parse would have run (see
         // StatementPlanEntry); otherwise the statement parses, recording its
-        // plan when it may be cached and has none yet.
+        // plan when it may be cached and has none yet — under a WITH prefix,
+        // filed where the prefix starts and recorded from there.
         var cachesPlan = MayCacheStatementPlan(context);
-        var entry = cachesPlan ? this.CurrentStatementPlan(context, statementStart) : null;
+        var prefix = TakeCtePrefixPlan(context);
+        if (!cachesPlan)
+            DisarmCtePrefixPlan(context, prefix);
+        var entry = !cachesPlan ? null : prefix is null ? this.CurrentStatementPlan(context, statementStart) : prefix.Entry;
         Selection selection;
         ReplayedLock[]? replayLocks;
         if (entry is { Query: { } cached } && this.ReplaysSelectParse(context, entry, statementStart))
@@ -4214,7 +4241,14 @@ public sealed partial class Simulation
         }
         else
         {
-            selection = this.ParseSelectStatementRecording(batch, statementStart, cachesPlan && entry is null, out replayLocks);
+            // A plan the prefix found that doesn't replay parses as a statement
+            // the cache keeps nothing of.
+            if (prefix is { Recording: null })
+            {
+                ParseSkippedCtePrefix(context, prefix);
+                statementStart = context.SaveCheckpoint();
+            }
+            selection = this.ParseSelectStatementRecording(batch, statementStart, cachesPlan && entry is null, out replayLocks, cachesPlan ? prefix : null);
         }
         // A value literal or a name left dangling after a complete
         // SELECT is always unconsumed trailing input — real SQL
@@ -4524,8 +4558,10 @@ public sealed partial class Simulation
     /// Whether the DML statement at the cursor may fire a trigger: false only
     /// when the object it names as written — after <c>INSERT [INTO]</c>,
     /// <c>UPDATE</c>, <c>DELETE [FROM]</c> or <c>MERGE [INTO]</c> — is a table
-    /// or view no trigger is attached to; any shape the look-ahead doesn't
-    /// read, a <c>TOP</c> or an alias among them, may.
+    /// or view no trigger is attached to, or a table variable, which carries
+    /// none, written from anything but an <c>EXEC</c>, whose body runs
+    /// statements of its own; any shape the look-ahead doesn't read, a
+    /// <c>TOP</c> or an alias among them, may.
     /// </summary>
     private static bool MayFireTrigger(BatchContext batch)
     {
@@ -4540,6 +4576,8 @@ public sealed partial class Simulation
             {
                 context.MoveNextOptional();
             }
+            if (context.Token is AtPrefixedString)
+                return verb is ReservedKeyword { Keyword: Keyword.Insert } && !InsertsFromValuesOrQuery(context);
             if (context.Token is not (Name or UnquotedString { ContextualKeyword: ContextualKeyword.None }))
                 return true;
             var name = BatchContext.ParseObjectName(context);
@@ -4556,6 +4594,37 @@ public sealed partial class Simulation
         {
             context.RestoreCheckpoint(start);
         }
+    }
+
+    /// <summary>
+    /// Whether the <c>INSERT</c> whose target name the cursor is on writes from
+    /// a <c>VALUES</c> list, <c>DEFAULT VALUES</c> or a query — past an
+    /// optional column list — rather than from an <c>EXEC</c> or a shape the
+    /// look-ahead doesn't read. Leaves the cursor wherever it stops.
+    /// </summary>
+    private static bool InsertsFromValuesOrQuery(ParserContext context)
+    {
+        context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+        {
+            // A parenthesized query source, or the column list.
+            if (!context.MoveNext())
+                return false;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Select or Keyword.With } or Operator { Character: '(' })
+                return true;
+            for (var depth = 1; depth > 0;)
+            {
+                depth += context.Token switch
+                {
+                    Operator { Character: '(' } => 1,
+                    Operator { Character: ')' } => -1,
+                    _ => 0,
+                };
+                if (!context.MoveNext())
+                    return false;
+            }
+        }
+        return context.Token is ReservedKeyword { Keyword: Keyword.Values or Keyword.Select or Keyword.Default } or Operator { Character: '(' };
     }
 
     /// <summary>
@@ -4587,18 +4656,27 @@ public sealed partial class Simulation
     /// the statement's plan (see <see cref="RunSelectStatement"/>) unless its
     /// shape is one a replay can't reproduce — a <c>SELECT … INTO</c>, which
     /// creates its table as it runs, or one reading what belongs to the
-    /// session.
+    /// session. A statement under a <c>WITH</c> prefix carries on the
+    /// recording <paramref name="prefix"/> armed ahead of it.
     /// </summary>
-    private Selection ParseSelectStatementRecording(BatchContext batch, ParserContext.Checkpoint statementStart, bool records, out ReplayedLock[]? replayLocks)
+    private Selection ParseSelectStatementRecording(BatchContext batch, ParserContext.Checkpoint statementStart, bool records, out ReplayedLock[]? replayLocks, CtePrefixPlan? prefix)
     {
         var context = batch.Parser;
         var connection = batch.Connection;
         // The statement-scoped flag is judged for this statement alone; what
         // earlier statements set still stands for the batch afterwards.
         var enteredSessionScoped = batch.HasSessionScopedReference;
-        var recording = records ? BeginStatementRecording(batch) : null;
-        if (recording is not null)
+        StatementPlanRecording? recording = null;
+        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
+        var database = context.CurrentDatabase;
+        var planStart = statementStart;
+        if (prefix is { Recording: { } armed })
         {
+            (recording, enteredSessionScoped, schemaVersion, database, planStart) = (armed, prefix.EnteredSessionScoped, prefix.SchemaVersion, prefix.Database, prefix.Start);
+        }
+        else if (records)
+        {
+            recording = BeginStatementRecording(batch);
             batch.HasSessionScopedReference = false;
         }
         else
@@ -4608,11 +4686,10 @@ public sealed partial class Simulation
             // session.
             batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
         }
+        recording?.Statement = statementStart;
 #if DEBUG
         var principalWatch = recording is null && batch.ReplayLockLog is not null ? PlanCacheCaptureAudit.WatchPrincipalReads(connection.Security) : null;
 #endif
-        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
-        var database = context.CurrentDatabase;
         try
         {
             var selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
@@ -4645,7 +4722,7 @@ public sealed partial class Simulation
             batch.HasSessionScopedReference |= enteredSessionScoped;
             if (recording is not null)
             {
-                this.EndStatementRecording(batch, recording, statementStart, schemaVersion, database);
+                this.EndStatementRecording(batch, recording, planStart, schemaVersion, database);
 #if DEBUG
                 batch.PrincipalReadWhileParsing ??= recording.PrincipalRead;
 #endif

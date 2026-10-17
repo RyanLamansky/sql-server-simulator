@@ -470,19 +470,14 @@ partial class Simulation
             batch.SequenceValuesByRow = [];
         try
         {
-            RowSecurity.NoteWrite(context.Batch, destinationTable);
+            RowSecurity.NoteWriteWhileParsing(context.Batch, destinationTable);
             if (context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' })
             {
                 var selection = context.Token is Operator
                     ? ParseParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable)
                     : ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable);
                 var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null), selection);
-                // A replay skips the write's binding of the target's security
-                // predicates above, so only a target with none replays.
-                NoteDmlPlan(
-                    context,
-                    selectPlan,
-                    admitted: RowSecurity.For(context.Batch, destinationTable) is null && AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
+                NoteDmlPlan(context, selectPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
                 return InsertSourceRows(context, selectPlan, sourceStamps);
             }
 

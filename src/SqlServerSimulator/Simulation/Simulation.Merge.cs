@@ -806,7 +806,9 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
             };
-            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false, ctePlan.ColumnNullability, [MergeMatchSource(cteAlias, columnNames, sourceSchema, ctePlan)], []);
+            // A recursive binding marks the statement session-scoped, so a
+            // plan holds only a CTE whose plan is read-only after its parse.
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: true, ctePlan.ColumnNullability, [MergeMatchSource(cteAlias, columnNames, sourceSchema, ctePlan)], []);
         }
 
         // A linked server's table reads through the same remote query a FROM

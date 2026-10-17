@@ -915,6 +915,256 @@ public sealed class DmlPlanReplayTests
             As("blind", ("@id", 3), ("@v", 3)),
             As("seer", ("@id", 4), ("@v", 4)));
 
+    private const string OutputView = Joined + """
+
+        go
+        create view tv as select id, name, v, pid, 100 / v as inv, name + N'!' as tag from t
+        """;
+
+    private const string OutputThroughTheView = """
+        update tv set v = @v output deleted.inv, inserted.inv, inserted.tag where id = @id;
+        insert tv (name, v, pid) output inserted.* values (@n, @v, null);
+        delete tv output deleted.id, deleted.tag where name = @n;
+        merge tv using (values (@id, @v)) s (id, v) on tv.id = s.id when matched then update set v = s.v output $action, inserted.inv;
+        """;
+
+    [TestMethod]
+    public void WritesThroughAViewWithOutput_DerivedColumnsAndSetOptions()
+        => AssertReplayMatchesFreshParse(
+            OutputView,
+            OutputThroughTheView,
+            JoinedState,
+            With(("@v", 5), ("@id", 1), ("@n", "x")),
+            With(("@v", 0), ("@id", 2), ("@n", "y")),
+            new Run("set xact_abort on", ("@v", 0), ("@id", 3), ("@n", "z")),
+            new Run("set xact_abort off; set arithabort off; set ansi_warnings off", ("@v", 0), ("@id", 3), ("@n", "z")),
+            new Run("set arithabort on; set ansi_warnings on; set concat_null_yields_null off", ("@v", 4), ("@id", 1), ("@n", "w")),
+            new Run("set concat_null_yields_null on", ("@v", 0), ("@id", 1), ("@n", "toolong")));
+
+    [TestMethod]
+    public void WritesThroughAViewWithOutput_SchemaChangesBetweenRuns()
+        => AssertReplayMatchesFreshParse(
+            OutputView,
+            OutputThroughTheView,
+            JoinedState,
+            With(("@v", 5), ("@id", 1), ("@n", "x")),
+            new Run("alter view tv as select id, name, v, pid, 1000 / (v + 1) as inv, name + N'?' as tag from t", ("@v", 0), ("@id", 2), ("@n", "y")),
+            With(("@v", 7), ("@id", 3), ("@n", "z")),
+            new Run("alter table t add extra int null", ("@v", 8), ("@id", 1), ("@n", "w")),
+            new Run("alter view tv as select id, name, v, pid, v as inv, N'#' + name as tag from t", ("@v", 9), ("@id", 2), ("@n", "u")),
+            With(("@v", 10), ("@id", 3), ("@n", "s")));
+
+    [TestMethod]
+    public void UpdateThroughAViewWithOutput_MasksAndPermissionChangesPerPrincipal()
+        => AssertReplayMatchesFreshParse(
+            Principals + """
+
+            go
+            create view mv as select id, s, copy, upper(s) as shout from m
+            go
+            grant select, update on mv to seer, blind
+            """,
+            "SET NOCOUNT ON;\nUPDATE [mv] SET [copy] = [s]\nOUTPUT INSERTED.[s], INSERTED.[shout], DELETED.[copy]\nWHERE [id] = @p0;",
+            "revert; select id, copy from m order by id",
+            As("blind", ("@p0", 1)),
+            As("seer", ("@p0", 2)),
+            As("blind", ("@p0", 3)),
+            new Run("revert; revoke unmask from seer; execute as user = 'seer'", ("@p0", 1)),
+            new Run("revert; grant unmask to blind; execute as user = 'blind'", ("@p0", 2)),
+            new Run("revert; deny update on mv to blind; execute as user = 'blind'", ("@p0", 3)),
+            As("seer", ("@p0", 3)));
+
+    [TestMethod]
+    public void UpdateThroughAViewWithOutputIntoATempTable_RecreatedBetweenRuns()
+        => AssertReplayMatchesFreshParse(
+            OutputView,
+            "update tv set v = @v output inserted.id, inserted.inv into #o where id = @id; update tv set v = v output inserted.tag where id = @id; select * from #o",
+            JoinedState,
+            new Run("create table #o (id int, inv int)", ("@v", 5), ("@id", 1)),
+            new Run("drop table #o; create table #o (id bigint, inv varchar(10), extra int null)", ("@v", 4), ("@id", 1)),
+            new Run("drop table #o; create table #o (id int, inv tinyint)", ("@v", 1), ("@id", 2)),
+            new Run("drop table #o; create table #o (id int, inv int)", ("@v", 2), ("@id", 3)));
+
+    private const string SecuredTarget = """
+        create table r (id int primary key, tenant int not null, v varchar(5) not null);
+        create table src (id int primary key, tenant int not null, s varchar(10) not null);
+        insert src values (1, 1, 'a'), (2, 2, 'b'), (3, 1, 'toolong!'), (4, 1, 'x'), (5, 1, 'y');
+        create user u1 without login;
+        grant select, insert on r to u1;
+        grant select on src to u1;
+        go
+        create function dbo.tenantOk (@t int) returns table with schemabinding as return
+            select 1 as ok where @t = cast(session_context(N't') as int) or user_name() = 'dbo'
+        go
+        create security policy pol
+            add filter predicate dbo.tenantOk(tenant) on dbo.r,
+            add block predicate dbo.tenantOk(tenant) on dbo.r after insert
+        """;
+
+    private static Run AsTenant(string user, int tenant, string? then, params (string Name, object Value)[] parameters) =>
+        new($"revert; {then}; exec sp_set_session_context N't', {tenant}; execute as user = '{user}'", parameters);
+
+    [TestMethod]
+    public void InsertSelectIntoASecuredTable_PredicatesPermissionsAndSchemaChanges()
+        => AssertReplayMatchesFreshParse(
+            SecuredTarget,
+            "insert into r (id, tenant, v) select id + @o, tenant, s from src where id = @id",
+            "revert; select id, tenant, v, user_name() from r order by id",
+            With(("@o", 0), ("@id", 1)),
+            AsTenant("u1", 1, null, ("@o", 0), ("@id", 4)),
+            AsTenant("u1", 1, null, ("@o", 0), ("@id", 2)),
+            AsTenant("u1", 2, null, ("@o", 10), ("@id", 2)),
+            AsTenant("u1", 1, null, ("@o", 0), ("@id", 3)),
+            AsTenant("u1", 1, "set ansi_warnings off", ("@o", 20), ("@id", 3)),
+            AsTenant("u1", 1, "set ansi_warnings on; alter security policy pol with (state = off)", ("@o", 30), ("@id", 2)),
+            AsTenant("u1", 1, "alter security policy pol with (state = on)", ("@o", 40), ("@id", 2)),
+            AsTenant("u1", 1, "alter table r add extra int null", ("@o", 50), ("@id", 5)),
+            AsTenant("u1", 1, "revoke select on src from u1", ("@o", 60), ("@id", 5)),
+            AsTenant("u1", 1, "grant select on src to u1; deny insert on r to u1", ("@o", 70), ("@id", 5)),
+            With(("@o", 80), ("@id", 5)));
+
+    [TestMethod]
+    public void InsertSelectIntoASecuredTable_FromATempTableRecreatedBetweenRuns()
+        => AssertReplayMatchesFreshParse(
+            SecuredTarget,
+            "insert into r (id, tenant, v) select id + @o, tenant, s from #s; select count(*) from r",
+            "revert; select id, tenant, v from r order by id",
+            new Run("create table #s (id int, tenant int, s varchar(10)); insert #s values (1, 1, 'a')", ("@o", 0)),
+            AsTenant("u1", 1, "drop table #s; create table #s (id bigint, tenant int, s nvarchar(3)); insert #s values (1, 1, N'b')", ("@o", 10)),
+            AsTenant("u1", 2, "drop table #s; create table #s (tenant int, id int, s char(2)); insert #s values (1, 1, 'c')", ("@o", 20)),
+            AsTenant("u1", 1, null, ("@o", 30)));
+
+    [TestMethod]
+    public void InsertSelectIntoATableUnderANonSchemaBoundPolicy()
+        => AssertReplayMatchesFreshParse(
+            """
+            create table r (id int primary key, v int not null);
+            create table src (id int primary key, v int not null);
+            insert src values (1, 1), (2, -1), (3, 3);
+            go
+            create function dbo.positive (@v int) returns table as return select 1 as ok where @v > 0
+            go
+            create security policy pol add block predicate dbo.positive(v) on dbo.r after insert with (schemabinding = off)
+            """,
+            "insert into r (id, v) select id + @o, v from src where id = @id",
+            "select id, v from r order by id",
+            With(("@o", 0), ("@id", 1)),
+            With(("@o", 0), ("@id", 2)),
+            With(("@o", 10), ("@id", 3)),
+            new Run("alter function dbo.positive (@v int) returns table as return select 1 as ok where @v > 1", ("@o", 20), ("@id", 1)),
+            With(("@o", 30), ("@id", 3)));
+
+    private const string WritesUnderAWithPrefix = """
+        with src as (select id, rate from p where rate >= @min)
+        update t set v = v / (select min(rate) from src) + @k where pid in (select id from src);
+        with dup as (select name, v from t where id = @id)
+        insert log (id, name, v) select @id, name, v * @k from dup;
+        with s (id, rate) as (select id, rate * @k from p)
+        merge p using s on p.id = s.id when matched and s.rate < 0 then delete when matched then update set rate = s.rate;
+        with gone as (select id from t where v > @max) delete t where id in (select id from gone);
+        """;
+
+    [TestMethod]
+    public void WritesUnderAWithPrefix_ErrorsAndSetOptions()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            WritesUnderAWithPrefix,
+            JoinedState,
+            With(("@min", 1), ("@k", 1), ("@id", 1), ("@max", 99)),
+            With(("@min", 0), ("@k", 2), ("@id", 2), ("@max", 99)),
+            With(("@min", 1), ("@k", -1), ("@id", 3), ("@max", 50)),
+            new Run("set ansi_warnings off; set arithabort off", ("@min", 0), ("@k", 1), ("@id", 4), ("@max", 5)),
+            new Run("set ansi_warnings on; set arithabort on; set xact_abort on; begin tran", ("@min", 0), ("@k", 1), ("@id", 1), ("@max", 99)),
+            new Run("set xact_abort off; begin tran", ("@min", 1), ("@k", 3), ("@id", 2), ("@max", 0)),
+            new Run("rollback", ("@min", 2), ("@k", 1), ("@id", 3), ("@max", 99)));
+
+    [TestMethod]
+    public void WritesUnderAWithPrefix_SchemaChangesBetweenRuns()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            WritesUnderAWithPrefix,
+            JoinedState,
+            With(("@min", 1), ("@k", 1), ("@id", 1), ("@max", 99)),
+            new Run("alter table log add extra int null", ("@min", 1), ("@k", 2), ("@id", 2), ("@max", 99)),
+            new Run("alter table p add note int null", ("@min", 1), ("@k", 1), ("@id", 3), ("@max", 99)),
+            new Run("alter table log drop column extra", ("@min", 2), ("@k", 1), ("@id", 1), ("@max", 99)),
+            new Run("create index ix_p_rate on p (rate)", ("@min", 2), ("@k", 1), ("@id", 2), ("@max", 6)),
+            With(("@min", 1), ("@k", 1), ("@id", 3), ("@max", 99)));
+
+    [TestMethod]
+    public void WritesUnderAWithPrefix_FromATempTableRecreatedBetweenRuns()
+        => AssertReplayMatchesFreshParse(
+            Joined,
+            "with src as (select id, v from #src) update t set v = src.v from t join src on src.id = t.id; with s as (select id from p) insert log (id, v) select s.id, x.v from s join #src x on x.id = s.id",
+            JoinedState,
+            new Run("drop table if exists #src; create table #src (id int, v int); insert #src values (1, 10)"),
+            new Run("drop table if exists #src; create table #src (v bigint, id int); insert #src values (20, 2)"),
+            new Run("drop table if exists #src; create table #src (id int, v varchar(5)); insert #src values (3, 'x')"),
+            new Run("drop table if exists #src; create table #src (id int, v int); insert #src values (1, 40), (2, 50)"));
+
+    [TestMethod]
+    public void WritesUnderAWithPrefix_ReadPermissionsAndMasksPerPrincipal()
+        => AssertReplayMatchesFreshParse(
+            ReadPrincipals,
+            """
+            with h as (select id, v from hidden) update k set s = cast(h.v as varchar(20)) from k join h on h.id = k.id where k.id = @id;
+            with mm as (select id, s from m) insert k (id, s) select id + @o, s from mm where id = @id;
+            with mm (id, s) as (select id, s from m where id = @id) merge k using mm on k.id = mm.id + @o when matched then update set s = mm.s;
+            """,
+            "revert; select id, s from k order by id",
+            As("blind", ("@id", 1), ("@o", 10)),
+            As("seer", ("@id", 2), ("@o", 10)),
+            As("blind", ("@id", 3), ("@o", 20)),
+            new Run("revert; revoke unmask from seer; execute as user = 'seer'", ("@id", 1), ("@o", 30)),
+            new Run("revert; grant select on hidden to blind; execute as user = 'blind'", ("@id", 2), ("@o", 40)),
+            As("seer", ("@id", 3), ("@o", 50)));
+
+    [TestMethod]
+    public void UnderAChangeTrackingContext_EachRunTagsItsOwnValue()
+        => AssertReplayMatchesFreshParse(
+            """
+            alter database current set change_tracking = on;
+            create table ct (id int primary key, a int);
+            alter table ct enable change_tracking;
+            insert ct values (1, 0), (2, 0);
+            """,
+            "declare @ctx varbinary(128) = @c; with change_tracking_context (@ctx), s as (select id from ct where id = @id) update ct set a = a + 1 where id in (select id from s)",
+            "select id, convert(varchar(10), sys_change_context, 1) from changetable(changes ct, 0) x order by id",
+            With(("@c", new byte[] { 1 }), ("@id", 1)),
+            With(("@c", new byte[] { 2 }), ("@id", 1)),
+            With(("@c", new byte[] { 3, 4 }), ("@id", 2)),
+            With(("@c", Array.Empty<byte>()), ("@id", 1)));
+
+    [TestMethod]
+    public void UnderAWithPrefix_ALockTimeoutOnTheCommonTableExpressionsTable()
+    {
+        static string Run(bool freshEachRun)
+        {
+            var simulation = new Simulation();
+            _ = simulation.ExecuteNonQuery(Joined);
+            using var holder = simulation.CreateOpenConnection();
+            using var connection = simulation.CreateOpenConnection();
+            var transcript = new StringBuilder();
+            const string text = "with src as (select id from p where rate >= 0) update t set v = v + 1 where pid in (select id from src)";
+            for (var run = 0; run < 4; run++)
+            {
+                var held = run % 2 == 1;
+                if (held)
+                    Execute(holder, "begin tran; select count(*) from p with (tablockx, holdlock)", [], transcript);
+                if (freshEachRun)
+                    _ = simulation.ExecuteNonQuery("dbcc freeproccache with no_infomsgs");
+                _ = transcript.AppendLine("--");
+                Execute(connection, "set lock_timeout 0; " + text, [], transcript);
+                Execute(connection, "select @@error, @@trancount; " + JoinedState, [], transcript);
+                if (held)
+                    Execute(holder, "rollback", [], transcript);
+            }
+            return transcript.ToString();
+        }
+
+        AreEqual(Run(freshEachRun: true), Run(freshEachRun: false));
+    }
+
     [TestMethod]
     public void ConcurrentReplays_OfOneJoinedUpdatePlan_ApplyEveryIncrement()
     {

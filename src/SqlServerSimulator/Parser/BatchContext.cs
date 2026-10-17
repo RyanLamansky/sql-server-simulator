@@ -963,11 +963,12 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// Takes <paramref name="locks"/> — a cached statement's parse-time
-    /// acquisitions and permission checks — as this batch's session, in the
-    /// order the parse took them. Stops ahead of a permission check, answering
-    /// false, once <see cref="Simulation.SchemaVersion"/> has moved off
+    /// acquisitions, permission checks and security-predicate notes — as this
+    /// batch's session, in the order the parse took them. Stops ahead of a
+    /// permission check or a security-predicate note, answering false, once
+    /// <see cref="Simulation.SchemaVersion"/> has moved off
     /// <paramref name="schemaVersion"/> (a lock waited out a definition
-    /// change): the check would judge an object the statement may no longer
+    /// change): the step would judge an object the statement may no longer
     /// name, and the caller parses the statement instead. A null
     /// <paramref name="schemaVersion"/> takes every step regardless.
     /// </summary>
@@ -985,6 +986,12 @@ internal sealed partial class BatchContext
             else if (taken.NoWaitTable is { } table)
             {
                 _ = (this.noWaitTables ??= []).Add(table);
+            }
+            else if (taken.RowSecurityWrite is { } written)
+            {
+                if (schemaVersion is { } expected && Volatile.Read(ref this.Connection.Simulation.SchemaVersion) != expected)
+                    return false;
+                RowSecurity.NoteWrite(this, written);
             }
             else if (taken.TransactionScoped)
             {

@@ -178,10 +178,17 @@ public sealed class DmlPlanCacheTests
         => AreEqual(2, ReplaysOverThreeRuns("insert into d default values", "create table d (id int identity, at datetime2 default sysutcdatetime())"));
 
     [TestMethod]
-    public void InsertSelectIntoATableWithASecurityPolicy_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns(
+    public void InsertSelectIntoATableWithASecurityPolicy_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
             "insert into t (name, v) select name, v from t where id = @id",
             "create function dbo.allow (@v int) returns table with schemabinding as return select 1 as ok\ngo\ncreate security policy pol add block predicate dbo.allow(v) on dbo.t after insert",
+            ("@id", 1)));
+
+    [TestMethod]
+    public void InsertSelectIntoATableWithANonSchemaBoundPolicy_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "insert into t (name, v) select name, v from t where id = @id",
+            "create function dbo.allow (@v int) returns table as return select 1 as ok where @v >= 0\ngo\ncreate security policy pol add filter predicate dbo.allow(v) on dbo.t with (schemabinding = off)",
             ("@id", 1)));
 
     [TestMethod]
@@ -216,12 +223,43 @@ public sealed class DmlPlanCacheTests
             ("@v", 3)));
 
     [TestMethod]
-    public void UpdateThroughAViewWithOutput_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("update tv set v = @v output inserted.v where name = N'a'", "create view tv as select name, v from t", ("@v", 3)));
+    public void UpdateThroughAViewWithOutput_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("update tv set v = @v output inserted.v, deleted.v10 where name = N'a'", "create view tv as select name, v, v * 10 as v10 from t", ("@v", 3)));
 
     [TestMethod]
-    public void UnderACommonTableExpression_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("with c as (select id from p) update t set v = @v where pid in (select id from c)", parameters: ("@v", 3)));
+    public void InsertAndDeleteThroughANestedViewWithOutput_Replay()
+        => AreEqual(4, ReplaysOverThreeRuns(
+            "insert tv2 (name, v) output inserted.v20 values (N'x', @v); delete tv2 output deleted.* where name = N'x'",
+            "create view tv as select name, v, v * 10 as v10 from t\ngo\ncreate view tv2 as select name, v, v10 * 2 as v20 from tv",
+            ("@v", 3)));
+
+    [TestMethod]
+    public void UnderACommonTableExpression_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("with c as (select id from p) update t set v = @v where pid in (select id from c)", parameters: ("@v", 3)));
+
+    [TestMethod]
+    public void InsertSelectUnderACommonTableExpressionAfterOtherStatements_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "set nocount on; declare @n int = @v; with c as (select id from p) insert t (name, v, pid) select N'x', @n, id from c",
+            parameters: ("@v", 3)));
+
+    [TestMethod]
+    public void MergeFromACommonTableExpression_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "with d as (select id, v from t where id = @id) merge t using d on t.id = d.id when matched then update set v = d.v + 1;",
+            parameters: ("@id", 1)));
+
+    [TestMethod]
+    public void UnderARecursiveCommonTableExpression_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("with r as (select 1 as n union all select n + 1 from r where n < 3) update t set v = v + 1 where id in (select n from r)"));
+
+    [TestMethod]
+    public void UnderAChangeTrackingContext_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("with change_tracking_context (0x01) update t set v = @v where id = 1", parameters: ("@v", 3)));
+
+    [TestMethod]
+    public void UpdatingACommonTableExpression_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns("with c as (select id, v from t where id = 1) update c set v = @v", parameters: ("@v", 3)));
 
     [TestMethod]
     public void TempTableTarget_Reparses()

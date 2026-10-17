@@ -115,6 +115,53 @@ public sealed class StatementPlanReplayTests
             After("rollback", ("@z", 3)));
 
     [TestMethod]
+    public void SelectSequence_AReadAnotherPrincipalIsRefused_SettlesAsParsed()
+        => AssertReplayMatchesFreshParse(
+            Tables + """
+
+            create user reader without login;
+            grant select on log to reader;
+            """,
+            "select id, name from t where id >= @lo;\nselect id, v from log;\nselect count(*) from t",
+            "revert; " + TableState,
+            With(("@lo", 1)),
+            After("execute as user = 'reader'", ("@lo", 2)),
+            After("revert; grant select on t to reader; execute as user = 'reader'", ("@lo", 1)),
+            After("revert; deny select on t (name) to reader; execute as user = 'reader'", ("@lo", 3)),
+            After("revert; set xact_abort on; begin tran; execute as user = 'reader'", ("@lo", 3)),
+            After("revert; set xact_abort off; while @@trancount > 0 rollback", ("@lo", 2)));
+
+    [TestMethod]
+    public void SelectSequence_ALockTimeoutOnALaterStatementsTable_SettlesAsParsed()
+    {
+        static string Run(bool freshEachRun)
+        {
+            var simulation = new Simulation();
+            _ = simulation.ExecuteNonQuery(Tables);
+            using var holder = simulation.CreateOpenConnection();
+            using var connection = simulation.CreateOpenConnection();
+            var transcript = new StringBuilder();
+            for (var run = 0; run < 4; run++)
+            {
+                var held = run % 2 == 1;
+                if (held)
+                    Execute(holder, "begin tran; select count(*) from log with (tablockx, holdlock)", CommandType.Text, [], transcript);
+                if (freshEachRun)
+                    _ = simulation.ExecuteNonQuery("dbcc freeproccache with no_infomsgs");
+                _ = transcript.AppendLine("--");
+                Execute(connection, "set lock_timeout 0", CommandType.Text, [], transcript);
+                Execute(connection, "select id from t;\nselect id, v from log;\nselect count(*) from t", CommandType.Text, [], transcript);
+                Execute(connection, "select @@error, @@rowcount", CommandType.Text, [], transcript);
+                if (held)
+                    Execute(holder, "rollback", CommandType.Text, [], transcript);
+            }
+            return transcript.ToString();
+        }
+
+        AreEqual(Run(freshEachRun: true), Run(freshEachRun: false));
+    }
+
+    [TestMethod]
     public void MixedBatch_SelectsBesideStatementsWithNoPlan()
         => AssertReplayMatchesFreshParse(Tables,
             "SET NOCOUNT ON;\nDECLARE @n int = @z;\nSELECT [id], [v] / @n FROM [t] WHERE [id] >= @lo ORDER BY [id];\nUPDATE [t] SET [v] = [v] + @n WHERE [id] = @lo;\nSELECT @@ROWCOUNT, [name] FROM [t] WHERE [id] = @lo",
@@ -641,6 +688,151 @@ public sealed class StatementPlanReplayTests
             With(("@id", 1), ("@v", 2)),
             With(("@id", 2), ("@v", 5)),
             With(("@id", 3), ("@v", 1)));
+
+    [TestMethod]
+    public void QueryStore_RecordsStatementsUnderWithPrefixesAsParsedOnes()
+        => AssertReplayMatchesFreshParse(Tables + "\nalter database current set query_store (query_capture_mode = all);\ngo\n" + CteProcedureBody,
+            "exec cte @id, @v; with s as (select id, v from t where id = @id) select v from s; with u as (select id from t where v > @v) delete log where id in (select id from u)",
+            """
+            select qt.query_sql_text, sum(rs.count_executions), min(rs.execution_type), max(rs.execution_type), object_name(q.object_id)
+            from sys.query_store_query_text qt
+            join sys.query_store_query q on q.query_text_id = qt.query_text_id
+            join sys.query_store_plan p on p.query_id = q.query_id
+            join sys.query_store_runtime_stats rs on rs.plan_id = p.plan_id
+            where qt.query_sql_text like '%with%'
+            group by qt.query_sql_text, q.object_id
+            order by 1
+            """,
+            With(("@id", 1), ("@v", 2)),
+            With(("@id", 2), ("@v", 5)),
+            With(("@id", 3), ("@v", 1)));
+
+    private const string InsertExecSource = Tables + """
+
+        go
+        create procedure src @id int, @v int as
+        select id, v + @v from t where id = @id;
+        update t set v = v + 1 where id = @id;
+        select @id + 100, 10 / (@v - 5)
+        go
+        create user caller without login;
+        grant select, insert on log to caller;
+        grant execute on src to caller
+        """;
+
+    private const string InsertExecCalls = """
+        insert log (id, v) exec src @id, @v;
+        exec src @id, @v;
+        insert log (id, v) exec sp_executesql N'select id, v * @k from t where id >= @lo', N'@k int, @lo int', @v, @id;
+        select @@rowcount, @@error
+        """;
+
+    [TestMethod]
+    public void InsertExec_BodyStatementsBesideDirectCalls_ErrorsAndSetOptions()
+        => AssertReplayMatchesFreshParse(
+            InsertExecSource,
+            InsertExecCalls,
+            TableState,
+            With(("@id", 1), ("@v", 2)),
+            With(("@id", 2), ("@v", 5)),
+            After("set ansi_warnings off; set arithabort off", ("@id", 3), ("@v", 5)),
+            After("set ansi_warnings on; set arithabort on; set xact_abort on", ("@id", 1), ("@v", 5)),
+            After("set xact_abort off; set concat_null_yields_null off", ("@id", 2), ("@v", 3)),
+            After("set concat_null_yields_null on", ("@id", 3), ("@v", -1)));
+
+    [TestMethod]
+    public void InsertExec_SchemaAndPermissionChangesBetweenCalls()
+        => AssertReplayMatchesFreshParse(
+            InsertExecSource,
+            InsertExecCalls,
+            "revert; " + TableState,
+            With(("@id", 1), ("@v", 2)),
+            After("alter table log add extra int null", ("@id", 2), ("@v", 2)),
+            After("alter procedure src @id int, @v int as select id, v + @v, 0 from t where id = @id", ("@id", 3), ("@v", 2)),
+            After("alter procedure src @id int, @v int as select id, cast(v as varchar(9)) + 'x' from t where id = @id", ("@id", 1), ("@v", 2)),
+            After("alter procedure src @id int, @v int as select id, v - @v from t where id = @id", ("@id", 2), ("@v", 1)),
+            After("execute as user = 'caller'", ("@id", 3), ("@v", 1)),
+            After("revert; revoke execute on src from caller; execute as user = 'caller'", ("@id", 1), ("@v", 1)),
+            After("revert; grant execute on src to caller; deny select on t to caller; execute as user = 'caller'", ("@id", 2), ("@v", 1)));
+
+    [TestMethod]
+    public void InsertExec_ABodyReadingTheCallersTempTable_RecreatedBetweenCalls()
+        => AssertReplayMatchesFreshParse(
+            Tables + """
+
+            go
+            create procedure fromTemp @d int as
+            select id, v + @d from #k;
+            select count(*), max(v) from #k
+            """,
+            "insert log (id, v) exec fromTemp @d; exec fromTemp @d",
+            TableState,
+            After("drop table if exists #k; create table #k (id int, v int); insert #k values (1, 10)", ("@d", 1)),
+            After("drop table if exists #k; create table #k (v bigint, id int); insert #k values (20, 2)", ("@d", 2)),
+            After("drop table if exists #k; create table #k (id int, v varchar(5)); insert #k values (3, 'x')", ("@d", 3)),
+            After("drop table if exists #k; create table #k (id int, v int); insert #k values (4, 40), (5, 50)", ("@d", 4)));
+
+    private const string CteProcedure = Tables + "\ngo\n" + CteProcedureBody;
+
+    private const string CteProcedureBody = """
+        create procedure cte @id int, @v int as
+        set nocount off;
+        with a as (select id, name, v from t where id >= @id)
+        select name, v / (@v - 5) from a order by id;
+        with b as (select id from t where id = @id)
+        update t set v = v + @v where id in (select id from b);
+        with xmlnamespaces ('urn:z' as z), c (k, n) as (select id, name from t)
+        select k, n from c where k = @id;
+        with d as (select id, v from t where id = @id) insert log (id, v) select id, v * @v from d
+        go
+        create user caller without login;
+        grant execute on cte to caller
+        """;
+
+    [TestMethod]
+    public void ProcedureUnderWithPrefixes_ErrorsSetOptionsAndSchemaChanges()
+        => AssertReplayMatchesFreshParse(
+            CteProcedure,
+            "exec cte @id, @v",
+            TableState,
+            With(("@id", 1), ("@v", 2)),
+            With(("@id", 2), ("@v", 5)),
+            After("set ansi_warnings off; set arithabort off", ("@id", 3), ("@v", 5)),
+            After("set ansi_warnings on; set arithabort on; set xact_abort on", ("@id", 1), ("@v", -9)),
+            After("set xact_abort off; alter table log add extra int null", ("@id", 2), ("@v", 1)),
+            After("alter table t add w as v * 2", ("@id", 3), ("@v", 1)),
+            After("execute as user = 'caller'", ("@id", 1), ("@v", 1)),
+            After("revert; deny select on t to caller; execute as user = 'caller'", ("@id", 2), ("@v", 1)),
+            After("revert", ("@id", 3), ("@v", 2)));
+
+    [TestMethod]
+    public void BatchUnderWithPrefixes_BesideStatementsWithNoPlan()
+        => AssertReplayMatchesFreshParse(
+            Tables,
+            "SET NOCOUNT ON;\nDECLARE @n int = @z;\nWITH a AS (SELECT [id], [v] FROM [t] WHERE [id] >= @lo)\nSELECT [id], [v] / @n FROM a ORDER BY [id];\nWITH b AS (SELECT [id] FROM [t] WHERE [id] = @lo)\nUPDATE [t] SET [v] = [v] + @n WHERE [id] IN (SELECT [id] FROM b);\nWITH c AS (SELECT [name] FROM [t] WHERE [id] = @lo + 1)\nSELECT @@ROWCOUNT, [name] FROM c",
+            TableState,
+            With(("@z", 1), ("@lo", 1)),
+            With(("@z", 0), ("@lo", 2)),
+            With(("@z", -9), ("@lo", 3)),
+            After("alter table t add w int null", ("@z", 2), ("@lo", 1)),
+            With(("@z", 2), ("@lo", 9)));
+
+    [TestMethod]
+    public void ProcedureUnderAWithPrefix_ReadingTheCallersTempTable_RecreatedBetweenCalls()
+        => AssertReplayMatchesFreshParse(
+            Tables + """
+
+            go
+            create procedure cteTemp @d int as
+            with k as (select id, v from #k) select id, v + @d from k;
+            with t2 as (select id from t) select count(*) from t2 join #k on #k.id = t2.id
+            """,
+            "exec cteTemp @d",
+            TableState,
+            After("drop table if exists #k; create table #k (id int, v int); insert #k values (1, 10)", ("@d", 1)),
+            After("drop table if exists #k; create table #k (v bigint, id int); insert #k values (20, 2)", ("@d", 2)),
+            After("drop table if exists #k; create table #k (id int, v varchar(5)); insert #k values (3, 'x')", ("@d", 3)),
+            After("drop table if exists #k; create table #k (id int, v int); insert #k values (2, 40), (3, 50)", ("@d", 4)));
 
     [TestMethod]
     public void ConcurrentCalls_OfOneProcedure_ReadTheirOwnRows()

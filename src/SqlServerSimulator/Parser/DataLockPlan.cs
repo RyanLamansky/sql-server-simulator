@@ -312,7 +312,8 @@ internal readonly struct KeyFenceInterval(SqlValueKey? lower, bool lowerInclusiv
 /// <summary>
 /// One step a cached statement's parse took that a replay takes again — a
 /// lock on <see cref="Resource"/>, the <c>NOWAIT</c> hint on
-/// <see cref="NoWaitTable"/>, or the permission check <see cref="Check"/> —
+/// <see cref="NoWaitTable"/>, the permission check <see cref="Check"/>, or a
+/// write's note of <see cref="RowSecurityWrite"/>'s security predicates —
 /// recorded so a plan-cache replay retakes it, in the parse's order, as the
 /// replaying session (<c>BatchContext.TakeReplayedLocks</c>).
 /// </summary>
@@ -326,9 +327,23 @@ internal readonly struct ReplayedLock
         this.TransactionScoped = transactionScoped;
     }
 
-    public ReplayedLock(HeapTable noWaitTable) => this.NoWaitTable = noWaitTable;
+    public ReplayedLock(HeapTable noWaitTable)
+        : this(noWaitTable, rowSecurityWrite: false)
+    {
+    }
 
     public ReplayedLock(CompiledPermissionCheck check) => this.Check = check;
+
+    private ReplayedLock(HeapTable table, bool rowSecurityWrite)
+    {
+        if (rowSecurityWrite)
+            this.RowSecurityWrite = table;
+        else
+            this.NoWaitTable = table;
+    }
+
+    /// <summary>The step of a write noting <paramref name="table"/>'s security predicates as it parses (<see cref="RowSecurity.NoteWriteWhileParsing"/>).</summary>
+    public static ReplayedLock ForRowSecurityWrite(HeapTable table) => new(table, rowSecurityWrite: true);
 
     /// <summary>The locked resource; null for a <see cref="NoWaitTable"/> or <see cref="Check"/> step.</summary>
     public readonly LockResource? Resource;
@@ -347,4 +362,7 @@ internal readonly struct ReplayedLock
 
     /// <summary>A permission check the parse made (<c>PermissionEnforcement.CheckWhileParsing</c>).</summary>
     public readonly CompiledPermissionCheck? Check;
+
+    /// <summary>A table a write noted as one a security policy names (<see cref="RowSecurity.NoteWrite"/>).</summary>
+    public readonly HeapTable? RowSecurityWrite;
 }

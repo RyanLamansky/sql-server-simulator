@@ -205,6 +205,35 @@ internal sealed class RowSecurity
     }
 
     /// <summary>
+    /// <see cref="NoteWrite"/> for a write that notes its target while it
+    /// parses, ahead of its source query's parse: when the parse is one the
+    /// plan cache may keep, the note is also recorded among the parse's locks,
+    /// for a replay to make again in the same place as its own session. The
+    /// locks the predicates' binding takes stay out of the recording, since
+    /// the replayed note binds them again.
+    /// </summary>
+    public static void NoteWriteWhileParsing(BatchContext batch, HeapTable table)
+    {
+        if (batch.IsSkipping || For(batch, table) is null)
+            return;
+        var log = batch.ReplayLockLog;
+        log?.Add(ReplayedLock.ForRowSecurityWrite(table));
+        batch.ReplayLockLog = null;
+        try
+        {
+#if DEBUG
+            // The binding may read the principal, which the replay reads again.
+            using var recorded = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+            NoteWrite(batch, table);
+        }
+        finally
+        {
+            batch.ReplayLockLog = log;
+        }
+    }
+
+    /// <summary>
     /// Notes on the session that the running query reads a table whose filter
     /// predicate applies, ahead of anything its plan evaluates as it starts.
     /// </summary>

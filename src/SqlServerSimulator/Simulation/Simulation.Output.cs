@@ -909,7 +909,7 @@ partial class Simulation
         // having failed the write.
         private SqlValue ReadOutputColumn(SqlValue[] row, int ordinal, BatchContext batch) =>
             view is not null
-                ? view.Read is { } read ? read(row, ordinal) : row[ordinal]
+                ? view.Read is { } read ? read(row, ordinal, batch) : row[ordinal]
                 : destinationTable.Columns[ordinal] is { Computed: not null, IsPersisted: false }
                 ? EvaluateComputedColumn(destinationTable, row, ordinal, batch)
                 : row[ordinal];

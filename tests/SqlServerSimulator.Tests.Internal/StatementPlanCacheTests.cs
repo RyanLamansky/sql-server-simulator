@@ -169,6 +169,24 @@ public sealed class StatementPlanCacheTests
             "exec sp_executesql N'select v from t where id = @id; update t set v = v + 1 where id = @id', N'@id int', @id = 1"));
 
     [TestMethod]
+    public void ProcedureUnderWithPrefixes_ReplaysItsQueriesAndWrites()
+        => AreEqual((4L, 4L), ReplaysOverThreeRuns(
+            "create procedure c as with a as (select id, v from t) select id from a where v > 0; with b (k) as (select id from t) update t set v = v + 1 where id in (select k from b); with xmlnamespaces ('urn:x' as x), d as (select id from t) select count(*) from d; with e as (select id, v from t where id = 1) insert log select id, v from e",
+            "exec c"));
+
+    [TestMethod]
+    public void InsertExecOfAProcedure_ReplaysItsBody()
+        => AreEqual((4L, 2L), ReplaysOverThreeRuns(
+            "create procedure s @id int as select id, v from t where id = @id; update t set v = v + 1 where id = @id; select @id, v from t where id = 2",
+            "insert log exec s 1"));
+
+    [TestMethod]
+    public void InsertExecOfADynamicBatch_ReplaysItsBody()
+        => AreEqual((2L, 0L), ReplaysOverThreeRuns(
+            "",
+            "insert log exec sp_executesql N'select id, v from t where id >= @id', N'@id int', @id = 1"));
+
+    [TestMethod]
     public void AlteredProcedure_RecordsAgainThenReplays()
     {
         var simulation = new Simulation();

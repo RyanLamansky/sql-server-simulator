@@ -338,7 +338,7 @@ public sealed partial class Simulation
     /// key can match it. Null where the plan cache's own gates say no.
     /// </summary>
     private static PlanCacheKey? DynamicBatchKey(SimulatedDbConnection connection, string text, string declarations) =>
-        connection.InsertExecTargetTypes is null ? PlanCacheKeyFor(connection, text, "\0" + declarations) : null;
+        PlanCacheKeyFor(connection, text, "\0" + declarations);
 
     /// <summary>
     /// The key a module body's statement plans are filed under, taken as the
@@ -500,40 +500,64 @@ public sealed partial class Simulation
                 batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
-                // The parse this replay skips took these locks; the
-                // replaying session takes them now, and gives back the
-                // statement-scoped ones when the statement ends — when the
-                // consumer moves past it, as in the dispatch loop, or in the
-                // finally below.
-                var current = batch.TakeReplayedLocks(entry.Locks[statement], statement == 0 ? entry.SchemaVersionAtParse : null);
-                if (statement == 0 && (!current || Volatile.Read(ref connection.Simulation.SchemaVersion) != entry.SchemaVersionAtParse))
+                // Query Store times a replayed statement as the dispatch loop
+                // does a parsed one, from before the steps its parse took.
+                var queryStore = BeginQueryStoreCapture(batch, io: null);
+                var queryStoreIo = queryStore is not null ? connection.StatementIo = new IoStatistics() : null;
+                var rowSecurityMarks = connection.RowSecurityMarks;
+                // The parse this replay skips took these locks and made these
+                // checks; the replaying session takes and makes them now, and
+                // gives back the statement-scoped locks when the statement
+                // ends — when the consumer moves past it, as in the dispatch
+                // loop, or in the finally below. A lock wait or check that
+                // fails ends the statement as it ended the parse, with no
+                // result set sent.
+                SimulatedSqlException? refused = null;
+                var current = true;
+                try
+                {
+                    current = batch.TakeReplayedLocks(entry.Locks[statement], statement == 0 ? entry.SchemaVersionAtParse : null);
+                }
+                catch (SimulatedSqlException error)
+                {
+                    refused = error;
+                }
+                if (refused is null && statement == 0 && (!current || Volatile.Read(ref connection.Simulation.SchemaVersion) != entry.SchemaVersionAtParse))
                 {
                     batch.ReleaseStatementSchemaLocks();
+                    EndReplayedStatement(connection, queryStoreIo, announcedReader: false);
                     stale.Value = true;
                     yield break;
                 }
                 // The cached plan is shared across principals; re-run the
                 // SELECT permission check against the replaying session's
                 // current principal.
-                PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+                if (refused is null)
+                {
+                    try
+                    {
+                        PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+                    }
+                    catch (SimulatedSqlException error)
+                    {
+                        refused = error;
+                    }
+                }
                 batch.CurrentStatement.SendsRows = selection.IntoTarget is null && !selection.IsAssignmentOnly;
                 // As in the dispatch loop, rows before a failing one go out
                 // ahead of its error (see EndedByError).
                 SimulatedSqlResultSet? executed = null;
-                SimulatedSqlException? cutShort = null;
+                var cutShort = refused;
                 int rowCount;
-                // Query Store times a replayed statement as the dispatch loop
-                // does a parsed one.
-                var queryStore = BeginQueryStoreCapture(batch, io: null);
-                var queryStoreIo = queryStore is not null ? connection.StatementIo = new IoStatistics() : null;
                 // As the dispatch loop's statements do (see LobReclamation).
                 var announcedReader = connection.Simulation.LobReclamation.Enter(connection.Session);
-                var rowSecurityMarks = connection.RowSecurityMarks;
                 // A result larger than real gets ahead of its client goes out
                 // as the client reads it, as the dispatch loop sends one.
                 ResultStream? stream = null;
                 try
                 {
+                    if (refused is not null)
+                        throw refused;
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
                     if (batch.StreamsResultRows && !selection.IsAssignmentOnly)
                         stream = executed.BeginStreaming(batch.CurrentStatement, batch.Connection);
@@ -554,18 +578,21 @@ public sealed partial class Simulation
                         EndQueryStoreCapture(batch, capture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, error.IsAttention ? (byte)3 : (byte)4, 0);
                     cutShort = error;
                     rowCount = 0;
-                    executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
+                    if (refused is null)
                     {
-                        ColumnNullability = selection.ColumnNullability,
-                        ColumnReportsNumeric = selection.ColumnReportsNumeric,
-                        ColumnAliasTypes = selection.ColumnAliasTypes,
-                        ColumnIdentitySources = selection.ColumnIdentitySources,
-                        ColumnWireFlags = selection.ColumnWireFlags,
-                        HiddenColumnCount = selection.HiddenColumnCount,
-                        Browse = selection.Browse,
-                    };
-                    executed.EndedByError = true;
-                    executed.ErrorCaught = CaughtByTryFrame(batch, error);
+                        executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
+                        {
+                            ColumnNullability = selection.ColumnNullability,
+                            ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                            ColumnAliasTypes = selection.ColumnAliasTypes,
+                            ColumnIdentitySources = selection.ColumnIdentitySources,
+                            ColumnWireFlags = selection.ColumnWireFlags,
+                            HiddenColumnCount = selection.HiddenColumnCount,
+                            Browse = selection.Browse,
+                        };
+                        executed.EndedByError = true;
+                        executed.ErrorCaught = CaughtByTryFrame(batch, error);
+                    }
                 }
                 finally
                 {
@@ -576,18 +603,19 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
                     ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
-                    : (SimulatedStatementOutcome)executed;
+                    : (SimulatedStatementOutcome?)executed;
                 // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
                 // suppression and the TEXTSIZE the loop's post-statement
                 // walk would have.
-                replayed.CountSuppressed = connection.NoCount;
+                replayed?.CountSuppressed = connection.NoCount;
                 if (connection.TextSize >= 0 && replayed is SimulatedQueryResult query)
                     query.ClientTextSize = connection.TextSize;
                 foreach (var message in DrainPendingMessages(connection))
                     yield return message;
                 if (stream is null)
                 {
-                    yield return replayed;
+                    if (replayed is not null)
+                        yield return replayed;
                 }
                 else
                 {
@@ -595,7 +623,8 @@ public sealed partial class Simulation
                     try
                     {
                         stream.Suspend(batch);
-                        yield return replayed;
+                        // A streaming result is one the statement executed.
+                        yield return replayed!;
                         while (true)
                         {
                             stream.Resume(batch);
@@ -621,7 +650,7 @@ public sealed partial class Simulation
                     if (stream.Error is { } streamed)
                     {
                         cutShort = streamed;
-                        executed.EndedByError = true;
+                        executed!.EndedByError = true;
                         executed.ErrorCaught = CaughtByTryFrame(batch, streamed);
                     }
                     if (queryStore is { } streamedCapture)

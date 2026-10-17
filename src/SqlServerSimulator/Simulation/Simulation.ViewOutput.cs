@@ -20,17 +20,17 @@ partial class Simulation
     /// that fails for the row (<c>10 / a</c> over a zero) raises only when
     /// OUTPUT reads it, as on real.
     /// </remarks>
-    private sealed class ViewOutputShape(HeapColumn[] columns, Func<SqlValue[], int, SqlValue>? read, Func<int, bool>? insertedRefused)
+    private sealed class ViewOutputShape(HeapColumn[] columns, Func<SqlValue[], int, BatchContext, SqlValue>? read, Func<int, bool>? insertedRefused)
     {
         public readonly HeapColumn[] Columns = columns;
 
         /// <summary>
         /// Reads view column <c>ordinal</c> off the row a DML site hands
-        /// OUTPUT — a base-table row, evaluated through the view — or null
-        /// when the site hands rows already shaped to the view (an
-        /// <c>INSTEAD OF</c> trigger's pseudo-table rows).
+        /// OUTPUT — a base-table row, evaluated through the view for the
+        /// executing batch — or null when the site hands rows already shaped
+        /// to the view (an <c>INSTEAD OF</c> trigger's pseudo-table rows).
         /// </summary>
-        public readonly Func<SqlValue[], int, SqlValue>? Read = read;
+        public readonly Func<SqlValue[], int, BatchContext, SqlValue>? Read = read;
 
         /// <summary>
         /// Which view columns <c>INSERTED</c> may not name — <strong>Msg
@@ -91,9 +91,12 @@ partial class Simulation
     /// <remarks>
     /// Each level's body is re-parsed here, as the other writes through a view
     /// do. A window function has no meaning over one row, so a windowed
-    /// level's derived column is refused rather than evaluated.
+    /// level's derived column is refused rather than evaluated. The reader
+    /// holds the parsed levels and nothing of <paramref name="batch"/>, each
+    /// read running against the batch it is handed, so a cached DML plan's
+    /// <c>OUTPUT</c> clause can share it.
     /// </remarks>
-    private static Func<SqlValue[], int, SqlValue> SingleBaseViewReader(BatchContext batch, View view, HeapTable table)
+    private static Func<SqlValue[], int, BatchContext, SqlValue> SingleBaseViewReader(BatchContext batch, View view, HeapTable table)
     {
         var collation = batch.CurrentDatabase.Collation;
         var levels = new List<(View View, Expression[]? Projections)>();
@@ -107,16 +110,25 @@ partial class Simulation
             level = lower;
         }
 
-        SqlValue ReadBase(SqlValue[] row, int ordinal) =>
+        return ReaderOver([.. levels], table, collation);
+    }
+
+    /// <summary>
+    /// <see cref="SingleBaseViewReader"/>'s reader over the parsed levels — a
+    /// static helper, so no closure over the parsing batch reaches it.
+    /// </summary>
+    private static Func<SqlValue[], int, BatchContext, SqlValue> ReaderOver((View View, Expression[]? Projections)[] levels, HeapTable table, Collation collation)
+    {
+        static SqlValue ReadBase(HeapTable table, SqlValue[] row, int ordinal, BatchContext batch) =>
             table.Columns[ordinal] is { Computed: not null, IsPersisted: false }
                 ? EvaluateComputedColumn(table, row, ordinal, batch)
                 : row[ordinal];
 
-        SqlValue ReadLevel(int depth, int ordinal, SqlValue[] row)
+        SqlValue ReadLevel(int depth, int ordinal, SqlValue[] row, BatchContext batch)
         {
             var (levelView, projections) = levels[depth];
             if (levelView.BaseColumnOrdinals[ordinal] is var baseOrdinal and >= 0)
-                return ReadBase(row, baseOrdinal);
+                return ReadBase(table, row, baseOrdinal, batch);
             if (projections is null || levelView.IsWindowed)
                 throw new NotSupportedException($"OUTPUT reading the derived column '{levelView.OutputColumns[ordinal].Name}' of '{levelView.Name}' isn't modeled for this view shape.");
 
@@ -124,18 +136,18 @@ partial class Simulation
             return projections[ordinal].Run(new RuntimeContext(
                 name =>
                 {
-                    if (below == levels.Count)
+                    if (below == levels.Length)
                     {
                         var baseOrdinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
-                        return baseOrdinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : ReadBase(row, baseOrdinal);
+                        return baseOrdinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : ReadBase(table, row, baseOrdinal, batch);
                     }
                     var lowerOrdinal = IndexOfViewOutputColumn(collation, levels[below].View, name.Leaf);
-                    return lowerOrdinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : ReadLevel(below, lowerOrdinal, row);
+                    return lowerOrdinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : ReadLevel(below, lowerOrdinal, row, batch);
                 },
                 batch));
         }
 
-        return (row, ordinal) => ReadLevel(0, ordinal, row);
+        return (row, ordinal, batch) => ReadLevel(0, ordinal, row, batch);
     }
 
     /// <summary>
@@ -165,7 +177,7 @@ partial class Simulation
         var (resolvers, _) = BuildChainResolvers(batch, chain, resolveTuple);
         var resolveOutput = resolvers[^1];
 
-        SqlValue Read(SqlValue[] row, int ordinal)
+        SqlValue Read(SqlValue[] row, int ordinal, BatchContext _)
         {
             if (tuplesByRow is null || !tuplesByRow.TryGetValue(row, out var recorded))
             {

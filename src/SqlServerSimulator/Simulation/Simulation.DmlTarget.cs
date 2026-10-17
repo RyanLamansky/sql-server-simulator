@@ -499,7 +499,7 @@ partial class Simulation
                 {
                     var baseOrd = view.BaseColumnOrdinals[v];
                     return viewRow is not null ? viewRow[v]
-                        : baseOrd < 0 ? SingleBaseViewReader(batch, view, table)(row, v)
+                        : baseOrd < 0 ? SingleBaseViewReader(batch, view, table)(row, v, batch)
                         : row[baseOrd];
                 }
             }
@@ -541,14 +541,14 @@ partial class Simulation
     /// <c>OUTPUT … INTO</c> target a plan can hold, nothing
     /// <see cref="BlocksDmlPlan"/> names (the client <c>OUTPUT</c> half of it
     /// only when rows go to the client), and a table target or a stored view
-    /// written through to its one base table. A view needs no <c>OUTPUT</c>
-    /// clause, whose view columns read through the parsing batch, and no
-    /// trigger on it or down its chain, since which way a write through a view
+    /// written through to its one base table — its <c>OUTPUT</c> clause's view
+    /// columns read through the executing batch — with no trigger on it or
+    /// down its chain, since which way a write through a view
     /// routes is settled while parsing from its <c>INSTEAD OF</c> triggers'
     /// enabled state, which no schema change records.
     /// </summary>
     private static bool AdmitsDmlPlan(BatchContext batch, HeapTable table, View? view, OutputProjection? output) =>
-        (view is null || (output is null && view is { UnstoredBody: null, PartitionedBase: null } && ReferenceEquals(view.BaseTable, table) && !ViewChainHasTrigger(batch, view)))
+        (view is null || (view is { UnstoredBody: null, PartitionedBase: null } && ReferenceEquals(view.BaseTable, table) && !ViewChainHasTrigger(batch, view)))
         && output is not { TargetBlocksDmlPlan: true }
         && !BlocksDmlPlan(batch, table, clientOutput: output is { HasTarget: false });
 

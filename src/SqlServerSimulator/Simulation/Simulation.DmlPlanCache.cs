@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
 
 namespace SqlServerSimulator;
 
@@ -39,16 +40,25 @@ partial class Simulation
     /// statement's parse would have left it, then takes the parse's locks and
     /// runs the plan's execution half, all inside <see cref="RunMutation"/>
     /// exactly where the parse would have run, so the statement's atomicity,
-    /// its errors and their order are the parsed statement's.
+    /// its errors and their order are the parsed statement's. A statement under
+    /// a <c>WITH</c> prefix files its plan where the prefix starts, the
+    /// prefix's parse part of its recording (see <see cref="PrepareCtePrefixPlan"/>).
     /// </summary>
     private SimulatedStatementOutcome RunDmlStatement(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> parse)
     {
         var batch = context.Batch;
-        if (!MayCacheStatementPlan(context))
+        // A prefix the cache holds is what admits the statement it leads.
+        var cachesPlan = MayCacheStatementPlan(context);
+        var prefix = TakeCtePrefixPlan(context);
+        if (!cachesPlan)
+        {
+            DisarmCtePrefixPlan(context, prefix);
             return RunMutation(context, parse);
+        }
 
-        var start = context.SaveCheckpoint();
-        var entry = this.CurrentStatementPlan(context, start);
+        var statement = context.SaveCheckpoint();
+        var start = prefix?.Start ?? statement;
+        var entry = prefix is null ? this.CurrentStatementPlan(context, start) : prefix.Entry;
         if (entry is { IsDeclined: true })
             return RunMutation(context, parse);
         if (entry is { Plan: not null } && context.CanJumpTo(entry.End))
@@ -61,18 +71,41 @@ partial class Simulation
                     return replayed;
                 // The schema locks the replay took waited out a definition
                 // change, so the statement parses as it would have.
-                replaying.RestoreCheckpoint(start);
+                if (prefix is not null)
+                    ParseSkippedCtePrefix(replaying, prefix);
+                else
+                    replaying.RestoreCheckpoint(start);
                 return parse(replaying);
             });
+        }
+        if (prefix is { Recording: null })
+        {
+            // A plan the prefix found that can't replay here parses as a
+            // statement the cache keeps nothing of.
+            ParseSkippedCtePrefix(context, prefix);
+            return RunMutation(context, parse);
         }
 
         // The statement-scoped flag is judged for this statement alone; what
         // earlier statements set still stands for the batch afterwards.
-        var enteredSessionScoped = batch.HasSessionScopedReference;
-        batch.HasSessionScopedReference = false;
-        var recording = batch.DmlPlanRecording = BeginStatementRecording(batch);
-        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
-        var database = context.CurrentDatabase;
+        bool enteredSessionScoped;
+        StatementPlanRecording recording;
+        long schemaVersion;
+        Database database;
+        if (prefix is { Recording: { } armed })
+        {
+            (recording, enteredSessionScoped, schemaVersion, database) = (armed, prefix.EnteredSessionScoped, prefix.SchemaVersion, prefix.Database);
+        }
+        else
+        {
+            enteredSessionScoped = batch.HasSessionScopedReference;
+            batch.HasSessionScopedReference = false;
+            recording = BeginStatementRecording(batch);
+            schemaVersion = Volatile.Read(ref this.SchemaVersion);
+            database = context.CurrentDatabase;
+        }
+        batch.DmlPlanRecording = recording;
+        recording.Statement = statement;
         try
         {
             var outcome = RunMutation(context, parse);
@@ -105,6 +138,79 @@ partial class Simulation
             // so its plan is as good as a successful one's.
             this.EndStatementRecording(batch, recording, start, schemaVersion, database);
         }
+    }
+
+    /// <summary>
+    /// At a statement's <c>WITH</c> prefix, the cursor on the keyword: when
+    /// the plan cache may keep the statement, finds the plan it filed where the
+    /// prefix starts — and then jumps the cursor past the unparsed prefix to the
+    /// statement's keyword, for the dispatch loop to route it to its arm, which
+    /// replays the plan — or, with none recorded yet, arms the statement's
+    /// recording ahead of the prefix, so the locks, checks and flags its common
+    /// table expressions' parse settles are recorded with the statement's own.
+    /// Either way the arm takes what this left on
+    /// <see cref="ParserContext.CtePrefixPlan"/>. True when the prefix is to be
+    /// parsed.
+    /// </summary>
+    private bool PrepareCtePrefixPlan(ParserContext context)
+    {
+        if (!MayCacheStatementPlan(context))
+            return true;
+        var start = context.SaveCheckpoint();
+        var entry = this.CurrentStatementPlan(context, start);
+        if (entry is { IsDeclined: true })
+            return true;
+        if (entry is not null)
+        {
+            if (!context.CanJumpTo(entry.Statement) || !context.CanJumpTo(entry.End))
+                return true;
+            context.JumpTo(entry.Statement);
+            context.CtePrefixPlan = CtePrefixPlan.Replaying(start, entry);
+            return false;
+        }
+        var batch = context.Batch;
+        var enteredSessionScoped = batch.HasSessionScopedReference;
+        batch.HasSessionScopedReference = false;
+        context.CtePrefixPlan = CtePrefixPlan.Recorded(start, BeginStatementRecording(batch), enteredSessionScoped, Volatile.Read(ref this.SchemaVersion), context.CurrentDatabase);
+        return true;
+    }
+
+    /// <summary>Takes what <see cref="PrepareCtePrefixPlan"/> left for the statement's arm, if anything.</summary>
+    private static CtePrefixPlan? TakeCtePrefixPlan(ParserContext context)
+    {
+        var prefix = context.CtePrefixPlan;
+        context.CtePrefixPlan = null;
+        return prefix;
+    }
+
+    /// <summary>
+    /// Lets go of a recording <see cref="PrepareCtePrefixPlan"/> armed that no
+    /// statement plan will take — a prefix that failed to parse, one tagging
+    /// the statement's change-tracking context as it parses, a statement the
+    /// cache keeps nothing of after all — keeping what its parse noted of
+    /// session-scoped references.
+    /// </summary>
+    private static void DisarmCtePrefixPlan(ParserContext context, CtePrefixPlan? prefix)
+    {
+        if (prefix?.Recording is null)
+            return;
+        var batch = context.Batch;
+        batch.ReplayLockLog = null;
+        batch.HasSessionScopedReference |= prefix.EnteredSessionScoped;
+#if DEBUG
+        EndPrincipalWatch(prefix.Recording);
+#endif
+    }
+
+    /// <summary>
+    /// Parses the <c>WITH</c> prefix a replay jumped past, for a statement that
+    /// parses after all, leaving the cursor on the statement's keyword.
+    /// </summary>
+    private static void ParseSkippedCtePrefix(ParserContext context, CtePrefixPlan prefix)
+    {
+        context.RestoreCheckpoint(prefix.Start);
+        ParseCteBindings(context);
+        context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
     }
 
     /// <summary>
@@ -163,9 +269,9 @@ partial class Simulation
 
     /// <summary>
     /// Whether the statement at the cursor may run from, or record, a cached
-    /// plan: a statement of a batch or module body the plan cache keys — not
-    /// under a <c>WITH</c> prefix, whose common table expressions parse ahead
-    /// of the statement's recording — under the settings its key was
+    /// plan: a statement of a batch or module body the plan cache keys — under
+    /// a <c>WITH</c> prefix only when the prefix's parse is recorded with it
+    /// (see <see cref="PrepareCtePrefixPlan"/>) — under the settings its key was
     /// taken with — a statement earlier in the batch may have changed one —
     /// and none of the settings the cache stays out of. A statement inside a
     /// block, an <c>IF</c>, a <c>WHILE</c> or a <c>TRY</c> qualifies as one at
@@ -186,7 +292,7 @@ partial class Simulation
             || batch.CreateTimeBinding
             || batch.DependencySink is not null
             || batch.FunctionBodyShape is not null
-            || context.CteBindings is not null
+            || (context.CteBindings is not null && context.CtePrefixPlan is null)
             || !context.HoldsTokenSequence)
         {
             return false;
@@ -202,7 +308,6 @@ partial class Simulation
             && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
             && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
             && !connection.StatisticsIo && !connection.StatisticsTime && !connection.NoBrowseTable
-            && connection.InsertExecTargetTypes is null
             && key.QuotedIdentifiers == context.QuotedIdentifiers
             && key.DateFormat == connection.DateFormat
             && key.AnsiNulls == connection.AnsiNulls

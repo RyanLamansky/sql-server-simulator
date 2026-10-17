@@ -46,6 +46,12 @@ internal sealed class StatementPlanRecording(int messagesAtStart)
     /// <summary>Where the parse left the cursor: the token after the statement.</summary>
     public ParserContext.Checkpoint End;
 
+    /// <summary>
+    /// Where the statement's own keyword stands, past a <c>WITH</c> prefix the
+    /// recording began ahead of; the statement's start when it has none.
+    /// </summary>
+    public ParserContext.Checkpoint Statement;
+
     /// <summary>The locks the parse took and the permission checks it made, in order.</summary>
     public ReplayedLock[] Locks = [];
 
@@ -115,6 +121,13 @@ internal sealed class StatementPlanEntry(StatementPlanRecording recording, long 
     public readonly DmlStatementPlan? Plan = recording.Plan;
     public readonly Selection? Query = recording.Query;
     public readonly ParserContext.Checkpoint End = recording.End;
+
+    /// <summary>
+    /// Where the statement's keyword stands: a replay of a statement under a
+    /// <c>WITH</c> prefix jumps there, its prefix unparsed, so the dispatch
+    /// loop routes it to its arm.
+    /// </summary>
+    public readonly ParserContext.Checkpoint Statement = recording.Statement;
     public readonly ReplayedLock[] Locks = recording.Locks;
     private readonly bool opensTransaction = recording.OpensTransaction, callsUserFunction = recording.CallsUserFunction;
     private readonly bool readsPermanentObject = recording.ReadsPermanentObject, readsTemporaryObject = recording.ReadsTemporaryObject;
@@ -196,4 +209,53 @@ internal sealed class StatementPlanSet
         lock (this.publishing)
             this.entries = new Dictionary<int, StatementPlanEntry>(this.entries) { [start] = entry };
     }
+}
+
+/// <summary>
+/// A statement's <c>WITH</c> prefix as the plan cache holds it
+/// (<see cref="ParserContext.CtePrefixPlan"/>): where the prefix starts, which
+/// is where the statement's plan is filed — the prefix's common table
+/// expressions are part of the plan, their parse recorded with the
+/// statement's — and either the cached <see cref="Entry"/> the statement
+/// replays or the <see cref="Recording"/> armed ahead of the prefix's parse,
+/// with what the statement's own arm would otherwise have taken as its parse
+/// began.
+/// </summary>
+internal sealed class CtePrefixPlan
+{
+    private CtePrefixPlan(ParserContext.Checkpoint start, StatementPlanEntry? entry, StatementPlanRecording? recording, bool enteredSessionScoped, long schemaVersion, Database database)
+    {
+        this.Start = start;
+        this.Entry = entry;
+        this.Recording = recording;
+        this.EnteredSessionScoped = enteredSessionScoped;
+        this.SchemaVersion = schemaVersion;
+        this.Database = database;
+    }
+
+    /// <summary>A prefix whose statement replays <paramref name="entry"/>.</summary>
+    public static CtePrefixPlan Replaying(ParserContext.Checkpoint start, StatementPlanEntry entry) =>
+        new(start, entry, recording: null, enteredSessionScoped: false, schemaVersion: entry.SchemaVersion, entry.Database);
+
+    /// <summary>A prefix about to parse under <paramref name="recording"/>.</summary>
+    public static CtePrefixPlan Recorded(ParserContext.Checkpoint start, StatementPlanRecording recording, bool enteredSessionScoped, long schemaVersion, Database database) =>
+        new(start, entry: null, recording, enteredSessionScoped, schemaVersion, database);
+
+    /// <summary>Where the <c>WITH</c> stands, the key of the statement's plan.</summary>
+    public readonly ParserContext.Checkpoint Start;
+
+    /// <summary>The plan the statement replays, its prefix unparsed.</summary>
+    public readonly StatementPlanEntry? Entry;
+
+    /// <summary>The recording armed ahead of the prefix's parse, for the statement's parse to go on filling.</summary>
+    public readonly StatementPlanRecording? Recording;
+
+    /// <summary>Whether the batch had met a session-scoped reference before the prefix (see <see cref="BatchContext.HasSessionScopedReference"/>).</summary>
+    public readonly bool EnteredSessionScoped;
+
+    /// <summary>The schema version the prefix's parse began under.</summary>
+    public readonly long SchemaVersion;
+
+    /// <summary>The database the prefix's parse began in.</summary>
+    public readonly Database Database;
 }

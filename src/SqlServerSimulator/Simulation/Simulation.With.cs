@@ -124,6 +124,9 @@ partial class Simulation
         // Server 2025).
         if (context.Token is UnquotedString contextWord && Collation.Baseline.Equals(contextWord.Value, "CHANGE_TRACKING_CONTEXT"))
         {
+            // The value is the statement's, read where it stands as the
+            // prefix parses, so the statement keeps no plan.
+            DisarmCtePrefixPlan(context, TakeCtePrefixPlan(context));
             ParseChangeTrackingContext(context);
             // Only a DML statement or a SELECT may follow (an EXEC is Msg 156
             // at itself; probed 2026-10-04 against SQL Server 2025).

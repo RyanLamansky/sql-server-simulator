@@ -395,6 +395,16 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool CtePrefixLeadsSelectStatement;
 
     /// <summary>
+    /// The plan cache's hold on the <c>WITH</c> prefix the dispatch loop just
+    /// met, for the <c>SELECT</c> or DML arm it leads to take: the cached plan
+    /// the statement replays, its prefix left unparsed, or the recording armed
+    /// ahead of the prefix's parse. Null when the statement has no prefix or
+    /// the cache keeps nothing of it; lives one statement, as
+    /// <see cref="CteBindings"/> does.
+    /// </summary>
+    public CtePrefixPlan? CtePrefixPlan;
+
+    /// <summary>
     /// True while an <c>Expression.Parse</c> call is running for a
     /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Held by the
     /// CREATE-TABLE parser around the call to

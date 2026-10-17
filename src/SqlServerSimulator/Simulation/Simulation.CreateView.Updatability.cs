@@ -330,7 +330,7 @@ partial class Simulation
             for (var j = 0; j < sourceColumnNames.Length; j++)
             {
                 if (collation.Equals(sourceColumnNames[j], name))
-                    return SingleBaseViewReader(batch, upstream, table)(row, j);
+                    return SingleBaseViewReader(batch, upstream, table)(row, j, batch);
             }
             return null;
         };

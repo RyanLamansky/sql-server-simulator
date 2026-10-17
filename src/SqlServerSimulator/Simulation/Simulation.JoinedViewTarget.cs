@@ -631,7 +631,7 @@ partial class Simulation
         public readonly Dictionary<(int Page, int Slot), SqlValue[]> Rows = [];
 
         /// <summary>Reads a derived view column off a base row; built on first use.</summary>
-        private Func<SqlValue[], int, SqlValue>? readDerived;
+        private Func<SqlValue[], int, BatchContext, SqlValue>? readDerived;
 
         /// <summary>
         /// An <c>APPLY</c>'s correlated body (<see cref="View.IsCorrelated"/>),
@@ -676,7 +676,7 @@ partial class Simulation
             {
                 values[i] = view.BaseColumnOrdinals[i] is var ordinal and >= 0 ? baseValues[ordinal]
                     : view.IsWindowed && this.Rows.TryGetValue(address, out var row) ? row[i]
-                    : (this.readDerived ??= SingleBaseViewReader(batch, view, table))(baseValues, i);
+                    : (this.readDerived ??= SingleBaseViewReader(batch, view, table))(baseValues, i, batch);
             }
             return EncodeFor(source, values);
         }
