@@ -294,6 +294,12 @@ partial class Simulation
         if (context.Token is not Operator { Character: ';' })
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
 
+        // A USING query's columns no clause reads go uncomputed (probed
+        // 2026-10-17 against SQL Server 2025: a source column dividing by zero
+        // that no action reads leaves the MERGE running).
+        if (matchSources is [{ LateralPlan: { } usingQuery, BackingView: null, BackingTable: null, Cte: null }])
+            _ = usingQuery.AcceptDemand(MergeSourceReads(context.CurrentDatabase.Collation, sourceAlias, sourceColumnNames, onPredicate, whenClauses, output));
+
         var plan = new MergePlan(
             destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema,
             onPredicate, whenClauses, writeMasks, output, serializableHint, viewRowsTarget, joinWrite, top);
@@ -920,6 +926,62 @@ partial class Simulation
     /// CTE the join reads, which no pseudo-column reaches.
     /// </summary>
     private const char JoinedDerivedSourceMark = '\u001E';
+
+    /// <summary>
+    /// Per USING column, whether the MERGE's ON, a WHEN clause or the OUTPUT
+    /// reads it — a bare name answering to it counting as a read; null when a
+    /// clause reads what no walk sees (a <c>MATCH</c>, or a subquery whose
+    /// reach is unknown).
+    /// </summary>
+    private static bool[]? MergeSourceReads(Collation collation, string sourceAlias, string[] sourceColumnNames, BooleanExpression onPredicate, List<WhenClause> whenClauses, OutputProjection? output)
+    {
+        var read = new bool[sourceColumnNames.Length];
+        var known = true;
+        void Name(MultiPartName name)
+        {
+            try
+            {
+                if (MergeSourceOrdinal(collation, name, sourceAlias, sourceColumnNames, unqualified: true) is >= 0 and var ordinal)
+                    read[ordinal] = true;
+            }
+            catch (SimulatedSqlException)
+            {
+                known = false;
+            }
+        }
+        bool Visit(ExpressionNode node, NodeShape shape)
+        {
+            known &= node is not MatchPredicate;
+            if (shape.Column is { } name)
+                Name(name);
+            foreach (var local in shape.Locals)
+            {
+                if (local is not Selection subquery)
+                    continue;
+                if (Selection.ReachOf(subquery) is { } names)
+                {
+                    foreach (var reached in names)
+                        Name(reached);
+                }
+                else
+                {
+                    known = false;
+                }
+            }
+            return known;
+        }
+        onPredicate.Walk(Visit);
+        foreach (var clause in whenClauses)
+        {
+            clause.SearchCondition?.Walk(Visit);
+            foreach (var (_, expression) in clause.Assignments ?? [])
+                expression.Walk(Visit);
+            foreach (var value in clause.InsertValues ?? [])
+                value.Walk(Visit);
+        }
+        output?.VisitExpressions(expression => expression.Walk(Visit));
+        return known ? read : null;
+    }
 
     /// <summary>
     /// The column of a <c>MERGE</c>'s source side <paramref name="name"/>

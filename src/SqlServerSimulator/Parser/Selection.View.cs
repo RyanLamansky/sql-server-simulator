@@ -90,17 +90,20 @@ partial class Selection
             schema[i] = columns[i].Type;
             columnNames[i] = columns[i].Name;
         }
-        return new Selection(
+        // The plan the closures below belong to, whose reader demand each run
+        // and each rebuilt plan carries; assigned once the plan exists.
+        Selection? self = null;
+        self = new Selection(
             schema,
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) => RowSecurity.FilterViewRows(
-                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten, rowNumberBounds, graphIdentity), outerBatch))
+                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten, rowNumberBounds, graphIdentity, RowSecurity.ViewReaderDemand(view, self!.ReaderDemand, outerBatch)), outerBatch))
         {
             PredicatePushdown = templates => ForView(
-                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten, rowNumberBounds, graphIdentity),
-            ViewRowNumberBoundPushdown = bounds => ForView(view, columns, pushedPredicates, systemTime, browseFlatten, bounds, graphIdentity),
+                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten, rowNumberBounds, graphIdentity).TakingReaderDemand(self!.ReaderDemand),
+            ViewRowNumberBoundPushdown = bounds => ForView(view, columns, pushedPredicates, systemTime, browseFlatten, bounds, graphIdentity).TakingReaderDemand(self!.ReaderDemand),
             // Whether the body groups can't be known here — it isn't parsed
             // until the reference executes — but CREATE VIEW already classified
             // it: the updatability rejection names the aggregate / GROUP BY
@@ -110,7 +113,8 @@ partial class Selection
             PushdownIsGrouped = view.RejectionReason
                 is ViewUpdatabilityRejection.Aggregate or ViewUpdatabilityRejection.GroupBy,
             VolatileColumns = view.VolatileColumns,
-        };
+        }.TakingReaderDemand(null);
+        return self;
     }
 
     /// <summary>

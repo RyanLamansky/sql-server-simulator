@@ -526,6 +526,22 @@ internal sealed class FromSource(
     public List<byte[]>? MaterializedRows;
 
     /// <summary>
+    /// Per column, whether the query reading this source reads it anywhere —
+    /// set once that query has bound (<c>Selection.NoteProjectionDemand</c>);
+    /// null when every column counts as read. A CTE's body is handed what all
+    /// its references read together.
+    /// </summary>
+    public bool[]? ReadColumns;
+
+    /// <summary>
+    /// Per column, whether this source's body leaves it uncomputed because
+    /// <see cref="ReadColumns"/> doesn't name it; null when the body computes
+    /// every column. A name resolving to one is a read the demand missed,
+    /// which <c>Selection.FindSourceColumn</c> refuses rather than answer NULL.
+    /// </summary>
+    public bool[]? UncomputedColumns;
+
+    /// <summary>
     /// The columns a joined reader re-draws per output row, taken from the
     /// query body this source reads (<see cref="Selection.VolatileColumns"/>) — null
     /// when there are none, or when the body draws its values once itself.
@@ -576,6 +592,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ReadColumns = this.ReadColumns,
+            UncomputedColumns = this.UncomputedColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -600,6 +618,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ReadColumns = this.ReadColumns,
+            UncomputedColumns = this.UncomputedColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -626,6 +646,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ReadColumns = this.ReadColumns,
+            UncomputedColumns = this.UncomputedColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -650,6 +672,8 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            ReadColumns = this.ReadColumns,
+            UncomputedColumns = this.UncomputedColumns,
             MaterializedRows = catalogRows is null ? rows : null,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,

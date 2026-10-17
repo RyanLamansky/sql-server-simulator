@@ -55,6 +55,20 @@ internal sealed class CteBinding(string name, string[] columnNames, Database dat
     public Schemas.View? DmlTarget;
 
     /// <summary>
+    /// Every FROM reference to the CTE, whose <see cref="FromSource.ReadColumns"/>
+    /// together are what its body computes (see <see cref="TakesReaderDemand"/>).
+    /// </summary>
+    public readonly List<FromSource> Readers = [];
+
+    /// <summary>
+    /// Whether the statement the CTE prefixes is a <c>SELECT</c> or an
+    /// <c>INSERT</c>, so nothing but its <see cref="Readers"/> reads the body's
+    /// rows and the columns none of them reads may go uncomputed; a write
+    /// through the CTE, or a <c>MERGE</c> reading it, reads every column.
+    /// </summary>
+    public bool TakesReaderDemand;
+
+    /// <summary>
     /// Per-column types of the body, captured from the anchor branch in a
     /// recursive CTE so subsequent recursive branches can self-reference
     /// with a known schema. Null until the anchor parse completes.

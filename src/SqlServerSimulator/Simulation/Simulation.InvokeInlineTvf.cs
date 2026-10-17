@@ -40,7 +40,8 @@ partial class Simulation
         Func<MultiPartName, SqlValue>? outerResolver,
         InlineTableValuedFunction function,
         Expression?[] arguments,
-        MultiPartName writtenName)
+        MultiPartName writtenName,
+        bool[]? readerDemand = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -56,7 +57,7 @@ partial class Simulation
 
         // The body binds and runs in the function's own database, one row at a
         // time, since the referencing statement consumes it lazily.
-        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, tableArguments, writtenName);
+        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, tableArguments, writtenName, readerDemand);
         return ReferenceEquals(function.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, function.Schema.Database, rows);
@@ -104,7 +105,8 @@ partial class Simulation
         SqlValue[] argValues,
         bool[] isDefault,
         HeapTable?[]? tableArguments,
-        MultiPartName writtenName)
+        MultiPartName writtenName,
+        bool[]? readerDemand)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -163,6 +165,8 @@ partial class Simulation
             // into another database, or of an object with another owner,
             // answer to the caller's rights.
             PermissionEnforcement.CheckModuleBodyReads(outerBatch, function, function.Schema.Database, bodySelection);
+            // The columns the reference's query never reads go uncomputed.
+            _ = bodySelection.AcceptDemand(readerDemand);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;

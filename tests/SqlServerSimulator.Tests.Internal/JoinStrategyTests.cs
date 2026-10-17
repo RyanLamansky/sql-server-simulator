@@ -236,7 +236,7 @@ public sealed class JoinStrategyTests
     [TestMethod]
     public void RedrawnNewIdInDerivedTable_MaterializesAndHashes()
         => Contains("Inner:HashMatch(keys=1,residual=0)",
-            CaptureStrategies("select a.id from a join (select top 1 a_id, newid() as g from b) d on d.a_id = a.id"));
+            CaptureStrategies("select a.id, d.g from a join (select top 1 a_id, newid() as g from b) d on d.a_id = a.id"));
 
     /// <summary>
     /// A draw whose expression reads a body column can't be re-drawn by the
@@ -247,7 +247,7 @@ public sealed class JoinStrategyTests
     [TestMethod]
     public void RowReadingNewIdInDerivedTable_StaysNestedLoops()
         => Contains("Inner:NestedLoops",
-            CaptureStrategies("select a.id from a join (select top 1 a_id, concat(a_id, newid()) as g from b) d on d.a_id = a.id"));
+            CaptureStrategies("select a.id, d.g from a join (select top 1 a_id, concat(a_id, newid()) as g from b) d on d.a_id = a.id"));
 
     /// <summary>
     /// A rowset function under a plain JOIN can no longer read a sibling (that

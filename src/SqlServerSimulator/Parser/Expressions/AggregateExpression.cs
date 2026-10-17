@@ -138,6 +138,16 @@ internal sealed class AggregateExpression : Expression
     public bool OperandUnreachable;
 
     /// <summary>
+    /// Set while every select-list column holding this aggregate is one the
+    /// query's reader never reads (see <see cref="ProjectionDemand"/>), so the
+    /// aggregate pass skips it as it does an <see cref="OperandUnreachable"/>
+    /// one: real computes no aggregate nothing reads, so <c>SELECT v FROM
+    /// (SELECT v, SUM(10 / (k - 3)) AS x FROM t GROUP BY v) d</c> answers
+    /// there (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    public bool ResultUnread;
+
+    /// <summary>
     /// Items from a postfix <c>WITHIN GROUP (ORDER BY ...)</c> clause; null
     /// when no ORDER BY was supplied. Set exactly once during parse, after the
     /// aggregate is constructed and registered (the postfix follows the

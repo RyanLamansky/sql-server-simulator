@@ -738,7 +738,7 @@ internal sealed partial class Selection
         }
 
         return new CursorSourcePlan(
-            shape.Sources, shape.Joins, slots, shape.Projections, shape.Excluders,
+            shape.Sources, shape.Joins, slots, selection.ComputedProjection(shape.Projections), shape.Excluders,
             selection.CursorOrderBy ?? [], selection.ColumnNames, shape.RowLimit)
         {
             InstallsRowAddresses = selection.InstallsRowAddresses,
@@ -763,6 +763,9 @@ internal sealed partial class Selection
         {
             if (batch.Connection.Simulation.TryParseViewBodyPlan(batch, view) is not { } body)
                 return null;
+            // The columns the cursor's query never reads go uncomputed, as
+            // they do when the view's rows are read in a statement.
+            _ = body.AcceptDemand(source.LateralPlan.ReaderDemand);
             var viewPlan = TryBuildCursorPlan(body, batch, fastForward, depth + 1);
             // A body whose projection count drifted from the columns captured
             // at CREATE VIEW (a `SELECT *` over a table that gained or lost a

@@ -179,7 +179,10 @@ internal sealed partial class Selection
                 QueryScope.Nested(QueryPosition.Subquery, outerTypeResolver),
                 isAssignmentOnly: false,
                 intoTarget: null,
-                readColumnSink: null);
+                readColumnSink: null,
+                // The body's own plan over these sources already handed them
+                // what it reads, every read of this one among them.
+                notesDemand: false);
             return new SemiJoinShape(keyPlan, [.. outerKeys], [.. keyTypes], [.. nullMatches], SeekableInnerTable(sources, innerKeys));
         }
         catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)

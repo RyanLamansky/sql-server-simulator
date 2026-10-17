@@ -522,6 +522,11 @@ partial class Simulation
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
+        // The joined sources' columns the statement never reads go uncomputed.
+        List<ExpressionNode> reads = where is null ? [] : [where];
+        output?.VisitExpressions(reads.Add);
+        Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
+
         var plan = new JoinedDeletePlan(table, sources, joins, targetIndex, where, output, top);
         NoteDmlPlan(context, plan, admitted: AdmitsDmlPlan(context.Batch, table, view: null, output));
         return RunJoinedDelete(context, plan);

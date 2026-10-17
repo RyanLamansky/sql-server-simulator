@@ -130,7 +130,7 @@ public sealed class MutationJoinStrategyTests
     [TestMethod]
     public void UpdateFromDerivedTableDrawingNewid_HashesTheMaterializedSource()
         => Contains("Inner:HashMatch(keys=1,residual=0)", JoinTrace(
-            "update t set v = d.w from t join (select id, w, newid() as g from s) d on d.id = t.id"));
+            "update t set v = case when d.g is null then 0 else d.w end from t join (select id, w, newid() as g from s) d on d.id = t.id"));
 
     /// <summary>
     /// A draw reading a body column declines the reuse — real re-draws it per
@@ -140,7 +140,7 @@ public sealed class MutationJoinStrategyTests
     [TestMethod]
     public void UpdateFromDerivedTableDrawingRowReadingNewid_KeepsTheNestedLoop()
         => Contains("Inner:NestedLoops", JoinTrace(
-            "update t set v = d.w from t join (select id, w, concat(w, newid()) as g from s) d on d.id = t.id"));
+            "update t set v = case when d.g is null then 0 else d.w end from t join (select id, w, concat(w, newid()) as g from s) d on d.id = t.id"));
 
     /// <summary>
     /// <c>CROSS APPLY</c>'s right side is lateral by construction, so the pass

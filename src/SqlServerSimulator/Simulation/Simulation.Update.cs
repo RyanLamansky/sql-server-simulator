@@ -1202,6 +1202,13 @@ partial class Simulation
         Selection.ValidateForcedSeeks(context, sources, joins, where);
         LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
+        // The joined sources' columns the statement never reads go uncomputed.
+        List<ExpressionNode> reads = [.. rawAssignments.Select(static assignment => assignment.Expr), .. assignments.Select(static assignment => assignment.Expr)];
+        if (where is not null)
+            reads.Add(where);
+        output?.VisitExpressions(reads.Add);
+        Selection.NoteMutationDemand(sources, joins, targetIndex, reads);
+
         var plan = new JoinedUpdatePlan(table, assignments, setMasks, sources, joins, targetIndex, where, output, top);
         NoteDmlPlan(
             context,

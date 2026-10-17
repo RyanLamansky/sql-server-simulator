@@ -67,7 +67,31 @@
   EF emits `ISNULL` only for `??` with a CAST; bare `??` emits `COALESCE`.
   Neither IIF nor NULLIF is EF-emitted (LINQ ternary → CASE) — load-bearing for `FromSqlInterpolated`.
 
-**Not modeled yet**: a derived table's, view's or CTE's select-list column the enclosing query never reads is computed anyway, so `SELECT COUNT(*) FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` — or a `MERGE` source column no action reads — is Msg 8134 here, where real's plan never computes it and answers (probed 2026-10-17 against SQL Server 2025).
+## Columns no reader reads
+
+Real's optimizer computes a derived table's, view's, CTE's, inline function's, `APPLY` body's or `VALUES` list's column only where something above it reads the column, so an error only that column would raise never appears: `SELECT COUNT(*) FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` answers 4 where reading `x` is Msg 8134 (probed 2026-10-17 against SQL Server 2025).
+The rule reaches everything a column alone needs: an aggregate or window function under the body's `GROUP BY` or `OVER` (`SUM(10 / (k - 3))`, `ROW_NUMBER() OVER (ORDER BY 10 / (k - 3))`, a `STRING_AGG … WITHIN GROUP` ordering), a scalar UDF, a scalar subquery (one returning several rows is no Msg 512), a constant real would otherwise run at plan start (`1 / 0`), and a seeded `RAND(5)`, which then leaves the session's generator unseeded.
+It reaches a `MERGE`'s `USING` query too, whose columns no `ON`, `WHEN` or `OUTPUT` reads go uncomputed, and the sources a joined `UPDATE` / `DELETE` reads beside its target.
+A column counts as read wherever the reading query names it — select list, `WHERE`, `ON`, `GROUP BY`, `HAVING`, `ORDER BY`, an aggregate's or window's operand, a correlated subquery or `APPLY` body — and a `SELECT *` names every column, so `SELECT k FROM (SELECT * FROM d) e` still leaves `d`'s other columns out, as a view over a view does.
+What a body reads itself is computed whatever its reader reads: a `DISTINCT` compares every column unless it projects a key (real then drops it, so only the key is needed), a `UNION`, `INTERSECT` or `EXCEPT` compares whole rows where a `UNION ALL` passes the demand to each branch, a `TOP` or `OFFSET` orders by its own key, a `GROUP BY` evaluates its grouping expressions and a `HAVING` its aggregates, a `PIVOT` groups by every column it doesn't rotate, and a recursive CTE spools every column.
+`NEXT VALUE FOR`, the one built-in whose evaluation is observable, is refused in every one of these bodies (Msg 11719), so whether an unread one advances never arises.
+
+`Selection.NoteProjectionDemand` records, as each query finishes binding, what each select-list column, window and aggregate reads of each source (`ProjectionDemand`), counting a subquery's or a source body's reach into the query through the names it leaves unbound (`Selection.ReachOf`, unknown for a rowset function, which then reads everything).
+It hands each deferred source the columns the query reads, and the source's body (`Selection.AcceptDemand`) replaces each unread select-list column with a typed NULL in place, so every path that runs it — its own rows, a pushed-down variant, a row-number bound, a cursor's re-read — leaves the column out, and skips the windows and aggregates only unread columns hold; the body then hands its own sources what its live columns read, so the narrowing reaches the bottom of a chain.
+A view's or inline function's body, parsed per run, takes the demand from its reference (`Selection.ReaderDemand`) — except under a filter predicate on the view, which reads the whole row — and a CTE's body takes what all its references read together, and only when the CTE prefixes a `SELECT` or `INSERT`: a write through it, or a `MERGE` reading it, reads every column.
+A name that resolves to a column its source left uncomputed is refused with an `InvalidOperationException` (`FromSource.UncomputedColumns`) rather than reading the NULL, so a clause the walk misses fails loudly; a new clause reading a source's columns joins the walk, and a new path reading a body's rows by position rather than by name hands it no demand.
+Over a 50,000-row view projecting six string, date and decimal expressions, `SELECT COUNT(*)` fell from about 130 ms to 12 ms and a derived table read for one of four columns from about 42 ms to 12 ms, with queries reading every column unchanged (measured 2026-10-17, Release build, warm plan cache).
+
+### Divergences
+
+- **Real evaluates a derived column where it is used, not where it is defined.**
+  `SELECT CASE WHEN k = 3 THEN 0 ELSE x END FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` answers there — the `CASE` arm that would read `x` for `k = 3` never runs, and `IIF(k = 3, 0, x)` and `ISNULL(k, x)` behave the same — while the simulator computes a read column for every row the body produces and raises Msg 8134.
+  The same placement lets real filter beneath a body's projection: `SELECT x FROM v WHERE k <> 3` answers there, while here only a conjunct the WHERE pushdown carries into the body filters first, and an `EXCEPT` body's anti-join compares `x` only for rows whose `k` matched (probed 2026-10-17 against SQL Server 2025).
+  It is the column-level face of [the evaluation ordering](#not-folded-yet) real's plan chooses.
+
+### Not modeled yet
+
+- A `MERGE` whose `USING` is a `VALUES` list, a table, a view or a CTE, and a joined write whose target is a view, CTE or derived table, compute every column of the source they read.
 
 ## Compile-time predicate folding
 

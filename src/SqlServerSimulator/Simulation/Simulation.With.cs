@@ -110,6 +110,19 @@ partial class Simulation
     /// </remarks>
     private static void ParseCteBindings(ParserContext context)
     {
+        ParseCteBindingList(context);
+        // Only a SELECT's or INSERT's queries read the bodies, through FROM
+        // references that record what they read.
+        if (context.CteBindings is { } bindings
+            && context.Token is ReservedKeyword { Keyword: Keyword.Select or Keyword.Insert } or Operator { Character: '(' })
+        {
+            foreach (var (_, binding) in bindings)
+                binding.TakesReaderDemand = true;
+        }
+    }
+
+    private static void ParseCteBindingList(ParserContext context)
+    {
         // A browse statement, or a view body it flattens, flattens its CTEs'
         // bodies too; the arming is the query's after them, not theirs to consume.
         var flattensBodies = context.BrowseFlatten || context.BrowseFlattenCtes;

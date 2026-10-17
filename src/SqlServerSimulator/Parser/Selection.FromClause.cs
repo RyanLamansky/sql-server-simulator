@@ -1441,7 +1441,7 @@ internal sealed partial class Selection
                         cteHints = ParseOptionalTableHints(context, commitOnLegacyParen: true);
                     }
 
-                    return new FromSource(
+                    var cteSource = new FromSource(
                         qualifier: cteAlias ?? cteBinding.Name,
                         columnNames: cteBinding.ColumnNames,
                         columns: cteColumns,
@@ -1463,6 +1463,8 @@ internal sealed partial class Selection
                         GraphIdentityTable = cteBinding.Plan.GraphIdentityColumnCount > 0 ? cteBinding.Plan.GraphIdentityTable : null,
                         ForcedSeekThrough = cteHints is { ForceSeek: true } ? cteHints : null,
                     };
+                    cteBinding.Readers.Add(cteSource);
+                    return cteSource;
                 }
 
                 // Past a CTE the name is an object — a table, view, table

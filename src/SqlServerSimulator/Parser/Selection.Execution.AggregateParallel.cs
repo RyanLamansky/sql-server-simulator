@@ -720,7 +720,7 @@ internal sealed partial class Selection
             for (var i = 0; i < this.aggregates.Length; i++)
             {
                 var aggregate = this.aggregates[i];
-                if (aggregate.OperandUnreachable)
+                if (aggregate.OperandUnreachable || aggregate.ResultUnread)
                     continue;
                 var operand = aggregate.CountsRowsOnly ? null : aggregate.Operand;
                 state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : aggregate.ObserveInput(operand.Run(runtime), runtime));

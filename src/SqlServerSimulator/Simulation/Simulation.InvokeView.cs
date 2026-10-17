@@ -53,6 +53,10 @@ partial class Simulation
     /// an ordinary reference.
     /// </param>
     /// <param name="graphIdentity">Whether the body carries the graph table it reads through as hidden trailing columns.</param>
+    /// <param name="readerDemand">
+    /// The columns the referencing query reads (see <see cref="Selection.AcceptDemand"/>),
+    /// the rest of which the body leaves uncomputed; null when it reads every column.
+    /// </param>
     internal IEnumerable<byte[]> InvokeView(
         BatchContext outerBatch,
         View view,
@@ -61,12 +65,13 @@ partial class Simulation
         InheritedSystemTime? systemTime = null,
         bool browseFlatten = false,
         List<Selection.RowNumberBound>? rowNumberBounds = null,
-        bool graphIdentity = false)
+        bool graphIdentity = false,
+        bool[]? readerDemand = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
-        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten, rowNumberBounds, graphIdentity);
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten, rowNumberBounds, graphIdentity, readerDemand);
         return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
@@ -260,7 +265,8 @@ partial class Simulation
         InheritedSystemTime? systemTime,
         bool browseFlatten,
         List<Selection.RowNumberBound>? rowNumberBounds,
-        bool graphIdentity)
+        bool graphIdentity,
+        bool[]? readerDemand)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -307,6 +313,9 @@ partial class Simulation
             // that boundary) or of an object with another owner: the caller
             // needs its own rights there (probe-confirmed).
             PermissionEnforcement.CheckModuleBodyReads(outerBatch, view, view.Schema.Database, bodySelection);
+            // The columns the reference's query never reads go uncomputed —
+            // before the pushdowns below, whose plans read the same select list.
+            _ = bodySelection.AcceptDemand(readerDemand);
             // A referencing statement's pushed WHERE conjuncts land here, after
             // the body bound (so its own errors report as they always did) and
             // after the permission check (which reads the body as written). A

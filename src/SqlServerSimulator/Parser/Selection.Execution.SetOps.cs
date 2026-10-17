@@ -1119,7 +1119,7 @@ internal sealed partial class Selection
             var bound = true;
             term.VisitColumnReferences(name =>
             {
-                if (FindSourceColumn(sources, name).SourceIndex >= 0)
+                if (FindSourceColumn(sources, name, reads: false).SourceIndex >= 0)
                     return;
                 (errors ??= []).Add(UnresolvedNameError(sources, name));
                 bound = false;

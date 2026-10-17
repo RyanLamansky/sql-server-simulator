@@ -43,19 +43,23 @@ partial class Selection
             schema[i] = function.OutputColumns[i].Type;
             columnNames[i] = function.OutputColumns[i].Name;
         }
-        return new Selection(
+        // The plan the closure belongs to, whose reader demand each run hands
+        // the body; assigned once the plan exists.
+        Selection? self = null;
+        self = new Selection(
             schema,
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, outerResolver) =>
-                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName))
+                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName, self!.ReaderDemand))
         {
             // An identity column reads through the function as an ordinary
             // updatable one (probed 2026-09-26 against SQL Server 2025).
             ColumnWireFlags = function.OutputWireFlags is { } flags
                 ? Array.ConvertAll(flags, flag => (flag & 0x10) != 0 ? (byte)((flag & ~0x10) | 0x08) : flag)
                 : null,
-        };
+        }.TakingReaderDemand(null);
+        return self;
     }
 }

@@ -904,6 +904,18 @@ partial class Simulation
         /// </summary>
         public bool TargetBlocksDmlPlan => outputTarget is { Replayable: false } || logged?.TargetBlocksDmlPlan == true;
 
+        /// <summary>
+        /// Calls <paramref name="visit"/> on each expression this clause, and
+        /// the <c>OUTPUT … INTO</c> clause it follows, projects — what a
+        /// MERGE's demand on its <c>USING</c> query counts as read.
+        /// </summary>
+        public void VisitExpressions(Action<Expression> visit)
+        {
+            foreach (var expression in expressions)
+                visit(expression);
+            logged?.VisitExpressions(visit);
+        }
+
         // A non-persisted computed column is evaluated when OUTPUT reads it,
         // so an expression that fails for the row raises here rather than
         // having failed the write.

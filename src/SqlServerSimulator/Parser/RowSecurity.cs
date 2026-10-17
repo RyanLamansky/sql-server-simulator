@@ -249,6 +249,13 @@ internal sealed class RowSecurity
     }
 
     /// <summary>
+    /// The columns a reader of <paramref name="view"/> reads, or null when a
+    /// filter predicate on the view reads the whole row whatever the reader does.
+    /// </summary>
+    public static bool[]? ViewReaderDemand(View view, bool[]? demand, BatchContext batch) =>
+        demand is not null && For(batch, view) is { Filter: not null } ? null : demand;
+
+    /// <summary>
     /// <paramref name="rows"/>, a read of <paramref name="view"/> whose rows
     /// carry <paramref name="columns"/>, past a filter predicate on the view —
     /// a schema-bound view takes one as a table does.

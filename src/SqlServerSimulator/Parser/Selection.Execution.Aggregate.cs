@@ -461,7 +461,7 @@ internal sealed partial class Selection
                 // supplies a value, so its operand isn't evaluated and the
                 // aggregator stays at its empty result — which nothing
                 // reads, the arm holding it being unreachable.
-                if (aggregate.OperandUnreachable)
+                if (aggregate.OperandUnreachable || aggregate.ResultUnread)
                     continue;
                 if (state.Aggregators[i] is Aggregators.ClrAggregator clrAggregator)
                 {

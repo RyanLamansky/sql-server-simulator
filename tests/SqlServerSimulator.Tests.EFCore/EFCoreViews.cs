@@ -49,6 +49,27 @@ public sealed class EFCoreViews
             .ToList();
         CollectionAssert.AreEqual(new[] { "Alice", "Bob" }, bigSpenders);
     }
+
+    /// <summary>
+    /// A view column the LINQ query never projects is never computed, so its
+    /// divide-by-zero (Alice's two orders) doesn't fail a query reading the
+    /// other columns, as on SQL Server 2025 (probed 2026-10-17).
+    /// </summary>
+    [TestMethod]
+    public void ToView_ColumnTheQueryNeverReads_IsNeverComputed()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table Orders (Id int primary key, Customer varchar(50), Amount decimal(10,2));
+            insert Orders values (1, 'Alice', 100.00), (2, 'Bob', 250.00), (3, 'Alice', 50.00);
+            """,
+            "create view OrderSummary as select Customer, sum(Amount) / (count(*) - 2) as TotalAmount, count(*) as OrderCount from Orders group by Customer");
+        using var context = new ViewDbContext(simulation);
+        CollectionAssert.AreEqual(new[] { "Alice", "Bob" }, context.OrderSummaries.OrderBy(s => s.Customer).Select(s => s.Customer).ToList());
+        Assert.AreEqual(2, context.OrderSummaries.Count());
+        Assert.AreEqual(3, context.OrderSummaries.Sum(s => s.OrderCount));
+    }
 }
 
 /// <summary>

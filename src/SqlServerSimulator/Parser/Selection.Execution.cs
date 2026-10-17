@@ -26,9 +26,18 @@ internal sealed partial class Selection
     /// <c>(-1, -1)</c> when no source resolves the name — the caller then
     /// falls through to the outer scope.
     /// </summary>
-    internal static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name)
+    internal static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name, bool reads = true)
     {
         var found = FindSourceColumnOfAnyKind(sources, name);
+        // A column the source's body left uncomputed reads as NULL, so a name
+        // reaching one is a read NoteProjectionDemand never saw: refused, as a
+        // wrong answer would be worse. A caller asking only whether the name
+        // binds (`reads: false`) reads nothing.
+        if (reads && found.SourceIndex >= 0 && sources[found.SourceIndex].UncomputedColumns is { } uncomputed
+            && found.ColumnIndex < uncomputed.Length && uncomputed[found.ColumnIndex])
+        {
+            throw new InvalidOperationException($"'{name}' reads a column its source's body left uncomputed, as no read of it was recorded.");
+        }
         // A graph table's hidden internal columns are there to be read only by
         // the pseudo-columns and MATCH; naming one in a query is Msg 13908
         // (probed 2026-09-27 against SQL Server 2025).
@@ -791,7 +800,8 @@ internal sealed partial class Selection
     /// </summary>
     private static SqlType ResolveColumnTypeAcrossSources(FromSource[] sources, MultiPartName name, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
-        var (s, c) = FindSourceColumn(sources, name);
+        // A type is known whether or not the body computes the column.
+        var (s, c) = FindSourceColumn(sources, name, reads: false);
         if (s != -1)
         {
             if (probingBinding && s >= 0)
@@ -1593,7 +1603,8 @@ internal sealed partial class Selection
         QueryScope scope,
         bool isAssignmentOnly,
         MultiPartName? intoTarget,
-        Dictionary<int, ColumnReadTarget>? readColumnSink)
+        Dictionary<int, ColumnReadTarget>? readColumnSink,
+        bool notesDemand = true)
     {
         using var bindingMemo = SourceBindingMemo.Enter(sources);
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates, windows, expressions);
@@ -2180,12 +2191,19 @@ internal sealed partial class Selection
             || source.LateralPlan?.ReadsStorage == true);
         var startupConstants = new List<Expression>();
         var projectionStartupConstants = new List<Expression>();
+        // The select-list column each projection constant sits in, which a
+        // reader that never reads the column leaves unevaluated.
+        var projectionStartupOwners = new List<int>();
         var startsConstants = readsStorage && !whereIsNeverTrue
             && !(sources is [{ BackingTable: { } onlyTable } onlySource] && PinsUniqueKey(onlyTable, onlySource, fromClause.Excluders));
         if (startsConstants)
         {
-            foreach (var expression in expressions)
-                ConstantFolding.CollectStartupConstants(expression, parseBatch.Parser, projectionStartupConstants);
+            for (var i = 0; i < expressions.Count; i++)
+            {
+                ConstantFolding.CollectStartupConstants(expressions[i], parseBatch.Parser, projectionStartupConstants);
+                while (projectionStartupOwners.Count < projectionStartupConstants.Count)
+                    projectionStartupOwners.Add(i);
+            }
             foreach (var excluder in fromClause.Excluders)
                 ConstantFolding.CollectStartupConstants(excluder, parseBatch.Parser, startupConstants);
             foreach (var join in joins)
@@ -2245,7 +2263,7 @@ internal sealed partial class Selection
                     RowSecurity.NoteReads(sources, batch);
                     RunStartupConstants(startupConstants, batch);
                     if (!ReferenceEquals(batch.ExistenceProbe, self))
-                        RunStartupConstants(projectionStartupConstants, batch);
+                        RunStartupConstants(self!.ComputedColumnConstants(projectionStartupConstants, projectionStartupOwners), batch);
                 }
                 // Push the WHERE conjuncts a deferred source's own body can
                 // apply into that body first, so the filter reaches its base
@@ -2278,10 +2296,13 @@ internal sealed partial class Selection
                 var projection = orderBy.Count == 0 && ReferenceEquals(batch.ExistenceProbe, self) ? []
                     : ReferenceEquals(batch.RowAddressProbe, self) ? [.. expressions, new RowAddress(0)]
                     : expressions;
+                // The windows a reader reads; one whose column nothing reads
+                // isn't computed.
+                var (liveWindows, liveOperandTypes, liveResultTypes) = self!.ComputedWindows(windows, windowOperandTypes, windowResultTypes);
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? AheadOfRowProjection(BuildAggregateProjectionRows(execSources, joins, resolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver))
-                    : windows.Count > 0
-                        ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                    ? AheadOfRowProjection(BuildAggregateProjectionRows(execSources, joins, resolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, liveWindows, liveOperandTypes, liveResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver))
+                    : liveWindows.Count > 0
+                        ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, liveWindows, liveOperandTypes, liveResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
             },
             isAssignmentOnly,
@@ -2420,6 +2441,12 @@ internal sealed partial class Selection
             selection.RowNumberBoundPushdown = bound => BuildBoundedRowNumberPlan(boundedShape, bound);
         }
 
+        // Last, once nothing else here resolves a name against the sources:
+        // what the query reads of each, which a deferred source's body then
+        // leaves the rest of uncomputed — unless another plan built over the
+        // same sources has said so already (notesDemand: false).
+        if (notesDemand)
+            NoteProjectionDemand(selection, sources, joins, expressions, fromClause, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, distinct, topExpression, outputColumnNames);
         return selection;
     }
 

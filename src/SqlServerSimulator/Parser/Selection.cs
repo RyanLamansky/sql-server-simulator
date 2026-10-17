@@ -571,27 +571,61 @@ internal sealed partial class Selection
     /// encoded. Riding the deferred lateral-plan seam is what gives VALUES its
     /// per-outer-row correlation for free, exactly like a derived-table SELECT.
     /// </summary>
-    private static Selection ForValuesConstructor(SqlType[] schema, string[] columnNames, List<Expression[]> tuples) =>
-        new(schema, columnNames,
+    private static Selection ForValuesConstructor(SqlType[] schema, string[] columnNames, List<Expression[]> tuples)
+    {
+        // The plan the closure belongs to, whose reader demand each run reads;
+        // assigned once the plan exists.
+        Selection? self = null;
+        self = new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, outerResolver) => EnumerateValuesRows(schema, tuples, batch, outerResolver))
+            rowSource: (batch, outerResolver) => EnumerateValuesRows(schema, tuples, self!.ReaderDemand, batch, outerResolver))
         {
             // One row merges into its reader like a FROM-less SELECT; a longer
             // list is a constant scan whose values are drawn once each (probed
             // 2026-09-28 against SQL Server 2025).
             VolatileColumns = VolatileProjection.Of([.. tuples.SelectMany(tuple => tuple)], fixesValues: tuples.Count > 1),
             IsSingleConstantRow = tuples.Count == 1,
-        };
+            freeNames = ValuesReach(tuples),
+        }.TakingReaderDemand(null);
+        return self;
+    }
+
+    /// <summary>
+    /// The names a <c>VALUES</c> list's cells read — every one an enclosing or
+    /// <c>APPLY</c>-left row's — or null when a cell holds a subquery.
+    /// </summary>
+    private static MultiPartName[]? ValuesReach(List<Expression[]> tuples)
+    {
+        var names = new List<MultiPartName>();
+        var known = true;
+        foreach (var tuple in tuples)
+        {
+            foreach (var cell in tuple)
+            {
+                cell.Walk((_, shape) =>
+                {
+                    if (shape.Column is { } name)
+                        names.Add(name);
+                    known &= !shape.Locals.Exists(static local => local is Selection);
+                    return true;
+                });
+            }
+        }
+        return known ? [.. names] : null;
+    }
 
     /// <summary>
     /// A <c>VALUES</c> list's rows. One row merges into its reader, so its
     /// values are computed as it is read, past an <c>INSERT</c>'s identity
     /// draw; a longer list is a constant scan, which computes every row before
     /// the first goes out — so a later row's error comes ahead of the first row
-    /// (probed 2026-10-04 against SQL Server 2025).
+    /// (probed 2026-10-04 against SQL Server 2025). A column
+    /// <paramref name="read"/> says no reader reads is computed in neither, as
+    /// <c>SELECT a FROM (VALUES (1, 1 / 0), (2, 3)) d(a, b)</c> answers there
+    /// (probed 2026-10-17 against SQL Server 2025).
     /// </summary>
-    private static byte[][] EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    private static byte[][] EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, bool[]? read, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         SqlValue Resolve(MultiPartName name) =>
             outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name);
@@ -605,6 +639,11 @@ internal sealed partial class Selection
             {
                 for (var c = 0; c < schema.Length; c++)
                 {
+                    if (read is not null && c < read.Length && !read[c])
+                    {
+                        values[c] = SqlValue.Null(schema[c]);
+                        continue;
+                    }
                     var raw = tuple[c].Run(runtime);
                     values[c] = raw.IsNull || raw.Type == schema[c] ? raw : raw.CoerceTo(schema[c]);
                 }
@@ -4145,7 +4184,7 @@ internal sealed partial class Selection
             // (`select 1` → Int, not IntN). The resolver is never consulted
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
-        };
+        }.NotingSynthesizedDemand(expressions, excluders, orderBy, prunable: referencesOuterColumns && !scope.ProjectionUnread);
     }
 
     /// <summary>
