@@ -43,15 +43,17 @@ internal static class ClusteredScan
     /// <c>MaterializeWithLockChecks</c> does.
     /// </summary>
     /// <remarks>
-    /// <paramref name="keys"/>, when given, receives the key of each address at
-    /// the same index where the seek cache's ordered view serves the order, and
-    /// stays empty where the order is sorted here. With <paramref name="keyed"/>
-    /// the order comes back from the ordered view even for a heap already in
-    /// key order, for a locking scan that has to follow a key another session
-    /// deletes and reinserts beside it.
+    /// <paramref name="keys"/> receives the key of each address at the same
+    /// index where the seek cache's ordered view serves the order, and null
+    /// where the order is sorted here. With <paramref name="keyed"/> the order
+    /// comes back from the ordered view even for a heap already in key order,
+    /// for a locking scan that has to follow a key another session deletes and
+    /// reinserts beside it. Both lists are shared with every scan of the
+    /// table's generation, so a caller copies what it changes.
     /// </remarks>
-    public static List<(int Page, int Slot)>? Order(HeapTable table, List<SqlValueKey>? keys = null, bool keyed = false)
+    public static List<(int Page, int Slot)>? Order(HeapTable table, out List<SqlValueKey>? keys, bool keyed = false)
     {
+        keys = null;
         if (ClusteredKey(table) is not var (ordinals, descending))
             return null;
         var schema = table.StoredColumns;
@@ -62,7 +64,7 @@ internal static class ClusteredScan
                 return SortedKeyOrder(table, ordinals, descending);
             commons[i] = schema[ordinals[i]].Type;
         }
-        return HeapSeekCache.For(table.Heap).KeyOrderUnlessHeapOrdered(table.Heap, schema, table.Heap, ordinals, commons, keys, keyed);
+        return HeapSeekCache.For(table.Heap).KeyOrderUnlessHeapOrdered(table.Heap, schema, table.Heap, ordinals, commons, out keys, keyed);
     }
 
     private static List<(int Page, int Slot)>? SortedKeyOrder(HeapTable table, int[] ordinals, bool[] descending)
@@ -234,9 +236,8 @@ internal static class ClusteredScan
         var rowGroup = KeyLockGroup.RowGroupOf(table);
         // Keys come with the order where the ordered view serves it, which a
         // read on from the last key needs.
-        var keys = rowGroup is null ? null : new List<SqlValueKey>();
-        var order = Order(table, keys);
-        if (keys is not null && (order is null || keys.Count != order.Count))
+        var order = Order(table, out var keys);
+        if (rowGroup is null || order is null || keys?.Count != order.Count)
             keys = null;
         List<((int Page, int Slot) Address, byte[] Image)>? ownDeletes = null;
         var nextOwnDelete = 0;
@@ -324,7 +325,7 @@ internal static class ClusteredScan
         var counts = io?.Touch(table);
         _ = counts?.ScanCount += 1;
         var lastPage = -1;
-        if (Order(table) is not { } order)
+        if (Order(table, out _) is not { } order)
         {
             if (counts is null && addresses is null)
             {
@@ -362,7 +363,7 @@ internal static class ClusteredScan
         var counts = io?.Touch(table);
         _ = counts?.ScanCount += 1;
         var lastPage = -1;
-        if (Order(table) is not { } order)
+        if (Order(table, out _) is not { } order)
         {
             foreach (var row in table.Heap.EnumerateRowsWithAddress())
             {

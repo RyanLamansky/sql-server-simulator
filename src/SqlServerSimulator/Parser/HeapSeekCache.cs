@@ -166,15 +166,17 @@ internal sealed class HeapSeekCache
     /// nullable column, whose NULL-keyed rows no bucket holds.
     /// </summary>
     /// <remarks>
-    /// <paramref name="keys"/>, when given, receives each address's key at the
-    /// same index: a scan reaching an address deleted since the order was taken
-    /// finds by it the row a reinsert of the key put elsewhere. With
-    /// <paramref name="keyed"/> the order comes back even when the heap's own
-    /// order is the key's, for a scan that needs those keys.
+    /// <paramref name="keys"/> receives each address's key at the same index: a
+    /// scan reaching an address deleted since the order was taken finds by it
+    /// the row a reinsert of the key put elsewhere. With <paramref name="keyed"/>
+    /// the order comes back even when the heap's own order is the key's, for a
+    /// scan that needs those keys. Both lists are the entry's own, shared with
+    /// every scan until the next write, so a caller copies what it changes.
     /// </remarks>
     public List<(int Page, int Slot)>? KeyOrderUnlessHeapOrdered(
-        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, List<SqlValueKey>? keys = null, bool keyed = false)
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, out List<SqlValueKey>? keys, bool keyed = false)
     {
+        keys = null;
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
@@ -185,8 +187,11 @@ internal sealed class HeapSeekCache
                 if (schema[ordinal].Nullable)
                     return null;
             }
-            var ordered = entry.CappedCandidates(null, false, null, false, int.MaxValue, keys)!;
-            return entry.NoteKeyOrderWalk(ordered) && !keyed ? null : ordered;
+            var (order, orderKeys) = entry.KeyedOrder();
+            if (entry.NoteKeyOrderWalk(CollectionsMarshal.AsSpan(order)) && !keyed)
+                return null;
+            keys = orderKeys;
+            return order;
         }
     }
 
@@ -508,6 +513,23 @@ internal sealed class HeapSeekCache
         public (int Page, int Slot)[] KeyOrder() =>
             this.keyOrder ??= [.. this.OrderedCandidates(null, false, null, false)];
 
+        // The unbounded ordered walk again with each address's key at the same
+        // index, which a scan following the clustered key reads: building it
+        // walks the ordered view and every bucket, which over a table written
+        // out of key order is most of a small query, so every scan until the
+        // next write shares one walk (AddRid / RemoveRid drop it).
+        private (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys)? keyedOrder;
+
+        public (List<(int Page, int Slot)> Order, List<SqlValueKey> Keys) KeyedOrder()
+        {
+            if (this.keyedOrder is not { } built)
+            {
+                List<SqlValueKey> keys = [];
+                this.keyedOrder = built = (this.CappedCandidates(null, false, null, false, int.MaxValue, keys)!, keys);
+            }
+            return built;
+        }
+
         // Hash views for shorter-arity equality probes against this (widened)
         // entry, keyed by probe arity, each mapping a leading-prefix key to the
         // full keys under it. Built lazily on the first probe of an arity and
@@ -681,14 +703,14 @@ internal sealed class HeapSeekCache
 
         // Called with a full ascending-key walk: when its addresses ascend too,
         // the heap is back in key order and the flag comes back on.
-        public bool NoteKeyOrderWalk(List<(int Page, int Slot)> ordered)
+        public bool NoteKeyOrderWalk(ReadOnlySpan<(int Page, int Slot)> ordered)
         {
-            for (var i = 1; i < ordered.Count; i++)
+            for (var i = 1; i < ordered.Length; i++)
             {
                 if (ordered[i].CompareTo(ordered[i - 1]) <= 0)
                     return false;
             }
-            this.StartHeapOrder(true, ordered.Count > 0 ? ordered[^1] : (-1, -1), this.sortedKeys is { Count: > 0 } sorted ? sorted.Max : null);
+            this.StartHeapOrder(true, ordered.Length > 0 ? ordered[^1] : (-1, -1), this.sortedKeys is { Count: > 0 } sorted ? sorted.Max : null);
             return true;
         }
 
@@ -704,6 +726,7 @@ internal sealed class HeapSeekCache
         private void AddRid(SqlValueKey key, (int Page, int Slot) rid)
         {
             this.keyOrder = null;
+            this.keyedOrder = null;
             var added = false;
             if (!this.Buckets.TryGetValue(key, out var bucket))
             {
@@ -763,6 +786,7 @@ internal sealed class HeapSeekCache
         private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
         {
             this.keyOrder = null;
+            this.keyedOrder = null;
             if (this.Buckets.TryGetValue(key, out var bucket))
             {
                 var at = bucket.BinarySearch(rid);

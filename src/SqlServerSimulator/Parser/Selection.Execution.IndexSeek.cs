@@ -364,8 +364,7 @@ internal sealed partial class Selection
     {
         if (!plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
-        var keys = new List<SqlValueKey>();
-        var addresses = batch.LockingScanOrder(table, keys, follow: !plan.SkipBlockedRows
+        var addresses = batch.LockingScanOrder(table, out var keys, follow: !plan.SkipBlockedRows
             && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree()));
         if (addresses is null)
         {
@@ -378,7 +377,7 @@ internal sealed partial class Selection
         var rest = ClusteredScan.ServesKeyedOrder(table) && KeyLockGroup.RowGroupOf(table) is { } rowGroup
             ? new OrderedScanRest(HeapSeekCache.For(table.Heap), table.Heap, table.StoredColumns, table.Heap, rowGroup.Ordinals, rowGroup.Commons, null, false, null, false, descending: false)
             : null;
-        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier, keys: keys.Count == addresses.Count ? keys : null, rest: rest))
+        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier, keys: keys?.Count == addresses.Count ? keys : null, rest: rest))
             yield return row;
     }
 

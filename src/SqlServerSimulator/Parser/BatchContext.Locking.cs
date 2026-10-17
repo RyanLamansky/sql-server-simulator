@@ -1349,7 +1349,9 @@ internal sealed partial class BatchContext
     /// <summary>
     /// The order a locking scan reads <paramref name="table"/> in
     /// (<see cref="ClusteredScan.Order"/>), with <paramref name="keys"/>
-    /// receiving each address's key. With <paramref name="follow"/>, keys
+    /// receiving each address's key, or null where the order comes without
+    /// them; both lists may be shared with other scans, so a caller copies
+    /// what it changes. With <paramref name="follow"/>, keys
     /// another session's delete has taken out of the order but not yet
     /// settled stand in it as their deleted rows, as real's index keeps a
     /// deleted key as a ghost under its writer's X until the delete commits:
@@ -1358,20 +1360,22 @@ internal sealed partial class BatchContext
     /// back elsewhere left the key in neither, so a key put back meanwhile
     /// (<see cref="HeapTable.KeysPutBack"/>) reads both again.
     /// </summary>
-    public List<(int Page, int Slot)>? LockingScanOrder(HeapTable table, List<SqlValueKey> keys, bool follow)
+    public List<(int Page, int Slot)>? LockingScanOrder(HeapTable table, out List<SqlValueKey>? keys, bool follow)
     {
         for (var reads = 1; ; reads++)
         {
             var putBack = Volatile.Read(ref table.KeysPutBack);
-            keys.Clear();
-            var order = ClusteredScan.Order(table, keys, follow);
-            if (order is null || !follow || keys.Count != order.Count)
+            var order = ClusteredScan.Order(table, out keys, follow);
+            if (order is null || !follow || keys is null || keys.Count != order.Count)
                 return order;
-            // An empty order may be the sorted-order cache's own list, shared
-            // with every scan of this generation: placing into it would change
-            // what they enumerate.
-            if (order.Count == 0)
-                order = [];
+            // The order and its keys are the seek cache's own lists, shared
+            // with every scan of this generation: placing into them would
+            // change what they enumerate.
+            if (!table.SupersededKeyImages.IsEmptyLockFree())
+            {
+                order = [.. order];
+                keys = [.. keys];
+            }
             this.PlaceInFlightDeletes(table, order, keys);
             if (Volatile.Read(ref table.KeysPutBack) == putBack || reads == Simulation.MaxTargetWalks)
                 return order;
@@ -2195,9 +2199,6 @@ internal sealed partial class BatchContext
         var lastPage = -1;
         // Null unless the statement reads a row locator (see RowLocator).
         var addresses = batch.CurrentStatement.RowAddresses;
-        // A clustered table scans in its key's order (see ClusteredScan); a
-        // snapshot read sweeps the heap and its version chains as before.
-        var orderKeys = snapshotXid is null ? new List<SqlValueKey>() : null;
         // A write in flight may delete and reinsert a key the scan has yet to
         // reach, the row landing at an address the heap's walk already passed:
         // the scan follows the key order then, keys in hand, even over a heap
@@ -2208,9 +2209,11 @@ internal sealed partial class BatchContext
             && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree()
                 || plan.Fence is { LocksAsScanned: true });
         var orderGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
-        if (snapshotXid is null && batch.LockingScanOrder(table, orderKeys!, followKeys) is { } clusteredOrder)
+        // A clustered table scans in its key's order (see ClusteredScan); a
+        // snapshot read sweeps the heap and its version chains as before.
+        if (snapshotXid is null && batch.LockingScanOrder(table, out var orderKeys, followKeys) is { } clusteredOrder)
         {
-            foreach (var row in ScanInKeyOrder(table, batch, plan, clusteredOrder, orderKeys!, orderGeneration, io, addresses))
+            foreach (var row in ScanInKeyOrder(table, batch, plan, clusteredOrder, orderKeys ?? [], orderGeneration, io, addresses))
                 yield return row;
             yield break;
         }

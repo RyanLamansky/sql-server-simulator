@@ -264,9 +264,8 @@ partial class Simulation
         var suspensions = statement.Suspensions;
         walk.Generation = Volatile.Read(ref heap.MutationGeneration);
         var rowGroup = KeyLockGroup.RowGroupOf(table);
-        var keys = rowGroup is null ? null : new List<SqlValueKey>();
-        var order = ClusteredScan.Order(table, keys);
-        if (keys is not null && (order is null || keys.Count != order.Count))
+        var order = ClusteredScan.Order(table, out var keys);
+        if (rowGroup is null || order is null || keys?.Count != order.Count)
             keys = null;
         byte[]? lastRead = null;
         var seen = new HashSet<(int, int)>();
