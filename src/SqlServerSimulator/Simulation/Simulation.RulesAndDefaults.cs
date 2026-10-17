@@ -186,6 +186,10 @@ partial class Simulation
         var futureOnly = futureOnlyText is not null;
         if (futureOnly && !BuiltInToken.Equals(futureOnlyText, "futureonly"))
             throw SimulatedSqlException.BindUsage(isRule);
+        // A SET turning an option off, then NOCOUNT drops every other
+        // statement's DONEINPROC (captured 2026-10-17 against SQL Server
+        // 2025).
+        yield return StatementDone(batch, StatementDoneKind.SetOptionOff);
         foreach (var outcome in InProcedureTransaction(batch, Bound(batch, procedureName, isRule, objectName, targetName, futureOnly, futureOnlyText), ProcedureTransactionEnding.CommitAfter, sendsMessagesInside: true))
             yield return outcome;
     }
@@ -293,8 +297,35 @@ partial class Simulation
         }
         if (target.Column is { } boundColumn && (isRule ? boundColumn.BoundRule is null : boundColumn.BoundDefault is null))
             throw SimulatedSqlException.ColumnHasNothingBound(targetName, isRule);
-        foreach (var outcome in InProcedureTransaction(batch, Unbound(batch, procedureName, isRule, targetName, futureOnly, futureOnlyText, target)))
+        if (target.Column is null)
+        {
+            foreach (var outcome in InProcedureTransaction(batch, Unbound(batch, procedureName, isRule, targetName, futureOnly, futureOnlyText, target)))
+                yield return outcome;
+            yield break;
+        }
+
+        // A column's unbinding closes each of its statements in a DONEINPROC,
+        // the confirmation raised after the commit (captured 2026-10-17
+        // against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, isRule ? "OSSIIIISSII" : "OSSIIIISSIII"))
+            yield return step;
+        var confirmations = new List<SimulatedInfoOutcome>();
+        foreach (var outcome in ProcedureTransactionSteps(batch, ColumnUnbound()))
             yield return outcome;
+        foreach (var message in confirmations)
+            yield return message;
+        foreach (var step in ProcedureSteps(batch, isRule ? "RIS" : "RS"))
+            yield return step;
+
+        // The confirmation is held back past the commit.
+        IEnumerable<SimulatedStatementOutcome> ColumnUnbound()
+        {
+            foreach (var outcome in Unbound(batch, procedureName, isRule, targetName, futureOnly, futureOnlyText, target))
+                yield return outcome;
+            confirmations.AddRange(DrainPendingMessages(batch.Connection));
+            foreach (var step in ProcedureSteps(batch, "ISI"))
+                yield return step;
+        }
     }
 
     /// <summary><see cref="InvokeSpUnbind"/>'s work, once its transaction is open.</summary>

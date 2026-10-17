@@ -221,10 +221,23 @@ partial class Simulation
             throw SimulatedSqlException.LinkedServerDoesNotExist(server);
         if (!dropLogins && linkedServer.Logins.Exists(static login => !(login.LocalPrincipalId == 0 && login.UsesSelf)))
             throw SimulatedSqlException.LinkedServerHasLogins(server);
-        _ = servers.TryRemove(server, out _);
-        // Dropping a linked server removes a four-part-name binding;
-        // cached plans referencing it would re-resolve incorrectly.
-        batch.Connection.Simulation.BumpSchemaVersion();
+        // Its statements, the removal in a transaction of its own (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SOIII"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Dropped()))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Dropped()
+        {
+            _ = servers.TryRemove(server, out _);
+            // Dropping a linked server removes a four-part-name binding;
+            // cached plans referencing it would re-resolve incorrectly.
+            batch.Connection.Simulation.BumpSchemaVersion();
+            foreach (var step in ProcedureSteps(batch, "IIISSIIIIXISIII"))
+                yield return step;
+        }
     }
 
     /// <summary>Marks a refusal raised binding a system procedure's arguments, which reports at line 0.</summary>

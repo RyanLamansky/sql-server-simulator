@@ -3,19 +3,25 @@ using SqlServerSimulator.Parser;
 
 namespace SqlServerSimulator;
 
-// The DONEINPROCs of the statements real's ODBC catalog procedures run ahead
-// of their result: they run without NOCOUNT, so each IF closes in a
-// count-less 0x00C0 and each assignment in a 0x00C1 counting its one row.
-// Which statements run depends on the arguments, so each procedure builds its
-// sequence from what it was given and found, as captured from SQL Server 2025
-// (2026-10-17) with a raw TDS client; NOCOUNT ON drops them all, as it drops
-// any DONEINPROC carrying neither rows nor an error.
+// The DONEINPROCs of the statements real's system procedures run without
+// NOCOUNT around their results: each IF closes in a count-less 0x00C0 and
+// each assignment in a 0x00C1 counting its one row. Which statements run
+// depends on the arguments, so each procedure builds its sequence from what it
+// was given and found, as captured from SQL Server 2025 (2026-10-17) with a
+// raw TDS client; NOCOUNT ON drops them all, as it drops any DONEINPROC
+// carrying neither rows nor an error.
 partial class Simulation
 {
     /// <summary>
     /// The statement DONEs a step program describes, in order: <c>S</c> an
-    /// assignment counting one row, <c>I</c> an <c>IF</c> condition, any
-    /// other character ignored.
+    /// assignment counting one row, <c>I</c> an <c>IF</c> or <c>WHILE</c>
+    /// condition, <c>N</c> a cursor <c>DECLARE</c> or <c>FETCH</c> (a
+    /// count-less <c>0x00C1</c>), <c>(</c> and <c>)</c> a cursor's
+    /// <c>OPEN</c> and <c>DEALLOCATE</c>, <c>O</c> a <c>SET</c> turning an
+    /// option off, <c>X</c> an <c>EXEC</c>, <c>P</c> a <c>PRINT</c>, <c>R</c>
+    /// a <c>RAISERROR</c> of a message, <c>D</c> a <c>DBCC</c> command,
+    /// <c>T</c> and <c>E</c> a <c>BEGIN TRY</c> and the end of its
+    /// <c>CATCH</c>; any other character ignored.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> ProcedureSteps(BatchContext batch, string program)
     {
@@ -23,13 +29,63 @@ partial class Simulation
         {
             switch (step)
             {
+                case '(':
+                    yield return StatementDone(batch, StatementDoneKind.OpenCursor);
+                    break;
+                case ')':
+                    yield return StatementDone(batch, StatementDoneKind.DeallocateCursor);
+                    break;
+                case 'D':
+                    yield return StatementDone(batch, StatementDoneKind.Dbcc);
+                    break;
+                case 'E':
+                    yield return StatementDone(batch, StatementDoneKind.EndCatch);
+                    break;
                 case 'I':
                     yield return StatementDone(batch, StatementDoneKind.Condition);
+                    break;
+                case 'N':
+                    yield return StatementDone(batch, StatementDoneKind.Select);
+                    break;
+                case 'O':
+                    yield return StatementDone(batch, StatementDoneKind.SetOptionOff);
+                    break;
+                case 'P':
+                    yield return StatementDone(batch, StatementDoneKind.Print);
+                    break;
+                case 'R':
+                    yield return StatementDone(batch, StatementDoneKind.RaisError);
                     break;
                 case 'S':
                     yield return StatementDone(batch, StatementDoneKind.Select, 1);
                     break;
+                case 'T':
+                    yield return StatementDone(batch, StatementDoneKind.BeginTry);
+                    break;
+                case 'X':
+                    yield return StatementDone(batch, StatementDoneKind.Execute);
+                    break;
             }
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="inside"/> between the <c>BEGIN TRANSACTION</c> and
+    /// <c>COMMIT</c> real's procedure runs it in — a transaction of its own,
+    /// whose ENVCHANGEs go out ahead of the two statements' DONEINPROCs, or
+    /// one nested in the caller's (see <see cref="InProcedureTransaction"/>).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> ProcedureTransactionSteps(BatchContext batch, IEnumerable<SimulatedStatementOutcome> inside)
+    {
+        foreach (var outcome in InProcedureTransaction(batch, Begun(batch, inside)))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Commit);
+
+        static IEnumerable<SimulatedStatementOutcome> Begun(BatchContext batch, IEnumerable<SimulatedStatementOutcome> inside)
+        {
+            yield return StatementDone(batch, StatementDoneKind.BeginTransaction);
+            foreach (var outcome in inside)
+                yield return outcome;
         }
     }
 
@@ -62,31 +118,52 @@ partial class Simulation
     }
 
     /// <summary>
-    /// <c>sp_tables</c>' steps with no <c>@table_type</c>: four conditions —
-    /// five with a qualifier — an assignment, a condition, an assignment and
-    /// a condition; a name adds a condition, and a name without a wildcard and
-    /// no owner adds another, then assigns once more after the next two
-    /// assignments when it found the object; two conditions follow, and a
-    /// name that picked one object closes with an assignment and a condition,
-    /// anything else with a condition.
+    /// <c>sp_tables</c>' steps: four conditions — five with a qualifier — an
+    /// assignment and a condition, then an assignment and a condition, or for
+    /// a <c>@table_type</c> list a condition and an assignment, then three
+    /// conditions with an assignment after the first when the list names
+    /// <c>'TABLE'</c> and after the second when it names <c>'VIEW'</c>,
+    /// quotes included; a name adds a condition, and a name holding no
+    /// <c>%</c> with no owner looks the table up by its exact name, adding
+    /// another, then assigns once more after the next two assignments when
+    /// one has that name. Two conditions follow, then, matching by pattern, an
+    /// assignment and a condition for a name that picked one object, a
+    /// condition for anything else; under <c>@fUsePattern = 0</c> nothing.
     /// </summary>
-    private static string SpTablesSteps(string? tableName, string? tableOwner, string? tableQualifier, bool found)
+    private static string SpTablesSteps(string? tableName, string? tableOwner, string? tableQualifier, string? tableType, bool usePattern, bool exactFound)
     {
-        var exactName = tableName is not null && !HasCatalogWildcard(tableName);
-        var exactOwner = tableOwner is null || !HasCatalogWildcard(tableOwner);
-        var looksUpOwner = exactName && tableOwner is null;
         var program = new StringBuilder("IIII");
         if (tableQualifier is not null)
             _ = program.Append('I');
-        _ = program.Append("SISI");
+        _ = program.Append("SI");
+        if (tableType is null)
+        {
+            _ = program.Append("SI");
+        }
+        else
+        {
+            _ = program.Append("ISI");
+            if (tableType.Contains("'TABLE'", StringComparison.OrdinalIgnoreCase))
+                _ = program.Append('S');
+            _ = program.Append('I');
+            if (tableType.Contains("'VIEW'", StringComparison.OrdinalIgnoreCase))
+                _ = program.Append('S');
+            _ = program.Append('I');
+        }
         if (tableName is not null)
             _ = program.Append('I');
+        var looksUpOwner = tableName is not null && !tableName.Contains('%', StringComparison.Ordinal) && tableOwner is null;
         if (looksUpOwner)
             _ = program.Append('I');
         _ = program.Append("SS");
-        if (looksUpOwner && found)
+        if (looksUpOwner && exactFound)
             _ = program.Append('S');
-        return program.Append("II").Append(exactName && exactOwner && found ? "SI" : "I").ToString();
+        _ = program.Append("II");
+        if (!usePattern)
+            return program.ToString();
+        var exactName = tableName is not null && !HasCatalogWildcard(tableName);
+        var exactOwner = tableOwner is null || !HasCatalogWildcard(tableOwner);
+        return program.Append(exactName && exactOwner && exactFound ? "SI" : "I").ToString();
     }
 
     /// <summary><c>sp_pkeys</c>' steps: two conditions, one more each for an owner and a qualifier, then two assignments.</summary>

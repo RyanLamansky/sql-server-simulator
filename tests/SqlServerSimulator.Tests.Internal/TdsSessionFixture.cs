@@ -196,8 +196,11 @@ internal sealed class TdsSessionFixture : IDisposable
                                 case 0x34: // INT2
                                     widths.Add(2);
                                     break;
-                                case 0x38: // INT4
+                                case 0x38 or 0x3A or 0x3B or 0x7A: // INT4, DATETIM4, FLT4, MONEY4
                                     widths.Add(4);
+                                    break;
+                                case 0x3C or 0x3D or 0x3E: // MONEY, DATETIME, FLT8
+                                    widths.Add(8);
                                     break;
                                 case 0x68 or 0x6D or 0x6E or 0x6F: // BITN, FLTN, MONEYN, DATETIMN
                                     widths.Add(-1);

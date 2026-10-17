@@ -73,8 +73,15 @@ partial class Simulation
             yield break;
 
         var filter = ParseWhoFilter(arguments, "sp_who");
+        var sessions = SessionSnapshot(batch, filter);
+        // An assignment and a condition, then two conditions and an
+        // assignment for a spid or three, an assignment and a condition for a
+        // login, one more condition for none, and an assignment after the
+        // listing (captured 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, filter.ActiveOnly ? "SI" : filter.Spid is not null ? "SIIIS" : filter.Login is not null ? "SIIISI" : "SII"))
+            yield return step;
         var rows = new List<SqlValue[]>();
-        foreach (var session in SessionSnapshot(batch, filter))
+        foreach (var session in sessions)
         {
             rows.Add([
                 SqlValue.FromInt16((short)session.Spid),
@@ -89,7 +96,11 @@ partial class Simulation
             ]);
         }
 
-        yield return new SimulatedSqlResultSet(SpWhoSchema, SpWhoColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SpWhoSchema, SpWhoColumnNames, rows)
+        {
+            ColumnNullability = [false, false, false, true, false, true, true, false, false],
+        };
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
     }
 
     /// <summary>

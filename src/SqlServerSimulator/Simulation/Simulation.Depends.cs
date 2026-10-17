@@ -97,28 +97,36 @@ partial class Simulation
         // row drops out of the set, which then goes out empty (probed
         // 2026-10-04 against SQL Server 2025).
         var policyRefers = entities.Exists(entity => entity.ObjectTypeCode == "SP" && entity.References.Exists(reference => reference.ReferencedId == targetId));
+
+        // Its statements ahead of the results, which go out under NOCOUNT,
+        // and the SET NOCOUNT OFF and assignment after them, around the
+        // message for an object with no dependencies too (captured 2026-10-17
+        // against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SISIS"))
+            yield return step;
         if (references.Count == 0 && referencedBy.Count == 0 && !policyRefers)
         {
-            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 83, 15461,
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 83, 15461,
                 "Object does not reference any object, and no objects reference it."));
+            foreach (var step in ProcedureSteps(batch, "OS"))
+                yield return step;
             yield break;
         }
-
         if (references.Count > 0)
         {
-            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 39, 15459,
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 39, 15459,
                 "In the current database, the specified object references the following:"));
-            yield return new SimulatedSqlResultSet(SpDependsReferencesSchema, SpDependsReferencesColumnNames, references);
+            yield return new SimulatedSqlResultSet(SpDependsReferencesSchema, SpDependsReferencesColumnNames, references) { CountSuppressed = true };
         }
 
         if (referencedBy.Count > 0 || policyRefers)
         {
-            // Sent as an outcome of its own so it lands between the two result
-            // sets rather than ahead of the first.
             yield return new SimulatedInfoOutcome(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 67, 15460,
                 "In the current database, the specified object is referenced by the following:"));
-            yield return new SimulatedSqlResultSet(SpDependsReferencedBySchema, SpDependsReferencedByColumnNames, referencedBy);
+            yield return new SimulatedSqlResultSet(SpDependsReferencedBySchema, SpDependsReferencedByColumnNames, referencedBy) { CountSuppressed = true };
         }
+        foreach (var step in ProcedureSteps(batch, "OS"))
+            yield return step;
     }
 
     /// <summary>

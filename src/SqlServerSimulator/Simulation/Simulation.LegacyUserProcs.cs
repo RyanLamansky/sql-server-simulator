@@ -317,8 +317,22 @@ partial class Simulation
         var values = BindSystemProcedureArguments("sp_approlepassword", calledAs, arguments, AppRolePasswordParameters);
         RefuseInTransaction(batch, calledAs, "sp_approlepassword", 25);
         var statement = $"alter application role {QuoteIdentifier(RequireValidName(values[0]))} with password = {QuoteText(values[1].IsNull ? "" : values[1].AsString)}";
-        foreach (var outcome in InProcedureTransaction(batch, this.RunProcedureStatement(batch, statement)))
+        // Its statements around the ALTER it runs as dynamic SQL in a
+        // transaction of its own (captured 2026-10-17 against SQL Server
+        // 2025).
+        foreach (var step in ProcedureSteps(batch, "IIOISSSS"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Altered()))
             yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Altered()
+        {
+            foreach (var outcome in this.RunProcedureStatement(batch, statement))
+                yield return outcome;
+            foreach (var step in ProcedureSteps(batch, "XI"))
+                yield return step;
+        }
     }
 
     /// <summary>

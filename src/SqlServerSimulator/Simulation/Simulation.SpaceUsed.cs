@@ -142,10 +142,16 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var target = objectName is null ? null : ResolveHelpTarget(batch, objectName);
+        var updatesUsage = updateUsage is not null && BuiltInToken.Equals(updateUsage, "true");
+
+        // Its statements ahead of the results, one condition fewer when it
+        // updates usage (captured 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, updatesUsage ? "IIISISI" : "IIISIISI"))
+            yield return step;
 
         // DBCC UPDATEUSAGE has nothing to correct (the page counts are read
         // live), but real prints a single space after running it.
-        if (updateUsage is not null && BuiltInToken.Equals(updateUsage, "true"))
+        if (updatesUsage)
             yield return HelpBlankLine(batch, procedureName, 201);
 
         if (target is null)

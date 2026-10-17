@@ -196,14 +196,31 @@ partial class Simulation
         var elapsed = (long)(now - simulation.SeedDate).TotalMilliseconds;
         var connections = simulation.SnapshotConnections().Length;
         static SqlValue Figure(long total, long since, string suffix = "") => SqlValue.FromVarchar($"{total}({since}){suffix}");
+        // Its statements ahead of the results, which go out under NOCOUNT
+        // (captured 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "IOISSSI"))
+            yield return step;
         yield return new SimulatedSqlResultSet([SqlType.DateTime, SqlType.DateTime, SqlType.Int32], ["last_run", "current_run", "seconds"],
-            [[SqlValue.FromDateTime(lastRun), SqlValue.FromDateTime(now), SqlValue.FromInt32(seconds)]]);
+            [[SqlValue.FromDateTime(lastRun), SqlValue.FromDateTime(now), SqlValue.FromInt32(seconds)]])
+        {
+            ColumnNullability = [false, true, true],
+            CountSuppressed = true,
+        };
         yield return new SimulatedSqlResultSet([SqlType.Varchar, SqlType.Varchar, SqlType.Varchar], ["cpu_busy", "io_busy", "idle"],
-            [[Figure(cpu, 0, "-0%"), Figure(0, 0, "-0%"), Figure(Math.Max(0, elapsed - cpu), 0, "-0%")]]);
+            [[Figure(cpu, 0, "-0%"), Figure(0, 0, "-0%"), Figure(Math.Max(0, elapsed - cpu), 0, "-0%")]])
+        {
+            CountSuppressed = true,
+        };
         yield return new SimulatedSqlResultSet([SqlType.Varchar, SqlType.Varchar, SqlType.Varchar], ["packets_received", "packets_sent", "packet_errors"],
-            [[Figure(0, 0), Figure(0, 0), Figure(0, 0)]]);
+            [[Figure(0, 0), Figure(0, 0), Figure(0, 0)]])
+        {
+            CountSuppressed = true,
+        };
         yield return new SimulatedSqlResultSet([SqlType.Varchar, SqlType.Varchar, SqlType.Varchar, SqlType.Varchar], ["total_read", "total_write", "total_errors", "connections"],
-            [[Figure(0, 0), Figure(0, 0), Figure(0, 0), Figure(connections, 0)]]);
+            [[Figure(0, 0), Figure(0, 0), Figure(0, 0), Figure(connections, 0)]])
+        {
+            CountSuppressed = true,
+        };
     }
 
     /// <summary>

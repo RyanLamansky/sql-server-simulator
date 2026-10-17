@@ -132,6 +132,14 @@ partial class Simulation
                 throw AtSystemProcedureLine(calledAs, SimulatedSqlException.PhysicalDeviceAlreadyExists(physicalName), 82);
             }
         }
+
+        // Its statements, the last two in a transaction of its own (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SOIISIIISXIII"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, ProcedureSteps(batch, "II")))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
     }
 
     /// <summary>
@@ -168,7 +176,14 @@ partial class Simulation
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.BackupDeviceDoesNotExist(name), 37);
         if (deleteFile && device.Type == 2 && this.OpenBackupFile is null && this.BackupDevices.TryRemove(BackupDeviceKey(device.PhysicalName), out _))
             QueueProcedureMessage(batch, calledAs, 2503, $"Successfully deleted the physical file '{device.PhysicalName}'.", 43);
-        QueueProcedureMessage(batch, calledAs, 15463, "Device dropped.", 52);
+        // Its statements, the DBCC among them, then the confirmation it
+        // raises and an assignment (captured 2026-10-17 against SQL Server
+        // 2025).
+        foreach (var step in ProcedureSteps(batch, "SIOIIIIDI"))
+            yield return step;
+        yield return new SimulatedInfoOutcome(SimulatedSqlException.SystemProcedureMessage(batch, calledAs, 52, 15463, "Device dropped."));
+        foreach (var step in ProcedureSteps(batch, "RS"))
+            yield return step;
     }
 
     /// <summary>

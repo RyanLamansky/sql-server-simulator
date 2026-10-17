@@ -130,22 +130,41 @@ partial class Simulation
         if (module.DefinitionText is not { } definition)
             yield break;
 
-        var connection = batch.Connection;
-        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
-        var savedAnsiNulls = connection.AnsiNulls;
-        connection.QuotedIdentifiers = module.UsesQuotedIdentifier;
-        connection.AnsiNulls = module.UsesAnsiNulls;
-        try
+        // Real's statements around the rebinding, which runs inside a TRY in
+        // a transaction of the procedure's own and sends nothing of its own
+        // (captured 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SIISII"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Rebound(definition)))
+            yield return outcome;
+        foreach (var step in ProcedureSteps(batch, "SXS"))
+            yield return step;
+
+        IEnumerable<SimulatedStatementOutcome> Rebound(string definition)
         {
-            var verbStart = ModuleVerbStart(definition);
-            var alter = definition[..verbStart] + "ALTER" + definition[(verbStart + "CREATE".Length)..];
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, alter, preDeclaredVariables: null))
-                yield return outcome;
-        }
-        finally
-        {
-            connection.QuotedIdentifiers = savedQuotedIdentifiers;
-            connection.AnsiNulls = savedAnsiNulls;
+            yield return StatementDone(batch, StatementDoneKind.BeginTry);
+            var connection = batch.Connection;
+            var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+            var savedAnsiNulls = connection.AnsiNulls;
+            connection.QuotedIdentifiers = module.UsesQuotedIdentifier;
+            connection.AnsiNulls = module.UsesAnsiNulls;
+            try
+            {
+                var verbStart = ModuleVerbStart(definition);
+                var alter = definition[..verbStart] + "ALTER" + definition[(verbStart + "CREATE".Length)..];
+                foreach (var outcome in this.ExecuteDynamicBatch(batch, alter, preDeclaredVariables: null))
+                {
+                    if (outcome is SimulatedErrorOutcome or SimulatedInfoOutcome or SimulatedQueryResult)
+                        yield return outcome;
+                }
+            }
+            finally
+            {
+                connection.QuotedIdentifiers = savedQuotedIdentifiers;
+                connection.AnsiNulls = savedAnsiNulls;
+            }
+            foreach (var step in ProcedureSteps(batch, "IIE"))
+                yield return step;
         }
     }
 }

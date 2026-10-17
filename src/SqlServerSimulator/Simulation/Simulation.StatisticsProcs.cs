@@ -234,10 +234,19 @@ partial class Simulation
                 throw AtSystemProcedureLine(calledAs, SimulatedSqlException.SelectedIndexDoesNotExist(written), 119, 15323);
         }
 
+        // Its statements ahead of the report or the change (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SISSISII"))
+            yield return step;
         if (turnOn is not null)
         {
-            foreach (var statistic in statistics)
-                statistic.SetNoRecompute(!turnOn.Value);
+            // A transaction of its own around a cursor over the statistics:
+            // two conditions, the DECLARE, OPEN and first FETCH, then a
+            // WHILE condition and a FETCH per statistic, the last condition
+            // and the DEALLOCATE.
+            foreach (var outcome in ProcedureTransactionSteps(batch, Changed(batch, statistics, turnOn.Value)))
+                yield return outcome;
+            yield return StatementDone(batch, StatementDoneKind.Select, 1);
             yield break;
         }
 
@@ -252,13 +261,36 @@ partial class Simulation
         }
         var autoUpdate = database.Switches.HasFlag(DatabaseSwitches.AutoUpdateStatistics) ? "ON" : "OFF";
         var autoCreate = database.Switches.HasFlag(DatabaseSwitches.AutoCreateStatistics) ? "ON" : "OFF";
+        // Each PRINT closes in a DONEINPROC of its own.
         yield return ProcedureMessage(batch, calledAs, 55, 0, $"Global statistics settings for [{database.Name}]:");
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return ProcedureMessage(batch, calledAs, 56, 0, $"  Automatic update statistics: {autoUpdate}");
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return ProcedureMessage(batch, calledAs, 57, 0, $"  Automatic create statistics: {autoCreate}");
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return new SimulatedInfoOutcome(SimulatedSqlException.HelpBlankLineMessage(batch, calledAs, 58));
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return ProcedureMessage(batch, calledAs, 62, 0, $"settings for table [{written}]");
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return new SimulatedInfoOutcome(SimulatedSqlException.HelpBlankLineMessage(batch, calledAs, 63));
+        yield return StatementDone(batch, StatementDoneKind.Print);
         yield return new SimulatedSqlResultSet(AutoStatsSchema, AutoStatsColumnNames, rows);
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+    }
+
+    /// <summary><see cref="InvokeSpAutoStats"/>'s change, once its transaction is open, statement by statement.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> Changed(BatchContext batch, List<ReportedStatistic> statistics, bool turnOn)
+    {
+        foreach (var step in ProcedureSteps(batch, "IIN(N"))
+            yield return step;
+        foreach (var statistic in statistics)
+        {
+            statistic.SetNoRecompute(!turnOn);
+            foreach (var step in ProcedureSteps(batch, "IN"))
+                yield return step;
+        }
+        foreach (var step in ProcedureSteps(batch, "I)"))
+            yield return step;
     }
 
     private static readonly SqlType[] AutoStatsSchema = [SqlType.NVarchar, VarcharSqlType.Get(3, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.DateTime];

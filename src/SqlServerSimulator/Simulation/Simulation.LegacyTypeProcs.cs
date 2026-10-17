@@ -129,8 +129,14 @@ partial class Simulation
         if (name is null || !(dbo.AliasTypes.TryGetValue(name, out var alias) ? alias is not null : dbo.TableTypes.ContainsKey(name)))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.DataTypeDoesNotExist(name ?? "(null)"), 14);
 
+        // Its statements around the DROP TYPE it runs as dynamic SQL (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SIIS"))
+            yield return step;
         var statement = "drop type [dbo].[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
         foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
+        foreach (var step in ProcedureSteps(batch, "XS"))
+            yield return step;
     }
 }

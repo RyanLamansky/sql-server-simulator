@@ -814,6 +814,21 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// <paramref name="outcomes"/> with every result set's count suppressed,
+    /// as a procedure that sets <c>NOCOUNT ON</c> ahead of its results sends
+    /// them, the statements it ran before that keeping their own.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> UncountedResults(IEnumerable<SimulatedStatementOutcome> outcomes)
+    {
+        foreach (var outcome in outcomes)
+        {
+            if (outcome is SimulatedQueryResult)
+                outcome.CountSuppressed = true;
+            yield return outcome;
+        }
+    }
+
     // The PRINT '' real puts between its sections, which arrives as one space.
     private static SimulatedInfoOutcome HelpBlankLine(BatchContext batch, string procedureName, int line) =>
         Printed(SimulatedSqlException.HelpBlankLineMessage(batch, procedureName, line));

@@ -233,20 +233,35 @@ partial class Simulation
         if (!replace && simulation.UserMessages.ContainsKey((messageId, languageId)))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.MessageReplaceRequired(), 133);
 
-        RecordMessageUndo(batch);
-        // Severity and event logging belong to the message, not to a language:
-        // a localized version takes the us_english one's, and a new us_english
-        // version moves every language's to its own.
-        simulation.UserMessages[(messageId, languageId)] = new UserMessage((byte)severity, isUsEnglish ? withLog : usEnglish!.IsEventLogged, values[2].AsString);
-        if (isUsEnglish)
+        // Its statements: a language named runs one more condition and one
+        // assignment fewer, event logging a shorter path, a replacement one
+        // condition more in each half, the change in a transaction of its own
+        // (captured 2026-10-17 against SQL Server 2025, each argument alone).
+        var before = "IIIII" + (values[3].IsNull ? "S" : "I") + "SSSSII" + (withLog ? "" : isUsEnglish ? "ISI" + (replace ? "I" : "") : "II");
+        foreach (var step in ProcedureSteps(batch, before))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Added()))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Added()
         {
-            foreach (var (key, other) in simulation.UserMessages)
+            RecordMessageUndo(batch);
+            // Severity and event logging belong to the message, not to a language:
+            // a localized version takes the us_english one's, and a new us_english
+            // version moves every language's to its own.
+            simulation.UserMessages[(messageId, languageId)] = new UserMessage((byte)severity, isUsEnglish ? withLog : usEnglish!.IsEventLogged, values[2].AsString);
+            if (isUsEnglish)
             {
-                if (key.MessageId == messageId && key.LanguageId != languageId)
-                    simulation.UserMessages[key] = new UserMessage((byte)severity, withLog, other.Text);
+                foreach (var (key, other) in simulation.UserMessages)
+                {
+                    if (key.MessageId == messageId && key.LanguageId != languageId)
+                        simulation.UserMessages[key] = new UserMessage((byte)severity, withLog, other.Text);
+                }
             }
+            foreach (var step in ProcedureSteps(batch, "IIIIII" + (replace ? "I" : "") + (withLog ? "S" : "SS")))
+                yield return step;
         }
-        yield break;
     }
 
     /// <summary>
@@ -294,10 +309,22 @@ partial class Simulation
             }
         }
 
-        RecordMessageUndo(batch);
-        foreach (var languageId in languageIds)
-            _ = simulation.UserMessages.TryRemove((messageId, languageId), out _);
-        yield break;
+        // Its statements, the removal in a transaction of its own (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, all ? "IIIII" : "IIIISIIS"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Dropped()))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Dropped()
+        {
+            RecordMessageUndo(batch);
+            foreach (var languageId in languageIds)
+                _ = simulation.UserMessages.TryRemove((messageId, languageId), out _);
+            foreach (var step in ProcedureSteps(batch, "IISI"))
+                yield return step;
+        }
     }
 
     /// <summary>
@@ -335,11 +362,24 @@ partial class Simulation
         if (keys.Count == 0)
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.MessageDoesNotExist(messageId), 42);
 
-        RecordMessageUndo(batch);
-        foreach (var key in keys)
+        // Its statements, the change in a transaction of its own (captured
+        // 2026-10-17 against SQL Server 2025).
+        foreach (var step in ProcedureSteps(batch, "SSIISI"))
+            yield return step;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Altered()))
+            yield return outcome;
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Altered()
         {
-            if (simulation.UserMessages.TryGetValue(key, out var message))
-                simulation.UserMessages[key] = new UserMessage(message.Severity, logged, message.Text);
+            RecordMessageUndo(batch);
+            foreach (var key in keys)
+            {
+                if (simulation.UserMessages.TryGetValue(key, out var message))
+                    simulation.UserMessages[key] = new UserMessage(message.Severity, logged, message.Text);
+            }
+            foreach (var step in ProcedureSteps(batch, "IS"))
+                yield return step;
         }
     }
 }

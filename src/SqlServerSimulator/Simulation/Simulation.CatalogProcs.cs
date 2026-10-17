@@ -193,7 +193,7 @@ partial class Simulation
     /// [, @table_qualifier] [, @table_type]</c> — the proc ODBC's
     /// <c>SQLTables</c> / JDBC's <c>getTables</c> call to enumerate the current
     /// database's tables and views. <c>@table_name</c> / <c>@table_owner</c>
-    /// are LIKE patterns (NULL → all); <c>@table_qualifier</c> restricts to a
+    /// are LIKE patterns (NULL → all) unless <c>@fUsePattern</c> is 0; <c>@table_qualifier</c> restricts to a
     /// database name (mismatch → empty); <c>@table_type</c> is a quoted
     /// comma-list (<c>"'TABLE','VIEW'"</c>). Rows sort by TABLE_TYPE,
     /// TABLE_QUALIFIER, TABLE_OWNER, TABLE_NAME (probe-confirmed).
@@ -204,13 +204,18 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var (tableName, tableOwner, tableQualifier, tableType) = ParseSpTablesArgs(arguments);
+        var (tableName, tableOwner, tableQualifier, tableType, usePattern) = ParseSpTablesArgs(arguments);
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
         var nullRemarks = SqlValue.Null(CatalogVarchar254);
         var tableTypeFilter = ParseTableTypeList(tableType);
-        var namePattern = CompileCatalogPattern(tableName);
-        var ownerPattern = CompileCatalogPattern(tableOwner);
+        // Under @fUsePattern = 0 a name and an owner match exactly, under the
+        // database's collation.
+        var namePattern = usePattern ? CompileCatalogPattern(tableName) : null;
+        var ownerPattern = usePattern ? CompileCatalogPattern(tableOwner) : null;
+        bool NameMatches(string candidate) => usePattern ? Matches(namePattern, candidate) : tableName is null || database.Collation.Equals(tableName, candidate);
+        bool OwnerMatches(string candidate) => usePattern ? Matches(ownerPattern, candidate) : tableOwner is null || database.Collation.Equals(tableOwner, candidate);
+        var exactFound = false;
 
         var rows = new List<SqlValue[]>();
         var visible = PermissionEnforcement.ObjectVisibility(batch, database);
@@ -218,7 +223,11 @@ partial class Simulation
         {
             foreach (var (_, schema) in database.Schemas)
             {
-                if (!Matches(ownerPattern, schema.Name))
+                foreach (var (_, table) in schema.HeapTables)
+                    exactFound |= tableName is not null && database.Collation.Equals(tableName, table.Name);
+                foreach (var (_, view) in schema.Views)
+                    exactFound |= tableName is not null && database.Collation.Equals(tableName, view.Name);
+                if (!OwnerMatches(schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var (_, table) in schema.HeapTables)
@@ -238,14 +247,14 @@ partial class Simulation
             foreach (var (view, schemaId) in BuiltInResources.SystemViews.Value)
             {
                 var schemaName = schemaId == Database.InformationSchemaId ? "INFORMATION_SCHEMA" : "sys";
-                if (Matches(ownerPattern, schemaName))
+                if (OwnerMatches(schemaName))
                     AddTableRow(rows, SqlValue.FromSystemName(schemaName), view.Name, "VIEW");
             }
         }
 
         void AddTableRow(List<SqlValue[]> into, SqlValue owner, string name, string type)
         {
-            if (!Matches(namePattern, name)
+            if (!NameMatches(name)
                 || (tableTypeFilter is not null && !tableTypeFilter.Contains(type)))
             {
                 return;
@@ -258,11 +267,8 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpTablesRows);
-        if (tableType is null)
-        {
-            foreach (var step in ProcedureSteps(batch, SpTablesSteps(tableName, tableOwner, tableQualifier, rows.Count > 0)))
-                yield return step;
-        }
+        foreach (var step in ProcedureSteps(batch, SpTablesSteps(tableName, tableOwner, tableQualifier, tableType, usePattern, exactFound)))
+            yield return step;
         yield return new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, rows);
     }
 
@@ -280,10 +286,11 @@ partial class Simulation
         }
     }
 
-    private static (string? Name, string? Owner, string? Qualifier, string? Type) ParseSpTablesArgs(
+    private static (string? Name, string? Owner, string? Qualifier, string? Type, bool UsePattern) ParseSpTablesArgs(
         List<ProcArgument> arguments)
     {
         string? name = null, owner = null, qualifier = null, type = null;
+        var usePattern = true;
         var positional = 0;
         foreach (var arg in arguments)
         {
@@ -295,7 +302,7 @@ partial class Simulation
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
                     case 3: type = CatalogStringArg(arg); break;
-                    case 4: break; // @fUsePattern — pattern mode is always on
+                    case 4: usePattern = CatalogUsePatternArg(arg); break;
                     default: throw CatalogBindingError(SimulatedSqlException.TooManyArgumentsToFunction("sp_tables"));
                 }
 
@@ -308,12 +315,12 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_type"): type = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "fUsePattern"): break;
+                case var n when BuiltInToken.Equals(n, "fUsePattern"): usePattern = CatalogUsePatternArg(arg); break;
                 default: throw CatalogBindingError(SimulatedSqlException.NotAParameterForProcedure(arg.Name, "sp_tables"));
             }
         }
 
-        return (name, owner, qualifier, type);
+        return (name, owner, qualifier, type, usePattern);
     }
 
     /// <summary>The ODBC driver generation an <c>sp_columns</c> version answers for.</summary>
