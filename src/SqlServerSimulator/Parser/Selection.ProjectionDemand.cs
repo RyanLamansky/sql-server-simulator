@@ -36,6 +36,27 @@ partial class Selection
     private MultiPartName[]? freeNames;
 
     /// <summary>
+    /// The deferred form of each select-list column of a view reference, taken
+    /// from the body the reference bound (see <see cref="DeferringAs"/>); null
+    /// for every other plan.
+    /// </summary>
+    private DeferredColumn?[]? viewDeferrableColumns;
+
+    /// <summary>
+    /// Per select-list column, the form a query reading this plan as a FROM
+    /// source may evaluate the column in itself, where it reads it, rather than
+    /// have this plan compute it per row (see <see cref="DeferredColumn"/>);
+    /// null for a column this plan must compute, and null outright for a plan
+    /// whose body isn't known here.
+    /// </summary>
+    internal DeferredColumn?[]? DeferrableColumns()
+    {
+        if (this.IsForClauseDocument)
+            return null;
+        return this.projectionDemand is { } demand ? demand.Templates() : this.viewDeferrableColumns;
+    }
+
+    /// <summary>
     /// Leaves uncomputed each select-list column <paramref name="read"/> says
     /// no reader reads (null: every column is read), as real's optimizer never
     /// computes a column nothing above it reads: <c>SELECT COUNT(*) FROM
@@ -88,7 +109,7 @@ partial class Selection
                 if (term.IsOrdinal && term.Ordinal - 1 is >= 0 and var ordinal && ordinal < selfRead.Length)
                     selfRead[ordinal] = true;
             }
-            this.projectionDemand = collector.Finish(this.Schema, this.ColumnNames, expressions, selfRead, readsWholeRow: orderBy.Exists(static term => !term.IsOrdinal), [], []);
+            this.projectionDemand = collector.Finish(this.Schema, this.ColumnNames, expressions, selfRead, readsWholeRow: orderBy.Exists(static term => !term.IsOrdinal), [], [], ownsStartupConstant: null, lateral: []);
         }
         return this;
     }
@@ -115,7 +136,7 @@ partial class Selection
         }
         foreach (var source in sources)
             collector.ReadReachOf(source);
-        _ = collector.Finish([], [], [], [], readsWholeRow: false, [], []).Apply(null);
+        _ = collector.Finish([], [], [], [], readsWholeRow: false, [], [], ownsStartupConstant: null, LateralSlots(sources, joins)).Apply(null);
     }
 
     /// <summary>
@@ -163,6 +184,48 @@ partial class Selection
     }
 
     /// <summary>
+    /// Hands a view reference the deferred columns of <paramref name="body"/>,
+    /// the view's body as the reference bound it — each run parses the same
+    /// definition again, laying its columns out the same way.
+    /// </summary>
+    internal Selection DeferringAs(Selection? body)
+    {
+        if (body?.DeferrableColumns() is { } columns && columns.Length == this.Schema.Length)
+            this.viewDeferrableColumns = columns;
+        return this;
+    }
+
+    /// <summary>
+    /// Per source, whether it is the right side of an <c>APPLY</c>, whose body
+    /// reads the sources to its left.
+    /// </summary>
+    private static bool[] LateralSlots(FromSource[] sources, JoinSpec[] joins)
+    {
+        var lateral = new bool[sources.Length];
+        for (var s = 1; s < sources.Length && s - 1 < joins.Length; s++)
+            lateral[s] = joins[s - 1].Kind is JoinKind.CrossApply or JoinKind.OuterApply;
+        return lateral;
+    }
+
+    /// <summary>
+    /// <paramref name="name"/>'s column among <paramref name="sources"/>,
+    /// whether or not its body computes it; null when none binds the name and
+    /// <c>(-1, -1)</c> when it is ambiguous among them.
+    /// </summary>
+    internal static (int Source, int Column)? TryBindSourceColumn(FromSource[] sources, MultiPartName name)
+    {
+        try
+        {
+            var (source, column) = FindSourceColumn(sources, name, reads: false);
+            return source < 0 ? null : (source, column);
+        }
+        catch (SimulatedSqlException)
+        {
+            return (-1, -1);
+        }
+    }
+
+    /// <summary>
     /// The names <paramref name="plan"/> reads from outside its own sources,
     /// or null when its reach isn't known — a plan built by a path that
     /// records none (a rowset function, a multi-statement function), which
@@ -195,7 +258,8 @@ partial class Selection
         SqlType[] windowResultTypes,
         bool distinct,
         Expression? topExpression,
-        string[] outputColumnNames)
+        string[] outputColumnNames,
+        List<int> startupConstantOwners)
     {
         var collector = new ProjectionDemand.Collector(sources, expressions.Count, aggregates, windows);
         for (var i = 0; i < expressions.Count; i++)
@@ -273,7 +337,12 @@ partial class Selection
             selfRead[i] = true;
 
         selection.freeNames = collector.Unknown ? null : [.. collector.FreeNames];
-        selection.projectionDemand = collector.Finish(selection.Schema, outputColumnNames, expressions, selfRead, readsWholeRow, windowOperandTypes, windowResultTypes);
+        // A column holding a constant real runs as its plan starts stays in
+        // the body, where that constant runs whenever the column is computed.
+        var ownsStartupConstant = new bool[expressions.Count];
+        foreach (var owner in startupConstantOwners)
+            ownsStartupConstant[owner] = true;
+        selection.projectionDemand = collector.Finish(selection.Schema, outputColumnNames, expressions, selfRead, readsWholeRow, windowOperandTypes, windowResultTypes, ownsStartupConstant, LateralSlots(sources, joins));
         _ = selection.projectionDemand.Apply(null);
     }
 }
@@ -313,6 +382,10 @@ internal sealed class ProjectionDemand
     private readonly int[][] windowOwners;
     private readonly SqlType[] windowOperandTypes;
     private readonly SqlType[] windowResultTypes;
+    private readonly bool[]? ownsStartupConstant;
+    private readonly bool[] lateral;
+    private DeferredColumn?[]? templates;
+    private bool templatesSettled;
 
     /// <summary>
     /// The windows a reader reads, with their operand and result types, once
@@ -323,8 +396,10 @@ internal sealed class ProjectionDemand
     /// <summary>Whether the last <see cref="Apply"/> left any column uncomputed.</summary>
     public bool Narrowed;
 
-    private ProjectionDemand(Collector collector, SqlType[] schema, string[] columnNames, List<Expression> projection, bool[] selfRead, bool readsWholeRow, SqlType[] windowOperandTypes, SqlType[] windowResultTypes)
+    private ProjectionDemand(Collector collector, SqlType[] schema, string[] columnNames, List<Expression> projection, bool[] selfRead, bool readsWholeRow, SqlType[] windowOperandTypes, SqlType[] windowResultTypes, bool[]? ownsStartupConstant, bool[] lateral)
     {
+        this.ownsStartupConstant = ownsStartupConstant;
+        this.lateral = lateral;
         this.columnNames = columnNames;
         this.sources = collector.Sources;
         this.prunable = collector.Prunable;
@@ -407,10 +482,140 @@ internal sealed class ProjectionDemand
         for (var s = 0; s < this.sources.Length; s++)
         {
             if (masks[s] is { } mask)
-                Hand(this.sources[s], mask);
+                Hand(this.sources[s], mask, this.DeferredAt(s, mask));
         }
         this.Narrowed = narrowed;
         return narrowed;
+    }
+
+    /// <summary>
+    /// The columns of the source at <paramref name="slot"/> this query
+    /// evaluates itself where it reads them (see <see cref="DeferredColumn"/>),
+    /// moving each from <paramref name="mask"/> — the columns its body
+    /// computes — to the columns it reads there instead; null when it defers
+    /// none.
+    /// </summary>
+    private DeferredColumn?[]? DeferredAt(int slot, bool[] mask)
+    {
+        if (SourceTemplates(this.sources[slot]) is not { } offered)
+            return null;
+        DeferredColumn?[]? deferred = null;
+        for (var c = 0; c < mask.Length && c < offered.Length; c++)
+        {
+            if (mask[c] && offered[c]?.BindAtReader(this.sources, slot, this.lateral.Length > slot && this.lateral[slot]) is { } bound)
+                (deferred ??= new DeferredColumn?[mask.Length])[c] = bound;
+        }
+        if (deferred is null)
+            return null;
+        for (var c = 0; c < deferred.Length; c++)
+        {
+            if (deferred[c] is { } column)
+            {
+                mask[c] = false;
+                foreach (var dependency in column.Dependencies)
+                    mask[dependency] = true;
+            }
+        }
+        return deferred;
+    }
+
+    /// <summary>The deferred columns the body behind <paramref name="source"/> offers.</summary>
+    private static DeferredColumn?[]? SourceTemplates(FromSource source) =>
+        source.Cte is { } binding ? binding.Plan?.DeferrableColumns() : source.LateralPlan?.DeferrableColumns();
+
+    /// <summary>
+    /// Per select-list column, the form a reader may evaluate it in itself
+    /// (see <see cref="Selection.DeferrableColumns"/>): a column the query
+    /// doesn't read itself, holding no constant real runs as its plan starts,
+    /// whose expression reads only columns the query projects as they are —
+    /// directly or through a source's own deferred column — or names from
+    /// outside the query. Settled once, the first time a reader asks.
+    /// </summary>
+    public DeferredColumn?[]? Templates()
+    {
+        if (this.templatesSettled)
+            return this.templates;
+        var count = this.written.Length;
+        DeferredColumn?[]? result = null;
+        if (!this.readsWholeRow)
+        {
+            var plain = new (int Source, int Column)?[count];
+            for (var j = 0; j < count; j++)
+            {
+                if (Unwrap(this.written[j]) is Reference reference && Selection.TryBindSourceColumn(this.sources, reference.ReferencedName) is { Source: >= 0 } id)
+                    plain[j] = id;
+            }
+            for (var i = 0; i < count; i++)
+            {
+                if (this.selfRead[i] || this.ownsStartupConstant?[i] == true)
+                    continue;
+                var template = plain[i] is var (source, column)
+                    ? this.Lift(source, column, plain)
+                    : DeferredColumn.Of(Unwrap(this.written[i]), name => this.BindInBody(name, plain));
+                if (template is not null)
+                    (result ??= new DeferredColumn?[count])[i] = template;
+            }
+        }
+        this.templates = result;
+        this.templatesSettled = true;
+        return result;
+    }
+
+    private static Expression Unwrap(Expression expression) => expression is NamedExpression named ? named.Inner : expression;
+
+    /// <summary>
+    /// Where a deferred column of this query finds <paramref name="name"/>: a
+    /// column of one of its sources, or — binding none of them — a name from
+    /// outside the query, placed once a reader binds the column.
+    /// </summary>
+    private DeferredBinding? BindInBody(MultiPartName name, (int Source, int Column)?[] plain) =>
+        Selection.TryBindSourceColumn(this.sources, name) switch
+        {
+            null => DeferredBinding.FreeName,
+            (-1, _) => null,
+            var (source, column) => this.BindSourceColumn(source, column, plain),
+        };
+
+    /// <summary>
+    /// Where a deferred column of this query finds column
+    /// <paramref name="column"/> of source <paramref name="source"/>: that
+    /// source's own deferred column, lifted to this query's row, or the select
+    /// list column projecting it as it is.
+    /// </summary>
+    private DeferredBinding? BindSourceColumn(int source, int column, (int Source, int Column)?[] plain)
+    {
+        if (this.prunable[source] && SourceTemplates(this.sources[source]) is { } offered && column < offered.Length && offered[column] is not null)
+            return this.Lift(source, column, plain) is { } lifted ? DeferredBinding.NestedColumn(lifted) : null;
+        for (var j = 0; j < plain.Length; j++)
+        {
+            if (plain[j] == (source, column))
+                return DeferredBinding.OutputColumn(j);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Column <paramref name="column"/> of source <paramref name="source"/> as
+    /// a deferred column of this query's own row; null when the source's body
+    /// computes it, or what it reads isn't projected here.
+    /// </summary>
+    private DeferredColumn? Lift(int source, int column, (int Source, int Column)?[] plain)
+    {
+        if (!this.prunable[source] || SourceTemplates(this.sources[source]) is not { } offered || column >= offered.Length || offered[column] is not { } template)
+            return null;
+        var lateral = this.lateral.Length > source && this.lateral[source];
+        return template.Rebind((binding, name) => binding.Kind switch
+        {
+            DeferredBindingKind.Output => this.BindSourceColumn(source, binding.Column, plain),
+            DeferredBindingKind.Free when lateral => Selection.TryBindSourceColumn(this.sources[..source], name) switch
+            {
+                null => DeferredBinding.FreeName,
+                (-1, _) => null,
+                var (left, leftColumn) => this.BindSourceColumn(left, leftColumn, plain),
+            },
+            DeferredBindingKind.Free => DeferredBinding.FreeName,
+            _ => null,
+        });
     }
 
     private (List<WindowExpression>, SqlType[], SqlType[]) WindowsLiveIn(bool[] slotLive, int windowBase)
@@ -440,18 +645,30 @@ internal sealed class ProjectionDemand
     }
 
     /// <summary>
-    /// Records on <paramref name="source"/> the columns its reader reads and
-    /// hands its body the demand; a CTE's body is handed what every reference
-    /// to it reads together (see <see cref="HandToCte"/>).
+    /// Records on <paramref name="source"/> the columns its body computes for
+    /// its reader and the ones the reader evaluates itself
+    /// (<paramref name="deferred"/>), and hands its body the demand; a CTE's
+    /// body is handed what every reference to it reads together (see
+    /// <see cref="HandToCte"/>).
     /// </summary>
-    private static void Hand(FromSource source, bool[] mask)
+    private static void Hand(FromSource source, bool[] mask, DeferredColumn?[]? deferred)
     {
         source.ReadColumns = mask;
+        source.DeferredColumns = deferred;
         var narrowed = Array.IndexOf(mask, false) >= 0;
         var takes = source.Cte is { } binding
             ? HandToCte(binding)
             : source.LateralPlan?.AcceptDemand(narrowed ? mask : null) == true;
-        source.UncomputedColumns = takes && narrowed ? Array.ConvertAll(mask, static read => !read) : null;
+        if (!(takes && narrowed))
+        {
+            source.UncomputedColumns = null;
+            return;
+        }
+        // A deferred column is read, by its reader rather than the body.
+        var uncomputed = new bool[mask.Length];
+        for (var c = 0; c < mask.Length; c++)
+            uncomputed[c] = !mask[c] && deferred?[c] is null;
+        source.UncomputedColumns = uncomputed;
     }
 
     /// <summary>
@@ -521,8 +738,8 @@ internal sealed class ProjectionDemand
 
         private int AggregateSlot(int index) => 1 + this.projectionCount + this.Windows.Count + index;
 
-        public ProjectionDemand Finish(SqlType[] schema, string[] columnNames, List<Expression> projection, bool[] selfRead, bool readsWholeRow, SqlType[] windowOperandTypes, SqlType[] windowResultTypes) =>
-            new(this, schema, columnNames, projection, selfRead, readsWholeRow, windowOperandTypes, windowResultTypes);
+        public ProjectionDemand Finish(SqlType[] schema, string[] columnNames, List<Expression> projection, bool[] selfRead, bool readsWholeRow, SqlType[] windowOperandTypes, SqlType[] windowResultTypes, bool[]? ownsStartupConstant, bool[] lateral) =>
+            new(this, schema, columnNames, projection, selfRead, readsWholeRow, windowOperandTypes, windowResultTypes, ownsStartupConstant, lateral);
 
         /// <summary>Counts every column of every source read by <paramref name="slot"/>.</summary>
         public void ReadEverything(int slot)

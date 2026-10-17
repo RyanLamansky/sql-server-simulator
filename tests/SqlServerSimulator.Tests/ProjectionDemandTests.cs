@@ -88,6 +88,91 @@ public sealed class ProjectionDemandTests
     public void ReadColumn_IsComputed(string query) => _ = Seeded().AssertSqlError(query, 8134);
 
     /// <summary>
+    /// A read column is evaluated where its reader uses it, as real merges the
+    /// body's projection into the reading query: a <c>CASE</c> / <c>IIF</c>
+    /// arm the guard skips, a filter beneath the projection or an <c>APPLY</c>
+    /// body's guarded column never divides by zero for <c>k = 3</c> (probed
+    /// 2026-10-17 against SQL Server 2025, each shape answering alike under
+    /// <c>RECOMPILE</c>, <c>MAXDOP 1</c>, a forced parallel plan, hash, merge
+    /// and loop hints, and heap, clustered and nonclustered layouts).
+    /// </summary>
+    [TestMethod]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(iif(k = 3, 0, x) as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from v1")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from v2")]
+    [DataRow("-5,-10,0,10", "with c as (select k, 10 / (k - 3) as x from src) select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from c")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select top 10 k, 10 / (k - 3) as x from src order by k) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x from src group by k) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select distinct k, 10 / (k - 3) as x from src) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when k = 3 then 0 else x end as varchar), ',') within group (order by k) from (select k, 10 / (k - 3) as x, row_number() over (order by k) as rn from src) d")]
+    [DataRow("-5,-10,0,10", "select string_agg(cast(case when s.k = 3 then 0 else a.x end as varchar), ',') within group (order by s.k) from src s cross apply (select 10 / (s.k - 3) as x) a")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from v1 where k <> 3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from v2 where k <> 3")]
+    [DataRow("-5,-10,10", "with c as (select k, 10 / (k - 3) as x from src) select string_agg(cast(x as varchar), ',') within group (order by k) from c where k <> 3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(x as varchar), ',') within group (order by k) from (select * from v1) e where k <> 3")]
+    [DataRow("-4,-9,11", "select string_agg(cast(y as varchar), ',') within group (order by k) from (select k, x + 1 as y from v1) e where k <> 3")]
+    [DataRow("-5,-10,10", "select string_agg(cast(d.x as varchar), ',') within group (order by a.k) from src a left join v1 d on a.k = d.k and d.k <> 3")]
+    [DataRow("-10,-5,10", "select string_agg(cast(x as varchar), ',') within group (order by x) from v1 where k <> 3")]
+    [DataRow("1,0,3,4", "select string_agg(cast(case when s = 'x' then 0 else c end as varchar), ',') within group (order by k) from (select k, s, cast(s as int) as c from src) d")]
+    [DataRow("1,2,3,4", "select string_agg(cast(isnull(k, x) as varchar), ',') within group (order by k) from v1")]
+    [DataRow("3", "select cast(count(*) as varchar) from v1 where k <> 3 and x > -100")]
+    [DataRow("4", "select cast(count(*) as varchar) from v1 where k = 3 or x > -100")]
+    [DataRow("4", "select cast(count(*) as varchar) from v1 where case when k = 3 then 1 else x end > -100")]
+    [DataRow("3", "select cast(count(*) as varchar) from (select x from v1 where k <> 3 group by x) g")]
+    [DataRow("3", "select cast(count(*) as varchar) from src s where exists (select 1 from v1 d where d.k = s.k and d.k <> 3 and d.x > -100)")]
+    [DataRow("-5", "select cast(sum(case when k = 3 then 0 else x end) as varchar) from v1")]
+    public void ReadColumn_IsEvaluatedWhereItsReaderUsesIt(string expected, string query) => AreEqual(expected, Seeded().ExecuteScalar(query));
+
+    /// <summary>
+    /// What the body reads of a column itself, or a column only it can
+    /// compute, is computed for every body row, and the guard above it comes
+    /// too late (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select case when k = 3 then 0 else x end from (select distinct v, k, 10 / (k - 3) as x from src2) d")]
+    [DataRow("select case when k = 3 then 0 else x end from (select k, 10 / (k - 3) as x from src2 union select 5, 1) d")]
+    [DataRow("select case when k = 3 then 0 else x end from (select k, sum(10 / (k - 3)) as x from src2 group by k) d")]
+    [DataRow("select case when k = 3 then 0 else x end from (select k, x from (select k, 10 / (k - 3) as x from src) i where i.x > -100) d")]
+    [DataRow("select x from (select top 10 k, 10 / (k - 3) as x from src order by x) d where k <> 3")]
+    [DataRow("select d.k from (select k, 10 / (k - 3) as x from src) d join src s on s.k = d.x")]
+    public void ReadColumn_TheBodyNeedsItself_RaisesUnderAGuard(string query) => _ = Seeded().AssertSqlError(query, 8134);
+
+    /// <summary>
+    /// Every reader of a deferred column reads it as the body would have
+    /// computed it: a hash join's key, a grouping, a window's order, a cursor's
+    /// fetch, a joined write's source and a correlated subquery.
+    /// </summary>
+    [TestMethod]
+    public void DeferredColumn_ReadsAsTheBodyComputesIt()
+    {
+        var simulation = Seeded();
+        AreEqual("1:2,2:4", simulation.ExecuteScalar("select string_agg(concat(d.k, ':', s.k), ',') within group (order by d.k) from (select k, k * 2 as x from src) d join src s on s.k = d.x"));
+        AreEqual("0:2,1:2", simulation.ExecuteScalar("select string_agg(concat(x, ':', n), ',') within group (order by x) from (select x, count(*) as n from (select k, k % 2 as x from src) d group by x) g"));
+        AreEqual("100,90,70,40", simulation.ExecuteScalar("select string_agg(cast(t as varchar), ',') within group (order by k) from (select k, sum(x) over (order by x desc) as t from (select k, k * 10 as x from src) d) w"));
+        AreEqual("11,22,33,44", simulation.ExecuteScalar("select string_agg(cast(a.y as varchar), ',') within group (order by s.k) from src s cross apply (select d.x + s.k as y from (select k, k * 10 as x from src) d where d.k = s.k) a"));
+        AreEqual("3,5,7,9", simulation.ExecuteScalar("select string_agg(cast(b.z as varchar), ',') within group (order by s.k) from src s cross apply (select s.k * 2 as y) a cross apply (select a.y + 1 as z) b"));
+        AreEqual(-10, simulation.ExecuteBatchesScalar(
+            """
+            declare @x int;
+            declare c cursor keyset for select x from (select k, 10 / (k - 3) as x from src) d where k <> 3 order by k;
+            open c;
+            fetch next from c into @x;
+            fetch next from c into @x;
+            close c;
+            deallocate c;
+            select @x;
+            """));
+        AreEqual("-5,-10,0,10", simulation.ExecuteBatchesScalar(
+            """
+            declare @u table (k int, v int);
+            insert @u select k, 0 from src;
+            update u set v = d.x from @u u join (select k, 10 / (k - 3) as x from src) d on d.k = u.k where u.k <> 3;
+            select string_agg(cast(v as varchar), ',') within group (order by k) from @u;
+            """));
+    }
+
+    /// <summary>
     /// A view's conversion error in a column the query never reads doesn't
     /// surface, where the column it does read still raises its own.
     /// </summary>

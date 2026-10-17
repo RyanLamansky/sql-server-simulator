@@ -82,12 +82,34 @@ A view's or inline function's body, parsed per run, takes the demand from its re
 A name that resolves to a column its source left uncomputed is refused with an `InvalidOperationException` (`FromSource.UncomputedColumns`) rather than reading the NULL, so a clause the walk misses fails loudly; a new clause reading a source's columns joins the walk, and a new path reading a body's rows by position rather than by name hands it no demand.
 Over a 50,000-row view projecting six string, date and decimal expressions, `SELECT COUNT(*)` fell from about 130 ms to 12 ms and a derived table read for one of four columns from about 42 ms to 12 ms, with queries reading every column unchanged (measured 2026-10-17, Release build, warm plan cache).
 
+### A read column is evaluated where its reader uses it
+
+Real merges the body's projection into the query reading it, so a column that is read is evaluated where the reader uses it rather than for every row the body produces.
+`SELECT CASE WHEN k = 3 THEN 0 ELSE x END FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` answers there, and so do `IIF(k = 3, 0, x)`, `ISNULL(k, x)`, `WHERE k = 3 OR x > -100`, a guard over a view, a view over a view, a CTE, a `TOP … ORDER BY k`, `GROUP BY k` or windowed body, and an `APPLY` body's column under a guard on the left row; a filter runs beneath the projection the same way, so `SELECT x FROM v WHERE k <> 3` answers too, as does an aggregate, a grouping, an ordering or an `EXISTS` reading the column above the filter (probed 2026-10-17 against SQL Server 2025, each of those shapes answering alike under `RECOMPILE`, `MAXDOP 1`, a forced parallel plan, hash, merge and loop hints, and heap, clustered and nonclustered layouts of a 20,000-row table).
+What the body reads of the column itself still computes it for every body row, and the guard above comes too late: a `DISTINCT` over no key, a `UNION` over branches no key makes unique, an aggregate (`SUM(10 / (k - 3))`), a `TOP` ordering by it, the body's own `WHERE` on it, and a join's `ON` reading it all raise.
+
+Each body offers, per select-list column, the form a reader may evaluate it in (`ProjectionDemand.Templates`, a `DeferredColumn`): the column's expression with each name it reads bound to a column the body projects as it is — directly, or through a source's own offered column, lifted to this body's row — or to a name from outside the body, which the reader places as a column left of its `APPLY` or as its enclosing scope's.
+A view's offer comes from the body `Simulation.BindViewColumns` parses for the reference, which each run parses again from the same definition.
+The reader (`ProjectionDemand.DeferredAt`, as it hands each source its demand) takes the offer for each column it reads, hands the body the columns the expression reads in place of the column — which the body then leaves uncomputed, as it does an unread one — and records the offer in `FromSource.DeferredColumns`; `Selection.ReadSourceColumn` evaluates it over the slot's row each time a name resolves to it, a NULL-extended slot reading NULL without evaluating.
+So **every read of a derived source's column goes through `Selection.ReadSourceColumn` or `Selection.DecodeOrCompute`**: a new path decoding such a row's bytes by position reads the NULL the body left there.
+A column is offered only when evaluating it again per reference is unobservable and changes nothing real computes once: its expression is pure (`Expression.ParallelSafe`, which declines a subquery, a function call and a per-call value such as `NEWID()`), holds no aggregate or window, reads at least one column (an expression reading none is a constant real runs as its plan starts), and holds no such startup constant.
+A body that reads the column itself (`ProjectionDemand`'s self-read set, or a whole-row reader) offers none of it.
+Over the same 50,000-row view a query reading all six columns measured the same within noise and one reading them under a filter halving the rows fell from about 80 ms to 65 ms (measured 2026-10-17, Release build, on a loaded host).
+
 ### Divergences
 
-- **Real evaluates a derived column where it is used, not where it is defined.**
-  `SELECT CASE WHEN k = 3 THEN 0 ELSE x END FROM (SELECT k, 10 / (k - 3) AS x FROM src) d` answers there — the `CASE` arm that would read `x` for `k = 3` never runs, and `IIF(k = 3, 0, x)` and `ISNULL(k, x)` behave the same — while the simulator computes a read column for every row the body produces and raises Msg 8134.
-  The same placement lets real filter beneath a body's projection: `SELECT x FROM v WHERE k <> 3` answers there, while here only a conjunct the WHERE pushdown carries into the body filters first, and an `EXCEPT` body's anti-join compares `x` only for rows whose `k` matched (probed 2026-10-17 against SQL Server 2025).
-  It is the column-level face of [the evaluation ordering](#not-folded-yet) real's plan chooses.
+- **A column reading what its body doesn't project is computed in the body.**
+  `SELECT CASE WHEN k = 3 THEN 0 ELSE c END FROM (SELECT k, CAST(s AS int) AS c FROM src) d` answers on real, whose merged projection reads `s` beneath the guard, while here `c` is computed for every row and raises Msg 245.
+  Not modeled yet: the reader would need the body's rows to carry the columns the expression reads.
+- **A `UNION ALL` body's column is computed per branch.**
+  Real pushes the reader's projection into each branch, so a guard over a `UNION ALL` body answers there; here it raises.
+- **A filter doesn't reach beneath a `DISTINCT` or set-operation body** (`SELECT x FROM (SELECT DISTINCT k, 10 / (k - 3) AS x FROM t) d WHERE k <> 3` answers on real), and the [WHERE pushdown](joins.md#where-pushdown-into-a-view--derived-table-body) carries no `<>`; an `EXCEPT` body's anti-join compares `x` only for rows whose `k` matched on real.
+- **Real's key-based simplifications aren't followed**: a `UNION` whose branch a key makes unique, or an aggregate grouped by a key, evaluates its column lazily there (`SUM(10 / (k - 3)) … GROUP BY k` over a primary key answers under a guard), while here it is computed per row.
+- **An inline function's, a `VALUES` list's and a FROM-less scalar subquery's column** is computed in its body: `CROSS APPLY (VALUES (t.k, 10 / (t.k - 3))) v(kk, x) WHERE kk <> 3` and a guarded `(SELECT 10 / (t.k - 3))` column answer on real.
+- The written-order `WHERE` (`WHERE x > -100 AND k <> 3`, which real answers by testing the cheap conjunct first over a base table too) and a `HAVING` on grouping columns (which real applies beneath the grouping, again over a base table too) are the query-wide orderings of [the backlog](backlog.md), not this section's.
+- **Settled — don't re-pitch: the shapes whose answer follows real's plan.**
+  A guard on the preserved side of an outer join over a computed column of the NULL-supplied side (`CASE WHEN b.k % 1000 = 3 THEN 0 ELSE d.x END … FROM b LEFT JOIN v d ON b.k = d.k`) raised in 20 of the 28 plan and layout combinations probed and answered in the rest, a filter on the other side of an inner join answered in 26 of 28 (a loop join over a heap raised), and a `TOP (n) … WHERE k % 1000 <> 3 ORDER BY x` raises over 20,000 rows where the same query over four answers — real computes the sort key ahead of the filter there even over a base table (probed 2026-10-17 against SQL Server 2025).
+  The simulator evaluates the column at its reader in all three and answers.
 
 ### Not modeled yet
 

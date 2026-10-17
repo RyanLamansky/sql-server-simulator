@@ -2875,10 +2875,7 @@ partial class Simulation
                 : SimulatedSqlException.InvalidColumnName(name);
         }
 
-        var bytes = tuple[s];
-        return bytes is null
-            ? SqlValue.Null(sources[s].Columns[c].Type)
-            : Selection.DecodeOrCompute(sources[s], c, bytes, batch);
+        return Selection.ReadSourceColumn(sources, tuple, s, c, batch, outerResolver: null, memo);
     }
 
     /// <summary>

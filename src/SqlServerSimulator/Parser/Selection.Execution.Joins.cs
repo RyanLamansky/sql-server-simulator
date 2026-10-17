@@ -50,10 +50,25 @@ internal sealed partial class Selection
                 : throw UnresolvedNameError(sources, name);
         }
 
-        var bytes = tuple[s];
-        return bytes is null
-            ? SqlValue.Null(sources[s].Columns[c].Type)
-            : DecodeOrCompute(sources[s], c, bytes, batch);
+        return ReadSourceColumn(sources, tuple, s, c, batch, outerResolver, memo);
+    }
+
+    /// <summary>
+    /// Column <paramref name="column"/> of source <paramref name="slot"/> in
+    /// <paramref name="tuple"/>: a typed NULL for a NULL-extended slot, a
+    /// column the reader evaluates itself run over the slot's row
+    /// (<see cref="FromSource.DeferredColumns"/>), and otherwise the stored or
+    /// computed value.
+    /// </summary>
+    internal static SqlValue ReadSourceColumn(FromSource[] sources, byte[]?[] tuple, int slot, int column, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, SourceColumnMemo? memo)
+    {
+        var bytes = tuple[slot];
+        var source = sources[slot];
+        if (bytes is null)
+            return SqlValue.Null(source.Columns[column].Type);
+        return source.DeferredColumns is { } deferred && deferred[column] is { } evaluated
+            ? evaluated.Evaluate(sources, tuple, slot, batch, outerResolver, memo)
+            : DecodeOrCompute(source, column, bytes, batch);
     }
 
     /// <summary>
@@ -1135,7 +1150,15 @@ internal sealed partial class Selection
     internal static SqlValue DecodeOrCompute(FromSource source, int columnIndex, byte[] bytes, BatchContext batch)
     {
         if (source.StorageOrdinals is null)
-            return RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore);
+        {
+            // A column the reader evaluates itself, read here off its row
+            // alone — a read with the whole tuple in hand takes ReadSourceColumn.
+            if (source.DeferredColumns is not { } deferred || deferred[columnIndex] is not { } evaluated)
+                return RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore);
+            return evaluated.ReadsOnlyItsRow
+                ? evaluated.Evaluate([source], [bytes], 0, batch, outerResolver: null, memo: null)
+                : throw new InvalidOperationException($"Column {columnIndex} of '{source.Qualifier}' reads outside its row and was read without the tuple holding it.");
+        }
 
         var column = source.Columns[columnIndex];
         return column.Computed is not { } computedExpr || column.IsPersisted

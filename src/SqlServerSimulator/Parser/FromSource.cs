@@ -541,10 +541,12 @@ internal sealed class FromSource(
     public List<byte[]>? MaterializedRows;
 
     /// <summary>
-    /// Per column, whether the query reading this source reads it anywhere —
-    /// set once that query has bound (<c>Selection.NoteProjectionDemand</c>);
-    /// null when every column counts as read. A CTE's body is handed what all
-    /// its references read together.
+    /// Per column, whether the query reading this source has its body compute
+    /// it: what the query reads anywhere, less the columns it evaluates itself
+    /// (<see cref="DeferredColumns"/>) and plus the ones those read — set once
+    /// that query has bound (<c>Selection.NoteProjectionDemand</c>); null when
+    /// every column counts as read. A CTE's body is handed what all its
+    /// references read together.
     /// </summary>
     public bool[]? ReadColumns;
 
@@ -555,6 +557,16 @@ internal sealed class FromSource(
     /// which <c>Selection.FindSourceColumn</c> refuses rather than answer NULL.
     /// </summary>
     public bool[]? UncomputedColumns;
+
+    /// <summary>
+    /// Per column, the expression the query reading this source evaluates
+    /// where it reads the column, in place of the body computing it
+    /// (<see cref="DeferredColumn"/>) — set once that query has bound; null
+    /// when the body computes every column it reads. The body leaves such a
+    /// column uncomputed, so every read of it goes through
+    /// <c>Selection.ReadSourceColumn</c> or <c>Selection.DecodeOrCompute</c>.
+    /// </summary>
+    public DeferredColumn?[]? DeferredColumns;
 
     /// <summary>
     /// The columns a joined reader re-draws per output row, taken from the
@@ -609,6 +621,7 @@ internal sealed class FromSource(
             BrowseBody = this.BrowseBody,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
+            DeferredColumns = this.DeferredColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -635,6 +648,7 @@ internal sealed class FromSource(
             BrowseBody = this.BrowseBody,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
+            DeferredColumns = this.DeferredColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -663,6 +677,7 @@ internal sealed class FromSource(
             BrowseBody = this.BrowseBody,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
+            DeferredColumns = this.DeferredColumns,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,
             SeekIsEquality = this.SeekIsEquality,
@@ -689,6 +704,7 @@ internal sealed class FromSource(
             BrowseBody = this.BrowseBody,
             ReadColumns = this.ReadColumns,
             UncomputedColumns = this.UncomputedColumns,
+            DeferredColumns = this.DeferredColumns,
             MaterializedRows = catalogRows is null ? rows : null,
             Seeks = this.Seeks,
             SeekOrdinals = this.SeekOrdinals,

@@ -679,7 +679,7 @@ partial class Simulation
                 for (var s = 0; s < sources.Length; s++)
                 {
                     for (var c = 0; c < sources[s].ColumnNames.Length; c++, k++)
-                        values[k] = tuple[s] is { } row ? Selection.DecodeOrCompute(sources[s], c, row, batch) : SqlValue.Null(types[k]);
+                        values[k] = tuple[s] is not null ? Selection.ReadSourceColumn(sources, tuple, s, c, batch, outerResolver: null, memo: null) : SqlValue.Null(types[k]);
                 }
                 rows.Add(values);
             }

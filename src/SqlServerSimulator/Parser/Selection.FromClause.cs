@@ -1610,7 +1610,7 @@ internal sealed partial class Selection
                     }
                     ValidateViewIndexHints(context, resolvedView, viewHints, objectName.ToString(), objectNameLine);
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
-                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens, graphIdentity: viewGraphIdentity);
+                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens, graphIdentity: viewGraphIdentity).DeferringAs(viewBody);
                     viewPlan.OutputKeys = viewBody?.OutputKeys;
                     var viewSource = new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,

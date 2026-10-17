@@ -70,6 +70,27 @@ public sealed class EFCoreViews
         Assert.AreEqual(2, context.OrderSummaries.Count());
         Assert.AreEqual(3, context.OrderSummaries.Sum(s => s.OrderCount));
     }
+
+    /// <summary>
+    /// A view column the query reads is evaluated where the query uses it, so
+    /// the filter LINQ's <c>Where</c> emits and the <c>CASE</c> its ternary
+    /// emits keep the row whose column divides by zero from computing it, as
+    /// on SQL Server 2025 (probed 2026-10-17).
+    /// </summary>
+    [TestMethod]
+    public void ToView_ColumnTheQueryReads_IsEvaluatedWhereTheQueryUsesIt()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table Orders (Id int primary key, Customer varchar(50), Amount decimal(10,2));
+            insert Orders values (1, 'Alice', 100.00), (2, 'Bob', 250.00), (3, 'Alice', 50.00);
+            """,
+            "create view OrderSummary as select Customer, 100.00 / (Id - 2) as TotalAmount, Id as OrderCount from Orders");
+        using var context = new ViewDbContext(simulation);
+        CollectionAssert.AreEqual(new[] { -100m, 100m }, context.OrderSummaries.Where(s => s.OrderCount != 2).OrderBy(s => s.OrderCount).Select(s => s.TotalAmount).ToList());
+        CollectionAssert.AreEqual(new[] { -100m, 0m, 100m }, context.OrderSummaries.OrderBy(s => s.OrderCount).Select(s => s.OrderCount == 2 ? 0m : s.TotalAmount).ToList());
+    }
 }
 
 /// <summary>

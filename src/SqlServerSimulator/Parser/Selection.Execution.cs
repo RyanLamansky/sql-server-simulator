@@ -2449,7 +2449,7 @@ internal sealed partial class Selection
         // leaves the rest of uncomputed — unless another plan built over the
         // same sources has said so already (notesDemand: false).
         if (notesDemand)
-            NoteProjectionDemand(selection, sources, joins, expressions, fromClause, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, distinct, topExpression, outputColumnNames);
+            NoteProjectionDemand(selection, sources, joins, expressions, fromClause, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, distinct, topExpression, outputColumnNames, projectionStartupOwners);
         return selection;
     }
 
