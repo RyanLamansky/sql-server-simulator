@@ -146,16 +146,25 @@ public sealed class ServerConfigurationTests
     }
 
     /// <summary>
-    /// The CLR rows keep reporting the host opt-in — the simulator's real gate
-    /// on assembly registration — whatever <c>sp_configure</c> wrote.
+    /// <c>clr enabled</c> starts as the host opt-in and then reports what
+    /// <c>sp_configure</c> and <c>RECONFIGURE</c> installed, the move reported
+    /// from the opt-in's value.
     /// </summary>
     [TestMethod]
-    public void ClrEnabled_ReportsHostOptIn_NotTheWrittenValue()
+    public void ClrEnabled_StartsAsHostOptIn_ThenReportsTheWrittenValue()
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("exec sp_configure 'clr enabled', 1; reconfigure;");
-        AreEqual(0, simulation.ExecuteScalar(
+        AreEqual(1, simulation.ExecuteScalar(
             "select convert(int, value_in_use) from sys.configurations where name = 'clr enabled'"));
+        var clr = new Simulation { EnableClr = true };
+        AreEqual("1|1", clr.ExecuteScalar("select concat(convert(int, value), '|', convert(int, value_in_use)) from sys.configurations where name = 'clr enabled'"));
+        using var connection = clr.CreateOpenConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.Add(e.Message);
+        _ = connection.CreateCommand("exec sp_configure 'clr enabled', 0; reconfigure").ExecuteNonQuery();
+        AreEqual("Configuration option 'clr enabled' changed from 1 to 0. Run the RECONFIGURE statement to install.", string.Join('|', messages));
+        AreEqual("0|0", clr.ExecuteScalar("select concat(convert(int, value), '|', convert(int, value_in_use)) from sys.configurations where name = 'clr enabled'"));
     }
 
     /// <summary>

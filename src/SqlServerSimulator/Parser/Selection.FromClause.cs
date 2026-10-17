@@ -1696,7 +1696,7 @@ internal sealed partial class Selection
                         var lateralPlan = function switch
                         {
                             InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName),
-                            ClrTableValuedFunction clrTvf => Selection.ForClrTvf(clrTvf, tvfArgs),
+                            ClrTableValuedFunction clrTvf => Selection.ForClrTvf(context.Batch, clrTvf, tvfArgs),
                             _ => Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs),
                         };
                         return new FromSource(

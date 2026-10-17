@@ -51,9 +51,12 @@ partial class Selection
     /// <see cref="ForMultiStatementTvf"/>: each execution evaluates the
     /// arguments in the outer scope and streams the rows the function's
     /// <c>FillRow</c> method produces, typed by its declared result table.
+    /// The reference needs <c>clr enabled</c> as the batch compiles
+    /// (<see cref="Simulation.RequireClrWhileCompiling"/>).
     /// </summary>
-    internal static Selection ForClrTvf(ClrTableValuedFunction function, Expression?[] arguments)
+    internal static Selection ForClrTvf(BatchContext batch, ClrTableValuedFunction function, Expression?[] arguments)
     {
+        Simulation.RequireClrWhileCompiling(batch);
         var schema = new SqlType[function.OutputColumns.Length];
         var columnNames = new string[function.OutputColumns.Length];
         for (var i = 0; i < function.OutputColumns.Length; i++)

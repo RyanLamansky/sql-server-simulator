@@ -2529,6 +2529,10 @@ internal readonly partial struct SqlValue
     /// </summary>
     private SqlValue CoerceClrUdt(SqlType target)
     {
+        // The type's code runs only while clr enabled is on; a compiled CAST
+        // or CONVERT checked it already, an implicit conversion checks here.
+        if (Parser.Expressions.Cast.RunsClrTypeCode(this.Type, target))
+            ((target as ClrUdtSqlType) ?? (ClrUdtSqlType)this.Type).Udt.Assembly.Host.RequireClrEnabled();
         if (target is ClrUdtSqlType udtTarget)
         {
             if (this.Type is XmlSqlType)

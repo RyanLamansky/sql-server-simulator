@@ -3,6 +3,13 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// Mimics SQL Server error 6263: CLR code a statement would run while
+    /// <c>clr enabled</c> is 0 (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrExecutionDisabled() =>
+        new("Execution of user code in the .NET Framework is disabled. Enable \"clr enabled\" configuration option.", 6263, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 6220: <c>SELECT … INTO</c> a table in a database
     /// that doesn't carry a CLR type a column of it has — a temporary table's
     /// <c>tempdb</c> always — which ends the batch (probed 2026-09-28 against

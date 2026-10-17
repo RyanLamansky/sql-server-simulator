@@ -103,6 +103,7 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
     public static ClrFunctionCall ParseCall(ClrScalarFunction function, ParserContext context)
     {
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function, function.Schema.Name, "EXECUTE"));
+        Simulation.RequireClrWhileCompiling(context.Batch);
         return new(function, UserFunctionCall.ParseFunctionArguments(function, context));
     }
 }

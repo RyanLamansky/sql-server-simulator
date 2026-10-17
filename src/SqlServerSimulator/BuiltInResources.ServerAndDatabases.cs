@@ -1100,23 +1100,16 @@ internal static partial class BuiltInResources
     /// currently reports: whatever <c>sp_configure</c> staged and
     /// <c>RECONFIGURE</c> installed, else the stock default.
     /// <para>
-    /// <c>clr enabled</c> is the exception, and reports the simulation's
-    /// <see cref="Simulation.EnableClr"/> opt-in whatever <c>sp_configure</c>
-    /// wrote.
+    /// <c>clr enabled</c>'s stock pair is the simulation's
+    /// <see cref="Simulation.EnableClr"/> opt-in
+    /// (<see cref="Simulation.ConfigurationDefault"/>).
     /// </para>
     /// </summary>
     internal static (int Configured, int InUse) EffectiveConfigurationValues(Simulation simulation, int index)
     {
-        var (id, name, value, _, _, valueInUse, _, _, _) = ConfigurationData[index];
-        if (name == "clr enabled")
-        {
-            var clr = simulation.EnableClr ? 1 : value;
-            return (clr, clr);
-        }
-
-        return simulation.ServerConfiguration.TryGetValue(id, out var setting)
+        return simulation.ServerConfiguration.TryGetValue(ConfigurationData[index].Id, out var setting)
             ? setting
-            : (value, valueInUse);
+            : simulation.ConfigurationDefault(index);
     }
 
     private static SqlValue[][] BuildConfigurationsRows()

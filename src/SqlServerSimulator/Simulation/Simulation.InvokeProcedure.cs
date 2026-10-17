@@ -101,6 +101,11 @@ partial class Simulation
             }
         }
 
+        // A CLR procedure runs only while clr enabled is on, which real checks
+        // ahead of the arguments (probed 2026-10-17 against SQL Server 2025).
+        if (procedure.ClrEntry is not null)
+            this.RequireClrEnabled();
+
         // Bind arguments to parameters. Positional args fill from the left;
         // named args do per-name lookup. Track which parameters are bound
         // so we can apply defaults / raise Msg 201 for unbound required.

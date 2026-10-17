@@ -45,6 +45,7 @@ internal enum AssemblyPermissionSet : byte
 /// </para>
 /// </remarks>
 internal sealed class SqlAssembly(
+    Simulation host,
     string name,
     int assemblyId,
     byte[] content,
@@ -52,6 +53,13 @@ internal sealed class SqlAssembly(
     int principalId,
     DateTime createDate)
 {
+    /// <summary>
+    /// The instance the assembly is registered on, whose <c>clr enabled</c>
+    /// option decides whether its code may run
+    /// (<see cref="Simulation.ClrEnabled"/>).
+    /// </summary>
+    public readonly Simulation Host = host;
+
     public readonly string Name = name;
     public readonly int AssemblyId = assemblyId;
 

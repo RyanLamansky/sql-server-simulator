@@ -20,6 +20,9 @@ partial class Simulation
     /// <summary><c>configuration_id</c> of <c>default trace enabled</c>.</summary>
     private const int DefaultTraceEnabledConfigurationId = 1568;
 
+    /// <summary><c>configuration_id</c> of <c>clr enabled</c>.</summary>
+    internal const int ClrEnabledConfigurationId = 1562;
+
     /// <summary><c>configuration_id</c> of <c>clr strict security</c>.</summary>
     private const int ClrStrictSecurityConfigurationId = 1587;
 
@@ -138,6 +141,43 @@ partial class Simulation
     internal bool ClrStrictSecurity => this.ConfigurationInUse(ClrStrictSecurityConfigurationId) != 0;
 
     /// <summary>
+    /// The installed value of <c>clr enabled</c>: whether registered CLR code
+    /// may run, Msg 6263 refusing it otherwise
+    /// (<see cref="RequireClrEnabled"/>). It starts as <see cref="EnableClr"/>,
+    /// so a simulation opted into CLR runs it until <c>sp_configure</c> and
+    /// <c>RECONFIGURE</c> turn the option off, while one that isn't never holds
+    /// an assembly to run.
+    /// </summary>
+    internal bool ClrEnabled => this.ConfigurationInUse(ClrEnabledConfigurationId) != 0;
+
+    /// <summary>
+    /// Raises Msg 6263 unless <c>clr enabled</c> is installed as 1: the gate
+    /// on executing a CLR procedure, trigger, function, aggregate or
+    /// user-defined type's code. Real creates every kind with the option off
+    /// and refuses only running one (probed 2026-10-07 and 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal void RequireClrEnabled()
+    {
+        if (!this.ClrEnabled)
+            throw SimulatedSqlException.ClrExecutionDisabled();
+    }
+
+    /// <summary>
+    /// <see cref="RequireClrEnabled"/> for a reference a statement compiles —
+    /// a CLR function, table-valued function or aggregate, or a user-defined
+    /// type's member or conversion — which real refuses as the batch compiles,
+    /// a skipped branch's included; a module body binding at <c>CREATE</c>
+    /// passes, as real creates the module with the option off (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static void RequireClrWhileCompiling(BatchContext batch)
+    {
+        if (!batch.CreateTimeBinding || batch.CompilingForRun)
+            batch.Connection.Simulation.RequireClrEnabled();
+    }
+
+    /// <summary>
     /// The installed value of <c>default trace enabled</c>, 1 unless
     /// <c>sp_configure</c> and <c>RECONFIGURE</c> turned it off: while on,
     /// <c>sys.traces</c> lists the default trace.
@@ -170,7 +210,18 @@ partial class Simulation
     private int ConfigurationInUse(int configurationId) =>
         this.ServerConfiguration.TryGetValue(configurationId, out var setting)
             ? setting.InUse
-            : BuiltInResources.ConfigurationData[IndexOfConfiguration(configurationId)].ValueInUse;
+            : this.ConfigurationDefault(IndexOfConfiguration(configurationId)).ValueInUse;
+
+    /// <summary>
+    /// The pair an option reports until <c>sp_configure</c> writes it: the
+    /// stock default, save <c>clr enabled</c>, which starts as
+    /// <see cref="EnableClr"/>.
+    /// </summary>
+    internal (int Value, int ValueInUse) ConfigurationDefault(int index)
+    {
+        var option = BuiltInResources.ConfigurationData[index];
+        return option.Id == ClrEnabledConfigurationId && this.EnableClr ? (1, 1) : (option.Value, option.ValueInUse);
+    }
 
     private static int IndexOfConfiguration(int configurationId)
     {
@@ -203,9 +254,8 @@ partial class Simulation
     /// The staged value lands in <see cref="ServerConfiguration"/> whatever the
     /// option, so every option round-trips through <c>sys.configurations</c>;
     /// one carries behavior where a feature reads its installed value
-    /// (<see cref="ConfigurationInUse"/>). The two CLR rows are the
-    /// exception — they keep reporting the <see cref="EnableClr"/> host opt-in,
-    /// which is the simulator's actual gate on assembly registration.
+    /// (<see cref="ConfigurationInUse"/>), <c>clr enabled</c> starting from the
+    /// <see cref="EnableClr"/> host opt-in (<see cref="ConfigurationDefault"/>).
     /// A write by a session without <c>ALTER SETTINGS</c> is Msg 15247.
     /// Real also returns a <c>duplicate_options</c> result set alongside
     /// Msg 15124, which isn't modeled.
@@ -256,10 +306,11 @@ partial class Simulation
         // Real reports the move from the option's staged value, and reports it
         // even when the value doesn't change ("changed from 1 to 1"), in the
         // error log too (probed 2026-10-16 against SQL Server 2025).
-        var previous = simulation.ServerConfiguration.TryGetValue(option.Id, out var current) ? current.Configured : option.Value;
+        var stock = simulation.ConfigurationDefault(index);
+        var previous = simulation.ServerConfiguration.TryGetValue(option.Id, out var current) ? current.Configured : stock.Value;
         _ = simulation.ServerConfiguration.AddOrUpdate(
             option.Id,
-            (requested, option.ValueInUse),
+            (requested, stock.ValueInUse),
             (_, existing) => (requested, existing.InUse));
         var changed = $"Configuration option '{option.Name}' changed from {previous} to {requested}. Run the RECONFIGURE statement to install.";
         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 196, 15457, changed));
@@ -294,13 +345,15 @@ partial class Simulation
         var configuration = simulation.ServerConfiguration;
         var adHocWas = simulation.AdHocDistributedQueriesEnabled;
         var cutoffWas = simulation.ConfigurationInUse(TwoDigitYearCutoffConfigurationId);
+        var clrWas = simulation.ClrEnabled;
         foreach (var entry in configuration)
             configuration[entry.Key] = (entry.Value.Configured, entry.Value.Configured);
         simulation.SettleDefaultTrace();
-        // Compiled plans over an ad hoc rowset were checked against the option
-        // when they compiled, and a plan's date literals were read through the
-        // cutoff, so a change to either retires them.
-        if (simulation.AdHocDistributedQueriesEnabled != adHocWas || simulation.ConfigurationInUse(TwoDigitYearCutoffConfigurationId) != cutoffWas)
+        // Compiled plans over an ad hoc rowset or a CLR routine were checked
+        // against their option when they compiled, and a plan's date literals
+        // were read through the cutoff, so a change to any of them retires them.
+        var cutoffMoved = simulation.ConfigurationInUse(TwoDigitYearCutoffConfigurationId) != cutoffWas;
+        if (simulation.AdHocDistributedQueriesEnabled != adHocWas || simulation.ClrEnabled != clrWas || cutoffMoved)
             simulation.BumpSchemaVersion();
     }
 

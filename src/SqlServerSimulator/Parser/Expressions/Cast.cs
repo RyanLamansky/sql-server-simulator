@@ -279,6 +279,7 @@ internal sealed class Cast : Expression
     /// </summary>
     internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, bool targetReportsNumeric, BatchContext batch) =>
         UndeclaredParameterDeduction.NoteExact(source, targetType) ? ResultStringType(targetType, targetType, batch.CurrentDatabase.Collation) ?? targetType
+        : RunsClrTypeCode(sourceType, targetType) && RequireClr(batch) ? targetType
         : sourceType is VectorSqlType sourceVector && targetType is VectorSqlType targetVector && sourceVector.IsFloat16 != targetVector.IsFloat16
             ? throw SimulatedSqlException.VectorBaseTypeConversion(sourceVector.BaseTypeName, targetVector.BaseTypeName)
         : source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
@@ -286,6 +287,23 @@ internal sealed class Cast : Expression
                 ConversionName(sourceType, source, batch),
                 targetReportsNumeric && targetType is DecimalSqlType ? "numeric" : ConversionName(targetType, null, batch))
             : ResultStringType(targetType, sourceType, batch.CurrentDatabase.Collation) ?? targetType;
+
+    /// <summary>
+    /// Whether converting between the two types runs a user-defined type's
+    /// code — its <c>Parse</c>, <c>ToString</c> or XML serialization — which
+    /// <c>clr enabled</c> gates, where a binary conversion reads or writes
+    /// the stored bytes (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    internal static bool RunsClrTypeCode(SqlType source, SqlType target) =>
+        (source is ClrUdtSqlType && (IsCharacterString(target) || target is XmlSqlType))
+        || (target is ClrUdtSqlType && (IsCharacterString(source) || source is XmlSqlType));
+
+    // Never true: raises Msg 6263 or lets the conversion's other checks run.
+    private static bool RequireClr(BatchContext batch)
+    {
+        Simulation.RequireClrWhileCompiling(batch);
+        return false;
+    }
 
     private static string ConversionName(SqlType type, Expression? source, BatchContext batch) =>
         type is HierarchyIdSqlType or SpatialSqlType ? $"{batch.CurrentDatabase.Name}.sys.{type.SqlServerName}"

@@ -393,7 +393,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   The 106 rows are a stock instance's **defaults** baked into `BuiltInResources.ConfigurationData` and materialized once into `ConfigurationsRows` — `configuration_id` and `name` are stable across instances, and `value` mirrors `value_in_use` on a fresh server.
   `sp_configure` writes are layered over those defaults per simulation (`Simulation.ServerConfiguration`, keyed by `configuration_id`): a staged value moves `value`, and `RECONFIGURE` moves `value_in_use` to match — see the `sp_configure` entry below.
   `SET` options are still not reflected here.
-  The two CLR rows are the exception and report the `Simulation.EnableClr` host opt-in whatever `sp_configure` wrote, since that opt-in — not the option — is what gates assembly registration.
+  `clr enabled` starts as the `Simulation.EnableClr` host opt-in rather than the stock 0, and `sp_configure` moves it from there (see [`clr-assemblies.md`](clr-assemblies.md#clr-enabled)).
   The row set is independent of the database argument (server-scoped).
   SSMS's SMO reads `select value_in_use from sys.configurations where configuration_id = 16384` (Agent XPs) during its Object-Explorer database-node preamble — without this the Msg 208 aborted the request before the database enumeration and the Databases folder showed empty.
 - **`sys.databases`** (full **98-column** projection matching SQL Server 2025; one row per `Database` via `DbId.DatabasesWithIds`, ordered by `database_id`).

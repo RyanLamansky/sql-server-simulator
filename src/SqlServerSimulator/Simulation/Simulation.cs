@@ -633,6 +633,12 @@ public sealed partial class Simulation
     /// <c>TRUSTWORTHY</c> (Msg 10343 otherwise).
     /// </para>
     /// <para>
+    /// The server option <c>clr enabled</c> starts at 1 when this is
+    /// <see langword="true"/>, and 0 otherwise; while <c>sp_configure</c> and
+    /// <c>RECONFIGURE</c> have it at 0, registered code stays registered but
+    /// running it raises SQL Server's error 6263, as on SQL Server.
+    /// </para>
+    /// <para>
     /// Leave it off unless the assembly bytes come from a source you trust as
     /// much as your own application code. It matters most when a
     /// <c>Simulation</c> is exposed over the network endpoint, where any client
@@ -3067,7 +3073,7 @@ public sealed partial class Simulation
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127) && !error.RefusedRecompilingDeferred
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite || batch.Connection.FiringTriggers.Count > 0)
-            && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947 or 33504
+            && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6263 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947 or 33504
                 || (error.Number == 208 && error.RaisedRunningFunctionBody && !error.EndedTriggerBody)
                 || (error.Number == 3930 && error.EndedTriggerBody)));
 

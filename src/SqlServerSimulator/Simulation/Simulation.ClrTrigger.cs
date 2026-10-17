@@ -26,9 +26,22 @@ partial class Simulation
     /// firing statement as a T-SQL body's error does. <c>INSERTED</c> and
     /// <c>DELETED</c> are reached only through the context connection, whose
     /// commands carry the trigger's frame.
+    /// <para>
+    /// With <c>clr enabled</c> off the trigger is Msg 6263 at the firing
+    /// statement's line, naming no procedure, which ends the statement and
+    /// dooms its transaction as the throw does (probed 2026-10-17 against SQL
+    /// Server 2025).
+    /// </para>
     /// </remarks>
     private static void RunClrTrigger(BatchContext outerBatch, TriggerFrame frame, ClrEntryPoint entry, string triggerName)
     {
+        if (!outerBatch.Connection.Simulation.ClrEnabled)
+        {
+            var disabled = SimulatedSqlException.ClrExecutionDisabled();
+            ApplyXactAbortPromotion(outerBatch.Connection, disabled);
+            throw disabled;
+        }
+
         (int Action, bool[] UpdatedColumns, string? EventData) fired;
         if (frame.Trigger is { } trigger)
         {

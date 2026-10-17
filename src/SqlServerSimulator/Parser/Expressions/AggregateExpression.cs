@@ -483,6 +483,7 @@ internal sealed class AggregateExpression : Expression
         if (arguments.Count != function.Parameters.Length)
             throw SimulatedSqlException.FunctionRequiresNArguments(written.ToString(), function.Parameters.Length);
         ValidateOperand(context, AggregateKind.ClrAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
+        Simulation.RequireClrWhileCompiling(context.Batch);
         return Register(context, new AggregateExpression(AggregateKind.ClrAggregate, arguments[0], distinct, separator: null)
         {
             ClrFunction = function,

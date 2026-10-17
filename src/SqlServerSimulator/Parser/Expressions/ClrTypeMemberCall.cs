@@ -105,6 +105,7 @@ internal sealed class ClrTypeMemberCall : Expression
 
     private static ClrTypeMemberCall Parse(ClrUserDefinedType udt, Expression? receiver, string memberName, ParserContext context)
     {
+        Simulation.RequireClrWhileCompiling(context.Batch);
         var isStatic = receiver is null;
         var checkpoint = context.SaveCheckpoint();
         if (context.GetNextOptional() is not Operator { Character: '(' })

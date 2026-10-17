@@ -147,6 +147,7 @@ partial class Simulation
         ClrAssemblyMetadata.VerifySafeContent(content, assemblyName, permissionSet, "CREATE");
 
         _ = database.Assemblies.TryAdd(assemblyName, new SqlAssembly(
+            simulation,
             assemblyName,
             database.AllocateAssemblyId(),
             content,

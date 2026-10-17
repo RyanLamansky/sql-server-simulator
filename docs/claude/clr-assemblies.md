@@ -16,7 +16,19 @@ The gate exists because a `Simulation` reachable over the network endpoint would
 
 The gate is deliberately stricter than real: probe-confirmed, real SQL Server's `clr enabled` option does **not** gate `CREATE ASSEMBLY` at all — registration succeeds with the option set to 0, and only *execution* raises Msg 6263.
 
-`sys.configurations` reports `clr enabled` as `EnableClr ? 1 : 0`, which is what lets mssql-django's `enable_clr()` run: it reads `clr enabled` from `sys.configurations` and only falls through to `sp_configure` when the value is 0.
+### `clr enabled`
+
+The option starts as `EnableClr` — 1 on a CLR-enabled simulation, where real installs 0 — so registered code runs until `sp_configure 'clr enabled', 0` and `RECONFIGURE` turn it off, and `sp_configure` reports its moves from there (`Simulation.ConfigurationDefault`).
+That start is what lets mssql-django's `enable_clr()` run: it reads `clr enabled` from `sys.configurations` and only falls through to `sp_configure` when the value is 0.
+On a simulation without `EnableClr` the option sets and reads back, but no assembly registers, so nothing is ever there to run.
+
+With the option off, real (probed 2026-10-07 and 2026-10-17 against SQL Server 2025) still creates every CLR kind, and refuses running one with **Msg 6263** (`Simulation.RequireClrEnabled`):
+- **A procedure call** fails as its own statement at its line, ahead of its arguments, the batch going on with `@@ERROR` 6263 and a return code variable as it was; a `TRY` catches it, naming no procedure.
+- **A reference to a CLR function, table-valued function or aggregate, or to a user-defined type's code** — a method, a property, a static member, a mutator, and a `CAST` / `CONVERT` between the type and a string or `xml` — fails the batch as it compiles, a skipped branch's included (`Simulation.RequireClrWhileCompiling`), so nothing ahead of it runs; a procedure body's fails as the procedure compiles, attributed to it, and a dynamic batch's alone, its caller going on.
+  Reading the type's column, declaring a variable of it and converting it to or from a binary need no CLR code and run.
+- **A CLR trigger** fails at the firing statement's line, naming no procedure, which ends the statement with Msg 3621, ends the batch and rolls back the transaction, or dooms it when a `TRY` catches it.
+
+`RECONFIGURE` changing the option retires every compiled plan and batch, which checked it as they compiled.
 
 ## What the server takes: the edition, the catalog and `clr strict security`
 
@@ -320,6 +332,7 @@ The strong-named case is unprobed.
   Real's names `SqlConnection.OnError`, `SqlInternalConnectionSmi` and the rest of the in-process plumbing, which has no counterpart here.
 - **A command's result sets are read to the end when it runs**, so a routine that writes between two `Read` calls can't change what the reader returns, as it could on real.
 - **`sp_describe_first_result_set`'s Msg 11515 comes from the metadata-only mode**, so a plain `SET FMTONLY ON` followed by `EXEC` of a CLR procedure raises it too; that shape is unprobed.
+- **An implicit conversion between a user-defined type and a string or `xml` with `clr enabled` off** — an `INSERT` of `'3,4'` into the type's column, a comparison with a string — is Msg 6263 as the statement runs, where real refuses the batch as it compiles (probed 2026-10-17 against SQL Server 2025).
 - Auto-generated `assembly_id` values start at 65536 and increment, which is what a fresh database showed (probed 2026-09-28); a server that has seen other assemblies hands out later ids.
 - The `Microsoft.SqlServer.Types` system row reports a fixed SQL Server 2025 RTM `create_date` / `modify_date` rather than a resource-database build stamp.
 
@@ -336,9 +349,5 @@ The strong-named case is unprobed.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.
 - `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, assembly signing (a signed assembly isn't trusted for its signature), `sp_add_trusted_assembly`'s `CONTROL SERVER` gate, and a reference to another assembly registered in the database (real resolves it by name, with `sys.assembly_references` and Msg 6589 on `DROP`; here it is Msg 6503).
 - BACPAC round-trip of `SqlAssembly` model elements.
-- **`clr enabled` set to 0 while `EnableClr` is on.**
-  The option reports `EnableClr` whatever `sp_configure` writes, so registered code always runs.
-  Real (probed 2026-10-07 against SQL Server 2025) still creates CLR procedures, functions, aggregates, types and triggers with the option off, but refuses running one with **Msg 6263**: a procedure call fails as its own statement, a reference to a CLR function, table-valued function or aggregate fails the batch as it compiles (a skipped branch's included, a procedure body's when the procedure compiles), and a CLR trigger's error dooms the transaction.
-  Building it means a gate at each of the four routine kinds' invocation sites; none ships, since `EnableClr` is fixed at construction and registering code requires it, so no routine can exist while it is off.
 - Out-of-process execution.
   Measured cost of a cross-process round trip is ~56 µs versus ~0.12 µs for an in-process cached delegate — roughly 470× — and a child process is not a sandbox without per-OS restriction work (seccomp/namespaces, restricted tokens, `sandbox_init`), so it is only worth building together with that.

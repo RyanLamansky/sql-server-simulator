@@ -45,6 +45,7 @@ internal sealed class ClrTypeMutation : Expression
     /// </summary>
     public static ClrTypeMutation Parse(Expression receiver, string receiverName, ClrUdtSqlType type, string memberName, ParserContext context)
     {
+        Simulation.RequireClrWhileCompiling(context.Batch);
         var udt = type.Udt;
         if (context.Token is Operator { Character: '=' })
         {
