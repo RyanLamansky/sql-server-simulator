@@ -1249,6 +1249,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var rendered = outcomes.Current;
             var outcome = rendered.Outcome;
             var effectiveDoneToken = rendered.InProc ? Tds.TokenDoneInProc : doneToken;
+            if (outcome.OpensSessionHold)
+                writer.MarkSessionHoldStart();
 
             // A streamed result set's marker, which its rows' writer reads.
             if (outcome is SimulatedRowsProduced)
@@ -1528,6 +1530,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // Real keeps the row count in the token and only clears the
                 // flag, so a suppressed count still goes out as the number.
                 writer.WriteDoneToken(effectiveDoneToken, status, Math.Max(affected, 0), DoneKindOf(outcome));
+                if (outcome.ClosesSessionHold)
+                    writer.HoldSessionFromMark();
                 closed = true;
                 unclosedError = false;
             }

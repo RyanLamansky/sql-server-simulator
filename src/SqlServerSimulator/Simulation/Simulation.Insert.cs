@@ -483,12 +483,13 @@ partial class Simulation
 
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            var sourceRows = ExecuteExecSource(context, destinationColumns, out var endedBody);
+            var sourceRows = ExecuteExecSource(context, destinationColumns, out var endedBody, out var holdsSession);
             var written = InsertRows(
                 context,
                 new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
                 sourceRows,
                 valueTupleStamps: null);
+            written.ClosesSessionHold = holdsSession;
             // The error that ended an executed body is the statement's, though it
             // wrote the rows the body returned before it.
             if (endedBody is not null)
@@ -2110,13 +2111,19 @@ partial class Simulation
     /// then carries no count, and leaves <c>@@ERROR</c> reading it (probed
     /// 2026-10-01 against SQL Server 2025).
     /// </param>
+    /// <param name="holdsSession">
+    /// Whether what the body sent opens a stretch holding a MARS session
+    /// (<see cref="SimulatedStatementOutcome.OpensSessionHold"/>), which the
+    /// INSERT's own outcome closes.
+    /// </param>
     /// <remarks>
     /// The body runs on past an error that ends only its statement, as any
     /// called batch does, and its error reaches the client among its messages
     /// while the rows of its later statements are still inserted.
     /// </remarks>
-    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, HeapColumn[] destinationColumns, out SimulatedSqlException? endedBody)
+    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, HeapColumn[] destinationColumns, out SimulatedSqlException? endedBody, out bool holdsSession)
     {
+        holdsSession = false;
         var expectedColumnCount = destinationColumns.Length;
         var batch = context.Batch;
         var connection = batch.Connection;
@@ -2152,6 +2159,7 @@ partial class Simulation
         var (outerActive, outerTarget) = (connection.InsertExecActive, connection.InsertExecTarget);
         connection.InsertExecActive = true;
         var target = connection.InsertExecTarget = new InsertExecTarget(destinationColumns, connection.CurrentTransaction?.TranCount ?? 0);
+        var sentBefore = batch.PendingTriggerOutcomes?.Count ?? 0;
         var sentError = false;
         // In auto-commit the body runs inside the transaction real opens for
         // the INSERT, as a trigger body runs inside its firing statement's:
@@ -2233,6 +2241,14 @@ partial class Simulation
         {
             connection.InsertExecActive = outerActive;
             connection.InsertExecTarget = outerTarget;
+            // What the body sent holds a MARS session while it goes out, the
+            // statement's DONE closing the stretch: real runs the INSERT
+            // atomically.
+            if (connection.FramesEveryStatement && batch.PendingTriggerOutcomes is { } sent && sent.Count > sentBefore)
+            {
+                sent[sentBefore].OpensSessionHold = true;
+                holdsSession = true;
+            }
         }
         return rows;
 

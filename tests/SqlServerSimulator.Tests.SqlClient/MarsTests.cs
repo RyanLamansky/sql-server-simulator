@@ -649,6 +649,43 @@ public sealed class MarsTests
     }
 
     /// <summary>
+    /// An <c>INSERT … EXEC</c> runs atomically, so while what its body sent is
+    /// still going out every other request is Msg 3980, as for a DML
+    /// statement's <c>OUTPUT</c> rows, where a plain <c>EXEC</c> of the same
+    /// body lets another request run beside it (probed 2026-10-17 against SQL
+    /// Server 2025: a body printing 300 messages of 4,000 characters).
+    /// </summary>
+    [TestMethod]
+    public async Task InsertExecBodyStillGoingOut_RefusesOtherRequestsWithMsg3980()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (a int); create table log (s varchar(20))");
+        Wire.ExecInProc(simulation, "create procedure p as begin insert log values ('before'); declare @i int = 0; while @i < 300 begin print replicate('x', 4000); set @i += 1; end; insert log values ('after'); select 1; end");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+        await using var probe = new SqlCommand("select string_agg(s, ',') from log with (nolock)", connection);
+
+        await using (var plain = new SqlCommand("select 1; exec p", connection))
+        await using (var reader = await plain.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual("before", await probe.ExecuteScalarAsync(TestContext.CancellationToken));
+            IsNull(await this.DrainAsync(reader));
+        }
+        await using (var truncate = new SqlCommand("truncate table log", connection))
+            _ = await truncate.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        await using (var insertExec = new SqlCommand("select 1; insert t exec p", connection))
+        await using (var reader = await insertExec.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual(3980, (await ThrowsExactlyAsync<SqlException>(async () => await probe.ExecuteScalarAsync(TestContext.CancellationToken))).Number);
+            IsNull(await this.DrainAsync(reader));
+        }
+        AreEqual("before,after", await probe.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
     /// A request steps aside between its batch's statements while its client
     /// has yet to read what it sent, so another request runs before the
     /// statement after a large <c>SELECT</c> — in a plain batch and in a

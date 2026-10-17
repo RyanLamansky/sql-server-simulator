@@ -90,6 +90,20 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     /// <summary>Notes where the result set about to be written starts, for <see cref="HoldSession"/>.</summary>
     public void MarkResultStart() => this.resultStart = this.length;
 
+    /// <summary>Where a stretch <see cref="HoldSessionFromMark"/> will close starts; -1 with none open.</summary>
+    private int sessionHoldMark = -1;
+
+    /// <summary>Notes where a stretch holding the session starts (see <see cref="SimulatedStatementOutcome.OpensSessionHold"/>).</summary>
+    public void MarkSessionHoldStart() => this.sessionHoldMark = this.length;
+
+    /// <summary>Marks what was written since <see cref="MarkSessionHoldStart"/> as holding the session while any of it is going out.</summary>
+    public void HoldSessionFromMark()
+    {
+        if (this.Request is not null && this.sessionHoldMark >= 0)
+            this.sessionHolds.Add((this.sessionHoldMark, this.length));
+        this.sessionHoldMark = -1;
+    }
+
     /// <summary>
     /// Marks the result set written since <see cref="MarkResultStart"/> — a
     /// DML statement's <c>OUTPUT</c> rows, which real can't suspend to run
@@ -205,6 +219,8 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.trailingDoneAt -= sent;
         this.finalDoneAt -= sent;
         this.resultStart -= sent;
+        if (this.sessionHoldMark >= 0)
+            this.sessionHoldMark = Math.Max(this.sessionHoldMark - sent, 0);
         for (var i = this.sessionHolds.Count - 1; i >= 0; i--)
         {
             var (start, end) = this.sessionHolds[i];

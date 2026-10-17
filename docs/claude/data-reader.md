@@ -261,6 +261,7 @@ A command takes the lowest request id from 2 that no unread reader holds, as Sql
 
 **Not modeled yet** (beside the wire's, which apply here too):
 - A transaction a batch began and left open is rolled back with Msg 3997 only when another reader was outstanding as its batch ended, where a MARS batch's always rolls back.
+- A batch's messages don't count toward what a reader's batch runs ahead of, so a procedure printing past the reader's window runs to its end before another command, which over TDS runs beside it — or, behind an `INSERT … EXEC`'s body, is Msg 3980 ([`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets)).
 - `ChangeDatabase` changes the database of a reader whose batch is still running, where SqlClient sends it as a request of its own, which leaves the reader's copy alone.
 
 ## Divergence

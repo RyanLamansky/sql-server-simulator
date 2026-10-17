@@ -606,7 +606,7 @@ partial class Simulation
                     sourceRows = ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList);
                     break;
                 case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
-                    sourceRows = ExecuteExecSource(context, destinationColumns, out _);
+                    sourceRows = ExecuteExecSource(context, destinationColumns, out _, out _);
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(context);

@@ -55,6 +55,19 @@ abstract class SimulatedStatementOutcome
     public bool InModule;
 
     /// <summary>
+    /// Whether this outcome starts a stretch of the response that holds a
+    /// MARS session while it goes out, as an <c>INSERT … EXEC</c>'s body's
+    /// output does — real runs the statement atomically, refusing every other
+    /// request with Msg 3980 while it is going out (probed 2026-10-17 against
+    /// SQL Server 2025) — up to the outcome that <see cref="ClosesSessionHold"/>.
+    /// Only the TDS endpoint reads it.
+    /// </summary>
+    public bool OpensSessionHold;
+
+    /// <summary>Whether this outcome ends the stretch an earlier one's <see cref="OpensSessionHold"/> started.</summary>
+    public bool ClosesSessionHold;
+
+    /// <summary>
     /// How many transaction events the session had recorded when the producing
     /// statement finished (<see cref="SimulatedDbConnection.TransactionEventsRecorded"/>),
     /// or -1 when unstamped: the TDS endpoint announces the events before that
