@@ -1119,21 +1119,37 @@ internal sealed partial class BatchContext
     /// <c>master.dbo.#t</c> and <c>dbo.#t</c> alike), and a database it names
     /// is ignored with the class-0 Msg 2701 as the batch compiles, at the line
     /// of the token after the name (probed 2026-10-06 and 2026-10-16 against
+    /// SQL Server 2025). A query or write <paramref name="readsOrWrites"/>
+    /// naming a temporary table the batch itself creates is compiled again as
+    /// it runs, and sends its Msg 2701 again there (probed 2026-10-17 against
     /// SQL Server 2025). Any other name passes through.
     /// </summary>
-    public static MultiPartName TemporaryTableName(ParserContext context, MultiPartName name)
+    public static MultiPartName TemporaryTableName(ParserContext context, MultiPartName name, bool readsOrWrites = false)
     {
         if (name.Count < 2 || !(IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf)))
             return name;
-        if (context.Batch.CompilingForRun && name.Count >= 3 && name[name.Count - 3] is { Length: > 0 } ignoredDatabase)
+        var batch = context.Batch;
+        if (name.Count >= 3 && name[name.Count - 3] is { Length: > 0 } ignoredDatabase && context.Token is { } last)
         {
-            var note = SimulatedSqlException.TempdbDatabaseNameIgnoredMessage(context.Batch, ignoredDatabase);
-            var nameLine = context.Token?.LineNumber ?? 0;
-            var atName = context.SaveCheckpoint();
-            var nextLine = context.GetNextOptional()?.LineNumber;
-            context.RestoreCheckpoint(atName);
-            note.LineNumber = (nextLine ?? nameLine) + context.Batch.LineOffset;
-            (context.Batch.CompileMessages ??= []).Add(note);
+            var recompiled = readsOrWrites && !batch.CompilingForRun && !batch.IsSkipping && batch.TemporaryNamesRecompiled?.Remove(last.StartIndex) == true;
+            if (batch.CompilingForRun || recompiled)
+            {
+                var note = SimulatedSqlException.TempdbDatabaseNameIgnoredMessage(batch, ignoredDatabase);
+                var atName = context.SaveCheckpoint();
+                var nextLine = context.GetNextOptional()?.LineNumber;
+                context.RestoreCheckpoint(atName);
+                note.LineNumber = (nextLine ?? last.LineNumber) + batch.LineOffset;
+                if (recompiled)
+                    batch.Connection.PendingMessages.Enqueue(note);
+                else
+                    (batch.CompileMessages ??= []).Add(note);
+            }
+            // A table the compile can't find is one the batch creates.
+            if (readsOrWrites && batch.CompilingForRun && batch.CompiledFor is { } running
+                && !(IsLocalTempName(name.Leaf) ? batch.Connection.TempTables.ContainsKey(name.Leaf) : batch.Connection.Simulation.GlobalTempTables.ContainsKey(name.Leaf)))
+            {
+                _ = (running.TemporaryNamesRecompiled ??= []).Add(last.StartIndex);
+            }
         }
         return new MultiPartName(name.Leaf);
     }

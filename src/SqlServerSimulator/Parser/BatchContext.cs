@@ -295,6 +295,15 @@ internal sealed partial class BatchContext
     public List<SimulatedError>? CompileMessages;
 
     /// <summary>
+    /// Where this batch's text names, with a database part, a temporary table
+    /// its compile found missing — one the batch itself creates — whose
+    /// statement real compiles again as it runs and so repeats its Msg 2701
+    /// (<see cref="TemporaryTableName"/>): each name's last token's position,
+    /// removed as the run sends the repeat; null when there are none.
+    /// </summary>
+    public HashSet<int>? TemporaryNamesRecompiled;
+
+    /// <summary>
     /// The procedures a module body binding at <c>CREATE</c> calls that don't
     /// exist, as each <c>EXEC</c> wrote them, for the Msg 2007 notes the
     /// <c>CREATE</c> sends; null for every other batch.

@@ -672,6 +672,27 @@ public sealed class TempTableTests
     /// the class-0 Msg 2701 at the line after the name, as a read does (probed
     /// 2026-10-16 against SQL Server 2025).
     /// </summary>
+    /// <summary>
+    /// A query or write naming, with a database part, a temporary table its
+    /// batch creates is compiled again as it runs, which repeats its Msg 2701;
+    /// a batch run again on its cached plan sends neither (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ReadOfATableItsBatchCreates_RepeatsMsg2701AsItRecompiles_OnceForTheText()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        var notes = new List<int>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => notes.AddRange(e.Errors.Cast<SimulatedError>().Select(error => error.Number));
+        const string batch = "create table #t (a int); insert master..#t values (1); select a from master..#t; drop table #t";
+        AreEqual(1, connection.CreateCommand(batch).ExecuteScalar());
+        AreEqual(4, notes.Count(number => number == 2701));
+        notes.Clear();
+        AreEqual(1, connection.CreateCommand(batch).ExecuteScalar());
+        IsEmpty(notes);
+    }
+
     [TestMethod]
     public void DefinitionAndMaintenanceStatements_IgnoreADatabasePart_WithMsg2701()
     {

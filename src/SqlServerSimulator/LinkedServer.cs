@@ -11,7 +11,7 @@ namespace SqlServerSimulator;
 /// <remarks>
 /// <para>
 /// Reads (<c>SELECT</c>, <c>JOIN</c>) traversing a
-/// <c>linkedserver.db.schema.t</c> reference open a fresh
+/// <c>linkedserver.db.schema.t</c> reference take a pooled
 /// <see cref="SimulatedDbConnection"/> on <see cref="Target"/> and execute
 /// the remote portion as a <c>SELECT * FROM [db].[schema].[t]</c>
 /// statement through the remote's full parser / planner / lock-manager
@@ -61,24 +61,94 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     public readonly string? Catalog = catalog;
 
     /// <summary>
-    /// Opens a fresh session of the server in <paramref name="database"/>, or
-    /// where the provider's session starts when none is named
-    /// (<see cref="SessionDatabaseName"/>): the
-    /// <c>@catalog</c> database, else the login's default database —
-    /// <c>master</c>, as real's <c>sa</c> login has it (probed 2026-09-28
-    /// against SQL Server 2025, where <c>DB_NAME()</c> inside <c>EXEC … AT</c>
-    /// and <c>OPENQUERY</c> reads the catalog when one is set).
+    /// A session of the server in <paramref name="database"/>, or where the
+    /// provider's session starts when none is named
+    /// (<see cref="SessionDatabaseName"/>): the <c>@catalog</c> database, else
+    /// the login's default database — <c>master</c>, as real's <c>sa</c> login
+    /// has it (probed 2026-09-28 against SQL Server 2025, where
+    /// <c>DB_NAME()</c> inside <c>EXEC … AT</c> and <c>OPENQUERY</c> reads the
+    /// catalog when one is set). The session comes from the provider's pool
+    /// when one is idle there, reset as a pooled connection is — its
+    /// <c>@@SPID</c> kept, everything else it held gone — so an
+    /// <c>EXEC … AT</c>, an <c>OPENQUERY</c> and a four-part read meet the
+    /// same <c>@@SPID</c> call after call, across the caller's batches and
+    /// sessions (probed 2026-10-17 against SQL Server 2025). Disposing the
+    /// lease hands it back (<see cref="ReleaseSession"/>).
     /// </summary>
-    public SimulatedDbConnection OpenSession(string? database)
+    public RemoteSession OpenSession(string? database)
     {
         // A server mapping no login lets no one in (probed 2026-10-05 against
         // SQL Server 2025).
         if (this.Logins.Count == 0)
             throw SimulatedSqlException.NoLoginMapping();
-        var connection = this.Target.CreateDbConnection();
-        connection.Open();
+        var connection = this.TakeIdleSession();
+        if (connection is null)
+        {
+            connection = this.Target.CreateDbConnection();
+            connection.Open();
+        }
         connection.ChangeDatabase(database ?? this.SessionDatabaseName);
-        return connection;
+        return new RemoteSession(this, connection);
+    }
+
+    /// <summary>
+    /// The sessions the provider's pool holds between uses, sleeping on the
+    /// server as real's do; guarded by itself.
+    /// </summary>
+    private readonly List<SimulatedDbConnection> idleSessions = [];
+
+    /// <summary>
+    /// An idle pooled session, reset onto a fresh connection under its
+    /// <c>@@SPID</c> as the TDS endpoint's <c>sp_reset_connection</c> resets
+    /// one, its logon triggers firing as a pooled login's; null when none is
+    /// idle.
+    /// </summary>
+    private SimulatedDbConnection? TakeIdleSession()
+    {
+        SimulatedDbConnection? idle = null;
+        lock (this.idleSessions)
+        {
+            while (idle is null && this.idleSessions.Count > 0)
+            {
+                idle = this.idleSessions[^1];
+                this.idleSessions.RemoveAt(this.idleSessions.Count - 1);
+                if (idle.State != System.Data.ConnectionState.Open)
+                    idle = null;
+            }
+        }
+        if (idle is null)
+            return null;
+        var spid = idle.Spid;
+        this.Target.BeginSessionReset(spid);
+        try
+        {
+            idle.ReplacedByReset = true;
+            idle.Dispose();
+            var fresh = new SimulatedDbConnection(this.Target, spid);
+            fresh.OpenSession();
+            this.Target.FireLogonTriggers(fresh, isPooled: true);
+            return fresh;
+        }
+        finally
+        {
+            this.Target.EndSessionReset(spid);
+        }
+    }
+
+    /// <summary>
+    /// Hands a session back to the provider's pool once its use ends, or
+    /// closes it when it can't be reused: killed, or with a transaction still
+    /// open.
+    /// </summary>
+    public void ReleaseSession(SimulatedDbConnection connection)
+    {
+        if (connection.State != System.Data.ConnectionState.Open || connection.CurrentTransaction is not null)
+        {
+            connection.Dispose();
+            return;
+        }
+        lock (this.idleSessions)
+            this.idleSessions.Add(connection);
     }
 
     /// <summary>
@@ -178,4 +248,15 @@ internal sealed class LinkedLogin(int localPrincipalId, bool usesSelf, string? r
     public readonly bool UsesSelf = usesSelf;
     public readonly string? RemoteName = remoteName;
     public readonly DateTime ModifyDate = modifyDate;
+}
+
+/// <summary>
+/// A session <see cref="LinkedServer.OpenSession"/> leased from the
+/// provider's pool, handed back when disposed.
+/// </summary>
+internal readonly struct RemoteSession(LinkedServer server, SimulatedDbConnection connection) : IDisposable
+{
+    public readonly SimulatedDbConnection Connection = connection;
+
+    public void Dispose() => server.ReleaseSession(this.Connection);
 }

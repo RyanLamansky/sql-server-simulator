@@ -20,7 +20,7 @@ internal sealed class TdsSessionFixture : IDisposable
     private readonly TdsSession session;
     private readonly SimulatedDbConnection connection;
 
-    public TdsSessionFixture()
+    public TdsSessionFixture(Simulation? simulation = null)
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=sss-test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -29,7 +29,7 @@ internal sealed class TdsSessionFixture : IDisposable
         this.certificate = request.CreateSelfSigned(
             new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2999, 1, 1, 0, 0, 0, TimeSpan.Zero));
-        var simulation = new Simulation();
+        simulation ??= new Simulation();
         this.session = new TdsSession(simulation, this.socket, this.certificate);
         this.connection = simulation.CreateDbConnection();
         this.connection.Open();

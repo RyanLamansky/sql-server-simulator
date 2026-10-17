@@ -178,6 +178,7 @@ internal static class PlanCacheCaptureAudit
         || type == typeof(Database)
         || type == typeof(Schema)
         || type == typeof(Simulation)
+        || type == typeof(LinkedServer)
         || type == typeof(LockResource)
         || typeof(MemberInfo).IsAssignableFrom(type)
         || typeof(Assembly).IsAssignableFrom(type);

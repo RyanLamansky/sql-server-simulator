@@ -54,7 +54,10 @@ partial class SimulatedSqlException
     /// real reads in tempdb whatever database (or server) the name gives.
     /// </summary>
     internal static SimulatedError TempdbDatabaseNameIgnoredMessage(BatchContext batch, string database) =>
-        batch.InfoMessage(@class: 0, state: 99, number: 2701, $"Database name '{database}' ignored, referencing object in tempdb.");
+        batch.InfoMessage(@class: 0, state: 99, number: TempdbDatabaseNameIgnoredMessageNumber, $"Database name '{database}' ignored, referencing object in tempdb.");
+
+    /// <summary>The number of <see cref="TempdbDatabaseNameIgnoredMessage"/>.</summary>
+    internal const int TempdbDatabaseNameIgnoredMessageNumber = 2701;
 
     /// <summary>Msg 4430, an index hint on a view read without <c>NOEXPAND</c>.</summary>
     internal static SimulatedError ViewIndexHintsIgnoredMessage(BatchContext batch, string viewName) =>

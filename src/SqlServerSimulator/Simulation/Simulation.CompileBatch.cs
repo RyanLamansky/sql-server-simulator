@@ -149,6 +149,17 @@ partial class Simulation
         {
             foreach (var message in compileMessages)
             {
+                // A temporary table's ignored database part goes out the first
+                // time the text compiles, as the join-order warning does: real
+                // runs it on its cached plan after (probed 2026-10-17 against
+                // SQL Server 2025), recompiling none of its statements.
+                if (message.Number == SimulatedSqlException.TempdbDatabaseNameIgnoredMessageNumber && sendsOnce
+                    && !(firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+                {
+                    if (compileBatch.CompiledFor is { } cachedPlanRun)
+                        cachedPlanRun.TemporaryNamesRecompiled = null;
+                    continue;
+                }
                 if (message.Number != SimulatedSqlException.JoinOrderEnforcedMessageNumber || key is not null || !sendsOnce
                     || (firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
                 {

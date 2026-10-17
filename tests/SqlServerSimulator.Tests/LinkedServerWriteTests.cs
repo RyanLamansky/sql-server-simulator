@@ -573,6 +573,26 @@ public class LinkedServerWriteTests
     }
 
     /// <summary>
+    /// Outside a transaction every use of a server — <c>EXEC … AT</c>,
+    /// <c>OPENQUERY</c>, a four-part read — takes the provider's pooled
+    /// session, reset: the same <c>@@SPID</c> from any caller's session,
+    /// nothing the last use left in it (probed 2026-10-17 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void Loopback_UsesOutsideATransaction_ShareThePooledSessionReset()
+    {
+        var sim = LoopbackOverRows();
+        _ = sim.ExecuteNonQuery("create view spid as select @@spid s");
+        using var first = sim.CreateOpenConnection();
+        using var second = sim.CreateOpenConnection();
+        var spid = first.CreateCommand("declare @s smallint; exec ('select ? = @@spid; create table #k (i int)', @s output) at SELF; select @s").ExecuteScalar();
+        AreEqual(spid, second.CreateCommand("select s from openquery(SELF, 'select @@spid s')").ExecuteScalar());
+        AreEqual(spid, first.CreateCommand("select s from SELF.simulated.dbo.spid").ExecuteScalar());
+        AreEqual(DBNull.Value, second.CreateCommand("select k from openquery(SELF, 'select object_id(''tempdb..#k'') k')").ExecuteScalar());
+    }
+
+    /// <summary>
     /// An enlisted call can't end its caller's transaction: its ROLLBACK
     /// leaves it, the transaction doomed with its work in place, which the
     /// caller's batch then rolls back with Msg 3998.

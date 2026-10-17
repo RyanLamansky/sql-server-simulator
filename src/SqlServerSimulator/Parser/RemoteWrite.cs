@@ -432,7 +432,7 @@ internal sealed class RemoteWrite
     }
 
     /// <summary>
-    /// Runs <paramref name="query"/> on a fresh session of the server and
+    /// Runs <paramref name="query"/> on the provider's pooled session of the server and
     /// returns its first result set, null when it produces none; an error the
     /// query raises there is thrown as the server raised it. The session
     /// starts in <paramref name="database"/> when one is given, so a view the
@@ -454,7 +454,8 @@ internal sealed class RemoteWrite
     {
         if (caller is not null)
             RequireResumableTransaction(caller, server);
-        using var connection = server.OpenSession(database);
+        using var session = server.OpenSession(database);
+        var connection = session.Connection;
         connection.NoBrowseTable = browse;
         // Describing a query, as the provider does before running it, reads
         // its first rowset's shape without running a statement.
@@ -643,7 +644,8 @@ internal sealed class RemoteWrite
         if (statements.Count == 0)
             return;
 
-        using var connection = this.Server.OpenSession(this.DatabaseName);
+        using var session = this.Server.OpenSession(this.DatabaseName);
+        var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
         try
         {

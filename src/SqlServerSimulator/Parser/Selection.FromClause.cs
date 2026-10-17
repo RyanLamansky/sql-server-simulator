@@ -1154,7 +1154,7 @@ internal sealed partial class Selection
                 var beforeObjectName = context.SaveCheckpoint();
                 var objectNameLine = context.Token?.LineNumber ?? 0;
                 var objectName = BatchContext.ParseObjectName(context);
-                objectName = BatchContext.TemporaryTableName(context, objectName);
+                objectName = BatchContext.TemporaryTableName(context, objectName, readsOrWrites: true);
 
                 // `FROM t.x.nodes('…') n(c)` in a subquery shreds a column of
                 // an enclosing query, as an APPLY's right side shreds one of

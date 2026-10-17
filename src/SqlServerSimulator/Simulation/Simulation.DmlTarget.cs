@@ -115,7 +115,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.OpenDataSource } when remoteKind is not null:
                 throw Selection.ParseOpenDataSource(context);
         }
-        var name = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context, acceptTableVariable: true));
+        var name = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context, acceptTableVariable: true), readsOrWrites: true);
         if (remoteKind is { } writeKind)
             remote = RemoteWrite.ForTarget(context.Batch, name, writeKind);
         else if (context.Batch.ExpandSynonym(name).Count >= 4)

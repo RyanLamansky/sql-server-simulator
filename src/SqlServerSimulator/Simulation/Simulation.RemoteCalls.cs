@@ -9,7 +9,7 @@ namespace SqlServerSimulator;
 
 // The two ways a batch runs code on a linked server: EXEC ('…') AT server and
 // a four-part procedure call. Both reach the server only while its `rpc out`
-// option is on, run in a fresh session of the server — or, a loopback's in
+// option is on, run in the provider's pooled session of the server — or, a loopback's in
 // its caller's transaction, the one the transaction's earlier calls ran in —
 // and hand their result sets, messages, counts, output parameters and return
 // code back to the caller (probed 2026-09-28 against SQL Server 2025).
@@ -53,7 +53,7 @@ partial class Simulation
         }
 
         var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, enlisting, out var refusal);
-        foreach (var outcome in outcomes)
+        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: true, endsInRefusal: refusal is not null, insertExecSource))
             yield return outcome;
         if (refusal is not null)
             throw refusal;
@@ -121,7 +121,7 @@ partial class Simulation
         // body whatever database the call arrives in.
         var database = procName[1].Length > 0 ? procName[1] : null;
         var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), enlisting, out var refusal);
-        foreach (var outcome in outcomes)
+        foreach (var outcome in ProviderRelayed(batch, outcomes, executeAt: false, endsInRefusal: refusal is not null, insertExecSource))
             yield return outcome;
         if (refusal is not null)
             throw refusal;
@@ -132,6 +132,110 @@ partial class Simulation
             var slot = batch.GetVariableSlot(returnCodeVar);
             slot.Value = (returnValue.OutputSqlValue ?? SqlValue.FromInt32(0)).CoerceTo(slot.DeclaredType);
         }
+    }
+
+    /// <summary>
+    /// Whether a remote call reaches the client as a procedure scope: on the
+    /// wire, unless it feeds an <c>INSERT … EXEC</c>, whose body's statements
+    /// send DONEINPROCs with no scope around them.
+    /// </summary>
+    private static bool FramesRemoteCall(BatchContext batch, bool insertExecSource) =>
+        batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource;
+
+    /// <summary>
+    /// What a remote call hands back as the provider relays it (captured
+    /// 2026-10-17 against SQL Server 2025): a procedure scope, each rowset
+    /// closing with a DONEINPROC counting its rows — followed, for an
+    /// <c>EXEC … AT</c>, by a RETURNSTATUS 0 — each count the server's
+    /// statements reported a DONEINPROC of the call's own kind carrying it,
+    /// and an error the server's batch ran on past closing in one with the
+    /// error bit. The server's other statements reach the client as nothing
+    /// but their messages; a message with no result after it, or a call
+    /// returning no result at all, closes in a count-less DONEINPROC. The
+    /// scope closes with no RETURNSTATUS — a procedure call's return code
+    /// reaches only its <c>EXEC @rc =</c> — and with the error bit when the
+    /// server's last outcome was an error, which then closes in that DONEPROC
+    /// alone; a call ending in an error of its own
+    /// (<paramref name="endsInRefusal"/>) leaves its scope for that error to
+    /// close.
+    /// An <c>INSERT … EXEC</c>'s call hands its outcomes over as they are.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> ProviderRelayed(BatchContext batch, List<SimulatedStatementOutcome> outcomes, bool executeAt, bool endsInRefusal, bool insertExecSource)
+    {
+        // An INSERT … EXEC takes the call's outcomes as they come.
+        if (insertExecSource)
+        {
+            foreach (var outcome in outcomes)
+                yield return outcome;
+            yield break;
+        }
+        var framed = FramesRemoteCall(batch, insertExecSource);
+        if (framed)
+            yield return new SimulatedProcScopeBoundary(isEnter: true);
+        var connection = batch.Connection;
+        var inModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
+        var anyResult = false;
+        var messageSinceResult = false;
+        foreach (var outcome in outcomes)
+        {
+            switch (outcome)
+            {
+                case SimulatedSqlResultSet rowset:
+                    if (messageSinceResult)
+                        yield return Completed(batch, -1);
+                    rowset.DoneKind = StatementDoneKind.Select;
+                    rowset.CountSuppressed = connection.NoCount;
+                    rowset.InModule = inModule;
+                    rowset.TransactionEventMark = connection.TransactionEventsRecorded;
+                    yield return rowset;
+                    if (executeAt)
+                        yield return new SimulatedReturnStatus(0) { InModule = inModule };
+                    (anyResult, messageSinceResult) = (true, false);
+                    break;
+                case SimulatedNonQuery { CountsRowsReturned: false, RecordsAffected: >= 0, CountSuppressed: not true } counted:
+                    if (messageSinceResult)
+                        yield return Completed(batch, -1);
+                    yield return Completed(batch, counted.RecordsAffected);
+                    (anyResult, messageSinceResult) = (true, false);
+                    break;
+                case SimulatedInfoOutcome:
+                    yield return outcome;
+                    messageSinceResult = true;
+                    break;
+                case SimulatedErrorOutcome failure:
+                    // The server's last outcome closes with the call's DONEPROC.
+                    failure.DoneKind = framed && ReferenceEquals(failure, outcomes[^1]) ? StatementDoneKind.ClosedByScope : StatementDoneKind.Execute;
+                    failure.InModule = inModule;
+                    failure.TransactionEventMark = connection.TransactionEventsRecorded;
+                    yield return failure;
+                    (anyResult, messageSinceResult) = (true, false);
+                    break;
+            }
+        }
+        if (endsInRefusal)
+            yield break;
+        var endedByError = outcomes is [.., SimulatedErrorOutcome];
+        if (!endedByError && (messageSinceResult || !anyResult))
+            yield return Completed(batch, -1);
+        if (framed)
+        {
+            yield return new SimulatedProcScopeBoundary(isEnter: false, endedByError: endedByError)
+            {
+                DoneKind = StatementDoneKind.Execute,
+                InModule = inModule,
+                CountSuppressed = connection.NoCount,
+                TransactionEventMark = connection.TransactionEventsRecorded,
+            };
+        }
+
+        static SimulatedNonQuery Completed(BatchContext batch, int count) =>
+            new(count)
+            {
+                DoneKind = StatementDoneKind.Execute,
+                InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null,
+                CountSuppressed = batch.Connection.NoCount,
+                TransactionEventMark = batch.Connection.TransactionEventsRecorded,
+            };
     }
 
     /// <summary>
@@ -196,7 +300,7 @@ partial class Simulation
         };
 
     /// <summary>
-    /// Runs <paramref name="text"/> in a fresh session of the server — or the
+    /// Runs <paramref name="text"/> in the provider's pooled session of the server — or the
     /// one <paramref name="enlisting"/>'s earlier calls to it ran in — starting
     /// in <paramref name="database"/> when one is given, and hands back what
     /// it produced, materialized before the session closes; the caller's
@@ -224,7 +328,7 @@ partial class Simulation
         // A call in the caller's transaction runs in the session the
         // transaction's earlier calls to the server ran in.
         var reused = enlisting?.TakeEnlistedSession(server);
-        var connection = reused ?? server.OpenSession(database);
+        var connection = reused ?? server.OpenSession(database).Connection;
         try
         {
             if (reused is not null && database is not null)
@@ -305,7 +409,7 @@ partial class Simulation
         finally
         {
             if (enlisting is null || !enlisting.KeepEnlistedSession(server, connection))
-                connection.Dispose();
+                server.ReleaseSession(connection);
         }
         if (lastCount is int count)
             batch.Connection.LastStatementRowCount = count;
