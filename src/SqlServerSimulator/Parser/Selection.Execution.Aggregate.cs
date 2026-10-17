@@ -251,6 +251,15 @@ internal sealed partial class Selection
             if (groupedAnyRow && GroupByAllWarns(aggregates, sources, groupAllFilter!))
                 batch.CurrentStatement.NullEliminated = true;
         }
+        catch (SimulatedSqlException accumulationError) when (parallel is null)
+        {
+            // Every input row is read before the first group leaves, so no
+            // INSERT draw precedes an error raised reading them — a derived
+            // table's select list included.
+            accumulationError.RaisedInRowProjection = false;
+            accumulationError.HeldRowsDrawn = null;
+            throw;
+        }
 #pragma warning disable CA1031 // Deliberate: the catch is the parallel path's whole error contract — every kind is discarded and re-raised, in order, by the serial re-run below.
         catch (Exception) when (parallel is not null)
         {
@@ -385,6 +394,67 @@ internal sealed partial class Selection
         }
 
         var orderRuntime = new RuntimeContext(ResolveOrderName, batch);
+
+        // How many of one grouping set's groups real's plan passes on ahead of
+        // `failing`: those HAVING keeps that come before it in the output
+        // order — the ORDER BY's, or the implicit key order, or arrival. Null
+        // when that order needs the select list (an ordinal or an alias term,
+        // which real sorts on after computing it, so nothing leaves first) or
+        // when settling it raises.
+        int? GroupsAheadOf(Dictionary<SqlValueKey, GroupState> groups, GroupState failing, (int[] Positions, bool[] Descending)? implicitOrder)
+        {
+            foreach (var item in orderByItems)
+            {
+                if (item.IsOrdinal
+                    || (item is { MayNameAlias: true, Expr: { } written } && UnwrapParentheses(written) is Reference { ReferencedName: { ImmediateQualifier: null } name }
+                        && Array.Exists(outputColumnNames, output => BuiltInToken.Equals(output, name.Leaf))))
+                {
+                    return null;
+                }
+            }
+
+            SqlValue[] OrderKeysOf(GroupState group)
+            {
+                currentState = group;
+                for (var i = 0; i < aggregates.Count; i++)
+                    aggregates[i].BindResult(batch, group.Aggregators[i].Result());
+                var keys = new SqlValue[orderByItems.Count];
+                for (var k = 0; k < orderByItems.Count; k++)
+                {
+                    orderTermMayNameAlias = false;
+                    keys[k] = orderByItems[k].Expr!.Run(orderRuntime);
+                }
+                return keys;
+            }
+
+            try
+            {
+                var failingKeys = orderByItems.Count == 0 ? [] : OrderKeysOf(failing);
+                var ahead = 0;
+                var arrivedBefore = true;
+                foreach (var (_, group) in groups)
+                {
+                    if (ReferenceEquals(group, failing))
+                    {
+                        arrivedBefore = false;
+                        continue;
+                    }
+                    var keys = OrderKeysOf(group);
+                    if (fromClause.Having is { } having && having.Run(groupRuntime) != true)
+                        continue;
+                    var order = orderByItems.Count > 0 ? CompareOrderKeys(keys, failingKeys, orderByItems)
+                        : implicitOrder is var (positions, descending) ? CompareGroupKeys(group.KeyValues, failing.KeyValues, positions, descending)
+                        : 0;
+                    if (order < 0 || (order == 0 && arrivedBefore))
+                        ahead++;
+                }
+                return ahead;
+            }
+            catch (SimulatedSqlException)
+            {
+                return null;
+            }
+        }
 
         // The group map one grouping set accumulates into. An empty set is the
         // implicit whole-input group, which exists even over no rows — and is
@@ -612,13 +682,30 @@ internal sealed partial class Selection
                     // dropped, so the projection and key tuple are computed into
                     // reused scratch and only copied out on admission.
                     var projected = topNGroups is null ? new SqlValue[expressions.Count] : projectionScratch;
-                    for (var i = 0; i < expressions.Count; i++)
+                    try
                     {
-                        projected[i] = projectionGroupingKeys?[i] is { } matched
-                            ? Array.IndexOf(currentSetKeys, matched) is >= 0 and var position
-                                ? currentState.KeyValues[position]
-                                : SqlValue.Null(expressions[i].GetSqlType(batch, resolveColumnType))
-                            : expressions[i].Run(groupRuntime);
+                        for (var i = 0; i < expressions.Count; i++)
+                        {
+                            projected[i] = projectionGroupingKeys?[i] is { } matched
+                                ? Array.IndexOf(currentSetKeys, matched) is >= 0 and var position
+                                    ? currentState.KeyValues[position]
+                                    : SqlValue.Null(expressions[i].GetSqlType(batch, resolveColumnType))
+                                : expressions[i].Run(groupRuntime);
+                        }
+                    }
+                    catch (SimulatedSqlException projectionError) when (topNGroups is null && effectiveSets.Count == 1)
+                    {
+                        // Real computes the select list over each group as the
+                        // group leaves its aggregate, so an INSERT has drawn for
+                        // the groups ahead of the failing one and for it (probed
+                        // 2026-10-17 against SQL Server 2025).
+                        batch.FailingRowIdentity?.Read(expressions, groupRuntime);
+                        if (GroupsAheadOf(groups, state, groupOrder) is int ahead)
+                        {
+                            projectionError.RaisedInRowProjection = true;
+                            projectionError.HeldRowsDrawn = ahead;
+                        }
+                        throw;
                     }
 
                     // Aggregate-query ORDER BY: keys are computed here, where

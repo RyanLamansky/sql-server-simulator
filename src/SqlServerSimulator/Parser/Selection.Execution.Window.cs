@@ -125,23 +125,36 @@ internal sealed partial class Selection
         // BuildAggregateProjectionRows) and reaches rows only through
         // runtimeAt, so it is agnostic to whether a "row" is a joined base
         // tuple or a GROUP BY group.
-        var perWindowResults = ComputeWindowResults(
-            windows, perWindowKeys, buffered.Count, RuntimeAtBuffered, ResolveWindowColumnType, windowOperandTypes, windowResultTypes, batch);
-
-        // Step 3: walk buffered tuples in the order real's window sorts leave
-        // them in — arrival order when a statement ORDER BY settles it anyway —
-        // bind each window's per-tuple result, then project. From here on,
-        // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
-        // post-processing.
         var emitOrder = orderBy.Count == 0 ? WindowEmitOrder(sources, windows, perWindowKeys, buffered.Count) : null;
-        var projectionSources = ProjectionSourceReferences(expressions);
-        var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
         // With nothing above the select list to hold rows back, real's plan
         // computes it row by row past the window operators and sends each row
         // on as it goes, so the rows ahead of a failing one reach the client —
         // or an INSERT, which draws their identity values and the failing
         // row's (probed 2026-10-06 against SQL Server 2025).
         var streams = orderBy.Count == 0 && !distinct && offsetCount is null && fetchCount is null && top.Count is null && top.Percent is null;
+        SqlValue[][] perWindowResults;
+        try
+        {
+            perWindowResults = ComputeWindowResults(
+                windows, perWindowKeys, buffered.Count, RuntimeAtBuffered, ResolveWindowColumnType, windowOperandTypes, windowResultTypes, batch);
+        }
+        catch (SimulatedSqlException operandError) when (streams && windows.Count == 1)
+        {
+            if (WindowRowsAheadOfOperandFailure(windows[0], perWindowKeys, buffered.Count, emitOrder, RuntimeAtBuffered) is int ahead)
+            {
+                operandError.RaisedInRowProjection = true;
+                operandError.HeldRowsDrawn = ahead - 1;
+            }
+            throw;
+        }
+
+        // Step 3: walk buffered tuples in the order real's window sorts leave
+        // them in — arrival order when a statement ORDER BY settles it anyway —
+        // bind each window's per-tuple result, then project. From here on,
+        // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
+        // post-processing.
+        var projectionSources = ProjectionSourceReferences(expressions);
+        var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
         if (streams)
             NoteWindowSorts(batch, sources, windows, expressions);
         for (var position = 0; position < buffered.Count; position++)
@@ -589,6 +602,121 @@ internal sealed partial class Selection
     /// costs no per-row delegate allocations.
     /// </summary>
     internal delegate RuntimeContext WindowRowContext(int index);
+
+    /// <summary>
+    /// How many rows real's plan passes on ahead of a window function whose
+    /// operand raises, when the select list streams past the window: real
+    /// computes the operand row by row in the window's order as each row's
+    /// frame needs it, so every earlier partition leaves whole and, in the
+    /// failing row's partition, each row whose frame ends before it —
+    /// <c>SUM(…) OVER (ORDER BY k)</c> the rows ahead of the failing one's
+    /// peers, <c>OVER ()</c> none, <c>LAG(…, n)</c> n more, <c>LEAD(…, n)</c>
+    /// n fewer (probed 2026-10-17 against SQL Server 2025). Null for a window
+    /// whose operand doesn't raise here or whose frame isn't read that way.
+    /// </summary>
+    private static int? WindowRowsAheadOfOperandFailure(
+        WindowExpression window,
+        List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]> perWindowKeys,
+        int rowCount,
+        int[]? emitOrder,
+        WindowRowContext runtimeAt)
+    {
+        var operand = window.Kind switch
+        {
+            WindowKind.Aggregate => window.AggregateInfo?.Operand,
+            WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => window.Operand,
+            _ => null,
+        };
+        if (operand is null)
+            return null;
+        long offset = 1;
+        if (window.Kind is WindowKind.Lag or WindowKind.Lead && window.OffsetArg is not null)
+        {
+            if (!window.OffsetArg.IsWrittenConstant)
+                return null;
+            offset = window.OffsetArg.Run(runtimeAt(0)).CoerceTo(SqlType.BigInt).AsInt64;
+        }
+
+        // The rows of each partition in the order they leave, partitions in
+        // the order they first do.
+        var partitions = new Dictionary<SqlValue[], List<int>>(RowEqualityComparer.Instance);
+        var partitionOrder = new List<List<int>>();
+        for (var position = 0; position < rowCount; position++)
+        {
+            var row = emitOrder is null ? position : emitOrder[position];
+            var key = perWindowKeys[row][0].PartitionKeys;
+            if (!partitions.TryGetValue(key, out var members))
+            {
+                members = [];
+                partitions[key] = members;
+                partitionOrder.Add(members);
+            }
+            members.Add(row);
+        }
+
+        var orderBy = new List<OrderBySpec>(window.OrderBy);
+        var ahead = 0;
+        foreach (var members in partitionOrder)
+        {
+            var failing = -1;
+            for (var i = 0; i < members.Count && failing < 0; i++)
+            {
+                try
+                {
+                    _ = operand.Run(runtimeAt(members[i]));
+                }
+                catch (SimulatedSqlException)
+                {
+                    failing = i;
+                }
+            }
+            if (failing < 0)
+            {
+                ahead += members.Count;
+                continue;
+            }
+
+            for (var r = 0; r < members.Count; r++)
+            {
+                long frameEnd;
+                switch (window.Kind)
+                {
+                    case WindowKind.Lag:
+                        frameEnd = r - offset;
+                        break;
+                    case WindowKind.Lead:
+                        frameEnd = r + offset;
+                        break;
+                    default:
+                        var lastPeer = r;
+                        while (lastPeer + 1 < members.Count
+                            && SortOrderKeys(perWindowKeys[members[lastPeer + 1]][0].OrderKeys, perWindowKeys[members[r]][0].OrderKeys, orderBy) == 0)
+                        {
+                            lastPeer++;
+                        }
+                        if (window.Frame is not { } frame)
+                        {
+                            frameEnd = orderBy.Count == 0 ? members.Count - 1 : lastPeer;
+                            break;
+                        }
+                        frameEnd = frame.End.Kind switch
+                        {
+                            FrameBoundKind.UnboundedFollowing => members.Count - 1,
+                            FrameBoundKind.CurrentRow => frame.IsRange ? lastPeer : r,
+                            FrameBoundKind.NFollowing => r + frame.End.Offset,
+                            FrameBoundKind.NPreceding => r - frame.End.Offset,
+                            _ => r,
+                        };
+                        break;
+                }
+                if (frameEnd >= failing)
+                    break;
+                ahead++;
+            }
+            return ahead;
+        }
+        return null;
+    }
 
     /// <summary>
     /// The window engine: partitions the row set by each window's PARTITION BY

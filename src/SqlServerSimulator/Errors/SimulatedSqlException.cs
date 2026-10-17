@@ -307,6 +307,17 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisedInRowProjection;
 
     /// <summary>
+    /// With <see cref="RaisedInRowProjection"/>, how many identity draws the
+    /// failure stands for beyond the failing row's own: the groups an aggregate
+    /// or the rows a window passed on ahead of the failing one, which real's
+    /// plan sends to an <c>INSERT</c> as it goes though the simulator read them
+    /// whole first — less one when the failing value is a window function's
+    /// operand, which no draw of the failing row's precedes (probed 2026-10-17
+    /// against SQL Server 2025). Null when no such operator raised it.
+    /// </summary>
+    internal int? HeldRowsDrawn;
+
+    /// <summary>
     /// The batch <see cref="EndedCalledBatch"/> was set in: within that batch
     /// the error still ends everything it passes through — a <c>BEGIN … END</c>
     /// block around the failing statement included — and only its caller

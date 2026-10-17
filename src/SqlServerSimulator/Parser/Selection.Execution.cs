@@ -2182,6 +2182,7 @@ internal sealed partial class Selection
         // real never runs: `SELECT COUNT(*) FROM t ORDER BY MAX(a) / 0`
         // returns its row there (probed 2026-09-26), so no key is evaluated.
         var aggregateOrderBy = fromClause.GroupingSets.Count == 0 ? [] : orderBy;
+        var scalarAggregate = aggregates.Count > 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null;
 
         // What real evaluates once as its plan starts, raising before any row
         // is read (see ConstantFolding.CollectStartupConstants). A scalar
@@ -2263,7 +2264,22 @@ internal sealed partial class Selection
                     RowSecurity.NoteReads(sources, batch);
                     RunStartupConstants(startupConstants, batch);
                     if (!ReferenceEquals(batch.ExistenceProbe, self))
-                        RunStartupConstants(self!.ComputedColumnConstants(projectionStartupConstants, projectionStartupOwners), batch);
+                    {
+                        try
+                        {
+                            RunStartupConstants(self!.ComputedColumnConstants(projectionStartupConstants, projectionStartupOwners), batch);
+                        }
+                        catch (SimulatedSqlException startupError) when (scalarAggregate)
+                        {
+                            // A scalar aggregate's one row reaches an INSERT, which
+                            // draws for it, ahead of its select list's constants
+                            // (probed 2026-10-17 against SQL Server 2025:
+                            // `SELECT MAX(k) + 1/0` uses up one value, with
+                            // GROUP BY none).
+                            startupError.RaisedInRowProjection = true;
+                            throw;
+                        }
+                    }
                 }
                 // Push the WHERE conjuncts a deferred source's own body can
                 // apply into that body first, so the filter reaches its base

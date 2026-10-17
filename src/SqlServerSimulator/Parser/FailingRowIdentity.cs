@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -35,6 +36,23 @@ internal sealed class FailingRowIdentity(Expression? cell)
             {
                 this.Read(cell, runtime);
                 return;
+            }
+        }
+
+        // A cell reading a derived table's, a CTE's or an APPLY body's column
+        // reads the expression that list computes under its name, which real
+        // computes ahead of the row's others too, so a body raising beneath
+        // the INSERT's select list still moves the identity to it (probed
+        // 2026-10-17 against SQL Server 2025).
+        if ((cell is Reference || cell is NamedExpression { Inner: Reference }) && cell.Name is { } name)
+        {
+            foreach (var expression in expressions)
+            {
+                if (Collation.Baseline.Equals(expression.Name, name))
+                {
+                    this.Read(expression, runtime);
+                    return;
+                }
             }
         }
     }

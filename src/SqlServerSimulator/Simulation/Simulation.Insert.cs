@@ -905,7 +905,7 @@ partial class Simulation
             {
                 // A row failing its projection drew its identity value first,
                 // as real's does (see UseUpIdentityValues).
-                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1);
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1 + (failure.HeldRowsDrawn ?? 0));
                 throw;
             }
             if (!more)
@@ -1949,7 +1949,7 @@ partial class Simulation
             }
             else
             {
-                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, readsWhole ? 0 : rows.Count + (sourceError.RaisedInRowProjection ? 1 + (sourceError.HeldRowsDrawn ?? 0) : 0));
             }
             throw;
         }

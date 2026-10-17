@@ -325,10 +325,13 @@ A select list raising in a row reads its identity cell on its own for that (`Fai
 A `MERGE … WHEN NOT MATCHED THEN INSERT` draws its row's value ahead of the row's own values and conversions, as an `INSERT` does, and with an `ON` settled non-TRUE — EF Core's multi-row insert — its source streams to the insert, so a failing `USING` source uses up a value per source row the clause's condition took before the failure, and one for the failing row when its select list raised (`UseUpMergeIdentityValues`): `USING (SELECT 1/0 AS x) s ON 1 = 0` uses up one, a source projecting `10 / (k - 3)` over `k` = 1..5 three, and one whose `WHERE 10 / (3 - k) > 0` fails at `k` = 3 two.
 Over a join to the target real read the source whole first and used none, over an empty heap target and a two-row one (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
 
-**Not modeled yet** (probed 2026-10-17 against SQL Server 2025):
+An aggregate and a window hold their rows until they are done, but real computes what lies above them as each row leaves, so an `INSERT` has drawn for the rows they passed on before the failure (probed 2026-10-17 against SQL Server 2025).
+The simulator reads them whole first and counts those rows on the error instead (`SimulatedSqlException.HeldRowsDrawn`):
 
-- A select list over an aggregate raising in a group uses up a value per group ahead of it and its own on real — `SELECT 10 / (k - 3) FROM src GROUP BY k` three, `SELECT MAX(k) + 1/0 FROM src` one — and a window function's operand, computed per row after the window's sort, the rows ahead of the failing one (`SUM(10 / (k - 3)) OVER (ORDER BY k)` two); the simulator uses none for either, the aggregate's projection counting as an operator ahead of every draw.
-- Under `IDENTITY_INSERT`, a failing row's identity cell read through a derived table (`SELECT id, x FROM (SELECT k + 40 id, 10 / (k - 3) x FROM src) d`) moves the identity to it on real and not here, since the raising select list is the derived table's.
+- A select list over an aggregate raising in a group uses up a value per group ahead of it in the output order — the `ORDER BY`'s, else the implicit key order — and its own: `SELECT 10 / (k - 3) FROM src GROUP BY k` three, with `ORDER BY k DESC` three as well, while an error in the accumulation, a `HAVING` or an `ORDER BY` naming the select list uses none.
+  A scalar aggregate's constant (`SELECT MAX(k) + 1/0`, `COUNT(*) + 1/0` over no rows) draws for its one row, where a grouped one raises at plan start, ahead of every draw.
+- A window function's operand is computed in the window's order as each row's frame needs it, so the earlier partitions leave whole and, in the failing row's, the rows whose frame ends before it: `SUM(10 / (k - 3)) OVER (ORDER BY k)` uses up two, `OVER (PARTITION BY k)` two, `OVER ()` none, `LAG(10 / (k - 3)) OVER (ORDER BY k)` three, and an operand in the window's `ORDER BY` none (`WindowRowsAheadOfOperandFailure`, for a select list with one window).
+- Under `IDENTITY_INSERT`, a failing row's identity cell read through a derived table, a CTE or an `APPLY` body (`SELECT id, x FROM (SELECT k + 40 id, 10 / (k - 3) x FROM src) d`) moves the identity to it: the cell reads the body's column of its name (`FailingRowIdentity`).
 
 ### `$IDENTITY` and `$ROWGUID`
 
