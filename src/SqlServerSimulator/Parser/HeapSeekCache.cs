@@ -41,6 +41,21 @@ internal sealed class HeapSeekCache
     /// <summary>The seek cache attached to <paramref name="heap"/>, created on first use.</summary>
     public static HeapSeekCache For(Heap heap) => caches.GetValue(heap, static _ => new HeapSeekCache());
 
+    private static readonly ConditionalWeakTable<Heap, HeapSeekCache> continuations = [];
+
+    /// <summary>
+    /// A second seek cache for <paramref name="heap"/>, whose entries continue
+    /// a heap's non-unique index with a unique key (<c>(CustomerId, Id)</c>
+    /// for an index on <c>CustomerId</c> beside a nonclustered primary key on
+    /// <c>Id</c>), so a read pinning the index's key and ordered by that
+    /// unique key (<c>WHERE CustomerId = @c ORDER BY Id</c>) reads its group
+    /// in order rather than sorting it. They are kept apart from
+    /// <see cref="For"/>'s, where an entry sharing the index's lead column
+    /// would widen to the same columns and then list every seek of the index
+    /// by them, where real's lists them by row address.
+    /// </summary>
+    public static HeapSeekCache ContinuationsFor(Heap heap) => continuations.GetValue(heap, static _ => new HeapSeekCache());
+
     private readonly Dictionary<int, CacheEntry> byLeadOrdinal = [];
 
     // Build / replay / read are serialized: the per-Heap cache is shared

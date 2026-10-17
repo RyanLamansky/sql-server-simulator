@@ -1477,8 +1477,12 @@ internal sealed partial class Selection
         // Pick the index / key whose leading prefix is a pinned run followed by
         // exactly the effective order columns. Largest pinned run wins (narrowest
         // seek); keys before indexes.
-        if (!TryFindOrderedSeekPrefix(table, pins, [.. effective], out var fullPrefix, out var pinnedLength))
+        if (!TryFindOrderedSeekPrefix(table, pins, [.. effective], out var fullPrefix, out var pinnedLength, out var continuedByKey))
             return false;
+        // A heap's index continued by a unique key reads a cache of its own,
+        // so the index's own seeks keep listing a group by row address; the
+        // usage counters see the index the prefix seeks.
+        var seekOrdinals = continuedByKey ? fullPrefix[..pinnedLength] : fullPrefix;
 
         // Scan the conjuncts: decline if a competing seek (equality / IN / range)
         // sits on a leading key column the chosen prefix doesn't consume, and fold
@@ -1563,7 +1567,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(pins[ord], source.StoredSchema[ord].Type, batch, outerResolver, out var pinnedValue, out var pinnedCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
                 default: commons[i] = pinnedCommon; prefixValues[i] = pinnedValue; break;
             }
         }
@@ -1579,7 +1583,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(lowerExpr, orderColumnType, batch, outerResolver, out lowerValue, out var lowerCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
                 default: commons[pinnedLength] = lowerCommon; hasLower = true; lowerInclusive = orderColumnBounds.LowerInclusive; break;
             }
         }
@@ -1588,7 +1592,7 @@ internal sealed partial class Selection
             switch (EvaluateBound(upperExpr, commons[pinnedLength], batch, outerResolver, out upperValue, out var upperCommon))
             {
                 case BoundEval.Decline: return false;
-                case BoundEval.Null: orderedSources = SeekedSource(source, [], fullPrefix); return true;
+                case BoundEval.Null: orderedSources = SeekedSource(source, [], seekOrdinals); return true;
                 default: commons[pinnedLength] = hasLower ? SqlType.Promote(commons[pinnedLength], upperCommon) : upperCommon; hasUpper = true; upperInclusive = orderColumnBounds.UpperInclusive; break;
             }
         }
@@ -1664,14 +1668,14 @@ internal sealed partial class Selection
             skipped = 0;
             IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
             orderedSources = SeekedSource(source, WalkKeyFence(table, batch, plan, rowGroup, walkCommons, walked, descending,
-                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where: true) : null), fullPrefix, orderedSeeks);
+                plan.RowTxScoped ? RowLockQualifier.For(source, conjuncts, outerResolver, where: true) : null), seekOrdinals, orderedSeeks);
             return true;
         }
         // A read keeping its row locks waits out the deletes in flight before
         // it takes its order, as the qualified scan does.
         if (plan.RowTxScoped && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
-        var cache = HeapSeekCache.For(table.Heap);
+        var cache = continuedByKey ? HeapSeekCache.ContinuationsFor(table.Heap) : HeapSeekCache.For(table.Heap);
         var candidates = pinnedLength > 0 && !hasLower && !hasUpper && lowerKey is { } pinnedKey
             ? cache.OrderedGroup(table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, pinnedKey)
             : cache.OrderedSeek(
@@ -1707,10 +1711,10 @@ internal sealed partial class Selection
             List<(int Page, int Slot)> inOrder = [.. candidates];
             if (descending)
                 inOrder.Reverse();
-            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver, where: true), rest: rest), fullPrefix, orderedSeeks);
+            orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, inOrder, RowLockQualifier.For(source, conjuncts, outerResolver, where: true), rest: rest), seekOrdinals, orderedSeeks);
             return true;
         }
-        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest), fullPrefix, orderedSeeks);
+        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped, rest), seekOrdinals, orderedSeeks);
         return true;
     }
 
@@ -2054,11 +2058,19 @@ internal sealed partial class Selection
     // full prefix (pinned ++ order) and the pinned-run length. The pinned run is
     // taken greedily from the front; the largest pinned run across all keys wins
     // (narrowest seek), keys preferred over indexes on a tie.
+    //
+    // Failing a pinned one, a heap's non-unique index whose whole key is pinned,
+    // ordered by exactly the columns of a unique key, is `continued`: the
+    // index lists a group by row address, which real sorts, but no two of the
+    // group's rows tie on a unique key, so the group read in that key's order
+    // is the sort's own answer, and the prefix names the index's key followed
+    // by the unique key's (see HeapSeekCache.ContinuationsFor).
     private static bool TryFindOrderedSeekPrefix(
-        HeapTable table, Dictionary<int, Expression> pins, int[] effective, out int[] fullPrefix, out int pinnedLength)
+        HeapTable table, Dictionary<int, Expression> pins, int[] effective, out int[] fullPrefix, out int pinnedLength, out bool continued)
     {
         fullPrefix = [];
         pinnedLength = 0;
+        continued = false;
         var bestPinned = -1;
         foreach (var ordinals in EnumerateKeyOrdinals(table))
         {
@@ -2086,7 +2098,56 @@ internal sealed partial class Selection
             }
         }
 
-        return bestPinned >= 0;
+        if (bestPinned > 0 || ClusteredScan.Key(table) is not null || !IsUniqueKey(table, effective))
+            return bestPinned >= 0;
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique || index.KeyColumns.Length == 0)
+                continue;
+            var allPinned = true;
+            foreach (var column in index.KeyColumns)
+            {
+                if (!pins.ContainsKey(column.StorageOrdinal) || Array.IndexOf(effective, column.StorageOrdinal) >= 0)
+                {
+                    allPinned = false;
+                    break;
+                }
+            }
+            if (!allPinned)
+                continue;
+            List<int> prefix = new(index.KeyColumns.Length + effective.Length);
+            foreach (var column in index.KeyColumns)
+                prefix.Add(column.StorageOrdinal);
+            prefix.AddRange(effective);
+            fullPrefix = [.. prefix];
+            pinnedLength = index.KeyColumns.Length;
+            continued = true;
+            break;
+        }
+
+        return continued || bestPinned >= 0;
+    }
+
+    // Whether `ordinals` are exactly the columns, in order, of a PRIMARY KEY /
+    // UNIQUE constraint or an unfiltered unique index.
+    private static bool IsUniqueKey(HeapTable table, int[] ordinals)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.StorageOrdinals.AsSpan().SequenceEqual(ordinals))
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (!index.IsUnique || index.KeyColumns.Length != ordinals.Length || index.Filter is not null)
+                continue;
+            var same = true;
+            for (var i = 0; i < ordinals.Length && same; i++)
+                same = index.KeyColumns[i].StorageOrdinal == ordinals[i];
+            if (same)
+                return true;
+        }
+        return false;
     }
 
     // True when `columnSide` is a leading key column of THIS source carrying a
