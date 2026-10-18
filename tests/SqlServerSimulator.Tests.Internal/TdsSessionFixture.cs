@@ -289,7 +289,35 @@ internal sealed class TdsSessionFixture : IDisposable
     /// user type — for asserting the flag bits SqlClient folds into its schema
     /// table.
     /// </summary>
-    public static List<string> ColumnFlags(byte[] response)
+    public static List<string> ColumnFlags(byte[] response) => WalkColumnMetadata(response, out _);
+
+    /// <summary>
+    /// The TABNAME token after the response's first COLMETADATA, each table as
+    /// its dotted name parts, in the token's order; empty when none follows.
+    /// </summary>
+    public static List<string> BrowseTableNames(byte[] response)
+    {
+        _ = WalkColumnMetadata(response, out var i);
+        var tables = new List<string>();
+        if (response[i] != 0xA4)
+            return tables;
+        var end = i + 3 + BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i + 1));
+        i += 3;
+        while (i < end)
+        {
+            var parts = new List<string>();
+            for (var count = response[i++]; count > 0; count--)
+            {
+                var chars = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                parts.Add(Encoding.Unicode.GetString(response, i + 2, chars * 2));
+                i += 2 + (chars * 2);
+            }
+            tables.Add(string.Join('.', parts));
+        }
+        return tables;
+    }
+
+    private static List<string> WalkColumnMetadata(byte[] response, out int end)
     {
         var i = Array.IndexOf(response, Tds.TokenColMetadata);
         if (i < 0)
@@ -345,6 +373,7 @@ internal sealed class TdsSessionFixture : IDisposable
             i += 1 + (response[i] * 2);
             described.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{name}:{flags:x4}{(userType == 0 ? "" : $":ut={userType}")}"));
         }
+        end = i;
         return described;
     }
 

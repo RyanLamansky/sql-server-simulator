@@ -41,7 +41,8 @@ partial class Simulation
         InlineTableValuedFunction function,
         Expression?[] arguments,
         MultiPartName writtenName,
-        bool[]? readerDemand = null)
+        bool[]? readerDemand = null,
+        bool browseFlatten = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -57,7 +58,7 @@ partial class Simulation
 
         // The body binds and runs in the function's own database, one row at a
         // time, since the referencing statement consumes it lazily.
-        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, tableArguments, writtenName, readerDemand);
+        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, tableArguments, writtenName, readerDemand, browseFlatten);
         return ReferenceEquals(function.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, function.Schema.Database, rows);
@@ -106,7 +107,8 @@ partial class Simulation
         bool[] isDefault,
         HeapTable?[]? tableArguments,
         MultiPartName writtenName,
-        bool[]? readerDemand)
+        bool[]? readerDemand,
+        bool browseFlatten)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -160,6 +162,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
+            parser.BrowseFlatten = browseFlatten;
             var bodySelection = ParseInlineTvfBody(parser, function, writtenName);
             // Inlined like a view body, so the same chain-breaks apply: reads
             // into another database, or of an object with another owner,
@@ -273,8 +276,32 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// The body of a call of <paramref name="inline"/> a browse statement
+    /// flattens, as it does a view's (see <see cref="ParserContext.BrowseFlatten"/>):
+    /// its columns describe down to the tables the body reads, which carry their
+    /// keys as hidden columns (captured 2026-10-18 against SQL Server 2025:
+    /// <c>SELECT v FROM f()</c> over <c>SELECT k, v FROM t</c> names <c>t</c>
+    /// and carries <c>k</c>); null for a call whose arguments can't be settled
+    /// while compiling or whose body doesn't parse here, which is described
+    /// as the function's own columns.
+    /// </summary>
+    internal static Selection? InlineTvfBrowseBody(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
+        if (batch.IsSkipping)
+            return null;
+        try
+        {
+            return ParseInlineTvfCall(batch, inline, arguments, name, browseFlatten: true);
+        }
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>An inline function's body parsed with <paramref name="arguments"/> evaluated as its parameters' values.</summary>
-    private static Selection ParseInlineTvfCall(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name, bool inlinesArguments = false)
+    private static Selection ParseInlineTvfCall(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name, bool inlinesArguments = false, bool browseFlatten = false)
     {
         var (argValues, isDefault, _) = EvaluateFunctionArguments(
             inline, arguments, new RuntimeContext(written => throw SimulatedSqlException.InvalidColumnName(written), batch));
@@ -317,6 +344,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
+            parser.BrowseFlatten = browseFlatten;
             return ParseInlineTvfBody(parser, inline, name);
         }
         finally

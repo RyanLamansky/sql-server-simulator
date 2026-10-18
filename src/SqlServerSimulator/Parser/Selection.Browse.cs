@@ -66,7 +66,8 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Appends, for each base table a browse statement reaches — in FROM order,
-    /// through the derived tables, views and CTEs it flattens — its key columns
+    /// through the derived tables, views, CTEs and inline functions it
+    /// flattens, a multi-statement function's return table among them — its key columns
     /// and then its rowversion column that the select list doesn't already
     /// read, as the hidden columns real carries in every row; returns how many.
     /// A table reached through a grouped or DISTINCT body contributes none.
@@ -78,7 +79,7 @@ internal sealed partial class Selection
         {
             if (!keyed)
                 continue;
-            foreach (var ordinal in BrowseColumnOrdinals(table.BackingTable!))
+            foreach (var ordinal in BrowseColumnOrdinals(BrowseHeap(table)!))
             {
                 if (expressions.Exists(expression => BrowseBaseColumn(sources, expression) is { Table: { } projected, Ordinal: var o } && ReferenceEquals(projected, table) && o == ordinal)
                     || BrowseReference(sources, table, ordinal) is not { } reference)
@@ -109,12 +110,20 @@ internal sealed partial class Selection
                         yield return table;
                 }
             }
-            else if (source.BackingTable is not null && !source.IsPlaceholder)
+            else if (BrowseHeap(source) is not null)
             {
                 yield return (source, keyed);
             }
         }
     }
+
+    /// <summary>
+    /// The base table browse mode describes <paramref name="source"/> as: its
+    /// own table, or a multi-statement function call's return table; null for
+    /// any other source.
+    /// </summary>
+    private static HeapTable? BrowseHeap(FromSource source) =>
+        source is { BackingTable: { } table, IsPlaceholder: false } ? table : source.BrowseReturnTable?.Shape;
 
     /// <summary>
     /// The base-table column <paramref name="expression"/> reads, through any
@@ -144,7 +153,7 @@ internal sealed partial class Selection
         // A VALUES constructor's or rowset constructor's column is an
         // expression, as is a catalog view's or system function's computed one
         // (probed 2026-10-17 against SQL Server 2025).
-        return source.BackingTable is not null && !source.IsPlaceholder ? (source, columnIndex, false)
+        return BrowseHeap(source) is not null ? (source, columnIndex, false)
             : (null, -1, source.ComputedCatalogColumns() is { } computed ? columnIndex < computed.Length && computed[columnIndex] : source.ConstructsRows);
     }
 
@@ -157,7 +166,7 @@ internal sealed partial class Selection
     /// </summary>
     private static Expression? BrowseReference(FromSource[] sources, FromSource table, int ordinal)
     {
-        var name = table.BackingTable!.Columns[ordinal].Name;
+        var name = BrowseHeap(table)!.Columns[ordinal].Name;
         foreach (var source in sources)
         {
             if (ReferenceEquals(source, table))
@@ -183,30 +192,39 @@ internal sealed partial class Selection
 
     /// <summary>
     /// The browse metadata for a statement whose last <paramref name="hidden"/>
-    /// columns are browse mode's own.
+    /// columns are browse mode's own. TABNAME lists the tables the columns
+    /// read, hidden ones included, in the order they first read them, so a
+    /// table no column reads — a keyless one, or one behind a grouped body or
+    /// under a grouped statement — goes unnamed (captured 2026-10-18 against
+    /// SQL Server 2025: <c>SELECT b.w, a.v FROM a CROSS JOIN b</c> names
+    /// <c>b</c> first while its hidden keys follow FROM order, and
+    /// <c>SELECT COUNT(*) FROM t</c> names no table).
     /// </summary>
     private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden)
     {
+        var reachable = new HashSet<FromSource>(ReferenceEqualityComparer.Instance);
+        foreach (var (table, _) in BrowseTables(sources))
+            _ = reachable.Add(table);
         var tables = new List<string[]>();
         var tableNumbers = new Dictionary<FromSource, int>(ReferenceEqualityComparer.Instance);
-        foreach (var (table, _) in BrowseTables(sources))
-        {
-            tables.Add((table.WrittenObjectName ?? table.BackingTable!.Name).Split('.'));
-            tableNumbers[table] = tables.Count;
-        }
 
         var columns = new (byte Table, byte Status, string? BaseName)[expressions.Count];
         for (var i = 0; i < expressions.Count; i++)
         {
             var isHidden = i >= expressions.Count - hidden;
             var (table, ordinal, isExpression) = BrowseBaseColumn(sources, expressions[i]);
-            if (table is null || !tableNumbers.TryGetValue(table, out var tableNumber))
+            if (table is null || !reachable.Contains(table))
             {
                 columns[i] = (0, (byte)(isExpression ? 0x04 : 0), null);
                 continue;
             }
+            if (!tableNumbers.TryGetValue(table, out var tableNumber))
+            {
+                tables.Add((table.WrittenObjectName ?? table.BrowseReturnTable?.Name ?? table.BackingTable!.Name).Split('.'));
+                tableNumbers[table] = tableNumber = tables.Count;
+            }
 
-            var heap = table.BackingTable!;
+            var heap = BrowseHeap(table)!;
             var baseName = heap.Columns[ordinal].Name;
             var renamed = !string.Equals(outputColumnNames[i], baseName, StringComparison.Ordinal);
             var status = (Array.IndexOf(BrowseKeyOrdinals(heap), ordinal) >= 0 ? 0x08 : 0)

@@ -36,6 +36,8 @@ public sealed class BrowseModeWireTests
         Wire.ExecInProc(simulation, "create view v3 as select a.name, b.v from w1 a join w2 b on a.id = b.k1");
         Wire.ExecInProc(simulation, "create view v4 as select a, b from h1");
         Wire.ExecInProc(simulation, "create view v5 as select name, count(*) c from w1 group by name");
+        Wire.ExecInProc(simulation, "create function dbo.mf() returns @r table (a int primary key, b int) as begin insert @r values (1, 2); return end");
+        Wire.ExecInProc(simulation, "create function dbo.inf() returns table as return select k1, k2, v from w2");
         return simulation;
     }
 
@@ -77,6 +79,8 @@ public sealed class BrowseModeWireTests
     [DataRow("select v from (values (1)) q(v)", "v:..v:e visible=1")]
     [DataRow("select [key] from openjson('[1]')", "key:..key:e visible=1")]
     [DataRow("select name from w1 union select name from w1", "name:..name:e visible=1")]
+    [DataRow("select b from dbo.mf()", "b:dbo.mf.b: a:dbo.mf.a:kh visible=1")]
+    [DataRow("select v from dbo.inf()", "v:.w2.v: k1:.w2.k1:kh k2:.w2.k2:kh visible=1")]
     public async Task KeyInfo_DescribesBaseColumnsAndCarriesHiddenKeys(string sql, string expected) =>
         AreEqual(expected, await this.KeyInfoSchema(sql));
 

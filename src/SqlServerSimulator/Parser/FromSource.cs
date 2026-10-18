@@ -70,6 +70,14 @@ internal sealed class FromSource(
     public Selection? BrowseBody;
 
     /// <summary>
+    /// A multi-statement function call's return table, which a browse statement
+    /// names as a base table under the name it was called by, its key that
+    /// table's (captured 2026-10-18 against SQL Server 2025); null for every
+    /// other source.
+    /// </summary>
+    public (HeapTable Shape, string Name)? BrowseReturnTable;
+
+    /// <summary>
     /// The node or edge table a derived table's, view's or CTE's body reads
     /// through, when the body carries its identity as hidden trailing columns
     /// (<see cref="Selection.GraphIdentityTable"/>); null for every other source.
@@ -654,6 +662,7 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            BrowseReturnTable = this.BrowseReturnTable,
             ViewColumnWireFlags = this.ViewColumnWireFlags,
             CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
@@ -683,6 +692,7 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            BrowseReturnTable = this.BrowseReturnTable,
             ViewColumnWireFlags = this.ViewColumnWireFlags,
             CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
@@ -714,6 +724,7 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            BrowseReturnTable = this.BrowseReturnTable,
             ViewColumnWireFlags = this.ViewColumnWireFlags,
             CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,
@@ -743,6 +754,7 @@ internal sealed class FromSource(
             xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
         {
             BrowseBody = this.BrowseBody,
+            BrowseReturnTable = this.BrowseReturnTable,
             ViewColumnWireFlags = this.ViewColumnWireFlags,
             CatalogColumns = this.CatalogColumns,
             ReadColumns = this.ReadColumns,

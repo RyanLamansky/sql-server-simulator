@@ -34,14 +34,24 @@ partial class Selection
     /// kinds.
     /// </para>
     /// </remarks>
-    internal static Selection ForInlineTvf(InlineTableValuedFunction function, Expression?[] arguments, MultiPartName writtenName)
+    /// <param name="function">The function called.</param>
+    /// <param name="arguments">The call's arguments, null for a <c>DEFAULT</c>.</param>
+    /// <param name="writtenName">The name the call was written with.</param>
+    /// <param name="columns">The columns the call reads, the function's own unless a browse statement flattens it.</param>
+    /// <param name="browseFlatten">
+    /// Whether a browse statement flattens the body, which then carries its
+    /// base tables' hidden browse columns after the function's own (see
+    /// <see cref="ParserContext.BrowseFlatten"/>), counted in <paramref name="columns"/>.
+    /// </param>
+    internal static Selection ForInlineTvf(InlineTableValuedFunction function, Expression?[] arguments, MultiPartName writtenName, HeapColumn[]? columns = null, bool browseFlatten = false)
     {
-        var schema = new SqlType[function.OutputColumns.Length];
-        var columnNames = new string[function.OutputColumns.Length];
-        for (var i = 0; i < function.OutputColumns.Length; i++)
+        columns ??= function.OutputColumns;
+        var schema = new SqlType[columns.Length];
+        var columnNames = new string[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
         {
-            schema[i] = function.OutputColumns[i].Type;
-            columnNames[i] = function.OutputColumns[i].Name;
+            schema[i] = columns[i].Type;
+            columnNames[i] = columns[i].Name;
         }
         // The plan the closure belongs to, whose reader demand each run hands
         // the body; assigned once the plan exists.
@@ -52,7 +62,7 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, outerResolver) =>
-                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName, self!.ReaderDemand))
+                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName, self!.ReaderDemand, browseFlatten))
         {
             // An identity column reads through the function as an ordinary
             // updatable one (probed 2026-09-26 against SQL Server 2025).

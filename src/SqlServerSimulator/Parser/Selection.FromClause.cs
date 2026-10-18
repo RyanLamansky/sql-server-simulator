@@ -1703,8 +1703,26 @@ internal sealed partial class Selection
                         // the scalar functions it calls inline with it.
                         if (function is InlineTableValuedFunction expanded)
                             InlinedScalarCalls.Note(context, expanded);
+                        // A browse statement flattens an inline function as it
+                        // does a view, its body carrying its tables' hidden
+                        // browse columns after the function's own.
+                        var inlineBrowseBody = function is InlineTableValuedFunction browsed && context.BrowseFlattenFrom
+                            ? Simulation.InlineTvfBrowseBody(context.Batch, browsed, tvfArgs, objectName)
+                            : null;
+                        if (inlineBrowseBody is { TrailingHiddenColumnCount: > 0 and var inlineHidden } && inlineBrowseBody.Schema.Length - inlineHidden == outputColumns.Length)
+                        {
+                            outputColumns = [
+                                .. outputColumns,
+                                .. Enumerable.Range(outputColumns.Length, inlineHidden).Select(i => new HeapColumn(inlineBrowseBody.TrailingHiddenName(i), inlineBrowseBody.Schema[i], maxLength: null, nullable: true, isHidden: true)),
+                            ];
+                        }
+                        else if (inlineBrowseBody is not null && inlineBrowseBody.Schema.Length != outputColumns.Length)
+                        {
+                            inlineBrowseBody = null;
+                        }
                         var lateralPlan = function switch
                         {
+                            InlineTableValuedFunction inlineTvf when inlineBrowseBody is not null => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName, outputColumns, browseFlatten: true),
                             InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName).DeferringAs(Simulation.InlineTvfOfferBody(context.Batch, inlineTvf, tvfArgs, objectName)),
                             ClrTableValuedFunction clrTvf => Selection.ForClrTvf(context.Batch, clrTvf, tvfArgs),
                             _ => Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs),
@@ -1732,6 +1750,10 @@ internal sealed partial class Selection
                                 ? objectName.ToString()
                                 : null,
                             InlineCall = function is InlineTableValuedFunction called ? (called, tvfArgs, objectName) : null,
+                            BrowseBody = inlineBrowseBody,
+                            // Only a browse statement's, whose plan is never
+                            // cached, holds the return table's shape.
+                            BrowseReturnTable = context.BrowseFlattenFrom && function is MultiStatementTableValuedFunction multiStatement ? (multiStatement.CatalogShape(), objectName.ToString()) : null,
                         };
                     }
                     // A table-valued function takes its parentheses (probed
