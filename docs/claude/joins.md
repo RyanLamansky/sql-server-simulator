@@ -121,6 +121,10 @@ With ≥1 equi-key, RIGHT / FULL route straight to `HashEquiJoin` (their unmatch
 The `COUNT(DISTINCT …)` per group over that join that prompted it decomposes as 10.6 ms for the bare scan, 49.3 with the join, 81.4 with the `GROUP BY` and 102.5 with the distinct sets, against live's 54 ms at DOP 8, so what is left there is grouping and intra-query parallelism rather than the join strategy.
 **Settled — don't re-pitch:** measured with no gain, and which side real builds is its cost model's choice, not a guarantee.
 
+**A join on one integer key buckets by the value itself** (`IntegerKeyed`): equal values of the promoted integer type are equal integers, so a `long` keys the chains exactly as the tuple key would, the build allocates no key array per distinct value, neither side's probe pays the tuple key's hashing and type-tested equality, and the build reads its key straight off each row rather than through the tuple resolver.
+Its buckets are sized up front (`DistinctKeysExpected`) from the table's rows where a key constraint or unique index covers the column alone, else from the reciprocal of the density a statistic leading with the column last measured — a capacity only, which a stale figure costs a regrowth.
+Measured 2026-10-17 (Release, minimum of six alternating rounds at a load average of 3–13): a bare `COUNT(*)` over `Invoices ⋈ InvoiceLines` 104 → 59 ms of CPU, and the WWI reports hashing that join 7–30% less CPU and 7–9% fewer bytes (`insel.year_join` 103 → 73 ms, `conditional.agg_pivot` 163 → 133, `derived.agg_join_last` 109 → 90).
+
 ### WHERE pushdown into every base-table source
 
 `NarrowJoinSources` (`Selection.Execution.IndexSeek.cs`, run by all three projectors — row, aggregate and window) attempts the single-source equality / range seek against the statement's WHERE excluders for **each** base-table FROM source, not just the leftmost.

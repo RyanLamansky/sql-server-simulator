@@ -982,10 +982,17 @@ internal sealed partial class Selection
         // repeated key twice, which profiling put at a third of a 228k-row
         // build's CPU. Both row lists are sized from the backing table's row
         // count where there is one, which retires the doubling copies.
+        //
+        // A join on one integer key buckets by the value itself
+        // (IntegerKeyed): equal values of the one promoted type are equal
+        // integers, so a long keys the chains exactly as the tuple key would,
+        // without an array per distinct key or the tuple key's hashing and
+        // equality per probe.
         var keyScratch = new SqlValue[plan.Keys.Length];
         List<byte[]> rightRows;
         List<int> next;
-        Dictionary<SqlValueKey, (int Head, int Tail)> buckets;
+        Dictionary<SqlValueKey, (int Head, int Tail)>? buckets = null;
+        Dictionary<long, (int Head, int Tail)>? integerBuckets = null;
         // A whole cached catalog view carries an index built once per
         // generation of its rowset, keyed exactly as this build would key it.
         if (right.CatalogRows is { } cachedCatalog)
@@ -1002,6 +1009,12 @@ internal sealed partial class Selection
             rightRows = cachedCatalog.Rows;
             next = index.Next;
             buckets = index.Buckets;
+        }
+        else if (IntegerKeyed(plan))
+        {
+            (rightRows, next, integerBuckets) = BuildIntegerHashSide(right, plan.Keys[0], tuple, level, batch, runtime);
+            if (!batch.CurrentStatement.WritesRows)
+                batch.Connection.StatementIo?.UseWorktable(hashJoin: true);
         }
         else
         {
@@ -1020,8 +1033,9 @@ internal sealed partial class Selection
         {
             batch.ThrowIfCancelled();
             var matchedLeft = false;
-            if (TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey)
-                && buckets.TryGetValue(probeKey, out var probeChain))
+            if (integerBuckets is not null
+                ? TryComputeIntegerKey(plan.Keys[0], plan.Keys[0].Left.Run(runtime), out var probeInteger) && integerBuckets.TryGetValue(probeInteger, out var probeChain)
+                : TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey) && buckets!.TryGetValue(probeKey, out probeChain))
             {
                 for (var ordinal = probeChain.Head; ordinal != -1; ordinal = next[ordinal])
                 {
@@ -1066,7 +1080,7 @@ internal sealed partial class Selection
         var expectedRows = right.BackingTable?.Heap.RowCount ?? 0;
         var rightRows = expectedRows > 0 ? new List<byte[]>(expectedRows) : [];
         var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
-        var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
+        var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>(plan.Keys.Length == 1 ? DistinctKeysExpected(right, plan.Keys[0]) : 0);
         var keyScratch = new SqlValue[plan.Keys.Length];
         foreach (var row in right.RowsFor(batch))
         {
@@ -1093,6 +1107,113 @@ internal sealed partial class Selection
         }
         tuple[level] = null;
         return (rightRows, next, buckets);
+    }
+
+    /// <summary>
+    /// <see cref="BuildHashSide"/> for a join on one integer key
+    /// (<see cref="IntegerKeyed"/>), bucketing by the promoted value. The key
+    /// column is read straight off the row, as the tuple resolver would read
+    /// it at the column <paramref name="key"/> names in its own source, unless
+    /// the source evaluates that column itself.
+    /// </summary>
+    private static (List<byte[]> Rows, List<int> Next, Dictionary<long, (int Head, int Tail)> Buckets) BuildIntegerHashSide(
+        FromSource right, EquiKey key, byte[]?[] tuple, int level, BatchContext batch, RuntimeContext runtime)
+    {
+        var expectedRows = right.BackingTable?.Heap.RowCount ?? 0;
+        var rightRows = expectedRows > 0 ? new List<byte[]>(expectedRows) : [];
+        var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
+        var buckets = new Dictionary<long, (int Head, int Tail)>(DistinctKeysExpected(right, key));
+        var direct = right.DeferredColumns?[key.RightOrdinal] is null;
+        foreach (var row in right.RowsFor(batch))
+        {
+            tuple[level] = row;
+            var ordinal = rightRows.Count;
+            rightRows.Add(row);
+            next.Add(-1);
+            var raw = direct ? DecodeOrCompute(right, key.RightOrdinal, row, batch) : key.Right.Run(runtime);
+            if (TryComputeIntegerKey(key, raw, out var value))
+            {
+                ref var chain = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, value, out var existed);
+                if (existed)
+                {
+                    next[chain.Tail] = ordinal;
+                    chain.Tail = ordinal;
+                }
+                else
+                {
+                    chain = (ordinal, ordinal);
+                }
+            }
+        }
+        tuple[level] = null;
+        return (rightRows, next, buckets);
+    }
+
+    /// <summary>
+    /// Whether the join's one key promotes to an integer type, whose values
+    /// are equal exactly when their integers are.
+    /// </summary>
+    private static bool IntegerKeyed(EquiJoinPlan plan) =>
+        plan.Keys is [{ Common: var common }]
+        && (ReferenceEquals(common, SqlType.Int32) || ReferenceEquals(common, SqlType.BigInt)
+            || ReferenceEquals(common, SqlType.SmallInt) || ReferenceEquals(common, SqlType.TinyInt));
+
+    /// <summary>
+    /// <paramref name="raw"/>, one side's value of an integer key, promoted
+    /// to the key's type as <see cref="TryComputeKeyInto"/> promotes it;
+    /// false for a NULL, which no bucket holds.
+    /// </summary>
+    private static bool TryComputeIntegerKey(EquiKey key, SqlValue raw, out long value)
+    {
+        if (raw.IsNull)
+        {
+            value = 0;
+            return false;
+        }
+        value = SqlValue.AsInt64Widened(raw.CoerceTo(key.Common));
+        return true;
+    }
+
+    /// <summary>
+    /// How many distinct values the build side's one key column is expected
+    /// to hold, which sizes its buckets so the build doesn't regrow them: the
+    /// table's rows where a key constraint or unique index makes the column
+    /// unique on its own; else the reciprocal of the density a statistic
+    /// leading with the column last measured, which compiling the join's
+    /// <c>ON</c> loaded; else none, and the buckets grow as values arrive.
+    /// Only a capacity — a stale or missing figure costs a regrowth, never a
+    /// different answer.
+    /// </summary>
+    private static int DistinctKeysExpected(FromSource right, EquiKey key)
+    {
+        if (right.BackingTable is not { } table)
+            return 0;
+        var rows = table.Heap.RowCount;
+        var column = right.StorageOrdinals is { } ordinals ? ordinals[key.RightOrdinal] : key.RightOrdinal;
+        var measured = 0;
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (!constraint.IsDisabled && constraint.StorageOrdinals is [var only] && only == column)
+                return rows;
+            if (constraint.FullOrdinals is [var leading, ..] && leading == key.RightOrdinal)
+                measured = Math.Max(measured, FromDensity(constraint.Statistics, rows));
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index is { IsUnique: true, IsDisabled: false, Filter: null, KeyColumns: [var only] } && only.StorageOrdinal == column)
+                return rows;
+            if (index.KeyFullOrdinals is [var leading, ..] && leading == key.RightOrdinal)
+                measured = Math.Max(measured, FromDensity(index.Statistics, rows));
+        }
+        foreach (var statistic in table.UserStatistics)
+        {
+            if (statistic.ColumnFullOrdinals is [var leading, ..] && leading == key.RightOrdinal)
+                measured = Math.Max(measured, FromDensity(statistic.Statistics, rows));
+        }
+        return measured;
+
+        static int FromDensity(StatisticsState state, int rows) =>
+            state.Snapshot is { DensityVector: [{ AllDensity: > 0 and var density }, ..] } ? (int)Math.Min(rows, 1 / density) : 0;
     }
 
     /// <summary>
