@@ -149,9 +149,15 @@ Three folds apply:
 
 - **Case**, always.
   Matching is case-insensitive whatever the column's collation says — probe-confirmed against a `Latin1_General_CS_AS` column, where `apple` and `APPLE` both matched both `Apple Banana` and `apple cherry`.
-- **Compatibility forms**, always: full-width and half-width forms, ligatures and the `dž` digraphs to their plain spelling, and `ß` / `æ` / `œ` / `ĳ` to two letters, so `straße` is `strasse` even to an accent-sensitive catalog.
+  Real's case table is older than .NET's, so some capitals keep their case — `Ș`, `Ț`, `Ѐ`, the Cyrillic `Ӑ` family, Cherokee, the Greek extended capitals — and a search for `știri` misses `Știri` (probed 2026-10-17 against SQL Server 2025).
+- **Compatibility forms**, always: full-width and half-width forms, ligatures and the `dž` digraphs to their plain spelling, and `ß` / `æ` / `œ` / `ĳ` to two letters, so `straße` is `strasse` even to an accent-sensitive catalog; a halfwidth Hangul letter folds to the compatibility jamo (`ﾡ` to `ㄱ`), not NFKC's conjoining one.
 - **Accents**, only when the backing catalog was created `WITH ACCENT_SENSITIVITY = OFF`.
-  The default is ON, so `café` and `cafe` are distinct terms; the fold strips Latin, Greek and Cyrillic marks and leaves a Devanagari virama or a kana voicing mark alone.
+  The default is ON, so `café` and `cafe` are distinct terms; the fold keeps the letters an accent-sensitive keyword is built from (below) and drops their codes, which is real's answer for every BMP character between two letters (probed 2026-10-17 against SQL Server 2025), so a kept capital and a Devanagari virama stay.
+
+**Which characters belong to a word** is also real's older table: letters of scripts and blocks it predates (`U+023A`–`U+024F`, N'Ko, Balinese, Vai …) and `µ` break a word, while unassigned code points, Braille, the Kangxi radicals and many other symbols stay inside one.
+`FullTextWordBreaker.Overrides` carries, from the embedded `CharacterClasses.tsv`, every BMP character the rules above would answer differently between two letters, read off `sys.dm_fts_parser` (probed 2026-10-17 against SQL Server 2025); what remains is the context rules' own residue in the divergences below.
+
+**A word over 64 characters** is cut into 64-character terms at successive positions, every later term moving on by the positions they add; a compound's composite keeps all its pieces at its own position beside its first part, and a number whose `nn` companion would run past 64 characters loses the companion (probed 2026-10-17 against SQL Server 2025).
 
 An **`xml` column** contributes its content and not its markup, which is what real indexes: probing `<r kind="cv"><skill>Engineer</skill></r>` found `Engineer` and the attribute *value* `cv`, but neither the element name `skill` nor the attribute name `kind`.
 A **`varbinary` column paired through `TYPE COLUMN`** contributes the text the filter its extension names extracts, fitted to SQL Server 2025 on Linux, whose `sys.fulltext_document_types` includes `.c`, `.csv`, `.htm`, `.html`, `.txt` and `.xml` but neither `.docx` nor `.pdf` (probed 2026-10-02): the plain-text ones index the decoded text as is, markup included; HTML indexes element text with entities decoded (`caf&eacute;` finds `café`) but neither tag names, attribute values, comments nor `script` / `style` bodies; XML indexes as an `xml` column does.
@@ -205,10 +211,10 @@ Rows come in real's index order: keyword bytes, column, document, position.
 
 - **The keyword** (`FullTextKeyword`) is the term's letters with their accents taken off, in UTF-16 big-endian, followed when any letter carried one by `0x0000` and a byte per letter up to the last accented one — 2 for none, else the accent's code (14 acute, 15 grave, 18 circumflex, 19 diaeresis, 25 tilde, 26 ring, 28 cedilla, a two-mark letter a code of its own): `café` is `0x0063006100660065` + `0x00000202020E`.
   Some letters fold to others there (`þ` to `th`, `ð` to `d` with code 104, `ς` to `σ`) and combining marks and the characters real's table lacks drop out; the per-character table was read off `sys.dm_fts_parser` for every BMP character between two letters and is embedded as `KeywordAccents.tsv`.
-  An accent-insensitive catalog keeps the folded letters and no codes.
+  An accent-insensitive catalog keeps the folded letters and no codes, which is the same fold its terms take.
 - **The display term** reads each accented letter back from its base and code, so letters sharing both read back alike (`ṹ` as `ǚ`), an expanding one as its letters (`ǣ` as `āē`), and some in upper case (`ÿ` as `Ÿ`, `ά` as `Ά`).
 - **`END OF FILE`** (`0xFF`): each non-NULL, non-empty value holds one a position past its last word, noise words counted, or at 1 when it has none (`'!!'`, `'   '`); a row with no such value holds one at position 1 of its highest-numbered indexed column.
-- **`document_id`** is the key's value for an integer key, and otherwise the key's rank in key order — the id real's initial crawl assigns.
+- **`document_id`** is the key's value for an integer key, and otherwise the id the index holds for the key (`FullTextIndex.DocumentIdFor`): the initial crawl numbers the rows in key order from 1, and a row written afterwards starts real's next block of ids — they run in blocks of a thousand with one left between them, so three crawled rows leave the next at 1002 and 1,500 leave it at 2003 — with later rows following in write order; a key keeps its id through an update and a delete and rewrite (probed 2026-10-17 against SQL Server 2025).
 - Real refuses a NULL argument with **Msg 30007**, an unknown database with **Msg 30003**, an object that isn't a user table there with **Msg 30004** and a table without a full-text index with **Msg 30006**.
 
 ### The `contains_search_condition` grammar
@@ -328,9 +334,9 @@ State 3 is what an operator keyword standing in *operand* position produces — 
   Every language breaks by the English rules with its own stoplist, which real matches only for neutral and British English.
   The rest carry locale rules — German reads `33,667.95` with a decimal comma, splits `d'angelo`, and knows no English month or meridiem — so on 400 English-text inputs per language the parser's output matched real's for 24–33% of them (German, French, Spanish, Italian, Dutch, Brazilian Portuguese, Russian); searched as a German column, the same differential's conditions returned real's rows for 94.7% of 505.
 - **Other languages' morphology** — see [Languages](#languages).
-- **The keyword table's case gaps** — a handful of capitals real's tables don't lower-case (`Ș`, `Ț`, `Ѐ`, the Cyrillic `Ӑ` family) keep their case in real's keyword and fold here, so they are one keyword with their small letter where real holds two; the table is keyed by the small letter the breaker emits.
-- **A word over 64 characters** — real cuts it into 64-character terms at successive positions (an accented one sooner), and the breaker here keeps it whole.
-- **The document id of a row written after the crawl**, for a key that isn't an integer: real gives it the next id past a reserved block (`1002` after three rows), where the rank in key order here renumbers every row after it.
+- **The context rules' character residue** — between two letters, real drops the vulgar fractions, the vertical tab and form feed and the Ogham space mark, keeps the hyphen, figure dash, horizontal bar and minus sign as a composite of the two words, and keeps `☹` / `☺` / `☻` as terms of their own, where the breaker here answers otherwise for those 30 characters.
+- **The keyword size limit on an accented term** — real keeps a term's keyword within 128 bytes, so a term of more than 42 characters with an accent near its end comes out shorter (a 43-character term accented last is 41 characters without the accent; a 64-character piece accented at 42 keeps 40 letters and the accent's code), cutting two characters at a time; whether the codes past the cut survive depends on the parity of the accent's position in a way the probes (2026-10-17) fit only piecewise, and the breaker here keeps the term whole.
+- **A row's document id is drawn as it is written**, before its transaction commits, so a rolled-back insert uses one up where real, crawling only committed rows, presumably wouldn't; a row written by a path other than `Simulation.InsertRow` takes its id when the keyword views first read it, in key order.
 - **`RANK` values** — see above.
 - **No crawl lag** — see above.
 - A phrase or `NEAR` can't span two columns of a multi-column index in either engine; the simulator gets that by leaving a wide position gap between columns rather than by tracking column identity.

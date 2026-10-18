@@ -1,92 +1,14 @@
 using System.Collections.Frozen;
-using System.Globalization;
-using System.Text;
 
 namespace SqlServerSimulator.Parser.FullText;
 
 /// <summary>
-/// The English morphology the query pipeline reads: the accent fold an
-/// accent-insensitive catalog applies, and the inflectional stemmer
+/// The English morphology the query pipeline reads: the inflectional stemmer
 /// <c>FREETEXT</c> / <c>FORMSOF(INFLECTIONAL, …)</c> expand through. The
 /// stoplists live with <see cref="FullTextLanguage"/>.
 /// </summary>
 internal static class FullTextLexicon
 {
-    /// <summary>
-    /// Strips diacritics the way an accent-<i>insensitive</i> catalog folds
-    /// them — <c>café</c> → <c>cafe</c>, <c>ÄÖÜ</c> → <c>aou</c>. Decomposes to
-    /// NFD and drops the combining marks, after the compatibility expansions
-    /// that have no combining form (<c>ß</c> → <c>ss</c>, <c>æ</c> → <c>ae</c>,
-    /// <c>ø</c> → <c>o</c>, <c>đ</c> → <c>d</c>), which real folds the same way.
-    /// A catalog created accent-<i>sensitive</i> (the default) never calls this,
-    /// so <c>café</c> and <c>cafe</c> stay distinct terms.
-    /// </summary>
-    public static string FoldAccents(string term)
-    {
-        var expanded = ExpandNonDecomposing(term);
-        var decomposed = expanded.Normalize(NormalizationForm.FormD);
-        var builder = new StringBuilder(decomposed.Length);
-        var baseFolds = false;
-        foreach (var ch in decomposed)
-        {
-            if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
-            {
-                // Only the European scripts' marks are accents to real: a
-                // Devanagari virama or a kana voicing mark stays.
-                baseFolds = ch is < '\u0530' or (>= '\u1E00' and < '\u2000');
-                _ = builder.Append(ch);
-            }
-            else if (!baseFolds)
-            {
-                _ = builder.Append(ch);
-            }
-        }
-        // A capital whose lower case decomposes (`İ`) folds to lower case only
-        // once its mark is gone.
-#pragma warning disable CA1308
-        return builder.ToString().Normalize(NormalizationForm.FormC).ToLowerInvariant();
-#pragma warning restore CA1308
-    }
-
-    /// <summary>
-    /// Handles the letters whose accent-free form isn't reachable by dropping
-    /// combining marks, because NFD leaves them atomic.
-    /// </summary>
-    private static string ExpandNonDecomposing(string term)
-    {
-        var needsExpansion = false;
-        foreach (var ch in term)
-        {
-            if (ch is 'ß' or 'æ' or 'Æ' or 'ø' or 'Ø' or 'đ' or 'Đ' or 'ð' or 'Ð' or 'þ' or 'Þ' or 'ł' or 'Ł' or 'œ' or 'Œ' or 'ı' or 'ŉ')
-            {
-                needsExpansion = true;
-                break;
-            }
-        }
-        if (!needsExpansion)
-            return term;
-
-        var builder = new StringBuilder(term.Length + 2);
-        foreach (var ch in term)
-        {
-            var replacement = ch switch
-            {
-                'ß' => "ss",
-                'æ' or 'Æ' => "ae",
-                'œ' or 'Œ' => "oe",
-                'ø' or 'Ø' => "o",
-                'đ' or 'Đ' or 'ð' or 'Ð' => "d",
-                'þ' or 'Þ' => "th",
-                'ł' or 'Ł' => "l",
-                'ı' => "i",
-                'ŉ' => "n",
-                _ => null,
-            };
-            _ = replacement is null ? builder.Append(ch) : builder.Append(replacement);
-        }
-        return builder.ToString();
-    }
-
     /// <summary>
     /// Irregular English forms that no suffix rule reaches, each row listing
     /// every surface form of one lemma with the lemma first. Probe-anchored

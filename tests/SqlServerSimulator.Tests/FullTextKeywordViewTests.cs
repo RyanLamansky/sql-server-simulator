@@ -119,6 +119,52 @@ public sealed class FullTextKeywordViewTests
     public void Parser_Keyword_EncodesTheAccents(string term, string keyword, string display) =>
         AreEqual($"{keyword}:{display}", Rows(new Simulation(), $"select keyword, display_term from sys.dm_fts_parser(N'\"{term}\"', 1033, NULL, 1)"));
 
+    /// <summary>
+    /// A key that isn't an integer keeps the id the initial crawl gave it
+    /// through an update and a delete-and-reinsert, and a row written after
+    /// the crawl starts real's next block of ids, its later ones following in
+    /// write order rather than key order.
+    /// </summary>
+    [TestMethod]
+    public void NonIntegerKey_RowsWrittenAfterTheCrawl_StartTheNextBlockInWriteOrder()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create fulltext catalog cat as default;
+            create table t (k nvarchar(10) not null constraint pk primary key, s nvarchar(100));
+            insert t values (N'b', N'alpha'), (N'd', N'beta'), (N'f', N'gamma');
+            create fulltext index on t (s) key index pk;
+            insert t values (N'z', N'zeta');
+            insert t values (N'a', N'delta');
+            update t set s = N'eta' where k = N'd';
+            delete t where k = N'f';
+            insert t values (N'f', N'theta');
+            create table e (k nvarchar(10) not null constraint pk_e primary key, s nvarchar(100));
+            create fulltext index on e (s) key index pk_e;
+            insert e values (N'q', N'omega');
+            """);
+        AreEqual(
+            "alpha:1 eta:2 theta:3 zeta:1002 delta:1003",
+            Rows(simulation, "select display_term, document_id from sys.dm_fts_index_keywords_by_document(db_id(), object_id('t')) where display_term <> 'END OF FILE' order by document_id"));
+        AreEqual(
+            "omega:1002",
+            Rows(simulation, "select display_term, document_id from sys.dm_fts_index_keywords_by_document(db_id(), object_id('e')) where display_term <> 'END OF FILE'"));
+    }
+
+    /// <summary>A crawl past a thousand rows skips the id between two blocks.</summary>
+    [TestMethod]
+    public void NonIntegerKey_CrawlPastAThousandRows_SkipsTheIdBetweenBlocks() =>
+        AreEqual(
+            "word1000:1000 word1001:1002 word1500:1501 omega:2003",
+            Rows(new Simulation(), """
+                create fulltext catalog cat as default;
+                create table u (k nvarchar(10) not null constraint pk primary key, s nvarchar(100));
+                insert u select right('0000' + cast(value as nvarchar(10)), 5), N'word' + cast(value as nvarchar(10)) from generate_series(1, 1500);
+                create fulltext index on u (s) key index pk;
+                insert u values (N'zzz', N'omega');
+                select display_term, document_id from sys.dm_fts_index_keywords_by_document(db_id(), object_id('u')) where display_term in (N'word1000', N'word1001', N'word1500', N'omega') order by document_id
+                """));
+
     [TestMethod]
     public void ByProperty_IsEmptyWithoutAPropertyList() =>
         AreEqual("", Rows(Seeded(), "select * from sys.dm_fts_index_keywords_by_property(db_id(), object_id('t'))"));

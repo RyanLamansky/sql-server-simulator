@@ -97,6 +97,27 @@ internal static class FullTextKeyword
         return (keyword, display.ToString());
     }
 
+    /// <summary>
+    /// The letters <paramref name="term"/>'s keyword is built from, without
+    /// their accent codes: what an accent-insensitive catalog keeps of a term.
+    /// </summary>
+    public static string Bases(string term)
+    {
+        var forward = Tables.Forward;
+        StringBuilder? builder = null;
+        for (var i = 0; i < term.Length; i++)
+        {
+            if (!forward.TryGetValue(term[i], out var entry))
+            {
+                _ = builder?.Append(term[i]);
+                continue;
+            }
+            builder ??= new StringBuilder(term.Length).Append(term, 0, i);
+            _ = builder.Append(entry.Base);
+        }
+        return builder?.ToString() ?? term;
+    }
+
     private static (FrozenDictionary<char, (string, byte[])>, FrozenDictionary<(char, byte), char>) Load()
     {
         using var stream = typeof(FullTextKeyword).Assembly.GetManifestResourceStream("SqlServerSimulator.FullText.KeywordAccents.tsv")

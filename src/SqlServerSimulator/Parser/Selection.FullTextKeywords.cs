@@ -87,6 +87,37 @@ partial class Selection
     }
 
     /// <summary>
+    /// The initial crawl of a just-created full-text index over a table whose
+    /// key isn't an integer: its rows take document ids in key order.
+    /// </summary>
+    internal static void CrawlFullTextDocuments(HeapTable table)
+    {
+        var index = table.FullTextIndex!;
+        var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
+        if (SqlType.IsIntegerCategory(table.StoredColumns[keyStorageOrdinal].Type))
+            return;
+        List<SqlValue> keys = [];
+        foreach (var bytes in table.Rows)
+            keys.Add(RowDecoder.DecodeColumn(table.StoredColumns, bytes, keyStorageOrdinal, table.Heap));
+        keys.Sort(static (a, b) => a.CompareTo(b));
+        foreach (var key in keys)
+            _ = index.DocumentIdFor(key);
+        index.EndInitialCrawl();
+    }
+
+    /// <summary>
+    /// Gives a row just written to a table with a full-text index over a
+    /// non-integer key its document id, in write order as real's crawl does.
+    /// </summary>
+    internal static void NoteFullTextDocument(HeapTable table, ReadOnlySpan<byte> image)
+    {
+        var index = table.FullTextIndex!;
+        var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
+        if (!SqlType.IsIntegerCategory(table.StoredColumns[keyStorageOrdinal].Type))
+            _ = index.DocumentIdFor(RowDecoder.DecodeColumn(table.StoredColumns.AsSpan(), image, keyStorageOrdinal, table.Heap));
+    }
+
+    /// <summary>
     /// The rows of one keyword view over the table <paramref name="args"/>
     /// names, after real's argument checks: a NULL argument is Msg 30007, an
     /// unknown database Msg 30003, an object that is no user table there Msg
@@ -98,9 +129,8 @@ partial class Selection
     /// <c>END OF FILE</c> entry one past its last word (at 1 when it has none);
     /// a row whose every column is NULL or empty holds one at position 1 of its
     /// highest-numbered indexed column. The document id is the key's value for
-    /// an integer key and otherwise the key's rank in key order, which is the
-    /// id real's initial crawl assigns — a row written later takes the next id
-    /// past real's reserved block there.
+    /// an integer key and otherwise the id the index holds for the key
+    /// (<see cref="Schemas.FullTextIndex.DocumentIdFor"/>).
     /// </remarks>
     private static List<SqlValue[]> FullTextKeywordRows(BatchContext batch, SqlValue[] args, FullTextKeywordView view)
     {
@@ -154,7 +184,7 @@ partial class Selection
         for (var r = 0; r < rows.Count; r++)
         {
             var (key, bytes) = rows[r];
-            var documentId = integerKey ? key.CoerceTo(SqlType.BigInt).AsInt64 : r + 1;
+            var documentId = integerKey ? key.CoerceTo(SqlType.BigInt).AsInt64 : index.DocumentIdFor(key);
             var endedAny = false;
             foreach (var column in columns)
             {

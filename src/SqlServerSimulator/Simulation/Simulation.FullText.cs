@@ -340,6 +340,7 @@ partial class Simulation
             // An index created without columns starts disabled.
             IsEnabled = columns.Count > 0,
         };
+        Selection.CrawlFullTextDocuments(table);
         // Change tracking can't follow WRITETEXT / UPDATETEXT into a legacy
         // LOB column, which real warns about as the index is created.
         if (options.ChangeTracking != FullTextChangeTracking.Off

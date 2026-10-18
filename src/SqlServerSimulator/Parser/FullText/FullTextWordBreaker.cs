@@ -70,13 +70,37 @@ internal static partial class FullTextWordBreaker
     /// </summary>
     public static string Normalize(ReadOnlySpan<char> term, bool accentSensitive)
     {
-        // Lower case, not CA1308's preferred upper: real's own normal form for
-        // a full-text term is lower (sys.dm_fts_parser reports every
-        // display_term that way), and the stoplist is stored to match.
+        // An accent-insensitive catalog keeps the letters an accent-sensitive
+        // one's keyword is built from, dropping only the accent codes — the
+        // same answer for every BMP character (probed 2026-10-17 against SQL
+        // Server 2025).
+        var lowered = term.IndexOfAny(CaseFormKeys) >= 0 ? LowerAroundCaseForms(term) : Lower(term);
+        return accentSensitive ? lowered : FullTextKeyword.Bases(lowered);
+    }
+
+    // Lower case, not CA1308's preferred upper: real's own normal form for a
+    // full-text term is lower (sys.dm_fts_parser reports every display_term
+    // that way), and the stoplist is stored to match.
 #pragma warning disable CA1308
-        var lowered = FoldCompatibility(term).ToLowerInvariant();
+    private static string Lower(ReadOnlySpan<char> term) => FoldCompatibility(term).ToLowerInvariant();
 #pragma warning restore CA1308
-        return accentSensitive ? lowered : FullTextLexicon.FoldAccents(lowered);
+
+    /// <summary>
+    /// <see cref="Lower"/> over the runs between the characters
+    /// <see cref="Overrides"/> gives a form of their own, each taking it.
+    /// </summary>
+    private static string LowerAroundCaseForms(ReadOnlySpan<char> term)
+    {
+        var builder = new StringBuilder(term.Length);
+        var runStart = 0;
+        for (var i = 0; i < term.Length; i++)
+        {
+            if (!Overrides.CaseForms.TryGetValue(term[i], out var form))
+                continue;
+            _ = builder.Append(Lower(term[runStart..i])).Append(form);
+            runStart = i + 1;
+        }
+        return builder.Append(Lower(term[runStart..])).ToString();
     }
 
     /// <summary>
@@ -125,6 +149,14 @@ internal static partial class FullTextWordBreaker
     /// <c>❤</c>).
     /// </summary>
     private static bool IsWordChar(char ch) =>
+        Overrides.Classes[ch] switch
+        {
+            ClassBreak => false,
+            ClassWord => true,
+            _ => IsWordCharByCategory(ch),
+        };
+
+    private static bool IsWordCharByCategory(char ch) =>
         ch switch
         {
             // Letter-like symbols, number forms, enclosed and squared
@@ -169,6 +201,65 @@ internal static partial class FullTextWordBreaker
         }
         return true;
     }
+
+    /// <summary>The longest term real keeps whole.</summary>
+    private const int MaxTermLength = 64;
+
+    /// <summary>
+    /// Cuts each term over <see cref="MaxTermLength"/> characters into
+    /// pieces of that length at successive positions, moving every later term
+    /// on by the positions they add — except a compound's composite, whose
+    /// pieces all sit at its own position beside its first part's — and drops
+    /// a number's <c>nn</c> companion that runs past the limit, as real's
+    /// breaker does (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    private static List<FullTextTerm> SplitLongTerms(List<FullTextTerm> terms)
+    {
+        var any = false;
+        foreach (var term in terms)
+        {
+            if (term.Text.Length > MaxTermLength)
+            {
+                any = true;
+                break;
+            }
+        }
+        if (!any)
+            return terms;
+
+        var result = new List<FullTextTerm>(terms.Count + 4);
+        var shift = 0;
+        for (var i = 0; i < terms.Count; i++)
+        {
+            var term = terms[i];
+            var position = term.Position + shift;
+            if (term.Kind != FullTextTermKind.Word || term.Text.Length <= MaxTermLength)
+            {
+                result.Add(new FullTextTerm(term.Text, position, term.Kind));
+                continue;
+            }
+            if (IsNumberCompanion(terms, i))
+                continue;
+            var composite = i + 1 < terms.Count && terms[i + 1].Position == term.Position && !IsNumberCompanion(terms, i + 1);
+            var pieces = (term.Text.Length + MaxTermLength - 1) / MaxTermLength;
+            for (var k = 0; k < pieces; k++)
+            {
+                var start = k * MaxTermLength;
+                result.Add(new FullTextTerm(term.Text.Substring(start, Math.Min(MaxTermLength, term.Text.Length - start)), composite ? position : position + k));
+            }
+            if (!composite)
+                shift += pieces - 1;
+        }
+        return result;
+    }
+
+    /// <summary>Whether the term at <paramref name="index"/> is the <c>nn</c>
+    /// companion of the number before it at the same position.</summary>
+    private static bool IsNumberCompanion(List<FullTextTerm> terms, int index) =>
+        index > 0
+        && terms[index - 1].Position == terms[index].Position
+        && terms[index].Text.StartsWith("nn", StringComparison.Ordinal)
+        && terms[index].Text.AsSpan(2).SequenceEqual(terms[index - 1].Text);
 
     private static bool AllLetters(ReadOnlySpan<char> span)
     {
@@ -225,7 +316,7 @@ internal static partial class FullTextWordBreaker
                 }
                 i += consumed;
             }
-            return this.terms;
+            return SplitLongTerms(this.terms);
         }
 
         /// <summary>

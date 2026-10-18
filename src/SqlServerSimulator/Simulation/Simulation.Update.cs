@@ -1871,6 +1871,8 @@ partial class Simulation
             {
                 IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
                 NoteInsertedRow(batch, table, unlocked);
+                if (table.FullTextIndex is not null)
+                    Selection.NoteFullTextDocument(table, image);
             }
             return unlocked;
         }
@@ -1891,6 +1893,8 @@ partial class Simulation
         {
             IndexUsageAccounting.NoteWrite(batch, table, WriteKind.Insert, 1);
             NoteInsertedRow(batch, table, address);
+            if (table.FullTextIndex is not null)
+                Selection.NoteFullTextDocument(table, image);
             batch.NoteKeyPutBack(table, image);
             // The page the row landed on, while some read or write locks
             // pages of the table whole.

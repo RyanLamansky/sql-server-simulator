@@ -153,6 +153,59 @@ public sealed class FullTextWordBreakerTests
     public void Breaks_As_Reference(string text, string expected) =>
         AreEqual(expected, Parsed('"' + text + '"'));
 
+    /// <summary>
+    /// Characters real's tables answer differently from .NET's: capitals it
+    /// leaves in upper case (some with an accent code of their own), letters of
+    /// scripts it predates that break a word, unassigned and symbol characters
+    /// it keeps in one, a halfwidth Hangul letter it folds to the compatibility
+    /// jamo, and a capital it drops from the keyword (probed 2026-10-17 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("xȘx", "1:xȘx")]
+    [DataRow("xȘx", "1:xȘx", 0)]
+    [DataRow("Știri", "1:Știri")]
+    [DataRow("xȚx", "1:xȚx")]
+    [DataRow("xЀx", "1:xЀx")]
+    [DataRow("xӐx", "1:xӐx")]
+    [DataRow("xƆx", "1:xƆx")]
+    [DataRow("xႠx", "1:xაx")]
+    [DataRow("xȺx", "1:x~ 2:x~")]
+    [DataRow("xµx", "1:x~ 2:x~")]
+    [DataRow("x⼔x", "1:x⼔x")]
+    [DataRow("xﾡx", "1:xㄱx")]
+    [DataRow("xẞx", "1:xx")]
+    [DataRow("ȘȚ", "1:ȘȚ")]
+    [DataRow("xӳx", "1:xӳx", 0)]
+    [DataRow("café", "1:cafe", 0)]
+    public void Characters_Follow_Reals_Tables(string text, string expected, int accentSensitive = 1) =>
+        AreEqual(expected, Parsed('"' + text + '"', accentSensitive: accentSensitive));
+
+    /// <summary>
+    /// A word over 64 characters is cut into 64-character terms at successive
+    /// positions, a compound's composite keeping its pieces at its own
+    /// position, and a number too long for its <c>nn</c> companion loses it
+    /// (probed 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(80, "", "1:{0} 2:{1}")]
+    [DataRow(70, " tail", "1:{0} 2:{1} 3:tail")]
+    [DataRow(70, "-xyz", "1:{0} 1:{1}-xyz 1:{0} 2:{1} 3:xyz")]
+    public void LongWord_IsCutIntoTermsOf64(int length, string suffix, string expected)
+    {
+        var word = string.Concat(Enumerable.Repeat("abcdefghij", 10))[..length];
+        AreEqual(string.Format(System.Globalization.CultureInfo.InvariantCulture, expected, word[..64], word[64..]), Parsed('"' + word + suffix + '"'));
+    }
+
+    [TestMethod]
+    public void LongNumber_DropsTheCompanionPastTheLimit()
+    {
+        var digits = string.Concat(Enumerable.Repeat("1234567890", 7));
+        AreEqual($"1:{digits[..62]} 1:nn{digits[..62]}", Parsed('"' + digits[..62] + '"'));
+        AreEqual($"1:{digits[..63]}", Parsed('"' + digits[..63] + '"'));
+        AreEqual($"1:{digits[..64]} 2:{digits[64..]}", Parsed('"' + digits + '"'));
+    }
+
     [TestMethod]
     public void Accent_Insensitive_Folds_European_Marks_Only()
     {
