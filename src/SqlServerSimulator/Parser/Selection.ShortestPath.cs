@@ -353,8 +353,11 @@ internal sealed partial class Selection
     /// from a source <c>FULL JOIN</c>ed to the start's node table on a false
     /// condition, so they add rows of their own where the start's are
     /// NULL-filled; the path reads its start's graph id there. Applied when
-    /// the start is a node table leading the FROM clause and the first hop's
-    /// edges are a table's.
+    /// the start is a node table, which a FROM list of commas lets lead the
+    /// sources whatever its written place, and whatever the first hop's edges
+    /// are read through. A start read through a view, a CTE or a derived
+    /// table starts from none, as on real (probed 2026-10-17 against SQL
+    /// Server 2025).
     /// </summary>
     private static void StartPathsFromMissingNodes(List<(ShortestPathSpec Spec, ShortestPathPlan Plan)> paths, List<FromSource> sources, List<JoinSpec> joins)
     {
@@ -362,17 +365,23 @@ internal sealed partial class Selection
         {
             if (spec.StartIsLastNode
                 || spec.Start is not { BackingTable: { GraphKind: GraphTableKind.Node } nodeTable, LateralPlan: null } start
-                || spec.Hops[0].Edge is not { BackingTable: { } edgeTable, LateralPlan: null }
-                || sources.Count == 0 || !ReferenceEquals(sources[0], start))
+                || sources.IndexOf(start) is not (>= 0 and var index)
+                || !joins.Take(index).All(static join => join is { Kind: JoinKind.Cross, IsComma: true, GroupCount: 1 }))
             {
                 continue;
             }
-            var forward = spec.Hops[0].Forward;
+            // The sources ahead of it are crossed with it alone, so moving it
+            // first changes no row the FROM list makes.
+            if (index > 0)
+            {
+                sources.RemoveAt(index);
+                sources.Insert(0, start);
+            }
             var columns = new[] { new HeapColumn(ShortestPathSpec.IdColumn, SqlType.BigInt, maxLength: null, nullable: false, isHidden: true) };
             SqlType[] schema = [SqlType.BigInt];
             string[] names = [ShortestPathSpec.IdColumn];
             var missing = new Selection(schema, names, hasOrderBy: false, hasTopOrOffsetOrFetch: false,
-                (_, _) => MissingStartRows(nodeTable, edgeTable, forward, schema));
+                (batch, outerResolver) => MissingStartRows(plan.MissingStartIds(nodeTable, batch, outerResolver), schema));
             sources.Insert(1, new FromSource(
                 qualifier: MissingStartQualifier,
                 columnNames: names,
@@ -388,27 +397,9 @@ internal sealed partial class Selection
         }
     }
 
-    /// <summary>
-    /// The graph ids, ascending, that <paramref name="edgeTable"/>'s edges
-    /// leave (walking backwards, enter) in <paramref name="nodeTable"/> where
-    /// it holds no row.
-    /// </summary>
-    private static List<byte[]> MissingStartRows(HeapTable nodeTable, HeapTable edgeTable, bool forward, SqlType[] schema)
+    /// <summary>The missing start rows, one per graph id.</summary>
+    private static List<byte[]> MissingStartRows(SortedSet<long> missing, SqlType[] schema)
     {
-        var graphId = nodeTable.StorageOrdinals[GraphColumns.OrdinalOf(nodeTable, GraphColumnKind.GraphId)];
-        var present = new HashSet<long>();
-        foreach (var row in ClusteredScan.Rows(nodeTable))
-            _ = present.Add(RowDecoder.DecodeColumn(nodeTable.StoredColumns, row, graphId, nodeTable.Heap).AsInt64);
-        var objectOrdinal = edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromObjId : GraphColumnKind.ToObjId)];
-        var idOrdinal = edgeTable.StorageOrdinals[GraphColumns.OrdinalOf(edgeTable, forward ? GraphColumnKind.FromId : GraphColumnKind.ToId)];
-        var missing = new SortedSet<long>();
-        foreach (var row in ClusteredScan.Rows(edgeTable))
-        {
-            var objectId = RowDecoder.DecodeColumn(edgeTable.StoredColumns, row, objectOrdinal, edgeTable.Heap);
-            var id = RowDecoder.DecodeColumn(edgeTable.StoredColumns, row, idOrdinal, edgeTable.Heap);
-            if (!objectId.IsNull && !id.IsNull && objectId.AsInt32 == nodeTable.ObjectId && !present.Contains(id.AsInt64))
-                _ = missing.Add(id.AsInt64);
-        }
         var rows = new List<byte[]>(missing.Count);
         foreach (var id in missing)
             rows.Add(RowEncoder.EncodeRow(schema, [SqlValue.FromInt64(id)]));
@@ -608,6 +599,28 @@ internal sealed partial class Selection
                 if (this.Identity(source, fromColumn, row) is { } from && this.Identity(source, toColumn, row) is { } to)
                     yield return (from, to, row);
             }
+        }
+
+        /// <summary>
+        /// The graph ids, ascending, that the first hop's edges leave (walking
+        /// backwards, enter) in <paramref name="nodeTable"/> where it holds no
+        /// row, the edges read however their source is.
+        /// </summary>
+        public SortedSet<long> MissingStartIds(HeapTable nodeTable, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+        {
+            var graphId = nodeTable.StorageOrdinals[GraphColumns.OrdinalOf(nodeTable, GraphColumnKind.GraphId)];
+            var present = new HashSet<long>();
+            foreach (var row in ClusteredScan.Rows(nodeTable))
+                _ = present.Add(Decode(nodeTable, row, graphId).AsInt64);
+            var hop = this.hops[0];
+            var missing = new SortedSet<long>();
+            foreach (var (from, to, _) in this.Edges(hop, batch, outerResolver))
+            {
+                var (objectId, id) = hop.Forward ? from : to;
+                if (objectId == nodeTable.ObjectId && !present.Contains(id))
+                    _ = missing.Add(id);
+            }
+            return missing;
         }
 
         /// <summary>A node source's rows by identity.</summary>

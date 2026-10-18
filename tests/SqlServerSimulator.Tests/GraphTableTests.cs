@@ -619,6 +619,33 @@ public sealed class GraphTableTests
         AreEqual(expected, Rows(sim, query));
     }
 
+    /// <summary>
+    /// A missing node starts a path behind another FROM source, crossed with
+    /// its rows, and from edges read through a view, while a start read
+    /// through a view, a CTE or a derived table starts from none (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select o.k, n1.name, string_agg(n2.name, '>') within group (graph path) p from O o, XN n1, XE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.name is null order by o.k, p",
+        "1|NULL|a;1|NULL|a>b;1|NULL|d;2|NULL|a;2|NULL|a>b;2|NULL|d")]
+    [DataRow("select count(*) from O o, XN n1, XE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+))", "16")]
+    [DataRow("select n1.name, string_agg(n2.name, '>') within group (graph path) p from XN n1, VE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.name is null order by p",
+        "NULL|a;NULL|a>b;NULL|d")]
+    [DataRow("select count(*) from VN n1, XE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.name is null", "0")]
+    [DataRow("select count(*) from (select * from XN) n1, XE for path e, XN for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.name is null", "0")]
+    public void ShortestPath_Starts_From_A_Missing_Node_Behind_Other_Sources(string query, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table XN (name varchar(10)) as node; create table XE (w int) as edge; create table O (k int); insert O values (1), (2)",
+            "create view VN as select * from XN",
+            "create view VE as select * from XE",
+            "insert XN values ('a'), ('b'), ('c'), ('d'), ('x')",
+            string.Join(";", new[] { ("a", "b", 10), ("c", "d", 20), ("c", "a", 30), ("x", "c", 40) }.Select(edge => $"insert XE select a.$node_id, b.$node_id, {edge.Item3} from XN a, XN b where a.name = '{edge.Item1}' and b.name = '{edge.Item2}'")),
+            "delete XN where name = 'c'");
+        AreEqual(expected, Rows(sim, query));
+    }
+
     [TestMethod]
     [DataRow("s p q t", "s>p s>q p>t q>t", "p;q;p>t")]
     [DataRow("s q p t", "s>p s>q p>t q>t", "q;p;q>t")]

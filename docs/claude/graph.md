@@ -103,7 +103,8 @@ Such a source has to project the pseudo-column its role reads (`$node_id`, `$fro
 The result is one row per node the start reaches, the start itself included when a cycle leads back to it, carrying the path to it.
 The walk follows edges whatever their endpoints hold: an edge into a node its table no longer holds leads on, the node reading NULL to the aggregates, and as the path's last node it is a row whose columns are NULL but for its graph id, which a `LAST_NODE` hop reads on.
 A node its table no longer holds starts a path too, as real starts one from every node the first hop's edges leave (walking backwards, enter), its columns and `$node_id` all NULL (probed 2026-10-16 and 2026-10-17 against SQL Server 2025: a deleted `c` with `c->d` reports `NULL|d`).
-`StartPathsFromMissingNodes` adds those starts as a source `FULL JOIN`ed to the start's node table on a false condition, whose rows the path reads its start's graph id from, when the start is a node table leading the FROM clause and the first hop's edges a table's.
+`StartPathsFromMissingNodes` adds those starts as a source `FULL JOIN`ed to the start's node table on a false condition, whose rows the path reads its start's graph id from, moving the start ahead of the comma-listed sources before it, which real crosses with every missing start, and reading the first hop's edges however their source is, a view included.
+A start read through a view, a CTE or a derived table starts from no missing node on real (probed 2026-10-17 against SQL Server 2025), and none here.
 
 `ApplyShortestPath` runs once the WHERE is parsed: each path's `FOR PATH` sources give way to one lateral source applied after every other source, whose rows the breadth-first walk produces per start row — the reached node's columns, its identity, then one column per graph path aggregate, all hidden, so `SELECT *` expands the other sources only.
 Each aggregate is bound to its column, and computes its value from an ordinary `Aggregator` fed the path's steps in order, so the result types are the ordinary aggregates' (`LAST_VALUE`'s is its operand's).
@@ -124,5 +125,4 @@ Real settles each depth in a `DISTINCT` sort over the candidates, the frontier w
 
 ## Not modeled yet
 
-- **A `SHORTEST_PATH` from a missing node when its start doesn't lead the FROM clause** (`FROM other, n1, …`), or the start or the first hop's edges are a derived table, view or CTE: the path starts only from the rows the start source holds.
 - **`NOT MATCH(SHORTEST_PATH(… {1, n}))`**: real fails the batch with an error carrying no message (sqlcmd reports SqlState 42000 alone); the simulator reads it as the `+` form under a `NOT` (probed 2026-10-16 against SQL Server 2025).
