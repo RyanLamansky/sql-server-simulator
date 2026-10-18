@@ -154,12 +154,8 @@ partial class Selection
                 RejectRepeatedForXmlOption(ref seen, ForXmlOptionSeen.InlineSchema);
                 if (namespaces is not null)
                     throw SimulatedSqlException.ForXmlNamespacesUnsupportedFeature();
-                if (mode == ForXmlMode.Explicit)
-                {
-                    throw xdr
-                        ? new NotSupportedException("FOR XML EXPLICIT, XMLDATA (an XDR schema for the universal table) isn't modeled.")
-                        : SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
-                }
+                if (mode == ForXmlMode.Explicit && !xdr)
+                    throw SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
                 if (mode == ForXmlMode.Path)
                     throw SimulatedSqlException.ForXmlPathInlineSchema();
                 context.MoveNextOptional();
@@ -225,7 +221,7 @@ partial class Selection
             xsinil = explicitPlan.Xsinil;
 
         var wrapped = WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan,
-            inlineSchema is var (inlineXdr, inlineUri) ? (inlineXdr, inlineUri, context.Batch.Connection) : null);
+            inlineSchema);
         wrapped.ColumnMasks = ForClauseDocumentMasks(inner);
         if (!typed)
             wrapped.streamedDocumentType = SqlType.NText;
@@ -298,7 +294,7 @@ partial class Selection
         return name;
     }
 
-    private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null, (bool Xdr, string? Uri, SimulatedDbConnection Connection)? inlineSchema = null)
+    private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null, (bool Xdr, string? Uri)? inlineSchema = null)
     {
         var innerSchema = inner.Schema;
 
@@ -320,6 +316,8 @@ partial class Selection
         var whenEmpty = options.Typed ? EmptyForXmlRow() : null;
         if (explicitPlan is not null)
         {
+            if (inlineSchema is not null)
+                options = options.WithInlineSchema(ForXmlInlineSchema.CompileExplicit(inner));
             IEnumerable<string> explicitPieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXmlExplicit(inner, innerSchema, explicitPlan, options, batch, outerResolver);
             return new Selection(schema, columnNames,
                 hasOrderBy: false,
@@ -333,8 +331,8 @@ partial class Selection
         if (options.Mode == ForXmlMode.Auto)
         {
             var levels = BuildAutoLevels(inner, forJson: false);
-            if (inlineSchema is var (autoXdr, autoUri, autoConnection))
-                options = options.WithInlineSchema(ForXmlInlineSchema.Compile(autoXdr, autoUri, inner, "row", levels, options.Elements, options.Xsinil, autoConnection));
+            if (inlineSchema is var (autoXdr, autoUri))
+                options = options.WithInlineSchema(ForXmlInlineSchema.Compile(autoXdr, autoUri, inner, "row", levels, options.Elements, options.Xsinil));
             // Without BINARY BASE64, an AUTO binary column addresses a
             // dbobject URL instead of carrying its bytes; the builder fills a
             // slot per such column (and raises where no URL can be addressed).
@@ -362,8 +360,8 @@ partial class Selection
         }
 
         var rowElement = BuildForXmlRowElement(inner, options);
-        if (inlineSchema is var (rawXdr, rawUri, rawConnection))
-            options = options.WithInlineSchema(ForXmlInlineSchema.Compile(rawXdr, rawUri, inner, rowElement.Name, null, options.Elements, options.Xsinil, rawConnection));
+        if (inlineSchema is var (rawXdr, rawUri))
+            options = options.WithInlineSchema(ForXmlInlineSchema.Compile(rawXdr, rawUri, inner, rowElement.Name, null, options.Elements, options.Xsinil));
 
         IEnumerable<string> pieces(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) => SerializeForXml(inner, innerSchema, rowElement, options, batch, outerResolver);
         return new Selection(schema, columnNames,

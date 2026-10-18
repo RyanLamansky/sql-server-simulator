@@ -33,8 +33,21 @@ internal sealed class ForXmlInlineSchema
     private readonly bool elements;
     private readonly bool xsinil;
 
-    private ForXmlInlineSchema(bool xdr, string? uri, ForXmlSchemaLevel[] levels, bool auto, bool elements, bool xsinil)
+    /// <summary>The <c>ElementType</c> declarations of an EXPLICIT universal table's XDR, compiled whole.</summary>
+    private readonly string? explicitDeclarations;
+
+    /// <summary>
+    /// The first column whose type XDR can't name, which real refuses with Msg
+    /// 6848 only as the statement runs — after its column metadata went out,
+    /// over an empty rowset too — using up a schema number (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    private readonly string? unmappedColumn;
+
+    private ForXmlInlineSchema(bool xdr, string? uri, ForXmlSchemaLevel[] levels, bool auto, bool elements, bool xsinil, string? explicitDeclarations = null, string? unmappedColumn = null)
     {
+        this.explicitDeclarations = explicitDeclarations;
+        this.unmappedColumn = unmappedColumn;
         this.Xdr = xdr;
         this.Uri = uri;
         this.levels = levels;
@@ -51,13 +64,13 @@ internal sealed class ForXmlInlineSchema
     /// <summary>
     /// Compiles the schema for <paramref name="inner"/>'s columns, laid out
     /// as RAW's one element or AUTO's nesting <paramref name="levels"/>,
-    /// refusing what real refuses as the statement compiles: under
-    /// <c>XMLDATA</c> a type XDR can't name (Msg 6848, which still uses up a
-    /// schema number), under attribute-centric <c>XMLSCHEMA</c> a
-    /// <c>sql_variant</c> (Msg 6847).
+    /// refusing under attribute-centric <c>XMLSCHEMA</c> a <c>sql_variant</c>
+    /// as the statement compiles (Msg 6847), and noting under <c>XMLDATA</c> a
+    /// type XDR can't name (see <see cref="unmappedColumn"/>).
     /// </summary>
-    public static ForXmlInlineSchema Compile(bool xdr, string? uri, Selection inner, string rowElement, AutoLevel[]? levels, bool elements, bool xsinil, SimulatedDbConnection connection)
+    public static ForXmlInlineSchema Compile(bool xdr, string? uri, Selection inner, string rowElement, AutoLevel[]? levels, bool elements, bool xsinil)
     {
+        string? unmapped = null;
         var nullability = inner.ColumnNullability;
         var reportsNumeric = inner.ColumnReportsNumeric;
         ForXmlSchemaColumn Column(int i)
@@ -66,10 +79,7 @@ internal sealed class ForXmlInlineSchema
             var name = ForXmlName.Encode(inner.ColumnNames[i]);
             var asElement = elements || type is XmlSqlType;
             if (xdr && !MapsToXdr(type))
-            {
-                connection.XmlDataSchemaNumber++;
-                throw SimulatedSqlException.ForXmlXmlDataUnmappedType(inner.ColumnNames[i]);
-            }
+                unmapped ??= inner.ColumnNames[i];
             if (!xdr && !asElement && type is SqlVariantSqlType)
                 throw SimulatedSqlException.ForXmlVariantAttributeWithSchema(inner.ColumnNames[i]);
             return new ForXmlSchemaColumn(name, type, nullability is null || nullability[i], asElement, reportsNumeric is not null && reportsNumeric[i]);
@@ -89,7 +99,82 @@ internal sealed class ForXmlInlineSchema
             for (var l = 0; l < levels.Length; l++)
                 compiled[l] = new ForXmlSchemaLevel(ForXmlName.Encode(levels[l].Name), [.. levels[l].Columns.Select(Column)]);
         }
-        return new ForXmlInlineSchema(xdr, uri, compiled, levels is not null, elements, xsinil);
+        return new ForXmlInlineSchema(xdr, uri, compiled, levels is not null, elements, xsinil, unmappedColumn: unmapped);
+    }
+
+    /// <summary>
+    /// Compiles <c>FOR XML EXPLICIT, XMLDATA</c>'s XDR from the universal
+    /// table's column names, already checked by the EXPLICIT plan: one
+    /// <c>ElementType</c> per tag number in the order the columns first name
+    /// them — <c>content="mixed" model="open"</c>, declaring each of its
+    /// attributes and then referencing its attributes and elements in column
+    /// order, and naming no child tag — followed by an <c>ElementType</c> for
+    /// each element column (<c>textOnly</c>, or <c>mixed</c> for the
+    /// <c>xml</c> directive). The <c>id</c> family's directives type their
+    /// attributes; hidden and unnamed columns and <c>xmltext</c> declare
+    /// nothing, and only a declared column's type can be Msg 6848 (probed
+    /// 2026-10-17 against SQL Server 2025).
+    /// </summary>
+    public static ForXmlInlineSchema CompileExplicit(Selection inner)
+    {
+        string? unmapped = null;
+        var order = new List<int>();
+        var declarations = new Dictionary<int, (string Element, StringBuilder Types, StringBuilder References, StringBuilder Elements)>();
+        var names = inner.ColumnNames;
+        for (var i = 2; i < names.Length; i++)
+        {
+            var segments = names[i].Split('!');
+            var tagId = int.Parse(segments[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture);
+            if (!declarations.TryGetValue(tagId, out var tag))
+            {
+                tag = (segments[0], new StringBuilder(), new StringBuilder(), new StringBuilder());
+                declarations.Add(tagId, tag);
+                order.Add(tagId);
+            }
+            var name = segments.Length > 2 ? segments[2] : "";
+            string? directive = null;
+            for (var s = 3; s < segments.Length; s++)
+            {
+                var written = Lowered(segments[s]);
+                directive = written == "hide" ? written : directive ?? written;
+            }
+            if (name.Length == 0 || directive is "hide" or "xmltext")
+                continue;
+            var type = inner.Schema[i];
+            if (!MapsToXdr(type))
+                unmapped ??= name;
+            switch (directive)
+            {
+                case "cdata":
+                case "element":
+                case "elementxsinil":
+                case "xml":
+                    _ = tag.References.Append("<element type=\"").Append(name).Append("\"/>");
+                    _ = tag.Elements.Append("<ElementType name=\"").Append(name).Append(directive == "xml" ? "\" content=\"mixed\" model=\"closed\"" : "\" content=\"textOnly\" model=\"closed\"").Append(XdrType(type)).Append("/>");
+                    break;
+                default:
+                    _ = tag.Types.Append("<AttributeType name=\"").Append(name).Append('"')
+                        .Append(directive is "id" or "idref" or "idrefs" or "nmtoken" or "nmtokens" ? " dt:type=\"" + directive + "\"" : XdrType(type)).Append("/>");
+                    _ = tag.References.Append("<attribute type=\"").Append(name).Append("\"/>");
+                    break;
+            }
+        }
+        var sb = new StringBuilder();
+        foreach (var tagId in order)
+        {
+            var (element, types, references, elements) = declarations[tagId];
+            _ = sb.Append("<ElementType name=\"").Append(element).Append("\" content=\"mixed\" model=\"open\">")
+                .Append(types).Append(references).Append("</ElementType>").Append(elements);
+        }
+        return new ForXmlInlineSchema(xdr: true, uri: null, [], auto: false, elements: false, xsinil: false, sb.ToString(), unmapped);
+    }
+
+    /// <summary>An EXPLICIT directive as written, lower-cased — real reads them case-insensitively.</summary>
+    private static string Lowered(string directive)
+    {
+        Span<char> lower = stackalloc char[directive.Length];
+        _ = directive.AsSpan().ToLowerInvariant(lower);
+        return new string(lower);
     }
 
     /// <summary>
@@ -101,6 +186,8 @@ internal sealed class ForXmlInlineSchema
         if (this.Xdr)
         {
             var number = ++connection.XmlDataSchemaNumber;
+            if (this.unmappedColumn is { } unmapped)
+                throw SimulatedSqlException.ForXmlXmlDataUnmappedType(unmapped);
             var name = "Schema" + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return ("x-schema:#" + name, this.RenderXdr(name, typed));
         }
@@ -351,7 +438,10 @@ internal sealed class ForXmlInlineSchema
             ? sb.Append(Declarations).Append(" name=\"").Append(name).Append('"')
             : sb.Append(" name=\"").Append(name).Append('"').Append(Declarations);
         _ = sb.Append('>');
-        this.AppendXdrLevel(sb, 0);
+        if (this.explicitDeclarations is { } declarations)
+            _ = sb.Append(declarations);
+        else
+            this.AppendXdrLevel(sb, 0);
         return sb.Append("</Schema>").ToString();
     }
 

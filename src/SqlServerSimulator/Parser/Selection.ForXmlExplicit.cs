@@ -26,10 +26,7 @@ partial class Selection
         ForXmlOptions options, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var sb = new StringBuilder();
-        var topLevelDeclarations = options.RootName is null ? options.Declarations : "";
-
-        if (options.RootName is { } rootName)
-            _ = sb.Append('<').Append(rootName).Append(options.Declarations).Append('>');
+        var topLevelDeclarations = InlineSchemaDeclarations(sb, options, batch);
 
         // Outermost first. A frame's body opens lazily so an element with
         // neither content nor children still self-closes.
@@ -118,7 +115,8 @@ partial class Selection
                 yield return Drain(sb);
         }
 
-        if (!any)
+        // XMLDATA sends its schema over an empty rowset too.
+        if (!any && options.InlineSchema is null)
             yield break;
 
         for (var i = open.Count - 1; i >= 0; i--)

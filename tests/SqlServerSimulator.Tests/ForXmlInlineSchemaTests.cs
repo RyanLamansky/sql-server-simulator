@@ -71,6 +71,50 @@ public sealed class ForXmlInlineSchemaTests
         """<Schema name="Schema1" xmlns="urn:schemas-microsoft-com:xml-data" xmlns:dt="urn:schemas-microsoft-com:datatypes"><ElementType name="row" content="empty" model="closed"><AttributeType name="id" dt:type="i4"/><attribute type="id"/></ElementType></Schema>""")]
     public void Xmldata_DeclaresAnXdrSchema(string query, string expected) => AreEqual(expected, Xml(Seeded(), query));
 
+    private const string XdrHead = """<Schema name="Schema1" xmlns="urn:schemas-microsoft-com:xml-data" xmlns:dt="urn:schemas-microsoft-com:datatypes">""";
+
+    /// <summary>
+    /// <c>FOR XML EXPLICIT, XMLDATA</c> declares one open, mixed
+    /// <c>ElementType</c> per tag with its attributes and element columns in
+    /// column order — a child tag referenced by none — and an
+    /// <c>ElementType</c> per element column after it; the identity directives
+    /// type their attributes, and hidden, unnamed and <c>xmltext</c> columns
+    /// declare nothing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 as Tag, null as Parent, 1 as [C!1!A], N'e' as [C!1!E!element], 2 as [C!1!B], N'f' as [C!1!F!xml] for xml explicit, xmldata",
+        XdrHead + """<ElementType name="C" content="mixed" model="open"><AttributeType name="A" dt:type="i4"/><AttributeType name="B" dt:type="i4"/><attribute type="A"/><element type="E"/><attribute type="B"/><element type="F"/></ElementType><ElementType name="E" content="textOnly" model="closed" dt:type="string"/><ElementType name="F" content="mixed" model="closed" dt:type="string"/></Schema><C xmlns="x-schema:#Schema1" A="1" B="2"><E>e</E><F>f</F></C>""")]
+    [DataRow("select 1 as Tag, null as Parent, 1 as [C!1!Id!id], null as [O!2!No], null as [O!2!Amt] union all select 2, 1, 1, 10, 2.5 for xml explicit, xmldata",
+        XdrHead + """<ElementType name="C" content="mixed" model="open"><AttributeType name="Id" dt:type="id"/><attribute type="Id"/></ElementType><ElementType name="O" content="mixed" model="open"><AttributeType name="No" dt:type="i4"/><AttributeType name="Amt" dt:type="number"/><attribute type="No"/><attribute type="Amt"/></ElementType></Schema><C xmlns="x-schema:#Schema1" Id="1"><O No="10" Amt="2.5"/></C>""")]
+    [DataRow("select 1 as Tag, null as Parent, 1 as [C!1!Id!hide], N'z' as [C!1!!element], cast('2020-01-01' as date) as [C!1] for xml explicit, xmldata",
+        XdrHead + """<ElementType name="C" content="mixed" model="open"></ElementType></Schema><C xmlns="x-schema:#Schema1">z2020-01-01</C>""")]
+    [DataRow("select 1 as Tag, null as Parent, null as [C!1!E!elementxsinil] for xml explicit, xmldata",
+        XdrHead + """<ElementType name="C" content="mixed" model="open"><element type="E"/></ElementType><ElementType name="E" content="textOnly" model="closed" dt:type="i4"/></Schema><C xmlns="x-schema:#Schema1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><E xsi:nil="true"/></C>""")]
+    [DataRow("select 1 as Tag, null as Parent, 1 as [C!1!Id] from x where 1 = 0 for xml explicit, xmldata",
+        XdrHead + """<ElementType name="C" content="mixed" model="open"><AttributeType name="Id" dt:type="i4"/><attribute type="Id"/></ElementType></Schema>""")]
+    public void Explicit_Xmldata_DeclaresEachTag(string query, string expected) => AreEqual(expected, Xml(Seeded(), query));
+
+    /// <summary>
+    /// Msg 6848 is raised as the statement runs, after the batch's earlier
+    /// results, using up a schema number; the attribute name is what it names.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 as Tag, null as Parent, cast('2020-01-01' as date) as [C!1!D] for xml explicit, xmldata", "D")]
+    [DataRow("select cast('2020-01-01' as date) d for xml raw, xmldata", "d")]
+    public void Xmldata_UnmappedType_RaisesAsTheStatementRuns(string query, string column)
+    {
+        using var connection = Seeded();
+        using (var reader = connection.CreateCommand("select 1; " + query).ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            var error = Throws<SimulatedSqlException>(() => reader.NextResult() && reader.Read());
+            AreEqual(6848, error.Number);
+            Assert.Contains($"column '{column}'", error.Message);
+        }
+        Assert.StartsWith("""<Schema name="Schema2" """, Xml(connection, "select id from x for xml raw, xmldata"));
+    }
+
     /// <summary>
     /// A string type's restriction names its collation's locale, comparison
     /// options, version, SQL sort order and supplementary characters.

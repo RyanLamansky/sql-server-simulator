@@ -1193,13 +1193,11 @@ Escaping is position-dependent:
   A non-nullable attribute is `use="required"`, a nullable element `minOccurs="0"`, `ELEMENTS XSINIL` makes each `nillable="1"`, and AUTO declares each level after its parent, which names it by `<xsd:element ref="schema:c" minOccurs="0" maxOccurs="unbounded"/>` under an extra `xmlns:schema` prefix.
   A `sql_variant` element is `xsd:anyType` with `sqltypes:sqlDbType="Variant"`, its row declaring `xsi` and `sqltypes` and each value naming its type (`xsi:type="sqltypes:int"`); as an attribute it is **Msg 6847**.
 - **`XMLDATA`** writes an XDR `Schema` named `Schema<n>` by a count of its own, with `ElementType` / `AttributeType` declarations carrying `dt:type` (`i4`, `string`, `number`, `fixed.14.4`, `bin.base64` …), a child level referenced first, and puts the rows in `x-schema:#Schema<n>`.
-  A type XDR has no mapping for — `date`, `time`, `datetime2`, `datetimeoffset`, a `max` type, `xml` — is **Msg 6848**, which still uses up a number, and a row tag name or `ROOT` beside it **Msg 6860**.
+  A type XDR has no mapping for — `date`, `time`, `datetime2`, `datetimeoffset`, a `max` type, `xml` — is **Msg 6848**, raised as the statement runs (after its column metadata, over an empty rowset too) and still using up a number, and a row tag name or `ROOT` beside it **Msg 6860**.
+- **`EXPLICIT, XMLDATA`** writes the universal table's XDR (`ForXmlInlineSchema.CompileExplicit`): one `ElementType` per tag number in the order the columns first name them, `content="mixed" model="open"`, declaring its attributes and then referencing its attributes and elements in column order, with no reference to a child tag, followed by an `ElementType` per element column — `textOnly` for `element`, `elementxsinil` and a named `cdata`, `mixed` for the `xml` directive.
+  `id`, `idref`, `idrefs`, `nmtoken` and `nmtokens` give their attribute that `dt:type`; hidden, unnamed and `xmltext` columns declare nothing, a tag left with nothing is written `<ElementType …></ElementType>`, and only a declared column's type can be Msg 6848, which names its attribute (probed 2026-10-17 against SQL Server 2025).
 - Either directive sends its schema over an empty rowset, and under `TYPE` returns it in the one `xml` value, its namespace declarations first; an embedded `xml` value's top-level elements undeclare the rows' namespace (`<q xmlns=""/>`).
   Both on PATH are **Msg 6855**, `XMLSCHEMA('')` **Msg 6862**, the two together Msg 102.
-
-### Not modeled yet
-
-- **`FOR XML EXPLICIT, XMLDATA`** — real writes an XDR for the universal table; it raises `NotSupportedException` here.
 
 ## Leading byte-order mark
 
