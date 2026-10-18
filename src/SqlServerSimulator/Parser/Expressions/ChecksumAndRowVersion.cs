@@ -232,17 +232,26 @@ internal sealed class Checksum : Expression
     };
 
     /// <summary>
-    /// A stand-in for real's <c>decimal</c> hash, whose bits aren't
-    /// reproduced: like real's, it ignores the sign, the declared precision
-    /// and scale and every trailing zero (<c>1.5</c>, <c>1.50</c> and
-    /// <c>150</c> hash alike), so equal values still hash equal.
+    /// Real's <c>decimal</c> hash: the magnitude rescaled to the widest scale
+    /// that keeps its integer digits (38 less the integer digit count, 38 below
+    /// one), its significant 32-bit words folded from the lowest. The sign, the
+    /// declared precision and scale and every trailing zero drop out, so
+    /// <c>1</c>, <c>10</c>, <c>0.1</c> and <c>-1</c> hash alike, while a value
+    /// below one keeps its leading zeros (<c>0.25</c> hashes as <c>25</c>,
+    /// <c>0.025</c> doesn't), and a rescaled magnitude a word narrower folds a
+    /// word fewer, which is why <c>1E-10</c> hashes as <c>4294967296</c>
+    /// (fitted to 400 random values and every integer to 300, probed
+    /// 2026-10-18 against SQL Server 2025).
     /// </summary>
     private static uint DecimalHash(Decimal38 value)
     {
-        var digits = value.Abs().ToString().Replace(".", "", StringComparison.Ordinal).Trim('0');
+        var digits = 0;
+        while (digits < 38 && value.Magnitude >= Decimal38.Pow10[digits])
+            digits++;
+        var rescaled = value.Magnitude * Decimal38.Pow10[38 - Math.Max(digits, value.Scale)];
         var hash = 0u;
-        foreach (var digit in digits)
-            hash = BitOperations.RotateLeft(hash, 4) ^ digit;
+        for (; rescaled != UInt128.Zero; rescaled >>= 32)
+            hash = BitOperations.RotateLeft(hash, 4) ^ (uint)rescaled;
         return hash;
     }
 

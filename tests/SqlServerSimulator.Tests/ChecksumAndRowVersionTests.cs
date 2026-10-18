@@ -103,6 +103,21 @@ public sealed class ChecksumAndRowVersionTests
     [DataRow("'ßß'", 1817504)]
     [DataRow("'a' + char(198)", 38770)]
     [DataRow("'a' + char(230)", 38770)]
+    [DataRow("cast(1 as decimal(38, 10))", -1374215283)]
+    [DataRow("cast(-1000 as numeric(5, 0))", -1374215283)]
+    [DataRow("cast(0.1 as decimal(38, 37))", -1374215283)]
+    [DataRow("cast(0.25 as decimal(10, 2))", 442323529)]
+    [DataRow("cast(0.025 as decimal(10, 3))", 1803929767)]
+    [DataRow("cast(123.456 as decimal(10, 3))", 543253508)]
+    [DataRow("cast(0.0000000001 as decimal(38, 10))", -1038096291)]
+    [DataRow("cast(4294967296 as decimal(38, 0))", -1038096291)]
+    [DataRow("cast(-0.0000562843675942956559203341541209548 as decimal(37, 37))", 886111688)]
+    [DataRow("cast(0.00000000000000000926400000000000000 as decimal(38, 35))", 1713322816)]
+    [DataRow("cast(855635929800982819073476366777 as decimal(31, 0))", -1377870596)]
+    [DataRow("cast(0 as decimal(5, 0))", 0)]
+    [DataRow("cast(7 as sql_variant)", 380181642)]
+    [DataRow("cast(cast(12.3456 as money) as sql_variant)", 543253504)]
+    [DataRow("cast(cast(-0.5 as smallmoney) as sql_variant)", 884647302)]
     public void Checksum_MatchesRealsFold(string arguments, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select checksum({arguments})"));
 
