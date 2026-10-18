@@ -147,40 +147,71 @@ internal sealed class NVarcharSqlType : SqlType
 
 /// <summary>
 /// SQL Server's <c>sysname</c>: <c>nvarchar(128) NOT NULL</c> alias used by
-/// the system catalogs. Always carries the server-default collation
-/// (<see cref="Collation.Baseline"/>) at
-/// <see cref="Coercibility.Implicit"/> rank, so a single shared instance is
-/// sufficient; anything that re-collates one makes an <c>nvarchar(128)</c>.
+/// the system catalogs, interned per collation and rank as
+/// <see cref="NVarcharSqlType"/> is. <see cref="SqlType.SystemName"/> is the
+/// server-default collation (<see cref="Collation.Baseline"/>) at
+/// <see cref="Coercibility.Implicit"/> rank; a database-scoped catalog
+/// column carries its database's collation, and a variable or a <c>CAST</c>
+/// the coercible-default rank (probed 2026-10-18 against SQL Server 2025:
+/// each describes as user type 256 in its database's collation).
 /// </summary>
-internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, TypePairClass.UnicodeString)
+internal sealed class SystemNameSqlType : SqlType
 {
+    private readonly Collation collation;
+
+    private readonly Coercibility coercibility;
+
+    private SystemNameSqlType(Collation collation, Coercibility coercibility)
+        : base(SqlTypeCategory.String, TypePairClass.UnicodeString)
+    {
+        this.collation = collation;
+        this.coercibility = coercibility;
+    }
+
+    private static readonly ConcurrentDictionary<(Collation Collation, Coercibility Coercibility), SystemNameSqlType> cache = new();
+
+    /// <summary>The <c>sysname</c> in <paramref name="collation"/> at <paramref name="coercibility"/>.</summary>
+    public static SystemNameSqlType Get(Collation collation, Coercibility coercibility) =>
+        cache.GetOrAdd((collation, coercibility), static key => new SystemNameSqlType(key.Collation, key.Coercibility));
+
     public override int Precedence => 6;
 
     public override Type ClrType => typeof(string);
 
     public override bool IsFixedLength => false;
 
-    public override Collation Collation => SqlServerSimulator.Collation.Baseline;
+    public override Collation Collation => this.collation;
 
-    public override Coercibility Coercibility => Coercibility.Implicit;
+    public override Coercibility Coercibility => this.coercibility;
 
     /// <summary>
-    /// A sysname under any other collation or rank — a <c>COLLATE</c>
-    /// postfix, an operator's settled collation — is the <c>nvarchar(128)</c>
-    /// it aliases (probed 2026-10-15 against SQL Server 2025: <c>name COLLATE
-    /// Latin1_General_BIN</c> selected into a table is <c>nvarchar(128)</c>
-    /// in that collation).
+    /// The <c>sysname</c> in another collation or rank: a conversion, a
+    /// variable or an operator's settled collation keeps the alias (probed
+    /// 2026-10-18 against SQL Server 2025: <c>CAST(N'a' AS sysname)</c> and
+    /// <c>ISNULL(@sysname, N'y')</c> describe as user type 256); a
+    /// <c>COLLATE</c> naming another collation is the <c>nvarchar(128)</c> it
+    /// aliases instead (<see cref="Recollated"/>).
     /// </summary>
-    public override SqlType WithCollation(Collation collation, Coercibility coercibility) =>
-        coercibility == Coercibility.Implicit && ReferenceEquals(collation, SqlServerSimulator.Collation.Baseline)
-            ? this
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(collation, coercibility);
+
+    /// <summary>
+    /// What a <c>COLLATE</c> postfix makes of this type: the <c>sysname</c>
+    /// itself under the collation it already has, else the
+    /// <c>nvarchar(128)</c> it aliases (probed 2026-10-18 against SQL Server
+    /// 2025: <c>name COLLATE Latin1_General_BIN</c> describes with no user
+    /// type and selects into a table as <c>nvarchar(128)</c>, where
+    /// <c>name COLLATE</c> its own collation stays user type 256).
+    /// </summary>
+    public SqlType Recollated(Collation collation, Coercibility coercibility) =>
+        StringComparer.OrdinalIgnoreCase.Equals(collation.Name, this.collation.Name)
+            ? Get(collation, coercibility)
             : NVarcharSqlType.Get(128, collation, coercibility);
 
     public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 
     public override int Encode(SqlValue value, Span<byte> destination) => Utf16LeEncode(value.AsString, destination);
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(Utf16LeDecode(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromSystemName(this, Utf16LeDecode(source));
 
     public override SqlValue ConvertParameter(object raw) => SqlValue.FromNVarchar((string)raw).CoerceTo(this);
 

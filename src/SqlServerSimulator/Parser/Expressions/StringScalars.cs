@@ -247,8 +247,14 @@ internal static class StringScalars
     /// schema only needs to be roughly correct since the value never
     /// materializes).
     /// </summary>
+    /// <remarks>
+    /// A <c>sysname</c> source is the <c>nvarchar(128)</c> it aliases (probed
+    /// 2026-10-18 against SQL Server 2025: <c>UPPER(name)</c> describes with no
+    /// user type, <c>LEFT(name, 3)</c> as <c>nvarchar(3)</c>).
+    /// </remarks>
     public static SqlType ResolveResultType(SqlType sourceType, BatchContext batch) =>
-        SqlType.IsStringCategory(sourceType) || !IsCoerceableToVarchar(sourceType)
+        sourceType is SystemNameSqlType sysname ? NVarcharSqlType.Get(128, sysname.Collation, sysname.Coercibility)
+        : SqlType.IsStringCategory(sourceType) || !IsCoerceableToVarchar(sourceType)
             ? sourceType
             : VarcharSqlType.Get(ConvertedWidth(sourceType), batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 

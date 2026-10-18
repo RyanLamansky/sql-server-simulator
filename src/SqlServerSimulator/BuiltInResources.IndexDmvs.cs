@@ -7,7 +7,8 @@ namespace SqlServerSimulator;
 // compatibility views — shapes probed 2026-10-05 against SQL Server 2025.
 internal static partial class BuiltInResources
 {
-    private static readonly NVarcharSqlType Nvarchar4000Catalog = NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit);
+    /// <summary>The missing-index text columns, in the server's collation (probed 2026-10-18 against SQL Server 2025).</summary>
+    private static readonly NVarcharSqlType MissingIndexText = NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit);
 
     /// <summary>
     /// Registers the index DMVs that are views — usage and the missing-index
@@ -49,10 +50,10 @@ internal static partial class BuiltInResources
             new("index_handle", SqlType.Int32, null, false),
             new("database_id", SqlType.SmallInt, null, false),
             new("object_id", SqlType.Int32, null, false),
-            new("equality_columns", Nvarchar4000Catalog, 4000, true),
-            new("inequality_columns", Nvarchar4000Catalog, 4000, true),
-            new("included_columns", Nvarchar4000Catalog, 4000, true),
-            new("statement", Nvarchar4000Catalog, 4000, true),
+            new("equality_columns", MissingIndexText, 4000, true),
+            new("inequality_columns", MissingIndexText, 4000, true),
+            new("included_columns", MissingIndexText, 4000, true),
+            new("statement", MissingIndexText, 4000, true),
         ], None);
 
         Sys("dm_db_missing_index_groups",
@@ -627,13 +628,13 @@ internal static partial class BuiltInResources
     internal static readonly (string Name, SqlType Type)[] IndexPhysicalStatsColumns =
     [
         ("database_id", SqlType.SmallInt), ("object_id", SqlType.Int32), ("index_id", SqlType.Int32), ("partition_number", SqlType.Int32),
-        ("index_type_desc", nvarchar60Catalog), ("alloc_unit_type_desc", nvarchar60Catalog), ("index_depth", SqlType.TinyInt), ("index_level", SqlType.TinyInt),
+        ("index_type_desc", nvarchar60Baseline), ("alloc_unit_type_desc", nvarchar60Baseline), ("index_depth", SqlType.TinyInt), ("index_level", SqlType.TinyInt),
         ("avg_fragmentation_in_percent", SqlType.Float), ("fragment_count", SqlType.BigInt), ("avg_fragment_size_in_pages", SqlType.Float),
         ("page_count", SqlType.BigInt), ("avg_page_space_used_in_percent", SqlType.Float), ("record_count", SqlType.BigInt),
         ("ghost_record_count", SqlType.BigInt), ("version_ghost_record_count", SqlType.BigInt), ("min_record_size_in_bytes", SqlType.Int32),
         ("max_record_size_in_bytes", SqlType.Int32), ("avg_record_size_in_bytes", SqlType.Float), ("forwarded_record_count", SqlType.BigInt),
         ("compressed_page_count", SqlType.BigInt), ("hobt_id", SqlType.BigInt), ("columnstore_delete_buffer_state", SqlType.TinyInt),
-        ("columnstore_delete_buffer_state_desc", nvarchar60Catalog), ("version_record_count", SqlType.BigInt), ("inrow_version_record_count", SqlType.BigInt),
+        ("columnstore_delete_buffer_state_desc", nvarchar60Baseline), ("version_record_count", SqlType.BigInt), ("inrow_version_record_count", SqlType.BigInt),
         ("inrow_diff_version_record_count", SqlType.BigInt), ("total_inrow_version_payload_size_in_bytes", SqlType.BigInt),
         ("offrow_regular_version_record_count", SqlType.BigInt), ("offrow_long_term_version_record_count", SqlType.BigInt),
     ];

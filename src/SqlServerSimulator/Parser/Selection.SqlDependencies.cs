@@ -18,11 +18,17 @@ partial class Selection
         "referencing_class", "referencing_class_desc", "is_caller_dependent",
     ];
 
+    /// <summary>
+    /// The referenced names, which real reads as <c>nvarchar(128)</c> (probed
+    /// 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    private static readonly NVarcharSqlType ReferencedName = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
+
     private static readonly SqlType[] ReferencedEntitiesSchema =
     [
         SqlType.Int32,
-        SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, SqlType.SystemName,
-        SqlType.SystemName, SqlType.Int32, SqlType.Int32,
+        ReferencedName, ReferencedName, ReferencedName, ReferencedName,
+        ReferencedName, SqlType.Int32, SqlType.Int32,
         SqlType.TinyInt, NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit),
         SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit,
         SqlType.Bit, SqlType.Bit, SqlType.Bit,
@@ -214,11 +220,11 @@ partial class Selection
             SqlValue[] Row(int minorId, string? minorName, bool selected, bool updated, bool selectAll) =>
             [
                 SqlValue.FromInt32(entity.ReferencingMinorId),
-                reference.ServerName is { } server ? SqlValue.FromSystemName(server) : nullName,
-                reference.DatabaseName is { } db ? SqlValue.FromSystemName(db) : nullName,
-                reference.SchemaName is { } schema ? SqlValue.FromSystemName(schema) : nullName,
-                SqlValue.FromSystemName(reference.EntityName),
-                minorName is null ? nullName : SqlValue.FromSystemName(minorName),
+                reference.ServerName is { } server ? SqlValue.FromNVarchar(ReferencedName, server) : nullName,
+                reference.DatabaseName is { } db ? SqlValue.FromNVarchar(ReferencedName, db) : nullName,
+                reference.SchemaName is { } schema ? SqlValue.FromNVarchar(ReferencedName, schema) : nullName,
+                SqlValue.FromNVarchar(ReferencedName, reference.EntityName),
+                minorName is null ? nullName : SqlValue.FromNVarchar(ReferencedName, minorName),
                 referencedId is { } id ? SqlValue.FromInt32(id) : SqlValue.Null(SqlType.Int32),
                 SqlValue.FromInt32(minorId),
                 SqlValue.FromByte(isType ? ModuleDependencies.TypeClass : ModuleDependencies.ObjectOrColumnClass),

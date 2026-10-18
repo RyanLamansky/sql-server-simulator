@@ -498,7 +498,7 @@ partial class Simulation
             _ when col.Type == SqlType.Text => new(129, int.MaxValue, int.MaxValue, null, null, null, ColumnFlagLong, true, false),
             _ when col.Type == SqlType.NText => new(130, 1073741823, 2147483646, null, null, null, ColumnFlagLong, true, false),
             _ when col.Type == SqlType.Image => new(128, int.MaxValue, int.MaxValue, null, null, null, ColumnFlagLong, false, false),
-            _ when col.Type == SqlType.SystemName => new(130, 128, 256, null, null, null, 0, true, false),
+            _ when col.Type is SystemNameSqlType => new(130, 128, 256, null, null, null, 0, true, false),
             CharSqlType c => new(129, c.length, c.length, null, null, null, Fixed, true, false),
             NCharSqlType nc => new(130, nc.length, nc.length * 2, null, null, null, Fixed, true, false),
             BinarySqlType bn => new(128, bn.length, bn.length, null, null, null, Fixed, false, false),
@@ -626,7 +626,7 @@ partial class Simulation
         // An alias type names itself as the domain, sysname under dbo.
         var (domainSchema, domainName) = col.AliasType is { } alias
             ? (alias.Schema.Name, alias.Name)
-            : col.Type == SqlType.SystemName ? (Database.DefaultSchemaName, "sysname") : (null, null);
+            : col.Type is SystemNameSqlType ? (Database.DefaultSchemaName, "sysname") : (null, null);
         row[24] = Name(domainName is null ? null : database.Name);
         row[25] = Name(domainSchema);
         row[26] = Name(domainName);

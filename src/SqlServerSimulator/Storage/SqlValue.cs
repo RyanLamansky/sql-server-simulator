@@ -240,6 +240,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(SqlType.SystemName, 0, value, isNull: false);
     }
 
+    /// <summary>Non-NULL <c>sysname</c> value of <paramref name="type"/>'s collation and rank.</summary>
+    public static SqlValue FromSystemName(SystemNameSqlType type, string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(type, 0, value, isNull: false);
+    }
+
     /// <summary>Non-NULL SQL <c>varbinary</c> value. The array is held by reference; callers shouldn't mutate it after construction.</summary>
     public static SqlValue FromVarbinary(byte[] value)
     {
@@ -808,7 +815,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromString(SqlType type, string value) =>
         type is VarcharSqlType v ? FromVarchar(v, value)
         : type is NVarcharSqlType n ? FromNVarchar(n, value)
-        : type == SqlType.SystemName ? FromSystemName(value)
+        : type is SystemNameSqlType systemName ? FromSystemName(systemName, value)
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
         : type == SqlType.Xml ? FromXml(value)

@@ -75,7 +75,7 @@ internal sealed class CatalogRowCache
         }
 
         CatalogPushdownDiagnostics.Sink?.Add($"CacheBuild({view.Name})");
-        var built = new CatalogRowSet(view, generate(view, batch, database), live ?? []);
+        var built = new CatalogRowSet(view, view.ColumnsIn(database), generate(view, batch, database), live ?? []);
         if (generation.Version != stamp || Volatile.Read(ref this.version) != stamp)
             return built;
         generation.Sets[key] = built;
@@ -114,7 +114,7 @@ internal sealed class CatalogRowCache
 /// order, and the hash indexes built over them so far. Immutable once
 /// published, so any number of sessions read it concurrently.
 /// </summary>
-internal sealed class CatalogRowSet(CatalogView view, List<byte[]> rows, Int128[] liveStamp)
+internal sealed class CatalogRowSet(CatalogView view, HeapColumn[] columns, List<byte[]> rows, Int128[] liveStamp)
 {
     /// <summary>
     /// How many distinct indexes one rowset keeps; past it an index is built
@@ -124,6 +124,9 @@ internal sealed class CatalogRowSet(CatalogView view, List<byte[]> rows, Int128[
     private const int MaxIndexes = 64;
 
     public readonly CatalogView View = view;
+
+    /// <summary>The columns the rows were encoded with: the view's as read in the rowset's database (<see cref="CatalogView.ColumnsIn"/>).</summary>
+    public readonly HeapColumn[] Columns = columns;
 
     /// <summary>The rows, never mutated after construction.</summary>
     public readonly List<byte[]> Rows = rows;
@@ -144,7 +147,7 @@ internal sealed class CatalogRowSet(CatalogView view, List<byte[]> rows, Int128[
         var key = new CatalogIndexKey(ordinals, keyTypes);
         if (this.indexes.TryGetValue(key, out var index))
             return index;
-        index = CatalogIndex.Build(this.View.Columns, this.Rows, ordinals, keyTypes);
+        index = CatalogIndex.Build(this.Columns, this.Rows, ordinals, keyTypes);
         return this.indexes.Count < MaxIndexes ? this.indexes.GetOrAdd(key, index) : index;
     }
 
@@ -156,7 +159,7 @@ internal sealed class CatalogRowSet(CatalogView view, List<byte[]> rows, Int128[
     /// </summary>
     public IEnumerable<byte[]> Seek(int ordinal, SqlValue[] values)
     {
-        var columnType = this.View.Columns[ordinal].Type;
+        var columnType = this.Columns[ordinal].Type;
         if (values.Length == 1)
         {
             var only = values[0];

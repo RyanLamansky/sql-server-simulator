@@ -11,10 +11,12 @@ The existing length-only `Get(N)` overloads return the `(N, Collation.Baseline, 
 New `Get(length, collation, coercibility)` overloads return the column-pinned variant.
 The `varchar` / `char` pair intern under `Collation.ForVarcharStorage()`, so a type built from a database or column collation always carries the collation's non-Unicode sort body — a `CHAR(n)` result once compared through the default collation's Unicode weights, ignoring `CHAR(0)` where real's varchar sort doesn't.
 
-`SystemNameSqlType` / `TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Baseline` at `Implicit` rank — sysname/text/ntext don't accept per-column COLLATE in the simulator (sysname rejects per grammar; text/ntext deferred as deprecated).
-A `sysname` variable or parameter is the `nvarchar(128)` it aliases at a variable's coercible-default rank instead (`VariableSlot.DeclaredType`), so `catalog_column LIKE @sysname` takes the column's collation rather than raising Msg 468 (probed 2026-10-16 against SQL Server 2025).
+`TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Baseline` at `Implicit` rank — text/ntext don't accept per-column COLLATE in the simulator (deferred as deprecated).
+`SystemNameSqlType` interns per collation and rank as `nvarchar` does, and keeps the alias — user type 256 in COLMETADATA and `sp_describe_first_result_set` — through a conversion, a variable, `ISNULL` and a promotion between two sysnames, where a string function's result and a `COLLATE` naming another collation are the `nvarchar(128)` it aliases (`SystemNameSqlType.Recollated`; probed 2026-10-18 against SQL Server 2025).
+A `sysname` variable or parameter holds it at a variable's coercible-default rank (`VariableSlot.DeclaredType`), so `catalog_column LIKE @sysname` takes the column's collation rather than raising Msg 468 (probed 2026-10-16 against SQL Server 2025).
+A `DECLARE`d variable's string type takes the current database's collation (probed 2026-10-18: in a `Latin1_General_CS_AS` database `@a = @b` compares case-sensitively).
 
-`SqlType.WithCollation(Collation, Coercibility)` is the virtual that rewraps a string type with new metadata; non-string types and the sysname/text/ntext singletons return `this`.
+`SqlType.WithCollation(Collation, Coercibility)` is the virtual that rewraps a string type with new metadata; non-string types and the text/ntext singletons return `this`.
 Used by `CollateExpression` for the postfix override and by CREATE TABLE / ALTER COLUMN for the column declaration.
 
 ## Coercibility precedence
@@ -261,11 +263,17 @@ The simulator matches; the `CsDatabase_*CharFunctionResultUsesActiveCollation` t
 
 Sites that intentionally stay on `Collation.Baseline`:
 - `SqlType.Varchar` / `NVarchar` pseudo-singletons and `SqlType.GetChar` / `GetNChar` static bridges — type-identity placeholders.
-- `text` / `ntext` / `sysname` `Collation` overrides — server-default-only types.
-  (Real SQL Server pins these per-database for text/ntext and per-server for sysname; a per-Simulation routing model is deferred.)
+- `text` / `ntext` `Collation` overrides — server-default-only types.
+  (Real SQL Server pins these per-database; a per-Simulation routing model is deferred.)
 - Error-message type placeholders, dynamic-SQL string extraction, PRINT formatting — collation irrelevant to the surfaced value.
-- User-supplied catalog content columns: `sys.extended_properties.value`, `sys.indexes.filter_definition` — real SQL Server tags these with the database collation; the process-wide catalog view declaration can't reach per-`Database` state, so these stay at Baseline until the per-Simulation catalog model lands.
 - `Simulation.ServerCollation` initializer — the deliberate anchor for "what does the simulator's hardcoded baseline resolve to."
+
+## Catalog name columns take the database's collation
+
+A database-scoped catalog view's name and text columns read in the collation of the database they are read from, a server-scoped view's (`sys.databases`, `sys.server_principals`, the instance DMVs) in the server's, and the fixed-collation columns below in theirs (probed 2026-10-18 against SQL Server 2025, every modeled view and system function described in a `Latin1_General_CS_AS` database and a default one).
+`Schemas/CatalogViewDatabaseCollatedColumns.tsv` lists, per view or function, the columns that take the database's; `CatalogView.ColumnsIn` re-collates them for a read, and a system function's rowset is re-collated as it binds.
+So in a case-sensitive database `sys.objects.name` compares case-sensitively and joins a column of that collation, while `sys.objects` against `sys.databases`, `master.sys.objects` or a column in another collation is Msg 468, as on real; `master.sys.objects` read from it keeps master's collation.
+A declared view column that takes the database's collation is declared in `Collation.Baseline`, which `ColumnsIn` leaves as it stands in a database of that collation.
 
 ## Catalog views pin `_desc` / enum columns to `Collation.Catalog`
 
@@ -782,7 +790,6 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default, so a `text` column stores CP1252 regardless of the clause.
   The clause is still *validated* — a Unicode-only collation on `text` raises Msg 459 from the column-declaration site (see [Unicode-only collations](#unicode-only-collations--msg-459)) — it just isn't pinned.
   Low impact (text/ntext deprecated since SQL Server 2005).
-- **Sysname's collation is always `Collation.Baseline`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
 - **Pre-v100 collation sort divergence on supplementary chars at position 1+, outside the Latin1-General tables.**
   Probe-confirmed against SQL Server 2025: the pre-v100 names sort `Z+emoji` BEFORE `Z+U+E000`, while the v100 family sorts the other way.
   The Latin1-General tables reproduce both (the unversioned table weighs no surrogate); every other pre-v100 name routes through `CompareInfo`, which compares by code point and so behaves like v100.

@@ -400,7 +400,7 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, bool dirtyRead)
     {
-        var (schema, columnNames) = CatalogViewShape(view);
+        var (schema, columnNames) = CatalogViewShape(view, targetDatabase);
         return new Selection(
             schema,
             columnNames,
@@ -442,7 +442,8 @@ internal sealed partial class Selection
         CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
         var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
         var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-        var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
+        var columns = view.ColumnsIn(targetDatabase);
+        var encoded = rows.Select(values => RowEncoder.EncodeRow(columns, view.Conform(values, columns)));
         return view.StableWithinStatement ? RememberWhenFullyDrained(statement, key, encoded) : encoded;
     }
 
@@ -469,8 +470,9 @@ internal sealed partial class Selection
     private static List<byte[]> GenerateCatalogRows(CatalogView view, BatchContext batch, Database database)
     {
         var rows = new List<byte[]>();
+        var columns = view.ColumnsIn(database);
         foreach (var values in view.RowGenerator(batch, database))
-            rows.Add(RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
+            rows.Add(RowEncoder.EncodeRow(columns, view.Conform(values, columns)));
         return rows;
     }
 
@@ -514,7 +516,7 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression[] comparands, bool dirtyRead)
     {
-        var (schema, columnNames) = CatalogViewShape(view);
+        var (schema, columnNames) = CatalogViewShape(view, targetDatabase);
         var ordinal = Array.FindIndex(view.Columns, column => BuiltInToken.Equals(column.Name, pushdownColumn));
         var filteredGenerator = comparands.Length == 1
             && view.PushdownColumns is { } keyed && Array.Exists(keyed, column => BuiltInToken.Equals(column, pushdownColumn))
@@ -559,21 +561,23 @@ internal sealed partial class Selection
                     : [];
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, generated);
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                return rows.Select(row => RowEncoder.EncodeRow(view.Columns, view.Conform(row)));
+                var columns = view.ColumnsIn(targetDatabase);
+                return rows.Select(row => RowEncoder.EncodeRow(columns, view.Conform(row, columns)));
             })
         {
             ReadsCatalogDirty = dirtyRead,
         };
     }
 
-    private static (SqlType[] Schema, string[] ColumnNames) CatalogViewShape(CatalogView view)
+    private static (SqlType[] Schema, string[] ColumnNames) CatalogViewShape(CatalogView view, Database targetDatabase)
     {
-        var schema = new SqlType[view.Columns.Length];
-        var columnNames = new string[view.Columns.Length];
-        for (var i = 0; i < view.Columns.Length; i++)
+        var columns = view.ColumnsIn(targetDatabase);
+        var schema = new SqlType[columns.Length];
+        var columnNames = new string[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
         {
-            schema[i] = view.Columns[i].Type;
-            columnNames[i] = view.Columns[i].Name;
+            schema[i] = columns[i].Type;
+            columnNames[i] = columns[i].Name;
         }
         return (schema, columnNames);
     }

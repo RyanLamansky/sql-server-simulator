@@ -6,6 +6,13 @@ namespace SqlServerSimulator;
 internal static partial class BuiltInResources
 {
     private static readonly NVarcharSqlType brokerName128 = NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit);
+
+    /// <summary>
+    /// The <c>sysname</c> the services, contracts and message types are named
+    /// by, in <c>Latin1_General_BIN</c> (probed 2026-10-18 against SQL Server
+    /// 2025: each <c>name</c> describes as user type 256 in that collation).
+    /// </summary>
+    private static readonly SystemNameSqlType brokerSysname = SystemNameSqlType.Get(Collation.Get("Latin1_General_BIN"), Coercibility.Implicit);
     private static readonly NVarcharSqlType brokerName256 = NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit);
 
     /// <summary>
@@ -24,7 +31,7 @@ internal static partial class BuiltInResources
 
         Sys("services",
         [
-            new("name", brokerName128, 128, false),
+            new("name", brokerSysname, 128, false),
             new("service_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("service_queue_id", SqlType.Int32, null, false),
@@ -59,7 +66,7 @@ internal static partial class BuiltInResources
         ], static (_, database) => EnumerateServiceQueues(database));
         Sys("service_contracts",
         [
-            new("name", brokerName128, 128, false),
+            new("name", brokerSysname, 128, false),
             new("service_contract_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
         ], static (_, database) => BrokerContracts(database).Select(contract => (SqlValue[])[
@@ -108,7 +115,7 @@ internal static partial class BuiltInResources
         var validationChar = CharSqlType.Get(2, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit);
         Sys("service_message_types",
         [
-            new("name", brokerName128, 128, false),
+            new("name", brokerSysname, 128, false),
             new("message_type_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("validation", validationChar, 2, false),
@@ -211,7 +218,9 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
         ], static (batch, _) => batch.Connection.Simulation.ServerEventNotifications.Where(notification => SeesServerEventNotification(batch, notification))
             .OrderBy(static notification => notification.ObjectId).Select(EventNotificationRow));
-        var eventTypeName = NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit);
+        // In the database's collation, as CatalogView.ColumnsIn reads it (probed
+        // 2026-10-18 against SQL Server 2025).
+        var eventTypeName = NVarcharSqlType.Get(64, Collation.Baseline, Coercibility.Implicit);
         Sys("event_notification_event_types",
         [
             new("type", SqlType.Int32, null, false),

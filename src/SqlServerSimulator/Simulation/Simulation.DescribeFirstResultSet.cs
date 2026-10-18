@@ -5,13 +5,20 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
+    /// <summary>
+    /// The describe result's name columns, <c>nvarchar(128)</c> rather than
+    /// <c>sysname</c> (captured 2026-10-18 against SQL Server 2025: user type 0
+    /// in COLMETADATA for the procedure and the function alike).
+    /// </summary>
+    private static readonly NVarcharSqlType DescribeName = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
+
     internal static readonly SqlType[] DescribeSchema =
     [
-        SqlType.Bit, SqlType.Int32, SqlType.SystemName, SqlType.Bit, SqlType.Int32, NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit),
-        SqlType.SmallInt, SqlType.TinyInt, SqlType.TinyInt, SqlType.SystemName, SqlType.Int32, SqlType.SystemName,
-        SqlType.SystemName, SqlType.SystemName, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit), SqlType.Int32, SqlType.SystemName, SqlType.SystemName,
-        SqlType.SystemName, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.SystemName, SqlType.SystemName,
-        SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, SqlType.Bit, SqlType.Bit, SqlType.Bit,
+        SqlType.Bit, SqlType.Int32, DescribeName, SqlType.Bit, SqlType.Int32, NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit),
+        SqlType.SmallInt, SqlType.TinyInt, SqlType.TinyInt, DescribeName, SqlType.Int32, DescribeName,
+        DescribeName, DescribeName, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit), SqlType.Int32, DescribeName, DescribeName,
+        DescribeName, SqlType.Bit, SqlType.Bit, SqlType.Bit, DescribeName, DescribeName,
+        DescribeName, DescribeName, DescribeName, SqlType.Bit, SqlType.Bit, SqlType.Bit,
         SqlType.Bit, SqlType.Bit, SqlType.SmallInt, SqlType.Bit, SqlType.SmallInt, SqlType.Int32,
         SqlType.Int32, SqlType.Int32, SqlType.TinyInt,
     ];
@@ -197,7 +204,7 @@ partial class Simulation
         var collation = type.Category == SqlTypeCategory.String ? type.Collation : null;
         var (tdsType, tdsLength) = DescribeTdsType(type, !nullable, numeric, maxLength);
         var codec = collation is null ? null : Network.TdsCollationCodec.For(collation);
-        var nullName = SqlValue.Null(SqlType.SystemName);
+        var nullName = SqlValue.Null(DescribeName);
         var nullBit = SqlValue.Null(SqlType.Bit);
         var nullSmall = SqlValue.Null(SqlType.SmallInt);
         var nullInt = SqlValue.Null(SqlType.Int32);
@@ -208,22 +215,24 @@ partial class Simulation
         var systemClrType = type == SqlType.HierarchyId ? "Microsoft.SqlServer.Types.SqlHierarchyId"
             : type is SpatialSqlType spatial ? spatial.ClrTypeName
             : null;
+        // So does sysname, with no assembly (probed 2026-10-18).
+        var systemUserType = systemClrType is not null || type is SystemNameSqlType;
         return
         [
             SqlValue.FromBoolean(false),
             SqlValue.FromInt32(index + 1),
-            string.IsNullOrEmpty(name) ? nullName : SqlValue.FromSystemName(name),
+            string.IsNullOrEmpty(name) ? nullName : SqlValue.FromNVarchar(DescribeName, name),
             SqlValue.FromBoolean(nullable),
             SqlValue.FromInt32(numeric ? 108 : type.SystemTypeId),
             SqlValue.FromNVarchar(DescribeTypeName(type, numeric)),
             SqlValue.FromInt16(maxLength),
             SqlValue.FromByte(precision),
             SqlValue.FromByte(scale),
-            collation is null ? nullName : SqlValue.FromSystemName(collation.Name),
-            alias is not null ? SqlValue.FromInt32(alias.UserTypeId) : type is VectorSqlType || systemClrType is not null ? SqlValue.FromInt32(type.UserTypeId) : nullInt,
-            alias is not null ? SqlValue.FromSystemName(alias.Schema.Database.Name) : systemClrType is not null ? SqlValue.FromSystemName(databaseName) : nullName,
-            alias is not null ? SqlValue.FromSystemName(alias.Schema.Name) : systemClrType is not null ? SqlValue.FromSystemName("sys") : nullName,
-            alias is not null ? SqlValue.FromSystemName(alias.Name) : systemClrType is not null ? SqlValue.FromSystemName(type.SqlServerName) : nullName,
+            collation is null ? nullName : SqlValue.FromNVarchar(DescribeName, collation.Name),
+            alias is not null ? SqlValue.FromInt32(alias.UserTypeId) : type is VectorSqlType || systemUserType ? SqlValue.FromInt32(type.UserTypeId) : nullInt,
+            alias is not null ? SqlValue.FromNVarchar(DescribeName, alias.Schema.Database.Name) : systemUserType ? SqlValue.FromNVarchar(DescribeName, databaseName) : nullName,
+            alias is not null ? SqlValue.FromNVarchar(DescribeName, alias.Schema.Name) : systemUserType ? SqlValue.FromNVarchar(DescribeName, "sys") : nullName,
+            alias is not null ? SqlValue.FromNVarchar(DescribeName, alias.Name) : systemUserType ? SqlValue.FromNVarchar(DescribeName, type is SystemNameSqlType ? "sysname" : type.SqlServerName) : nullName,
             systemClrType is not null
                 ? SqlValue.FromNVarchar($"{systemClrType}, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91")
                 : SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),

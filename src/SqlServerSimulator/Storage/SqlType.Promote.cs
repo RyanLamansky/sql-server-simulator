@@ -292,6 +292,12 @@ internal abstract partial class SqlType
             : b.PairClass == TypePairClass.Binary ? (a.Collation ?? Collation.Baseline, a.Coercibility)
             : Collation.Resolve(a, b) ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
 
+        // Two sysnames stay one, in the settled collation (probed 2026-10-18
+        // against SQL Server 2025: COALESCE(name, @sysname) describes as user
+        // type 256).
+        if (a is SystemNameSqlType && b is SystemNameSqlType)
+            return SystemNameSqlType.Get(collation, coercibility);
+
         // JSON text stays JSON text when it meets another string.
         var jsonText = IsJsonText(a) || IsJsonText(b);
         if (aLen == MaxLengthSentinel || bLen == MaxLengthSentinel)

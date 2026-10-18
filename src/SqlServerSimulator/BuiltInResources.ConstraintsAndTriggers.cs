@@ -236,7 +236,7 @@ internal static partial class BuiltInResources
             new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
             new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
-            .. column ? (HeapColumn[])[new("COLUMN_NAME", nvarchar128Baseline, 128, true)] : [],
+            .. column ? (HeapColumn[])[new("COLUMN_NAME", SqlType.SystemName, 128, true)] : [],
             new("PRIVILEGE_TYPE", VarcharSqlType.Get(10, Collation.Baseline, Coercibility.Implicit), 10, true),
             new("IS_GRANTABLE", VarcharSqlType.Get(3, Collation.Baseline, Coercibility.Implicit), 3, true),
         ];
@@ -498,7 +498,7 @@ internal static partial class BuiltInResources
             new("hash", SqlType.Varbinary, 8000, true),
             new("description", SqlType.NVarchar, 4000, true),
             new("create_date", SqlType.GetDateTime2(7), null, false),
-            new("created_by", SqlType.SystemName, 128, false),
+            new("created_by", nvarchar128Baseline, 128, false),
         ], static (batch, _) => EnumerateTrustedAssemblies(batch));
 
         // sys.assembly_files: one row per registered assembly, carrying the

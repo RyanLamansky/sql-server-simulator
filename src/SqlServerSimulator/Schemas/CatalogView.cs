@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Storage;
 
@@ -85,6 +86,44 @@ internal sealed class CatalogView(
     public bool[]? ComputedColumns;
 
     /// <summary>
+    /// Per column, whether it takes the collation of the database the view is
+    /// read in rather than the server's — a database-scoped view's name and
+    /// text columns, where a server-scoped view's and a fixed-collation
+    /// column keep theirs (from <c>CatalogViewDatabaseCollatedColumns.tsv</c>,
+    /// captured 2026-10-18 against SQL Server 2025 in a
+    /// <c>Latin1_General_CS_AS</c> database); null when none does.
+    /// </summary>
+    public bool[]? DatabaseCollatedColumns;
+
+    /// <summary><see cref="Columns"/> as read in each database collation other than the declared one.</summary>
+    private readonly ConcurrentDictionary<Collation, HeapColumn[]> collatedColumns = new();
+
+    /// <summary>
+    /// <see cref="Columns"/> as the view reads in <paramref name="database"/>:
+    /// each of <see cref="DatabaseCollatedColumns"/> in the database's
+    /// collation, at the column's own rank, so a comparison with a user
+    /// column of the database's collation resolves and one with another
+    /// collation is Msg 468, as on real.
+    /// </summary>
+    public HeapColumn[] ColumnsIn(Database database)
+    {
+        var collation = database.Collation;
+        if (this.DatabaseCollatedColumns is not { } collated || ReferenceEquals(collation, Collation.Baseline))
+            return this.Columns;
+        return this.collatedColumns.GetOrAdd(collation, (collation, state) =>
+        {
+            var (columns, flags) = state;
+            var result = (HeapColumn[])columns.Clone();
+            for (var i = 0; i < result.Length; i++)
+            {
+                if (flags[i] && result[i].Type.Collation is not null)
+                    result[i] = result[i].WithType(result[i].Type.WithCollation(collation, result[i].Type.Coercibility));
+            }
+            return result;
+        }, (this.Columns, collated));
+    }
+
+    /// <summary>
     /// The ordinals declared <c>sysname</c> or another <c>nvarchar</c>, whose
     /// generators may produce either: real types each view's name columns
     /// one way or the other (probed 2026-09-26 against SQL Server 2025), and
@@ -96,15 +135,16 @@ internal sealed class CatalogView(
     /// <paramref name="values"/> with every name column's value carrying its
     /// declared type — a <c>sysname</c> value in a column declared
     /// <c>nvarchar</c>, or the reverse, re-typed in place — so the row encoder,
-    /// which refuses a type mismatch, takes it.
+    /// which refuses a type mismatch, takes it. <paramref name="columns"/> is
+    /// what <see cref="ColumnsIn"/> answered for the database read.
     /// </summary>
-    public SqlValue[] Conform(SqlValue[] values)
+    public SqlValue[] Conform(SqlValue[] values, HeapColumn[] columns)
     {
         this.nameOrdinals ??= [.. Enumerable.Range(0, this.Columns.Length)
             .Where(i => this.Columns[i].Type is SystemNameSqlType or NVarcharSqlType)];
         foreach (var ordinal in this.nameOrdinals)
         {
-            var declared = this.Columns[ordinal].Type;
+            var declared = columns[ordinal].Type;
             if (ordinal < values.Length
                 && !ReferenceEquals(values[ordinal].Type, declared)
                 && values[ordinal].Type is SystemNameSqlType or NVarcharSqlType

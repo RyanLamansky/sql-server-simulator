@@ -237,7 +237,7 @@ internal abstract partial class SqlType
         CharSqlType => 175,
         _ when this == RowVersion => 189,
         NVarcharSqlType => 231,
-        _ when this == SystemName => 231,
+        _ when this is SystemNameSqlType => 231,
         NCharSqlType => 239,
         _ when this == HierarchyId => 240,
         SpatialSqlType => 240,
@@ -255,7 +255,7 @@ internal abstract partial class SqlType
     /// SQL Server 2025 <c>sys.types</c>), the spatial pair, and <c>vector</c>,
     /// which shares <c>varbinary</c>'s system id 165 under user id 255.
     /// </summary>
-    public int UserTypeId => this == SystemName ? 256
+    public int UserTypeId => this is SystemNameSqlType ? 256
         : this == HierarchyId ? 128
         : this == Geometry ? 129
         : this == Geography ? 130
@@ -393,7 +393,7 @@ internal abstract partial class SqlType
     /// <see cref="SqlType"/> instance because it appears with its own identity
     /// across system catalogs and in user-visible <c>sp_help</c> output.
     /// </remarks>
-    public static readonly SystemNameSqlType SystemName = new();
+    public static readonly SystemNameSqlType SystemName = SystemNameSqlType.Get(Collation.Baseline, Coercibility.Implicit);
 
     /// <remarks>
     /// Stored as raw bytes — no encoding, no codepage conversion. The simulator

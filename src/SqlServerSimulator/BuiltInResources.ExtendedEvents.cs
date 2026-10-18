@@ -144,7 +144,9 @@ internal static partial class BuiltInResources
         HeapColumn[] sessions =
         [
             new("event_session_id", SqlType.Int32, null, false),
-            new("name", text128, 128, true),
+            // A sysname, though the catalog lists it as nvarchar(128) (probed
+            // 2026-10-18 against SQL Server 2025).
+            new("name", SqlType.SystemName, 128, true),
             new("event_retention_mode", mode, 1, true),
             new("event_retention_mode_desc", text60, 60, true),
             new("max_dispatch_latency", SqlType.Int32, null, true),

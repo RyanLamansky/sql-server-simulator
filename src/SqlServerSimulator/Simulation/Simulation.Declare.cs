@@ -126,6 +126,15 @@ partial class Simulation
                 spelledNumeric = IsNumericTypeWord(context.Token);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType, out xmlDocument);
                 spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
+                // A variable's string type takes the current database's
+                // collation (probed 2026-10-18 against SQL Server 2025: in a
+                // Latin1_General_CS_AS database a sysname or nvarchar variable
+                // describes in that collation).
+                if (declaredType.Collation is not null && declaredType.Coercibility is Coercibility.CoercibleDefault or Coercibility.Implicit
+                    && !ReferenceEquals(declaredType.Collation, context.Batch.CurrentDatabase.Collation))
+                {
+                    declaredType = declaredType.WithCollation(context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+                }
                 // A variable typed by a collection takes EXECUTE on it: Msg
                 // 229, the variable declared NULL and its initializer never
                 // run (probed 2026-10-04 against SQL Server 2025).

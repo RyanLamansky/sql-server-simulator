@@ -516,10 +516,10 @@ internal static class TdsTypeCodec
                 writer.WriteUInt16(NationalMaxLength(nv.length));
                 TdsCollationCodec.For(nv.Collation).Write(writer);
                 break;
-            case SystemNameSqlType:
+            case SystemNameSqlType sysname:
                 writer.WriteByte(0xE7);
                 writer.WriteUInt16(256);
-                TdsCollationCodec.For(null).Write(writer);
+                TdsCollationCodec.For(sysname.Collation).Write(writer);
                 break;
             case NCharSqlType nc:
                 writer.WriteByte(0xEF);

@@ -71,6 +71,7 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
         return !SqlType.IsNationalStringCategory(type) && UnresolvedCollation.On(type) is { } conflict
             ? throw SimulatedSqlException.UnresolvedCollationInOperation(
                 conflict.RightName, conflict.LeftName, conflict.OperatorName, "COLLATE", 6)
+            : type is SystemNameSqlType systemName ? systemName.Recollated(collation, Coercibility.Explicit)
             : type.WithCollation(collation, Coercibility.Explicit);
     }
 

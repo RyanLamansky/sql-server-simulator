@@ -390,7 +390,7 @@ partial class Simulation
             _ when type == SqlType.SmallDateTime => 19,
             _ when type == SqlType.Date => 16,
             _ when type == SqlType.UniqueIdentifier => 36,
-            _ when type == SqlType.SystemName => 128,
+            _ when type is SystemNameSqlType => 128,
             _ => 256,
         };
 

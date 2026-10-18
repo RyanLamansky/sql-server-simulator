@@ -1546,8 +1546,8 @@ internal sealed partial class Selection
                     return new FromSource(
                         qualifier: catalogAlias ?? catalogView.Name,
                         columnNames: catalogColumnNames,
-                        columns: catalogView.Columns,
-                        storedSchema: catalogView.Columns,
+                        columns: catalogView.ColumnsIn(catalogTargetDb),
+                        storedSchema: catalogView.ColumnsIn(catalogTargetDb),
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
@@ -2272,8 +2272,17 @@ internal sealed partial class Selection
     {
         RejectRowsetFunctionWith(context);
         var columns = new HeapColumn[plan.Schema.Length];
+        // A function's database-scoped columns take the session database's
+        // collation, as a catalog view's do (CatalogView.ColumnsIn).
+        var databaseCollated = constructsColumns || writtenName is null ? null : BuiltInResources.DatabaseCollatedColumns("sys." + writtenName, plan.ColumnNames);
+        var databaseCollation = context.Batch.CurrentDatabase.Collation;
         for (var ci = 0; ci < columns.Length; ci++)
-            columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
+        {
+            var type = plan.Schema[ci];
+            if (databaseCollated is not null && databaseCollated[ci] && type.Collation is not null)
+                type = type.WithCollation(databaseCollation, type.Coercibility);
+            columns[ci] = new HeapColumn(plan.ColumnNames[ci], type, maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
+        }
         var qualifier = ConsumeOptionalAliasAtCurrent(context);
         RejectRowsetColumnAliasList(context, writtenName, qualified);
         return new FromSource(

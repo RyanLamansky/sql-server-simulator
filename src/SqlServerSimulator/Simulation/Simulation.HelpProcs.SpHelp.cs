@@ -772,7 +772,7 @@ partial class Simulation
             _ when type == SqlType.Text => (16, 2147483647, null),
             _ when type == SqlType.NText => (16, 1073741823, null),
             _ when type == SqlType.Image => (16, 2147483647, null),
-            _ when type == SqlType.SystemName => (256, 128, null),
+            _ when type is SystemNameSqlType => (256, 128, null),
             DecimalSqlType d => (d.FixedLength, d.precision, d.scale),
             TimeSqlType t => (t.FixedLength, t.precision == 0 ? 8 : 9 + t.precision, t.precision),
             DateTime2SqlType t => (t.FixedLength, t.precision == 0 ? 19 : 20 + t.precision, t.precision),

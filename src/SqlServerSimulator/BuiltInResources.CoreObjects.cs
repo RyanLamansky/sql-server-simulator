@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -351,11 +352,15 @@ internal static partial class BuiltInResources
         // omits a NULL from the row, so there is no storage difference to make.
         // SMO's Object-Explorer HasSparseColumn probe reads it off
         // sys.all_columns, which adds the catalog views' columns to
-        // sys.columns' (the system tables' among them).
-        HeapColumn[] ColumnsShape() =>
+        // sys.columns' (the system tables' among them). The two views over a
+        // union of sys.columns' rows read their sysname columns as the
+        // nvarchar(128) a union makes of them, and only sys.columns reads its
+        // encryption algorithm as a sysname, in the metadata collation (probed
+        // 2026-10-18 against SQL Server 2025).
+        HeapColumn[] ColumnsShape(bool union = false, bool columnsView = false) =>
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", union ? nvarchar128Baseline : SqlType.SystemName, 128, true),
             new("column_id", SqlType.Int32, null, false),
             new("system_type_id", systemTypeId, null, false),
             new("user_type_id", SqlType.Int32, null, false),
@@ -395,7 +400,7 @@ internal static partial class BuiltInResources
             new("is_ansi_padded", SqlType.Bit, null, false),
             new("column_encryption_key_id", SqlType.Int32, null, true),
             new("default_object_id", SqlType.Int32, null, false),
-            new("encryption_algorithm_name", nvarchar128Catalog, 128, true),
+            new("encryption_algorithm_name", columnsView ? SystemNameSqlType.Get(Collation.Catalog, Coercibility.Implicit) : nvarchar128Catalog, 128, true),
             new("encryption_type", SqlType.Int32, null, true),
             new("generated_always_type", SqlType.TinyInt, null, true),
             new("graph_type", SqlType.Int32, null, true),
@@ -420,22 +425,22 @@ internal static partial class BuiltInResources
             // vector_base_type the vector element type id (0 for float32).
             new("generated_always_type_desc", nvarchar60Catalog, 60, true),
             new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true),
-            new("column_encryption_key_database_name", SqlType.SystemName, 128, true),
+            new("column_encryption_key_database_name", union ? nvarchar128Baseline : SqlType.SystemName, 128, true),
             new("graph_type_desc", nvarchar60Catalog, 60, true),
             new("is_data_deletion_filter_column", SqlType.Bit, null, true),
             new("vector_base_type", SqlType.TinyInt, null, true),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database, CatalogFilter filter) =>
             EnumerateColumns(batch, database, nullCollation, filter, userColumns: true, systemColumns: false);
-        SysP("columns", ColumnsShape(), ["object_id"], ColumnRows);
+        SysP("columns", ColumnsShape(columnsView: true), ["object_id"], ColumnRows);
         // sys.all_columns adds sys.system_columns: the catalog views' own
         // columns, each in its type's collation (probed 2026-09-26 against SQL
         // Server 2025).
-        SysP("all_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
+        SysP("all_columns", ColumnsShape(union: true), ["object_id"], (batch, database, filter) =>
             EnumerateColumns(batch, database, nullCollation, filter, userColumns: true, systemColumns: true));
         // sys.system_columns declares its flag columns NOT NULL where
         // sys.columns doesn't (probed 2026-09-26 against SQL Server 2025).
-        SysP("system_columns", NotNullable(ColumnsShape(), "is_computed", "is_sparse", "is_column_set", "is_dropped_ledger_column", "is_hidden", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated", "is_data_deletion_filter_column"), ["object_id"], (batch, database, filter) =>
+        SysP("system_columns", NotNullable(ColumnsShape(union: true), "is_computed", "is_sparse", "is_column_set", "is_dropped_ledger_column", "is_hidden", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated", "is_data_deletion_filter_column"), ["object_id"], (batch, database, filter) =>
             EnumerateColumns(batch, database, nullCollation, filter, userColumns: false, systemColumns: true));
 
         // sys.identity_columns / sys.computed_columns / sys.masked_columns:
@@ -511,6 +516,28 @@ internal static partial class BuiltInResources
                     SqlValue.FromString(NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), entry.Column.MaskingFunction!.Definition),
                 ]));
     }
+
+    /// <summary>
+    /// The view columns real's catalog lists under another type than they
+    /// read as: the union views' sysname columns, which read as
+    /// <c>nvarchar(128)</c>, and <c>sys.server_event_sessions.name</c>, a
+    /// <c>sysname</c> listed as <c>nvarchar(128)</c> (probed 2026-10-18
+    /// against SQL Server 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> CatalogListedTypeFlips = FrozenSet.ToFrozenSet(
+    [
+        "all_columns.name", "all_columns.column_encryption_key_database_name", "all_columns.encryption_algorithm_name",
+        "all_parameters.name", "all_parameters.column_encryption_key_database_name", "all_parameters.encryption_algorithm_name",
+        "system_columns.name", "system_columns.column_encryption_key_database_name",
+        "system_parameters.name", "system_parameters.column_encryption_key_database_name",
+        "syscolumns.name", "server_event_sessions.name",
+    ], StringComparer.Ordinal);
+
+    /// <summary><paramref name="column"/> of the catalog view <paramref name="viewName"/> as real's catalog lists it (<see cref="CatalogListedTypeFlips"/>).</summary>
+    private static HeapColumn CatalogListedColumn(string viewName, HeapColumn column) =>
+        !CatalogListedTypeFlips.Contains(viewName + "." + column.Name) || column.Type.Collation is not { } collation ? column
+        : column.Type is SystemNameSqlType ? column.WithType(NVarcharSqlType.Get(128, collation, Coercibility.Implicit))
+        : column.WithType(SystemNameSqlType.Get(collation, Coercibility.Implicit));
 
     /// <summary>
     /// <paramref name="shape"/> with the named columns declared NOT NULL — for
@@ -690,7 +717,7 @@ internal static partial class BuiltInResources
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 for (var i = 0; i < view.Columns.Length; i++)
                 {
-                    var column = view.Columns[i];
+                    var column = CatalogListedColumn(view.Name, view.Columns[i]);
                     var row = Row(viewObjectId, column, i + 1, declared: false);
                     row[11] = SqlType.IsCollatedString(column.Type) && column.Type.Collation is { } typeCollation
                         ? SqlValue.FromSystemName(typeCollation.Name)
@@ -822,7 +849,7 @@ internal static partial class BuiltInResources
             _ when t == SqlType.UniqueIdentifier => (16, 0, 0),
             _ when t == SqlType.RowVersion => (8, 0, 0),
             _ when t == SqlType.Text || t == SqlType.NText || t == SqlType.Image => (16, 0, 0),
-            _ when t == SqlType.SystemName => (256, 0, 0),
+            _ when t is SystemNameSqlType => (256, 0, 0),
             CharSqlType c => (c.length, 0, 0),
             NCharSqlType nc => ((short)(nc.length * 2), 0, 0),
             BinarySqlType bn => (bn.length, 0, 0),

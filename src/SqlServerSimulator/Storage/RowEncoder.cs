@@ -178,6 +178,7 @@ internal static class RowEncoder
             valueType == columnType
             || (valueType is VarcharSqlType && columnType is VarcharSqlType)
             || (valueType is NVarcharSqlType && columnType is NVarcharSqlType)
+            || (valueType is SystemNameSqlType && columnType is SystemNameSqlType)
             || (valueType is VarbinarySqlType && columnType is VarbinarySqlType)
             || (valueType is CharSqlType vCh && columnType is CharSqlType cCh && vCh.length == cCh.length && vCh.trimsTrailingSpaces == cCh.trimsTrailingSpaces)
             || (valueType is NCharSqlType vNCh && columnType is NCharSqlType cNCh && vNCh.length == cNCh.length);

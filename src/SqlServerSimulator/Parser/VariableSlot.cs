@@ -16,15 +16,17 @@ namespace SqlServerSimulator.Parser;
 internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength, SqlValue value, DbParameter? parameter)
 {
     /// <summary>
-    /// The variable's type. A <c>sysname</c> declaration holds the
-    /// <c>nvarchar(128)</c> it aliases at a variable's coercible-default
-    /// rank, since <see cref="SystemNameSqlType"/> carries a column's
-    /// implicit one: a <c>sysname</c> variable compared with a catalog
-    /// column in another collation takes the column's (probed 2026-10-16
-    /// against SQL Server 2025: <c>sys.objects.type_desc LIKE @sysname</c>
-    /// runs where an implicit-against-implicit pair is Msg 468).
+    /// The variable's type. A <c>sysname</c> declaration holds the alias at a
+    /// variable's coercible-default rank rather than a column's implicit one:
+    /// a <c>sysname</c> variable compared with a catalog column in another
+    /// collation takes the column's (probed 2026-10-16 against SQL Server
+    /// 2025: <c>sys.objects.type_desc LIKE @sysname</c> runs where an
+    /// implicit-against-implicit pair is Msg 468), and still describes as
+    /// user type 256 (probed 2026-10-18).
     /// </summary>
-    public readonly SqlType DeclaredType = declaredType is SystemNameSqlType ? SysnameVariable : declaredType;
+    public readonly SqlType DeclaredType = declaredType is SystemNameSqlType systemName
+        ? SystemNameSqlType.Get(systemName.Collation, Coercibility.CoercibleDefault)
+        : declaredType;
 
     /// <summary>
     /// Declared max length for variable-length string / binary types (e.g.
@@ -34,9 +36,9 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
 
-    public SqlValue Value = declaredType is SystemNameSqlType ? AsSysnameVariable(value) : value;
-
-    private static readonly NVarcharSqlType SysnameVariable = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
+    public SqlValue Value = declaredType is SystemNameSqlType systemName
+        ? AsSysnameVariable(SystemNameSqlType.Get(systemName.Collation, Coercibility.CoercibleDefault), value)
+        : value;
 
     public readonly DbParameter? Parameter = parameter;
 
@@ -94,7 +96,7 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
             throw SimulatedSqlException.XmlSchemaCollectionAlteredDuringBatch(binding.VariableName);
         this.Value = value.Type is XmlSqlType
             ? Expressions.Cast.ValidateTypedXml(value, this.XmlSchemaCollection, this.XmlDocument)
-            : ReferenceEquals(this.DeclaredType, SysnameVariable) ? AsSysnameVariable(value) : value;
+            : this.DeclaredType is SystemNameSqlType variable ? AsSysnameVariable(variable, value) : value;
     }
 
     /// <summary>
@@ -103,9 +105,9 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// a <c>DECLARE @v sysname = 'x'</c> initializer and a <c>sysname</c>
     /// procedure or <c>sp_executesql</c> parameter both arrive as one.
     /// </summary>
-    private static SqlValue AsSysnameVariable(SqlValue value) =>
-        value.IsNull ? SqlValue.Null(SysnameVariable)
-        : value.Type is SystemNameSqlType ? SqlValue.FromNVarchar(SysnameVariable, value.AsString)
+    private static SqlValue AsSysnameVariable(SystemNameSqlType variable, SqlValue value) =>
+        value.IsNull ? SqlValue.Null(variable)
+        : value.Type is SystemNameSqlType or NVarcharSqlType ? SqlValue.FromSystemName(variable, value.AsString)
         : value;
 }
 

@@ -55,10 +55,10 @@ partial class Selection
         ("database_id", SqlType.Int32), ("object_id", SqlType.Int32), ("index_id", SqlType.Int32), ("partition_id", SqlType.Int32), ("rowset_id", SqlType.BigInt),
         ("allocation_unit_id", SqlType.BigInt), ("allocation_unit_type", SqlType.Int32),
         ("allocation_unit_type_desc", NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit)), ("data_clone_id", SqlType.Int32), ("clone_state", SqlType.Int32),
-        ("clone_state_desc", NVarcharSqlType.Get(9, Collation.Catalog, Coercibility.Implicit)), ("extent_file_id", SqlType.SmallInt), ("extent_page_id", SqlType.Int32),
+        ("clone_state_desc", NVarcharSqlType.Get(9, Collation.Baseline, Coercibility.Implicit)), ("extent_file_id", SqlType.SmallInt), ("extent_page_id", SqlType.Int32),
         ("allocated_page_iam_file_id", SqlType.SmallInt), ("allocated_page_iam_page_id", SqlType.Int32), ("allocated_page_file_id", SqlType.SmallInt),
         ("allocated_page_page_id", SqlType.Int32), ("is_allocated", SqlType.TinyInt), ("is_iam_page", SqlType.TinyInt), ("is_mixed_page_allocation", SqlType.TinyInt),
-        ("page_free_space_percent", SqlType.Int32), ("page_type", SqlType.Int32), ("page_type_desc", NVarcharSqlType.Get(256, Collation.Catalog, Coercibility.Implicit)),
+        ("page_free_space_percent", SqlType.Int32), ("page_type", SqlType.Int32), ("page_type_desc", NVarcharSqlType.Get(256, Collation.Baseline, Coercibility.Implicit)),
         ("page_level", SqlType.TinyInt), ("next_page_file_id", SqlType.SmallInt), ("next_page_page_id", SqlType.Int32), ("previous_page_file_id", SqlType.SmallInt),
         ("previous_page_page_id", SqlType.Int32), ("is_page_compressed", SqlType.TinyInt), ("has_ghost_records", SqlType.TinyInt),
     ];
@@ -78,8 +78,8 @@ partial class Selection
 
     private static readonly (string Name, SqlType Type)[] MissingIndexColumnsColumns =
     [
-        ("column_id", SqlType.Int32), ("column_name", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit)),
-        ("column_usage", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit)),
+        ("column_id", SqlType.Int32), ("column_name", NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
+        ("column_usage", NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
     ];
 
     private static readonly (string Name, SqlType Type)[] OperationalStatsColumns =

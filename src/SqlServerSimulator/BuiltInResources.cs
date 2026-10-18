@@ -38,6 +38,10 @@ internal static partial class BuiltInResources
     // rather than sysname, in the default collation a sysname carries.
     private static readonly NVarcharSqlType nvarchar128Baseline = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
 
+    // A _desc column real computes in the server's collation rather than the
+    // metadata one (sys.dm_db_index_physical_stats').
+    private static readonly NVarcharSqlType nvarchar60Baseline = NVarcharSqlType.Get(60, Collation.Baseline, Coercibility.Implicit);
+
     // numeric(25, 0) — the log-sequence-number (LSN) storage shape shared
     // by the mirroring / replica-state / master-files views. Always surfaced
     // NULL here (the simulator has no physical log), so precision matters

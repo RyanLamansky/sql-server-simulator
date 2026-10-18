@@ -137,9 +137,13 @@ internal static partial class BuiltInResources
         // (LEFT JOIN … ret_param.object_id = udf.object_id AND
         // ret_param.is_output = 1); without the view every such property errors
         // Msg 208.
-        SysP("all_parameters", parameterColumns, ["object_id"], static (batch, database, filter) =>
+        // The two views over a union of parameter rows read the name as the
+        // nvarchar(128) a union makes of a sysname (probed 2026-10-18 against
+        // SQL Server 2025).
+        var unionParameterColumns = Array.ConvertAll(parameterColumns, static column => column.Name == "name" ? column.WithType(nvarchar128Baseline) : column);
+        SysP("all_parameters", unionParameterColumns, ["object_id"], static (batch, database, filter) =>
             EnumerateParameters(batch, database, filter).Concat(EnumerateSystemParameters(filter)));
-        SysP("system_parameters", parameterColumns, ["object_id"], static (_, _, filter) => EnumerateSystemParameters(filter));
+        SysP("system_parameters", unionParameterColumns, ["object_id"], static (_, _, filter) => EnumerateSystemParameters(filter));
 
         // sys.views: per-view rows. Load-bearing subset of real SQL Server's
         // sys.views shape — object_id / name / schema_id / with_check_option /
@@ -581,7 +585,7 @@ internal static partial class BuiltInResources
             // assembly_class: the CLR type name (probe-confirmed
             // Microsoft.SqlServer.Types.Sql{HierarchyId,Geometry,Geography}).
             // DacFx's assembly-type scripting query joins it.
-            new("assembly_class", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
+            new("assembly_class", SystemNameSqlType.Get(Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
             // is_binary_ordered: 1 only for hierarchyid (byte-comparable
             // OrdPath), 0 for the two spatial types. is_fixed_length: 0 for
             // all three. prog_id: always NULL. assembly_qualified_name: the
@@ -1630,7 +1634,7 @@ internal static partial class BuiltInResources
             _ when t == SqlType.Text => (2147483647, 2147483647, null, null, null, null),
             _ when t == SqlType.NText => (1073741823, 2147483646, null, null, null, null),
             _ when t == SqlType.Image => (2147483647, 2147483647, null, null, null, null),
-            _ when t == SqlType.SystemName => (128, 256, null, null, null, null),
+            _ when t is SystemNameSqlType => (128, 256, null, null, null, null),
             CharSqlType c => (c.length, c.length, null, null, null, null),
             NCharSqlType nc => (nc.length, nc.length * 2, null, null, null, null),
             BinarySqlType bn => (bn.length, bn.length, null, null, null, null),
@@ -1886,7 +1890,7 @@ internal static partial class BuiltInResources
     /// <see cref="SqlType.SqlServerName"/>.
     /// </summary>
     private static SqlValue IsoDataTypeName(SqlType type) =>
-        SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
+        SqlValue.FromSystemName(type is SystemNameSqlType ? "nvarchar" : type.SqlServerName);
 
     // A routine's parameter or return value of type vector reads as the
     // varbinary it is stored as, where a table column reads vector (probed

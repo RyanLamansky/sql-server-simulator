@@ -41,6 +41,20 @@ public sealed class ColumnMetadataFlagsTests
         AreEqual(flags, Flags(fixture, sql));
     }
 
+    /// <summary>
+    /// A conversion to sysname and a sysname variable keep the alias's user
+    /// type, where a COLLATE naming another collation and a string function
+    /// drop it (captured 2026-10-18).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @n sysname = N'x'; select @n as v, cast(N'b' as sysname) as c", "v:0021:ut=256 c:0021:ut=256")]
+    [DataRow("select nm collate Latin1_General_BIN as d, upper(nm) as u, isnull(nm, N'y') as i from t", "d:0023 u:0021 i:0020:ut=256")]
+    public void Sysname_KeepsItsUserTypeThroughConversions(string sql, string flags)
+    {
+        using var fixture = Seeded();
+        AreEqual(flags, Flags(fixture, sql));
+    }
+
     [TestMethod]
     [DataRow("select 1 as k, 'x' as s, null as n, a + 1 as e, b + 'q' as q from t", "k:0020 s:0020 n:0021 e:0021 q:0021")]
     [DataRow("select 1 as k, (select 1) as sq", "k:0020 sq:0021")]

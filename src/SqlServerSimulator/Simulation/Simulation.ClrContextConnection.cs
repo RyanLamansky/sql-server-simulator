@@ -399,7 +399,7 @@ partial class Simulation
             var sqlFieldTypes = new Type[schema.Length];
             for (var i = 0; i < schema.Length; i++)
             {
-                typeNames[i] = schema[i] == SqlType.SystemName ? "nvarchar"
+                typeNames[i] = schema[i] is SystemNameSqlType ? "nvarchar"
                     : resultSet.ColumnReportsNumeric is { } numeric && numeric[i] ? "numeric"
                     : schema[i].SqlServerName;
                 (fieldTypes[i], sqlFieldTypes[i]) = ClrTypeMarshaller.ContextFieldTypes(schema[i]);

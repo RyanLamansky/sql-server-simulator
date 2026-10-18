@@ -103,7 +103,9 @@ partial class Selection
         context.MoveNextOptional();
 
         var collation = Collation.Get("Latin1_General_CI_AI");
-        var name = NVarcharSqlType.Get(128, collation, Coercibility.Implicit);
+        // The two names are sysname in that collation (probed 2026-10-18
+        // against SQL Server 2025).
+        var name = SystemNameSqlType.Get(collation, Coercibility.Implicit);
         SqlType[] schema = [name, name, NVarcharSqlType.Get(60, collation, Coercibility.Implicit)];
         string[] columnNames = ["entity_name", "subentity_name", "permission_name"];
 
@@ -170,10 +172,10 @@ partial class Selection
             yield break;
         }
 
-        var nameType = (NVarcharSqlType)schema[0];
+        var nameType = (SystemNameSqlType)schema[0];
         var permissionType = (NVarcharSqlType)schema[2];
-        var entityValue = SqlValue.FromNVarchar(nameType, entity);
-        var subentity = SqlValue.FromNVarchar(nameType, "");
+        var entityValue = SqlValue.FromSystemName(nameType, entity);
+        var subentity = SqlValue.FromSystemName(nameType, "");
         foreach (var row in BuiltinPermissionRows.All)
         {
             if (BuiltInToken.Comparer.Equals(row.ClassDescription, className) && holds(row.PermissionName))
@@ -188,7 +190,7 @@ partial class Selection
                 for (var ordinal = 1; ordinal <= columns.Value.Columns.Length; ordinal++)
                 {
                     if (columns.Value.Holds(permission, ordinal))
-                        yield return RowEncoder.EncodeRow(schema, [entityValue, SqlValue.FromNVarchar(nameType, columns.Value.Columns[ordinal - 1].Name), SqlValue.FromNVarchar(permissionType, permission.CanonicalName)]);
+                        yield return RowEncoder.EncodeRow(schema, [entityValue, SqlValue.FromSystemName(nameType, columns.Value.Columns[ordinal - 1].Name), SqlValue.FromNVarchar(permissionType, permission.CanonicalName)]);
                 }
             }
         }

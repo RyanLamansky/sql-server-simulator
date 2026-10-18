@@ -149,6 +149,10 @@ internal sealed class Substring : Expression
         StringScalars.RequireSettledCollation(sourceType, "substring");
         if (!SqlType.IsStringCategory(sourceType))
             return sourceType;
+        // A sysname is the nvarchar(128) it aliases (probed 2026-10-18 against
+        // SQL Server 2025: SUBSTRING(name, 1, 2) describes as nvarchar(2)).
+        if (sourceType is SystemNameSqlType sysname)
+            sourceType = NVarcharSqlType.Get(128, sysname.Collation, sysname.Coercibility);
         if (length is not null && StringScalars.IsConstantNegativeCount(length))
             throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
         if (sourceType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel })

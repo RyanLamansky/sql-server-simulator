@@ -20,9 +20,13 @@ internal static partial class BuiltInResources
     {
         var columnsView = views["sys.columns"];
         var parametersView = views["sys.parameters"];
+        // The name reads as the nvarchar(128) of the union beneath, the
+        // collation and print format in Latin1_General_CI_AI (probed
+        // 2026-10-18 against SQL Server 2025).
+        var legacyCollation = Collation.Get("Latin1_General_CI_AI");
         HeapColumn[] columns =
         [
-            new("name", SqlType.SystemName, 128, true),
+            new("name", nvarchar128Baseline, 128, true),
             new("id", SqlType.Int32, null, false),
             new("xtype", SqlType.TinyInt, null, false),
             new("typestat", SqlType.TinyInt, null, true),
@@ -46,13 +50,13 @@ internal static partial class BuiltInResources
             new("status", SqlType.TinyInt, null, true),
             new("type", SqlType.TinyInt, null, false),
             new("usertype", SqlType.SmallInt, null, true),
-            new("printfmt", SqlType.Varchar, 255, true),
+            new("printfmt", VarcharSqlType.Get(255, legacyCollation, Coercibility.Implicit), 255, true),
             new("prec", SqlType.SmallInt, null, true),
             new("scale", SqlType.Int32, null, true),
             new("iscomputed", SqlType.Int32, null, true),
             new("isoutparam", SqlType.Int32, null, true),
             new("isnullable", SqlType.Int32, null, true),
-            new("collation", SqlType.SystemName, 128, true),
+            new("collation", SystemNameSqlType.Get(legacyCollation, Coercibility.Implicit), 128, true),
             new("tdscollation", BinarySqlType.Get(5), 5, true),
         ];
         var view = new CatalogView("syscolumns", columns, (batch, database) => EnumerateSyscolumns(batch, database, columnsView, parametersView));

@@ -168,15 +168,16 @@ internal static partial class BuiltInResources
 
         // sysservers: the SQL Server 2000 compatibility view over sys.servers,
         // its options packed into srvstatus as sp_serveroption's bits (probed
-        // 2026-10-06 against SQL Server 2025).
-        var nvarcharName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
-        var nvarcharText = NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit);
+        // 2026-10-06 against SQL Server 2025), its names sysname and its text
+        // in the server's collation (probed 2026-10-18).
+        var nvarcharName = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
+        var nvarcharText = NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit);
         var sysservers = new CatalogView("sysservers",
         [
             new("srvid", SqlType.SmallInt, null, true),
             new("srvstatus", SqlType.SmallInt, null, true),
-            new("srvname", nvarcharName, 128, false),
-            new("srvproduct", nvarcharName, 128, false),
+            new("srvname", SqlType.SystemName, 128, false),
+            new("srvproduct", SqlType.SystemName, 128, false),
             new("providername", nvarcharName, 128, false),
             new("datasource", nvarcharText, 4000, true),
             new("location", nvarcharText, 4000, true),
@@ -184,11 +185,11 @@ internal static partial class BuiltInResources
             new("schemadate", SqlType.DateTime, null, false),
             new("topologyx", SqlType.Int32, null, true),
             new("topologyy", SqlType.Int32, null, true),
-            new("catalog", nvarcharName, 128, true),
-            new("srvcollation", nvarcharName, 128, true),
+            new("catalog", SqlType.SystemName, 128, true),
+            new("srvcollation", SqlType.SystemName, 128, true),
             new("connecttimeout", SqlType.Int32, null, true),
             new("querytimeout", SqlType.Int32, null, true),
-            new("srvnetname", CharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), 30, true),
+            new("srvnetname", CharSqlType.Get(30, Collation.Baseline, Coercibility.Implicit), 30, true),
             new("isremote", SqlType.Bit, null, true),
             new("rpc", SqlType.Bit, null, false),
             new("pub", SqlType.Bit, null, false),
@@ -201,7 +202,7 @@ internal static partial class BuiltInResources
             new("system", SqlType.Bit, null, false),
             new("useremotecollation", SqlType.Bit, null, false),
             new("lazyschemavalidation", SqlType.Bit, null, false),
-            new("collation", nvarcharName, 128, true),
+            new("collation", SqlType.SystemName, 128, true),
             new("nonsqlsub", SqlType.Bit, null, true),
         ], EnumerateSysservers);
         views["sysservers"] = sysservers;
@@ -2013,8 +2014,8 @@ internal static partial class BuiltInResources
     {
         var zero = SqlValue.FromInt32(0);
         var no = SqlValue.FromBoolean(false);
-        var nullName = SqlValue.Null(NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit));
-        var netNameType = CharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit);
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        var netNameType = CharSqlType.Get(30, Collation.Baseline, Coercibility.Implicit);
         foreach (var row in EnumerateSysServers(batch, database))
         {
             var linked = row[10].AsBoolean;

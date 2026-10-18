@@ -170,6 +170,13 @@ internal static partial class BuiltInResources
             "default_value", "xml_collection_id", "is_readonly", "is_nullable", "encryption_type", "encryption_type_desc",
             "encryption_algorithm_name", "column_encryption_key_id", "column_encryption_key_database_name", "vector_dimensions", "vector_base_type", "vector_base_type_desc",
         ],
+        ["sys.system_parameters"] =
+        [
+            "object_id", "name", "parameter_id", "system_type_id", "user_type_id", "max_length",
+            "precision", "scale", "is_output", "is_cursor_ref", "has_default_value", "is_xml_document",
+            "default_value", "xml_collection_id", "is_readonly", "is_nullable", "encryption_type", "encryption_type_desc",
+            "encryption_algorithm_name", "column_encryption_key_id", "column_encryption_key_database_name", "vector_dimensions", "vector_base_type", "vector_base_type_desc",
+        ],
         ["sys.system_columns"] =
         [
             "object_id", "name", "column_id", "system_type_id", "user_type_id", "max_length",
@@ -298,7 +305,7 @@ internal static partial class BuiltInResources
         [
             (new("encryption_type", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true), SqlValue.Null(SqlType.NVarchar)),
-            (new("encryption_algorithm_name", nvarchar128Catalog, 128, true), SqlValue.Null(SqlType.NVarchar)),
+            (new("encryption_algorithm_name", SystemNameSqlType.Get(Collation.Catalog, Coercibility.Implicit), 128, true), SqlValue.Null(SqlType.SystemName)),
             (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("column_encryption_key_database_name", SqlType.SystemName, 128, true), SqlValue.Null(SqlType.SystemName)),
         ],
@@ -326,15 +333,21 @@ internal static partial class BuiltInResources
             (new("index_version", SqlType.Int32, null, true), SqlValue.FromInt32(2)),
             (new("incremental_timestamp", BinarySqlType.Get(8), 8, true), SqlValue.Null(BinarySqlType.Get(8))),
         ],
-        ["sys.all_parameters"] =
-        [
-            (new("encryption_type", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
-            (new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true), SqlValue.Null(SqlType.NVarchar)),
-            (new("encryption_algorithm_name", nvarchar128Catalog, 128, true), SqlValue.Null(SqlType.NVarchar)),
-            (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
-            (new("column_encryption_key_database_name", SqlType.SystemName, 128, true), SqlValue.Null(SqlType.SystemName)),
-        ],
+        // The two views over a union of parameter rows read their sysname
+        // columns as nvarchar(128) (probed 2026-10-18 against SQL Server 2025).
+        ["sys.all_parameters"] = UnionParameterEncryptionColumns(),
+        ["sys.system_parameters"] = UnionParameterEncryptionColumns(),
     };
+
+    /// <summary>The Always Encrypted columns <c>sys.all_parameters</c> and <c>sys.system_parameters</c> carry, constant NULL.</summary>
+    private static (HeapColumn Column, SqlValue Value)[] UnionParameterEncryptionColumns() =>
+    [
+        (new("encryption_type", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
+        (new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true), SqlValue.Null(SqlType.NVarchar)),
+        (new("encryption_algorithm_name", nvarchar128Catalog, 128, true), SqlValue.Null(SqlType.NVarchar)),
+        (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
+        (new("column_encryption_key_database_name", nvarchar128Baseline, 128, true), SqlValue.Null(SqlType.NVarchar)),
+    ];
 
     /// <summary>Declares <see cref="RealConstantColumns"/> on their views, ahead of <see cref="ApplyRealColumnOrder"/> placing them.</summary>
     private static void ApplyRealConstantColumns(Dictionary<string, CatalogView> views)
@@ -381,10 +394,20 @@ internal static partial class BuiltInResources
     /// columns' names, comma-separated (captured 2026-10-17 against SQL Server
     /// 2025).
     /// </summary>
-    private static readonly Lazy<FrozenDictionary<string, string[]>> RealComputedColumnNames = new(static () =>
+    private static readonly Lazy<FrozenDictionary<string, string[]>> RealComputedColumnNames = new(static () => ReadColumnLists("SqlServerSimulator.CatalogViewComputedColumns.tsv"));
+
+    /// <summary>
+    /// <c>CatalogViewDatabaseCollatedColumns.tsv</c>, in the same shape: each
+    /// view's columns that take the collation of the database it is read in
+    /// (<see cref="CatalogView.DatabaseCollatedColumns"/>).
+    /// </summary>
+    private static readonly Lazy<FrozenDictionary<string, string[]>> RealDatabaseCollatedColumnNames = new(static () => ReadColumnLists("SqlServerSimulator.CatalogViewDatabaseCollatedColumns.tsv"));
+
+    /// <summary>An embedded list of a key, a tab and comma-separated column names per line.</summary>
+    private static FrozenDictionary<string, string[]> ReadColumnLists(string resource)
     {
-        using var stream = typeof(BuiltInResources).Assembly.GetManifestResourceStream("SqlServerSimulator.CatalogViewComputedColumns.tsv")
-            ?? throw new InvalidOperationException("Embedded resource SqlServerSimulator.CatalogViewComputedColumns.tsv is missing.");
+        using var stream = typeof(BuiltInResources).Assembly.GetManifestResourceStream(resource)
+            ?? throw new InvalidOperationException($"Embedded resource {resource} is missing.");
         using var reader = new StreamReader(stream);
         var names = new Dictionary<string, string[]>(BuiltInToken.Comparer);
         while (reader.ReadLine() is { } line)
@@ -394,17 +417,28 @@ internal static partial class BuiltInResources
                 names[line[..tab]] = line[(tab + 1)..].Split(',');
         }
         return names.ToFrozenDictionary(BuiltInToken.Comparer);
-    });
+    }
 
     /// <summary>
     /// Per column of <paramref name="columnNames"/>, whether real's definition
     /// of the catalog view or system function <paramref name="key"/> computes
     /// it.
     /// </summary>
-    internal static bool[] RealComputedColumns(string key, string[] columnNames)
+    internal static bool[] RealComputedColumns(string key, string[] columnNames) => ColumnFlags(RealComputedColumnNames.Value, key, columnNames);
+
+    /// <summary>
+    /// Per column of <paramref name="columnNames"/>, whether the catalog view
+    /// or system function <paramref name="key"/> reads it in the database's
+    /// collation; null when it reads none so.
+    /// </summary>
+    internal static bool[]? DatabaseCollatedColumns(string key, string[] columnNames) =>
+        RealDatabaseCollatedColumnNames.Value.ContainsKey(key) ? ColumnFlags(RealDatabaseCollatedColumnNames.Value, key, columnNames) : null;
+
+    /// <summary>Per column of <paramref name="columnNames"/>, whether <paramref name="lists"/> names it under <paramref name="key"/>.</summary>
+    private static bool[] ColumnFlags(FrozenDictionary<string, string[]> lists, string key, string[] columnNames)
     {
         var computed = new bool[columnNames.Length];
-        if (RealComputedColumnNames.Value.TryGetValue(key, out var names))
+        if (lists.TryGetValue(key, out var names))
         {
             foreach (var name in names)
             {
@@ -416,13 +450,18 @@ internal static partial class BuiltInResources
         return computed;
     }
 
-    /// <summary>Marks each view's columns real's definition computes (<see cref="CatalogView.ComputedColumns"/>).</summary>
+    /// <summary>
+    /// Marks each view's columns real's definition computes (<see cref="CatalogView.ComputedColumns"/>)
+    /// and those that take the reading database's collation (<see cref="CatalogView.DatabaseCollatedColumns"/>).
+    /// </summary>
     private static void ApplyRealComputedColumns(Dictionary<string, CatalogView> views)
     {
         foreach (var (key, view) in views)
         {
             if (RealComputedColumnNames.Value.ContainsKey(key))
                 view.ComputedColumns = RealComputedColumns(key, Array.ConvertAll(view.Columns, static column => column.Name));
+            if (RealDatabaseCollatedColumnNames.Value.ContainsKey(key))
+                view.DatabaseCollatedColumns = ColumnFlags(RealDatabaseCollatedColumnNames.Value, key, Array.ConvertAll(view.Columns, static column => column.Name));
         }
     }
 }

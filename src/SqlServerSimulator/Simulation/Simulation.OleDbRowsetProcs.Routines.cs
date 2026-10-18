@@ -487,7 +487,7 @@ partial class Simulation
             _ when type == SqlType.Text => new(129, int.MaxValue, int.MaxValue, null, null, Name("text"), null),
             _ when type == SqlType.NText => new(130, 1073741823, 2147483646, null, null, Name("ntext"), null),
             _ when type == SqlType.Image => new(128, int.MaxValue, int.MaxValue, null, null, Name("image"), null),
-            _ when type == SqlType.SystemName => new(130, 128, 256, null, null, Name("nvarchar"), null),
+            _ when type is SystemNameSqlType => new(130, 128, 256, null, null, Name("nvarchar"), null),
             CharSqlType c => new(129, c.length, c.length, null, null, Name("char"), null),
             NCharSqlType nc => new(130, nc.length, nc.length * 2, null, null, Name("nchar"), null),
             BinarySqlType bn => new(128, bn.length, bn.length, null, null, Name("binary"), null),
