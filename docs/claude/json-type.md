@@ -95,7 +95,7 @@ The paths are string literals kept as written (`$` without `FOR`), each well-for
 ## Client surface
 
 The in-process reader surfaces the canonical text (`GetFieldType` string, `GetDataTypeName` `json`).
-Over the TDS endpoint a client that negotiates json support (SqlClient 6+) receives the native json type, `GetDataTypeName` `json`; one that doesn't receives `varchar(max)` collated `Latin1_General_100_BIN2_UTF8`, the form Microsoft's json data type page gives for a TDS 7.4 client without json support — see [`tds-endpoint.md`](tds-endpoint.md).
+Over the TDS endpoint a client that negotiates json support (SqlClient 6+) receives the native json type, `GetDataTypeName` `json`; one that doesn't receives `varchar(max)` collated `Latin1_General_100_BIN2_UTF8`, the form Microsoft's json data type page gives for a TDS 7.4 client without json support, and one without UTF-8 support `nvarchar(max)` in the database's collation — see [`tds-endpoint.md`](tds-endpoint.md#utf-8-support).
 
 ## Divergences
 

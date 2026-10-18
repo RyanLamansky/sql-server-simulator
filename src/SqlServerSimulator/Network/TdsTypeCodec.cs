@@ -210,7 +210,7 @@ internal static class TdsTypeCodec
     /// the USHORTLEN families' <c>0xFFFF</c>, and one byte for the BYTELEN
     /// families and the legacy LOB trio's empty text pointer.
     /// </summary>
-    private static int NullValueBytes(TdsTokenWriter writer, SqlType type) => type switch
+    private static int NullValueBytes(TdsTokenWriter writer, SqlType type) => WireType(writer, type) switch
     {
         VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel } => 8,
         XmlSqlType or JsonSqlType or SpatialSqlType or HierarchyIdSqlType or ClrUdtSqlType => 8,
@@ -393,17 +393,46 @@ internal static class TdsTypeCodec
     }
 
     /// <summary>
-    /// A result column's COLMETADATA user type: a rowversion's 80, a native
-    /// vector's 255, <c>sysname</c>'s 256 and an alias type's own
-    /// <c>user_type_id</c>, 0 for the rest (captured 2026-10-17 against SQL
-    /// Server 2025).
+    /// A result column's COLMETADATA user type: a rowversion's 80, a float32
+    /// vector's 255 — native or sent as text — <c>sysname</c>'s 256 and an
+    /// alias type's own <c>user_type_id</c>, 0 for the rest (captured
+    /// 2026-10-17 and 2026-10-18 against SQL Server 2025).
     /// </summary>
     private static uint UserTypeOf(TdsTokenWriter writer, SqlType type, Schemas.AliasType? alias) =>
         alias is not null ? (uint)alias.UserTypeId
         : type is RowVersionSqlType ? 0x50u
-        : IsNativeVector(writer, type) ? 0xFFu
+        : IsNativeVector(writer, type) || (!writer.NativeVector && type is VectorSqlType { IsFloat16: false }) ? 0xFFu
         : type is SystemNameSqlType ? 0x100u
         : 0u;
+
+    /// <summary>
+    /// The type <paramref name="type"/> travels to this client as. One that
+    /// negotiated no UTF-8 support gets a UTF-8-collated <c>varchar</c> or
+    /// <c>char</c> as the <c>nvarchar</c> of the same width in the same
+    /// collation (<c>nvarchar(max)</c> past 4000), and a <c>json</c> or
+    /// <c>vector</c> it can't take natively as <c>nvarchar(max)</c> in the
+    /// session database's collation, each value as UTF-16 (captured 2026-10-18
+    /// against SQL Server 2025 with a raw TDS client sending no feature
+    /// extension); a <c>sql_variant</c>'s value keeps its own type.
+    /// </summary>
+    private static SqlType WireType(TdsTokenWriter writer, SqlType type) =>
+        writer.Utf8Support ? type
+        : type switch
+        {
+            VarcharSqlType varchar when varchar.Collation.AnsiCodePage == 65001 => NVarcharSqlType.Get(NationalWidth(varchar.length), varchar.Collation, varchar.Coercibility),
+            CharSqlType fixedChar when fixedChar.Collation.AnsiCodePage == 65001 => NVarcharSqlType.Get(NationalWidth(fixedChar.length), fixedChar.Collation, fixedChar.Coercibility),
+            JsonSqlType when !writer.NativeJson => NVarcharSqlType.Get(SqlType.MaxLengthSentinel, writer.DatabaseCollation, Coercibility.Implicit),
+            VectorSqlType when !IsNativeVector(writer, type) => NVarcharSqlType.Get(SqlType.MaxLengthSentinel, writer.DatabaseCollation, Coercibility.Implicit),
+            _ => type,
+        };
+
+    /// <summary>The <c>nvarchar</c> width a UTF-8 string of <paramref name="length"/> bytes travels as down-level.</summary>
+    private static int NationalWidth(int length) => length is SqlType.MaxLengthSentinel or > 4000 ? SqlType.MaxLengthSentinel : length;
+
+    /// <summary><paramref name="value"/> of <paramref name="type"/> as the <paramref name="wire"/> type <see cref="WireType"/> chose for it.</summary>
+    private static SqlValue WireValue(SqlType type, NVarcharSqlType wire, SqlValue value) =>
+        value.IsNull ? SqlValue.Null(wire)
+        : SqlValue.FromNVarchar(wire, type is VectorSqlType ? VectorSqlType.Format(value.AsVectorBytes) : value.AsString);
 
     /// <summary>Whether <paramref name="type"/> goes to this client as the native float32 vector type.</summary>
     private static bool IsNativeVector(TdsTokenWriter writer, SqlType type) =>
@@ -411,6 +440,7 @@ internal static class TdsTypeCodec
 
     private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull, bool reportsNumeric = false, string databaseName = "")
     {
+        type = WireType(writer, type);
         // A NOT NULL fixed-width column carries the FIXEDLENTYPE token (single
         // byte, no max-length byte), matching real — the N-variant token below
         // is the nullable-only form. The paired ROW value is written raw (see
@@ -653,6 +683,11 @@ internal static class TdsTypeCodec
 
     private static void WriteValue(TdsTokenWriter writer, SqlType type, SqlValue value)
     {
+        if (WireType(writer, type) is NVarcharSqlType wire && !ReferenceEquals(wire, type))
+        {
+            value = WireValue(type, wire, value);
+            type = wire;
+        }
         switch (type)
         {
             case TinyIntSqlType:

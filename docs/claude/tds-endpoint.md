@@ -571,13 +571,20 @@ Specifics:
   Removing it from the reject list unblocked DacFx export of AW's `OrganizationNode` / `DocumentNode`.
   Oracle: `HierarchyIdWireTests`.
 - **`vector`**: a client that asks for the vector feature extension at login (`FEATUREEXT_VECTORSUPPORT`, 0x0E — SqlClient 6.1+) has it acknowledged at version 1 in a FEATUREEXTACK after the packet-size ENVCHANGE, and a float32 vector then travels as the native type: `0xF5`, user type 255, a 2-byte byte length (the 8-byte header and four bytes an element) and the element-type byte 0, the value a 2-byte length (`0xFFFF` NULL) and the stored form (captured 2026-10-02 against SQL Server 2025 through SqlClient 7.0.2).
-  A float16 vector, and every vector to a client that didn't ask, travels as `0xA7` `varchar(max)` collated `Latin1_General_100_BIN2_UTF8` holding the text form (probed 2026-09-26 through SqlClient 5.1) — see [`vector.md`](vector.md).
+  A float16 vector, and every vector to a client that didn't ask, travels as `0xA7` `varchar(max)` collated `Latin1_General_100_BIN2_UTF8` holding the text form (probed 2026-09-26 through SqlClient 5.1), user type 255 kept (captured 2026-10-18) — or as `nvarchar(max)` to a client without [UTF-8 support](#utf-8-support) — see [`vector.md`](vector.md).
   A `SqlDbTypeExtensions.Vector` input parameter (`0xF5`: a 2-byte maximum length and the element-type byte, then a 2-byte length — `0xFFFF` NULL — and the vector's binary form) binds as `vector(n)`, whatever was acknowledged.
   Oracle: `VectorWireTests`.
-- **`json`**: a client asking for the json feature extension (`FEATUREEXT_JSONSUPPORT`, 0x0D — SqlClient 6+) has it acknowledged at version 1, and a json value then travels as the native `0xF4`, its TYPE_INFO the type byte alone and its value the canonical text as PLP UTF-8 (captured 2026-10-02 through SqlClient 7.0.2); to a client that didn't ask it travels as the same `0xA7` `varchar(max)` text the down-level form Microsoft's json data type page gives for a TDS 7.4 client — see [`json-type.md`](json-type.md).
+- **`json`**: a client asking for the json feature extension (`FEATUREEXT_JSONSUPPORT`, 0x0D — SqlClient 6+) has it acknowledged at version 1, and a json value then travels as the native `0xF4`, its TYPE_INFO the type byte alone and its value the canonical text as PLP UTF-8 (captured 2026-10-02 through SqlClient 7.0.2); to a client that didn't ask it travels as the same `0xA7` `varchar(max)` text the down-level form Microsoft's json data type page gives for a TDS 7.4 client, or as `nvarchar(max)` to one without [UTF-8 support](#utf-8-support) — see [`json-type.md`](json-type.md).
   A `SqlDbType.Json` input parameter (`0xF4`, no TYPE_INFO, the document as PLP UTF-8) binds as `json`, so `.modify()` and `JSON_MODIFY` insert it as JSON; SqlClient sends the token whatever was acknowledged.
   Oracle: `JsonWireTests`.
 - **`text` / `ntext` / `image`** (legacy in-band textptr form) — see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms) below.
+
+### UTF-8 support
+
+A client asking for `FEATUREEXT_UTF8_SUPPORT` (0x0A, sent by every SqlClient) has it acknowledged at version 1, ahead of the json and vector acknowledgements in the one FEATUREEXTACK, and receives a UTF-8-collated `varchar` / `char` as itself, its value in UTF-8 bytes.
+One that doesn't ask gets it as the `nvarchar` of the same width in the same collation — `char(n)` too, `nvarchar(max)` past 4000 — its value as UTF-16, and a `json` or `vector` it takes no native form of as `nvarchar(max)` in the session database's collation, `vector` keeping user type 255 (captured 2026-10-18 against SQL Server 2025 with a raw TDS 7.4 client sending no feature extension; `TdsTypeCodec.WireType`); a `sql_variant`'s inner value keeps its own type, and the collation ENVCHANGE is the same either way.
+**Not modeled yet**: an output parameter the client declared UTF-8-collated, which real returns as `nvarchar` too; the endpoint returns it in the type the parameter's `DbType` names.
+Oracle: `Utf8DownLevelWireTests`.
 - Every modeled result-column type has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
 
 ### Browse mode (`CommandBehavior.KeyInfo`)
@@ -632,14 +639,14 @@ Derived generatively per collation (cached by interned reference), validated aga
 
 - Flags from name tokens: CI→bit20, AI→bit21, absent WS→bit22 (ignore-width), absent KS→bit23 (ignore-kana), BIN→bit24, BIN2→bit25.
   **Width=22/Kana=23 is load-bearing** for KS/WS-only names and contradicts MS-TDS's field-declaration order — the spec's own assembly line and SqlClient's constants agree with 22/23, probe-confirmed via `_CI_AS_KS` (0x05) / `_CI_AS_WS` (0x09).
-- `_UTF8` → bit26, and it **displaces** the binary bits (`_BIN2_UTF8` reports 0x40, not 0x60); sensitivity bits are retained.
+- `_UTF8` → bit26, beside a `_BIN2`'s binary-sort bit (`_BIN2_UTF8` reports 0x60), and a UTF-8 collation's width and kana bits are the other way round from the rest's — its wire form is `COLLATIONPROPERTY`'s, for each of the 1585 UTF-8 collations (captured 2026-10-18 against SQL Server 2025, the client having negotiated UTF-8 support).
   Code page becomes 65001.
 - `_SC` / `_VSS` set no wire bit — the structure is lossy (5540 names → 3987 distinct tuples).
 - Version nibble from the name's number token: none/SQL_*→0, 90→1, 100→2, 140→3, **160→4**.
 - LCID + ANSI code page per name-prefix from the core-layer `Collation.LcidAndCodePageByPrefix` (probe-derived, one entry per `KnownPrefixes` key); SQL_* code page comes from the CPnnn token (CP1→1252).
   Anomaly: `SQL_Latin1_General_CP1254_*` reports the Turkish LCID 0x041F (special-cased).
 - Baseline `SQL_Latin1_General_CP1_CI_AS` derives to the canonical `09 04 D0 00 34` (sortId 52).
-- `COLLATIONPROPERTY(name, 'TDSCollation')` is **not** this structure byte for byte: real's property swaps the width and kana bits, keeps `_BIN2` under `_UTF8`, and reports the two EBCDIC sort variants with their base sort id (probed 2026-09-26), so `TdsCollationCodec.PropertyBytes` derives it from the wire form rather than the reverse.
+- `COLLATIONPROPERTY(name, 'TDSCollation')` — and `sp_describe_first_result_set`'s `tds_collation_id` (probed 2026-10-18) — is **not** this structure byte for byte but for a UTF-8 collation: real's property swaps the width and kana bits and reports the two EBCDIC sort variants with their base sort id (probed 2026-09-26), so `TdsCollationCodec.PropertyBytes` derives it from the wire form rather than the reverse.
 
 ## Login response shape
 
@@ -658,7 +665,6 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
   Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.
 - Mid-stream attention (cancel) ships — see below, including inside a single statement.
 - SPID in packet headers truncates to 16 bits.
-- **A client that negotiates no `UTF8_SUPPORT` feature** receives a UTF-8-collated `varchar` column, `json` and `vector` as `nvarchar` from real (`nvarchar(max)` for the two native types, `vector` keeping user type 255; observed 2026-10-17 against SQL Server 2025 with a raw TDS 7.4 client sending no feature extension); the endpoint sends them as `varchar` whatever the client negotiated, which every SqlClient — which always asks for UTF-8 — reads as real sends it.
 - **TDS 7.1–7.4 clients connect** (the LOGINACK always answers 7.4, or 8.0 under strict); **TDS 7.0** (SQL Server 7.0 / 1998, `tds_version=7.0` in FreeTDS/pymssql) is **not modeled** — its divergent pre-modern-PRELOGIN handshake makes the session close early ("Unexpected EOF" client-side) rather than complete.
   Real SQL Server 2025 still accepts 7.0, so matching it would mean implementing a 27-year-old handshake variant no modern client (SqlClient, JDBC, ODBC 18, pymssql-default) ever requests and the managed oracle can't exercise; deferred as a legacy-protocol edge with no fidelity payoff short of full support.
 - **Temp tables created by an RPC `sp_executesql` / `sp_execute` / `sp_prepexec` statement are module-scoped** (dropped when the RPC returns), matching real — so tedious's `execSql`, which routes every statement through `sp_executesql`, can re-run a `create table #t` without a Msg 2714 collision and doesn't leak the temp onto the session. The command carries `ScopeTempTablesToBatch`; the engine drops the batch's registered temps in `CreateResultSetsForCommand`'s finally. See [`temp-tables.md`](temp-tables.md).

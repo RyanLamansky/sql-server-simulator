@@ -55,7 +55,7 @@ internal sealed class CollationProperty : Expression
             "COMPARISONSTYLE" => SqlValue.FromInt32(metrics.ComparisonStyle),
             "LCID" => SqlValue.FromInt32(metrics.Lcid),
             "NAME" => SqlValue.FromNVarchar(metrics.Name),
-            "TDSCOLLATION" => SqlValue.FromBinary(BinarySqlType.Get(5), Network.TdsCollationCodec.For(Collation.Get(metrics.Name)).PropertyBytes(metrics.Name.Contains("_BIN2", StringComparison.OrdinalIgnoreCase))),
+            "TDSCOLLATION" => SqlValue.FromBinary(BinarySqlType.Get(5), Network.TdsCollationCodec.For(Collation.Get(metrics.Name)).PropertyBytes()),
             "VERSION" => SqlValue.FromByte(checked((byte)metrics.Version)),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };

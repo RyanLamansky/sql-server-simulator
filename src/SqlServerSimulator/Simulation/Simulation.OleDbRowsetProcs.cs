@@ -603,7 +603,6 @@ partial class Simulation
                 65001 => "utf8",
                 var codePage => "cp" + codePage.ToString(System.Globalization.CultureInfo.InvariantCulture),
             };
-            var binary2 = collation.Name.Contains("_BIN2", StringComparison.OrdinalIgnoreCase);
             row[18] = Name("master");
             row[19] = Name(Database.DefaultSchemaName);
             row[20] = Name(characterSet);
@@ -612,7 +611,7 @@ partial class Simulation
             row[23] = Name(collation.Name);
             row[28] = SqlValue.FromInt32(metrics.Lcid);
             row[29] = SqlValue.FromInt32(ComparisonFlags(collation.Name, metrics.ComparisonStyle));
-            row[31] = SqlValue.FromBinary(BinarySqlType.Get(5), Network.TdsCollationCodec.For(collation).PropertyBytes(binary2));
+            row[31] = SqlValue.FromBinary(BinarySqlType.Get(5), Network.TdsCollationCodec.For(collation).PropertyBytes());
         }
         else
         {

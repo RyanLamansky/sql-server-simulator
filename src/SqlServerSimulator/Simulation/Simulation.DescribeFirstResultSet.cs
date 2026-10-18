@@ -169,20 +169,6 @@ partial class Simulation
 
     private static readonly VarcharSqlType Float16DescribeType = VarcharSqlType.Get(-1, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit);
 
-    /// <summary>
-    /// <c>tds_collation_id</c>: the wire's collation word, except that a
-    /// <c>_BIN2_UTF8</c> collation keeps the binary-sort bit the wire drops,
-    /// as <c>COLLATIONPROPERTY</c>'s form does (probed 2026-09-29 against SQL
-    /// Server 2025).
-    /// </summary>
-    private static int DescribedCollationInfo(Network.TdsCollationCodec codec, Collation collation)
-    {
-        if (!collation.Name.EndsWith("_BIN2_UTF8", StringComparison.OrdinalIgnoreCase))
-            return (int)codec.Info;
-        var property = codec.PropertyBytes(binary2: true);
-        return System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(property);
-    }
-
     private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index, string databaseName)
     {
         // An unsized string result describes as the width the wire reports
@@ -257,7 +243,10 @@ partial class Simulation
             nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),
             SqlValue.FromInt32(tdsLength),
-            codec is null ? nullInt : SqlValue.FromInt32(DescribedCollationInfo(codec, collation!)),
+            // tds_collation_id is COLLATIONPROPERTY's form of the word, its
+            // width and kana bits the other way round from the wire's but for a
+            // UTF-8 collation (probed 2026-10-18 against SQL Server 2025).
+            codec is null ? nullInt : SqlValue.FromInt32(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(codec.PropertyBytes())),
             codec is null ? SqlValue.Null(SqlType.TinyInt) : SqlValue.FromByte(codec.SortId),
         ];
     }

@@ -37,6 +37,12 @@ internal sealed class Login7Request
     /// </summary>
     public byte VectorSupportVersion;
 
+    /// <summary>
+    /// The client's feature extension asked for UTF-8 support
+    /// (<c>FEATUREEXT_UTF8_SUPPORT</c>, 0x0A), as every SqlClient does.
+    /// </summary>
+    public bool Utf8Support;
+
     private Login7Request(uint tdsVersion, int packetSize, int clientProcessId, string hostName, string userName, string password, string appName, string database)
     {
         this.TdsVersion = tdsVersion;
@@ -82,9 +88,9 @@ internal sealed class Login7Request
     /// Reads the feature extension block a client flags with OptionFlags3's
     /// fExtension bit: the offset pair at 56 locates a DWORD holding the
     /// block's own offset, and the block is a run of feature id, DWORD
-    /// length and data, ended by 0xFF (MS-TDS 2.2.6.4). Only the JSON and
-    /// vector support versions are kept; every other feature goes
-    /// unacknowledged.
+    /// length and data, ended by 0xFF (MS-TDS 2.2.6.4). Only UTF-8 support
+    /// and the JSON and vector support versions are kept; every other feature
+    /// goes unacknowledged.
     /// </summary>
     private static void ReadFeatureExtension(ReadOnlySpan<byte> payload, Login7Request request)
     {
@@ -103,6 +109,9 @@ internal sealed class Login7Request
             var data = payload.Slice(offset + 5, length);
             switch (featureId)
             {
+                case 0x0A:
+                    request.Utf8Support = true;
+                    break;
                 case 0x0D when length >= 1:
                     request.JsonSupportVersion = data[0];
                     break;

@@ -271,7 +271,7 @@ internal static partial class BuiltInResources
             SqlValue.FromInt32(entry.Nullable ? 1 : 0),
             collation is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(collation),
             SqlValue.FromBinary(BinarySqlType.Get(5), hasCollation
-                ? Network.TdsCollationCodec.For(Collation.Get(collation!)).PropertyBytes(collation!.Contains("_BIN2", StringComparison.OrdinalIgnoreCase))
+                ? Network.TdsCollationCodec.For(Collation.Get(collation!)).PropertyBytes()
                 : new byte[5]),
         ];
     }

@@ -45,20 +45,22 @@ internal sealed class TdsCollationCodec
 
     /// <summary>
     /// <c>COLLATIONPROPERTY(name, 'TDSCollation')</c>, which is not quite the
-    /// wire structure: it swaps the ignore-width and ignore-kana bits, keeps
-    /// the binary-sort bit a <c>_BIN2_UTF8</c> collation's wire form drops,
-    /// and gives the two EBCDIC sort variants their base collation's sort id
-    /// (probed 2026-09-26 against SQL Server 2025, all 5540 collations).
+    /// wire structure but for a UTF-8 collation: it swaps the ignore-width and
+    /// ignore-kana bits and gives the two EBCDIC sort variants their base
+    /// collation's sort id (probed 2026-09-26 against SQL Server 2025, all
+    /// 5540 collations).
     /// </summary>
-    public byte[] PropertyBytes(bool binary2)
+    public byte[] PropertyBytes()
     {
-        var info = this.Info & ~(IgnoreWidth | IgnoreKana);
-        if ((this.Info & IgnoreWidth) != 0)
-            info |= IgnoreKana;
-        if ((this.Info & IgnoreKana) != 0)
-            info |= IgnoreWidth;
-        if (binary2 && (info & Utf8) != 0)
-            info |= Binary2;
+        var info = this.Info;
+        if ((info & Utf8) == 0)
+        {
+            info &= ~(IgnoreWidth | IgnoreKana);
+            if ((this.Info & IgnoreWidth) != 0)
+                info |= IgnoreKana;
+            if ((this.Info & IgnoreKana) != 0)
+                info |= IgnoreWidth;
+        }
         var sortId = this.SortId switch { 218 => (byte)212, 219 => (byte)211, var own => own };
         return [(byte)info, (byte)(info >> 8), (byte)(info >> 16), (byte)(info >> 24), sortId];
     }
@@ -78,7 +80,7 @@ internal sealed class TdsCollationCodec
         {
             if (!Collation.TryGetMetrics(name, out var metrics))
                 continue;
-            var key = PropertyKey(For(Collation.Get(name)).PropertyBytes(name.Contains("_BIN2", StringComparison.OrdinalIgnoreCase)));
+            var key = PropertyKey(For(Collation.Get(name)).PropertyBytes());
             if (!byKey.TryGetValue(key, out var held) || metrics.CollationId < held.Id)
                 byKey[key] = (name, metrics.CollationId);
         }
@@ -185,11 +187,19 @@ internal sealed class TdsCollationCodec
                 this.SortId = checked((byte)sortOrder.OrderNumber);
         }
 
-        // Probed: the fUTF8 bit displaces the binary-sort bits (_BIN2_UTF8
-        // reports 0x40, not 0x60) while the sensitivity bits are retained.
+        // A UTF-8 collation's wire form is its COLLATIONPROPERTY form: the
+        // fUTF8 bit beside a _BIN2's binary-sort bit, and the ignore-width and
+        // ignore-kana bits the other way round from every other collation's
+        // (captured 2026-10-18 against SQL Server 2025 for each of 1400 UTF-8
+        // collations, the client having negotiated UTF-8 support).
         if (utf8)
         {
-            flags = (flags & ~(Binary | Binary2)) | Utf8;
+            var swapped = flags & ~(IgnoreWidth | IgnoreKana);
+            if ((flags & IgnoreWidth) != 0)
+                swapped |= IgnoreKana;
+            if ((flags & IgnoreKana) != 0)
+                swapped |= IgnoreWidth;
+            flags = swapped | Utf8;
             codePage = 65001;
         }
 

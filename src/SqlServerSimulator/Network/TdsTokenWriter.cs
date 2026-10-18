@@ -82,6 +82,22 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     public bool NativeJson;
 
     /// <summary>
+    /// The client negotiated UTF-8 support at login, so a UTF-8-collated
+    /// <c>varchar</c> / <c>char</c> value goes out in its own UTF-8 bytes;
+    /// without it, it goes out as the <c>nvarchar</c> of its width, and a
+    /// down-level <c>json</c> or <c>vector</c> as <c>nvarchar(max)</c>
+    /// (<see cref="TdsTypeCodec"/>'s <c>WireType</c>).
+    /// </summary>
+    public bool Utf8Support;
+
+    /// <summary>
+    /// The collation of the session's database as a result is written, which a
+    /// down-level <c>json</c> or <c>vector</c> takes for a client without
+    /// UTF-8 support (captured 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    public Collation DatabaseCollation = Collation.Baseline;
+
+    /// <summary>
     /// Runs once the response's last packet is ready, just before it is sent:
     /// the MARS path ends the request's in-flight count here, so a client that
     /// acts on the response's end — a commit on another session — never finds

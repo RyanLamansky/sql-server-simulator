@@ -59,7 +59,7 @@ The results are **bit-exact** to real's, which took reverse-engineering its SIMD
 ## Client surface
 
 The simulator core doesn't reference SqlClient, so the in-process reader can't hand back `SqlVector<float>`: it surfaces the text form (`GetFieldType` string, `GetDataTypeName` `vector`, `GetValue` / `GetString` the text).
-Over the TDS endpoint a client that negotiates vector support (SqlClient 6.1+) receives a float32 vector as the native type and reads `SqlVector<float>`; a float16 vector, and any vector sent to a client that didn't negotiate, travels as `varchar(max)` collated `Latin1_General_100_BIN2_UTF8` holding the text form, as real sends it (captured 2026-10-02 through SqlClient 7.0.2), and a `SqlVector<float>` parameter binds as `vector(n)` — see [`tds-endpoint.md`](tds-endpoint.md).
+Over the TDS endpoint a client that negotiates vector support (SqlClient 6.1+) receives a float32 vector as the native type and reads `SqlVector<float>`; a float16 vector, and any vector sent to a client that didn't negotiate, travels as `varchar(max)` collated `Latin1_General_100_BIN2_UTF8` holding the text form, as real sends it (captured 2026-10-02 through SqlClient 7.0.2) — `nvarchar(max)` in the database's collation to a client without [UTF-8 support](tds-endpoint.md#utf-8-support) — and a `SqlVector<float>` parameter binds as `vector(n)` — see [`tds-endpoint.md`](tds-endpoint.md).
 
 ## The float16 base type
 

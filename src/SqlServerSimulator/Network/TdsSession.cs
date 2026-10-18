@@ -50,6 +50,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// <summary>The vector support version acknowledged at login, 0 for none.</summary>
     private byte vectorSupportVersion;
 
+    /// <summary>Whether UTF-8 support was acknowledged at login (<see cref="TdsTokenWriter.Utf8Support"/>).</summary>
+    private bool utf8Support;
+
     /// <summary>
     /// Closes the socket; the session task observes the closure at its next
     /// I/O operation and runs its normal cleanup.
@@ -200,7 +203,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // SQL Server 2025 through SqlClient 7.0.2).
             this.jsonSupportVersion = Math.Min(login.JsonSupportVersion, (byte)1);
             this.vectorSupportVersion = Math.Min(login.VectorSupportVersion, (byte)1);
-            writer = new TdsTokenWriter(transport) { NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
+            this.utf8Support = login.Utf8Support;
+            writer = new TdsTokenWriter(transport) { NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0, Utf8Support = this.utf8Support };
             if (simulation.RefuseLogin(login.UserName, login.Password, ClientForErrorLog(socket)) is { } refusal)
             {
                 // Probe-confirmed shape: one error at severity 14 state 1 — Msg
@@ -633,11 +637,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             checked((byte)ReferenceBuild.Version.Minor),
             checked((ushort)ReferenceBuild.Version.Build));
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        // Real acknowledges a requested feature after the packet-size change.
-        if (this.jsonSupportVersion > 0 || this.vectorSupportVersion > 0)
+        // Real acknowledges a requested feature after the packet-size change,
+        // UTF-8 support at version 1 ahead of the json and vector pair
+        // (captured 2026-10-18 against SQL Server 2025).
+        if (this.utf8Support || this.jsonSupportVersion > 0 || this.vectorSupportVersion > 0)
         {
-            Span<(byte, byte)> features = stackalloc (byte, byte)[2];
+            Span<(byte, byte)> features = stackalloc (byte, byte)[3];
             var count = 0;
+            if (this.utf8Support)
+                features[count++] = (0x0A, 1);
             if (this.jsonSupportVersion > 0)
                 features[count++] = (0x0D, this.jsonSupportVersion);
             if (this.vectorSupportVersion > 0)
@@ -763,7 +771,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             Spid = unchecked((ushort)this.connection!.Spid),
             Counters = this.connection.Transport,
         };
-        var writer = new TdsTokenWriter(transport) { DeferFlush = true, MarsSession = session, NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
+        var writer = new TdsTokenWriter(transport) { DeferFlush = true, MarsSession = session, NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0, Utf8Support = this.utf8Support };
         try
         {
             while (true)
@@ -1390,7 +1398,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // hold a MARS session from their first.
                 if (query is SimulatedSqlResultSet { Stream.PendingWrite: not null })
                     writer.HoldSessionFromResultStart();
-                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse, query.OrderColumns, query.ColumnAliasTypes);
+                writer.DatabaseCollation = this.connection!.CurrentDatabase.Collation;
+                TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection.CurrentDatabase.Name, query.Browse, query.OrderColumns, query.ColumnAliasTypes);
                 long rows = 0;
                 using (var cursor = query.CreateClientCursor())
                 {
