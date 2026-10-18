@@ -426,4 +426,16 @@ public sealed class DecimalTests
             select case when checksum(cast(1 as numeric(10, 2))) = checksum(cast(1 as numeric(10, 0)))
                 then 1 else 0 end
             """));
+
+    /// <summary>
+    /// Unary minus negates a decimal exactly at its own type, every digit of
+    /// a high scale kept (probed 2026-10-18 against SQL Server 2025), where
+    /// the additive <c>0 - x</c> typing would cut the scale and round it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("-0.0000562843675942956559203341541209548", "-0.0000562843675942956559203341541209548")]
+    [DataRow("-cast(-0.99999999999999999999999999999999999 as decimal(38, 36))", "0.999999999999999999999999999999999990")]
+    [DataRow("-cast(0 as decimal(5, 2))", "0.00")]
+    public void UnaryMinus_KeepsEveryDigit(string expression, string expected) =>
+        AreEqual(expected, ExecuteScalar($"select cast({expression} as varchar(50))"));
 }

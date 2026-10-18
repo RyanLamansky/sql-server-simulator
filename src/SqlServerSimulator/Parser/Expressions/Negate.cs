@@ -74,6 +74,12 @@ internal sealed class Negate(Expression operand) : Expression
                 : SqlValue.FromSingle(-value.AsSingle);
         }
 
+        // A decimal negates exactly at its own type: `0 - x` would type as
+        // the additive result, whose scale drops past 38 digits of precision,
+        // and so round a value of high scale before it was boxed back.
+        if (!value.IsNull && value.Type is DecimalSqlType)
+            return SqlValue.FromDecimal(value.Type, value.AsDecimal38.Negate());
+
         var resultType = PreservedResultType(value.Type);
         SqlValue raw;
         try
