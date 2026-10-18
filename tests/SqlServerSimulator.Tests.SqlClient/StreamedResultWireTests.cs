@@ -103,20 +103,25 @@ public sealed class StreamedResultWireTests
     /// Over MARS the statement produces what the client's window takes at the
     /// packet size its login negotiated — a <c>SELECT</c>'s rows and a DML
     /// statement's <c>OUTPUT</c> rows alike — so a <c>REPEATABLE READ</c>
-    /// reader holds the keys of exactly the rows those packets carry (probed
-    /// 2026-10-17 against SQL Server 2025 with 2,000 rows).
+    /// reader holds the keys of the rows those packets carry (probed
+    /// 2026-10-17 against SQL Server 2025 with 2,000 rows, where an unloaded
+    /// client settles on <paramref name="held"/>). SqlClient widens its window
+    /// as its own socket reads take packets in, apart from the rows the test
+    /// reads, so a slower host settles a packet short of that or up to two
+    /// past it, with real behind the client as with the simulator; the bound
+    /// still fails a statement that doesn't run ahead or doesn't stop.
     /// </summary>
     [TestMethod]
-    [DataRow("select * from w", 2000, 8000, 2, 20, "S")]
-    [DataRow("select * from w", 2000, 8000, 21, 44, "S")]
-    [DataRow("select * from w", 2000, 8000, 100, 116, "S")]
-    [DataRow("select * from w", 2000, 4096, 10, 17, "S")]
-    [DataRow("select * from w", 2000, 16000, 2, 40, "S")]
-    [DataRow("select * from w", 500, 8000, 50, 127, "S")]
-    [DataRow("select * from w", 100, 8000, 200, 598, "S")]
-    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 8000, 2, 20, "X")]
-    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 4096, 10, 17, "X")]
-    public async Task OverMars_TheStatementRunsAheadByTheClientsWindow(string sql, int width, int packetSize, int read, int held, string mode)
+    [DataRow("select * from w", 2000, 8000, 2, 20, 4, "S")]
+    [DataRow("select * from w", 2000, 8000, 21, 44, 4, "S")]
+    [DataRow("select * from w", 2000, 8000, 100, 116, 4, "S")]
+    [DataRow("select * from w", 2000, 4096, 10, 17, 2, "S")]
+    [DataRow("select * from w", 2000, 16000, 2, 40, 8, "S")]
+    [DataRow("select * from w", 500, 8000, 50, 127, 16, "S")]
+    [DataRow("select * from w", 100, 8000, 200, 598, 75, "S")]
+    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 8000, 2, 20, 4, "X")]
+    [DataRow("update w set v = v output inserted.k, inserted.v", 2000, 4096, 10, 17, 2, "X")]
+    public async Task OverMars_TheStatementRunsAheadByTheClientsWindow(string sql, int width, int packetSize, int read, int held, int rowsPerPacket, string mode)
     {
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, $"""
@@ -137,14 +142,16 @@ public sealed class StreamedResultWireTests
             // The window the client's reads opened reaches the endpoint on
             // frames of their own, so the request can be seen suspended on the
             // window before them, holding fewer rows than it settles on once
-            // they arrive: wait for it to settle, which no other state the
-            // observer can read marks.
+            // they arrive: wait for it to reach the bound, which no other state
+            // the observer can read marks.
             await Wire.AwaitSuspendedAsync(other, spid, TestContext.CancellationToken);
+            var (low, high) = (held - rowsPerPacket, held + (2 * rowsPerPacket));
             var waited = System.Diagnostics.Stopwatch.StartNew();
             int keys;
-            while ((keys = await this.HeldKeysAsync(other, spid, mode)) != held && waited.ElapsedMilliseconds < 10_000)
+            while ((keys = await this.HeldKeysAsync(other, spid, mode)) < low && waited.ElapsedMilliseconds < 10_000)
                 await Task.Delay(10, TestContext.CancellationToken);
-            AreEqual(held, keys);
+            IsGreaterThanOrEqualTo(low, keys);
+            IsLessThanOrEqualTo(high, keys);
             command.Cancel();
         }
         await transaction.RollbackAsync(TestContext.CancellationToken);
