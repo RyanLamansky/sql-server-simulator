@@ -237,6 +237,7 @@ internal sealed partial class DatabaseImage
         this.WritePlanGuides(w);
         this.WritePartitioning(w);
         this.WriteBroker(w);
+        this.WriteAuditSpecifications(w);
     }
 
     private static DatabaseImage Read(BinaryReader r)
@@ -353,6 +354,7 @@ internal sealed partial class DatabaseImage
         ReadPlanGuides(r, image);
         ReadPartitioning(r, image);
         ReadBroker(r, image);
+        ReadAuditSpecifications(r, image);
         return image;
     }
 

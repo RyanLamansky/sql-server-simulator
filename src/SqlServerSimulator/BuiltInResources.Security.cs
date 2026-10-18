@@ -319,13 +319,12 @@ internal static partial class BuiltInResources
         // The key store's views (sys.symmetric_keys, sys.key_encryptions,
         // sys.openkeys; rows in BuiltInResources.EncryptionKeys.cs), then
         // views for features the simulator hasn't built (Always Encrypted
-        // column keys, database-scoped credentials, cryptographic providers,
-        // server audits), each with the full shape probed against SQL Server
+        // column keys, database-scoped credentials, cryptographic providers),
+        // each with the full shape probed against SQL Server
         // 2025 (2026-07-16) and no rows — DacFx's bacpac-export
         // reverse-engineering references them (e.g. sys.symmetric_keys LEFT
-        // JOIN sys.cryptographic_providers). server_audits /
-        // server_file_audits / cryptographic_providers are server-scoped (the
-        // row generator ignores the database). See docs/claude/catalog-views.md.
+        // JOIN sys.cryptographic_providers). cryptographic_providers is
+        // server-scoped (the row generator ignores the database). See docs/claude/catalog-views.md.
         Sys("symmetric_keys",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -447,46 +446,6 @@ internal static partial class BuiltInResources
             new("operation", SqlType.Int32, null, true),
             new("operation_desc", nvarchar60Catalog, 60, true),
         ], static (_, database) => EnumerateSecurityPredicates(database));
-        Sys("server_audits",
-        [
-            new("audit_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
-            new("audit_guid", SqlType.UniqueIdentifier, null, true),
-            new("create_date", SqlType.DateTime, null, false),
-            new("modify_date", SqlType.DateTime, null, false),
-            new("principal_id", SqlType.Int32, null, true),
-            new("type", charTwo, 2, false),
-            new("type_desc", nvarchar60Catalog, 60, true),
-            new("on_failure", SqlType.TinyInt, null, true),
-            new("on_failure_desc", nvarchar60Catalog, 60, true),
-            new("is_state_enabled", SqlType.Bit, null, true),
-            new("queue_delay", SqlType.Int32, null, true),
-            new("predicate", SqlType.NVarchar, 3000, true),
-            new("is_operator_audit", SqlType.Bit, null, true),
-        ], static (_, _) => EmptyCatalogRows);
-        Sys("server_file_audits",
-        [
-            new("audit_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
-            new("audit_guid", SqlType.UniqueIdentifier, null, true),
-            new("create_date", SqlType.DateTime, null, false),
-            new("modify_date", SqlType.DateTime, null, false),
-            new("principal_id", SqlType.Int32, null, true),
-            new("type", charTwo, 2, false),
-            new("type_desc", nvarchar60Catalog, 60, true),
-            new("on_failure", SqlType.TinyInt, null, true),
-            new("on_failure_desc", nvarchar60Catalog, 60, true),
-            new("is_state_enabled", SqlType.Bit, null, true),
-            new("queue_delay", SqlType.Int32, null, true),
-            new("predicate", SqlType.NVarchar, 3000, true),
-            new("max_file_size", SqlType.BigInt, null, true),
-            new("max_rollover_files", SqlType.Int32, null, true),
-            new("max_files", SqlType.Int32, null, true),
-            new("reserve_disk_space", SqlType.Bit, null, true),
-            new("log_file_path", SqlType.NVarchar, 260, true),
-            new("log_file_name", SqlType.NVarchar, 260, true),
-            new("retention_days", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
     }
 
     /// <summary>

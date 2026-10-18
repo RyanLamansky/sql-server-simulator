@@ -1123,6 +1123,8 @@ internal static partial class BuiltInResources
         ("dm_sql_referenced_entities", -481970182, "IF"),
         ("dm_sql_referencing_entities", -686951493, "IF"),
         ("fn_builtin_permissions", -413116802, "IF"),
+        ("fn_get_audit_file", -647968877, "IF"),
+        ("fn_get_audit_file_v2", -744389705, "IF"),
         ("fn_listextendedproperty", -572068538, "TF"),
         ("fn_my_permissions", -462384620, "TF"),
         ("fn_trace_geteventinfo", -81646787, "TF"),

@@ -96,6 +96,7 @@ partial class DatabaseImage
             image.ExtendedProperties.Add((key, value));
         image.CaptureKeys(database);
         image.CapturePlanGuides(database);
+        image.CaptureAuditSpecifications(database);
         image.CapturePartitioning(database);
         image.CaptureBroker(database, conversations);
 

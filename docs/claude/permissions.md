@@ -789,7 +789,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 #### Not modeled yet
 
-- The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-notification, audit and availability-group families and `ALTER RESOURCES`.
+- The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-notification and availability-group families and `ALTER RESOURCES`.
 - `UNSAFE ASSEMBLY` as a signing certificate's or key's login holds it under `clr strict security`; it is read only as a `TRUSTWORTHY` database's owner's (see [`clr-assemblies.md`](clr-assemblies.md#what-the-server-takes-the-edition-the-catalog-and-clr-strict-security)).
 - `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
 - `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry, and `ALTER LOGIN [sa] WITH PASSWORD` (or `sp_password` on it) meets real's policy check (Msg 33062 for a too-short password, probed 2026-09-30 against SQL Server 2025) and then `NotSupportedException`: recording a password for `sa` would switch the TDS endpoint from accepting any credentials to enforcing them, and real's own answer to a wrong `OLD_PASSWORD` is Msg 15151.
@@ -950,7 +950,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike, and a column list on INSERT is real's Msg 1020 — see [Column-level grants](#column-level-grants). Residual gap: the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server permissions whose statements aren't built** — endpoints, audits, and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
+- **Server permissions whose statements aren't built** — endpoints and a signed assembly's login's `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — a pooled TDS reset clears the role instead of killing the session (real's Msg 596), `sp_setapprole` under `EXECUTE AS` leaves the impersonated identity on top, and the ODBC `{Encrypt}` password escape doesn't parse.

@@ -264,19 +264,6 @@ internal static partial class BuiltInResources
             new("os_language_version", SqlType.Int32, null, false),
         ], static (_, _) => WindowsInfoRows);
 
-        // No server audit is defined.
-        Sys("dm_server_audit_status",
-        [
-            new("audit_id", SqlType.Int32, null, false),
-            new("name", SqlType.NVarchar, 256, false),
-            new("status", SqlType.SmallInt, null, false),
-            new("status_desc", SqlType.NVarchar, 256, false),
-            new("status_time", SqlType.GetDateTime2(7), null, false),
-            new("event_session_address", SqlType.Varbinary, 8, true),
-            new("audit_file_path", SqlType.NVarchar, 256, true),
-            new("audit_file_size", SqlType.BigInt, null, true),
-        ], static (_, _) => EmptyCatalogRows);
-
         // No memory-optimized transaction statistics are kept.
         HeapColumn[] xtpStats =
         [

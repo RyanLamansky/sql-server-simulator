@@ -32,6 +32,8 @@ partial class Simulation
     /// </summary>
     private bool TryParseCreate(ParserContext context)
     {
+        if (TryParseAuditDdl(context, "CREATE"))
+            return true;
         RefuseUnbuiltStatement(context, "CREATE");
         switch (context.GetNextRequired())
         {

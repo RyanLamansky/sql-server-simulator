@@ -33,6 +33,8 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseDrop(ParserContext context)
     {
+        if (TryParseAuditDdl(context, "DROP"))
+            return true;
         RefuseUnbuiltStatement(context, "DROP");
         // DROP INDEX has a distinct grammar — `name ON table [, name ON table, …]`
         // (not just `name`). Route it through its own parser before the

@@ -16,6 +16,8 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlter(ParserContext context)
     {
+        if (TryParseAuditDdl(context, "ALTER"))
+            return true;
         RefuseUnbuiltStatement(context, "ALTER");
         switch (context.GetNextRequired())
         {

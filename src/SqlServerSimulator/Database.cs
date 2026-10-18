@@ -111,6 +111,7 @@ internal sealed partial class Database
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
         this.PlanGuides = new(collation);
+        this.AuditSpecifications = new(collation);
         this.EncryptionKeys = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         // guest's schema hosts objects like any other: a user defaulting to it
@@ -1121,6 +1122,22 @@ internal sealed partial class Database
     /// 2025).
     /// </summary>
     public int LastPlanGuideId = 65535;
+
+    /// <summary>
+    /// The database's audit specifications by name, compared under its
+    /// collation; <c>sys.database_audit_specifications</c> lists them in id
+    /// order. A backup carries them, so a restore brings each back with its
+    /// id, dates, state and the audit GUID it names.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Audit.AuditSpecification> AuditSpecifications;
+
+    /// <summary>
+    /// The last id an audit specification in the database took, from 65536
+    /// and never reused, a refused <c>CREATE</c> spending one; <c>master</c>'s
+    /// numbers the server audit specifications too (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    public int LastAuditSpecificationId = 65535;
 
     private int nextPartitionFunctionId = 65535;
 

@@ -126,6 +126,14 @@ partial class Simulation
                     yield return canonical;
             }
         }
+        if (this.AuditsIfMade is { } audits)
+        {
+            foreach (var (path, _) in audits.Files)
+            {
+                if (CanonicalServerPath(path) is { } canonical)
+                    yield return canonical;
+            }
+        }
     }
 
     /// <summary>Creates <paramref name="canonical"/> and every directory above it.</summary>

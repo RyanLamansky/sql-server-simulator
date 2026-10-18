@@ -100,6 +100,7 @@ internal static partial class BuiltInResources
         RegisterPerformanceCounters(views);
         RegisterExtendedEvents(views);
         RegisterTraceViews(views);
+        RegisterAuditViews(views);
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
         RegisterCompatibilityProjections(views);

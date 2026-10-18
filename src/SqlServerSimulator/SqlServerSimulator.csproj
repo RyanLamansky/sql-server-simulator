@@ -65,6 +65,9 @@
     <!-- SQL Trace's catalog, zipped the same way. -->
     <TraceMetadataFile Include="Trace/Metadata/*.tsv" />
     <EmbeddedResource Include="$(BaseIntermediateOutputPath)TraceMetadata.zip" LogicalName="SqlServerSimulator.TraceMetadata.zip" />
+    <!-- SQL Server Audit's catalog (some 80 KB of text), zipped the same way. -->
+    <AuditMetadataFile Include="Audit/Metadata/*.tsv" />
+    <EmbeddedResource Include="$(BaseIntermediateOutputPath)AuditMetadata.zip" LogicalName="SqlServerSimulator.AuditMetadata.zip" />
   </ItemGroup>
 
   <Target Name="ZipXeMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(XeMetadataFile)" Outputs="$(BaseIntermediateOutputPath)XeMetadata.zip">
@@ -73,6 +76,10 @@
 
   <Target Name="ZipTraceMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(TraceMetadataFile)" Outputs="$(BaseIntermediateOutputPath)TraceMetadata.zip">
     <ZipDirectory SourceDirectory="Trace/Metadata" DestinationFile="$(BaseIntermediateOutputPath)TraceMetadata.zip" Overwrite="true" />
+  </Target>
+
+  <Target Name="ZipAuditMetadata" BeforeTargets="PrepareResourceNames" Inputs="@(AuditMetadataFile)" Outputs="$(BaseIntermediateOutputPath)AuditMetadata.zip">
+    <ZipDirectory SourceDirectory="Audit/Metadata" DestinationFile="$(BaseIntermediateOutputPath)AuditMetadata.zip" Overwrite="true" />
   </Target>
 
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">

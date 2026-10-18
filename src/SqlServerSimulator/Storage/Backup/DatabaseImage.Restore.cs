@@ -86,6 +86,7 @@ partial class DatabaseImage
         }
         this.ApplyKeys(database);
         this.ApplyPlanGuides(database);
+        this.ApplyAuditSpecifications(database);
     }
 
     /// <summary>
