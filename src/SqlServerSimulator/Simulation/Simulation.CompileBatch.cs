@@ -367,6 +367,9 @@ partial class Simulation
         // parsed since the last error starts — which a block's END, read as
         // one rather than as an error, doesn't reset.
         List<int> errorOffsets = [errorToken.StartIndex];
+        // The CATCH blocks an END TRY recovery read past has opened, whose
+        // END CATCH closes one rather than standing stray.
+        var catchesOpenedByEndTry = 0;
         // An assignment's target refusal is raised on reducing its last token,
         // which the count takes in (probed 2026-10-16 against SQL Server 2025:
         // `select @a = 1` and a later line's `select @b` report both).
@@ -450,7 +453,37 @@ partial class Simulation
                 // its BEGIN would read as a CATCH without a TRY.
                 if (next.Number == 102 && at is Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.End } && OpenBlocksBefore(text, at.StartIndex, errorOffsets) > 0)
                 {
-                    restart = PastCatchOpening(text, at.EndIndex);
+                    // An END CATCH closes a CATCH block only an END TRY
+                    // opened; past an error, a BEGIN CATCH opens a plain
+                    // block whose CATCH is discarded, so the END's CATCH is
+                    // Msg 102 once three tokens other than that discarded one
+                    // have parsed (probed 2026-10-19 against SQL Server 2025:
+                    // `begin catch select 1 end catch` reports it, `begin try
+                    // end try begin catch end catch` doesn't).
+                    if (WordAfter(text, at.EndIndex, "CATCH") is { } strayCatch)
+                    {
+                        if (catchesOpenedByEndTry > 0)
+                        {
+                            catchesOpenedByEndTry--;
+                            restart = strayCatch.EndIndex;
+                            continue;
+                        }
+                        var since = countFrom ?? restart;
+                        if (TokensBetween(text, since, strayCatch.StartIndex) - DiscardedCatches(text, since, strayCatch.StartIndex) >= 3)
+                        {
+                            var stray = SimulatedSqlException.SyntaxErrorNear(strayCatch);
+                            stray.ResolveDiagnostics(Parser.Token.LineAt(text, strayCatch.StartIndex), compileBatch.LineOffset, compileBatch.ErrorProcedureName);
+                            errors.Add(stray);
+                            errorOffsets.Add(strayCatch.StartIndex);
+                            countFrom = null;
+                        }
+                        restart = strayCatch.EndIndex;
+                        continue;
+                    }
+                    var pastOpening = PastCatchOpening(text, at.EndIndex);
+                    if (pastOpening != at.EndIndex)
+                        catchesOpenedByEndTry++;
+                    restart = pastOpening;
                     continue;
                 }
                 errorOffsets.Add(at.StartIndex);
@@ -677,6 +710,48 @@ partial class Simulation
         {
         }
         return from;
+    }
+
+    /// <summary>The word token right after <paramref name="from"/>, whitespace and comments aside, when it is <paramref name="word"/>.</summary>
+    private static Parser.Token? WordAfter(string text, int from, string word)
+    {
+        var index = from;
+        try
+        {
+            while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is Parser.Tokens.Whitespace or Parser.Tokens.Comment)
+                    continue;
+                return token is Parser.Tokens.UnquotedString { Value: var value } && value.Equals(word, StringComparison.OrdinalIgnoreCase) ? token : null;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return null;
+    }
+
+    /// <summary>How many <c>CATCH</c> words right after a <c>BEGIN</c> lie between two offsets — words recovery discards rather than parses.</summary>
+    private static int DiscardedCatches(string text, int from, int to)
+    {
+        var count = 0;
+        var index = from;
+        var afterBegin = false;
+        try
+        {
+            while (index < to && Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is Parser.Tokens.Whitespace or Parser.Tokens.Comment)
+                    continue;
+                if (afterBegin && token is Parser.Tokens.UnquotedString { Value: var value } && value.Equals("CATCH", StringComparison.OrdinalIgnoreCase))
+                    count++;
+                afterBegin = token is Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Begin };
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return count;
     }
 
     /// <summary>The tokens, whitespace and comments aside, between two offsets of <paramref name="text"/>.</summary>
