@@ -169,6 +169,23 @@ public sealed class SetLanguageTests
     }
 
     /// <summary>
+    /// A date string reads the session language's month names, full or short,
+    /// in any case but with their accents and without a trailing period, and
+    /// no English one (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("Français", "12 janv 2024", "2024-01-12")]
+    [DataRow("Français", "12 FÉVRIER 2024", "2024-02-12")]
+    [DataRow("Français", "12 fevrier 2024", null)]
+    [DataRow("Français", "12 févr. 2024", null)]
+    [DataRow("Français", "12 January 2024", null)]
+    [DataRow("Deutsch", "Oktober 3, 2024", "2024-10-03")]
+    [DataRow("Deutsch", "Dez 2024", "2024-12-01")]
+    [DataRow("Português", "12 fevereiro 2024", "2024-02-12")]
+    public void ADateString_ReadsTheLanguagesMonthNames(string language, string text, string? expected)
+        => AreEqual((object?)expected ?? DBNull.Value, Scalar($"set language N'{language}'; select convert(varchar(10), try_cast(N'{text}' as date), 120)"));
+
+    /// <summary>
     /// DATENAME's month and weekday names, a month name in a date string, and
     /// FORMAT's culture follow the session language, and Msg 5703 speaks it
     /// (probed 2026-10-04 against SQL Server 2025).
