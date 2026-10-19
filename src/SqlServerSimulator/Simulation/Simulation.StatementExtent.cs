@@ -68,7 +68,10 @@ partial class Simulation
     /// at its own last token, leaving out the separator, white space and
     /// comments after it, rather than at the next statement's start: a
     /// query, <c>EXEC</c> but not <c>EXECUTE AS</c>, a cursor's
-    /// <c>DECLARE</c>, <c>TRUNCATE</c>, <c>DBCC</c>, <c>RETURN</c>, and among
+    /// <c>DECLARE</c>, <c>TRUNCATE</c>, <c>DBCC</c>, <c>RETURN</c>,
+    /// <c>BACKUP</c> (probed 2026-10-17 against SQL Server 2025 through an
+    /// audit record's statement, where <c>RESTORE FILELISTONLY</c> took its
+    /// <c>;</c>), and among
     /// the DDL what real's grammar ends the same way — <c>CREATE</c>
     /// <c>TABLE</c>, any index, <c>STATISTICS</c>, <c>DATABASE</c> and
     /// <c>XML SCHEMA COLLECTION</c>; <c>ALTER</c> <c>TABLE</c>,
@@ -126,7 +129,7 @@ partial class Simulation
         if (Is(0, "MERGE"))
             return takesTerminator = true;
         if (Is(0, "SELECT") || Is(0, "INSERT") || Is(0, "UPDATE") || Is(0, "DELETE") || Is(0, "WITH")
-            || Is(0, "TRUNCATE") || Is(0, "DBCC") || Is(0, "RETURN"))
+            || Is(0, "TRUNCATE") || Is(0, "DBCC") || Is(0, "RETURN") || Is(0, "BACKUP"))
         {
             return true;
         }

@@ -75,12 +75,33 @@ The session's fields — `session_id`, the server principal (the effective login
 
 `AUDIT_CHANGE_GROUP` records each audit and specification statement as `CR`, `AL` or `DR` with class `A `, `SA` or `DA`, in `master` for the server's and the specification's database for a database specification, naming the object as it was before the statement (a rename names the old name); a `STATE` change is recorded before it takes effect.
 
+The engine's seams report the rest (`AuditSites`):
+
+- **Logins.** `LGIS` as a session opens (`Simulation.ServerTriggers`' login path: in process, over TDS and on a pooled reset), class `LX`, the session's options as its statement in the login event's words and its connection as `<action_info>`; `LGO` as it ends; `LGIF` from the error log's refused-login line (`Simulation.LogLoginFailure`), with no session or principal ids, the name it tried as `server_principal_name`, the error-log message as its statement and the error number and state in `<action_info>`.
+- **Object access.** `SL`, `IN`, `UP`, `DL`, `EX`, `RF` and `RC`, class the object's type, `permission_bitmask` the object permission's bit and `is_column_permission` set for `SELECT`, `UPDATE` and `REFERENCES`: from every permission check on an object (`PermissionEnforcement.CheckObject`), every read a query's securable list records (`CheckReadSources`) — down through a view to what its body reads — and a single-table `UPDATE` or `DELETE`'s target, which also records `SL` when it reads the target's columns.
+  Real records an access whether or not an ownership chain spares its check, a denied one with `succeeded` 0, and one per statement and object however often it is named, which `StatementContext.AuditedAccesses` keeps; from a module body the record carries the module stack as `additional_information`.
+- **Schema object changes.** `CR`, `AL` and `DR` of every object the object events report (`XeObjectEvents.Note`), class its type, a creation preceded by its schema's `AL` (class `SC`), and of a schema itself.
+- **Permission changes.** `G`, `D` and `R` per grantee and permission of a database-scope statement on an object, a schema or the database (`DB`, the database as its object), the permission's bit (`PermissionBits.tsv`) and the grantee as the target principal.
+- **`DBCC`, `BACKUP`, `RESTORE`.** Recorded as the statement starts, whatever it does — a `DBCC CHECKIDENT` refused with Msg 7997 records `succeeded` 1 — class `DB`, the database its object (a restore's with no object name); a `RESTORE` reading a device's contents records nothing.
+- **`sp_audit_write`.** `UDAU`, class `DB`, its event id and information.
+
+A server whose audits run no specification covering an action writes nothing for it.
+With no audit running a site's cost is the one `Simulation.RunningAudits` read: a workload of 4,000 single-row statements and a 5,000-iteration loop ran in the same time with no audit and with one running that no specification feeds, and about 2.5 times as long with `SCHEMA_OBJECT_ACCESS_GROUP` recording every statement synchronously (measured 2026-10-19, Release build, median of six runs in a shared container).
+
 ### Divergences
 
 - `audit_file_offset` reads 16384 for every record, a file's first buffer, where real's asynchronous audits step to later buffers as they flush; reading from a file and offset therefore reads on from the next file.
 - A file's size counts each record at the simulator's estimate of real's encoding, some 300 bytes and two a character of its text, so it grows near, not at, real's.
 - An `AUSC` record's `permission_bitmask` and `sequence_group_id` read zeros where real's carry stray bytes, and its `connection_id` the session's where real's reads a constant.
 - `client_tls_version` and its name read 0 and empty, as an in-process connection's; real's TLS clients report 771 and `1.2`.
+- A logout's CPU and I/O counters read zero, a login's `client_options` are real's sqlcmd values whatever the client, and a failed login's `PasswordFirstNibbleHash` is left out.
+- `database_transaction_id`, `affected_rows`, `response_rows` and `duration_milliseconds` read zero; real fills `database_transaction_id` for a write.
+- A view read through a query records the view and its base tables; real's order between them is unprobed.
+
+### Not modeled yet (records)
+
+- The other groups' actions — the principal and role-membership changes, impersonation, ownership changes, the batch and transaction groups, `DATABASE_CHANGE_GROUP` for `CREATE` / `DROP DATABASE`, the server object and server permission changes, and a refused statement's record (a `GRANT` of a server permission outside `master` records `G` with `succeeded` 0 on real).
+- A joined `UPDATE` / `DELETE`'s, a `MERGE`'s and a view target's write record beside the checks they already reach, and the `CR` real writes beside a `RESTORE`.
 
 ### Not modeled yet
 

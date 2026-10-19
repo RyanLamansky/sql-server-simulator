@@ -45,7 +45,7 @@ partial class Simulation
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_server_diagnostics" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_tableoption" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
-        or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus"
+        or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus" or "sp_audit_write"
         or "xp_cmdshell" or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread"
         or "xp_regenumvalues" or "xp_instance_regenumvalues" or "xp_regenumkeys" or "xp_instance_regenumkeys"
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
@@ -89,7 +89,7 @@ partial class Simulation
         or "xp_sysmail_activate" or "xp_sysmail_attachment_load" or "xp_sysmail_format_query"
         or "xp_create_subdir" or "xp_delete_file" or "xp_dirtree" or "xp_fileexist"
         or "sp_cycle_errorlog" or "sp_enumerrorlogs" or "sp_readerrorlog" or "xp_enumerrorlogs" or "xp_logevent" or "xp_readerrorlog"
-        or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus"
+        or "sp_trace_create" or "sp_trace_generateevent" or "sp_trace_setevent" or "sp_trace_setfilter" or "sp_trace_setstatus" or "sp_audit_write"
         || systemProcName.StartsWith("sp_OA", StringComparison.Ordinal)
         || IsOleDbRowsetProcedure(systemProcName);
 
@@ -482,6 +482,7 @@ partial class Simulation
             "sp_tablecollations_100" => InvokeSpTableCollations(batch, systemProcName, SpColumnsVersion.V100),
             "sp_trace_create" => InvokeSpTraceCreate(batch, returnCodeVar),
             "sp_trace_generateevent" => InvokeSpTraceGenerateEvent(batch, returnCodeVar),
+            "sp_audit_write" => InvokeSpAuditWrite(batch, returnCodeVar),
             "sp_trace_setevent" => InvokeSpTraceSetEvent(batch, returnCodeVar),
             "sp_trace_setfilter" => InvokeSpTraceSetFilter(batch, returnCodeVar),
             "sp_trace_setstatus" => InvokeSpTraceSetStatus(batch, returnCodeVar),

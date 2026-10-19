@@ -564,8 +564,13 @@ internal static class PermissionEnforcement
         // 2025).
         if (batch.RestrictsUserData && securables.Exists(securable => securable.ObjectId > 0))
             throw SimulatedSqlException.RestrictedDataAccess();
+        var audited = batch.Connection.Simulation.RunningAudits is not null;
         if (BypassesEverywhere(batch.Connection))
+        {
+            if (audited)
+                AuditReads(batch, securables, succeeded: true);
             return;
+        }
         // Real names the last-bound denied object, not the first: with no
         // grant on either of two joined tables the error names the second
         // (probed 2026-09-29 against SQL Server 2025, joins, subqueries,
@@ -573,9 +578,36 @@ internal static class PermissionEnforcement
         for (var i = securables.Count - 1; i >= 0; i--)
         {
             var s = securables[i];
-            CheckReadSource(batch, s, readColumns);
-            if (s.Module is { } module)
-                CheckModuleBodyReads(batch, module, module.Schema.Database, s.ModuleReads, s.ModuleReadColumns);
+            try
+            {
+                CheckReadSource(batch, s, readColumns);
+                if (s.Module is { } module)
+                    CheckModuleBodyReads(batch, module, module.Schema.Database, s.ModuleReads, s.ModuleReadColumns);
+            }
+            catch (SimulatedSqlException) when (audited)
+            {
+                Audit.AuditSites.ObjectAccess(batch, s.Database, s.Permission, s.ObjectId, s.SchemaId, s.ObjectName, s.SchemaName, s.Securable, succeeded: false);
+                throw;
+            }
+        }
+        if (audited)
+            AuditReads(batch, securables, succeeded: true);
+    }
+
+    /// <summary>
+    /// The audit records of a statement's reads: each object it reads, and
+    /// down through a view what the view's body reads, which real records
+    /// whether or not an ownership chain spares its check (probed 2026-10-17
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void AuditReads(BatchContext batch, List<ReferencedSecurable> securables, bool succeeded)
+    {
+        foreach (var s in securables)
+        {
+            if (s.ObjectId > 0)
+                Audit.AuditSites.ObjectAccess(batch, s.Database, s.Permission, s.ObjectId, s.SchemaId, s.ObjectName, s.SchemaName, s.Securable, succeeded);
+            if (s.ModuleReads is { } reads)
+                AuditReads(batch, reads, succeeded);
         }
     }
 
@@ -1017,6 +1049,25 @@ internal static class PermissionEnforcement
 
     /// <summary>Checks one permission on one object in <paramref name="database"/>; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
     internal static void CheckObject(BatchContext batch, Database database, string permission, int objectId, int schemaId, string objectName, string schemaName, string procedure = "", Schemas.SchemaObject? securable = null)
+    {
+        if (batch.Connection.Simulation.RunningAudits is null)
+        {
+            CheckObjectUnaudited(batch, database, permission, objectId, schemaId, objectName, schemaName, procedure, securable);
+            return;
+        }
+        try
+        {
+            CheckObjectUnaudited(batch, database, permission, objectId, schemaId, objectName, schemaName, procedure, securable);
+        }
+        catch (SimulatedSqlException)
+        {
+            Audit.AuditSites.ObjectAccess(batch, database, permission, objectId, schemaId, objectName, schemaName, securable, succeeded: false);
+            throw;
+        }
+        Audit.AuditSites.ObjectAccess(batch, database, permission, objectId, schemaId, objectName, schemaName, securable, succeeded: true);
+    }
+
+    private static void CheckObjectUnaudited(BatchContext batch, Database database, string permission, int objectId, int schemaId, string objectName, string schemaName, string procedure, Schemas.SchemaObject? securable)
     {
         if (!TryResolveScope(batch, database, objectId, out var principalId, securable))
             return;

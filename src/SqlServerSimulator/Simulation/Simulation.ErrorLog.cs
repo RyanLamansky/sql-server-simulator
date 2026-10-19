@@ -140,6 +140,7 @@ partial class Simulation
             ? $"Login failed for user '{userName}'. Reason: The account is disabled. [CLIENT: {client}]"
             : $"Login failed for user '{userName}'. Reason: {reason} [CLIENT: {client}]";
         this.ErrorLog.WriteError(DateTime.UtcNow, "Logon", number, 14, state, message);
+        Audit.AuditSites.LoginFailed(this, userName, number, state, message, client);
     }
 
     /// <summary>

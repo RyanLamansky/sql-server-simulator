@@ -24,8 +24,11 @@ internal static class XeObjectEvents
         || XeEvents.Takes(simulation, XeEventKind.ObjectDeleted);
 
     /// <summary>The event for a schema-scoped object, its type the two characters <c>sys.objects.type</c> holds.</summary>
-    public static void Note(BatchContext batch, XeEventKind kind, Database database, SchemaObject @object) =>
+    public static void Note(BatchContext batch, XeEventKind kind, Database database, SchemaObject @object)
+    {
+        Audit.AuditSites.ObjectChanged(batch, kind, database, @object);
         Note(batch, kind, database, @object.ObjectId, @object.ObjectTypeCode, 0, @object.Name);
+    }
 
     /// <summary>
     /// Ends an autocommit statement's object events: each closing phase, in
@@ -110,6 +113,8 @@ internal static class XeObjectEvents
     public static void Note(BatchContext batch, XeEventKind kind, Database database, int objectId, string typeCode, int indexId, string name, bool independent = false)
     {
         var connection = batch.Connection;
+        if (typeCode == "SC")
+            Audit.AuditSites.SchemaChanged(batch, kind, database, objectId, name);
         if ((batch.IsSkipping && !independent) || !XeEvents.Takes(connection.Simulation, kind))
             return;
         var key = (ulong)(typeCode[0] | ((typeCode.Length > 1 ? typeCode[1] : ' ') << 8));

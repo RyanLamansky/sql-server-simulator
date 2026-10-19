@@ -420,6 +420,13 @@ internal sealed class StatementContext
     public List<(Action Commit, Action Rollback)>? ObjectEventPhases;
 
     /// <summary>
+    /// The object accesses the statement has audited, by object and action,
+    /// so a statement naming an object twice writes one record (probed
+    /// 2026-10-17 against SQL Server 2025: a table joined to itself).
+    /// </summary>
+    public HashSet<long>? AuditedAccesses;
+
+    /// <summary>
     /// Set by <c>OPTION (USE HINT ('DISABLE_TSQL_SCALAR_UDF_INLINING'))</c>,
     /// which keeps the statement's scalar function calls from inlining (see
     /// <see cref="InlinedScalarCalls"/>).
@@ -577,6 +584,7 @@ internal sealed class StatementContext
         this.BindsDeferredSource = false;
         this.DeferredReadToEnd = false;
         this.ObjectEventPhases = null;
+        this.AuditedAccesses = null;
         this.DisablesScalarUdfInlining = false;
         this.Recompiles = false;
         this.ReadsTableVariable = false;

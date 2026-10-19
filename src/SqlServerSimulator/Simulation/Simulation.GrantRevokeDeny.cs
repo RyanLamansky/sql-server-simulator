@@ -640,6 +640,20 @@ partial class Simulation
                 }
             }
         }
+        if (context.Simulation.RunningAudits is not null)
+        {
+            var verb = kind switch
+            {
+                PermissionStatementKind.Deny => "DENY",
+                PermissionStatementKind.Revoke => "REVOKE",
+                _ => "GRANT",
+            };
+            foreach (var grantee in grantees)
+            {
+                foreach (var (permName, _) in permissions)
+                    Audit.AuditSites.PermissionChanged(context.Batch, database, verb, permClass, permMajorId, securableObject, CanonicalPermissionName(permName), grantee);
+            }
+        }
         if (permissionEvent is { } recorded)
         {
             RecordDdlEvent(context, recorded.EventType, recorded.SchemaName, recorded.ObjectName, recorded.ObjectType,

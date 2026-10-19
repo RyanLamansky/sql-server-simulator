@@ -621,6 +621,52 @@ partial class Simulation
         });
     }
 
+    /// <summary>
+    /// <c>sp_audit_write @user_defined_event_id, @succeeded [,
+    /// @user_defined_information]</c>: a <c>UDAU</c> record for every running
+    /// audit whose specification takes <c>USER_DEFINED_AUDIT_GROUP</c>; the
+    /// first two are required (Msg 201).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpAuditWrite(BatchContext batch, string? returnCodeVariableName)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+        Storage.SqlValue? eventId = null, succeeded = null, information = null;
+        var positional = 0;
+        foreach (var argument in arguments)
+        {
+            var slot = argument.Name is null ? positional++
+                : BuiltInToken.Equals(argument.Name, "user_defined_event_id") ? 0
+                : BuiltInToken.Equals(argument.Name, "succeeded") ? 1
+                : BuiltInToken.Equals(argument.Name, "user_defined_information") ? 2
+                : -1;
+            if (argument.IsDefault)
+                continue;
+            switch (slot)
+            {
+                case 0:
+                    eventId = argument.Value;
+                    break;
+                case 1:
+                    succeeded = argument.Value;
+                    break;
+                case 2:
+                    information = argument.Value;
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (eventId is not { IsNull: false } id)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_audit_write", "@user_defined_event_id");
+        if (succeeded is not { IsNull: false } outcome)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_audit_write", "@succeeded");
+        AuditSites.UserDefined(batch, id.CoerceTo(Storage.SqlType.SmallInt).AsInt16, outcome.CoerceTo(Storage.SqlType.Bit).AsBoolean,
+            information is { IsNull: false } text ? text.CoerceTo(Storage.SqlType.NVarchar).AsString : "");
+        SetReturnCode(batch, returnCodeVariableName, 0);
+    }
+
     /// <summary>A specification statement's clauses as written.</summary>
     private sealed class AuditSpecificationClauses
     {

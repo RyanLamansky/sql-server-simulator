@@ -1132,6 +1132,7 @@ public sealed partial class Simulation
         {
             _ = Interlocked.Increment(ref this.LogoutCount);
             ExtendedEvents.XeSessionEvents.Logout(connection);
+            Audit.AuditSites.Logout(connection);
             this.NoteTraceLogout(connection);
         }
     }
@@ -3620,6 +3621,12 @@ public sealed partial class Simulation
             yield return RunUnderFmtOnly(batch, fmtKeyword);
             yield break;
         }
+
+        // DBCC, BACKUP and RESTORE are audited as they start, whatever their
+        // outcome (probed 2026-10-17 against SQL Server 2025: a DBCC CHECKIDENT
+        // refused with Msg 7997 records succeeded = 1).
+        if (this.RunningAudits is not null && !batch.IsSkipping && context.Token is ReservedKeyword { Keyword: Keyword.Dbcc or Keyword.Backup or Keyword.Restore })
+            Audit.AuditSites.StatementStarting(context);
 
         SimulatedStatementOutcome? outcome;
         int? rowCount = null;

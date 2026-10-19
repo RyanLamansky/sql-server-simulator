@@ -186,6 +186,8 @@ partial class Simulation
         var deleteSecurable = context.Batch.IsSkipping
             ? null
             : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
+        if (deleteSecurable is { } audited && context.Simulation.RunningAudits is not null && !PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(audited)))
+            Audit.AuditSites.TargetWrite(context.Batch, audited, "DELETE", reads: where is not null, succeeded: true);
         if (deleteSecurable is { } securable && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(securable)))
         {
             SimulatedSqlException? readDenied = null;

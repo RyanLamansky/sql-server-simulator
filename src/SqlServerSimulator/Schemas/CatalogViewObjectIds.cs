@@ -691,6 +691,7 @@ internal static class CatalogViewObjectIds
         ["sp_trace_setevent"] = -112232411,
         ["sp_trace_setfilter"] = -51217710,
         ["sp_trace_setstatus"] = -291903302,
+        ["sp_audit_write"] = -848078723,
         ["xp_logevent"] = -865724525,
         ["xp_readerrorlog"] = -314669890,
         ["xp_instance_regread"] = -1057316729,

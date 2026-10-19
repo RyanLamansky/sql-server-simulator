@@ -1033,6 +1033,27 @@ partial class Simulation
             : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
         if (updateSecurable is null)
             return;
+        if (context.Simulation.RunningAudits is null)
+        {
+            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, plan);
+            return;
+        }
+        var reads = where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch);
+        try
+        {
+            CheckUpdateSecurable(context, updateSecurable, table, sourceView, rawAssignments, where, plan);
+        }
+        catch (SimulatedSqlException)
+        {
+            Audit.AuditSites.TargetWrite(context.Batch, updateSecurable, "UPDATE", reads, succeeded: false);
+            throw;
+        }
+        Audit.AuditSites.TargetWrite(context.Batch, updateSecurable, "UPDATE", reads, succeeded: true);
+    }
+
+    private static void CheckUpdateSecurable(ParserContext context, SchemaObject updateSecurable, HeapTable table, View? sourceView,
+        List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where, UpdatePlan? plan)
+    {
         if (!PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
         {
             // A module body's reference to the view is chained, but the

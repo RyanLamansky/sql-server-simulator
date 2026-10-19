@@ -337,6 +337,8 @@ internal static partial class BuiltInResources
         "sp_trace_setevent",
         "sp_trace_setfilter",
         "sp_trace_setstatus",
+        // SQL Server Audit's user-defined record.
+        "sp_audit_write",
         // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
