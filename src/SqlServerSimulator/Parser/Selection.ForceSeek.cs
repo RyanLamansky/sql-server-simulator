@@ -131,7 +131,8 @@ partial class Selection
             {
                 throw SimulatedSqlException.ForceSeekPlanInfeasible(state: 2);
             }
-            if (hints.ForceSeek && !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn))
+            if (hints.ForceSeek && !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn)
+                && !SpatialSeekServes(batch, source, i, sources, table, hints, conjuncts))
             {
                 if (defers)
                     return true;
@@ -191,6 +192,26 @@ partial class Selection
             }
         }
         return refusal is { } reason ? SimulatedSqlException.SpatialIndexHintNoPlan(reason) : SimulatedSqlException.ForceSeekPlanInfeasible();
+    }
+
+    /// <summary>
+    /// Whether a spatial index <paramref name="hints"/> leave a
+    /// <c>FORCESEEK</c> answers one of <paramref name="conjuncts"/>, which
+    /// real seeks as an <c>INDEX</c> hint naming the index would (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private static bool SpatialSeekServes(BatchContext batch, FromSource source, int index, FromSource[] sources, HeapTable table, TableHintInfo hints, List<BooleanExpression> conjuncts)
+    {
+        table.SettleIndexIds();
+        foreach (var spatial in table.SpatialIndexes)
+        {
+            if (!NamedByIndexHint(batch, hints, spatial.Name, spatial.IndexId))
+                continue;
+            var probe = new ForceSeekProbe(batch, source, index, sources, [spatial.ColumnOrdinal - 1]);
+            if (conjuncts.Exists(conjunct => SpatialConjunctVerdict(conjunct, probe) == 0))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

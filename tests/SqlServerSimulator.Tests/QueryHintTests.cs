@@ -1200,6 +1200,25 @@ public sealed class QueryHintTests
     }
 
     /// <summary>
+    /// FORCESEEK seeks a spatial index on a predicate it answers, and a
+    /// spatial predicate it can't is Msg 8622 there, not 8635 (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("with (forceseek) where g.STIntersects(geometry::Point(1, 1, 0)) = 1", 0)]
+    [DataRow("with (forceseek, index(sx)) where g.STDistance(geometry::Point(1, 1, 0)) < 5", 0)]
+    [DataRow("with (forceseek) where g.STIntersects(geometry::Point(1, 1, 0)) = 0", 8622)]
+    [DataRow("with (forceseek, index(1)) where g.STIntersects(geometry::Point(1, 1, 0)) = 1", 8622)]
+    public void ForceSeek_SeeksASpatialIndexOnAPredicateItAnswers(string hinted, int number)
+    {
+        var sql = $"create table s (id int primary key, g geometry); create spatial index sx on s(g) with (bounding_box = (0, 0, 10, 10)); select * from s {hinted}";
+        if (number == 0)
+            _ = new Simulation().ExecuteNonQuery(sql);
+        else
+            _ = new Simulation().AssertSqlError(sql, number);
+    }
+
+    /// <summary>
     /// An INDEX hint naming a spatial index needs a predicate the index
     /// answers: a binary method of its column compared = 1 or its STDistance
     /// below a value, written on the comparison's left; otherwise the batch
