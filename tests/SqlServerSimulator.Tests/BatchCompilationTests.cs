@@ -503,6 +503,7 @@ public sealed class BatchCompilationTests
     [DataRow("select iif(1, 1, 2) from t where 1 +", "4145@1")]
     [DataRow("select iif(1, 1, 2) from t;\nselect 3 +", "4145@1 102@2")]
     [DataRow("select (1 from t order by", "156@1")]
+    [DataRow("select @a, row_number() over (order by 1) +", "137@1")]
     [DataRow("select * from (select 1 a) d NATURAL JOIN (select 1 a) e;", "102@1 102@1")]
     [DataRow("select (1;\nselect 2;", "102@1")]
     [DataRow("select from t;\nselect 3;", "156@1")]
