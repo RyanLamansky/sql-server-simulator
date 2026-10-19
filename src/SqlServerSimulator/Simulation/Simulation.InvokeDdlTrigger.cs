@@ -161,8 +161,24 @@ partial class Simulation
     {
         // Every statement passes through here, and the body's closures would
         // be allocated on entry, so the common case returns ahead of them.
-        if (batch.CurrentStatement.PendingDdlEvents is { Count: > 0 } events)
+        if (batch.CurrentStatement.PendingDdlEvents is not { Count: > 0 } events)
+            return;
+        if (events[0].EventType != "CREATE_SCHEMA")
+        {
             this.FireDdlTriggers(batch, events);
+            return;
+        }
+        // A trigger's error on CREATE SCHEMA takes the statement's Msg 2759
+        // after it, as the statement's own errors do (probed 2026-10-19
+        // against SQL Server 2025).
+        try
+        {
+            this.FireDdlTriggers(batch, events);
+        }
+        catch (SimulatedSqlException error) when (error.Number != 2759)
+        {
+            throw SimulatedSqlException.Aggregate([error, SimulatedSqlException.CreateSchemaFailed()]);
+        }
     }
 
     /// <summary>Fires the DDL triggers for <paramref name="events"/>, the statement's pending ones.</summary>

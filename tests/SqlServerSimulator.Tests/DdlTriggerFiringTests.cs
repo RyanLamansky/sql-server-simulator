@@ -422,4 +422,22 @@ public sealed class DdlTriggerFiringTests
         while (reader.NextResult());
         AreEqual("before|fired|after", string.Join("|", read));
     }
+
+    /// <summary>
+    /// An error a DDL trigger throws on CREATE SCHEMA, a ROLLBACK's Msg 3609
+    /// included, takes the statement's Msg 2759 after it, which is what a TRY
+    /// catches, while a RAISERROR the trigger goes on past adds none (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TriggerErrorOnCreateSchema_TakesMsg2759()
+    {
+        var raising = new Simulation();
+        raising.ExecuteBatches("create trigger tr on database for create_schema as raiserror('no', 16, 1)");
+        AreEqual(2759, raising.ExecuteScalar("begin try exec('create schema s') end try begin catch select error_number() end catch"));
+        var rolling = new Simulation();
+        rolling.ExecuteBatches("create trigger tr on database for create_schema as rollback");
+        var ex = rolling.AssertSqlError("create schema s", 3609);
+        AreEqual("3609|2759", string.Join("|", ex.Errors.Select(static e => e.Number)));
+    }
 }
