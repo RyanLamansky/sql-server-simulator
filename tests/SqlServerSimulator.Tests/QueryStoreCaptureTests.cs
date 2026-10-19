@@ -81,6 +81,13 @@ public sealed class QueryStoreCaptureTests
     [DataRow("select * from t where not a = 1", "select * from t where not a = 1")]
     [DataRow("select name from sys.objects where name = 't'", "select name from sys.objects where name = 't'")]
     [DataRow("select top 1 a from t where a > 0 order by a", "select top 1 a from t where a > 0 order by a")]
+    [DataRow("select count(*) from t where a = 5", "(@1 tinyint)SELECT COUNT(*) FROM [t] WHERE [a]=@1")]
+    [DataRow("select count_big(*) + 1, sum(a), avg(b) from t where a = 5", "(@1 tinyint)SELECT COUNT_BIG(*)+(1),SUM([a]),AVG([b]) FROM [t] WHERE [a]=@1")]
+    [DataRow("select cast(a as bigint), convert(varchar(5), a) from t where a = 6", "(@1 tinyint)SELECT CONVERT([bigint],[a]),CONVERT([varchar](5),[a]) FROM [t] WHERE [a]=@1")]
+    [DataRow("select coalesce(b, a), abs(a) from t where a = 5", "(@1 tinyint)SELECT coalesce([b],[a]),abs([a]) FROM [t] WHERE [a]=@1")]
+    [DataRow("select max(b) from t where a = 9", "select max(b) from t where a = 9")]
+    [DataRow("select len(c) from t where a = 2", "select len(c) from t where a = 2")]
+    [DataRow("select isnull(b, 0) from t where a = 3", "select isnull(b, 0) from t where a = 3")]
     public void SimpleParameterization_StoresRealsParameterizedText(string statement, string expected)
     {
         var sim = CapturingAll();

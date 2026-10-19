@@ -592,6 +592,30 @@ public sealed class ExtendedEventsFiringTests
                 .Select(summary => summary.StartsWith("object_created", StringComparison.Ordinal) ? summary + " statistics_list=" : summary)));
     }
 
+    // A compile loads each up-to-date statistic its predicates read, once,
+    // and refreshes a stale one, while a statement real runs under a
+    // parameterized plan cached for another text compiles nothing (probed
+    // 2026-10-19).
+    [TestMethod]
+    public void AutoStats_LoadAndRefreshAsTheQueryCompiles()
+    {
+        var sim = WithSession("add event sqlserver.auto_stats (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        _ = sim.ExecuteNonQuery("create table s (a int, b int); insert s select top (600) row_number() over (order by (select null)), 1 from sys.all_columns");
+        using var client = Client(sim, "app");
+        Run(client, "select count(*) from s where a = 5");
+        _ = sim.ExecuteNonQuery("insert s select top (1500) row_number() over (order by (select null)), 2 from sys.all_columns");
+        Run(client, "select count(*) from s where a = 6");
+        Run(client, "select count(*) from s where a = 7 option (recompile)");
+        Run(client, "select a, count(*) from s where a < 3 or a > 5 group by a");
+        AreEqual(string.Join("\n",
+            "auto_stats status=1 statistics_list=Created: a",
+            "auto_stats status=9 statistics_list=Loading without updating: s._WA_Sys_00000001_00000065",
+            "auto_stats status=8 statistics_list=Loading and updating: s._WA_Sys_00000001_00000065",
+            "auto_stats status=1 statistics_list=Updated: s._WA_Sys_00000001_00000065",
+            "auto_stats status=9 statistics_list=Loading without updating: s._WA_Sys_00000001_00000065"),
+            string.Join("\n", Summaries(RingBuffer(sim), "status", "statistics_list")));
+    }
+
     // The default trace records the object events from the server's start,
     // a closing phase's BigintData1 its Begin's sequence, and stops while
     // its option is off.
@@ -624,5 +648,23 @@ public sealed class ExtendedEventsFiringTests
         var data = RingBuffer(sim, "system_health");
         Contains("<![CDATA[severe]]>", data);
         DoesNotContain("<![CDATA[ordinary]]>", data);
+    }
+
+    /// <summary>A predicate's NOT inverts its operand, beside a conjunct it leaves alone (probed 2026-10-19).</summary>
+    [TestMethod]
+    public void Predicate_Not_InvertsItsOperand()
+    {
+        var sim = WithSession("""
+            add event sqlserver.error_reported (where not (error_number = 50001) and severity = 16 and sqlserver.client_app_name = N'app')
+            add target package0.ring_buffer
+            """);
+        using var client = Client(sim, "app");
+        Run(client, "begin try raiserror(50001, 16, 1) end try begin catch end catch");
+        Run(client, "begin try raiserror('two', 16, 1) end try begin catch end catch");
+        Run(client, "begin try raiserror('three', 15, 1) end try begin catch end catch");
+        var data = RingBuffer(sim);
+        Contains("<![CDATA[two]]>", data);
+        Contains("no message with that error number", data);
+        DoesNotContain("<![CDATA[three]]>", data);
     }
 }

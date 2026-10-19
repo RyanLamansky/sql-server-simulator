@@ -125,10 +125,14 @@ public sealed class UpdateStatisticsTests
         _ = sim.ExecuteNonQuery("insert t select value + 3, value from generate_series(1, 499)");
         _ = sim.ExecuteScalar("select count(*) from t where v = 5");
         AreEqual("_WA_Sys_00000002_:1:1:3", sim.ExecuteScalar(Auto));
-        // A cached plan doesn't check its statistics again, so the query
-        // that refreshes them is a new text.
+        // Past the threshold, a new literal still runs under the prepared plan
+        // simple parameterization cached for the first one, which compiles
+        // nothing, so the query that refreshes them is one that compiles
+        // (probed 2026-10-19 against SQL Server 2025).
         _ = sim.ExecuteNonQuery("insert t values (1000, 0)");
         _ = sim.ExecuteScalar("select count(*) from t where v = 6");
+        AreEqual("_WA_Sys_00000002_:1:1:3", sim.ExecuteScalar(Auto));
+        _ = sim.ExecuteScalar("select count(*) from t where v = 6 option (recompile)");
         AreEqual("_WA_Sys_00000002_:1:1:503", sim.ExecuteScalar(Auto));
     }
 

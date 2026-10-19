@@ -496,6 +496,21 @@ internal sealed class StatementContext
     public bool SuppressErrorReset;
 
     /// <summary>
+    /// Whether real would run the statement under a prepared plan simple
+    /// parameterization cached for an earlier text — 0 until asked, then 1 for
+    /// no and 2 for yes (<c>Simulation.ReusesCachedParameterizedPlan</c>).
+    /// Reset by <see cref="BeginDispatch"/>.
+    /// </summary>
+    public byte ReusesPreparedPlan;
+
+    /// <summary>
+    /// The statistics the statement's compile loaded or refreshed, each loaded
+    /// once however often its predicates name the column; null until an
+    /// <c>auto_stats</c> event is taken. Reset by <see cref="BeginDispatch"/>.
+    /// </summary>
+    public List<(HeapTable Table, int StatsId)>? LoadedStatistics;
+
+    /// <summary>
     /// The statement declared scalar variables with no initializer, which
     /// leaves a <c>SET SHOWPLAN_*</c> after it the batch's first statement
     /// (see <see cref="BatchContext.ShowplanRefusalLine"/>). Reset by
@@ -586,6 +601,8 @@ internal sealed class StatementContext
     {
         this.DispatchSerial++;
         this.SuppressErrorReset = false;
+        this.ReusesPreparedPlan = 0;
+        this.LoadedStatistics = null;
         this.DeclaresOnly = false;
         this.ReportedIgnoredDuplicate = false;
         this.ReportedNoiseWords = false;

@@ -36,8 +36,12 @@ namespace SqlServerSimulator.Parser;
 /// <para>
 /// Which statements qualify is <see cref="BindErrorReport.IsSimplyParameterizable"/>'s
 /// rule, narrowed by what real declines on top of it: <c>&lt;&gt;</c>,
-/// <c>!=</c> and <c>NOT</c> (probed 2026-09-29). A shape the renderer
-/// doesn't know yields null, and the statement is stored as written.
+/// <c>!=</c> and <c>NOT</c> (probed 2026-09-29), and a call of <c>MIN</c>,
+/// <c>MAX</c>, <c>LEN</c>, <c>UPPER</c> or <c>ISNULL</c> (probed
+/// 2026-10-19). An aggregate renders in upper case, <c>COUNT(*)</c> included,
+/// any other function as written, and a <c>CAST</c> or <c>CONVERT</c> as
+/// <c>CONVERT([type](length),expression)</c>. A shape the renderer doesn't
+/// know yields null, and the statement is stored as written.
 /// </para>
 /// </remarks>
 internal static class SimpleParameterization
@@ -583,32 +587,135 @@ internal static class SimpleParameterization
                     this.position++;
                     _ = this.body.Append("DEFAULT");
                     return true;
+                case ReservedKeyword { Keyword: Keyword.Convert } when this.Peek(1) is Operator { Character: '(' }:
+                    return this.Conversion(site, cast: false);
+                case Name { Value: var cast } when this.Peek(1) is Operator { Character: '(' } && cast.Equals("CAST", StringComparison.OrdinalIgnoreCase):
+                    return this.Conversion(site, cast: true);
+                case ReservedKeyword { Keyword: Keyword.Coalesce } coalesce when this.Peek(1) is Operator { Character: '(' }:
+                    return this.Call(site, coalesce.Source.ToString(), upperCased: false);
                 case Name name when this.Peek(1) is Operator { Character: '(' }:
-                    // A function call: its name as written, its arguments rendered.
-                    this.position += 2;
-                    _ = this.body.Append(name.Source).Append('(');
-                    if (!this.AtOperator(')'))
-                    {
-                        while (true)
-                        {
-                            if (!this.Expression(site == LiteralSite.Kept ? site : LiteralSite.Widened, parenthesizeArithmetic: false))
-                                return false;
-                            if (!this.AtOperator(','))
-                                break;
-                            this.position++;
-                            _ = this.body.Append(',');
-                        }
-                    }
-                    if (!this.AtOperator(')'))
-                        return false;
-                    this.position++;
-                    _ = this.body.Append(')');
-                    return true;
+                    // A function call: its name as written — an aggregate's
+                    // upper case — and its arguments rendered; real declines a
+                    // statement calling some (probed 2026-10-19 against SQL
+                    // Server 2025).
+                    return FunctionCase(name.Value) is { } upperCased && this.Call(site, upperCased ? name.Value.ToUpperInvariant() : name.Source.ToString(), upperCased);
                 case Name:
                     return this.DottedName();
                 default:
                     return false;
             }
+        }
+
+        /// <summary>A function call named <paramref name="written"/>, the cursor on its name: an aggregate's <c>*</c> argument, else its arguments rendered.</summary>
+        private bool Call(LiteralSite site, string written, bool upperCased)
+        {
+            this.position += 2;
+            _ = this.body.Append(written).Append('(');
+            if (upperCased && this.AtOperator('*'))
+            {
+                this.position++;
+                _ = this.body.Append('*');
+            }
+            else if (!this.AtOperator(')'))
+            {
+                while (true)
+                {
+                    if (!this.Expression(site == LiteralSite.Kept ? site : LiteralSite.Widened, parenthesizeArithmetic: false))
+                        return false;
+                    if (!this.AtOperator(','))
+                        break;
+                    this.position++;
+                    _ = this.body.Append(',');
+                }
+            }
+            if (!this.AtOperator(')'))
+                return false;
+            this.position++;
+            _ = this.body.Append(')');
+            return true;
+        }
+
+        /// <summary>
+        /// Whether real renders a call of <paramref name="name"/> in upper case
+        /// — the aggregates — or as written, or null for a function whose call
+        /// real doesn't parameterize: <c>MIN</c>, <c>MAX</c>, <c>LEN</c>,
+        /// <c>UPPER</c> and <c>ISNULL</c> (probed 2026-10-19 against SQL Server
+        /// 2025).
+        /// </summary>
+        private static bool? FunctionCase(string name)
+        {
+            Span<char> upper = stackalloc char[name.Length];
+            return upper[..name.AsSpan().ToUpperInvariant(upper)] switch
+            {
+                "AVG" or "CHECKSUM_AGG" or "COUNT" or "COUNT_BIG" or "STDEV" or "STRING_AGG" or "SUM" => true,
+                "ISNULL" or "LEN" or "MAX" or "MIN" or "UPPER" => null,
+                _ => false,
+            };
+        }
+
+        /// <summary>
+        /// A <c>CAST</c> or two-argument <c>CONVERT</c>, which real renders as
+        /// <c>CONVERT([type](length),expression)</c> (probed 2026-10-19 against
+        /// SQL Server 2025).
+        /// </summary>
+        private bool Conversion(LiteralSite site, bool cast)
+        {
+            this.position += 2;
+            var expressionAt = this.body.Length;
+            string? type;
+            if (cast)
+            {
+                if (!this.Expression(site == LiteralSite.Kept ? site : LiteralSite.Widened, parenthesizeArithmetic: false)
+                    || this.Current is not ReservedKeyword { Keyword: Keyword.As })
+                {
+                    return false;
+                }
+                this.position++;
+                type = this.TypeName();
+            }
+            else
+            {
+                type = this.TypeName();
+                if (type is null || !this.AtOperator(','))
+                    return false;
+                this.position++;
+                if (!this.Expression(site == LiteralSite.Kept ? site : LiteralSite.Widened, parenthesizeArithmetic: false))
+                    return false;
+            }
+            if (type is null || !this.AtOperator(')'))
+                return false;
+            this.position++;
+            var expression = this.body.ToString(expressionAt, this.body.Length - expressionAt);
+            _ = this.body.Remove(expressionAt, this.body.Length - expressionAt).Append("CONVERT(").Append(type).Append(',').Append(expression).Append(')');
+            return true;
+        }
+
+        /// <summary>A conversion's target type as real renders it — <c>[varchar](10)</c> — or null for one past this renderer.</summary>
+        private string? TypeName()
+        {
+            if (this.Current is not Name type)
+                return null;
+            this.position++;
+            var rendered = "[" + type.Value + "]";
+            if (!this.AtOperator('('))
+                return rendered;
+            this.position++;
+            if (this.Current is not Numeric length)
+                return null;
+            this.position++;
+            rendered += "(" + length.Source.ToString();
+            if (this.AtOperator(','))
+            {
+                this.position++;
+                if (this.Current is not Numeric scale)
+                    return null;
+                this.position++;
+                rendered += "," + scale.Source.ToString();
+            }
+            if (!this.AtOperator(')'))
+                return null;
+            this.position++;
+            return rendered + ")";
         }
 
         private bool LiteralTerm(LiteralSite site, bool negative)

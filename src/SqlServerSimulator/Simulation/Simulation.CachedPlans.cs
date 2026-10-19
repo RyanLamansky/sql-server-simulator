@@ -183,6 +183,42 @@ partial class Simulation
             connection.Session.RunningPlanHandle ?? PlanHandleFor(connection, CachedPlanKind.Adhoc, batchText, database));
     }
 
+    /// <summary>
+    /// Whether the statement compiling on <paramref name="batch"/> would run on
+    /// real under a prepared plan simple parameterization already cached for
+    /// an earlier text — which compiles nothing, so its statistics are neither
+    /// loaded nor refreshed however stale (probed 2026-10-19 against SQL
+    /// Server 2025: <c>select count(*) from t where a = 6</c> after <c>… a =
+    /// 5</c> fires no <c>auto_stats</c> past real's threshold). Settled once
+    /// per statement.
+    /// </summary>
+    internal static bool ReusesCachedParameterizedPlan(BatchContext batch)
+    {
+        var statement = batch.CurrentStatement;
+        if (statement.ReusesPreparedPlan == 0)
+            statement.ReusesPreparedPlan = FindsCachedParameterizedPlan(batch) ? (byte)2 : (byte)1;
+        return statement.ReusesPreparedPlan == 2;
+    }
+
+    private static bool FindsCachedParameterizedPlan(BatchContext batch)
+    {
+        var connection = batch.Connection;
+        if (batch.CachedPlanOrigin == CachedPlanOrigin.None || batch.CachedPlanDeclined || connection.NestingLevel != 0 || IsModuleBody(batch))
+            return false;
+        var simulation = connection.Simulation;
+        var text = batch.Parser.Command.CommandText;
+        var start = Math.Clamp(batch.CurrentStatement.StartIndex, 0, text.Length);
+        var end = ExtendedEvents.LockReports.StatementEnd(simulation, text, start);
+        var through = end < 0 ? text.Length : Math.Min(end + 1, text.Length);
+        var database = batch.CachedPlanDatabase ?? batch.CurrentDatabase;
+        if (simulation.QueryStoreShapeOf(text.AsSpan(start, through - start).TrimEnd().TrimEnd(';').TrimEnd(), database, parser: null, tokensFrom: null) is not { PreparedText: { } prepared })
+            return false;
+        var key = new CachedPlanKey(CachedPlanKind.Prepared, database.Id, 0, prepared, null, SetOptionsOf(connection, batch.Parser.QuotedIdentifiers),
+            connection.Language.LangId, DateFormatCode(connection.DateFormat), connection.DateFirst);
+        // A plan of a dropped database whose id the new one took isn't live.
+        return simulation.CachedPlans.Find(key) is { } plan && ReferenceEquals(plan.Database, database);
+    }
+
     /// <summary>The handle of the batch plan of <paramref name="text"/> the session's settings compile, cached or not.</summary>
     private static byte[] PlanHandleFor(SimulatedDbConnection connection, CachedPlanKind kind, string text, Database database)
     {
@@ -224,8 +260,14 @@ partial class Simulation
         var registry = connection.Simulation.CachedPlans;
         if (registry.Find(key) is { } found)
         {
-            created = false;
-            return found;
+            if (ReferenceEquals(found.Database, database))
+            {
+                created = false;
+                return found;
+            }
+            // The plan of a dropped, restored-over or detached database whose id
+            // this one took is no plan of this one's.
+            registry.Remove(plan => ReferenceEquals(plan, found));
         }
         var planText = declaration is null ? text : "(" + declaration + ")" + text;
         return registry.Add(new CachedPlan(key, database, planText, module: null, userId, batch.CurrentStatement.UtcNow), out created);

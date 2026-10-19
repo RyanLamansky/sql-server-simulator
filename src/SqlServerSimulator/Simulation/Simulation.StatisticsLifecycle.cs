@@ -291,26 +291,41 @@ partial class Simulation
                 stale |= autoUpdate && !user.NoRecompute && IsStale(table, user.Statistics, columnOrdinal);
             }
         }
-        if (stale)
+        // A statement real runs under a plan cached for another text compiles
+        // nothing, which is settled only once there is something to do.
+        var reports = ExtendedEvents.XeStatisticsEvents.Taken(batch.Connection.Simulation);
+        var creates = !led && database.Switches.HasFlag(DatabaseSwitches.AutoCreateStatistics) && table.Heap.RowCount != 0;
+        if ((!stale && !creates && !(led && reports)) || ReusesCachedParameterizedPlan(batch))
+            return;
+        if (stale || (led && reports))
         {
             foreach (var statistic in StatisticsOn(table))
             {
-                if (statistic.LeadingOrdinal == columnOrdinal && !statistic.NoRecompute && IsStale(table, statistic.State, columnOrdinal))
+                if (statistic.LeadingOrdinal != columnOrdinal)
+                    continue;
+                if (stale && !statistic.NoRecompute && IsStale(table, statistic.State, columnOrdinal))
                 {
-                    if (!ExtendedEvents.XeStatisticsEvents.Taken(batch.Connection.Simulation))
+                    if (!reports)
                     {
                         BuildStatistics(batch, table, statistic);
                         continue;
                     }
+                    _ = NoteStatisticLoaded(batch, table, statistic.StatsId);
                     ExtendedEvents.XeStatisticsEvents.Refreshing(batch, table, statistic.StatsId, statistic.Name);
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     BuildStatistics(batch, table, statistic);
                     ExtendedEvents.XeStatisticsEvents.Refreshed(batch, table, statistic.StatsId, statistic.Name,
                         (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMicroseconds);
                 }
+                // A statistic already up to date is loaded as it stands, once
+                // per statement (probed 2026-10-19 against SQL Server 2025).
+                else if (reports && NoteStatisticLoaded(batch, table, statistic.StatsId))
+                {
+                    ExtendedEvents.XeStatisticsEvents.Loaded(batch, table, statistic.StatsId, statistic.Name);
+                }
             }
         }
-        if (led || !database.Switches.HasFlag(DatabaseSwitches.AutoCreateStatistics) || table.Heap.RowCount == 0)
+        if (!creates)
             return;
 
         var column = table.Columns[columnOrdinal];
@@ -356,11 +371,24 @@ partial class Simulation
         // transaction (probed 2026-10-16 against SQL Server 2025:
         // Object:Created for _WA_Sys_… as the query compiles).
         ExtendedEvents.XeObjectEvents.NoteIndex(batch, ExtendedEvents.XeEventKind.ObjectCreated, database, table.ObjectId, created.StatsId, created.Name, statistics: true, independent: true);
-        if (ExtendedEvents.XeStatisticsEvents.Taken(batch.Connection.Simulation))
+        if (reports && NoteStatisticLoaded(batch, table, created.StatsId))
         {
             ExtendedEvents.XeStatisticsEvents.Created(batch, table, created.StatsId, created.Name, column.Name,
                 (long)System.Diagnostics.Stopwatch.GetElapsedTime(creating).TotalMicroseconds);
         }
+    }
+
+    /// <summary>Notes that the statement's compile loaded the statistic, answering whether it is the first time.</summary>
+    private static bool NoteStatisticLoaded(BatchContext batch, HeapTable table, int statsId)
+    {
+        var loaded = batch.CurrentStatement.LoadedStatistics ??= [];
+        foreach (var (seenTable, seenId) in loaded)
+        {
+            if (ReferenceEquals(seenTable, table) && seenId == statsId)
+                return false;
+        }
+        loaded.Add((table, statsId));
+        return true;
     }
 
     /// <summary>

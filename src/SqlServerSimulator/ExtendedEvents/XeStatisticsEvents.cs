@@ -29,8 +29,12 @@ internal static class XeStatisticsEvents
     public static void Created(Parser.BatchContext batch, HeapTable table, int statsId, string statistic, string column, long durationMicroseconds)
     {
         Fire(batch, table, 0, 1, $"Created: {column}", durationMicroseconds, refresh: false);
-        Fire(batch, table, statsId, 9, $"Loading without updating: {table.Name}.{statistic}", 0, refresh: false);
+        Loaded(batch, table, statsId, statistic);
     }
+
+    /// <summary>An up-to-date statistic a compile reads.</summary>
+    public static void Loaded(Parser.BatchContext batch, HeapTable table, int statsId, string statistic) =>
+        Fire(batch, table, statsId, 9, $"Loading without updating: {table.Name}.{statistic}", 0, refresh: false);
 
     private static void Fire(Parser.BatchContext batch, HeapTable table, int indexId, ulong status, string list, long durationMicroseconds, bool refresh)
     {
