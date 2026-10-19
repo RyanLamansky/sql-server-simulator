@@ -355,4 +355,39 @@ public sealed class OleDbRowsetProcedureTests
         AreEqual(208, ended.Number);
         AreEqual("sys|X |-401594603", connection.CreateCommand("select concat_ws('|', schema_name(schema_id), type, object_id) from sys.all_objects where name = 'sp_reset_connection'").ExecuteScalar());
     }
+
+    /// <summary>
+    /// The tables rowsets list the system base tables and the two tables real
+    /// ships beside the catalog views as SYSTEM TABLE, with their row counts
+    /// and none of their columns (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void TablesRowsets_ListTheSystemTables()
+    {
+        var sim = Fixture();
+        AreEqual("SYSTEM TABLE|22", ResultSets(sim, "exec sp_tables_info_rowset N'trace_xe_action_map', N'sys'")[0].Single().Split('|') is var map ? $"{map[3]}|{map[11]}" : null);
+        AreEqual("SYSTEM TABLE", ResultSets(sim, "exec sp_tables_rowset N'sysrowsets', N'sys'")[0].Single().Split('|')[3]);
+        HasCount(74, ResultSets(sim, "exec sp_tables_rowset2 N'sys', N'SYSTEM TABLE'")[0]);
+        IsEmpty(ResultSets(sim, "exec sp_columns_rowset N'trace_xe_action_map', N'sys'")[0]);
+        IsEmpty(ResultSets(sim, "exec sp_columns_rowset N'sysrowsets', N'sys'")[0]);
+    }
+
+    /// <summary>
+    /// sys.trace_xe_action_map and sys.trace_xe_event_map are tables real
+    /// ships in sys — type U, a clustered table to OBJECTPROPERTY, listed by
+    /// sp_tables as one, and no view — whose rows read as any catalog view's
+    /// (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void TraceMaps_AreShippedTables()
+        => AreEqual("U |USER_TABLE|1|1|0|1|NULL|22|U |0|TABLE", new Simulation().ExecuteScalar("""
+            declare @id int = object_id('sys.trace_xe_action_map');
+            create table #t (q sysname, o sysname, n sysname, t varchar(32), r varchar(254));
+            insert #t exec sp_tables @table_name = N'trace_xe_action_map', @table_owner = N'sys';
+            select concat_ws('|', o.type collate database_default, o.type_desc collate database_default, objectproperty(@id, 'IsUserTable'), objectproperty(@id, 'TableHasClustIndex'),
+                objectproperty(@id, 'IsView'), objectproperty(@id, 'IsAnsiNullsOn'), isnull(cast(objectproperty(@id, 'IsSchemaBound') as varchar), 'NULL'),
+                cast(objectpropertyex(@id, 'Cardinality') as varchar), cast(objectpropertyex(@id, 'BaseType') as varchar),
+                (select count(*) from sys.all_views where object_id = @id), (select t from #t))
+            from sys.all_objects as o where o.object_id = @id
+            """));
 }

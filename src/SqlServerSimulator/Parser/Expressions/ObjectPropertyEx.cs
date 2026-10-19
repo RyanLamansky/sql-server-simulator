@@ -100,6 +100,7 @@ internal sealed class ObjectPropertyEx : Expression
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
         {
             return IsBaseType(prop) ? TypeCodeVariant(system.Type, database)
+                : system.Table is { } shipped && BuiltInToken.Equals(prop, "Cardinality") ? SqlValue.FromVariant(SqlValue.FromInt64(shipped.RowGenerator(runtime.Batch, database).LongCount()))
                 : ObjectProperty.EvaluateSystemObjectProperty(system, prop) is int systemResult
                     ? SqlValue.FromVariant(SqlValue.FromInt32(systemResult))
                     : SqlValue.Null(SqlType.SqlVariant);

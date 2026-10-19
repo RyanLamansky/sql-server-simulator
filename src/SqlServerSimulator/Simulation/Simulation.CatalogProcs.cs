@@ -260,13 +260,14 @@ partial class Simulation
                 }
             }
 
-            // The catalog views list too, as views of their own schemas
-            // (probed 2026-09-26 against SQL Server 2025).
+            // The catalog views list too, as views of their own schemas, and the
+            // tables real ships beside them as tables (probed 2026-09-26 and
+            // 2026-10-19 against SQL Server 2025).
             foreach (var (view, schemaId) in BuiltInResources.SystemViews.Value)
             {
                 var schemaName = schemaId == Database.InformationSchemaId ? "INFORMATION_SCHEMA" : "sys";
                 if (OwnerMatches(schemaName))
-                    AddTableRow(rows, SqlValue.FromSystemName(schemaName), view.Name, "VIEW");
+                    AddTableRow(rows, SqlValue.FromSystemName(schemaName), view.Name, view.IsTable ? "TABLE" : "VIEW");
             }
         }
 

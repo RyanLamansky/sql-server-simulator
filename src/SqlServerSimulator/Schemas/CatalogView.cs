@@ -59,6 +59,15 @@ internal sealed class CatalogView(
     public bool EnforcesJoinOrder;
 
     /// <summary>
+    /// True for a table real ships in the <c>sys</c> schema rather than a
+    /// view — <c>sys.trace_xe_action_map</c> and
+    /// <c>sys.trace_xe_event_map</c>, type <c>U</c> with a clustered index
+    /// (probed 2026-10-19 against SQL Server 2025) — which the catalog lists
+    /// as a table while its rows are read as any catalog view's.
+    /// </summary>
+    public bool IsTable;
+
+    /// <summary>
     /// The <c>object_id</c> <c>OBJECT_ID('sys.&lt;view&gt;')</c> surfaces: real's
     /// fixed id from <see cref="CatalogViewObjectIds"/>, assigned by key once the
     /// registry is built (<c>OBJECT_ID('sys.objects')</c> is −385). A view real

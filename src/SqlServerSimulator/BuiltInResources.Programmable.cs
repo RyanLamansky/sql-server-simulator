@@ -1104,6 +1104,8 @@ internal static partial class BuiltInResources
         var msShipped = SqlValue.FromBoolean(true);
         foreach (var (view, schemaId) in SystemViews.Value)
         {
+            if (view.IsTable)
+                continue;
             yield return [
                 SqlValue.FromInt32(view.ObjectId),
                 SqlValue.FromSystemName(view.Name),

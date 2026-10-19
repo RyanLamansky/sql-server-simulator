@@ -207,10 +207,13 @@ partial class Simulation
 
     /// <summary>
     /// A table, view, synonym or catalog view a schema rowset describes, with
-    /// the columns it has and the dates its <c>sys.objects</c> row reports.
+    /// the columns it has, the dates its <c>sys.objects</c> row reports and,
+    /// for a system table, its row count.
     /// </summary>
-    private readonly struct RowsetObject(string schema, string name, string type, SchemaObject? owner, HeapTable? table, HeapColumn[] columns, DateTime createDate, DateTime modifyDate)
+    private readonly struct RowsetObject(string schema, string name, string type, SchemaObject? owner, HeapTable? table, HeapColumn[] columns, DateTime createDate, DateTime modifyDate, long? systemRows = null)
     {
+        public readonly long? SystemRows = systemRows;
+
         public readonly string Schema = schema;
         public readonly string Name = name;
         public readonly string Type = type;
@@ -254,10 +257,27 @@ partial class Simulation
                 if (Named(synonym.Name) && visible?.Invoke(synonym) != false)
                     objects.Add(new(schema.Name, synonym.Name, "SYNONYM", synonym, null, [], synonym.CreateDate, synonym.ModifyDate));
             }
+            // A system table — a system base table, or one real ships beside the
+            // catalog views — lists with its row count and none of its columns
+            // (probed 2026-10-19 against SQL Server 2025).
             foreach (var (systemView, schemaId) in BuiltInResources.SystemViews.Value)
             {
-                if (schemaId == schema.SchemaId && Named(systemView.Name))
-                    objects.Add(new(schema.Name, systemView.Name, "SYSTEM VIEW", null, null, systemView.Columns, BuiltInResources.SystemObjectDate, BuiltInResources.SystemObjectDate));
+                if (schemaId != schema.SchemaId || !Named(systemView.Name))
+                    continue;
+                objects.Add(systemView.IsTable
+                    ? new(schema.Name, systemView.Name, "SYSTEM TABLE", null, null, [], BuiltInResources.SystemObjectDate, BuiltInResources.SystemObjectDate,
+                        systemView.RowGenerator(batch, database).LongCount())
+                    : new(schema.Name, systemView.Name, "SYSTEM VIEW", null, null, systemView.Columns, BuiltInResources.SystemObjectDate, BuiltInResources.SystemObjectDate));
+            }
+            if (schema.SchemaId != Database.SysSchemaId)
+                continue;
+            foreach (var systemTable in BuiltInResources.SystemTableObjects(database))
+            {
+                if (systemTable.IsInternal || !Named(systemTable.Name) || !Parser.Expressions.ObjectProperty.SystemTableVisible(batch, database, systemTable))
+                    continue;
+                var created = systemTable.CreateDate ?? BuiltInResources.SysDatabasesCreateDate;
+                objects.Add(new(schema.Name, systemTable.Name, "SYSTEM TABLE", null, null, [], created, systemTable.ModifyDate ?? created,
+                    BuiltInResources.SystemTableCardinality(batch, database, systemTable)));
             }
         }
         objects.Sort((a, b) =>
@@ -331,7 +351,9 @@ partial class Simulation
                 row[8] = SqlValue.FromInt32(bookmark64 ? 8 : 4);
                 row[9] = SqlValue.FromInt32(0);
                 row[10] = SqlValue.FromInt64(ObjectSchemaVersion(item.ModifyDate));
-                row[11] = item.Table is { } table ? SqlValue.FromInt32((int)table.Heap.CountLiveRows()) : SqlValue.Null(SqlType.Int32);
+                row[11] = item.Table is { } table ? SqlValue.FromInt32((int)table.Heap.CountLiveRows())
+                    : item.SystemRows is { } systemRows ? SqlValue.FromInt32((int)systemRows)
+                    : SqlValue.Null(SqlType.Int32);
                 row[12] = SqlValue.Null(RowsetDescription);
                 row[13] = SqlValue.Null(SqlType.Int32);
                 if (withFlags)

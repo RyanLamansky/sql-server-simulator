@@ -52,6 +52,28 @@ internal sealed class ObjectProperty : Expression
         return result is int value ? SqlValue.FromInt32(value) : SqlValue.Null(SqlType.Int32);
     }
 
+    /// <summary>
+    /// The OBJECTPROPERTY answers for a table real ships in the <c>sys</c>
+    /// schema (<c>sys.trace_xe_action_map</c> and its event sibling), as real
+    /// gives them for a clustered table of its own: the table, index and SET
+    /// option flags on, the constraint, trigger-execution and module members
+    /// NULL, every other member off (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private static int? EvaluateShippedTableProperty(BuiltInResources.SystemObject system, ReadOnlySpan<char> name) => name switch
+    {
+        "CNSTISCLUSTKEY" or "CNSTISCOLUMN" or "CNSTISDELETECASCADE" or "CNSTISDISABLED" or "CNSTISNONCLUSTKEY" or "CNSTISNOTREPL"
+            or "CNSTISNOTTRUSTED" or "CNSTISUPDATECASCADE" or "EXECISAFTERTRIGGER" or "EXECISANSINULLSON" or "EXECISDELETETRIGGER"
+            or "EXECISFIRSTDELETETRIGGER" or "EXECISFIRSTINSERTTRIGGER" or "EXECISFIRSTUPDATETRIGGER" or "EXECISINSERTTRIGGER"
+            or "EXECISINSTEADOFTRIGGER" or "EXECISLASTDELETETRIGGER" or "EXECISLASTINSERTTRIGGER" or "EXECISLASTUPDATETRIGGER"
+            or "EXECISQUOTEDIDENTON" or "EXECISSTARTUP" or "EXECISTRIGGERDISABLED" or "EXECISTRIGGERNOTFORREPL" or "EXECISUPDATETRIGGER"
+            or "EXECISWITHNATIVECOMPILATION" or "ISDETERMINISTIC" or "ISENCRYPTED" or "ISSCHEMABOUND" or "ISSYSTEMVERIFIED"
+            or "TABLEFULLTEXTDOCSPROCESSED" or "TABLEFULLTEXTFAILCOUNT" or "TABLEFULLTEXTITEMCOUNT" or "TABLEFULLTEXTPENDINGCHANGES" => null,
+        "ISANSINULLSON" or "ISINDEXED" or "ISMSSHIPPED" or "ISQUOTEDIDENTON" or "ISTABLE" or "ISUSERTABLE" or "TABLEHASCLUSTINDEX" or "TABLEHASINDEX" => 1,
+        "OWNERID" or "SCHEMAID" => system.SchemaId,
+        _ when name.StartsWith("CNST") || name.StartsWith("EXEC") || name.StartsWith("HAS") || name.StartsWith("IS") || name.StartsWith("TABLE") => 0,
+        _ => null,
+    };
+
     /// <summary>Whether the session's principal may see <paramref name="table"/>'s metadata, which a user without permissions may not (probed 2026-10-16 against SQL Server 2025).</summary>
     internal static bool SystemTableVisible(BatchContext batch, Database database, SystemTableObject table) =>
         PermissionEnforcement.MetadataVisibilityPrincipal(batch, database) is not { } principalId
@@ -119,6 +141,8 @@ internal sealed class ObjectProperty : Expression
     {
         Span<char> upper = stackalloc char[property.Length];
         var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        if (system.Table is not null)
+            return EvaluateShippedTableProperty(system, name);
         var isView = system.Type == "V ";
         var isTableFunction = system.Type is "IF" or "TF";
         var module = system.IsModule;

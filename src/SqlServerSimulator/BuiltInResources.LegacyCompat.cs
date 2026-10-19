@@ -1020,11 +1020,15 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// One system object: a catalog view (type <c>V</c>, schema <c>sys</c> or
-    /// <c>INFORMATION_SCHEMA</c>) or a modeled system procedure (<c>P</c>, or
-    /// <c>X</c> for the extended ones).
+    /// <c>INFORMATION_SCHEMA</c>) — or the shipped table one stands for
+    /// (<c>U</c>, <paramref name="table"/>) — or a modeled system procedure
+    /// (<c>P</c>, or <c>X</c> for the extended ones).
     /// </summary>
-    internal readonly struct SystemObject(int objectId, string name, int schemaId, string type, string typeDesc)
+    internal readonly struct SystemObject(int objectId, string name, int schemaId, string type, string typeDesc, CatalogView? table = null)
     {
+        /// <summary>The catalog view reading a shipped table's rows, for a <c>U</c> object.</summary>
+        public readonly CatalogView? Table = table;
+
         public readonly int ObjectId = objectId;
         public readonly string Name = name;
         public readonly int SchemaId = schemaId;
@@ -1164,8 +1168,8 @@ internal static partial class BuiltInResources
             // 2025).
             if (view.MasterScoped)
                 continue;
-            objects.Add(IsInlineFunction(view)
-                ? new SystemObject(view.ObjectId, view.Name, schemaId, "IF", "SQL_INLINE_TABLE_VALUED_FUNCTION")
+            objects.Add(IsInlineFunction(view) ? new SystemObject(view.ObjectId, view.Name, schemaId, "IF", "SQL_INLINE_TABLE_VALUED_FUNCTION")
+                : view.IsTable ? new SystemObject(view.ObjectId, view.Name, schemaId, "U ", "USER_TABLE", view)
                 : new SystemObject(view.ObjectId, view.Name, schemaId, "V ", "VIEW"));
         }
         foreach (var (name, objectId, type) in SystemFunctions)

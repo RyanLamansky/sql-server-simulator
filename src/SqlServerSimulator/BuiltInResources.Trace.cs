@@ -91,6 +91,9 @@ internal static partial class BuiltInResources
         {
             SqlValue.FromInt16(row.ColumnId), Text(package, row.Package), Text(package, row.Name),
         }));
+
+        views["sys.trace_xe_event_map"].IsTable = true;
+        views["sys.trace_xe_action_map"].IsTable = true;
     }
 
     /// <summary>

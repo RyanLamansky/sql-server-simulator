@@ -7,6 +7,7 @@ The default trace's own row and its empty file live in [`catalog-views.md`](cata
 ## The catalog
 
 `sys.trace_categories`, `sys.trace_columns`, `sys.trace_events`, `sys.trace_subclass_values`, `sys.trace_event_bindings`, `sys.trace_xe_event_map` and `sys.trace_xe_action_map` list real's rows in real's order: 21 categories, 66 columns, 180 events, 6,279 subclass values, 4,316 bindings, 139 event mappings and 22 action mappings.
+The two maps are tables to real rather than views — type `U` in `sys`, a clustered table to `OBJECTPROPERTY`, a `TABLE` to `sp_tables` and a `SYSTEM TABLE` to the OLE DB rowsets, absent from `sys.all_views` — which the catalog lists as such while their rows read as a catalog view's (`CatalogView.IsTable`; probed 2026-10-19 against SQL Server 2025).
 The rows live as tab-separated text under `src/SqlServerSimulator/Trace/Metadata/`, one file per view, zipped into the assembly like the Extended Events catalog (`ZipTraceMetadata`), and `TraceCatalog` reads them once per process.
 `DefaultTraceEvents.tsv` beside them is the default trace's own event set, what `fn_trace_geteventinfo(1)` lists.
 Real types the two `_map` views as tables in `sys`; here they register as views.
