@@ -424,7 +424,8 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// </para>
     /// </remarks>
     public override string GetDataTypeName(int ordinal) =>
-        CurrentSchema[ordinal] is var type && type is SystemNameSqlType ? "nvarchar" : type.SqlServerName;
+        CurrentSchema[ordinal] is var type && type is SystemNameSqlType ? "nvarchar"
+        : ResultSchemaTable.ClrTypeName(type, this.connection?.CurrentDatabase.Name ?? string.Empty) ?? type.SqlServerName;
 
     /// <summary>
     /// Mirrors SqlClient's polymorphic <c>GetDateTime</c>: a <c>date</c> column

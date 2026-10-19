@@ -159,7 +159,8 @@ Two of the simulator's own type names never reach a SqlClient consumer as writte
 - **`sysname` reads `nvarchar`.** It is an alias for `nvarchar(128)` and TDS carries the base type, so every producer of one reports `nvarchar` on real: a `sysname` column, the catalog views' `name` columns, the `TYPE_NAME` / `SCHEMA_NAME` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` / `DB_NAME` / `USER_NAME` / `SUSER_NAME` / `SUSER_SNAME` / `COL_NAME` / `FILE_NAME` / `FILEGROUP_NAME` / `INDEX_COL` family, `CURRENT_USER` / `SESSION_USER` / `SYSTEM_USER` / `USER`, `CAST(… AS sysname)` and a `sysname` variable.
   `sysname` likewise carries the **national** string family into a promotion the way `nvarchar` does, so `TYPE_NAME(56) + ''` types as `nvarchar(129)` rather than falling to `varchar` (`SqlType.Promote`'s two `national` predicates).
 
-Everything else in the type matrix already matched: the whole numeric / character / binary / date-time family, `xml`, `sql_variant`, `hierarchyid`, `rowversion` (reported `timestamp`), and an alias type, which reports its base type's name on both.
+Everything else in the type matrix already matched: the whole numeric / character / binary / date-time family, `xml`, `sql_variant`, `rowversion` (reported `timestamp`), and an alias type, which reports its base type's name on both.
+A CLR type — `hierarchyid`, the spatial pair, a user's — answers `GetDataTypeName` with SqlClient's three-part name (`simulated.sys.hierarchyid`, `simulated.dbo.Point`), and the spatial pair reads as a long column in the schema table, `ColumnSize` 2147483647 and `IsLong` (probed 2026-10-19 against SQL Server 2025); `GetFieldType` answers the type's stored form, where SqlClient answers the CLR type only when the host can load its assembly.
 
 ## `GetSchemaTable` answers SqlClient's table
 

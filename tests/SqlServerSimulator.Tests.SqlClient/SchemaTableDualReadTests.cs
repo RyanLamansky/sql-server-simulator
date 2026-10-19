@@ -24,7 +24,7 @@ public sealed class SchemaTableDualReadTests
             create table stt (id int identity primary key, ti tinyint not null, si smallint, bi bigint, bt bit, d decimal(10,2), n numeric(5,0),
                 f float, r real, m money, sm smallmoney, dt datetime, sdt smalldatetime, dd date, t time(3), dt2 datetime2(4), dto datetimeoffset,
                 c char(5), vc varchar(10), vcm varchar(max), nc nchar(4), nvc nvarchar(20) not null, nvm nvarchar(max), b binary(3), vb varbinary(7),
-                vbm varbinary(max), g uniqueidentifier, x xml, sv sql_variant, rv rowversion, tx text, ntx ntext, img image, comp as (ti + 1), h hierarchyid);
+                vbm varbinary(max), g uniqueidentifier, x xml, sv sql_variant, rv rowversion, tx text, ntx ntext, img image, comp as (ti + 1), h hierarchyid, geo geography, gm geometry);
             create table w1 (id int identity primary key, name varchar(10), amt int, rv rowversion);
             insert w1 (name, amt) values ('a', 1);
             create table cst (k int primary key, sp int sparse null, cset xml column_set for all_sparse_columns)

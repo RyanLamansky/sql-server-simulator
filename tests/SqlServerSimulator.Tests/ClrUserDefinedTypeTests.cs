@@ -305,7 +305,7 @@ public class ClrUserDefinedTypeTests
         {
             IsTrue(reader.Read());
             AreEqual("800000018000000200", Hex(reader.GetValue(0)));
-            AreEqual("Point", reader.GetDataTypeName(0));
+            AreEqual("simulated.dbo.Point", reader.GetDataTypeName(0));
         }
 
         using var help = sim.ExecuteReader("exec sp_help 'Point'");

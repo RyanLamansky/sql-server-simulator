@@ -130,6 +130,14 @@ internal static class ResultSchemaTable
     // What SqlClient reports per type: the size it reads from TYPE_INFO
     // (characters for a national string), the precision and scale where the
     // type has them (255 where it doesn't), and its CLR and SqlTypes types.
+    /// <summary>
+    /// What SqlClient's <c>GetDataTypeName</c> answers for a CLR type —
+    /// <c>hierarchyid</c>, the spatial pair or a user's — the name the schema
+    /// table gives it (<c>db.sys.hierarchyid</c>); null for any other type.
+    /// </summary>
+    internal static string? ClrTypeName(SqlType type, string databaseName) =>
+        type is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType ? Describe(type, databaseName).Name : null;
+
     private static TypeInfo Describe(SqlType type, string databaseName) => type switch
     {
         TinyIntSqlType => new(1, 3, 255, typeof(byte), SqlDbType.TinyInt, typeof(SqlByte), "tinyint"),
@@ -167,7 +175,9 @@ internal static class ResultSchemaTable
         VectorSqlType => new(int.MaxValue, 255, 255, typeof(string), SqlDbType.VarChar, typeof(SqlString), "vector", isLong: true),
         JsonSqlType => new(int.MaxValue, 255, 255, typeof(string), SqlDbType.VarChar, typeof(SqlString), "json", isLong: true),
         HierarchyIdSqlType => new(892, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.hierarchyid", udtName: Network.TdsTypeCodec.HierarchyIdAssemblyQualifiedName),
-        SpatialSqlType spatial => new(-1, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.{spatial.SqlServerName}", udtName: Network.TdsTypeCodec.SpatialAssemblyQualifiedName(spatial)),
+        // An unlimited CLR type reads as SqlClient's long column (probed
+        // 2026-10-19 against SQL Server 2025: 2147483647, IsLong).
+        SpatialSqlType spatial => new(int.MaxValue, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.{spatial.SqlServerName}", isLong: true, udtName: Network.TdsTypeCodec.SpatialAssemblyQualifiedName(spatial)),
         ClrUdtSqlType udt => new(udt.Udt.MaxByteSize, 255, 255, null, SqlDbType.Udt, null, udt.Udt.QualifiedName, udtName: udt.Udt.AssemblyQualifiedName),
         _ => new(-1, 255, 255, type.ClrType, SqlDbType.Variant, null, type.SqlServerName),
     };
