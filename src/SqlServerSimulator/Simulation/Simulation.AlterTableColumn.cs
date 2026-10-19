@@ -232,7 +232,7 @@ partial class Simulation
             var visibleColumns = new List<HeapColumn?>(table.Columns.Length + heapColumns.Count);
             visibleColumns.AddRange(table.Columns);
             visibleColumns.AddRange(heapColumns);
-            BindCheckConstraints(context.Batch, visibleColumns, pendingChecks);
+            BindCheckConstraints(context.Batch, visibleColumns, pendingChecks, table.Name);
             RejectChecksOverNonPersistedComputedColumns(collation, table.Name, visibleColumns, pendingChecks);
         }
 

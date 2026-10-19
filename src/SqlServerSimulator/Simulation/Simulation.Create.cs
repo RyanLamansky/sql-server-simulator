@@ -350,7 +350,7 @@ partial class Simulation
         // A CHECK predicate — inline or table-level — may not read a
         // non-persisted computed column (Msg 1764). Runs ahead of the Msg 8141
         // walk below, matching real's probed precedence.
-        BindCheckConstraints(context.Batch, heapColumns, pendingChecks);
+        BindCheckConstraints(context.Batch, heapColumns, pendingChecks, tableName.Leaf);
         RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, tableName.Leaf, heapColumns, pendingChecks);
 
         // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
@@ -3601,14 +3601,63 @@ partial class Simulation
     internal static void BindCheckConstraints(
         BatchContext batch,
         List<HeapColumn?> columns,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks)
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
+        string? tableName = null)
     {
+        List<SimulatedSqlException>? nameErrors = null;
+        foreach (var pending in pendingChecks)
+            CollectCheckNameErrors(batch, columns, pending.Predicate, tableName, ref nameErrors);
+        ThrowCheckNameErrors(nameErrors);
         foreach (var pending in pendingChecks)
             BindCheckConstraint(batch, columns, pending.Predicate);
     }
 
-    internal static void BindCheckConstraint(BatchContext batch, IReadOnlyList<HeapColumn?> columns, BooleanExpression predicate)
+    /// <summary>
+    /// Every name the checks read that their table can't answer, in source
+    /// order and once per occurrence, across all of a statement's checks: a
+    /// leaf no column carries is Msg 207, a qualifier other than the table's
+    /// name Msg 4104 on the whole name (probed 2026-10-19 against SQL Server
+    /// 2025: <c>CHECK (x1 + x1 &gt; 0)</c> is two Msg 207s).
+    /// </summary>
+    private static void CollectCheckNameErrors(BatchContext batch, IReadOnlyList<HeapColumn?> columns, BooleanExpression predicate, string? tableName, ref List<SimulatedSqlException>? errors)
     {
+        var state = (Batch: batch, Columns: columns, Table: tableName, Errors: errors);
+        predicate.Walk(ref state, static (_, shape, ref state) =>
+        {
+            if (shape.Column is not { } name)
+                return true;
+            var collation = state.Batch.CurrentDatabase.Collation;
+            if (name.ImmediateQualifier is { } qualifier && state.Table is { } table && !collation.Equals(qualifier, table))
+            {
+                (state.Errors ??= []).Add(SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString()));
+                return true;
+            }
+            foreach (var column in state.Columns)
+            {
+                if (column is not null && collation.Equals(column.Name, name.Leaf))
+                    return true;
+            }
+            (state.Errors ??= []).Add(SimulatedSqlException.InvalidColumnName(name.Leaf));
+            return true;
+        });
+        errors = state.Errors;
+    }
+
+    private static void ThrowCheckNameErrors(List<SimulatedSqlException>? errors)
+    {
+        if (errors is null)
+            return;
+        var report = errors.Count == 1 ? errors[0] : SimulatedSqlException.Aggregate(errors);
+        report.CatchReadsFirstEntry = true;
+        throw report;
+    }
+
+    internal static void BindCheckConstraint(BatchContext batch, IReadOnlyList<HeapColumn?> columns, BooleanExpression predicate, string? tableName = null)
+    {
+        List<SimulatedSqlException>? nameErrors = null;
+        CollectCheckNameErrors(batch, columns, predicate, tableName, ref nameErrors);
+        ThrowCheckNameErrors(nameErrors);
+
         SqlType ResolveColumnType(MultiPartName name)
         {
             foreach (var column in columns)

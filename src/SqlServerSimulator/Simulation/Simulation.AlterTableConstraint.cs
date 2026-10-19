@@ -356,7 +356,7 @@ partial class Simulation
             // a table the batch creates waits for its statement (probed
             // 2026-10-19 against SQL Server 2025).
             if (bindsWhileCompiling && context.Batch.TryResolveTable(tableName, out var compiled))
-                BindCheckConstraint(context.Batch, compiled.Columns, predicate);
+                BindCheckConstraint(context.Batch, compiled.Columns, predicate, compiled.Name);
             return true;
         }
         if (!context.Batch.TryResolveTable(tableName, out var table))
@@ -364,7 +364,7 @@ partial class Simulation
         AssertConstraintNameUnique(table, explicitName);
         // A CHECK may not read a non-persisted computed column — Msg 1764,
         // raised whether or not WITH NOCHECK skipped the data validation.
-        BindCheckConstraint(context.Batch, table.Columns, predicate);
+        BindCheckConstraint(context.Batch, table.Columns, predicate, table.Name);
         RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
         var column = SingleCheckedColumn(context.Batch.CurrentDatabase.Collation, predicate);
         var name = explicitName ?? AutoCheckName(table.Name, column, table.CheckConstraints.Count);

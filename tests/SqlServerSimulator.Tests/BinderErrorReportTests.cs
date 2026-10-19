@@ -214,6 +214,19 @@ public sealed partial class BinderErrorReportTests
     public void ClauseOrderAndRepeatedColumns_ReportAfterTheNames(string statement, string expected)
         => AreEqual(expected, Report(statement));
 
+    /// <summary>
+    /// A CHECK reports every name its table can't answer, once per occurrence
+    /// and across all of a CREATE TABLE's checks, a foreign qualifier as Msg
+    /// 4104 (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add constraint ck check (x1 > 0 and a > 0 and x2 < 1)", "207:1:x1 207:1:x2")]
+    [DataRow("alter table t add constraint ck check (x1 + x1 > 0)", "207:1:x1 207:1:x1")]
+    [DataRow("alter table t add constraint ck check (t.x1 > 0 and zz.a > 0)", "207:1:x1 4104:1:zz.a")]
+    [DataRow("create table w (p int check (x1 > 0), q int, constraint c2 check (x2 > q))", "207:1:x1 207:1:x2")]
+    public void CheckConstraint_ReportsEveryName(string statement, string expected)
+        => AreEqual(expected, Report(statement));
+
     /// <summary>An explicit value for a rowversion column reports with a ragged VALUES list's refusal.</summary>
     [TestMethod]
     public void ExplicitTimestamp_ReportsWithRaggedValues()
