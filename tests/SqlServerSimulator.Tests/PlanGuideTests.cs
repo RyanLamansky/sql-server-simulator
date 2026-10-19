@@ -354,6 +354,20 @@ public sealed class PlanGuideTests
         AreEqual(1, simulation.ExecuteScalar("grant view definition to u; execute as user = 'u'; select count(*) from sys.plan_guides"));
     }
 
+    /// <summary>
+    /// An <c>OBJECT</c> guide may be controlled with <c>ALTER</c> on its module
+    /// alone (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ObjectPlanGuide_IsControlledWithAlterOnItsModule()
+    {
+        var simulation = WithTable();
+        _ = simulation.ExecuteNonQuery("exec sp_create_plan_guide N'g', N'select * from t where a = 1 option (maxdop 2)', N'OBJECT', N'dbo.p', NULL, N'OPTION (MAXDOP 1)'; create user u without login; grant alter on dbo.p to u");
+        _ = simulation.ExecuteNonQuery("execute as user = 'u'; exec sp_control_plan_guide N'DISABLE', N'g'");
+        IsTrue((bool)simulation.ExecuteScalar("select is_disabled from sys.plan_guides")!);
+        _ = simulation.AssertSqlError("revoke alter on dbo.p to u; execute as user = 'u'; exec sp_control_plan_guide N'ENABLE', N'g'", 10518);
+    }
+
     [TestMethod]
     public void PlanGuideProcedures_ListAmongTheSystemObjects()
         => AreEqual("fn_validate_plan_guide:IF|sp_control_plan_guide:P |sp_create_plan_guide:P |sp_get_query_template:X ", new Simulation().ExecuteScalar("""

@@ -556,4 +556,56 @@ public sealed class AgentProcedureTests
     [TestMethod]
     public void UpdateSchedule_MissingName_IsTheVerifiersScheduleName()
         => new Simulation().AssertSqlError("exec msdb.dbo.sp_update_schedule @name = N'none', @enabled = 0", 14262, "The specified @schedule_name ('none') does not exist.");
+
+    /// <summary>
+    /// The reports' columns and the rows their filters keep, as SQL Server
+    /// 2025's read for one job with two steps, a schedule and its server and
+    /// no history (probed 2026-10-18).
+    /// </summary>
+    [TestMethod]
+    [DataRow("sp_help_jobhistory @job_name = N'j'", 0,
+        "job_id|job_name|run_status|run_date|run_time|run_duration|operator_emailed|operator_netsent|operator_paged|retries_attempted|server")]
+    [DataRow("sp_help_jobhistory @job_name = N'j', @mode = N'FULL'", 0,
+        "instance_id|job_id|job_name|step_id|step_name|sql_message_id|sql_severity|message|run_status|run_date|run_time|run_duration|operator_emailed|operator_netsent|operator_paged|retries_attempted|server")]
+    [DataRow("sp_help_jobactivity @job_name = N'j'", 0,
+        "session_id|job_id|job_name|run_requested_date|run_requested_source|queued_date|start_execution_date|last_executed_step_id|last_executed_step_date|stop_execution_date|next_scheduled_run_date|job_history_id|message|run_status|operator_id_emailed|operator_id_netsent|operator_id_paged")]
+    [DataRow("sp_help_jobstep @job_name = N'j', @step_id = 2", 1,
+        "step_id|step_name|subsystem|command|flags|cmdexec_success_code|on_success_action|on_success_step_id|on_fail_action|on_fail_step_id|server|database_name|database_user_name|retry_attempts|retry_interval|os_run_priority|output_file_name|last_run_outcome|last_run_duration|last_run_retries|last_run_date|last_run_time|proxy_id")]
+    [DataRow("sp_help_jobschedule @job_name = N'j'", 1,
+        "schedule_id|schedule_name|enabled|freq_type|freq_interval|freq_subday_type|freq_subday_interval|freq_relative_interval|freq_recurrence_factor|active_start_date|active_end_date|active_start_time|active_end_time|date_created|schedule_description|next_run_date|next_run_time|schedule_uid|job_count")]
+    [DataRow("sp_help_jobserver @job_name = N'j'", 1, "server_id|server_name|enlist_date|last_poll_date")]
+    [DataRow("sp_help_job @enabled = 1, @subsystem = N'CmdExec', @category_name = N'[Uncategorized (Local)]'", 1, null)]
+    [DataRow("sp_help_job @execution_status = 4", 0, null)]
+    [DataRow("sp_help_job @owner_login_name = N'sa'", 1, null)]
+    public void HelpReports_ReadTheJobAsReal(string call, int rows, string? columns)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            use msdb;
+            exec sp_add_job @job_name = N'j';
+            exec sp_add_jobstep @job_name = N'j', @step_name = N's1', @command = N'select 1';
+            exec sp_add_jobstep @job_name = N'j', @step_name = N's2', @subsystem = N'CmdExec', @command = N'echo';
+            exec sp_add_schedule @schedule_name = N's', @freq_type = 4, @freq_interval = 1;
+            exec sp_attach_schedule @job_name = N'j', @schedule_name = N's';
+            exec sp_add_jobserver @job_name = N'j'
+            """);
+        using var reader = simulation.ExecuteReader($"exec msdb.dbo.{call}");
+        if (columns is not null)
+            AreEqual(columns, string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName)));
+        HasCount(rows, reader.EnumerateRecords().ToList());
+    }
+
+    [TestMethod]
+    public void HelpOperator_ReadsTheOperatorAsReal()
+        => AreEqual("op|1|a@b.c|0|0||0|0|90000|180000|90000|180000|90000|180000|0||0|0|[Uncategorized]", new Simulation().ExecuteScalar("""
+            exec msdb.dbo.sp_add_operator @name = N'op', @email_address = N'a@b.c';
+            create table #o (id int, name nvarchar(128), enabled tinyint, email_address nvarchar(100), last_email_date int, last_email_time int,
+                pager_address nvarchar(100), last_pager_date int, last_pager_time int, weekday_pager_start_time int, weekday_pager_end_time int,
+                saturday_pager_start_time int, saturday_pager_end_time int, sunday_pager_start_time int, sunday_pager_end_time int, pager_days tinyint,
+                netsend_address nvarchar(100), last_netsend_date int, last_netsend_time int, category_name nvarchar(128));
+            insert #o exec msdb.dbo.sp_help_operator @operator_name = N'op';
+            select concat_ws('|', name, enabled, email_address, last_email_date, last_email_time, isnull(pager_address, ''), last_pager_date, last_pager_time,
+                weekday_pager_start_time, weekday_pager_end_time, saturday_pager_start_time, saturday_pager_end_time, sunday_pager_start_time, sunday_pager_end_time,
+                pager_days, isnull(netsend_address, ''), last_netsend_date, last_netsend_time, category_name) from #o
+            """));
 }

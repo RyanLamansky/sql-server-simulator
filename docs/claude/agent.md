@@ -14,7 +14,7 @@ Which calls notify is real's own rule, not the obvious one:
 - operators and categories never notify.
 
 `sp_start_job` and `sp_stop_job` run their checks and then reach the service, whose Msg 22022 arrives at severity 16 — sent to the client past any `TRY`, the batch going on and the procedure answering 1 even inside one.
-The Agent never starting is the modeled state, so `sysjobhistory`, `sysjobactivity` and `syssessions` stay empty and `sp_help_job` reports every job idle (`current_execution_status` 4), never run (`last_run_outcome` 5) and unscheduled.
+The Agent never starting is the modeled state, so `sysjobhistory`, `sysjobactivity` and `syssessions` stay empty and `sp_help_job` reports every job idle (`current_execution_status` 4), never run (`last_run_outcome` 5) and unscheduled, though an `@execution_status` filter lists none of them, idle included (probed 2026-10-19 against SQL Server 2025).
 
 ## Dispatch, errors and return codes
 

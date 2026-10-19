@@ -157,7 +157,10 @@ partial class Simulation
             conditions.Add("enabled = @enabled");
             parameters.Add(("enabled", call.Values[7]));
         }
-        if (call.Int(8) is { } status and not 4)
+        // Real's filter asks the stopped service which jobs are in that
+        // state, which answers none, idle included (probed 2026-10-19
+        // against SQL Server 2025).
+        if (!call.IsNull(8))
             conditions.Add("1 = 0");
         var comparator = call.Text(9)?.Trim() is { Length: 1 } written && written is "<" or ">" ? written : "=";
         if (!call.IsNull(10))
