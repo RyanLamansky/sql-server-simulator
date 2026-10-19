@@ -60,6 +60,69 @@ public sealed class DeferredCompileRefusalTests
         AreEqual(number, error.Number);
     }
 
+    /// <summary>
+    /// An added constraint real refuses from the table's definition alone — a
+    /// second primary key, a second default, a key over a nullable column —
+    /// ends the batch past its TRY, while through EXEC the TRY catches it; a
+    /// data-dependent refusal stays catchable (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add constraint pk2 primary key (v)", 1779)]
+    [DataRow("alter table t add constraint t primary key (v)", 1779)]
+    [DataRow("alter table t add constraint df2 default 8 for v", 1781)]
+    [DataRow("alter table u add constraint pku primary key (id)", 8111)]
+    public void DefinitionRefusedConstraint_EndsTheBatchPastTheTry(string statement, int number)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int not null primary key, v int null constraint df default 9); create table u (id int)");
+        var (rows, error) = Run(simulation, $"select 'first';\nbegin try {statement}; end try begin catch select 'caught' end catch;\nselect 'after'");
+        CollectionAssert.AreEqual(new object[] { "first" }, rows);
+        AreEqual(number, error.Number);
+        AreEqual(1750, error.Errors[^1].Number);
+    }
+
+    [TestMethod]
+    [DataRow("begin try exec('alter table t add constraint df2 default 8 for v'); end try begin catch select 'caught', error_number() end catch", "caught")]
+    [DataRow("begin try alter table t add constraint uq unique (v); end try begin catch select 'caught', error_number() end catch", "caught")]
+    public void CalledOrDataDependentConstraintRefusal_IsCaught(string sql, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int not null primary key, v int null constraint df default 9); insert t values (1, 1), (2, 1)");
+        AreEqual(expected, simulation.ExecuteScalar(sql));
+    }
+
+    /// <summary>
+    /// An added CHECK binds as the batch compiles against the table as it stands
+    /// then, so nothing ahead of it runs — a column an earlier statement adds
+    /// included — and a second PRIMARY KEY in a CREATE TABLE refuses the batch
+    /// the same way (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 'first'; alter table t add w int; alter table t add constraint ck check (w > 0); select 'after'", 207)]
+    [DataRow("select 'first'; if 1 = 0 alter table t add constraint ck check (nosuch > 0); select 'after'", 207)]
+    [DataRow("select 'first'; begin try create table x (a int primary key, b int primary key); end try begin catch select 'caught' end catch;", 8110)]
+    public void CompileTimeDdlRefusal_RunsNothing(string sql, int number)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int not null primary key, v int null)");
+        var (rows, error) = Run(simulation, sql);
+        IsEmpty(rows);
+        AreEqual(number, error.Number);
+    }
+
+    /// <summary>A failing ALTER COLUMN rewrite a TRY catches leaves no row count (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void CaughtAlterColumnRewrite_SendsNoCount()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int not null primary key, s varchar(10)); insert t values (1, 'abc')");
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand("begin try alter table t alter column s varchar(1); end try begin catch select 1 end catch");
+        using var reader = command.ExecuteReader();
+        AreEqual(-1, reader.RecordsAffected);
+    }
+
     [TestMethod]
     [DataRow("select 'first';\ndelete top (-1) from e")]
     [DataRow("select 'first';\ncreate table t (a int);\ninsert top (-1) into t values (1)")]

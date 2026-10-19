@@ -385,6 +385,11 @@ partial class Simulation
         if (systemVersioning is { On: false })
             systemVersioning = null;
 
+        // A second primary key refuses the batch as it compiles (probed
+        // 2026-10-19 against SQL Server 2025: nothing ahead of it runs).
+        if (pendingKeys.FindAll(static key => key.Kind == KeyConstraintKind.PrimaryKey).Count > 1)
+            throw SimulatedSqlException.MultiplePrimaryKey(tableName.Leaf);
+
         // In a skipped IF branch, gate both the existence check (Msg 2714)
         // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
         // TABLE foo (...)`) relies on the un-taken CREATE not surfacing

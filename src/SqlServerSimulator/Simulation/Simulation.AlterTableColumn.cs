@@ -1276,7 +1276,7 @@ partial class Simulation
 
         // The rewrite writes every row, so an error it ends with is followed
         // by Msg 3621 as a DML statement's is.
-        context.Batch.CurrentStatement.WritesRows = true;
+        context.Batch.CurrentStatement.WritesRows = context.Batch.CurrentStatement.RewritesTable = true;
         try
         {
             RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns, context.Batch);
@@ -1890,7 +1890,7 @@ partial class Simulation
 
         // Every row is rewritten, so an error evaluating one is followed by
         // Msg 3621 as a DML statement's is.
-        context.Batch.CurrentStatement.WritesRows = true;
+        context.Batch.CurrentStatement.WritesRows = context.Batch.CurrentStatement.RewritesTable = true;
         try
         {
             var oldHeap = table.Heap;

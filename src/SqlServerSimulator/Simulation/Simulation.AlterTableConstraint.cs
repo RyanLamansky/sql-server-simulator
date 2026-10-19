@@ -112,7 +112,21 @@ partial class Simulation
         if ((items > 1 || columns is not null) && context.OnlineIndexBuildsParsed > onlineBefore)
             throw SimulatedSqlException.OnlineConstraintNotAlone();
         if (batch.IsSkipping)
+        {
+            // A CHECK binds as the batch compiles, against the table as it
+            // stands then, unless the list adds the columns it may read.
+            if (columns is null)
+            {
+                var resume = context.SaveCheckpoint();
+                foreach (var start in constraintStarts)
+                {
+                    context.RestoreCheckpoint(start);
+                    _ = ParseOneAddedConstraint(context, tableName, withNoCheck, bindsWhileCompiling: true);
+                }
+                context.RestoreCheckpoint(resume);
+            }
             return true;
+        }
 
         var end = context.SaveCheckpoint();
         var undo = AlterTableAddUndo.Capture(context, tableName);
@@ -176,7 +190,7 @@ partial class Simulation
     /// <summary>
     /// Parses one constraint element of an <c>ALTER TABLE … ADD</c> list.
     /// </summary>
-    private static bool ParseOneAddedConstraint(ParserContext context, MultiPartName tableName, bool withNoCheck)
+    private static bool ParseOneAddedConstraint(ParserContext context, MultiPartName tableName, bool withNoCheck, bool bindsWhileCompiling = false)
     {
         // Optional explicit CONSTRAINT name.
         string? explicitName = null;
@@ -198,7 +212,7 @@ partial class Simulation
 
         return context.Token switch
         {
-            ReservedKeyword { Keyword: Keyword.Check } => ParseAddCheckConstraint(context, tableName, explicitName, withNoCheck),
+            ReservedKeyword { Keyword: Keyword.Check } => ParseAddCheckConstraint(context, tableName, explicitName, withNoCheck, bindsWhileCompiling),
             ReservedKeyword { Keyword: Keyword.Foreign } => ParseAddForeignKeyConstraint(context, tableName, explicitName, withNoCheck),
             ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } => ParseAddKeyConstraint(context, tableName, explicitName),
             ReservedKeyword { Keyword: Keyword.Default } => ParseAddDefaultConstraint(context, tableName, explicitName),
@@ -307,7 +321,7 @@ partial class Simulation
     /// Parses a CHECK clause inline and applies it. <c>WITH NOCHECK</c>
     /// bypasses existing-row validation.
     /// </summary>
-    private static bool ParseAddCheckConstraint(ParserContext context, MultiPartName tableName, string? explicitName, bool withNoCheck)
+    private static bool ParseAddCheckConstraint(ParserContext context, MultiPartName tableName, string? explicitName, bool withNoCheck, bool bindsWhileCompiling)
     {
         // Inline equivalent of ParseInlineCheckPredicate without the trailing
         // MoveNextRequired — ADD CHECK at end-of-batch has no follow-on
@@ -335,7 +349,16 @@ partial class Simulation
         context.MoveNextOptional();
 
         if (context.Batch.IsSkipping)
+        {
+            // The predicate binds as the batch compiles, against the table as
+            // it stands then — a column an earlier statement of the batch adds
+            // is Msg 207, an un-taken branch's check included — while one over
+            // a table the batch creates waits for its statement (probed
+            // 2026-10-19 against SQL Server 2025).
+            if (bindsWhileCompiling && context.Batch.TryResolveTable(tableName, out var compiled))
+                BindCheckConstraint(context.Batch, compiled.Columns, predicate);
             return true;
+        }
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         AssertConstraintNameUnique(table, explicitName);
@@ -498,7 +521,6 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        AssertConstraintNameUnique(table, explicitName);
 
         // Resolve column names → full ordinals; UQ/PK column missing → Msg 1911.
         var fullOrdinals = new int[columnNames.Count];
@@ -533,6 +555,10 @@ partial class Simulation
                     throw SimulatedSqlException.PrimaryKeyOnNullableColumn(table.Name);
             }
         }
+
+        // A second primary key is refused ahead of its name's collision
+        // (probed 2026-10-19 against SQL Server 2025).
+        AssertConstraintNameUnique(table, explicitName);
 
         var name = explicitName ?? AutoConstraintName(table.Name, kind, fullOrdinals, table.Columns);
         var storageOrdinals = new int[fullOrdinals.Length];

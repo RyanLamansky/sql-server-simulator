@@ -277,6 +277,14 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
+    /// Set beside <see cref="WritesRows"/> by the rewrite <c>ALTER TABLE …
+    /// ALTER COLUMN</c> runs, which counts no rows: one a <c>TRY</c> catches
+    /// leaves the statement's DONE without a count (probed 2026-10-19 against
+    /// SQL Server 2025).
+    /// </summary>
+    public bool RewritesTable;
+
+    /// <summary>
     /// Set by <c>WRITETEXT</c> and <c>UPDATETEXT</c> once they reach their
     /// pointer's value: an error after that — the value, an offset, the copy
     /// form's source, the bulk form's data — aborts as under
@@ -584,6 +592,7 @@ internal sealed class StatementContext
         this.NullEliminated = false;
         this.OwesOverflowNotice = this.OwesDivideByZeroNotice = false;
         this.WritesRows = false;
+        this.RewritesTable = false;
         this.WritesText = false;
         this.ClientOutputShape = null;
         this.SentWrittenRows = false;

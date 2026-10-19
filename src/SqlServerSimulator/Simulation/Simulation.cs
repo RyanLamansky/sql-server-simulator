@@ -2996,12 +2996,13 @@ public sealed partial class Simulation
     /// <c>INSERT</c> whose trigger's <c>UPDATE</c> failed reports two.
     /// A statement whose <c>OUTPUT</c> clause returns rows reports through the
     /// empty result set instead. Null for any other statement, a
-    /// <c>WRITETEXT</c> or <c>UPDATETEXT</c> among them, which count nothing.
+    /// <c>WRITETEXT</c>, <c>UPDATETEXT</c> or an <c>ALTER COLUMN</c>'s rewrite
+    /// among them, which count nothing.
     /// </summary>
     private static SimulatedStatementOutcome? CaughtWriteCount(BatchContext batch)
     {
         var statement = batch.CurrentStatement;
-        if (!statement.WritesRows || statement.WritesText || statement.SentWrittenRows)
+        if (!statement.WritesRows || statement.WritesText || statement.RewritesTable || statement.SentWrittenRows)
             return null;
         SimulatedStatementOutcome count = statement.ClientOutputShape is var (schema, names)
             ? new SimulatedSqlResultSet(schema, names, Array.Empty<byte[]>(), 0) { EndedByError = true, ErrorCaught = true }
@@ -3339,14 +3340,17 @@ public sealed partial class Simulation
     /// <c>TOP</c>'s written constant, a nested <c>NEXT VALUE FOR</c> (probed
     /// 2026-10-06), and an <c>INSERT … SELECT *</c>'s count against its column
     /// list, Msg 120 / 121 (probed 2026-10-09), and a write naming an identity,
-    /// rowversion or computed column, Msg 8102 / 271 / 272 / 273 (probed
-    /// 2026-10-19). An error not listed keeps a
+    /// rowversion or computed column, Msg 8102 / 271 / 272 / 273, and an added
+    /// constraint real refuses from the table's definition alone — a second
+    /// primary key, a second default, a key over a nullable column, Msg 1779 /
+    /// 1781 / 8111 with their Msg 1750 (probed 2026-10-19). An error not listed
+    /// keeps a
     /// run-time error's handling.
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 271 or 272 or 273 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8102 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 1779 or 1781 or 8102 or 8111 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709
             // A table hint's index and granularity refusals (probed 2026-10-16
             // against SQL Server 2025).
             || ex.Number is 307 or 308 or 309 or 315 or 316 or 362 or 363 or 365 or 651

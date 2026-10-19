@@ -955,10 +955,12 @@ partial class Simulation
             {
                 // A procedure's, dynamic SQL's, trigger's or called
                 // function's batch is as far as a batch-aborting
-                // name-resolution error reaches, so a TRY around the call
-                // or the firing statement catches it (probed 2026-10-01
-                // against SQL Server 2025 for a trigger).
-                if ((batch.ProcFrame is not null || batch.TriggerFrame is not null || batch.CalledFunctionBody) && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex)) && !ex.EndedCalledBatch)
+                // name-resolution error — or any error real raises compiling
+                // a statement — reaches, so a TRY around the call or the
+                // firing statement catches it (probed 2026-10-01 against SQL
+                // Server 2025 for a trigger, 2026-10-19 for an added
+                // constraint's Msg 1781 through EXEC).
+                if ((batch.ProcFrame is not null || batch.TriggerFrame is not null || batch.CalledFunctionBody) && IsDeferredCompileError(ex) && !ex.EndedCalledBatch)
                 {
                     ex.EndedCalledBatch = true;
                     ex.EndedCalledBatchIn = batch;
