@@ -37,7 +37,7 @@ These two land through the BACPAC loader (AW's `[SqlDatabaseDdlTrigger].[ddlData
 
 **Level 0** may also be `USER` (class 4 DATABASE_PRINCIPAL, a database user — never a built-in principal or a role, and never with a level 1 beneath it).
 
-**Level 1** under a schema: `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `SEQUENCE` / `SYNONYM` / `RULE` / `DEFAULT` (class 1), `TYPE` (class 6 TYPE, major_id = `user_type_id`, alias and table types alike), and `XML SCHEMA COLLECTION` (class 10, major_id = `xml_collection_id`).
+**Level 1** under a schema: `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `SEQUENCE` / `SYNONYM` / `RULE` / `DEFAULT` / `QUEUE` (class 1; a queue takes no level 2, Msg 15600 state 12, probed 2026-10-19 against SQL Server 2025), `TYPE` (class 6 TYPE, major_id = `user_type_id`, alias and table types alike), and `XML SCHEMA COLLECTION` (class 10, major_id = `xml_collection_id`).
 
 **Level 2:** `COLUMN` of a table, view or table-valued function (class 1) or of a table type (class 8 TYPE_COLUMN); `PARAMETER` of a procedure or function (class 2, minor_id = `parameter_id`); a table's `CONSTRAINT` (class 1, the constraint's own object_id); a table's or view's `TRIGGER` (class 1, the trigger's object_id); and a table's or view's `INDEX` (class 7, minor_id = `index_id` from `IndexIdentities()`, XML and spatial ids included).
 
@@ -88,4 +88,4 @@ The rules, which are not the ones the argument names suggest (probed 2026-09-26 
 
 ## Not modeled yet
 
-- **Level-1 kinds real accepts beyond the modeled ones** (`AGGREGATE`, `QUEUE`, …) raise Msg 15600 state 5.
+- **Level-1 kinds real accepts beyond the modeled ones** (`AGGREGATE`, …) raise Msg 15600 state 5.

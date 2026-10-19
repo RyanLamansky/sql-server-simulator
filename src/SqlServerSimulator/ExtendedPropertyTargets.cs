@@ -164,6 +164,7 @@ internal sealed class ExtendedPropertyTargets
             RuleObject => "RULE",
             DefaultObject => "DEFAULT",
             SecurityPolicy => "SECURITY POLICY",
+            ServiceQueue => "QUEUE",
             _ => obj.ObjectTypeDescription,
         };
         return [("SCHEMA", this.schemaNames.GetValueOrDefault(obj.SchemaId, "")), (kind, obj.Name)];

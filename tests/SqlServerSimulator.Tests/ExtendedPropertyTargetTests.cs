@@ -16,7 +16,7 @@ public sealed class ExtendedPropertyTargetTests
         create table t (a int constraint ck check (a > 0), b int); create index ix on t (b);
         create type tt as table (k int); create type at from int; create sequence sq; create synonym sy for t;
         create xml schema collection xc as '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"><xsd:element name="a" type="xsd:int"/></xsd:schema>';
-        create user u without login;
+        create user u without login; create queue q;
         """;
 
     private static Simulation Seeded()
@@ -49,6 +49,7 @@ public sealed class ExtendedPropertyTargetTests
     [DataRow("'schema', 'dbo', 'synonym', 'sy'", "OBJECT_OR_COLUMN:sy:0")]
     [DataRow("'schema', 'dbo', 'rule', 'r1'", "OBJECT_OR_COLUMN:r1:0")]
     [DataRow("'schema', 'dbo', 'default', 'd1'", "OBJECT_OR_COLUMN:d1:0")]
+    [DataRow("'schema', 'dbo', 'queue', 'q'", "OBJECT_OR_COLUMN:q:0")]
     public void AnObjectLevelTarget_LandsOnItsObject(string levels, string expected)
         => AreEqual(expected, Seeded().ExecuteScalar(Add(levels) + "; select concat(class_desc, ':', object_name(major_id), ':', minor_id) from sys.extended_properties"));
 
@@ -58,6 +59,21 @@ public sealed class ExtendedPropertyTargetTests
     [DataRow("'schema', 'dbo', 'type', 'tt', 'column', 'k'", "TYPE_COLUMN:tt:1")]
     public void ATypeTarget_LandsOnItsUserTypeId(string levels, string expected)
         => AreEqual(expected, Seeded().ExecuteScalar(Add(levels) + "; select concat(class_desc, ':', type_name(major_id), ':', minor_id) from sys.extended_properties"));
+
+    /// <summary>
+    /// A queue takes a property at level 1, lists as <c>QUEUE</c>, and takes
+    /// no level 2 (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AQueue_ListsAsQueue()
+    {
+        var sim = Seeded();
+        AreEqual("QUEUE:q:v2", sim.ExecuteScalar(Add("'schema', 'dbo', 'queue', 'q'")
+            + "; exec sp_updateextendedproperty 'd', 'v2', 'schema', 'dbo', 'queue', 'q'; select concat(objtype, ':', objname, ':', cast(value as nvarchar(10))) from fn_listextendedproperty(null, 'schema', 'dbo', 'queue', 'q', null, null)"));
+        AreEqual((byte)12, sim.AssertSqlError(Add("'schema', 'dbo', 'queue', 'q', 'column', 'x'"), 15600).Errors[0].State);
+        AreEqual((byte)9, sim.AssertSqlError(Add("'schema', 'dbo', 'queue', 't'"), 15135).Errors[0].State);
+        AreEqual(0, sim.ExecuteScalar("exec sp_dropextendedproperty 'd', 'schema', 'dbo', 'queue', 'q'; select count(*) from sys.extended_properties"));
+    }
 
     [TestMethod]
     public void AnXmlSchemaCollection_LandsOnItsId()

@@ -379,6 +379,7 @@ partial class Simulation
             "DEFAULT" => schema.Defaults.GetValueOrDefault(level1Name),
             "FUNCTION" => schema.Functions.GetValueOrDefault(level1Name),
             "PROCEDURE" => schema.Procedures.GetValueOrDefault(level1Name),
+            "QUEUE" => schema.Queues.GetValueOrDefault(level1Name),
             "RULE" => schema.Rules.GetValueOrDefault(level1Name),
             "SECURITY POLICY" => schema.SecurityPolicies.GetValueOrDefault(level1Name),
             "SEQUENCE" => schema.Sequences.GetValueOrDefault(level1Name),
