@@ -960,7 +960,19 @@ internal static class PermissionEnforcement
     /// read or write its own Msg 230 (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException? Combine(SimulatedSqlException? first, SimulatedSqlException? second) =>
-        first is null ? second : second is null ? first : SimulatedSqlException.Aggregate([first, second]);
+        first is null ? second : second is null ? first : ReadFirstInCatch(SimulatedSqlException.Aggregate([first, second]));
+
+    /// <summary>
+    /// A statement's permission report is its compile's, so a <c>CATCH</c>
+    /// reads its first entry (probed 2026-10-19 against SQL Server 2025:
+    /// <c>SELECT *</c> missing two columns' grants reads the first column's
+    /// Msg 230).
+    /// </summary>
+    private static SimulatedSqlException ReadFirstInCatch(SimulatedSqlException report)
+    {
+        report.CatchReadsFirstEntry = true;
+        return report;
+    }
 
     private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target, ServerLoginRights server)
     {
@@ -995,7 +1007,7 @@ internal static class PermissionEnforcement
             if (!PermissionChecker.IsColumnGranted(database, closure, permission, securable.ObjectId, securable.SchemaId, ordinal, server, securable))
                 (denied ??= []).Add(SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, target.Columns[ordinal - 1].Name, securable.Name, database.Name, SchemaNameFor(database, securable.SchemaId)));
         }
-        return denied is null ? null : SimulatedSqlException.Aggregate(denied);
+        return denied is null ? null : ReadFirstInCatch(SimulatedSqlException.Aggregate(denied));
     }
 
     /// <summary>

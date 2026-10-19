@@ -120,4 +120,19 @@ public sealed class PermissionRefusalOrderTests
         var ex = new Simulation().AssertSqlError("create user u without login; alter user u with default_schema = null; select 1", 102);
         AreEqual(((byte)16, "Incorrect syntax near 'default_schema'."), (ex.Class, ex.Errors[0].Message));
     }
+
+    /// <summary>A CATCH reads a statement's permission report by its first refusal (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select * from t")]
+    [DataRow("select count(*) from t")]
+    [DataRow("delete t where v > 0")]
+    [DataRow("update t set s = 'z' where v > 0")]
+    public void CaughtPermissionReport_ReadsItsFirstRefusal(string statement)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (id int primary key, v int, s varchar(5))", "create user u without login", "grant select (id) on t to u");
+        AreEqual(
+            "The SELECT permission was denied on the column 'v' of the object 't', database 'simulated', schema 'dbo'.",
+            sim.ExecuteScalar($"execute as user = 'u'; begin try {statement}; end try begin catch select error_message() end catch"));
+    }
 }
