@@ -1738,6 +1738,14 @@ internal abstract class BooleanExpression : ExpressionNode
         this.SeeksOn(probe, negated) || probe.SettlesNeverTrue(this, negated);
 
     /// <summary>
+    /// Whether real's optimizer carries this predicate across a join's
+    /// equality to the column it equates, which a negation — a <c>NOT</c>, a
+    /// <c>&lt;&gt;</c> — it doesn't, though either seeks on its own column
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    internal virtual bool ImpliedThroughEquality => true;
+
+    /// <summary>
     /// The shape half of <see cref="OffersSeek"/>: whether this predicate's
     /// own form seeks, before a written constant is folded.
     /// </summary>
@@ -2960,6 +2968,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
+        internal override bool ImpliedThroughEquality => false;
+
         internal override FoldRole ConstantFoldRole => FoldRole.Junction;
 
         internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
@@ -3302,6 +3312,8 @@ internal abstract class BooleanExpression : ExpressionNode
 
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
+        internal override bool ImpliedThroughEquality => false;
+
         /// <summary>The two sides, for <see cref="TryRebindOperands"/>.</summary>
         internal (Expression Left, Expression Right) Operands => (this.left, this.right);
 
@@ -3417,7 +3429,7 @@ internal abstract class BooleanExpression : ExpressionNode
         // `_` has none to seek on; a pattern read from a variable or column is
         // settled at run time, which real's plan leaves to a dynamic seek.
         private protected override bool SeeksOn(Selection.ForceSeekProbe probe, bool negated) =>
-            probe.IsSeekColumn(this.left) && probe.IsValueSide(this.right) && !probe.ConvertsColumn(this.left, this.right)
+            probe.IsSeekColumn(this.left) && probe.ReadsAsString(this.left) && probe.IsValueSide(this.right) && !probe.ConvertsColumn(this.left, this.right)
             && (this.right is not Value { Constant: { IsNull: false, Type.Category: SqlTypeCategory.String } pattern }
                 || pattern.AsString is not ['%' or '_', ..]);
 

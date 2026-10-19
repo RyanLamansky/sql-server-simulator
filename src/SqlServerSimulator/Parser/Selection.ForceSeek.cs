@@ -255,7 +255,7 @@ partial class Selection
                 // @@SPID doesn't (probed 2026-10-16 against SQL Server 2025).
                 var constant = true;
                 conjunct.VisitOperandExpressions(operand => constant &= partnerProbe.IsSeekColumn(operand) || operand.IsWrittenConstant);
-                if (constant && ReadsOnlySeekingSources(sources, conjunct, partner, alone) && conjunct.OffersSeek(partnerProbe, negated: false))
+                if (constant && conjunct.ImpliedThroughEquality && ReadsOnlySeekingSources(sources, conjunct, partner, alone) && conjunct.OffersSeek(partnerProbe, negated: false))
                     return true;
             }
         }
@@ -713,6 +713,13 @@ partial class Selection
         public bool IsColumnAgainstValue(Expression a, Expression b) =>
             (this.IsSeekColumn(a) && this.IsValueSide(b) && !this.ConvertsColumn(a, b))
             || (this.IsSeekColumn(b) && this.IsValueSide(a) && !this.ConvertsColumn(b, a));
+
+        /// <summary>
+        /// Whether <paramref name="column"/> reads as a string, which a
+        /// <c>LIKE</c> seeks on: one over a number or a date converts the
+        /// column, so offers none (probed 2026-10-19 against SQL Server 2025).
+        /// </summary>
+        public bool ReadsAsString(Expression column) => this.TypeOf(column) is not { } type || type.Category == SqlTypeCategory.String;
 
         /// <summary>Whether comparing <paramref name="column"/> against <paramref name="value"/> converts the column away from its index.</summary>
         public bool ConvertsColumn(Expression column, Expression value) =>

@@ -105,12 +105,18 @@ public sealed class ForceSeekSpreadTests
     [DataRow("select * from t1 with (forceseek) where id in (select id from t2 with (forceseek))")]
     [DataRow("select * from t1 with (forceseek) where v in (select id from t2 with (forceseek) where v = 1)")]
     [DataRow("declare @v int = 1; select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where t1.id = @v")]
+    [DataRow("select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where t1.id <> 1")]
+    [DataRow("select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where not (t1.id = 1)")]
+    [DataRow("select * from t1 inner hash join t2 with (forceseek) on t1.id = t2.id where t1.id like '1%'")]
+    [DataRow("select * from t2 with (forceseek) where id like '1%'")]
     public void AnUnplannableSeek_IsMsg8622(string query) =>
         _ = Prepared().AssertSqlError(query, 8622);
 
     [TestMethod]
     [DataRow("select * from t1 with (forceseek) join t2 with (forceseek) on t1.id = t2.id where t1.id = 1")]
     [DataRow("select * from t1 with (forceseek) join t2 on t1.id = t2.id")]
+    [DataRow("select * from t2 with (forceseek) where id <> 1")]
+    [DataRow("select * from t2 with (forceseek) where not (id = 1)")]
     [DataRow("select * from t1 with (forceseek) join t2 with (forceseek) on t1.id = t2.id join t3 with (forceseek) on t2.id = t3.id where t3.id = 1")]
     [DataRow("select * from t1 with (forceseek) join t2 with (forceseek) on t1.id = t2.id and t2.id = 1")]
     [DataRow("select * from t1 with (forceseek) left join t2 with (forceseek) on t1.id = t2.id where t1.id = 1")]
