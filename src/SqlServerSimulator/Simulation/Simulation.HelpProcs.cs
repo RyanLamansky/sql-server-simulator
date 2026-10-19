@@ -732,8 +732,9 @@ partial class Simulation
     {
         // An Agent procedure's error carries its site, often an inner
         // verification procedure (probed 2026-10-16 against SQL Server 2025).
-        // A Msg 229 names the procedure as the call wrote it.
-        _ when exception.AgentSite is { } agentSite => (agentSite.Line, exception.Number == 229 ? null : agentSite.Procedure ?? systemProcName),
+        // The called one is named as the call wrote it, `msdb..sp_delete_alert`
+        // included (probed 2026-10-18 against SQL Server 2025).
+        _ when exception.AgentSite is { } agentSite => (agentSite.Line, exception.Number == 229 ? null : agentSite.Procedure),
         // The Query Store procedures report every error at line 1, a missing
         // parameter's included (probed 2026-09-29).
         (var name, _) when name.StartsWith("sp_query_store_", StringComparison.Ordinal) => (1, null),

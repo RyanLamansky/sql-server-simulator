@@ -451,7 +451,7 @@ public sealed class AgentProcedureTests
             """);
         AreEqual(1, simulation.ExecuteScalar("use master; execute as login = 'r'; select count(*) from msdb.dbo.sysjobs_view"));
         var ex = simulation.AssertSqlError("use master; execute as login = 'r'; exec msdb.dbo.sp_update_job @job_name = N'admins', @enabled = 0", 14525);
-        AreEqual("sp_update_job", ex.Errors[0].Procedure);
+        AreEqual("msdb.dbo.sp_update_job", ex.Errors[0].Procedure);
         AreEqual(156, ex.Errors[0].LineNumber);
     }
 
@@ -484,4 +484,76 @@ public sealed class AgentProcedureTests
             select concat(j.name, '|', c.name, '|', s.command, '|', j.version_number)
             from msdb.dbo.sysjobs j join msdb.dbo.syscategories c on c.category_id = j.category_id join msdb.dbo.sysjobsteps s on s.job_id = j.job_id
             """));
+
+    /// <summary>
+    /// The procedure called is named as the call spelled it, the verification
+    /// procedures it calls as it spells them (probed 2026-10-18 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec msdb.dbo.sp_delete_alert @name = N'none'", "msdb.dbo.sp_delete_alert")]
+    [DataRow("exec msdb..sp_delete_alert @name = N'none'", "msdb..sp_delete_alert")]
+    [DataRow("use msdb; exec dbo.sp_delete_alert @name = N'none'", "dbo.sp_delete_alert")]
+    [DataRow("use msdb; exec sp_delete_alert @name = N'none'", "sp_delete_alert")]
+    public void Refusal_NamesTheCalledProcedureAsWritten(string call, string expected)
+        => AreEqual(expected, new Simulation().AssertSqlError(call, 14262).Errors[0].Procedure);
+
+    [TestMethod]
+    public void HelpAlert_RefusesAMissingNameOrId_NotACategory()
+    {
+        var simulation = new Simulation();
+        var byName = simulation.AssertSqlError("exec msdb.dbo.sp_help_alert @alert_name = N'none'", 14262);
+        AreEqual("30:The specified @alert_name ('none') does not exist.", $"{byName.LineNumber}:{byName.Errors[0].Message}");
+        var byId = simulation.AssertSqlError("exec msdb.dbo.sp_help_alert @alert_id = 99", 14262);
+        AreEqual("43:The specified @alert_id ('99') does not exist.", $"{byId.LineNumber}:{byId.Errors[0].Message}");
+        _ = simulation.ExecuteNonQuery("exec msdb.dbo.sp_help_alert @category_name = N'none'");
+    }
+
+    /// <summary>
+    /// <c>sp_delete_notification</c> raises its own Msg 14262 for the
+    /// notification it can't find, after its verifier's for a missing alert or
+    /// operator (probed 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DeleteNotification_RefusesWhatItCantFind_AfterItsVerifier()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            exec msdb.dbo.sp_add_operator @name = N'o';
+            exec msdb.dbo.sp_add_alert @name = N'a', @severity = 17
+            """);
+        var ex = simulation.AssertSqlError("exec msdb.dbo.sp_delete_notification @alert_name = N'none', @operator_name = N'o'", 14262);
+        AreEqual("sp_verify_notification:33:The specified @alert_name ('none') does not exist.|msdb.dbo.sp_delete_notification:44:The specified notification ('none / o') does not exist.",
+            string.Join("|", ex.Errors.Select(static e => $"{e.Procedure}:{e.LineNumber}:{e.Message}")));
+        AreEqual("sp_verify_notification:44", simulation.ExecuteScalar("""
+            begin try exec msdb.dbo.sp_delete_notification @alert_name = N'a', @operator_name = N'none' end try
+            begin catch select concat(error_procedure(), ':', error_line()) end catch
+            """));
+        simulation.AssertSqlError("exec msdb.dbo.sp_delete_notification @alert_name = N'a', @operator_name = N'o'", 14262, "The specified notification ('a / o') does not exist.");
+    }
+
+    /// <summary>
+    /// The two job-schedule procedures refuse a schedule that exists but isn't
+    /// the job's with Msg 14374 and one that doesn't exist with Msg 14262, each
+    /// at a line of its own (probed 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("sp_update_jobschedule", "theirs", 14374, 122, "The specified schedule name \"theirs\" is not associated with the job \"j\".")]
+    [DataRow("sp_update_jobschedule", "none", 14262, 144, "The specified Schedule Name ('none') does not exist.")]
+    [DataRow("sp_delete_jobschedule", "theirs", 14374, 110, "The specified schedule name \"theirs\" is not associated with the job \"j\".")]
+    [DataRow("sp_delete_jobschedule", "none", 14262, 132, "The specified @name ('none') does not exist.")]
+    public void JobSchedule_RefusesAnUnattachedOrMissingSchedule(string procedure, string schedule, int number, int line, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            exec msdb.dbo.sp_add_job @job_name = N'j';
+            exec msdb.dbo.sp_add_schedule @schedule_name = N'theirs', @freq_type = 1
+            """);
+        var ex = simulation.AssertSqlError($"exec msdb.dbo.{procedure} @job_name = N'j', @name = N'{schedule}'", number);
+        AreEqual($"msdb.dbo.{procedure}:{line}:{message}", $"{ex.Errors[0].Procedure}:{ex.LineNumber}:{ex.Errors[0].Message}");
+    }
+
+    [TestMethod]
+    public void UpdateSchedule_MissingName_IsTheVerifiersScheduleName()
+        => new Simulation().AssertSqlError("exec msdb.dbo.sp_update_schedule @name = N'none', @enabled = 0", 14262, "The specified @schedule_name ('none') does not exist.");
 }

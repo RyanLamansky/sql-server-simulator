@@ -248,7 +248,7 @@ partial class Simulation
     /// 2026-10-16: <c>sp_detach_schedule</c> of another job's schedule by name
     /// is Msg 14262, by id Msg 14374).
     /// </summary>
-    private AgentRow ResolveAgentSchedule(BatchContext batch, int? scheduleId, string? scheduleName, string nameParameter = "@schedule_name", SqlValue? attachedTo = null)
+    private AgentRow ResolveAgentSchedule(BatchContext batch, int? scheduleId, string? scheduleName, SqlValue? attachedTo = null)
     {
         const string verifier = "msdb.dbo.sp_verify_schedule_identifiers";
         if ((scheduleId is null) == (scheduleName is null))
@@ -264,7 +264,7 @@ partial class Simulation
             ("name", SqlValue.FromNVarchar(scheduleName!.Trim())), ("job", attachedTo ?? SqlValue.Null(SqlType.UniqueIdentifier)));
         return named switch
         {
-            [] => throw SimulatedSqlException.AgentDoesNotExist(nameParameter, scheduleName).AtAgentSite(138, verifier),
+            [] => throw SimulatedSqlException.AgentDoesNotExist("@schedule_name", scheduleName).AtAgentSite(138, verifier),
             [var only] => only,
             _ => throw SimulatedSqlException.AgentScheduleNameAmbiguous(scheduleName).AtAgentSite(113, verifier),
         };
@@ -420,7 +420,7 @@ partial class Simulation
         if (BindAgentCall(batch, "sp_update_schedule", SpUpdateScheduleParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_update_schedule", AgentUserRoleId);
-        var row = this.ResolveAgentSchedule(batch, call.Int(0), call.Text(1), "@name");
+        var row = this.ResolveAgentSchedule(batch, call.Int(0), call.Text(1));
         RequireAgentScheduleOwner(batch, row, 108);
         var owner = call.Text(14) is { Length: > 0 } ownerName ? ownerName : null;
         if (owner is not null && !AgentIsSysadmin(batch))
@@ -504,15 +504,23 @@ partial class Simulation
 
     /// <summary>
     /// The schedule named <paramref name="name"/> among those attached to
-    /// <paramref name="jobId"/>, as the two job-schedule procedures look it
-    /// up (Msg 14262 at <paramref name="line"/> for none).
+    /// <paramref name="job"/>, as the two job-schedule procedures look it up:
+    /// one that exists unattached is Msg 14374 at
+    /// <paramref name="unattachedLine"/>, and one that doesn't Msg 14262 at
+    /// <paramref name="missingLine"/> naming <paramref name="missingParameter"/>
+    /// (probed 2026-10-18 against SQL Server 2025).
     /// </summary>
-    private AgentRow ResolveAgentJobSchedule(BatchContext batch, SqlValue jobId, string name, int line, string procedure)
+    private AgentRow ResolveAgentJobSchedule(BatchContext batch, AgentRow job, string name, int unattachedLine, int missingLine, string missingParameter)
     {
+        var trimmed = SqlValue.FromNVarchar(name.Trim());
         var rows = this.AgentRows(batch, "sysschedules",
             "name = @name and schedule_id in (select schedule_id from dbo.sysjobschedules where job_id = @job)",
-            ("name", SqlValue.FromNVarchar(name.Trim())), ("job", jobId));
-        return rows is [var row, ..] ? row : throw SimulatedSqlException.AgentDoesNotExist("@name", name).AtAgentSite(line, procedure);
+            ("name", trimmed), ("job", AgentJobId(job)));
+        if (rows is [var row, ..])
+            return row;
+        throw this.AgentScalar(batch, "select 1 from dbo.sysschedules where name = @name", ("name", trimmed)) is null
+            ? SimulatedSqlException.AgentDoesNotExist(missingParameter, name).AtAgentSite(missingLine)
+            : SimulatedSqlException.AgentScheduleNotAttached(name, job.Text("name")!).AtAgentSite(unattachedLine);
     }
 
     /// <summary>
@@ -528,7 +536,7 @@ partial class Simulation
         var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
         RequireAgentJobOwner(batch, job, 93, null);
         var jobId = AgentJobId(job);
-        var row = this.ResolveAgentJobSchedule(batch, jobId, call.Text(2)!, 92, "sp_update_jobschedule");
+        var row = this.ResolveAgentJobSchedule(batch, job, call.Text(2)!, 122, 144, "Schedule Name");
         var schedule = AgentSchedule.From(row);
         schedule.Merge(call, 4);
         VerifyAgentSchedule(batch, schedule);
@@ -567,7 +575,7 @@ partial class Simulation
         var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
         RequireAgentJobOwner(batch, job, 36, null);
         var jobId = AgentJobId(job);
-        var row = this.ResolveAgentJobSchedule(batch, jobId, call.Text(2)!, 132, "sp_delete_jobschedule");
+        var row = this.ResolveAgentJobSchedule(batch, job, call.Text(2)!, 110, 132, "@name");
         this.DetachAgentSchedule(batch, jobId, row["schedule_id"], deleteUnused: call.Int(3) == 0);
         if (this.AgentJobTargetsLocalServer(batch, jobId))
             yield return AgentNotRunningNotice(batch);

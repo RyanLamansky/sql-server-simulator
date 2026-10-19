@@ -659,7 +659,7 @@ partial class Simulation
         // and as the procedure its errors name (probed 2026-10-16 against SQL
         // Server 2025).
         var temporary = BatchContext.IsLocalTempName(procName.Leaf) || BatchContext.IsGlobalTempName(procName.Leaf);
-        var writtenName = temporary ? procName.Leaf : procName.ToString();
+        var writtenName = temporary ? procName.Leaf : CalledName(procName);
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
         {

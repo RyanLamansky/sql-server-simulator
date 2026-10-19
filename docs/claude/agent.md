@@ -25,11 +25,12 @@ Real's procedures are T-SQL, and their errors behave as such:
 
 - Binding is a T-SQL procedure's: Msg 201 at state 4, Msg 8114 at state 1, the caller's return code unset.
 - Each refusal is a `RAISERROR` at a line of real's source, very often in the verification procedure the called one delegates to — `sp_verify_job`, `sp_verify_jobstep`, `sp_verify_schedule`, `sp_verify_job_identifiers`, `msdb.dbo.sp_verify_schedule_identifiers` … — which `ERROR_PROCEDURE()` and the client both report (`SimulatedSqlException.AgentSite`).
-  Some inner names arrive schema-qualified and some don't, as real names them.
+  Some inner names arrive schema-qualified and some don't, as real names them; the called procedure itself is named as the call wrote it (`msdb..sp_delete_alert` included, probed 2026-10-18 against SQL Server 2025), Database Mail's too.
 - Outside a `TRY` the procedure goes on to its `RETURN (1)`; under one the error transfers control before the `RETURN`, so the caller's return code keeps its value.
   `sp_add_alert` answers 0 even when it refuses.
 - `sp_add_job` of a NULL name is its INSERT's own Msg 515, at its line 148 with the Msg 3621 that follows, and answers 515.
-- Msg 229 for a caller without `EXECUTE` names the procedure as the call wrote it, at line 1.
+- Msg 229 for a caller without `EXECUTE` is at line 1, naming the called procedure even where the refusal it stands in for would name an inner one.
+- `sp_delete_notification` goes on past its verifier: a missing alert or operator is `sp_verify_notification`'s Msg 14262, then its own for the notification it can't find, which is all a pair with none raises (a `TRY` catches the first).
 
 ## What is kept, and how
 
@@ -45,10 +46,12 @@ Real's procedures are T-SQL, and their errors behave as such:
   Names need not be unique — `sp_add_schedule` takes a second of the same name, and naming one ambiguously later is Msg 14371.
   A one-time, Agent-start or idle schedule drops its frequency fields, a recurring one without a sub-day unit gets unit 1, and a daily one drops its relative interval and recurrence factor; weekly and monthly keep what they are given.
   `sp_detach_schedule` by name finds only the job's own schedules (Msg 14262), by id any (then Msg 14374 at severity 0, answering 1).
+  `sp_update_jobschedule` and `sp_delete_jobschedule` refuse a schedule that exists but isn't the job's with Msg 14374 at severity 16, and a name no schedule carries with Msg 14262 (*Schedule Name* in the update's wording).
   `sp_delete_job` deletes the schedules it leaves unused unless `@delete_unused_schedule = 0`.
 - **Descriptions.** `@include_description = 1` writes `sp_get_schedule_description`'s text, its times the stored integers as they are (*Every day at 233000*).
 - **Categories.** msdb ships real's 21, user ones numbered from 100; a job category is `LOCAL` or `MULTI-SERVER`, an alert or operator category `NONE`, and the default `LOCAL` with `@class = 'ALERT'` is refused.
 - **Operators, alerts, notifications.** An alert watches exactly one condition (Msg 14500) that no other alert watches (Msg 14501); `has_notification` is the notification methods ORed together, recomputed as operators and notifications go.
+  `sp_help_alert` refuses an `@alert_name` or `@alert_id` no alert has (Msg 14262), while a category with none lists nothing.
 
 `sysjobs_view`, `sysschedules_localserver_view` and `sysoriginatingservers_view` are seeded views and `dbo.agent_datetime(@date, @time)` a seeded function reading the integers through a style-120 string, so its out-of-range input is the conversion's own Msg 241, 242 or 8115.
 

@@ -44,7 +44,7 @@ public sealed class DatabaseMailTests
         var simulation = new Simulation();
         var ex = simulation.AssertSqlError("declare @rc int; exec @rc = msdb.dbo.sp_send_dbmail @recipients = 'x@example.invalid', @subject = N's'", 15281);
         AreEqual("SQL Server blocked access to procedure 'dbo.sp_send_dbmail' of component 'Database Mail XPs' because this component is turned off as part of the security configuration for this server. A system administrator can enable the use of 'Database Mail XPs' by using sp_configure. For more information about enabling 'Database Mail XPs', search for 'Database Mail XPs' in SQL Server Books Online.", ex.Errors[0].Message);
-        AreEqual("sp_send_dbmail", ex.Errors[0].Procedure);
+        AreEqual("msdb.dbo.sp_send_dbmail", ex.Errors[0].Procedure);
         AreEqual(0, ex.Errors[0].LineNumber);
         AreEqual("15281||0", simulation.ExecuteScalar("""
             declare @rc int, @caught int;

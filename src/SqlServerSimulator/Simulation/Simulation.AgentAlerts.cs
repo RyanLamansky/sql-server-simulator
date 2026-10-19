@@ -269,6 +269,12 @@ partial class Simulation
         if (BindAgentCall(batch, "sp_help_alert", SpHelpAlertParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_help_alert", AgentOperatorRoleId);
+        // A name or id that matches no alert is refused; a category's is not
+        // (probed 2026-10-18 against SQL Server 2025).
+        if (call.Text(0) is { } alertName && this.AgentScalar(batch, "select 1 from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(alertName))) is null)
+            throw SimulatedSqlException.AgentDoesNotExist("@alert_name", alertName).AtAgentSite(30);
+        if (call.Int(2) is { } alertId && this.AgentScalar(batch, "select 1 from dbo.sysalerts where id = @id", ("id", SqlValue.FromInt32(alertId))) is null)
+            throw SimulatedSqlException.AgentDoesNotExist("@alert_id", alertId.ToString(CultureInfo.InvariantCulture)).AtAgentSite(43);
         var rows = this.AgentSql(batch, """
             select a.id, a.name, a.event_source, a.event_category_id, a.event_id, a.message_id, a.severity, a.enabled, a.delay_between_responses,
                 a.last_occurrence_date, a.last_occurrence_time, a.last_response_date, a.last_response_time, a.notification_message,
@@ -331,17 +337,40 @@ partial class Simulation
         AgentRequired("operator_name", AgentName, 128),
     ];
 
-    /// <summary><c>sp_delete_notification</c>: the alert stops notifying the operator, with the stopped Agent's notice.</summary>
+    /// <summary>
+    /// <c>sp_delete_notification</c>: the alert stops notifying the operator,
+    /// with the stopped Agent's notice. A missing alert or operator is
+    /// <c>sp_verify_notification</c>'s Msg 14262, after which the procedure
+    /// goes on to raise its own for the notification it then can't find, as
+    /// it does for a pair with none (probed 2026-10-18 against SQL Server
+    /// 2025); a <c>TRY</c> catches the first.
+    /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpDeleteNotification(BatchContext batch, string? returnCodeVar)
     {
         if (BindAgentCall(batch, "sp_delete_notification", SpDeleteNotificationParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_delete_notification", grantedRole: null);
-        var (alertId, operatorId) = this.ResolveAgentNotification(batch, call.Text(0)!, call.Text(1)!);
+        var (alert, op) = (call.Text(0)!, call.Text(1)!);
+        var alertId = this.AgentScalar(batch, "select id from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(alert)));
+        var operatorId = this.AgentScalar(batch, "select id from dbo.sysoperators where name = @name", ("name", SqlValue.FromNVarchar(op)));
+        if (alertId is null || operatorId is null)
+        {
+            var unverified = alertId is null
+                ? SimulatedSqlException.AgentDoesNotExist("@alert_name", alert)
+                : SimulatedSqlException.AgentDoesNotExist("@operator_name", op);
+            AttributeToSystemProcedure(unverified, (alertId is null ? 33 : 44, "sp_verify_notification"), "sp_delete_notification", "sp_delete_notification");
+            foreach (var outcome in GoneOnPast(batch, unverified, ""))
+                yield return outcome;
+        }
+        if (alertId is not { } alertKey || operatorId is not { } operatorKey
+            || this.AgentScalar(batch, "select 1 from dbo.sysnotifications where alert_id = @alert and operator_id = @op", ("alert", alertKey), ("op", operatorKey)) is null)
+        {
+            throw SimulatedSqlException.AgentDoesNotExist("notification", $"{alert} / {op}").AtAgentSite(44);
+        }
         _ = this.AgentSql(batch, """
             delete dbo.sysnotifications where alert_id = @alert and operator_id = @op;
             update dbo.sysalerts set has_notification = isnull((select max(n.notification_method) from dbo.sysnotifications as n where n.alert_id = @alert), 0) where id = @alert;
-            """, ("alert", alertId), ("op", operatorId));
+            """, ("alert", alertKey), ("op", operatorKey));
         yield return AgentNotRunningNotice(batch);
         AgentReturn(batch, returnCodeVar, 0);
     }

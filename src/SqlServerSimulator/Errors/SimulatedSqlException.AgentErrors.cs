@@ -44,6 +44,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AgentDoesNotExist(string parameter, string value) =>
         new($"The specified {parameter} ('{value}') does not exist.", 14262, 16, 1);
 
+    /// <summary>Msg 14374: a schedule that exists isn't attached to the job a job-schedule procedure names.</summary>
+    internal static SimulatedSqlException AgentScheduleNotAttached(string schedule, string job) =>
+        new($"The specified schedule name \"{schedule}\" is not associated with the job \"{job}\".", 14374, 16, 1);
+
     /// <summary>Msg 14266: a parameter outside the values an Agent procedure lists.</summary>
     internal static SimulatedSqlException AgentInvalidValue(string parameter, string validValues) =>
         new($"The specified '{parameter}' is invalid (valid values are: {validValues}).", 14266, 16, 1);

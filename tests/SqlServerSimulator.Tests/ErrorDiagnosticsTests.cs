@@ -107,6 +107,8 @@ public sealed class ErrorDiagnosticsTests
     [DataRow("exec dbo.p_boom", "dbo.p_boom")]
     [DataRow("exec [dbo].[p_boom]", "dbo.p_boom")]
     [DataRow("exec DBO.P_BOOM", "DBO.P_BOOM")]
+    [DataRow("exec simulated.dbo.p_boom", "simulated.dbo.p_boom")]
+    [DataRow("exec simulated..p_boom", "simulated..p_boom")]
     [DataRow("declare @n sysname = 'p_boom'; exec @n", "p_boom")]
     public void ProcedureBodyError_NamesTheProcedureAsInvoked(string exec, string expected)
     {
