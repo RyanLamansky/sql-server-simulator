@@ -290,4 +290,23 @@ public sealed class AtTimeZoneTests
             insert at values (3);
             select concat_ws('|', x.at, x.b, (select at.at from at at)) from (select 1 at, 2 b) x
             """));
+
+    /// <summary>An operand type AT TIME ZONE doesn't take refuses the batch as it compiles, so nothing ahead of it runs (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select d at time zone 'UTC' from t", "date")]
+    [DataRow("select s at time zone 'UTC' from t", "varchar")]
+    [DataRow("declare @d date = '2021-01-01'; select @d at time zone 'UTC'", "date")]
+    public void InvalidOperand_RefusesTheBatch(string query, string typeName)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (d date, s varchar(20))");
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand($"select 'first'; {query}");
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            _ = reader.Read();
+        });
+        AreEqual($"Argument data type {typeName} is invalid for argument 1 of AT TIME ZONE function.", error.Errors[0].Message);
+    }
 }

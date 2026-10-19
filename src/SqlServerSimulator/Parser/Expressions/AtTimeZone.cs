@@ -41,8 +41,19 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
     private readonly Expression source = source;
     private readonly Expression zoneNameExpression = zoneNameExpression;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(this.source.GetSqlType(batch, resolveColumnType));
+    /// <summary>
+    /// The operand's type is judged as the statement compiles: anything but
+    /// <c>datetime</c>, <c>smalldatetime</c>, <c>datetime2</c> or
+    /// <c>datetimeoffset</c> is Msg 8116 there, a column of an empty table and
+    /// a variable included (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var lhs = this.source.GetSqlType(batch, resolveColumnType);
+        if (lhs is not (DateTimeOffsetSqlType or DateTime2SqlType) && lhs != SqlType.DateTime && lhs != SqlType.SmallDateTime && !IsUntypedNullLiteral(this.source))
+            throw SimulatedSqlException.AtTimeZoneInvalidArgument(SimulatedSqlException.FamilyRootName(lhs));
+        return ResolveResultType(lhs);
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -54,9 +65,8 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         if (input.IsNull || zoneName.IsNull)
             return SqlValue.Null(resultType);
 
-        // Reject date / time at runtime — real SQL Server raises Msg 8116
-        // post-parse, even when the LHS is a column reference whose type is
-        // statically known.
+        // GetSqlType refuses these while compiling; a value reaching here
+        // untyped keeps the same refusal.
         if (input.Type == SqlType.Date)
             throw SimulatedSqlException.AtTimeZoneInvalidArgument("date");
         if (input.Type is TimeSqlType)
@@ -96,10 +106,7 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         return SqlValue.FromDateTimeOffset(resultType, zoned);
     }
 
-    // date / time (which raise Msg 8116 at runtime) and unknown LHS types
-    // fall back to datetimeoffset(7) — GetSqlType requires a non-throwing
-    // answer for projection-schema resolution that may not be reached at
-    // runtime.
+    // An untyped NULL operand types as datetimeoffset(7).
     private static SqlType ResolveResultType(SqlType lhs) => SwitchOffset.ResultTypeFor(lhs);
 
     /// <summary>Whether the <c>AT</c> at the cursor opens <c>AT TIME</c> rather than being an alias.</summary>
