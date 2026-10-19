@@ -183,6 +183,53 @@ partial class Selection
     }
 
     /// <summary>
+    /// The top-level conjuncts of <paramref name="where"/> a write through a
+    /// view taken by its <c>INSTEAD OF</c> trigger pushes into the view as it
+    /// reads the rows the trigger's pseudo-tables are built from: each column
+    /// one of <paramref name="columnNames"/>, named by its leaf, and every other
+    /// operand row-independent, under <see cref="TryTemplateConjunct"/>'s rules;
+    /// null when none qualifies. The statement still judges every row it reads
+    /// by the whole <c>WHERE</c>.
+    /// </summary>
+    internal static List<BooleanExpression>? TemplatesOverViewColumns(BooleanExpression where, string[] columnNames, Collation collation, BatchContext batch)
+    {
+        var conjuncts = new List<BooleanExpression>();
+        where.CollectConjuncts(conjuncts);
+        List<BooleanExpression>? templates = null;
+        foreach (var conjunct in conjuncts)
+        {
+            var namesAColumn = false;
+            var template = RebindTemplate(conjunct, operand =>
+            {
+                while (operand is Parenthesized parenthesized)
+                    operand = parenthesized.Wrapped;
+                if (operand is Reference reference)
+                {
+                    var ordinal = Array.FindIndex(columnNames, name => collation.Equals(name, reference.ReferencedName.Leaf));
+                    if (ordinal < 0)
+                        return null;
+                    namesAColumn = true;
+                    return new ProjectionSlot(ordinal);
+                }
+                if (!operand.IsRowIndependent)
+                    return null;
+                try
+                {
+                    return Value.NonLiteral(operand.Run(new RuntimeContext(
+                        static name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch)));
+                }
+                catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+                {
+                    return null;
+                }
+            });
+            if (namesAColumn && template is not null)
+                (templates ??= []).Add(template);
+        }
+        return templates;
+    }
+
+    /// <summary>
     /// Records the pushdown shape of a plain SELECT-project-filter plan — no
     /// TOP / OFFSET / FETCH, no GROUP BY / HAVING / aggregate, no window, no
     /// ORDER BY — which is the one shape an enclosing WHERE conjunct can move

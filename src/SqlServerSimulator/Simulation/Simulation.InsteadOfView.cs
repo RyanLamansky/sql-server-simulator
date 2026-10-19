@@ -108,7 +108,7 @@ partial class Simulation
         }
         var runtime = new RuntimeContext(Resolve, batch);
 
-        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level))
+        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level, where))
         {
             current = levelRow;
             if (where is not null && where.Run(runtime) != true)
@@ -212,7 +212,7 @@ partial class Simulation
             return ordinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : current[ordinal];
         }
         var runtime = new RuntimeContext(Resolve, batch);
-        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level))
+        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level, where))
         {
             current = levelRow;
             if (where is null || where.Run(runtime) == true)
@@ -381,10 +381,15 @@ partial class Simulation
     /// reads it as: itself, or through <paramref name="level"/>, whose filter
     /// drops the rows it hides.
     /// </summary>
-    private static List<(SqlValue[] Row, SqlValue[] LevelRow)> ReadInsteadOfRows(BatchContext batch, View view, HeapColumn[] columns, InsteadOfLevelView? level)
+    private static List<(SqlValue[] Row, SqlValue[] LevelRow)> ReadInsteadOfRows(BatchContext batch, View view, HeapColumn[] columns, InsteadOfLevelView? level, BooleanExpression? where = null)
     {
         var rows = new List<(SqlValue[] Row, SqlValue[] LevelRow)>();
-        foreach (var row in ReadViewRows(batch, view, columns))
+        // A WHERE on the view's own columns reaches its body, where a seek can
+        // take it, rather than reading every row the view holds.
+        var pushed = level is null && where is not null
+            ? Selection.TemplatesOverViewColumns(where, [.. columns.Select(static column => column.Name)], batch.CurrentDatabase.Collation, batch)
+            : null;
+        foreach (var row in ReadViewRows(batch, view, columns, pushed))
         {
             if (level is null)
                 rows.Add((row, row));
@@ -395,13 +400,13 @@ partial class Simulation
     }
 
     /// <summary>Every row the view yields, decoded to its columns.</summary>
-    private static List<SqlValue[]> ReadViewRows(BatchContext batch, View view, HeapColumn[] columns)
+    private static List<SqlValue[]> ReadViewRows(BatchContext batch, View view, HeapColumn[] columns, List<BooleanExpression>? pushed = null)
     {
         var schema = new SqlType[columns.Length];
         for (var i = 0; i < columns.Length; i++)
             schema[i] = columns[i].Type;
         var rows = new List<SqlValue[]>();
-        foreach (var bytes in Selection.ForView(view, columns).Execute(batch).RowBytes)
+        foreach (var bytes in Selection.ForView(view, columns, pushed).Execute(batch).RowBytes)
             rows.Add(RowDecoder.DecodeRow(schema, bytes));
         return rows;
     }

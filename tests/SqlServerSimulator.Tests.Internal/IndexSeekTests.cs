@@ -2611,6 +2611,22 @@ public sealed class IndexSeekTests
         AreEqual("5,500", Seq(ReadRows(c, "select val from t where id <> 2 order by id")));
     }
 
+    /// <summary>
+    /// A write a view's INSTEAD OF trigger takes reads the rows its WHERE
+    /// keeps through the view, seeking the table under it, where it read
+    /// every row the view held.
+    /// </summary>
+    [TestMethod]
+    public void InsteadOfViewWrite_SeeksThroughTheView()
+    {
+        var c = FreshT();
+        Exec(c, "create view vt as select id, val from t");
+        Exec(c, "create trigger tvt on vt instead of update as update t set val = i.val from t join inserted i on i.id = t.id");
+        var trace = ExecTraced(c, "update vt set val = 999 where id = 2");
+        Contains("Seek(t)", trace);
+        AreEqual("5,999,500", Seq(ReadRows(c, "select val from t order by id")));
+    }
+
     [TestMethod]
     public void DeleteByPrimaryKey_SeeksTarget()
     {
