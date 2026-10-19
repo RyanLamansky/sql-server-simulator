@@ -1648,7 +1648,7 @@ partial class Simulation
                     // values included (probed 2026-10-19 against SQL Server
                     // 2025).
                     var duplicate = SimulatedSqlException.ColumnAssignedMoreThanOnce(col.Name);
-                    if (context.Batch.BindErrors?.RecordInStatementClause(duplicate, BindClause.MergeDuplicateAssignment) != true)
+                    if (!RecordMergeDuplicate(context, duplicate, colTok))
                         throw duplicate;
                 }
                 insertColumns.Add(col);
@@ -1867,7 +1867,7 @@ partial class Simulation
                     if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
                     {
                         var duplicate = SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
-                        if (context.Batch.BindErrors?.RecordInStatementClause(duplicate, BindClause.MergeDuplicateAssignment) != true)
+                        if (!RecordMergeDuplicate(context, duplicate, first))
                             throw duplicate;
                         assignedTwice = true;
                     }
@@ -1929,6 +1929,18 @@ partial class Simulation
         report.Record(SimulatedSqlException.InvalidColumnName(columnName), target.StartIndex);
         return null;
     }
+
+    /// <summary>
+    /// Records a column a MERGE assigns twice (Msg 264) in the statement's
+    /// report, answering whether it could; one written after a <c>SET</c>
+    /// target whose qualifier failed (Msg 4104) goes unreported, real comparing
+    /// no assignment past it (probed 2026-10-19 against SQL Server 2025:
+    /// <c>SET v = 1, v = 2, x.s = 3</c> reports the Msg 4104 then the Msg 264,
+    /// <c>SET x.s = 1, v = 2, v = 3</c> the Msg 4104 alone).
+    /// </summary>
+    private static bool RecordMergeDuplicate(ParserContext context, SimulatedSqlException duplicate, Token at) =>
+        context.Batch.BindErrors is { } report
+        && (report.RecordedBefore(4104, at.StartIndex) || report.RecordInStatementClause(duplicate, BindClause.MergeDuplicateAssignment));
 
     private static WhenClause ParseMergeDeleteAction(ParserContext context, WhenClauseKind kind, BooleanExpression? searchCondition)
     {

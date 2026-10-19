@@ -391,6 +391,10 @@ internal sealed class BindErrorReport(string command)
         return false;
     }
 
+    /// <summary>Whether an error numbered <paramref name="number"/> was recorded at a position written ahead of <paramref name="position"/>.</summary>
+    public bool RecordedBefore(int number, int position) =>
+        this.entries.Exists(entry => entry.Error.Number == number && entry.LinePosition < position);
+
     /// <summary>Whether a name error was recorded at <paramref name="position"/>.</summary>
     public bool FailedAt(int position)
     {
