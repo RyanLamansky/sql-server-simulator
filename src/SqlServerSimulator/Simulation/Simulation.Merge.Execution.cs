@@ -168,7 +168,8 @@ partial class Simulation
     /// row's value ahead of computing its values: the rows the source produced
     /// before the failure use one each where the clause's condition takes
     /// them, and so does the failing row when its error came from the source's
-    /// select list (probed 2026-10-06 and 2026-10-17 against SQL Server 2025).
+    /// select list and no condition reads it (probed 2026-10-06, 2026-10-17
+    /// and 2026-10-19 against SQL Server 2025).
     /// Over a join to the target real reads the source whole first, so a
     /// failing source uses none up (probed over an empty and a two-row heap).
     /// </summary>
@@ -194,7 +195,10 @@ partial class Simulation
             return;
         }
 
-        var count = failingRowReached ? 1 : 0;
+        // A condition reads the failing row's values, which its error left
+        // uncomputed, so that row reaches no insert (probed 2026-10-19
+        // against SQL Server 2025: `AND s.x > 4` over a failing `10 / v AS x`).
+        var count = failingRowReached && clause.SearchCondition is null ? 1 : 0;
         foreach (var sourceValues in sourceRows)
         {
             try

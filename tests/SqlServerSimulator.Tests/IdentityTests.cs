@@ -739,9 +739,9 @@ public sealed class IdentityTests
     /// A <c>MERGE</c> whose <c>ON</c> settles non-TRUE streams its source
     /// rows to the <c>WHEN NOT MATCHED</c> insert, so a failing source uses
     /// up a value per row the clause took before the failure and one for the
-    /// failing row; over a join to the target the source is read whole first
-    /// and uses none (probed 2026-10-06 and 2026-10-17 against SQL Server
-    /// 2025). The table holds one row, so the next value reads how many were
+    /// failing row unless the clause's condition reads its failing column;
+    /// over a join to the target the source is read whole first and uses none
+    /// (probed 2026-10-06, 2026-10-17 and 2026-10-19 against SQL Server 2025). The table holds one row, so the next value reads how many were
     /// used up.
     /// </summary>
     [TestMethod]
@@ -749,6 +749,7 @@ public sealed class IdentityTests
     [DataRow("merge t using (select 10 / (k - 3) as x from src) s on 1 = 0 when not matched then insert (v) values (s.x);", 5)]
     [DataRow("merge t using (select k from src where 10 / (3 - k) > 0) s on 1 = 0 when not matched then insert (v) values (s.k);", 4)]
     [DataRow("merge t using (select k, 10 / (k - 3) as x from src) s on 1 = 0 when not matched and s.k <> 2 then insert (v) values (s.x);", 4)]
+    [DataRow("merge t using (select 10 / (k - 3) as x from src) s on 1 = 0 when not matched and s.x > -100 then insert (v) values (s.x);", 4)]
     [DataRow("merge t using (select 10 / (k - 3) as x from src) s on t.v = s.x when not matched then insert (v) values (s.x);", 2)]
     public void FailingMergeSource_UsesUpTheRowsTheInsertReached(string merge, int expected)
     {
