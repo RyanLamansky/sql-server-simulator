@@ -99,9 +99,13 @@ partial class Simulation
             this.RejectRestoreWithoutPermission(batch, existing, verb);
         else if (!PermissionEnforcement.HasDatabaseDdlAuthority(batch, Permission.CreateAnyDatabase))
             throw SimulatedSqlException.BackupPermissionDenied("CREATE DATABASE", MasterDatabaseName, verb);
+        // A database the restoring session is in is refused before the device
+        // is opened (probed 2026-10-19 against SQL Server 2025).
+        if (existing is not null && ReferenceEquals(connection.CurrentDatabase, existing))
+            throw SimulatedSqlException.RestoreDatabaseInUseBySession(existing.Name, verb);
 
         var device = SingleDevice(devices, verb);
-        var media = this.ReadMediaForRestore(batch, device, verb);
+        var media = this.ReadMediaForRestore(batch, device, verb, options.MediaName);
         if (options.File > media.Sets.Count)
             throw SimulatedSqlException.BackupFileIdIncorrectlyFormed(options.File, device.Display, verb);
         var set = media.Sets[options.File - 1];

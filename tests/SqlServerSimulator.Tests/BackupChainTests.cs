@@ -316,4 +316,40 @@ public sealed class BackupChainTests
         CollectionAssert.AreEqual(numbers, TestHelpers.Numbers(error));
         AreEqual("SIMPLE", simulation.ExecuteScalar("select recovery_model_desc from sys.databases where name = 'd'"));
     }
+
+    /// <summary>
+    /// A MEDIANAME is checked against the media's own without regard to case,
+    /// by INIT and every RESTORE form alike, and passed only by FORMAT and
+    /// SKIP; appending keeps the media's name (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void MediaName_IsCheckedWithoutCase_AndKept()
+    {
+        var simulation = WithDatabase();
+        _ = simulation.ExecuteNonQuery("use master; backup database d to disk = N'/b/m.bak' with medianame = N'a', format; backup database d to disk = N'/b/m.bak' with medianame = N'A'");
+        using (var connection = simulation.CreateOpenConnection())
+        using (var reader = connection.CreateCommand("restore labelonly from disk = N'/b/m.bak'").ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual("a", reader["MediaName"]);
+        }
+        foreach (var statement in new[]
+        {
+            "backup database d to disk = N'/b/m.bak' with medianame = N'b', init",
+            "restore verifyonly from disk = N'/b/m.bak' with medianame = N'b'",
+            "restore headeronly from disk = N'/b/m.bak' with medianame = N'b'",
+            "restore database d from disk = N'/b/m.bak' with medianame = N'b', replace",
+        })
+        {
+            var refused = simulation.AssertSqlError("use master; " + statement, 4037);
+            AreEqual("The user-specified MEDIANAME \"b\" does not match the MEDIANAME \"a\" of the device \"/b/m.bak\".", refused.Errors[0].Message);
+        }
+        _ = simulation.ExecuteNonQuery("use master; backup database d to disk = N'/b/m.bak' with medianame = N'b', skip");
+        _ = simulation.ExecuteNonQuery("use master; backup database d to disk = N'/b/m.bak' with medianame = N'b', format");
+        _ = simulation.ExecuteNonQuery("use master; restore verifyonly from disk = N'/b/m.bak' with medianame = N'B'");
+    }
+
+    [TestMethod]
+    public void Restore_OfTheSessionsOwnDatabase_IsRefusedBeforeTheDevice()
+        => _ = WithDatabase().AssertSqlError("use d; restore database d from disk = N'/b/none.bak'", 3102);
 }

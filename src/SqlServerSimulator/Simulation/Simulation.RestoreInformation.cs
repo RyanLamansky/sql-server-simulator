@@ -55,7 +55,7 @@ partial class Simulation
         if (form == "VERIFYONLY" && batch.Connection.CurrentTransaction is not null)
             throw SimulatedSqlException.BackupInTransaction(verb);
         var device = SingleDevice(devices, verb);
-        var media = this.ReadMediaForRestore(batch, device, verb);
+        var media = this.ReadMediaForRestore(batch, device, verb, options.MediaName);
         switch (form)
         {
             case "FILELISTONLY":
@@ -109,8 +109,8 @@ partial class Simulation
         return true;
     }
 
-    /// <summary>The media a restore reads from <paramref name="device"/>, refusing one it can't read.</summary>
-    private BackupMedia ReadMediaForRestore(BatchContext batch, BackupDeviceTarget device, string verb)
+    /// <summary>The media a restore reads from <paramref name="device"/>, refusing one it can't read or whose name isn't <paramref name="mediaName"/>.</summary>
+    private BackupMedia ReadMediaForRestore(BatchContext batch, BackupDeviceTarget device, string verb, string? mediaName)
     {
         var bytes = this.ReadBackupDevice(device.Path, out var osError);
         if (bytes is null)
@@ -118,13 +118,16 @@ partial class Simulation
             this.LogBackupMediaFailure(batch, device.Path, osError, create: false);
             throw SimulatedSqlException.CannotOpenBackupDevice(device.Display, osError, verb);
         }
-        return BackupMedia.TryRead(bytes, out var read, out var writtenBy) switch
+        var media = BackupMedia.TryRead(bytes, out var read, out var writtenBy) switch
         {
             BackupMedia.ReadOutcome.Read => read!,
             BackupMedia.ReadOutcome.Empty => throw SimulatedSqlException.BackupVolumeEmpty(device.Display, verb),
             BackupMedia.ReadOutcome.OtherVersion => throw SimulatedSqlException.BackupFromIncompatibleVersion(writtenBy!, BackupMedia.SimulatorVersion, verb),
             _ => throw SimulatedSqlException.MediaFamilyIncorrectlyFormed(device.Display, verb),
         };
+        if (mediaName is not null)
+            RefuseMediaNameMismatch(media, mediaName, device, verb);
+        return media;
     }
 
     /// <summary>The set at <c>FILE = <paramref name="file"/></c>, Msg 4038 past the last.</summary>

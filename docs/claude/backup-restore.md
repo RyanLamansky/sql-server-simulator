@@ -21,6 +21,8 @@ A relative `DISK =` path resolves against the default backup directory, `/var/op
 The file holds the simulator's own format ([`BackupMedia`](../../src/SqlServerSimulator/Storage/Backup/BackupMedia.cs)), not Microsoft's Tape Format: a real `.bak` is refused as an incorrectly formed media family, which is what real says of a file that isn't one.
 Row values are stored in the engine's own storage encodings, so the header records the writing build (the assembly's informational version, commit included) and any other build refuses the backup.
 
+A `MEDIANAME` is held against the media's own name without regard to case — by `BACKUP`, `INIT` included, and by every `RESTORE` form — and only `FORMAT` and `SKIP` pass it; appending to media keeps the name they were formatted with, so `'A'` appends to media named `'a'` and leaves them `'a'` (probed 2026-10-19 against SQL Server 2025).
+
 ## The server's disk
 
 The simulator models the disk of SQL Server 2025 on Linux as the surfaces that ask about paths see it (probed 2026-10-16): a path is read case aside, `C:\` as the root, `.` and `..` settled and repeated `/` collapsed, and a relative path names nothing.
@@ -188,7 +190,7 @@ Real's `DatabaseBackup` checks that the root `@Directory` exists and relies on `
 - `REWINDONLY`, `PARTIAL` and piecemeal restores, `STOPATMARK = 'lsn:…'`, and `VERIFYONLY`'s permission check.
 - A stop inside a log set with a definition change on both sides of it, or inside a span its database's log stopped recording; both raise `NotSupportedException`.
 - `RESTORE … WITH RECOVERY` alone combined with `NORECOVERY`, `STANDBY` or a stop point, `RESTORE LOG` of a full or differential set its LSNs don't refuse, and `BACKUP DATABASE … WITH NORECOVERY` / `NO_TRUNCATE`.
-- Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`, `MEDIANAME` on `RESTORE`.
+- Striped media (more than one device), `TAPE` and `URL` devices written as such (a registered tape device is refused as real's Linux server refuses it), `MIRROR TO`, encryption, `EXPIREDATE` / `RETAINDAYS`.
 - Backing up a database holding CLR assemblies or modules, full-text catalogs, change tracking, security policies, `CREATE DEFAULT` / `CREATE RULE` objects or bindings, memory-optimized tables or table types, temporal or graph tables, XML / spatial / JSON / vector / columnstore / hash / hypothetical indexes, masked or `GENERATED ALWAYS` columns, edge constraints, encrypted or numbered modules, or a DDL trigger with a firing order.
 - Restoring `model` or `msdb`.
 - Detaching or attaching a database holding what a backup can't yet carry (above); `@keepfulltextindexfile` has nothing to keep.

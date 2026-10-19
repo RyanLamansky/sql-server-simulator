@@ -313,9 +313,12 @@ partial class Simulation
         }
         if (options.MediaName is { } mediaName)
         {
-            if (!options.Format && media.Sets.Count != 0 && media.MediaName is { } actual && actual != mediaName)
-                throw SimulatedSqlException.BackupMediaNameMismatch(mediaName, actual, device.Display, verb);
-            media.MediaName = mediaName;
+            // FORMAT and SKIP pass the media's name, INIT doesn't (probed
+            // 2026-10-19 against SQL Server 2025).
+            if (!options.Format && !options.Flags.Contains("SKIP"))
+                RefuseMediaNameMismatch(media, mediaName, device, verb);
+            // Media keep the name they were formatted with.
+            media.MediaName ??= mediaName;
         }
         if (options.MediaDescription is { } mediaDescription)
             media.MediaDescription = mediaDescription;
@@ -964,7 +967,7 @@ partial class Simulation
                     ExpectEquals(context);
                     options.MediaDescription = ParseBackupStringValue(context, batch);
                     break;
-                case "MEDIANAME" when !restore:
+                case "MEDIANAME":
                     ExpectEquals(context);
                     options.MediaName = ParseBackupNameValue(context, batch);
                     break;
@@ -1044,6 +1047,18 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
+    }
+
+    /// <summary>
+    /// Msg 4037 for a <c>MEDIANAME</c> the media's own doesn't match, compared
+    /// without regard to case (probed 2026-10-19 against SQL Server 2025:
+    /// <c>'A'</c> appends to media named <c>'a'</c>); media carrying no name
+    /// match any.
+    /// </summary>
+    private static void RefuseMediaNameMismatch(BackupMedia media, string mediaName, BackupDeviceTarget device, string verb)
+    {
+        if (media.MediaName is { } actual && !string.Equals(actual, mediaName, StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.BackupMediaNameMismatch(mediaName, actual, device.Display, verb);
     }
 
     /// <summary>The option pairs one statement may not name both of, and how Msg 3031 names them.</summary>
