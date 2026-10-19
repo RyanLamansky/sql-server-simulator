@@ -1,3 +1,4 @@
+using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Schemas;
@@ -106,12 +107,12 @@ partial class Simulation
                 if (inferred == "column" || (kind is not null && BuiltInToken.Equals(kind, "COLUMN")))
                 {
                     RenameColumn(batch, objName, newName, inferred ?? objType!);
-                    RecordRenameEvent(batch, objName, "COLUMN");
+                    RecordRenameEvent(batch, objName, newName, objType, "COLUMN");
                 }
                 else if (inferred == "index" || (kind is not null && BuiltInToken.Equals(kind, "INDEX")))
                 {
                     RenameIndex(batch, objName, newName, inferred ?? objType!, procedureName);
-                    RecordRenameEvent(batch, objName, "INDEX");
+                    RecordRenameEvent(batch, objName, newName, objType, "INDEX");
                 }
                 else if (inferred == "userdatatype" || (kind is not null && BuiltInToken.Equals(kind, "USERDATATYPE")))
                 {
@@ -120,12 +121,12 @@ partial class Simulation
                 else if (kind is not null && BuiltInToken.Equals(kind, "STATISTICS"))
                 {
                     RenameStatistics(batch, objName, newName, procedureName);
-                    RecordRenameEvent(batch, objName, "STATISTICS");
+                    RecordRenameEvent(batch, objName, newName, objType, "STATISTICS");
                 }
                 else
                 {
                     var renamedKind = this.RenameObject(batch, objName, newName, objType);
-                    RecordRenameEvent(batch, objName, renamedKind);
+                    RecordRenameEvent(batch, objName, newName, objType, renamedKind);
                 }
             }
             catch (SimulatedSqlException refused) when (refused.Number is 3906 or 4928 or 5074)
@@ -145,8 +146,10 @@ partial class Simulation
 
     /// <summary>
     /// Raises the <c>RENAME</c> DDL event for a completed <c>sp_rename</c>.
-    /// Real reports the <em>old</em> name as <c>ObjectName</c> (probe-confirmed)
-    /// alongside a <c>NewObjectName</c> element the simulator doesn't emit.
+    /// Real reports the <em>old</em> name as <c>ObjectName</c> (probe-confirmed),
+    /// then after the target pair the <c>NewObjectName</c> and the procedure's
+    /// three arguments as a <c>Parameters</c> list, an omitted <c>@objtype</c>
+    /// as an empty element (probed 2026-10-19 against SQL Server 2025).
     /// </summary>
     /// <remarks>
     /// A column or index names its table as <c>TargetObjectName</c> /
@@ -154,8 +157,13 @@ partial class Simulation
     /// rename carries the pair empty (probed 2026-10-04 against SQL Server
     /// 2025).
     /// </remarks>
-    private static void RecordRenameEvent(BatchContext batch, string objName, string objectType)
+    private static void RecordRenameEvent(BatchContext batch, string objName, string newName, string? objType, string objectType)
     {
+        if (!RaisesDdlEvents(batch.Parser))
+            return;
+        var builder = new StringBuilder();
+        AppendElement(builder, "NewObjectName", newName);
+        var trailing = builder.Append(RenderEventParameters(objName, newName, objType)).ToString();
         var parts = objName.Split('.');
         for (var i = 0; i < parts.Length; i++)
             parts[i] = parts[i].Trim('[', ']');
@@ -163,11 +171,11 @@ partial class Simulation
         if (objectType is "COLUMN" or "INDEX" && parts.Length >= 2)
         {
             var columnSchema = parts.Length >= 3 ? parts[^3] : Database.DefaultSchemaName;
-            RecordDdlEvent(batch.Parser, "RENAME", columnSchema, leaf, objectType, parts[^2], "TABLE");
+            RecordDdlEvent(batch.Parser, "RENAME", columnSchema, leaf, objectType, parts[^2], "TABLE", trailingElements: trailing);
             return;
         }
         var schemaName = parts.Length >= 2 ? parts[^2] : Database.DefaultSchemaName;
-        RecordDdlEvent(batch.Parser, "RENAME", schemaName, leaf, objectType, targetObjectName: "", targetObjectType: "");
+        RecordDdlEvent(batch.Parser, "RENAME", schemaName, leaf, objectType, targetObjectName: "", targetObjectType: "", trailingElements: trailing);
     }
 
     private static (string? ObjName, string? NewName, string? ObjType) ParseSpRenameArgs(List<ProcArgument> arguments)

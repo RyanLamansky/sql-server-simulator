@@ -188,10 +188,15 @@ partial class Simulation
         // the schema last.
         RecordSlotUndo<Schema>(context, context.CurrentDatabase.Schemas, schemaName, null);
 
-        // Real reports the new schema as both SchemaName and ObjectName.
+        // Real reports the new schema as both SchemaName and ObjectName, and
+        // its owner after ObjectType (probed 2026-10-19 against SQL Server 2025).
+        string? eventOwnerName = null;
         if (context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var createdSchema))
+        {
             ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, context.CurrentDatabase, createdSchema.SchemaId, "SC", 0, createdSchema.Name);
-        RecordDdlEvent(context, "CREATE_SCHEMA", schemaName, schemaName, "SCHEMA");
+            eventOwnerName = Ownership.PrincipalName(context.CurrentDatabase, createdSchema.PrincipalId);
+        }
+        RecordDdlEvent(context, "CREATE_SCHEMA", schemaName, schemaName, "SCHEMA", ownerName: eventOwnerName);
         return true;
     }
 

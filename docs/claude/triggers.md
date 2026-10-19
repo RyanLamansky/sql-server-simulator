@@ -394,10 +394,13 @@ Element order is real's.
 `SchemaName` is **omitted entirely** for `CREATE_USER` / `CREATE_ROLE` and their siblings, an application role's and a full-text catalog's, matching real; `TargetObjectName` / `TargetObjectType` follow `ObjectType` for the index and trigger events (naming the parent table or view — for a database-scope trigger an empty `SchemaName` and `TargetObjectName` with `TargetObjectType` `Database`), for `UPDATE_STATISTICS` (which carries no `ObjectName`) and for an `sp_rename` of a column or index (naming its table; an object's carries an empty pair), and a synonym event carries `TargetObjectName` alone (probed 2026-10-04 against SQL Server 2025).
 `ObjectType` uses real's spellings — `TABLE`, `VIEW`, `INDEX`, `SCHEMA`, `TRIGGER`, `SEQUENCE`, `SYNONYM`, `TYPE`, `ROLE`, `SQL USER`, `APPLICATION ROLE`, `XML SCHEMA COLLECTION`, `FULLTEXT CATALOG`; a full-text index event names its table.
 
-Three kinds carry elements of their own after the common ones (probed 2026-09-28 against SQL Server 2025):
+A schema's `CREATE_SCHEMA` / `DROP_SCHEMA` carries its owner as `OwnerName` after `ObjectType`, and `ALTER SCHEMA … TRANSFER` reports the moved object's own `ObjectType` (`SYNONYM`, `TABLE`, …) (probed 2026-10-19 against SQL Server 2025).
+
+Four kinds carry elements of their own after the common ones (probed 2026-09-28 against SQL Server 2025, the rename's 2026-10-19):
 - A **permission** event names the securable — an object under its schema, a schema, principal or the database itself under an empty `SchemaName` — then `Grantor` (the session's user, except that a user or application-role securable is its own grantor and a role its owner), `Permissions` (each in lower case, a column list dropped), `Grantees`, `AsGrantor` (the `AS` principal, else empty), `GrantOption` (1 for `WITH GRANT OPTION` and `REVOKE GRANT OPTION FOR`) and `CascadeOption` (1 only when a grantee held the grant option a written `CASCADE` reaches).
 - An **extended-property** event names the deepest level given — a level-2 object with its level-1 host as `TargetObjectName` / `TargetObjectType`, a schema or the database under an empty `SchemaName` — with the target pair always present, then `PropertyName`, `PropertyValue` (not for a drop) and `Parameters`, one `Param` per procedure parameter in order, as written.
 - A **binding** event names the default or rule for `BIND_*`, and for `UNBIND_*` the column (under its table's schema) or alias type, then `Parameters`.
+- A **rename** names the old name, then after the target pair `NewObjectName` and `Parameters`, an omitted `@objtype` an empty `Param`.
 `ServerName` is `SIMULATED`, matching `@@SERVERNAME`; `LoginName` / `UserName` read the session's effective principal, so `EXECUTE AS` shows through.
 `QUOTED_IDENTIFIER` reflects the session setting; the other `SetOptions` attributes are fixed.
 
@@ -408,9 +411,8 @@ Three kinds carry elements of their own after the common ones (probed 2026-09-28
 
 ### Not modeled yet
 
-- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage`, an application role's included (the role-member events carry `RoleName` but not these two, and `sp_addrolemember`'s event reports its own `EXEC` text where real reports the `ALTER ROLE` it runs), a schema's `OwnerName`, `sp_rename`'s `NewObjectName`, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
+- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage`, an application role's included (the role-member events carry `RoleName` but not these two, and `sp_addrolemember`'s event reports its own `EXEC` text where real reports the `ALTER ROLE` it runs), and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
   The common header plus `TSQLCommand` is what an audit body reads.
-- **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
 - **A binding procedure's rows-affected count** — an `EXEC sp_bindefault` a DDL trigger fires for reports the body's writes as its own count, where real reports its internal statements' (probed 2026-09-28 against SQL Server 2025).
 
 ## Server-scope triggers — `ON ALL SERVER`

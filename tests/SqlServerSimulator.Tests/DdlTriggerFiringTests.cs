@@ -360,7 +360,46 @@ public sealed class DdlTriggerFiringTests
         _ = sim.ExecuteNonQuery("create table dbo.t1 (a int)");
         _ = sim.ExecuteNonQuery("exec sp_rename 'dbo.t1.a', 'b', 'COLUMN'");
         var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'RENAME'")!;
-        Assert.Contains("<TargetObjectName>t1</TargetObjectName><TargetObjectType>TABLE</TargetObjectType>", document);
+        Assert.Contains("<TargetObjectName>t1</TargetObjectName><TargetObjectType>TABLE</TargetObjectType><NewObjectName>b</NewObjectName><Parameters><Param>dbo.t1.a</Param><Param>b</Param><Param>COLUMN</Param></Parameters>", document);
+    }
+
+    /// <summary>
+    /// A rename's event carries the new name and the procedure's arguments
+    /// after the target pair, an omitted <c>@objtype</c> as an empty element
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RenameObject_CarriesNewNameAndParameters()
+    {
+        var sim = NewLoggingSimulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t1 (a int)");
+        _ = sim.ExecuteNonQuery("exec sp_rename @objname = 'dbo.t1', @newname = 't2'");
+        var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'RENAME'")!;
+        Assert.Contains("<TargetObjectName /><TargetObjectType /><NewObjectName>t2</NewObjectName><Parameters><Param>dbo.t1</Param><Param>t2</Param><Param /></Parameters><TSQLCommand>", document);
+    }
+
+    /// <summary>
+    /// A schema's create and drop events name its owner after
+    /// <c>ObjectType</c>, and a transfer reports the moved object's own kind
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SchemaEvents_NameTheOwnerAndTheTransferredKind()
+    {
+        var sim = NewLoggingSimulation();
+        sim.ExecuteBatches(
+            "create role r",
+            "create schema s1",
+            "create schema s2 authorization r",
+            "create synonym dbo.syn for dbo.ddl_log",
+            "alter schema s1 transfer dbo.syn",
+            "create table dbo.t (a int)",
+            "alter schema s1 transfer dbo.t",
+            "drop schema s2");
+        AreEqual("dbo|r|SYNONYM|TABLE|r", sim.ExecuteScalar("""
+            select string_agg(iif(ev = 'ALTER_SCHEMA', x.value('(/EVENT_INSTANCE/ObjectType)[1]', 'sysname'), x.value('(/EVENT_INSTANCE/OwnerName)[1]', 'sysname')), '|') within group (order by id)
+            from ddl_log cross apply (select cast(doc as xml) x) d where ev in ('CREATE_SCHEMA', 'ALTER_SCHEMA', 'DROP_SCHEMA')
+            """));
     }
 
     /// <summary>

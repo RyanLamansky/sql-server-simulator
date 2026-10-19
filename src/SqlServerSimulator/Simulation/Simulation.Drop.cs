@@ -328,7 +328,7 @@ partial class Simulation
             RecordSlotUndo(context, context.CurrentDatabase.Schemas, schemaName, droppedSchema);
         if (droppedSchema is not null)
             ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectDeleted, context.CurrentDatabase, droppedSchema.SchemaId, "SC", 0, droppedSchema.Name);
-        RecordDdlEvent(context, "DROP_SCHEMA", schemaName, schemaName, "SCHEMA");
+        RecordDdlEvent(context, "DROP_SCHEMA", schemaName, schemaName, "SCHEMA", ownerName: Ownership.PrincipalName(context.CurrentDatabase, schema.PrincipalId));
     }
 
     /// <summary>

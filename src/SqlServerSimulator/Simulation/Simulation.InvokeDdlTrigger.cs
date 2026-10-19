@@ -328,7 +328,7 @@ partial class Simulation
     /// the <c>TargetObject*</c> pair the index / trigger / synonym events carry,
     /// and <c>TSQLCommand</c>. Real also emits per-event extras this doesn't —
     /// <c>AlterTableActionList</c>, a principal's <c>SID</c> /
-    /// <c>DefaultSchema</c>, a schema's <c>OwnerName</c>.
+    /// <c>DefaultSchema</c>.
     /// </remarks>
     private static string BuildDdlEventData(BatchContext batch, DdlEventInfo info, string statementText)
     {
