@@ -142,6 +142,9 @@ partial class Simulation
             throw SimulatedSqlException.IncludedColumnsOnClusteredIndex();
         if (ignoreDupKey && !isUnique)
             throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndex();
+        // A column named twice refuses the batch as it compiles, over a table
+        // the batch creates too (probed 2026-10-19 against SQL Server 2025).
+        RejectDuplicateIndexColumns(context.Batch.CurrentDatabase.Collation, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, inline: false);
 
         if (context.Batch.IsSkipping)
             return true;

@@ -111,6 +111,32 @@ public sealed class DeferredCompileRefusalTests
         AreEqual(number, error.Number);
     }
 
+    /// <summary>An index naming a column twice refuses the batch as it compiles, over a table the batch creates too (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select 'first'; begin try create index ix on t (a, a); end try begin catch select 'caught' end catch", (byte)1)]
+    [DataRow("select 'first'; begin try create index ix on t (a) include (a); end try begin catch select 'caught' end catch", (byte)2)]
+    [DataRow("create table u (a int); select 'first'; begin try create index ix on u (a, a); end try begin catch select 'caught' end catch", (byte)1)]
+    public void IndexColumnNamedTwice_RunsNothing(string sql, byte state)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int, a int)");
+        var (rows, error) = Run(simulation, sql);
+        IsEmpty(rows);
+        AreEqual(1909, error.Number);
+        AreEqual(state, error.Errors[0].State);
+    }
+
+    /// <summary>A query over a table whose clustered index the batch disabled ends the batch past its TRY (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void QueryOverADisabledClusteredIndex_EndsTheBatchPastTheTry()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int); create clustered index cx on t (id)");
+        var (rows, error) = Run(simulation, "select 'first'; begin try alter index cx on t disable; select count(*) from t; end try begin catch select 'caught' end catch; select 'after'");
+        CollectionAssert.AreEqual(new object[] { "first" }, rows);
+        AreEqual(8655, error.Number);
+    }
+
     /// <summary>A failing ALTER COLUMN rewrite a TRY catches leaves no row count (probed 2026-10-19 against SQL Server 2025).</summary>
     [TestMethod]
     public void CaughtAlterColumnRewrite_SendsNoCount()
