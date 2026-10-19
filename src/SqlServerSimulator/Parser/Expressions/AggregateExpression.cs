@@ -568,7 +568,13 @@ internal sealed class AggregateExpression : Expression
     private SqlType BindOrderedOperand(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
-        StringScalars.RequireSettledCollation(operandType, this.Kind == AggregateKind.Max ? "max" : "min");
+        var operatorName = this.Kind == AggregateKind.Max ? "max" : "min";
+        // An operand MAX / MIN can't order is refused as the statement
+        // compiles, over an empty table too (probed 2026-10-19 against SQL
+        // Server 2025).
+        if (operandType.IsIncomparable || operandType is BitSqlType)
+            throw Aggregator.MinMaxRejection(operandType, operatorName);
+        StringScalars.RequireSettledCollation(operandType, operatorName);
         return operandType;
     }
 

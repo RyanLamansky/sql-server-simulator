@@ -132,7 +132,7 @@ internal abstract class Aggregator
     /// caller reading <c>Number</c> sees 6210 and the 8117 follows in
     /// <c>Errors</c>. Every other refused operand reports 8117 alone.
     /// </summary>
-    private static SimulatedSqlException MinMaxRejection(SqlType operandType, string operatorName) =>
+    internal static SimulatedSqlException MinMaxRejection(SqlType operandType, string operatorName) =>
         operandType is SpatialSqlType
             ? SimulatedSqlException.Aggregate([
                 SimulatedSqlException.ClrTypeNotFullyComparable(operandType),

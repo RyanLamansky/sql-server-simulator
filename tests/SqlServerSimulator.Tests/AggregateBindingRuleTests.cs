@@ -228,4 +228,24 @@ public sealed class AggregateBindingRuleTests
         // Msg 130 is scoped to an aggregate's own argument: a subquery in
         // HAVING, in the projection, or in WHERE stays legal.
         _ = Seeded().ExecuteScalar(sql);
+
+    /// <summary>An operand MAX or MIN can't order refuses the batch as it compiles, over an empty table and windowed alike (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select max(x) from e", 8117)]
+    [DataRow("select min(g) from e", 6210)]
+    [DataRow("select max(bt) from e", 8117)]
+    [DataRow("select max(x) over () from e", 8117)]
+    public void UnorderableMinMaxOperand_RefusesTheBatch(string query, int number)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table e (x xml, g geography, bt bit)");
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand($"select 'first'; {query}");
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            _ = reader.Read();
+        });
+        AreEqual(number, error.Number);
+    }
 }
