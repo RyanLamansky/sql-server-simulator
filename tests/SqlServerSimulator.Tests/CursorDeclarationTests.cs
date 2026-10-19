@@ -30,6 +30,10 @@ public sealed class CursorDeclarationTests
     [DataRow("cursor scroll_locks", " for read only", "READ_ONLY and SCROLL_LOCKS")]
     [DataRow("insensitive cursor", " for update", "FOR UPDATE and INSENSITIVE")]
     [DataRow("cursor fast_forward static scroll_locks", "", "STATIC and FAST_FORWARD")]
+    [DataRow("cursor static read_only", " for update", "FOR UPDATE and READ_ONLY")]
+    [DataRow("cursor static scroll_locks", " for update of id", "FOR UPDATE and STATIC")]
+    [DataRow("cursor fast_forward scroll_locks", " for update", "FAST_FORWARD and FOR UPDATE")]
+    [DataRow("cursor fast_forward read_only", " for update", "FAST_FORWARD and FOR UPDATE")]
     public void ConflictingOptions_Msg1048(string options, string tail, string pair)
     {
         var simulation = new Simulation();

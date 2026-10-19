@@ -414,18 +414,22 @@ partial class Simulation
         (CursorOptions.Static, "STATIC", CursorOptions.Keyset, "KEYSET"),
         (CursorOptions.Static, "STATIC", CursorOptions.Dynamic, "DYNAMIC"),
         (CursorOptions.Static, "STATIC", CursorOptions.FastForward, "FAST_FORWARD"),
-        (CursorOptions.Static, "STATIC", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
         (CursorOptions.Keyset, "KEYSET", CursorOptions.Dynamic, "DYNAMIC"),
         (CursorOptions.Keyset, "KEYSET", CursorOptions.FastForward, "FAST_FORWARD"),
         (CursorOptions.Dynamic, "DYNAMIC", CursorOptions.FastForward, "FAST_FORWARD"),
+        // A FOR UPDATE is judged ahead of the concurrency options (probed
+        // 2026-10-19 against SQL Server 2025: STATIC SCROLL_LOCKS … FOR UPDATE
+        // is FOR UPDATE and STATIC, STATIC READ_ONLY … FOR UPDATE FOR UPDATE
+        // and READ_ONLY).
+        (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.ForUpdate, "FOR UPDATE"),
+        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.ReadOnly, "READ_ONLY"),
+        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.Static, "STATIC"),
+        (CursorOptions.Static, "STATIC", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
         (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
         (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.Optimistic, "OPTIMISTIC"),
         (CursorOptions.ReadOnly, "READ_ONLY", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
         (CursorOptions.Optimistic, "OPTIMISTIC", CursorOptions.ReadOnly, "READ_ONLY"),
         (CursorOptions.ScrollLocks, "SCROLL_LOCKS", CursorOptions.Optimistic, "OPTIMISTIC"),
-        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.Static, "STATIC"),
-        (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.ForUpdate, "FOR UPDATE"),
-        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.ReadOnly, "READ_ONLY"),
     ];
 
     /// <summary>

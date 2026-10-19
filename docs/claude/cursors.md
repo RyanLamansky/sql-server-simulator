@@ -443,6 +443,7 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
   Real fixes the cursor's plan at DECLARE too, so the direction matches; what isn't modeled is real's schema-change detection.
 - **DYNAMIC navigation order without an ORDER BY is each source's scan order nested left-to-right** — clustered key order, or write order for a heap — where real walks its chosen plan's order.
   For the left-deep scan shape the two agree; a plan real would run differently (a hash join reordering the inner, a covering nonclustered index) could emit the same rows in another order.
+- **A KEYSET cursor over a heap whose identifying key is a unique index** walks write order here, where real's READ_ONLY and SCROLL_LOCKS keysets walk the index's key order and its default and OPTIMISTIC ones the heap's (probed 2026-10-19 against SQL Server 2025); the order follows the plan real picks per concurrency, like the static join's order beside it.
 - **`@@CURSOR_ROWS` is `-1` throughout for DYNAMIC.**
   Real SQL Server may report a transient positive count for a freshly-opened dynamic cursor before the first fetch (asynchronous population heuristic); the simulator doesn't model the transition.
 - **A deleted keyset member's row follows the projection's inferred nullability**, so where that isn't inferred (a join, a deferred source) every column reads NULL where real zeroes the NOT NULL ones.
