@@ -11,9 +11,11 @@ namespace SqlServerSimulator.Parser;
 /// <c>WHERE</c>, then the <c>SET</c> targets, the <c>SET</c> values and
 /// <c>OUTPUT</c>; an <c>INSERT</c> its source before its column list; a
 /// <c>MERGE</c> its source, <c>ON</c>, the insert column list, every
-/// <c>WHEN</c> condition and then every action. An <c>INSERT … VALUES</c>
-/// arity refusal follows everything (probed 2026-09-27 against SQL Server
-/// 2025).
+/// <c>WHEN</c> condition and then every action, then its clause-order
+/// refusals and its columns assigned twice, binding its <c>OUTPUT</c> only when
+/// nothing failed. An <c>INSERT … VALUES</c> arity refusal follows everything,
+/// and an <c>UPDATE</c>'s columns assigned twice follow its <c>OUTPUT</c>
+/// (probed 2026-09-27 and 2026-10-19 against SQL Server 2025).
 /// </summary>
 internal enum BindClause : byte
 {
@@ -38,8 +40,11 @@ internal enum BindClause : byte
     MergeNotMatchedCondition,
     MergeBySourceCondition,
     MergeAction,
+    MergeClauseOrder,
+    MergeDuplicateAssignment,
     Assignment,
     Output,
+    DuplicateAssignment,
     InsertArity,
 }
 
@@ -69,8 +74,8 @@ internal sealed class BindErrorReport(string command)
     /// it first is worth reading the statement again for the whole report.
     /// </summary>
     public static bool StartsReport(SimulatedSqlException error) =>
-        error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 273 or 402 or 468 or 529 or 1011 or 1012 or 1013 or 1015
-            or 4101 or 4104 or 5308 or 5309 or 5310 or 5319 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
+        error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 264 or 273 or 402 or 468 or 529 or 1011 or 1012 or 1013 or 1015
+            or 4101 or 4104 or 5308 or 5309 or 5310 or 5319 or 5324 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
 
     /// <summary>
     /// Whether <paramref name="error"/> is a type check real reports where it
@@ -425,6 +430,41 @@ internal sealed class BindErrorReport(string command)
         });
 
     /// <summary>
+    /// Records <paramref name="error"/> in <paramref name="clause"/> as a whole,
+    /// reported at <paramref name="linePosition"/>'s line, the statement's own
+    /// by default: a check real makes on the statement once its names have
+    /// bound, ordered among the clause's others as recorded. Answers whether it
+    /// could — false, for a statement read from another text, leaves the
+    /// caller to throw.
+    /// </summary>
+    public bool RecordInStatementClause(SimulatedSqlException error, BindClause clause, int? linePosition = null)
+    {
+        if (this.openScopes.Find(scope => scope.Start >= 0) is not { } statement)
+            return false;
+        this.entries.Add(new Entry
+        {
+            Error = error,
+            SortPosition = statement.Start,
+            Sub = this.entries.Count,
+            LinePosition = linePosition ?? statement.Start,
+            Clause = clause,
+            EligibleFrom = -1,
+        });
+        return true;
+    }
+
+    /// <summary>
+    /// Forgets the errors recorded since the report held
+    /// <paramref name="count"/>: what the parse read there is text real
+    /// doesn't bind.
+    /// </summary>
+    public void DropRecordedSince(int count) => this.entries.RemoveRange(count, this.entries.Count - count);
+
+    /// <summary>Forgets the errors recorded at <paramref name="start"/>..<paramref name="end"/>, text real doesn't bind.</summary>
+    public void DropRecordedWithin(int start, int end) =>
+        _ = this.entries.RemoveAll(entry => start <= entry.LinePosition && entry.LinePosition < end);
+
+    /// <summary>
     /// Records a value its write target can't take without an explicit
     /// conversion (Msg 206 / 257 and the other type checks), answering whether
     /// it could. Real makes the check once every value of the statement has
@@ -493,12 +533,13 @@ internal sealed class BindErrorReport(string command)
     /// (probed 2026-09-27: <c>SUM(SUM(x1)), x2</c> reports the two Msg 207s,
     /// <c>SUM(COUNT(*)), x1</c> Msg 130 then Msg 207).
     /// </summary>
-    public void RecordUnlessPreceded(SimulatedSqlException error, int position) =>
+    public void RecordUnlessPreceded(SimulatedSqlException error, int position, BindClause? clause = null) =>
         this.entries.Add(new Entry
         {
             Error = error,
             SortPosition = position,
             LinePosition = position,
+            Clause = clause,
             EligibleFrom = position,
         });
 

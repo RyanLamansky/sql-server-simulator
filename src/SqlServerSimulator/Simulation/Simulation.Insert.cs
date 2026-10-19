@@ -353,7 +353,14 @@ partial class Simulation
                 if (GraphColumns.IsInternal(tableColumn.GraphKind))
                     throw SimulatedSqlException.InternalGraphColumnAccess(tableColumn.Name, state: 1);
                 if (usedColumns.Contains(tableColumn))
-                    throw SimulatedSqlException.ColumnAssignedMoreThanOnce(tableColumn.Name);
+                {
+                    // Reported only when the source bound (probed 2026-10-19
+                    // against SQL Server 2025: `INSERT t (v, v) VALUES (x1, 1)`
+                    // is the Msg 207 alone).
+                    if (bindErrors is null || !bindErrors.Covers(column))
+                        throw SimulatedSqlException.ColumnAssignedMoreThanOnce(tableColumn.Name);
+                    bindErrors.RecordUnlessPreceded(SimulatedSqlException.ColumnAssignedMoreThanOnce(tableColumn.Name), column.StartIndex, BindClause.InsertColumns);
+                }
                 usedColumns.Add(tableColumn);
 
                 var separator = context.GetNextRequired();

@@ -471,7 +471,7 @@ Probe-confirmed schema-inference rules:
 | Probed Msg | When raised |
 |---|---|
 | **5316** | The target has an INSTEAD OF trigger for some of the actions the WHEN clauses perform but not all — see [`triggers.md`](triggers.md#instead-of-on-views). |
-| **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. Real's parser raises it, so it comes back alone and ends the batch (probed 2026-10-01). |
+| **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. It reports in the statement's binder report after its names, the families last written first, each at its family's first clause, the out-of-order clause's condition and the `OUTPUT` going unbound, and it ends the batch's compile there; a repeated action (Msg 10714) anywhere in the statement preempts it (probed 2026-10-19). |
 | **8672** | A target row matched more than one source row, and the WHEN MATCHED clause that fired chose UPDATE. DELETE is forgiving (multiple matches collapse to one delete — probe-confirmed). It ends the batch and rolls the transaction back as under `XACT_ABORT` (probed 2026-09-28). |
 | **10710** | WHEN NOT MATCHED [BY TARGET] clause specified UPDATE or DELETE (only INSERT is legal). |
 | **10711** | WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause specified INSERT (only UPDATE / DELETE are legal). |

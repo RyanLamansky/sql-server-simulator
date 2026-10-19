@@ -2310,9 +2310,15 @@ partial class Simulation
 
             if (!assigned.Add(columnOrdinal))
             {
-                throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null
+                // Reported after OUTPUT, once every name has bound (probed
+                // 2026-10-19 against SQL Server 2025).
+                var duplicate = SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null
                     ? table.Columns[columnOrdinal].Name
                     : colName);
+                if (bindErrors?.RecordInStatementClause(duplicate, BindClause.DuplicateAssignment) != true)
+                    throw duplicate;
+                assignments.Add((-1, expr));
+                continue;
             }
             RejectUnmodifiableSetTarget(table, columnOrdinal, database);
             if (ReferenceEquals(expr, ColumnDefaultValue.Unbound))

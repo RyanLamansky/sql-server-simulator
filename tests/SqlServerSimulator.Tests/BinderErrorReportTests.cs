@@ -181,6 +181,39 @@ public sealed partial class BinderErrorReportTests
     public void StatementShapes_StopWhereTheBinderStops(string statement, string expected)
         => AreEqual(expected, Report(statement));
 
+    /// <summary>
+    /// A MERGE's clause-order refusal (Msg 5324) and the columns a statement
+    /// assigns twice (Msg 264) report after its names: a MERGE reports its
+    /// families' refusals last written first, each at the family's first
+    /// clause, binding neither the out-of-order clause's condition nor its
+    /// OUTPUT past an error, and an action assigning a column twice binds none
+    /// of its values; an UPDATE reports Msg 264 after its OUTPUT, and an INSERT
+    /// only when its source bound. A repeated action (Msg 10714) preempts them
+    /// all (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 1 when matched then update set b = 1;", "10714:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set a = 1 when matched then delete;", "5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set x1 = 2;", "207:1:x1 5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.x1 = 1 then update set a = 2;", "5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 2 output x1;", "5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 2 when not matched by source and t.x1 = 1 then delete;", "207:1:x1 5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a\nwhen matched then delete\nwhen matched and u.d = 1 then update set a = 1, a = 2\nwhen not matched by source then delete\nwhen not matched by source and t.b = 1 then update set b = 2;", "5324:4:WHEN NOT MATCHED BY SOURCE 5324:2:WHEN MATCHED 264:1:a")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set a = u.x1, a = 3;", "264:1:a")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set a = u.x1 output x2;", "207:1:x1")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set a = 1, a = 2 when not matched then insert (a, a) values (1, u.x1);", "207:1:x1 264:1:a 264:1:a")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set a = 1, a = 2, a = 3, b = 1, b = 2;", "264:1:a 264:1:a 264:1:b")]
+    [DataRow("merge t using u on t.a = u.a when matched then update set x1 = 1, a = 2, a = 3;", "207:1:x1 264:1:a")]
+    [DataRow("update t set a = 1, a = x1", "207:1:x1 264:1:a")]
+    [DataRow("update t set a = 1, a = 3 where x1 = 1", "207:1:x1")]
+    [DataRow("update t set a = 1, a = 3 output x1", "207:1:x1 264:1:a")]
+    [DataRow("update t set a = 1, x2 = 2, a = x1", "207:1:x2")]
+    [DataRow("insert t (a, a) values (x1, 1)", "207:1:x1")]
+    [DataRow("select x1 from t; merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 1;", "207:1:x1 5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 1; select x1 from t;", "5324:1:WHEN MATCHED")]
+    public void ClauseOrderAndRepeatedColumns_ReportAfterTheNames(string statement, string expected)
+        => AreEqual(expected, Report(statement));
+
     /// <summary>An explicit value for a rowversion column reports with a ragged VALUES list's refusal.</summary>
     [TestMethod]
     public void ExplicitTimestamp_ReportsWithRaggedValues()

@@ -1016,7 +1016,7 @@ public sealed class MergeTests
     public void Merge_RepeatedAction_RaisesMsg10714(string clauses, string message)
         => new Simulation().AssertSqlError($"create table t (id int, v int); merge t using (values (1, 0)) s(id, v) on t.id = s.id {clauses};", 10714, message);
 
-    /// <summary>Msg 5324 is the parser's, so nothing after it is reported (probed 2026-10-01).</summary>
+    /// <summary>Two unconditional clauses of one family are Msg 5324 alone (probed 2026-10-01).</summary>
     [TestMethod]
     public void Merge_ConditionAfterUnconditional_ReportsMsg5324Alone()
     {

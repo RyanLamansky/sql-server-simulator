@@ -887,14 +887,14 @@ partial class Simulation
                 // body but stops at a Msg 529, so a body whose first
                 // statement carries one reports it alone even when a later
                 // statement names a missing column (probed 2026-08-05). A
-                // MERGE's Msg 5324 is its parser's, so nothing follows it
-                // (probed 2026-10-01), and neither does an inline function's
+                // MERGE's Msg 5324 ends it after the rest of its statement's
+                // report (probed 2026-10-19), and so does an inline function's
                 // Msg 1090 for a table-valued DEFAULT (probed 2026-10-04).
                 // A FOR SYSTEM_TIME over a view reading no versioned table
                 // (Msg 13544) ends it the same way (probed 2026-10-04), as
                 // does a linked server's provider refusing an object's
                 // metadata — Msg 7314, 7325, 7357, 9514 (probed 2026-10-05).
-                if (ex.Number is 529 or 1090 or 5324 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544 || ex.BindsWithBatch)
+                if (ex.Number is 529 or 1090 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544 || ex.BindsWithBatch || ex.Errors.Any(static entry => entry.Number == 5324))
                     batch.BatchAborted = true;
             }
             else if (CaughtByTryFrame(batch, ex))

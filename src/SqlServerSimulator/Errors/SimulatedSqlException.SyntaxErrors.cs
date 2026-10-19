@@ -562,15 +562,12 @@ partial class SimulatedSqlException
     /// wording verbatim. The <paramref name="clauseFamily"/> is either
     /// <c>"WHEN MATCHED"</c> or <c>"WHEN NOT MATCHED BY SOURCE"</c> —
     /// <c>WHEN NOT MATCHED [BY TARGET]</c> has at most one clause total
-    /// (Msg 10714) and so doesn't share this path.
+    /// (Msg 10714) and so doesn't share this path. It reports among the
+    /// statement's binder errors, after its names, and ends the batch's compile
+    /// there (probed 2026-10-19 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException MergeUnconditionalMustBeLast(string clauseFamily) =>
-        new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1)
-        {
-            // Real's parser raises it, so the batch reports it alone (probed
-            // 2026-10-01 against SQL Server 2025).
-            PreemptsBinderErrors = true,
-        };
+        new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 8672: a <c>MERGE</c> statement's

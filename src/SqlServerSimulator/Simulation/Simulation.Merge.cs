@@ -65,10 +65,11 @@ partial class Simulation
         // Real binds the source, then ON, stopping there when ON fails; then
         // the insert column list, every WHEN condition, and every action
         // (probed 2026-09-27: an ON miss reports alone, and `… UPDATE SET x1 =
-        // x2 … INSERT (a, x4) VALUES (x5, 1)` reports x4, x1, x2, x5).
+        // x2 … INSERT (a, x4) VALUES (x5, 1)` reports x4, x1, x2, x5); then
+        // OUTPUT, only when nothing failed (probed 2026-10-19).
         var bindErrors = context.Batch.BindErrors;
         bindErrors?.OpenScope(context.Token);
-        bindErrors?.SetBarriers(BindClause.MergeInsertColumns);
+        bindErrors?.SetBarriers(BindClause.MergeInsertColumns, BindClause.Output);
 
         // MERGE [TOP (n) [PERCENT]] [INTO] target [AS] alias
         context.MoveNextRequired();
@@ -1395,6 +1396,13 @@ partial class Simulation
         var matchedUnconditionalSeen = false;
         var nmbsUnconditionalSeen = false;
         var nmbtSeen = false;
+        // A family's clause-order refusal (Msg 5324) waits for the statement's
+        // names, which real binds first, and reports at the family's first
+        // clause; a repeated action (Msg 10714) anywhere preempts it. A family
+        // holds two clauses at most before an action repeats.
+        Token? firstMatched = null;
+        Token? firstBySource = null;
+        List<(string Family, Token FirstClause)>? outOfOrder = null;
 
         // See ParseMerge's commentary on `targetColumns` — view target's
         // user-facing column shape is OutputColumns; base shape otherwise.
@@ -1457,6 +1465,17 @@ partial class Simulation
                 _ => scope.BySourceCondition,
             };
 
+            // A clause after its family's unconditional one binds no condition
+            // (probed 2026-10-19 against SQL Server 2025: a miss there goes
+            // unreported beside the Msg 5324).
+            var outOfFamilyOrder = kind switch
+            {
+                WhenClauseKind.Matched => matchedUnconditionalSeen,
+                WhenClauseKind.NotMatchedBySource => nmbsUnconditionalSeen,
+                _ => false,
+            };
+            var recordedBefore = context.Batch.BindErrors?.Count ?? 0;
+
             // Optional AND search_condition.
             BooleanExpression? searchCondition = null;
             if (context.Token is ReservedKeyword { Keyword: Keyword.And })
@@ -1471,19 +1490,23 @@ partial class Simulation
                 Selection.RefuseClauseAggregates(context.Batch, conditionAggregates, static () => SimulatedSqlException.AggregateInMergeWhenClause());
                 searchCondition.BindCarryingTypeChecks(context.Batch, conditionResolver);
             }
+            if (outOfFamilyOrder)
+                context.Batch.BindErrors?.DropRecordedSince(recordedBefore);
 
             // Family-level ordering checks.
             if (kind == WhenClauseKind.Matched)
             {
-                if (matchedUnconditionalSeen)
-                    throw SimulatedSqlException.MergeUnconditionalMustBeLast("WHEN MATCHED");
+                firstMatched ??= whenToken;
+                if (outOfFamilyOrder)
+                    (outOfOrder ??= []).Add(("WHEN MATCHED", firstMatched));
                 if (searchCondition is null)
                     matchedUnconditionalSeen = true;
             }
             else if (kind == WhenClauseKind.NotMatchedBySource)
             {
-                if (nmbsUnconditionalSeen)
-                    throw SimulatedSqlException.MergeUnconditionalMustBeLast("WHEN NOT MATCHED BY SOURCE");
+                firstBySource ??= whenToken;
+                if (outOfFamilyOrder)
+                    (outOfOrder ??= []).Add(("WHEN NOT MATCHED BY SOURCE", firstBySource));
                 if (searchCondition is null)
                     nmbsUnconditionalSeen = true;
             }
@@ -1511,6 +1534,16 @@ partial class Simulation
             if (clauses.Exists(earlier => earlier.Kind == kind && earlier.Action == clause.Action))
                 throw SimulatedSqlException.MergeActionRepeated(kind == WhenClauseKind.Matched ? "WHEN MATCHED" : "WHEN NOT MATCHED BY SOURCE", clause.Action == MergeActionKind.Update ? "UPDATE" : "DELETE");
             clauses.Add(clause);
+        }
+
+        if (outOfOrder is not null)
+        {
+            // Real reports the families last written first (probed 2026-10-19
+            // against SQL Server 2025).
+            if (context.Batch.BindErrors is not { } report || !report.Covers(outOfOrder[0].FirstClause))
+                throw SimulatedSqlException.MergeUnconditionalMustBeLast(outOfOrder[^1].Family);
+            for (var i = outOfOrder.Count - 1; i >= 0; i--)
+                _ = report.RecordInStatementClause(SimulatedSqlException.MergeUnconditionalMustBeLast(outOfOrder[i].Family), BindClause.MergeClauseOrder, outOfOrder[i].FirstClause.StartIndex);
         }
 
         return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
@@ -1612,7 +1645,14 @@ partial class Simulation
                 if (col.GeneratedAs != GeneratedAlwaysAsRow.None)
                     throw SimulatedSqlException.CannotInsertExplicitGeneratedAlways(QualifyTableName(destinationTable, context.Batch.DatabaseFor(destinationTable)));
                 if (insertColumns.Contains(col))
-                    throw SimulatedSqlException.ColumnAssignedMoreThanOnce(col.Name);
+                {
+                    // Reported once the statement's names have bound, its
+                    // values included (probed 2026-10-19 against SQL Server
+                    // 2025).
+                    var duplicate = SimulatedSqlException.ColumnAssignedMoreThanOnce(col.Name);
+                    if (context.Batch.BindErrors?.RecordInStatementClause(duplicate, BindClause.MergeDuplicateAssignment) != true)
+                        throw duplicate;
+                }
                 insertColumns.Add(col);
                 var sep = context.GetNextRequired();
                 if (sep is Operator { Character: ')' })
@@ -1716,6 +1756,11 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var assignments = new List<(int Ordinal, Expression Expr)>();
+        // An action assigning a column twice binds none of its values (probed
+        // 2026-10-19 against SQL Server 2025: `SET v = x1, v = 3` is the Msg
+        // 264 alone).
+        List<(int Start, int End)>? valueSpans = null;
+        var assignedTwice = false;
         using (ParserScope.Enter(ref context.OuterTypeResolver, resolveType))
         {
             while (true)
@@ -1771,11 +1816,12 @@ partial class Simulation
                         unboundTarget = true;
                     }
 
-                    context.MoveNextRequired();
+                    var valueStart = context.GetNextRequired().StartIndex;
                     setsDefault = context.Token is ReservedKeyword { Keyword: Keyword.Default };
                     rhs = setsDefault ? ColumnDefaultValue.Unbound : Expression.Parse(context);
                     if (setsDefault)
                         context.MoveNextOptional();
+                    (valueSpans ??= []).Add((valueStart, context.Token?.StartIndex ?? int.MaxValue));
                 }
 
                 // A target already reported binds no further; its value still
@@ -1798,15 +1844,28 @@ partial class Simulation
                         throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(destinationTable, context.Batch.DatabaseFor(destinationTable)));
                     if (setsDefault)
                         rhs = ColumnDefaultValue.Bind(targetColumn);
-                    AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
                     if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
-                        throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
-                    assignments.Add((ordinal, rhs));
+                    {
+                        var duplicate = SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
+                        if (context.Batch.BindErrors?.RecordInStatementClause(duplicate, BindClause.MergeDuplicateAssignment) != true)
+                            throw duplicate;
+                        assignedTwice = true;
+                    }
+                    else
+                    {
+                        AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
+                        assignments.Add((ordinal, rhs));
+                    }
                 }
 
                 if (context.Token is not Operator { Character: ',' })
                     break;
             }
+        }
+        if (assignedTwice && valueSpans is not null)
+        {
+            foreach (var (start, end) in valueSpans)
+                context.Batch.BindErrors!.DropRecordedWithin(start, end);
         }
 
         RejectColumnSetBesideSparse(destinationTable, assignments);
@@ -1879,6 +1938,7 @@ partial class Simulation
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
 
         var targetColumns = view?.Columns ?? destinationTable.Columns;
         var expressions = new List<Expression>();
