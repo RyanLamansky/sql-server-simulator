@@ -316,7 +316,6 @@ public sealed class MaxTypesTests
     [TestMethod]
     [DataRow("text")]
     [DataRow("ntext")]
-    [DataRow("image")]
     public void LegacyLob_Like_Allowed(string columnType)
     {
         var simulation = new Simulation();

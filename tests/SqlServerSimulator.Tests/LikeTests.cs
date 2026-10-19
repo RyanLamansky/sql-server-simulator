@@ -317,5 +317,20 @@ public class LikeTests
     [TestMethod]
     public void XmlEscape_RaisesMsg8116()
         => new Simulation().AssertSqlError("select case when 'a' like 'a' escape cast('<a/>' as xml) then 1 else 0 end", 8116, "Argument data type xml is invalid for argument 3 of like function.");
+
+    /// <summary>An image matched against a string, either way round, is Msg 8116 naming the pattern's type; a binary pattern matches (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("im like 'a%'", "varchar")]
+    [DataRow("im like N'a%'", "nvarchar")]
+    [DataRow("'a' like im", "image")]
+    public void ImageAgainstAString_RaisesMsg8116(string predicate, string typeName)
+        => new Simulation().AssertSqlError($"create table t (im image); select 1 from t where {predicate}", 8116, $"Argument data type {typeName} is invalid for argument 2 of like function.");
+
+    /// <summary>An image against a binary pattern matches its bytes whole, a wildcard byte included (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("0x61", 1)]
+    [DataRow("0x6125", 0)]
+    public void ImageAgainstABinaryPattern_MatchesItsBytesWhole(string pattern, int expected)
+        => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"create table t (im image); insert t values (0x61), (0x6162); select count(*) from t where im like {pattern}"));
 }
 

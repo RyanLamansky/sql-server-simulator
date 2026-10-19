@@ -3448,6 +3448,12 @@ internal abstract class BooleanExpression : ExpressionNode
             if (l.IsNull || r.IsNull)
                 return null;
 
+            // An image against a binary value matches its bytes whole, wildcards
+            // and all (probed 2026-10-19 against SQL Server 2025: 0x61 matches
+            // 0x61 alone, 0x6125 — 'a%' — matches neither 0x61 nor 0x6162).
+            if (l.Type is ImageSqlType || r.Type is ImageSqlType)
+                return l.AsBytes.AsSpan().SequenceEqual(r.AsBytes) ^ this.negated;
+
             // A non-string operand is implicitly converted to varchar, matching
             // real SQL Server (probe-confirmed: int / decimal / float / date /
             // datetime / uniqueidentifier / bit all LIKE-match their default
@@ -3548,6 +3554,12 @@ internal abstract class BooleanExpression : ExpressionNode
                 return;
             RejectUncomparableLikeArgument(leftType, 1);
             RejectUncomparableLikeArgument(rightType, 2);
+            // An image matched against a string, either way round, refuses the
+            // pattern's type (probed 2026-10-19 against SQL Server 2025:
+            // `im LIKE 'a%'` names varchar, `'a' LIKE im` image), where a
+            // binary pattern or a varbinary subject is matched.
+            if ((leftType is ImageSqlType && SqlType.IsStringCategory(rightType)) || (rightType is ImageSqlType && SqlType.IsStringCategory(leftType)))
+                throw SimulatedSqlException.InvalidArgumentDataType(rightType.SqlServerName, 2, "like");
             RequireResolvableCollation(leftType, rightType, "like");
             if (this.escape is not null)
                 RejectUncomparableLikeArgument(this.escape.GetSqlType(batch, resolveColumnType), 3);
