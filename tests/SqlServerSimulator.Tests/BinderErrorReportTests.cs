@@ -461,4 +461,34 @@ public sealed partial class BinderErrorReportTests
         _ = simulation.ExecuteNonQuery("create view vs as select a, b + 1 c from t");
         AreEqual(expected, Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement))));
     }
+
+    /// <summary>
+    /// A write through a partitioned view, or a UNION ALL view failing the
+    /// partitioning rules, reports the statement's names and none of the
+    /// view's refusals — save TOP and OUTPUT, which follow the names, and the
+    /// Msg 4406 of an INSERT whose source failed (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete pv from pv join t1 on x1 = 1", "207:1:x1")]
+    [DataRow("delete pv from pv join t1 on t1.id = pv.id", "4439:1:zz.dbo.pv")]
+    [DataRow("update pv set v = 1 from pv join t2 on x1 = 1", "207:1:x1")]
+    [DataRow("update vu set a = x1", "207:1:x1")]
+    [DataRow("update vu set a = 1", "4442:1:zz.dbo.vu")]
+    [DataRow("delete top (1) pv where x1 = 1", "207:1:x1 417:1:")]
+    [DataRow("delete pv output deleted.x2 where x1 = 1", "207:1:x1 489:1:pv")]
+    [DataRow("insert pv (id, v) values (x1, 1)", "207:1:x1 4406:1:pv")]
+    [DataRow("insert pv (id) values (x1)", "207:1:x1 4406:1:pv")]
+    [DataRow("insert pv (id) values (1)", "4448:1:zz.dbo.pv")]
+    [DataRow("insert pv (id, x9) values (1, 1)", "207:1:x9")]
+    [DataRow("insert pv (id, v) output inserted.x3 values (x1, 1)", "207:1:x1 4406:1:pv")]
+    [DataRow("insert vu (a) values (x1)", "207:1:x1 4406:1:vu")]
+    public void PartitionedViewWrite_ReportsTheNames(string statement, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database zz");
+        _ = simulation.ExecuteNonQuery("use zz; create table t (a int, b int); create table t1 (id int primary key check (id < 10), v int); create table t2 (id int primary key check (id >= 10), v int);");
+        _ = simulation.ExecuteNonQuery("use zz; exec ('create view pv as select id, v from t1 union all select id, v from t2'); exec ('create view vu as select a from t union all select b from t');");
+        AreEqual(expected, Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("use zz; " + statement))));
+    }
 }

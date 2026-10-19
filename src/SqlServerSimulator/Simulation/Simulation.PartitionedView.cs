@@ -546,6 +546,18 @@ partial class Simulation
     private static SimulatedNonQuery ProcessPartitionedViewInsert(View view, ParserContext context, MultiPartName name)
     {
         var batch = context.Batch;
+        // Real reports the statement's names ahead of every refusal the view
+        // meets, which none joins but the Msg 4406 of a source that failed
+        // (probed 2026-10-19 against SQL Server 2025), so a statement whose
+        // names fail reads no further.
+        if (batch.BindErrors is { } report && report.Covers(context.Token))
+        {
+            var atList = context.SaveCheckpoint();
+            var recordedBefore = report.Count;
+            if (ReadPastRefusedViewInsert(context, view, name, namesOnly: true) is { } failed && report.Count > recordedBefore)
+                return failed;
+            context.RestoreCheckpoint(atList);
+        }
         var partitioned = view.PartitionedBase!;
         var collation = batch.CurrentDatabase.Collation;
         var viewColumns = ViewColumnsFor(batch, view, name);
@@ -692,10 +704,7 @@ partial class Simulation
         var batch = context.Batch;
         var partitioned = view.PartitionedBase!;
         var collation = batch.CurrentDatabase.Collation;
-        if (top is not null)
-            throw SimulatedSqlException.TopOnPartitionedView();
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw SimulatedSqlException.OutputOnPartitionedView(name.ToString());
+        var shapeRefusal = RefusePartitionedWriteShape(context, name, top);
 
         var viewColumns = ViewColumnsFor(batch, view, name);
         var setColumns = new List<(int ViewOrdinal, string Name)>();
@@ -714,6 +723,17 @@ partial class Simulation
         }
 
         var (sources, joins, where, positioned) = ReadPartitionedTarget(context, name, view, viewColumns, from, ref targetIndex, reads);
+        if (batch.BindErrors is { } report)
+        {
+            // The values bind ahead of every refusal the view meets.
+            var valueTypes = Selection.ColumnTypeResolverFor(sources);
+            foreach (var (_, expr) in rawAssignments)
+                _ = expr.GetSqlType(batch, valueTypes);
+            if (shapeRefusal is null && report.Count > 0)
+                return new SimulatedNonQuery(0);
+        }
+        if (shapeRefusal is not null)
+            return RecordPartitionedWriteShape(batch, shapeRefusal);
         var found = PartitionedMembers(batch, partitioned, name.ToString(), PartitionedWrite.Update);
         RefuseMemberReads(batch, partitioned, found, reads);
         RefuseJoinedMemberReads(batch, partitioned, found, sources, targetIndex);
@@ -825,6 +845,33 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Refuses an <c>UPDATE</c> or <c>DELETE</c> through a partitioned view
+    /// that carries <c>TOP</c> (Msg 417) or an <c>OUTPUT</c> clause (Msg 489)
+    /// — or, while the statement's binder report is being gathered, steps over
+    /// the <c>OUTPUT</c> clause and answers the refusal, which real reports
+    /// after the statement's names (probed 2026-10-19 against SQL Server
+    /// 2025), for <see cref="RecordPartitionedWriteShape"/>.
+    /// </summary>
+    private static SimulatedSqlException? RefusePartitionedWriteShape(ParserContext context, MultiPartName name, Selection.DmlTopLimit? top)
+    {
+        var output = context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output };
+        var refusal = top is not null ? SimulatedSqlException.TopOnPartitionedView()
+            : output ? SimulatedSqlException.OutputOnPartitionedView(name.ToString())
+            : null;
+        if (refusal is null)
+            return null;
+        if (context.Batch.BindErrors is not { } report || !report.Covers(context.Token))
+            throw refusal;
+        if (output)
+            SkipOutputClause(context);
+        return refusal;
+    }
+
+    /// <summary>Records a <see cref="RefusePartitionedWriteShape"/> refusal behind the names the statement read, or throws it.</summary>
+    private static SimulatedNonQuery RecordPartitionedWriteShape(BatchContext batch, SimulatedSqlException refusal) =>
+        batch.BindErrors is { } report && report.RecordViewRefusal(refusal) ? new SimulatedNonQuery(0) : throw refusal;
+
+    /// <summary>
     /// <c>DELETE</c> through a partitioned view, or a view, CTE or derived
     /// table over one, as <see cref="ExecutePartitionedViewUpdate"/> reads its
     /// target: each member's rows the view shows and the statement picks are
@@ -841,14 +888,16 @@ partial class Simulation
     {
         var batch = context.Batch;
         var partitioned = view.PartitionedBase!;
-        if (top is not null)
-            throw SimulatedSqlException.TopOnPartitionedView();
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw SimulatedSqlException.OutputOnPartitionedView(name.ToString());
+        var shapeRefusal = RefusePartitionedWriteShape(context, name, top);
 
         var viewColumns = ViewColumnsFor(batch, view, name);
         var reads = new List<SchemaObject>();
         var (sources, joins, where, positioned) = ReadPartitionedTarget(context, name, view, viewColumns, from, ref targetIndex, reads);
+        if (shapeRefusal is not null)
+            return RecordPartitionedWriteShape(batch, shapeRefusal);
+        // Every refusal the view meets waits for the statement's names to bind.
+        if (batch.BindErrors is { Count: > 0 })
+            return new SimulatedNonQuery(0);
         var found = PartitionedMembers(batch, partitioned, name.ToString(), PartitionedWrite.Delete);
         RefuseMemberReads(batch, partitioned, found, reads);
         RefuseJoinedMemberReads(batch, partitioned, found, sources, targetIndex);

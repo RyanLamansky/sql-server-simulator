@@ -60,10 +60,11 @@ partial class Simulation
     /// name: its column list against the view's columns, then its source, then
     /// the refusal — Msg 4406 when the source failed or the list names a
     /// derived column, <paramref name="refusal"/> or the view's own refusal
-    /// else, and none through a CTE whose source failed. Null when no report
-    /// is being gathered.
+    /// else — none at all when <paramref name="namesOnly"/>, for a view whose
+    /// refusals real reports only past names that bound — and none through a
+    /// CTE whose source failed. Null when no report is being gathered.
     /// </summary>
-    private static SimulatedNonQuery? ReadPastRefusedViewInsert(ParserContext context, View view, MultiPartName name, SimulatedSqlException? refusal = null)
+    private static SimulatedNonQuery? ReadPastRefusedViewInsert(ParserContext context, View view, MultiPartName name, SimulatedSqlException? refusal = null, bool namesOnly = false)
     {
         if (context.Batch.BindErrors is not { } report || !report.Covers(context.Token))
             return null;
@@ -111,6 +112,7 @@ partial class Simulation
         var written = name.ToString();
         var reported = report.Count > recordedBefore
             ? view.UnstoredBody is null ? SimulatedSqlException.ViewDmlTouchesDerivedField(written) : null
+            : namesOnly ? null
             : anyDerived ? SimulatedSqlException.ViewDmlTouchesDerivedField(view.UnionOwnerName ?? written) : refusal ?? NonUpdatableViewError(view, written);
         if (reported is not null)
             _ = report.RecordViewRefusal(reported);
