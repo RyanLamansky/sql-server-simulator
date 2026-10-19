@@ -570,6 +570,23 @@ partial class SimulatedSqlException
         new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 10716: a DML statement nested as a query's
+    /// source carries no <c>OUTPUT</c> clause, refused ahead of where it stands
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlWithoutOutput() =>
+        new("A nested INSERT, UPDATE, DELETE, or MERGE statement must have an OUTPUT clause.", 10716, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10729: a DML statement nested in a <c>SELECT</c>
+    /// that isn't an <c>INSERT</c>'s immediate source — a plain query, a
+    /// subquery, a CTE, or a derived table under the source (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NestedDmlOutsideInsertSource() =>
+        new("A nested INSERT, UPDATE, DELETE, or MERGE statement is not allowed in a SELECT statement that is not the immediate source of rows for an INSERT statement.", 10729, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8672: a <c>MERGE</c> statement's
     /// <c>WHEN MATCHED ... THEN UPDATE</c> branch attempted to update the
     /// same target row from multiple source rows. SQL Server's <c>DELETE</c>

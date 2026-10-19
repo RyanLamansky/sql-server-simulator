@@ -1091,4 +1091,25 @@ public sealed class MergeTests
     [DataRow("null")]
     public void Merge_InsertDefaultIdentity_RaisesMsg339(string value)
         => new Simulation().AssertSqlError($"create table t (id int identity, v int); merge t using (values (1)) s(x) on 1 = 0 when not matched then insert (id, v) values ({value}, 1);", 339);
+
+    /// <summary>
+    /// A DML statement nested as a derived table needs an OUTPUT clause (Msg
+    /// 10716) and stands only in the FROM of an INSERT's immediate source (Msg
+    /// 10729), each refused while the batch parses (probed 2026-10-19 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (merge t using (values (1, 1)) s(id, v) on t.id = s.id when matched then update set v = 0 output $action a) x;", 10729)]
+    [DataRow("select * from (delete t output deleted.id) x;", 10729)]
+    [DataRow("select * from (insert t values (5, 5)) x;", 10716)]
+    [DataRow("select 1 from t where exists (select * from (delete t output deleted.id) x);", 10729)]
+    [DataRow("insert h select * from (select * from (delete t output deleted.id, deleted.id i2) y) x;", 10729)]
+    [DataRow("select nosuch from t; select * from (update t set v = 1 output inserted.id) x;", 10729)]
+    public void NestedDml_OutsideAnInsertSource_IsRefused(string statement, int number)
+        => new Simulation().AssertSqlError($"create table t (id int primary key, v int); create table h (a int, id int); {statement}", number);
+
+    [TestMethod]
+    public void NestedDml_AsAnInsertSource_IsNotModeled()
+        => Contains("Composable DML", Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+            "create table t (id int primary key, v int); create table h (a int, id int); insert h select * from (delete t output deleted.id, deleted.v) x;")).Message);
 }

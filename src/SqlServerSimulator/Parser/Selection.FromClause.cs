@@ -538,7 +538,8 @@ internal sealed partial class Selection
     /// Peeks whether the FROM source about to be parsed is a parenthesized
     /// join group — an opening <c>(</c> whose first interior token is not
     /// <c>SELECT</c> (a derived table), <c>VALUES</c> (a table-value
-    /// constructor) or <c>WITH</c> (a CTE prefix, which no query in a
+    /// constructor), a DML keyword (a nested statement, refused there) or
+    /// <c>WITH</c> (a CTE prefix, which no query in a
     /// parenthesized position may carry — routing it to the derived-table
     /// branch is what gets it real's Msg 156 instead of a join group's
     /// Msg 102), nor a parenthesized query (<see cref="LeadsParenthesizedQuery"/>,
@@ -554,7 +555,7 @@ internal sealed partial class Selection
         var checkpoint = context.SaveCheckpoint();
         var opensGroup = context.GetNextOptional() is Operator { Character: '(' } && context.GetNextOptional() switch
         {
-            null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With } => false,
+            null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge } => false,
             Operator { Character: '(' } => !LeadsParenthesizedQuery(context, closeCounts: true),
             _ => true,
         };
@@ -1078,8 +1079,7 @@ internal sealed partial class Selection
     {
         var token = context.GetNextRequired();
         // A nested DML source feeding a linked server's table is refused
-        // before its own grammar is judged; a parenthesized source reaches
-        // here through the join-group parse.
+        // before its own grammar is judged.
         if (token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
             && context.Batch.CurrentStatement.RemoteWrite is not null)
         {
@@ -1934,8 +1934,15 @@ internal sealed partial class Selection
                 // Rides the same deferred lateral-plan seam as a derived-table
                 // SELECT, so a VALUES source correlates to outer scope the same
                 // way (needed for a comma-FROM VALUES referencing an outer CTE).
-                if (afterOpenParen is ReservedKeyword { Keyword: Keyword.Values })
-                    return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
+                switch (afterOpenParen)
+                {
+                    case ReservedKeyword { Keyword: Keyword.Values }:
+                        return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
+                    case ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }:
+                        throw context.Batch.CurrentStatement.RemoteWrite is not null
+                            ? SimulatedSqlException.RemoteDmlTargetWithOutput()
+                            : NestedDmlRefusal(context, scope);
+                }
 
                 if (afterOpenParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
                 {
@@ -2320,6 +2327,38 @@ internal sealed partial class Selection
             ConstructsRows = true,
             CatalogColumns = constructsColumns ? null : BuiltInResources.RealComputedColumns("sys." + writtenName, plan.ColumnNames),
         };
+    }
+
+    /// <summary>
+    /// A DML statement written as a derived table, read to its closing
+    /// parenthesis: real refuses one without an <c>OUTPUT</c> clause (Msg
+    /// 10716), then one anywhere but the <c>FROM</c> of an <c>INSERT</c>'s
+    /// immediate source (Msg 10729), where it is composable DML, not built.
+    /// </summary>
+    private static Exception NestedDmlRefusal(ParserContext context, QueryScope scope)
+    {
+        var depth = 1;
+        var output = false;
+        while (depth > 0 && context.MoveNext())
+        {
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Output } when depth == 1:
+                    output = true;
+                    break;
+            }
+        }
+        if (!output)
+            return SimulatedSqlException.NestedDmlWithoutOutput();
+        return scope.Position == QueryPosition.InsertSource
+            ? new NotSupportedException("Composable DML — a nested INSERT, UPDATE, DELETE or MERGE with OUTPUT as an INSERT … SELECT's source — is not modeled.")
+            : SimulatedSqlException.NestedDmlOutsideInsertSource();
     }
 
     /// <summary>
