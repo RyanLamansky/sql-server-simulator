@@ -472,7 +472,7 @@ Unpinned triggers of one scope fire in creation order.
 - **CLR server-scope triggers** (`ON ALL SERVER … AS EXTERNAL NAME`) raise `NotSupportedException`, and `sys.server_assembly_modules` isn't projected.
 - **Server-level events past logins and databases** — endpoints, credentials, server roles and permissions, linked servers and the rest of `DDL_SERVER_LEVEL_EVENTS` raise none.
 - **A logon trigger's `COMMIT`** is Msg 3902 here and refuses the login; real lets the login stand.
-- **A login's default database** — `ALTER LOGIN … DEFAULT_DATABASE` is discarded, so a login lands where the connection asks or on the simulator's default.
+- **A login's default database** — `ALTER LOGIN … DEFAULT_DATABASE` is recorded for the catalog (`sys.server_principals.default_database_name`) but no session reads it, so a login lands where the connection asks or on the simulator's default.
 - **Login-event `CommandText`** — real keeps the statement's `;` and the newline after it; the simulator trims them.
 
 ## EF Core reach

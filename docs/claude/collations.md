@@ -475,7 +475,7 @@ Surrogates split the same way: an unversioned name ignores every surrogate code 
 With no character to ride with, a subject made only of ignorables reads as empty: `NCHAR(0) LIKE N''` and `NCHAR(0) + NCHAR(0x200D) LIKE N''` are true, `NCHAR(0) LIKE N'_'` and `LIKE N'[^a]'` false (probed 2026-09-30 against SQL Server 2025).
 The same holds for `varchar` data under the Windows collations, whose `CHAR(0)` is ignorable too (`('a' + CHAR(0) + 'b') COLLATE Latin1_General_CI_AS LIKE 'a_b'` is false).
 A grid of U+0000, U+0001, U+00AD, U+200B, U+200D and U+0378 in and around subjects and patterns, under unversioned, `_100`, `_140`, `SQL_`, UTF-8 and binary names, matches real in both types.
-Not modeled yet: U+FFFF, which rides like an ignorable under `_` on real yet makes `LIKE N'%' + NCHAR(65535) + N'%'` false even over a subject holding it, and keeps `N'a' + NCHAR(65535) + N'b' LIKE N'a[^x]b'` false, where both are true here.
+Not modeled yet: U+FFFF makes `LIKE N'%' + NCHAR(65535) + N'%'` false on real even over a subject holding it, where it is true here; `N'a' + NCHAR(65535) + N'b' LIKE N'a[^x]b'` is false on both (probed 2026-10-19 against SQL Server 2025).
 
 Measured by the probe itself: the simulator's ignorable set disagreed with real's on 21,096 of the 65,536 code units under `Latin1_General_CI_AS` and 5,841 under `Latin1_General_100_CI_AS`, and matches it exactly under all 31 names.
 

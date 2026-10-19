@@ -13,6 +13,22 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class SetOperationTests
 {
+    /// <summary>
+    /// In a derived table a set operation's <c>ORDER BY … OFFSET / FETCH</c>
+    /// limits its last branch alone, a view's rows passing whole (probed
+    /// 2026-10-01 and 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a from v union all select 9 order by 1 offset 1 rows fetch next 2 rows only", "1,2,3")]
+    [DataRow("select a from t union all select 0 order by 1 offset 0 rows fetch next 1 rows only", "0,1,2,3")]
+    [DataRow("select a from t union all select 9 order by 1 offset 1 rows", "1,2,3")]
+    public void DerivedSetOperationOffset_LimitsItsLastBranch(string body, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int); insert t values (1), (2), (3)", "create view v as select a from t");
+        AreEqual(expected, sim.ExecuteScalar($"select string_agg(a, ',') within group (order by a) from ({body}) d"));
+    }
+
     private static List<int> ReadInts(DbCommand command)
     {
         using var reader = command.ExecuteReader();

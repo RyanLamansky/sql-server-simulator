@@ -485,7 +485,7 @@ A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / 
 
 **Not modeled yet.**
 Moving a system endpoint to a login other than `sa`, and any server role, raise `NotSupportedException`: neither owner is carried.
-An `INSERT … SELECT` over two denied objects raises the target's INSERT denial with the source's, where real names only the source.
+An `INSERT … SELECT` over two denied objects raises the target's INSERT denial, where real raises only the source's SELECT denial (probed 2026-10-19 against SQL Server 2025).
 `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event for a server-scope DDL trigger, among the server-level events [`triggers.md`](triggers.md#not-modeled-yet-1) lists.
 
 ### Legacy security procedures

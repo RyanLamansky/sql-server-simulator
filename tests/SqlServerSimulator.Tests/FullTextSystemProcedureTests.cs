@@ -127,5 +127,8 @@ public sealed class FullTextSystemProcedureTests
         AreEqual(36, error.Errors[0].LineNumber);
         Contains("lcid '(null)'", sim.AssertSqlError("exec sys.sp_fulltext_load_thesaurus_file null", 50000).Message);
         _ = sim.AssertSqlError("begin tran; exec sys.sp_fulltext_load_thesaurus_file 1033", 15002);
+        // A string that doesn't convert is Msg 8114 at state 5 (probed
+        // 2026-10-19 against SQL Server 2025).
+        AreEqual((byte)5, new Simulation().AssertSqlError("exec sys.sp_fulltext_load_thesaurus_file 'abc'", 8114).Errors[0].State);
     }
 }

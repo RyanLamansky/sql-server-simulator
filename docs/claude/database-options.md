@@ -291,10 +291,6 @@ The **full-text** statements report the subsystem's own **Msg 7690** instead (`F
 DacFx omits the access mode from `SqlDatabaseOptions` even when exporting a read-only database (verified against the WideWorldImporters and AdventureWorks models, neither of which carries the property), and an `IsReadOnly` property is deliberately not translated: the element is read in phase 1, before the schema and data load, so a `READ_ONLY` set there would refuse the rest of its own import.
 Carrying it wants a post-load hook.
 
-### Not modeled yet
-
-- The database-level `OFFLINE` / `EMERGENCY` / `RESTRICTED_USER` states real also refuses writes in stay parse-and-discard.
-
 ## `COLLATE` clause
 
 `ALTER DATABASE name COLLATE <name>` — separate top-level grammar, not under `SET`.

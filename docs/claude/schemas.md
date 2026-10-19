@@ -117,7 +117,6 @@ Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off
 **Not modeled yet**
 
 - **The `OBJECT_*` scalars' metadata-visibility gate** reads the session's database rather than the one a three-part argument names; catalog-view visibility already follows the target.
-- **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
 
 ## Modules reached through a three-part name
 

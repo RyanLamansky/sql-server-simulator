@@ -350,7 +350,7 @@ The strong-named case is unprobed.
 - `OBJECT_ID(name, 'TA')` and the other CLR object-type codes as the filter argument.
 - `SqlMetaData`'s constructors taking a `SortOrder` or a UDT type.
 - The `SqlUserDefinedAggregate` flags `IsNullIfEmpty` / `IsInvariantTo*` and `MaxByteSize` — read by real's optimizer and serializer, ignored here.
-- `INSERT` into a CLR table-valued function reports Msg 208 where real reports its "derived table is not updatable" error, a gap shared with the T-SQL kinds.
+- `INSERT` into a CLR table-valued function reports Msg 208 where real reports its "derived table is not updatable" error; a T-SQL multi-statement function's is real's Msg 270.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.
 - `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, assembly signing (a signed assembly isn't trusted for its signature), `sp_add_trusted_assembly`'s `CONTROL SERVER` gate, and a reference to another assembly registered in the database (real resolves it by name, with `sys.assembly_references` and Msg 6589 on `DROP`; here it is Msg 6503).
 - BACPAC round-trip of `SqlAssembly` model elements.
