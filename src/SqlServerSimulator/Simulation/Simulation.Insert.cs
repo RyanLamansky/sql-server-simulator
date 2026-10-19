@@ -148,7 +148,7 @@ partial class Simulation
             DmlViewRoute.BaseTable => ProcessHeapInsert(destinationView.BaseTable!, context, top, destinationName, destinationView),
             DmlViewRoute.JoinView => ProcessJoinViewInsert(destinationView, context, top, destinationName),
             DmlViewRoute.Partitioned => ProcessPartitionedViewInsert(destinationView, context, destinationName),
-            _ => throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false),
+            _ => ReadPastRefusedViewInsert(context, destinationView, destinationName) ?? throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false),
         };
     }
 
@@ -341,6 +341,14 @@ partial class Simulation
                     bindErrors.Record(missing, column.StartIndex, BindClause.InsertColumns);
                     tableColumn = new HeapColumn(columnName, SqlType.Int32, null, nullable: true);
                 }
+                catch (SimulatedSqlException derived) when (bindErrors is not null && derived.Number == 4406 && bindErrors.Covers(column) && bindErrors.RecordViewRefusal(derived))
+                {
+                    // A view's derived column is refused once the source's
+                    // names have reported (probed 2026-10-19 against SQL
+                    // Server 2025: `INSERT vw (c) VALUES (x1)` is Msg 207 then
+                    // Msg 4406).
+                    tableColumn = new HeapColumn(columnName, SqlType.Int32, null, nullable: true);
+                }
                 // A computed column is refused for merely being named, whatever
                 // value the tuple pairs with it (Msg 271 even for DEFAULT).
                 // A rowversion / GENERATED ALWAYS column is not: naming it is
@@ -422,6 +430,7 @@ partial class Simulation
         // sources carry no DEFAULT keyword, so this stays null for them.
         List<Expression[]>? valueTuples = null;
         bindErrors?.EnterClause(context.Token, BindClause.InsertSource);
+        var sourceStart = context.Token;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             // Collect the sequences the tuples reference so the Msg 11731 gate
@@ -432,6 +441,7 @@ partial class Simulation
                 valueTuples = ParseValuesTuples(context, allowDefault: true);
             }
 
+            NoteViewInsertSource(context, bindErrors, sourceStart, destinationView, destinationName);
             RejectTooManyValueRows(valueTuples);
             RejectConflictingExplicitCollations(valueTuples);
             RejectSequenceDefaultOutsideColumnList(valueTuples, tupleSequences, destinationTable, destinationColumns);
@@ -483,6 +493,7 @@ partial class Simulation
                 var selection = context.Token is Operator
                     ? ParseParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable)
                     : ParseSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable);
+                NoteViewInsertSource(context, bindErrors, sourceStart, destinationView, destinationName);
                 var selectPlan = new InsertSourcePlan(new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null), selection);
                 NoteDmlPlan(context, selectPlan, admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
                 return InsertSourceRows(context, selectPlan, sourceStamps);

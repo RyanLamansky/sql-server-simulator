@@ -178,6 +178,19 @@ partial class Simulation
         }
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             SkipOutputClause(context);
+        _ = ParseInsertSourceUnbound(context);
+        SkipOptionClause(context);
+        RejectStrayToken(context);
+    }
+
+    /// <summary>
+    /// An INSERT's source read with no target to check it against — <c>VALUES</c>
+    /// tuples, a query, <c>DEFAULT VALUES</c>, or an <c>EXEC</c> with its
+    /// argument list, which runs nothing in the compile pass — answering the
+    /// query, when it is one.
+    /// </summary>
+    private static Selection? ParseInsertSourceUnbound(ParserContext context)
+    {
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Values }:
@@ -194,8 +207,7 @@ partial class Simulation
                 }
                 break;
             case ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }:
-                _ = Selection.Parse(context, new QueryScope(QueryPosition.InsertSource, null));
-                break;
+                return Selection.Parse(context, new QueryScope(QueryPosition.InsertSource, null));
             case ReservedKeyword { Keyword: Keyword.Default }:
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Values })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -210,8 +222,7 @@ partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        SkipOptionClause(context);
-        RejectStrayToken(context);
+        return null;
     }
 
     /// <summary>

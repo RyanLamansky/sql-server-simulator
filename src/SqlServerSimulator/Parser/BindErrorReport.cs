@@ -13,9 +13,11 @@ namespace SqlServerSimulator.Parser;
 /// <c>MERGE</c> its source, <c>ON</c>, the insert column list, every
 /// <c>WHEN</c> condition and then every action, then its clause-order
 /// refusals and its columns assigned twice, binding its <c>OUTPUT</c> only when
-/// nothing failed. An <c>INSERT … VALUES</c> arity refusal follows everything,
-/// and an <c>UPDATE</c>'s columns assigned twice follow its <c>OUTPUT</c>
-/// (probed 2026-09-27 and 2026-10-19 against SQL Server 2025).
+/// nothing failed. A write's refusal of its view target follows the names and
+/// ends the report, so an <c>INSERT … VALUES</c> arity refusal, which follows
+/// everything else, never joins it, and an <c>UPDATE</c>'s columns assigned
+/// twice follow its <c>OUTPUT</c> (probed 2026-09-27 and 2026-10-19 against
+/// SQL Server 2025).
 /// </summary>
 internal enum BindClause : byte
 {
@@ -45,6 +47,7 @@ internal enum BindClause : byte
     Assignment,
     Output,
     DuplicateAssignment,
+    ViewRefusal,
     InsertArity,
 }
 
@@ -75,7 +78,7 @@ internal sealed class BindErrorReport(string command)
     /// </summary>
     public static bool StartsReport(SimulatedSqlException error) =>
         error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 264 or 273 or 402 or 468 or 529 or 1011 or 1012 or 1013 or 1015
-            or 4101 or 4104 or 5308 or 5309 or 5310 or 5319 or 5324 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
+            or 4101 or 4104 or 4403 or 4405 or 4406 or 5308 or 5309 or 5310 or 5319 or 5324 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
 
     /// <summary>
     /// Whether <paramref name="error"/> is a type check real reports where it
@@ -155,8 +158,16 @@ internal sealed class BindErrorReport(string command)
         /// </summary>
         public bool Alone;
 
-        /// <summary>A FROM clause's name collision, after which real binds nothing more.</summary>
+        /// <summary>A FROM clause's name collision or a view refusal, after which real binds nothing more.</summary>
         public bool Ends;
+
+        /// <summary>
+        /// For an error real raises only once a span of the statement has
+        /// failed to bind — an <c>INSERT</c> through a view's source — the
+        /// span, whose errors may be recorded after this one; null for an
+        /// error that stands on its own.
+        /// </summary>
+        public (int Start, int End)? AfterFailureWithin;
 
         /// <summary>
         /// An error real meets binding its query's aggregates, which it does
@@ -458,6 +469,42 @@ internal sealed class BindErrorReport(string command)
     }
 
     /// <summary>
+    /// Records a write's refusal of the view it targets (Msg 4403 / 4405 /
+    /// 4406), which real reports in <paramref name="clause"/> once the
+    /// statement's names have bound and stops at — or, when
+    /// <paramref name="unlessPreceded"/>, only when nothing ahead of it failed
+    /// — answering whether it could; false leaves the caller to throw.
+    /// </summary>
+    public bool RecordViewRefusal(SimulatedSqlException refusal, BindClause clause = BindClause.ViewRefusal, bool unlessPreceded = false)
+    {
+        if (this.openScopes.Find(scope => scope.Start >= 0) is not { } statement)
+            return false;
+        this.entries.Add(new Entry
+        {
+            Error = refusal,
+            SortPosition = statement.Start,
+            LinePosition = statement.Start,
+            Clause = clause,
+            EligibleFrom = unlessPreceded ? statement.Start : -1,
+            Ends = true,
+        });
+        return true;
+    }
+
+    /// <summary>
+    /// Records <paramref name="refusal"/> as <see cref="RecordViewRefusal"/>
+    /// does, to be reported only when an error is recorded at
+    /// <paramref name="start"/>..<paramref name="end"/>, whenever the parse
+    /// records it — an <c>INSERT … VALUES</c> binds its tuples after reading
+    /// them.
+    /// </summary>
+    public void RecordViewRefusalAfterFailureWithin(SimulatedSqlException refusal, int start, int end)
+    {
+        if (this.RecordViewRefusal(refusal))
+            this.entries[^1] = this.entries[^1] with { AfterFailureWithin = (start, end) };
+    }
+
+    /// <summary>
     /// Forgets the errors recorded since the report held
     /// <paramref name="count"/>: what the parse read there is text real
     /// doesn't bind.
@@ -588,6 +635,8 @@ internal sealed class BindErrorReport(string command)
     {
         if ((stopper is { Class: <= 15 } && stopper.Number is not (130 or 147 or 1087)) || stopper is { PreemptsBindReport: true })
             return stopper;
+        _ = this.entries.RemoveAll(entry => entry.AfterFailureWithin is var (start, end)
+            && !this.entries.Exists(other => other.AfterFailureWithin is null && other.Clause != BindClause.InsertArity && start <= other.LinePosition && other.LinePosition < end));
         if (this.entries.Count == 0)
             return null;
 

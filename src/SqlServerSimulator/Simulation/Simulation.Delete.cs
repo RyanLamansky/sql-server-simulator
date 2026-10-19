@@ -52,7 +52,11 @@ partial class Simulation
         var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
         RejectQueryAfterDeleteTarget(context);
         if (leadingView is not null && RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete) == DmlViewRoute.Refused)
-            throw NonUpdatableViewError(leadingView, leadingIdent.ToString(), delete: true);
+        {
+            var refusal = NonUpdatableViewError(leadingView, leadingIdent.ToString(), delete: true);
+            context.MoveNextOptional();
+            return ReadPastRefusedViewWrite(context, leadingIdent, leadingView, refusal, isUpdate: false) ? new SimulatedNonQuery(0) : throw refusal;
+        }
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints, leadingIdent.ToString(), "DELETE");

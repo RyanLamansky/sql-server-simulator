@@ -413,4 +413,52 @@ public sealed partial class BinderErrorReportTests
     [DataRow("select * from tt unpivot (v for k in (x1, x2)) p", "207:1:x1 207:1:x2")]
     public void Rotation_ReportsEveryName(string statement, string expected)
         => AreEqual(expected, TypedReport(statement));
+
+    /// <summary>
+    /// A write through a view real can't write through refuses the view only
+    /// once the statement's names have bound: a DELETE after its FROM and
+    /// WHERE names, an UPDATE never beside them, an INSERT after its source's
+    /// and column list's — and an INSERT whose source failed through any view,
+    /// not a CTE, is Msg 4406. Neither reads its OUTPUT clause (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete va where x1 = 1 and x2 = 2", "207:1:x1 207:1:x2 4403:1:va")]
+    [DataRow("delete va output deleted.x3 where x1 = 1", "207:1:x1 4403:1:va")]
+    [DataRow("delete va\nfrom va join t on x1 = 1\nwhere x2 = 1", "207:2:x1 207:3:x2 4403:1:va")]
+    [DataRow("delete v from va v where x1 = 1", "207:1:x1 4403:1:v")]
+    [DataRow("delete vj where x1 = 1", "207:1:x1 4405:1:vj")]
+    [DataRow("delete va where a = 1", "4403:1:va")]
+    [DataRow("update va set a = 1 where x1 = 1", "207:1:x1")]
+    [DataRow("update va set x1 = 1 where x2 = 1", "207:1:x2")]
+    [DataRow("update va set n = x1", "4406:1:va")]
+    [DataRow("update va set a = 1 output inserted.x5 where x1 = 1", "207:1:x1")]
+    [DataRow("update v set a = 1 from va v where x1 = 1", "207:1:x1")]
+    [DataRow("update va set a = 1 where a = 1", "4403:1:va")]
+    [DataRow("insert va (a) select x3 from t where x4 = 1", "207:1:x4 207:1:x3 4406:1:va")]
+    [DataRow("insert va (x9) values (1)", "207:1:x9 4403:1:va")]
+    [DataRow("insert va (x9) select x3 from t", "207:1:x3 207:1:x9 4406:1:va")]
+    [DataRow("insert va (x1, x2) select x3 from t", "120:1:")]
+    [DataRow("insert va (a) output inserted.x5 values (x6)", "207:1:x6 4406:1:va")]
+    [DataRow("insert va (a) values (1, 2)", "4403:1:va")]
+    [DataRow("insert vs (a) values (x1)", "207:1:x1 4406:1:vs")]
+    [DataRow("insert vs (a) values (x1, 2)", "207:1:x1 4406:1:vs")]
+    [DataRow("insert vs (a) select a from t where x1 = 1", "207:1:x1 4406:1:vs")]
+    [DataRow("insert vs (a, a) values (x1, 1)", "207:1:x1 4406:1:vs")]
+    [DataRow("insert vs (c) values (x1)", "207:1:x1 4406:1:vs")]
+    [DataRow("insert vj (a, d) values (x1, 1)", "207:1:x1 4406:1:vj")]
+    [DataRow("insert vj (a) values (x1)", "207:1:x1 4406:1:vj")]
+    [DataRow("insert vj (a, d) values (1, 1)", "4405:1:vj")]
+    [DataRow("with c as (select a from t) insert c (a) values (x1)", "207:1:x1")]
+    [DataRow("with c as (select a, count(*) n from t group by a) insert c (a) values (x1)", "207:1:x1")]
+    [DataRow("with c as (select a, count(*) n from t group by a) delete c where x1 = 1", "207:1:x1 4403:1:c")]
+    public void ViewWriteRefusal_FollowsTheNames(string statement, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Setup);
+        _ = simulation.ExecuteNonQuery("create view va as select a, count(*) n from t group by a");
+        _ = simulation.ExecuteNonQuery("create view vj as select t.a, u.d from t join u on t.a = u.d");
+        _ = simulation.ExecuteNonQuery("create view vs as select a, b + 1 c from t");
+        AreEqual(expected, Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement))));
+    }
 }

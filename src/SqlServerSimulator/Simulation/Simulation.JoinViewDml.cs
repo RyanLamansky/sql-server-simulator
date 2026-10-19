@@ -519,8 +519,13 @@ partial class Simulation
     {
         var batch = context.Batch;
         var viewName = destinationName.ToString();
+        SimulatedStatementOutcome Refused()
+        {
+            var refusal = SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
+            return ReadPastRefusedViewInsert(context, destinationView, destinationName, refusal) ?? throw refusal;
+        }
         if (context.Token is not Operator { Character: '(' })
-            throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
+            return Refused();
 
         var chain = BuildJoinViewChain(batch, destinationView, viewName);
         var checkpoint = context.SaveCheckpoint();
@@ -533,13 +538,13 @@ partial class Simulation
         {
             var (columnPath, columnIndex) = DescendToBaseColumn(batch, chain, listedNames[i]);
             if (path is not null && !path.AsSpan().SequenceEqual(columnPath))
-                throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
+                return Refused();
             path = columnPath;
             baseOrdinals[i] = columnIndex;
         }
 
-        var table = chain.TableAt(path!)
-            ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
+        if (chain.TableAt(path!) is not { } table)
+            return Refused();
 
         var columns = new Dictionary<string, HeapColumn>(batch.CurrentDatabase.Collation);
         for (var i = 0; i < listedNames.Count; i++)

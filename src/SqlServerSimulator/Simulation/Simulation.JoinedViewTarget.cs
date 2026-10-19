@@ -125,7 +125,8 @@ partial class Simulation
             return ExecuteInsteadOfViewUpdate(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, rawAssignments, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Update))
             return ExecutePartitionedViewUpdate(context, leadingIdent, view, rawAssignments, top, from, targetIndex, partitionedReads ?? []);
-        RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)]);
+        if (RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)], sources, joins, from.After))
+            return new SimulatedNonQuery(0);
         if (view.BaseTable is not { } table)
             return ExecuteJoinedJoinViewUpdate(context, written, view, sources, joins, targetIndex, rawAssignments, top, from.After);
 
@@ -293,7 +294,8 @@ partial class Simulation
             return ExecuteInsteadOfViewDelete(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
             return ExecutePartitionedViewDelete(context, leadingIdent, view, top, from, targetIndex);
-        RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Delete, written, setColumns: null);
+        if (RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Delete, written, setColumns: null, sources, joins, from.After))
+            return new SimulatedNonQuery(0);
         var table = view.BaseTable!;
         FunctionBodyShape.NoteTableWrite(batch, "DELETE", table);
         LockWriteTable(batch, table, "DELETE", checkFilegroup: true);
@@ -506,26 +508,45 @@ partial class Simulation
     /// through one reading several base tables Msg 4405, and a view no write
     /// passes through its own refusal — an <c>UPDATE</c>'s unknown column Msg
     /// 207 and derived one Msg 4406 first — all naming the target as written
-    /// (probed 2026-10-01 against SQL Server 2025).
+    /// (probed 2026-10-01 against SQL Server 2025). A statement whose binder
+    /// report is being gathered records the refusal behind its names instead
+    /// and reads on through its <c>WHERE</c>, answering true: the caller is
+    /// done.
     /// </summary>
-    private static void RefuseJoinedViewWrite(ParserContext context, View view, string viewWritten, TriggerActions action, string written, List<string>? setColumns)
+    private static bool RefuseJoinedViewWrite(ParserContext context, View view, string viewWritten, TriggerActions action, string written, List<string>? setColumns, FromSource[] sources, JoinSpec[] joins, ParserContext.Checkpoint afterFrom)
     {
         if (HasInsteadOfTrigger(context.Batch, view, action))
             throw SimulatedSqlException.InsteadOfViewInJoin(viewWritten, action == TriggerActions.Delete);
         if (view.BaseTable is not null || (view.IsJoinUpdatable && action != TriggerActions.Delete))
-            return;
+            return false;
+        var refusal = NonUpdatableViewError(view, written, action == TriggerActions.Delete);
         if (action != TriggerActions.Delete && view.DerivedOutputColumns is { } derived)
         {
             foreach (var column in setColumns!)
             {
                 var ordinal = IndexOfViewOutputColumn(context.CurrentDatabase.Collation, view, column);
                 if (ordinal < 0)
-                    throw SimulatedSqlException.InvalidColumnName(column);
+                {
+                    refusal = SimulatedSqlException.InvalidColumnName(column);
+                    break;
+                }
                 if (derived[ordinal])
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(view.IsDerivedTable ? written : view.UnionOwnerName ?? written, view.IsDerivedTable);
+                {
+                    refusal = SimulatedSqlException.ViewDmlTouchesDerivedField(view.IsDerivedTable ? written : view.UnionOwnerName ?? written, view.IsDerivedTable);
+                    break;
+                }
             }
         }
-        throw NonUpdatableViewError(view, written, action == TriggerActions.Delete);
+        var isUpdate = action != TriggerActions.Delete;
+        if (context.Batch.BindErrors is not { } report
+            || !(isUpdate ? report.RecordViewRefusal(refusal, BindClause.SetTarget, unlessPreceded: true) : report.RecordViewRefusal(refusal)))
+        {
+            throw refusal;
+        }
+        _ = ParseJoinedViewTargetWhere(context, afterFrom, sources, joins, Selection.ColumnTypeResolverFor(sources));
+        SkipOptionClause(context);
+        RejectStrayToken(context);
+        return true;
     }
 
     /// <summary>

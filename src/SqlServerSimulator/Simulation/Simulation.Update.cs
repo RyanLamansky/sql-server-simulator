@@ -76,7 +76,8 @@ partial class Simulation
             if (viewRoute == DmlViewRoute.Refused)
             {
                 context.MoveNextOptional();
-                throw RefuseNonUpdatableViewWrite(context, leadingView, leadingIdent, isUpdate: true);
+                var refusal = RefuseNonUpdatableViewWrite(context, leadingView, leadingIdent, isUpdate: true);
+                return ReadPastRefusedViewWrite(context, leadingIdent, leadingView, refusal, isUpdate: true) ? new SimulatedNonQuery(0) : throw refusal;
             }
             if (viewRoute is DmlViewRoute.BaseTable or DmlViewRoute.JoinView)
                 RejectCheckOptionOverRowLimit(leadingView, leadingIdent.ToString());
