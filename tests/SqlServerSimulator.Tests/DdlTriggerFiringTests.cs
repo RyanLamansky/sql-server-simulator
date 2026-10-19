@@ -362,4 +362,25 @@ public sealed class DdlTriggerFiringTests
         var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'RENAME'")!;
         Assert.Contains("<TargetObjectName>t1</TargetObjectName><TargetObjectType>TABLE</TargetObjectType>", document);
     }
+
+    /// <summary>
+    /// A DDL trigger's body sends its rows between the firing statement's
+    /// neighbors as a reader reads them (probed 2026-10-19 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void BodySelect_ReachesTheReaderBetweenItsNeighbors()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create trigger trg on database for create_table as select 'fired' f");
+        using var reader = sim.ExecuteReader("select 'before' z; create table x (a int); select 'after' o");
+        var read = new List<string>();
+        do
+        {
+            while (reader.Read())
+                read.Add(reader.GetString(0));
+        }
+        while (reader.NextResult());
+        AreEqual("before|fired|after", string.Join("|", read));
+    }
 }
