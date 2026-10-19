@@ -786,4 +786,23 @@ public sealed class IdentityTests
         else
             _ = simulation.AssertSqlError(insert, error);
     }
+
+    /// <summary>
+    /// Before any value is generated, an explicit value short of the seed in
+    /// the increment's direction leaves the counter where it was, the next
+    /// value still the seed (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("identity(10, 5)", 3, 10)]
+    [DataRow("identity(10, 5)", 7, 10)]
+    [DataRow("identity(10, 5)", 10, 15)]
+    [DataRow("identity(10, 5)", 12, 17)]
+    [DataRow("identity(10, -5)", 30, 10)]
+    [DataRow("identity(10, -5)", 3, -2)]
+    public void ExplicitValueBeforeTheSeed_LeavesTheSeedNext(string identity, int explicitValue, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar<int>($"create table a (id int {identity}, v int); set identity_insert a on; insert a (id, v) values ({explicitValue}, 0); set identity_insert a off; insert a (v) values (1); select id from a where v = 1"));
+
+    [TestMethod]
+    public void ExplicitValueBeforeTheSeed_AfterTruncate_LeavesTheSeedNext()
+        => AreEqual(10, new Simulation().ExecuteScalar<int>("create table k (id int identity(10, 5), v int); insert k (v) values (0); truncate table k; set identity_insert k on; insert k (id, v) values (3, 0); set identity_insert k off; insert k (v) values (1); select id from k where v = 1"));
 }

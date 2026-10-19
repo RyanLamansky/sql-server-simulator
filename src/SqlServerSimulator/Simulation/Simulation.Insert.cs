@@ -1008,6 +1008,7 @@ partial class Simulation
                     rowValues[ordinal] = targetColumn.Default is { } columnDefault
                         ? CoerceForInsert(EnforceMaxLength(columnDefault.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch)), targetColumn, destinationTable, context.Connection), targetColumn)
                         : SqlValue.Null(targetColumn.Type);
+                    RefuseListedNull(rowValues[ordinal], targetColumn, destinationTable, plan.Verb, insteadOfActive);
                     continue;
                 }
 
@@ -1026,6 +1027,7 @@ partial class Simulation
                 if (valueTuples is not null && targetColumn.Type is SqlVariantSqlType && source.Type is DecimalSqlType)
                     coerced = SqlValue.NameVariantBase(source, coerced, ValuesColumnReportsNumeric(valueTuples, i, context.Batch));
                 rowValues[ordinal] = coerced;
+                RefuseListedNull(coerced, targetColumn, destinationTable, plan.Verb, insteadOfActive);
 
                 if (ReferenceEquals(targetColumn, identityColumn))
                 {
@@ -1339,6 +1341,24 @@ partial class Simulation
     {
         var hasColumnSet = table.ColumnSet is not null;
         return Array.FindAll(table.Columns, column => column.IsColumnSet || (IsImplicitInsertColumn(column) && !(hasColumnSet && column.IsSparse)));
+    }
+
+    /// <summary>
+    /// Msg 515 for a listed column's NULL, raised as its value is written: real
+    /// checks each listed column's length and nullability in the column list's
+    /// order, then the unlisted ones, so <c>INSERT t (v, s) VALUES (NULL,
+    /// 'toolong')</c> is Msg 515 where <c>(s, v)</c> is Msg 2628 (probed
+    /// 2026-10-19 against SQL Server 2025). An identity column refuses its own,
+    /// and a graph, column-set, rowversion or period column is settled after
+    /// the list.
+    /// </summary>
+    private static void RefuseListedNull(SqlValue value, HeapColumn column, HeapTable table, string verb, bool insteadOf)
+    {
+        if (value.IsNull && !column.Nullable && !insteadOf && column.Identity is null && column.GraphKind == GraphColumnKind.None && !column.IsColumnSet
+            && column.Type != SqlType.RowVersion && column.GeneratedAs == GeneratedAlwaysAsRow.None)
+        {
+            throw SimulatedSqlException.CannotInsertNull(column.Name, QualifyForNullMessage(table), verb);
+        }
     }
 
     /// <summary>
@@ -1890,6 +1910,10 @@ partial class Simulation
                 throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
             if (UndeclaredParameterDeduction.NoteExact(projected, destinationColumns[i].Type))
                 continue;
+            // A rowversion column refuses its value with Msg 273 alone (probed
+            // 2026-10-19 against SQL Server 2025: a float there is no Msg 206).
+            if (destinationColumns[i].Type == SqlType.RowVersion)
+                continue;
             if (selection.ColumnIsUntypedNull is not { } untyped || !untyped[i])
             {
                 try
@@ -1980,12 +2004,22 @@ partial class Simulation
             && (selection.StartsConstants || (context.Batch.CurrentStatement.FoldsConstantsAtCompile() && selection.IsBareConstantRow))
             && selection.ProjectionExpressions is { } projections)
         {
+            // The values convert in the column list's order, and one NULL for a
+            // NOT NULL column stops them there, its row's Msg 515 coming first
+            // (probed 2026-10-19: `SELECT CAST(NULL AS int), 'toolong'` into a
+            // NOT NULL column and a varchar(3) is Msg 515, and over an empty
+            // FROM raises nothing).
             var startupValues = new List<(HeapColumn Column, Expression Value)>();
+            var runtime = new RuntimeContext(static _ => throw new InvalidOperationException("A startup value reads no column."), context.Batch);
             for (var i = 0; i < expectedColumnCount; i++)
             {
                 var projected = projections[i] is Parser.Expressions.NamedExpression named ? named.Inner : projections[i];
-                if (ConstantFolding.IsStartupValue(projected))
-                    startupValues.Add((destinationColumns[i], projected));
+                if (!ConstantFolding.IsStartupValue(projected))
+                    continue;
+                var column = destinationColumns[i];
+                if (!column.Nullable && column.Identity is null && EvaluatesNull(projected, runtime))
+                    break;
+                startupValues.Add((column, projected));
             }
             try
             {
@@ -1999,6 +2033,19 @@ partial class Simulation
                 UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1);
                 throw;
             }
+        }
+    }
+
+    /// <summary>Whether a startup value is NULL; one that raises is left for its conversion to raise.</summary>
+    private static bool EvaluatesNull(Expression value, RuntimeContext runtime)
+    {
+        try
+        {
+            return value.Run(runtime).IsNull;
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
         }
     }
 

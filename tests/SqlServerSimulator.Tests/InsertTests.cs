@@ -891,4 +891,28 @@ public class InsertTests
         AreEqual(8, simulation.ExecuteScalar<int>("create table t (a int, rv rowversion); insert t values (1, null); insert t (a, rv) values (2, cast(null as binary(8))); select min(datalength(rv)) from t"));
         _ = simulation.AssertSqlError("declare @n binary(8); insert t (a, rv) values (3, @n)", 273);
     }
+
+    /// <summary>
+    /// A listed column's length and nullability are checked in the column
+    /// list's order, then the unlisted columns', a source's statement-wide
+    /// values stopping at a NULL for a NOT NULL column (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (v, s, w) values (null, 'toolong', 1)", 515)]
+    [DataRow("insert t (s, v, w) values ('toolong', null, 1)", 2628)]
+    [DataRow("insert t (v, s, w) select v, s, w from src", 515)]
+    [DataRow("insert t (s, v, w) select s, v, w from src", 2628)]
+    [DataRow("insert t (v, s, w) select cast(null as int), 'toolong', 1", 515)]
+    [DataRow("declare @v int; insert t (v, s, w) select @v, 'toolong', 1", 515)]
+    [DataRow("insert t (v, s, w) select v, 'toolong', 1 from src", 2628)]
+    [DataRow("insert t (s) values ('toolong')", 2628)]
+    [DataRow("insert t (w, s) values (null, 'toolong')", 515)]
+    public void ListedColumns_AreCheckedInListOrder(string insert, int number)
+        => new Simulation().AssertSqlError($"create table t (id int identity primary key, v int not null, s varchar(3) null, w int not null default 1); create table src (v int, s varchar(20), w int); insert src values (null, 'toolong', 1); {insert}", number);
+
+    /// <summary>A rowversion target refuses an INSERT … SELECT's value with Msg 273 alone (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void SelectIntoRowversion_RaisesMsg273Alone()
+        => HasCount(1, new Simulation().AssertSqlError("create table t (id int identity, v int, rv rowversion); create table src (a int, b float); insert t select a, b from src", 273).Errors);
 }

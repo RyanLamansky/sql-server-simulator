@@ -131,7 +131,10 @@ internal sealed class IdentityState(Int128 seed, Int128 increment, bool notForRe
     /// <summary>
     /// Records an explicit value supplied under <c>IDENTITY_INSERT ON</c>;
     /// advances the high-water mark only when <paramref name="value"/> is
-    /// past the current mark in the <see cref="Increment"/> direction.
+    /// past the current mark in the <see cref="Increment"/> direction. Before
+    /// any value, one short of the first value to generate moves nothing, the
+    /// next still being that first value (probed 2026-10-19 against SQL Server
+    /// 2025: an explicit 7 into <c>IDENTITY(10, 5)</c> leaves the next at 10).
     /// </summary>
     public void ObserveExplicit(Int128 value)
     {
@@ -139,7 +142,9 @@ internal sealed class IdentityState(Int128 seed, Int128 increment, bool notForRe
         {
             if (this.highWaterMark is not Int128 current)
             {
-                this.highWaterMark = value;
+                var first = this.reseededStart ?? this.Seed;
+                if (this.Increment >= 0 ? value >= first : value <= first)
+                    this.highWaterMark = value;
                 return;
             }
 
