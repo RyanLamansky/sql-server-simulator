@@ -326,4 +326,19 @@ public sealed class SqlVariantPropertyTests
         _ = Assert.IsInstanceOfType<int>(reader.GetValue(0));
         AreEqual(10, reader.GetValue(0));
     }
+
+    /// <summary>
+    /// A decimal's MaxLength and TotalBytes follow the words its magnitude needs,
+    /// whatever its declared precision, and FORMAT's value records real's
+    /// nvarchar(4000) (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as decimal(38, 6))", "5|9")]
+    [DataRow("cast(9223372036854.775807 as decimal(38, 6))", "9|13")]
+    [DataRow("cast(1e20 as decimal(38, 0))", "13|17")]
+    [DataRow("cast(1e29 as decimal(38, 0))", "17|21")]
+    [DataRow("cast(1 as decimal(10, 0))", "5|9")]
+    [DataRow("format(1, 'N0')", "8000|10")]
+    public void VariantLengths_FollowTheStoredValue(string value, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select concat(cast(sql_variant_property(cast({value} as sql_variant), 'MaxLength') as int), '|', cast(sql_variant_property(cast({value} as sql_variant), 'TotalBytes') as int))"));
 }

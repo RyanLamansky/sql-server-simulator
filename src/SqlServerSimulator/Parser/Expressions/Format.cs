@@ -53,24 +53,24 @@ internal sealed partial class Format : Expression
         var valueValue = this.value.Run(runtime);
         RejectUnsupportedValueType(valueValue.Type);
         if (valueValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(ResultType);
 
         var formatString = formatValue.IsNull ? null : formatValue.AsString;
 
         try
         {
             var formatted = FormatValue(valueValue, formatString, culture);
-            return SqlValue.FromNVarchar(formatted);
+            return SqlValue.FromString(ResultType, formatted);
         }
         catch (FormatException)
         {
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(ResultType);
         }
         catch (ArgumentOutOfRangeException)
         {
             // A date outside the culture calendar's range (0001-01-01 under
             // ar-SA's Umm al-Qura) answers NULL as a FormatException does.
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(ResultType);
         }
     }
 
@@ -83,8 +83,15 @@ internal sealed partial class Format : Expression
         _ = StringScalars.RequireStringArgument(this.format, this.format.GetSqlType(batch, resolveColumnType), "format", 2, acceptsLegacyLob: false);
         if (this.culture is not null)
             _ = StringScalars.RequireStringArgument(this.culture, this.culture.GetSqlType(batch, resolveColumnType), "format", 3, acceptsLegacyLob: false);
-        return SqlType.NVarchar;
+        return ResultType;
     }
+
+    /// <summary>
+    /// <c>nvarchar(4000)</c>, real's result type, which a <c>sql_variant</c>
+    /// records as an 8000-byte maximum (probed 2026-10-19 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static readonly NVarcharSqlType ResultType = NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.CoercibleDefault);
 
     /// <summary>
     /// Picks the culture data for the formatter. A name Windows can't parse —

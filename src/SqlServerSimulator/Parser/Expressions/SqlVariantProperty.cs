@@ -166,7 +166,7 @@ internal sealed class SqlVariantProperty : Expression
             _ when t == SqlType.SmallDateTime => (16, 0, 4, 2),
             _ when t == SqlType.DateTime => (23, 3, 8, 2),
             _ when t == SqlType.UniqueIdentifier => (0, 0, 16, 2),
-            DecimalSqlType d => (d.precision, d.scale, d.FixedLength, 4),
+            DecimalSqlType d => (d.precision, d.scale, DecimalVariantLength(value.AsDecimal38), 4),
             TimeSqlType tm => (9 + tm.precision, tm.precision, tm.FixedLength, 3),
             DateTime2SqlType dt2 => (20 + dt2.precision, dt2.precision, dt2.FixedLength, 3),
             DateTimeOffsetSqlType dto => (27 + dto.precision, dto.precision, dto.FixedLength, 3),
@@ -184,10 +184,21 @@ internal sealed class SqlVariantProperty : Expression
         };
         if (metrics is not { } m)
             return null;
+        if (t is DecimalSqlType)
+            actualBytes = m.MaxLength;
         var baseType = t is DecimalSqlType ? "numeric" : t is SystemNameSqlType ? "nvarchar" : t.SqlServerName;
         var collationName = t.Category == SqlTypeCategory.String ? (t.Collation ?? Collation.Baseline).Name : null;
         return new VariantInfo(baseType, m.Precision, m.Scale, m.MaxLength, actualBytes + m.Overhead, collationName);
     }
+
+    /// <summary>
+    /// The bytes a <c>sql_variant</c> stores a decimal in: a sign byte and the
+    /// fewest 4-byte words its magnitude needs, one at least (probed 2026-10-19
+    /// against SQL Server 2025: 1 as <c>decimal(38, 6)</c> is 5, 1E20 13, 1E29
+    /// 17), whatever the declared precision.
+    /// </summary>
+    private static int DecimalVariantLength(Decimal38 value) =>
+        1 + (4 * Math.Max(1, (128 - (int)UInt128.LeadingZeroCount(value.Magnitude) + 31) / 32));
 
     internal override string DebugDisplay() => $"SQL_VARIANT_PROPERTY({this.valueArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 
