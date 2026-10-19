@@ -1744,6 +1744,9 @@ partial class Simulation
         // aren't a thing in SQL Server).
         var pseudoColumns = sourceView?.OutputColumns ?? destinationTable.Columns;
 
+        // Each action's triggers read the whole statement's count in
+        // @@ROWCOUNT, AFTER and INSTEAD OF alike (probed 2026-10-19 against SQL
+        // Server 2025).
         var totalAffected = pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count;
         if (pendingInserts.Count > 0)
         {
@@ -1755,19 +1758,19 @@ partial class Simulation
                 var insertedViewRows = sourceView is null
                     ? insertedRows
                     : insertedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
-                context.Connection.LastStatementRowCount = pendingInserts.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Insert,
                     pseudoColumns, insertedViewRows, deletedRows: null,
-                    affectedRowCount: pendingInserts.Count);
+                    affectedRowCount: totalAffected);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert))
             {
-                context.Connection.LastStatementRowCount = pendingInserts.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 context.Batch.Connection.Simulation.FireTriggers(
                     context.Batch, destinationTable, TriggerActions.Insert,
                     insertedRows: insertedRows, deletedRows: null,
-                    affectedRowCount: pendingInserts.Count);
+                    affectedRowCount: totalAffected);
             }
         }
         if (pendingUpdates.Count > 0)
@@ -1787,19 +1790,19 @@ partial class Simulation
                 var deletedViewRows = sourceView is null
                     ? deletedRows
                     : deletedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
-                context.Connection.LastStatementRowCount = pendingUpdates.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Update,
                     pseudoColumns, insertedViewRows, deletedViewRows,
-                    affectedRowCount: pendingUpdates.Count, updatedColumnOrdinals);
+                    affectedRowCount: totalAffected, updatedColumnOrdinals);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Update))
             {
-                context.Connection.LastStatementRowCount = pendingUpdates.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 context.Batch.Connection.Simulation.FireTriggers(
                     context.Batch, destinationTable, TriggerActions.Update,
                     insertedRows: insertedRows, deletedRows: deletedRows,
-                    affectedRowCount: pendingUpdates.Count, updatedColumnOrdinals);
+                    affectedRowCount: totalAffected, updatedColumnOrdinals);
             }
         }
         if (pendingDeletes.Count > 0)
@@ -1812,19 +1815,19 @@ partial class Simulation
                 var deletedViewRows = sourceView is null
                     ? deletedRows
                     : deletedRows.ConvertAll(r => ProjectThroughView(null, null, sourceView, r));
-                context.Connection.LastStatementRowCount = pendingDeletes.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
                     context.Batch, insteadOfTarget, TriggerActions.Delete,
                     pseudoColumns, insertedRows: null, deletedRows: deletedViewRows,
-                    affectedRowCount: pendingDeletes.Count);
+                    affectedRowCount: totalAffected);
             }
             else if (HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Delete))
             {
-                context.Connection.LastStatementRowCount = pendingDeletes.Count;
+                context.Connection.LastStatementRowCount = totalAffected;
                 context.Batch.Connection.Simulation.FireTriggers(
                     context.Batch, destinationTable, TriggerActions.Delete,
                     insertedRows: null, deletedRows: deletedRows,
-                    affectedRowCount: pendingDeletes.Count);
+                    affectedRowCount: totalAffected);
             }
         }
 

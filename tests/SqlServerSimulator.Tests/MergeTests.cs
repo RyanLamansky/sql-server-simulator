@@ -1112,4 +1112,19 @@ public sealed class MergeTests
     public void NestedDml_AsAnInsertSource_IsNotModeled()
         => Contains("Composable DML", Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
             "create table t (id int primary key, v int); create table h (a int, id int); insert h select * from (delete t output deleted.id, deleted.v) x;")).Message);
+
+    /// <summary>Each action's trigger reads the whole MERGE's row count in @@ROWCOUNT, AFTER and INSTEAD OF alike (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("after")]
+    [DataRow("instead of")]
+    public void Merge_TriggerRowCount_IsTheStatements(string timing)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int primary key, v int); insert t values (1, 10), (2, 20); create table seen (k varchar(2), rc int)",
+            $"create trigger tu on t {timing} update as insert seen values ('U', @@rowcount)",
+            $"create trigger ti on t {timing} insert as insert seen values ('I', @@rowcount)");
+        _ = simulation.ExecuteNonQuery("merge t using (values (1, 5), (9, 9), (8, 8)) x (id, v) on t.id = x.id when matched then update set v = x.v when not matched then insert values (x.id, x.v);");
+        AreEqual("I:3|U:3", simulation.ExecuteScalar("select string_agg(concat(k, ':', rc), '|') within group (order by k) from seen"));
+    }
 }
