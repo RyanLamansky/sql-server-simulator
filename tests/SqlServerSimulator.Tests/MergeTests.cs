@@ -1044,4 +1044,51 @@ public sealed class MergeTests
     [DataRow("create table t (id int, v int not null); merge t using (values (1, null)) s(id, v) on t.id = s.id when not matched then insert values (s.id, s.v);", "column does not allow nulls. UPDATE fails.")]
     public void Merge_ConstraintRefusal_NamesTheMerge(string sql, string fragment)
         => Contains(fragment, Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery(sql)).Errors[0].Message);
+
+    /// <summary>
+    /// An insert action's Msg 515 checks the columns it lists last to first —
+    /// all of them for DEFAULT VALUES — then the unlisted ones first to last
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("default values", "d")]
+    [DataRow("(a, b, c, d) values (default, default, default, default)", "d")]
+    [DataRow("(c, a) values (null, null)", "c")]
+    [DataRow("(a, b, c, d) values (null, 1, null, null)", "d")]
+    [DataRow("(b, c) values (1, null)", "c")]
+    [DataRow("(c) values (1)", "a")]
+    [DataRow("(d, a) values (1, 1)", "c")]
+    public void Merge_InsertNullRefusal_NamesRealsColumn(string insert, string column)
+        => Contains($"column '{column}'", Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery(
+            $"create table t (a int not null, b int null, c int not null, d int not null); merge t using (values (1)) s(x) on 1 = 0 when not matched then insert {insert};")).Errors[0].Message);
+
+    /// <summary>
+    /// An insert action's value may be DEFAULT — the column's default, NULL
+    /// without one — and its column-list-less form lists a rowversion column,
+    /// which takes only DEFAULT or a constant NULL (probed 2026-10-19 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Merge_InsertDefaultValue_TakesTheColumnsDefault()
+        => AreEqual("1:1:7|2:-:7", new Simulation().ExecuteScalar("""
+            create table t (id int primary key, v int, w int default 7, rv rowversion);
+            merge t using (values (1, 1)) s(id, v) on t.id = s.id when not matched then insert values (s.id, s.v, default, default);
+            merge t using (values (2, 1)) s(id, v) on t.id = s.id when not matched then insert (id, v, w, rv) values (s.id, default, default, null);
+            select string_agg(concat(id, ':', isnull(cast(v as varchar), '-'), ':', w), '|') within group (order by id) from t
+            """));
+
+    [TestMethod]
+    [DataRow("insert values (1, 1, 3)", 213)]
+    [DataRow("insert values (1, 1, 3, 0x01)", 273)]
+    [DataRow("insert (id, v, rv) values (1, 1, 0x01)", 273)]
+    [DataRow("insert (id, v) values (default + 1, 1)", 102)]
+    public void Merge_InsertValueRefusals(string insert, int number)
+        => new Simulation().AssertSqlError($"create table t (id int primary key, v int, w int default 7, rv rowversion); merge t using (values (1)) s(x) on 1 = 0 when not matched then {insert};", number);
+
+    /// <summary>DEFAULT or a constant NULL for an identity column is Msg 339 ahead of Msg 544 (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("default")]
+    [DataRow("null")]
+    public void Merge_InsertDefaultIdentity_RaisesMsg339(string value)
+        => new Simulation().AssertSqlError($"create table t (id int identity, v int); merge t using (values (1)) s(x) on 1 = 0 when not matched then insert (id, v) values ({value}, 1);", 339);
 }

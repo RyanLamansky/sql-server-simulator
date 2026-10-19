@@ -1409,7 +1409,19 @@ partial class Simulation
                     break;
                 }
             }
-            var source = clause.InsertValues![i].Run(sourceRuntime);
+            if (clause.InsertValues![i] is Parser.Expressions.DefaultValueExpression)
+            {
+                // DEFAULT takes the column's default, NULL without one; a
+                // rowversion column draws its value below.
+                if (targetColumn.Type != SqlType.RowVersion)
+                {
+                    rowValues[ordinal] = targetColumn.Default is { } columnDefault
+                        ? CoerceForInsert(EnforceMaxLength(columnDefault.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch)), targetColumn, destinationTable, context.Connection), targetColumn)
+                        : SqlValue.Null(targetColumn.Type);
+                }
+                continue;
+            }
+            var source = clause.InsertValues[i].Run(sourceRuntime);
             if (writeMasks?[ordinal] is { } mask)
                 source = DataMasking.ForStorage(mask.Apply(source, targetColumn.Type));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
@@ -1462,7 +1474,7 @@ partial class Simulation
         {
             // A MERGE's insert reports Msg 515 as "UPDATE fails." and Msg 547
             // as the MERGE statement's (probed 2026-10-01 against SQL Server 2025).
-            EnforceNotNull(destinationTable, rowValues, "UPDATE");
+            EnforceMergeInsertNotNull(destinationTable, rowValues, clause);
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch, reportedVerb: "MERGE", deferFunctionChecks: true);
             EnforceEdgeConstraints(destinationTable, rowValues, context, "MERGE");
             RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
@@ -2082,6 +2094,31 @@ partial class Simulation
                 this.scratch[i] = raw.Type == this.keys[i].Common ? raw : raw.CoerceTo(this.keys[i].Common);
             }
             return true;
+        }
+    }
+    /// <summary>
+    /// A MERGE insert's Msg 515, "UPDATE fails.": real checks the columns the
+    /// action lists last to first — every column, for <c>DEFAULT VALUES</c> —
+    /// and then the unlisted ones first to last (probed 2026-10-19 against SQL
+    /// Server 2025: <c>INSERT (c, a) VALUES (NULL, NULL)</c> names <c>c</c>,
+    /// <c>INSERT (c) VALUES (1)</c> names <c>a</c> ahead of <c>d</c>).
+    /// </summary>
+    private static void EnforceMergeInsertNotNull(HeapTable destinationTable, SqlValue[] rowValues, WhenClause clause)
+    {
+        var columns = destinationTable.Columns;
+        var everyColumnListed = clause.InsertColumns!.Length == 0 && clause.InsertColumnsImplied;
+        for (var pass = 0; pass < 2; pass++)
+        {
+            for (var k = 0; k < columns.Length; k++)
+            {
+                var i = pass == 0 ? columns.Length - 1 - k : k;
+                var column = columns[i];
+                if (!column.Nullable && rowValues[i].IsNull
+                    && (everyColumnListed || Array.IndexOf(clause.InsertColumns, column) >= 0) == (pass == 0))
+                {
+                    throw SimulatedSqlException.CannotInsertNull(column.Name, QualifyForNullMessage(destinationTable), "UPDATE");
+                }
+            }
         }
     }
 }

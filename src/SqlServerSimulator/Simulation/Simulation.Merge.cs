@@ -1638,8 +1638,6 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (GraphColumns.IsInternal(col.GraphKind))
                     throw SimulatedSqlException.InternalGraphColumnAccess(col.Name, state: 1);
-                if (col.Type == SqlType.RowVersion)
-                    throw SimulatedSqlException.CannotInsertExplicitTimestamp();
                 // A period column takes no value from an insert action (probed
                 // 2026-10-04 against SQL Server 2025).
                 if (col.GeneratedAs != GeneratedAlwaysAsRow.None)
@@ -1673,8 +1671,17 @@ partial class Simulation
         {
             while (true)
             {
-                context.MoveNextRequired();
-                insertValues.Add(Expression.Parse(context));
+                // A value may be DEFAULT, standing alone (probed 2026-10-19
+                // against SQL Server 2025: `DEFAULT + 1` is Msg 102).
+                if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Default })
+                {
+                    insertValues.Add(Parser.Expressions.DefaultValueExpression.Instance);
+                    context.MoveNextRequired();
+                }
+                else
+                {
+                    insertValues.Add(Expression.Parse(context));
+                }
                 if (context.Token is Operator { Character: ')' })
                     break;
                 if (context.Token is not Operator { Character: ',' })
@@ -1702,7 +1709,9 @@ partial class Simulation
                 var defaultCols = new List<HeapColumn>();
                 foreach (var c in destinationTable.Columns)
                 {
-                    if (IsImplicitInsertColumn(c) && c.Type != SqlType.RowVersion)
+                    // A rowversion column counts, taking only DEFAULT (probed
+                    // 2026-10-19 against SQL Server 2025).
+                    if (IsImplicitInsertColumn(c))
                         defaultCols.Add(c);
                 }
                 columns = [.. defaultCols];
@@ -1729,9 +1738,20 @@ partial class Simulation
         }
 
         // Each value meets its column's one-way assignment rule while
-        // compiling (probe-confirmed against SQL Server 2025).
+        // compiling (probe-confirmed against SQL Server 2025); a rowversion
+        // column takes only DEFAULT or a constant NULL, and an identity column
+        // refuses both ahead of Msg 544 (probed 2026-10-19).
         for (var i = 0; i < columns.Length; i++)
         {
+            var defaultOrNull = insertValues[i] is Parser.Expressions.DefaultValueExpression || IsConstantNull(insertValues[i], context.Batch);
+            if (columns[i].Identity is not null && defaultOrNull)
+                throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
+            if (columns[i].Type == SqlType.RowVersion)
+            {
+                if (!defaultOrNull)
+                    throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+                continue;
+            }
             if (insertValues[i] is not Parser.Expressions.DefaultValueExpression)
                 AssignmentRules.RequireAssignable(insertValues[i], insertValues[i].GetSqlType(context.Batch, resolveType), columns[i].Type);
         }
