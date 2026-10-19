@@ -72,6 +72,12 @@ internal sealed class View(
     public readonly string BodyText = bodyText;
 
     /// <summary>
+    /// Newlines between the start of the batch that created the view and its
+    /// body, which places a body error's line in that batch's text.
+    /// </summary>
+    public int BodyLineOffset;
+
+    /// <summary>
     /// True when the view was declared with a trailing <c>WITH CHECK
     /// OPTION</c>. Parsed and surfaced through
     /// <c>sys.views.with_check_option</c> /

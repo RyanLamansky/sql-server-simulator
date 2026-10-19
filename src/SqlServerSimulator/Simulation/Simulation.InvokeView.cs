@@ -228,7 +228,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var savedAnsiNulls = connection.AnsiNulls;
         connection.AnsiNulls = view.UsesAnsiNulls;
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime, ModuleSchema = view.Schema };
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime, ModuleSchema = view.Schema, LineOffset = view.BodyLineOffset };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         innerBatch.InheritCallerTriggerFrame(outerBatch);
         connection.NestingLevel++;

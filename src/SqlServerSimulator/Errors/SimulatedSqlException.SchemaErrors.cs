@@ -172,16 +172,25 @@ partial class SimulatedSqlException
         }
         var trailer = new SimulatedSqlException($"Could not use view or function '{writtenName.Written}' because of binding errors.", 4413, 16, 1);
         if (writtenName.Count < 2)
-            return FollowedBy(FromErrors(entries), trailer);
+            return BindingWithBatch(FollowedBy(FromErrors(entries), trailer));
         // When every body entry already carries the line it bound at — a
         // missing qualified object's 12 — the whole report is pinned, so a
         // procedure body adds no offset to it; an entry still waiting for the
         // statement's line (a missing column's) leaves the trailer's 12 to be
         // offset as the statement's is.
         if (entries.TrueForAll(static entry => entry.LineNumber != 0))
-            return FollowedBy(FromErrors(entries), trailer).PinLine(12, keepStamped: true);
+            return BindingWithBatch(FollowedBy(FromErrors(entries), trailer).PinLine(12, keepStamped: true));
         trailer.Errors[0].LineNumber = 12;
-        return FollowedBy(FromErrors(entries), trailer);
+        return BindingWithBatch(FollowedBy(FromErrors(entries), trailer));
+
+        // The body binds as the statement compiles, so its missing object
+        // refuses the batch there rather than deferring with the statement
+        // (probed 2026-10-19 against SQL Server 2025).
+        static SimulatedSqlException BindingWithBatch(SimulatedSqlException report)
+        {
+            report.BindsWithBatch = true;
+            return report;
+        }
     }
 
     /// <summary>

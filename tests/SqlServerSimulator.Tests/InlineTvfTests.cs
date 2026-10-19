@@ -370,6 +370,31 @@ public sealed class InlineTvfTests
     }
 
     /// <summary>
+    /// A view's or inline function's body that no longer binds reports its
+    /// error at the line of the batch that created the module — the header
+    /// and any leading lines counted — and a view's refuses the referencing
+    /// batch as it compiles, so nothing ahead of it runs (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view vw as\nselect t.id\nfrom t\njoin u on u.id = t.id", "select 'first'; select * from vw", 4)]
+    [DataRow("\ncreate function f() returns table as\nreturn\nselect t.id\nfrom t\njoin u on u.id = t.id", "select * from f()", 6)]
+    public void ABodyThatNoLongerBinds_ReportsTheCreatingBatchsLine(string module, string query, int line)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (id int); create table u (id int)", module, "drop table u");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand(query);
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            IsFalse(reader.Read());
+        });
+        AreEqual(208, error.Number);
+        AreEqual(line, error.Errors[0].LineNumber);
+    }
+
+    /// <summary>
     /// A bare <c>RETURN</c> body may be a set operation, its later branches
     /// not read as new statements (probed 2026-09-26 against SQL Server 2025).
     /// </summary>

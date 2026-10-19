@@ -259,6 +259,7 @@ partial class Simulation
         {
             DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             HasViewMetadata = options.ViewMetadata,
+            BodyLineOffset = CountNewlines(commandText, 0, bodyStart),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             DerivedOutputColumns = DerivedOutputColumnsFor(bodySelection, baseTable, rejectionReason, outputColumns.Length),

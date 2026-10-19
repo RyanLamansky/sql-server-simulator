@@ -685,6 +685,7 @@ partial class Simulation
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             OutputWireFlags = outputWireFlags,
+            BodyLineOffset = CountNewlines(commandText, 0, bodyStart),
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
