@@ -195,6 +195,22 @@ public sealed class CollationCodePageTests
     }
 
     /// <summary>
+    /// A code page 1252 literal written to a UTF-8 <c>varchar(max)</c> column
+    /// keeps every character, though its UTF-8 bytes outgrow the literal's
+    /// own width, while a <c>COLLATE</c> keeps that width (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Utf8MaxColumn_TakesALiteralWhole()
+        => AreEqual("3|4|1", new Simulation().ExecuteScalar("""
+            create table t (id int, m varchar(max) collate Latin1_General_100_CI_AS_SC_UTF8);
+            insert t values (1, 'mé'), (2, 'x');
+            update t set m = 'mé!' where id = 2;
+            select concat_ws('|', (select datalength(m) from t where id = 1), (select datalength(m) from t where id = 2),
+                datalength(cast('mé' collate Latin1_General_100_CI_AS_SC_UTF8 as varchar(max))))
+            """));
+
+    /// <summary>
     /// The Windows collations with no ANSI code page are Unicode-only: pinning
     /// one on a char-family type raises Msg 459, while nvarchar accepts it.
     /// </summary>
