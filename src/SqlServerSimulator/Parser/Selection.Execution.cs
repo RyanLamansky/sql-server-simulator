@@ -466,6 +466,32 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Msg 8161 for a <c>GROUPING</c> or <c>GROUPING_ID</c> call a query without
+    /// grouping reads, outside its subqueries; one whose argument reads an
+    /// enclosing query's column belongs to that query and is left to it.
+    /// </summary>
+    private static void RejectUngroupedGroupingCalls(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy)
+    {
+        foreach (var expression in expressions)
+            expression.Walk(ref sources, Refuse);
+        foreach (var spec in orderBy)
+            spec.Expr?.Walk(ref sources, Refuse);
+
+        static bool Refuse(ExpressionNode node, NodeShape _, ref FromSource[] sources)
+        {
+            if (node is not (Grouping or GroupingId))
+                return true;
+            var state = (Sources: sources, Local: true);
+            ((Expression)node).VisitColumnReferences(ref state, static (name, ref state) => state.Local &= TryResolveSourceColumn(state.Sources, name) is not null);
+            if (!state.Local)
+                return false;
+            throw node is GroupingId
+                ? SimulatedSqlException.GroupingArgumentNotInGroupBy(1, "GROUPING_ID")
+                : SimulatedSqlException.GroupingArgumentNotInGroupBy(1);
+        }
+    }
+
+    /// <summary>
     /// Enforces the GROUP BY containment rule (Msg 8120 / 8121 / 8127): outside
     /// an aggregate, a column reference must resolve to a bare GROUP BY column.
     /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> already skips
@@ -2095,6 +2121,12 @@ internal sealed partial class Selection
                     grouped ? new NullabilityContext(parseBatch, static _ => true, resolveColumnType) : null,
                     parseBatch.BindErrors);
             }
+        }
+        else if (parseBatch.Parser.GroupingCallsParsed > 0)
+        {
+            // A query with no grouping refuses a GROUPING call while compiling,
+            // over an empty table too (probed 2026-10-19 against SQL Server 2025).
+            RejectUngroupedGroupingCalls(sources, expressions, orderBy);
         }
 
         // An EXISTS body only counts rows, so real never evaluates its select

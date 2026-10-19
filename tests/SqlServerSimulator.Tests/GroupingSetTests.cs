@@ -231,6 +231,9 @@ public sealed class GroupingSetTests
     [DataRow("begin try select grouping_id(g, k) from t group by g; end try begin catch select 'caught' end catch")]
     [DataRow("select g from t group by g order by grouping(k)")]
     [DataRow("select g, (select grouping(k)) from t group by g")]
+    [DataRow("select grouping(g) from t")]
+    [DataRow("begin try select grouping_id(g, k) from t; end try begin catch select 'caught' end catch")]
+    [DataRow("select g from t order by grouping(g)")]
     public void GroupingMismatch_IsRefusedWhileCompiling(string sql)
     {
         var simulation = new Simulation();

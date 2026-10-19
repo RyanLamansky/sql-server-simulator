@@ -180,6 +180,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int OnlineIndexBuildsParsed;
 
     /// <summary>
+    /// How many <c>GROUPING</c> / <c>GROUPING_ID</c> calls the batch has parsed,
+    /// which tells a query with no <c>GROUP BY</c> whether to look for one to
+    /// refuse (Msg 8161).
+    /// </summary>
+    public int GroupingCallsParsed;
+
+    /// <summary>
     /// Set while a multi-statement function's return table parses, whose
     /// grammar, like a table type's, has no <c>SPARSE</c> (Msg 102 at it,
     /// probed 2026-10-06 against SQL Server 2025) where a table variable's

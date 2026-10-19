@@ -33,8 +33,12 @@ internal sealed class Grouping(ParserContext context) : Expression
     /// call written in a query's own <c>WHERE</c> is the aggregate's Msg 147
     /// (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    internal static Expression? RefuseInWhere(ParserContext context) =>
-        context.InWhereClause ? throw SimulatedSqlException.AggregateInWhereClause() : null;
+    internal static Expression? RefuseInWhere(ParserContext context)
+    {
+        // Counted, so a query with no GROUP BY knows to look for one.
+        context.GroupingCallsParsed++;
+        return context.InWhereClause ? throw SimulatedSqlException.AggregateInWhereClause() : null;
+    }
 
     // A grouped-away marker or a bitmap — never NULL, so real projects both
     // functions NOT NULL (probed 2026-10-01 against SQL Server 2025).
