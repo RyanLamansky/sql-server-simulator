@@ -670,7 +670,7 @@ partial class Simulation
             "sql_variant" => (-9, "sql_variant", 16, null, null, null, -9, null, null, 39, 39),
             "text" => (-1, "text", int.MaxValue, int.MaxValue, null, null, -1, null, int.MaxValue, 35, 35),
             "time" => (-9, "time", scale == 0 ? 8 : 9 + scale, 2 * (scale == 0 ? 8 : 9 + scale), null, null, -9, null, null, 0, 0),
-            "timestamp" => (-2, "timestamp", 8, 8, null, null, -2, null, 8, 45, 45),
+            "timestamp" => (-2, "timestamp", 8, 8, null, null, -2, null, 8, 45, 37),
             "tinyint" => (-6, "tinyint", 3, 1, 0, 10, -6, null, null, 48, 38),
             "uniqueidentifier" => (-11, "uniqueidentifier", 16, 36, null, null, -11, null, null, 36, 36),
             "varbinary" or "vector" => (-3, "varbinary", isMax ? 0 : maxLength, isMax ? null : maxLength, null, null, -3, null, isMax ? 0 : maxLength, 37, 37),

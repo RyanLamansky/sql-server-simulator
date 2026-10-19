@@ -915,4 +915,12 @@ public class InsertTests
     [TestMethod]
     public void SelectIntoRowversion_RaisesMsg273Alone()
         => HasCount(1, new Simulation().AssertSqlError("create table t (id int identity, v int, rv rowversion); create table src (a int, b float); insert t select a, b from src", 273).Errors);
+
+    /// <summary>A rowversion column declared NULL is nullable, as written; undeclared it is NOT NULL (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("c rowversion null", true)]
+    [DataRow("c timestamp null", true)]
+    [DataRow("c rowversion", false)]
+    public void RowversionNullability_FollowsTheDeclaration(string column, bool nullable)
+        => AreEqual(nullable, new Simulation().ExecuteScalar<bool>($"create table t ({column}, k int); select is_nullable from sys.columns where object_id = object_id('t') and name = 'c'"));
 }

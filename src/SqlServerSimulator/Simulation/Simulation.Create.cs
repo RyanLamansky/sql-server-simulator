@@ -3010,14 +3010,15 @@ partial class Simulation
         if (resolvedType == SqlType.RowVersion)
         {
             // SQL Server allows at most one rowversion / timestamp column per
-            // table; the second declaration raises Msg 2738. Implicit NOT NULL
-            // (no nullable form is reachable through the type itself).
+            // table; the second declaration raises Msg 2738. NOT NULL unless
+            // the declaration writes NULL, which real keeps (probed 2026-10-19
+            // against SQL Server 2025).
             for (var i = 0; i < heapColumns.Count; i++)
             {
                 if (heapColumns[i] is { } existing && existing.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.MultipleTimestampColumns(tableName, columnName.Value);
             }
-            actualNullable = false;
+            actualNullable = nullable == true;
         }
 
         // Any non-string column is Msg 447 at state 1 (probed 2026-10-01).
