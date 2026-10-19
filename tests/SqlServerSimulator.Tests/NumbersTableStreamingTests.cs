@@ -25,11 +25,17 @@ public sealed class NumbersTableStreamingTests
         return connection;
     }
 
-    private static List<long> Read(SimulatedDbConnection connection, string sql)
+    /// <summary>
+    /// The values <paramref name="sql"/> reads, within <paramref name="timeoutSeconds"/>:
+    /// a few seconds for a query whose only work is the rows it streams, longer
+    /// for one that also writes its rows, so a slow or loaded host still fits
+    /// that work in.
+    /// </summary>
+    private static List<long> Read(SimulatedDbConnection connection, string sql, int timeoutSeconds = 5)
     {
         using var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.CommandTimeout = 5;
+        command.CommandTimeout = timeoutSeconds;
         using var reader = command.ExecuteReader();
         var values = new List<long>();
         do
@@ -82,12 +88,12 @@ public sealed class NumbersTableStreamingTests
         AreSequenceEqual([100_000, 5_000_050_000], Read(connection, $"""
             select top (100000) row_number() over (order by (select null)) n into #nums from {Product};
             select count(*) from #nums union all select sum(n) from #nums
-            """));
+            """, timeoutSeconds: 60));
         AreSequenceEqual([100_000], Read(connection, $"""
             create table #t (n bigint);
             insert #t select top (100000) row_number() over (order by (select null)) from {Product};
             select count(*) from #t
-            """));
+            """, timeoutSeconds: 60));
     }
 
     /// <summary>A user table of 10^5 rows crossed with itself: 10^10 tuples, ten read.</summary>

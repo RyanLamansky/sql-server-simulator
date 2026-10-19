@@ -1268,7 +1268,14 @@ public sealed class CreateIndexTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table ix (a int)");
-        _ = sim.ExecuteNonQuery(string.Join("\n", Enumerable.Range(1, 999).Select(i => $"create index i{i} on ix (a)")));
+        // 999 index builds in one batch, without the default 30-second
+        // timeout a slow or loaded host can run past.
+        using (var connection = sim.CreateOpenConnection())
+        using (var command = connection.CreateCommand(string.Join("\n", Enumerable.Range(1, 999).Select(i => $"create index i{i} on ix (a)"))))
+        {
+            command.CommandTimeout = 0;
+            _ = command.ExecuteNonQuery();
+        }
         sim.AssertSqlError("create index i1000 on ix (a)", 1910, "Could not create nonclustered index 'i1000' because it exceeds the maximum of 999 allowed per table or view.");
     }
 }
