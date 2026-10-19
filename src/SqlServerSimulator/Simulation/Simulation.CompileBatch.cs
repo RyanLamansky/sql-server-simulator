@@ -531,6 +531,12 @@ partial class Simulation
                 {
                     case Parser.Tokens.Whitespace or Parser.Tokens.Comment:
                         continue;
+                    // A clause's keyword can't begin a statement, so real's
+                    // recovery discards it as it does a name (probed
+                    // 2026-10-19 against SQL Server 2025: past an IIF's Msg
+                    // 4145, `FROM t WHERE 1 +` reports nothing).
+                    case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.From or Parser.Keyword.Where or Parser.Keyword.Group or Parser.Keyword.Order or Parser.Keyword.Having or Parser.Keyword.On or Parser.Keyword.And or Parser.Keyword.Or or Parser.Keyword.As or Parser.Keyword.By or Parser.Keyword.Join or Parser.Keyword.Inner or Parser.Keyword.Outer or Parser.Keyword.Left or Parser.Keyword.Right or Parser.Keyword.Full or Parser.Keyword.Cross or Parser.Keyword.Union or Parser.Keyword.Except or Parser.Keyword.Intersect or Parser.Keyword.Is or Parser.Keyword.Null or Parser.Keyword.Like or Parser.Keyword.Between or Parser.Keyword.In or Parser.Keyword.Then or Parser.Keyword.Else or Parser.Keyword.When or Parser.Keyword.Distinct or Parser.Keyword.Top or Parser.Keyword.Escape or Parser.Keyword.Collate or Parser.Keyword.Asc or Parser.Keyword.Desc or Parser.Keyword.Over }:
+                        continue;
                     case Parser.Tokens.ReservedKeyword or Parser.Tokens.Operator { Character: ';' }:
                     case Parser.Tokens.UnquotedString { Value: var word } when word.Equals("THROW", StringComparison.OrdinalIgnoreCase):
                     case Parser.Tokens.Operator { Character: '(' } when OpensQuery(text, index):
