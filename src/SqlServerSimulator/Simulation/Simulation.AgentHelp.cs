@@ -140,6 +140,50 @@ partial class Simulation
         AgentReturn(batch, returnCodeVar, 0);
     }
 
+    private static readonly SystemProcedureParameter[] SpScheduleJobsParameters =
+    [
+        AgentParameter("schedule_name", AgentName, 128),
+        AgentParameter("schedule_id", SqlType.Int32),
+    ];
+
+    /// <summary>The jobs the caller sees that the schedule a schedule-jobs report names is attached to, in job-id order.</summary>
+    private List<AgentRow> AgentScheduleJobs(BatchContext batch, AgentCall call)
+    {
+        var schedule = this.ResolveAgentSchedule(batch, call.Int(1), call.Text(0));
+        var jobs = this.AgentRows(batch, "sysjobs", "job_id in (select job_id from dbo.sysjobschedules where schedule_id = @id) order by job_id", ("id", schedule["schedule_id"]));
+        if (!this.AgentSeesAllJobs(batch))
+            _ = jobs.RemoveAll(job => !AgentOwns(batch, job));
+        return jobs;
+    }
+
+    /// <summary>
+    /// <c>sp_help_jobcount</c>: how many jobs the schedule — named by exactly
+    /// one of its identifiers — is attached to, as one <c>JobCount</c> column
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpJobCount(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_help_jobcount", SpScheduleJobsParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_help_jobcount", AgentUserRoleId);
+        yield return this.AgentResultSet(["JobCount int"], [[SqlValue.FromInt32(this.AgentScheduleJobs(batch, call).Count)]]);
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
+    /// <summary>
+    /// <c>sp_help_jobs_in_schedule</c>: <c>sp_help_job</c>'s details of the
+    /// jobs the schedule — named by exactly one of its identifiers — is
+    /// attached to (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpJobsInSchedule(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_help_jobs_in_schedule", SpScheduleJobsParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_help_jobs_in_schedule", AgentUserRoleId);
+        yield return this.AgentResultSet(AgentJobColumns, this.AgentJobRows(batch, this.AgentScheduleJobs(batch, call)));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
     /// <summary>The jobs the caller sees that <c>sp_help_job</c>'s filters keep, in job-id order.</summary>
     private List<AgentRow> FilteredAgentJobs(BatchContext batch, AgentCall call)
     {

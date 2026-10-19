@@ -22,7 +22,7 @@ partial class Simulation
         "sp_add_notification", "sp_add_operator", "sp_add_schedule", "sp_attach_schedule", "sp_delete_alert",
         "sp_delete_category", "sp_delete_job", "sp_delete_jobschedule", "sp_delete_jobserver", "sp_delete_jobstep",
         "sp_delete_notification", "sp_delete_operator", "sp_delete_schedule", "sp_detach_schedule", "sp_enum_sqlagent_subsystems", "sp_help_alert",
-        "sp_help_category", "sp_help_job", "sp_help_jobactivity", "sp_help_jobhistory", "sp_help_jobschedule",
+        "sp_help_category", "sp_help_job", "sp_help_jobactivity", "sp_help_jobcount", "sp_help_jobhistory", "sp_help_jobs_in_schedule", "sp_help_jobschedule",
         "sp_help_jobserver", "sp_help_jobstep", "sp_help_operator", "sp_help_schedule", "sp_purge_jobhistory",
         "sp_start_job", "sp_stop_job", "sp_update_alert", "sp_update_category", "sp_update_job", "sp_update_jobschedule", "sp_update_jobstep", "sp_update_operator", "sp_update_schedule",
     ];
@@ -111,7 +111,9 @@ partial class Simulation
         "sp_help_category" => this.InvokeSpHelpCategory(batch, returnCodeVar),
         "sp_help_job" => this.InvokeSpHelpJob(batch, returnCodeVar),
         "sp_help_jobactivity" => this.InvokeSpHelpJobActivity(batch, returnCodeVar),
+        "sp_help_jobcount" => this.InvokeSpHelpJobCount(batch, returnCodeVar),
         "sp_help_jobhistory" => this.InvokeSpHelpJobHistory(batch, returnCodeVar),
+        "sp_help_jobs_in_schedule" => this.InvokeSpHelpJobsInSchedule(batch, returnCodeVar),
         "sp_help_jobschedule" => this.InvokeSpHelpJobSchedule(batch, returnCodeVar),
         "sp_help_jobserver" => this.InvokeSpHelpJobServer(batch, returnCodeVar),
         "sp_help_jobstep" => this.InvokeSpHelpJobStep(batch, returnCodeVar),

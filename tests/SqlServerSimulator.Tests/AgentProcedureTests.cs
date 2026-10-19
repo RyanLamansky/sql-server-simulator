@@ -753,4 +753,35 @@ public sealed class AgentProcedureTests
         AreEqual(263, category.Errors[0].LineNumber);
         AreEqual(1, simulation.ExecuteScalar("use msdb; exec sp_update_alert @name = N'c', @job_id = '00000000-0000-0000-0000-000000000000'; select count(*) from sysalerts where name = N'c' and job_id = '00000000-0000-0000-0000-000000000000'"));
     }
+
+    /// <summary>
+    /// sp_help_jobcount and sp_help_jobs_in_schedule report the jobs a schedule
+    /// named by exactly one identifier is attached to (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void ScheduleJobReports_CountAndListTheJobs()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            use msdb;
+            exec sp_add_job @job_name = N'j1';
+            exec sp_add_job @job_name = N'j2';
+            exec sp_add_schedule @schedule_name = N's', @freq_type = 4, @freq_interval = 1;
+            exec sp_attach_schedule @job_name = N'j1', @schedule_name = N's';
+            exec sp_attach_schedule @job_name = N'j2', @schedule_name = N's';
+            """);
+        AreEqual(2, simulation.ExecuteScalar("exec msdb.dbo.sp_help_jobcount @schedule_name = N's'"));
+        using (var connection = simulation.CreateOpenConnection())
+        using (var reader = connection.CreateCommand("exec msdb.dbo.sp_help_jobs_in_schedule @schedule_id = 8").ExecuteReader())
+        {
+            var names = new List<string>();
+            while (reader.Read())
+                names.Add(reader.GetString(reader.GetOrdinal("name")));
+            names.Sort(StringComparer.Ordinal);
+            CollectionAssert.AreEqual(new[] { "j1", "j2" }, names);
+        }
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobcount", 14373);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobs_in_schedule @schedule_name = N's', @schedule_id = 8", 14373);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobcount @schedule_id = 99", 14262);
+    }
 }

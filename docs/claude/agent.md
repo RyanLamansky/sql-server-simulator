@@ -77,5 +77,5 @@ The three Agent roles are seeded in msdb with real's memberships (`SQLAgentOpera
 ## Not modeled yet
 
 - Starting the Agent, and with it running a job's T-SQL steps, writing history and activity, schedules' next run dates, and the `$(ESCAPE_SQUOTE(…))` tokens.
-- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262), `sp_help_jobcount`, `sp_help_jobs_in_schedule` and the multi-server (MSX / TSX) procedures.
+- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262) and the multi-server (MSX / TSX) procedures.
 - The procedures as catalog objects: `msdb.sys.procedures`, `OBJECT_ID('msdb.dbo.sp_add_job')` and `sp_helptext` don't list them.
