@@ -451,4 +451,36 @@ public sealed class DatabaseMailTests
         simulation.AssertSqlError("exec msdb.dbo.sysmail_delete_mailitems_sp", 14608, "Either @sent_before or @sent_status parameter needs to be supplied");
         AreEqual(0, simulation.ExecuteScalar("exec msdb.dbo.sysmail_delete_log_sp @event_type = 'information'; exec msdb.dbo.sysmail_delete_log_sp @event_type = 'error'; select count(*) from msdb.dbo.sysmail_log"));
     }
+
+    /// <summary>
+    /// The account and configuration reports read as SQL Server 2025's, a
+    /// missing account refused by its verifier (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void HelpAccountAndConfigure_ReadAsReal()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec msdb.dbo.sysmail_add_account_sp @account_name = N'a', @email_address = N'a@b.c', @mailserver_name = N'smtp.example.invalid'");
+        using (var reader = simulation.ExecuteReader("exec msdb.dbo.sysmail_help_account_sp @account_name = N'a'"))
+        {
+            AreEqual("account_id|name|description|email_address|display_name|replyto_address|servertype|servername|port|username|use_default_credentials|enable_ssl",
+                string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName)));
+            IsTrue(reader.Read());
+            AreEqual("a|a@b.c|SMTP|smtp.example.invalid|25|False|False", string.Join("|", reader["name"], reader["email_address"], reader["servertype"], reader["servername"], reader["port"], reader["use_default_credentials"], reader["enable_ssl"]));
+        }
+        var byName = simulation.AssertSqlError("exec msdb.dbo.sysmail_help_account_sp @account_name = N'none'", 14607);
+        AreEqual("msdb.dbo.sysmail_verify_account_sp:42:account name is not valid", $"{byName.Errors[0].Procedure}:{byName.LineNumber}:{byName.Errors[0].Message}");
+        var byId = simulation.AssertSqlError("exec msdb.dbo.sysmail_help_account_sp @account_id = 99999", 14606);
+        AreEqual("msdb.dbo.sysmail_verify_account_sp:33:account id is not valid", $"{byId.Errors[0].Procedure}:{byId.LineNumber}:{byId.Errors[0].Message}");
+        AreEqual("AccountRetryAttempts,AccountRetryDelay,DatabaseMailExeMinimumLifeTime,DefaultAttachmentEncoding,LoggingLevel,MaxFileSize,ProhibitedExtensions",
+            ConfigureRows(simulation, "", static r => r.GetString(0), ","));
+        AreEqual("MaxFileSize|1000000|Default maximum file size", ConfigureRows(simulation, " @parameter_name = N'MaxFileSize'", static r => $"{r[0]}|{r[1]}|{r[2]}", "|"));
+        IsEmpty(ConfigureRows(simulation, " @parameter_name = N'none'", static r => r.GetString(0), ","));
+
+        static string ConfigureRows(Simulation simulation, string arguments, Func<System.Data.Common.DbDataReader, string> read, string separator)
+        {
+            using var reader = simulation.ExecuteReader($"exec msdb.dbo.sysmail_help_configure_sp{arguments}");
+            return string.Join(separator, reader.EnumerateRecords().Select(read));
+        }
+    }
 }
