@@ -608,6 +608,14 @@ public sealed class BatchCompilationTests
         AreEqual(expected, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}")));
     }
 
+    /// <summary>A misplaced procedure's valued RETURN names the procedure, as its Msg 111 does (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void MisplacedProcedure_ValuedReturn_NamesTheProcedure()
+    {
+        var ex = new Simulation().AssertSqlError("select 1; create procedure zzp as select 1; return 7", 111);
+        AreEqual("111:zzp 178:zzp", string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}:{error.Procedure}")));
+    }
+
     /// <summary>
     /// An unterminated list ending the batch names its last token, at that
     /// token's line, whichever statement holds it (probed 2026-10-16 against

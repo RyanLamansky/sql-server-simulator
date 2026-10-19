@@ -538,7 +538,12 @@ partial class Simulation
                     context.MoveNextOptional();
                 }
             }
-            return SimulatedSqlException.ReturnWithValueNotAllowed();
+            // Read as a misplaced procedure's body, it names that procedure,
+            // as the Msg 111 did (probed 2026-10-19 against SQL Server 2025).
+            var refused = SimulatedSqlException.ReturnWithValueNotAllowed();
+            if (context.Batch.MisplacedModuleProcedure is { Length: > 0 } procedure)
+                refused.Errors[0].Procedure = procedure;
+            return refused;
         }
 
         var context = batch.Parser;
