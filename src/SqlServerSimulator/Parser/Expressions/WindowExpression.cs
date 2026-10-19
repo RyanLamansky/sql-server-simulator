@@ -1327,16 +1327,22 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     private static void ValidateFrameBounds(bool isRange, FrameBound start, FrameBound end)
     {
+        // An end before the start is refused ahead of RANGE's offsets (probed
+        // 2026-10-19 against SQL Server 2025).
+        switch (start.Kind, end.Kind)
+        {
+            case (FrameBoundKind.NFollowing, FrameBoundKind.NPreceding):
+                throw SimulatedSqlException.FrameEndsBeforeStart("... FOLLOWING", "... PRECEDING", state: 1);
+            case (FrameBoundKind.NFollowing, FrameBoundKind.CurrentRow):
+                throw SimulatedSqlException.FrameEndsBeforeStart("... FOLLOWING", "CURRENT ROW", state: 4);
+            case (FrameBoundKind.CurrentRow, FrameBoundKind.NPreceding):
+                throw SimulatedSqlException.FrameEndsBeforeStart("CURRENT ROW", "... PRECEDING", state: 5);
+        }
+
         if (isRange && (start.Kind is FrameBoundKind.NPreceding or FrameBoundKind.NFollowing
                      || end.Kind is FrameBoundKind.NPreceding or FrameBoundKind.NFollowing))
         {
             throw SimulatedSqlException.RangeFrameOnlySupportsUnboundedAndCurrentRow();
-        }
-
-        if (start.Kind == FrameBoundKind.NFollowing
-            && end.Kind is FrameBoundKind.NPreceding or FrameBoundKind.CurrentRow)
-        {
-            throw SimulatedSqlException.FrameBetweenFollowingAndPreceding();
         }
     }
 

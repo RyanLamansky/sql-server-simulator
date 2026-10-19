@@ -472,6 +472,23 @@ public sealed class WindowFrameTests
         AreEqual(4193, ex.Number);
     }
 
+    /// <summary>
+    /// An end bound before the start is Msg 4193 worded for its pair, ahead of
+    /// a RANGE frame's Msg 4194 (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("rows between 1 following and 1 preceding", (byte)1, "'BETWEEN ... FOLLOWING AND ... PRECEDING'")]
+    [DataRow("rows between 1 following and current row", (byte)4, "'BETWEEN ... FOLLOWING AND CURRENT ROW'")]
+    [DataRow("rows between current row and 1 preceding", (byte)5, "'BETWEEN CURRENT ROW AND ... PRECEDING'")]
+    [DataRow("range between 1 following and current row", (byte)4, "'BETWEEN ... FOLLOWING AND CURRENT ROW'")]
+    [DataRow("range between current row and 1 preceding", (byte)5, "'BETWEEN CURRENT ROW AND ... PRECEDING'")]
+    public void Frame_EndBeforeStart_Raises4193(string frame, byte state, string pair)
+    {
+        var ex = new Simulation().AssertSqlError($"create table t (id int, v int); select sum(v) over (order by id {frame}) from t", 4193);
+        AreEqual(state, ex.Errors[0].State);
+        StartsWith(pair, ex.Errors[0].Message);
+    }
+
     [TestMethod]
     public void Frame_BetweenCurrentRowAndUnboundedPreceding_Raises102()
     {

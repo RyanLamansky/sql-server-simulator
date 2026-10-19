@@ -521,8 +521,8 @@ internal sealed partial class Selection
         // node, which is before it reaches them.
         var foldedAway = new HashSet<ExpressionNode>(ReferenceEqualityComparer.Instance);
 
-        // GROUPING() / GROUPING_ID() answer their own mismatch (Msg 8161), so
-        // their arguments aren't this check's to report.
+        // GROUPING() / GROUPING_ID() answer their own mismatch (Msg 8161) as
+        // the walk meets them, so their arguments aren't this check's to report.
         bool coversSubtree(ExpressionNode node)
         {
             if (foldedAway.Contains(node))
@@ -533,7 +533,8 @@ internal sealed partial class Selection
                 expression.AddFoldedAwayOperands(context, foldedAway);
             return expression switch
             {
-                Grouping or GroupingId => true,
+                Grouping grouping => grouping.RequireGrouped(fromClause.AllGroupingExpressions),
+                GroupingId groupingId => groupingId.RequireGrouped(fromClause.AllGroupingExpressions),
                 NullIf { FoldedBeforeGroupingCheck: true } => true,
                 Reference => false,
                 _ => groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, expression)),
@@ -557,8 +558,13 @@ internal sealed partial class Selection
 
         // Inside a subquery only a grouping expression's match covers: the
         // folds above type their operands against this query's sources alone.
-        bool coversCorrelated(ExpressionNode node) =>
-            node is Expression expression && groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, expression));
+        bool coversCorrelated(ExpressionNode node) => node switch
+        {
+            Grouping grouping => grouping.RequireGrouped(fromClause.AllGroupingExpressions),
+            GroupingId groupingId => groupingId.RequireGrouped(fromClause.AllGroupingExpressions),
+            Expression expression => groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, expression)),
+            _ => false,
+        };
 
         Action<Selection> SubqueryCheck(Func<string, SimulatedSqlException> error) =>
             inner => VisitCorrelatedReferences(inner, static _ => false, coversCorrelated, (_, name) => Check(name, error));

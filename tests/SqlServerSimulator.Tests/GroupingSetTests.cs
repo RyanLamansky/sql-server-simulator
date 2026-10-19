@@ -225,6 +225,19 @@ public sealed class GroupingSetTests
             ex.Message);
     }
 
+    /// <summary>A GROUPING argument no grouping expression matches is refused as the query compiles — over an empty table, past a TRY, in a subquery (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("begin try select grouping(k) from t group by g; end try begin catch select 'caught' end catch")]
+    [DataRow("begin try select grouping_id(g, k) from t group by g; end try begin catch select 'caught' end catch")]
+    [DataRow("select g from t group by g order by grouping(k)")]
+    [DataRow("select g, (select grouping(k)) from t group by g")]
+    public void GroupingMismatch_IsRefusedWhileCompiling(string sql)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (g varchar(2), k int)");
+        _ = simulation.AssertSqlError(sql, 8161);
+    }
+
     [TestMethod]
     public void GroupingOfNonGroupedColumn_RaisesMsg8161()
     {

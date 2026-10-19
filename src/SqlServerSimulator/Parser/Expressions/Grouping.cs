@@ -55,6 +55,14 @@ internal sealed class Grouping(ParserContext context) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
 
     /// <summary>
+    /// Msg 8161 for an argument no grouping expression matches, raised as the
+    /// query compiles (probed 2026-10-19 against SQL Server 2025: an empty
+    /// rowset raises it too, past a <c>TRY</c>); answers true for the walk.
+    /// </summary>
+    internal bool RequireGrouped(List<Expression> grouping) =>
+        FindArg(grouping, this.argument) ? true : throw SimulatedSqlException.GroupingArgumentNotInGroupBy(1);
+
+    /// <summary>
     /// Looks for <paramref name="argument"/> in <paramref name="haystack"/> by
     /// <see cref="ShapeKey"/>, keying each column by its name alone: real
     /// matches <c>GROUPING(x.a + 1)</c> against <c>ROLLUP(a + 1)</c> (probed
@@ -100,6 +108,17 @@ internal sealed class GroupingId : Expression
             list.Add(Parse(context));
         }
         this.arguments = [.. list];
+    }
+
+    /// <summary>Msg 8161 naming the first argument no grouping expression matches; see <see cref="Grouping.RequireGrouped"/>.</summary>
+    internal bool RequireGrouped(List<Expression> grouping)
+    {
+        for (var i = 0; i < this.arguments.Length; i++)
+        {
+            if (!Grouping.FindArg(grouping, this.arguments[i]))
+                throw SimulatedSqlException.GroupingArgumentNotInGroupBy(i + 1, "GROUPING_ID");
+        }
+        return true;
     }
 
     public override SqlValue Run(RuntimeContext runtime)

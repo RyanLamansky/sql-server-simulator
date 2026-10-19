@@ -872,6 +872,10 @@ The one wrinkle: a bare name is built as a `Reference` before the parser knows w
 The count alone can't tell an outer column from a local one, so an item that counted columns has them resolved against the query's own sources once it has parsed (`Selection.NamesOnlyOuterColumns`), through `ExpressionNode.Walk`, which reaches every node kind.
 Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
 
+### Not modeled yet
+
+- **`GROUPING` in a query with no `GROUP BY`** raises Msg 8161 per row, so an empty rowset raises nothing, where real refuses it as the query compiles (probed 2026-10-19 against SQL Server 2025); a mismatched argument beside a `GROUP BY` is refused while compiling.
+
 ## GROUP BY containment
 
 Msg 8120 (select list) / 8121 (HAVING) / 8127 (ORDER BY): outside an aggregate, every column reference has to be covered by the GROUP BY clause.

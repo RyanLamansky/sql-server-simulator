@@ -1147,14 +1147,14 @@ partial class SimulatedSqlException
         new("Window frame with ROWS or RANGE must have an ORDER BY clause.", 10756, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 4193 — the frame's start bound is
-    /// <c>N FOLLOWING</c> and the end bound is <c>N PRECEDING</c> or
-    /// <c>CURRENT ROW</c>, which is semantically invalid (end before start).
-    /// Probe-confirmed against SQL Server 2025 (2026-05-12): Class 16,
-    /// State 1.
+    /// Mimics SQL Server's Msg 4193 — a frame whose end bound comes before its
+    /// start: <c>N FOLLOWING AND N PRECEDING</c> (state 1), <c>N FOLLOWING AND
+    /// CURRENT ROW</c> (state 4) or <c>CURRENT ROW AND N PRECEDING</c> (state
+    /// 5), each worded for its pair (probed 2026-05-12 and 2026-10-19 against
+    /// SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException FrameBetweenFollowingAndPreceding() =>
-        new("'BETWEEN ... FOLLOWING AND ... PRECEDING' is not a valid window frame and cannot be used with the OVER clause.", 4193, 16, 1);
+    internal static SimulatedSqlException FrameEndsBeforeStart(string startWord, string endWord, byte state) =>
+        new($"'BETWEEN {startWord} AND {endWord}' is not a valid window frame and cannot be used with the OVER clause.", 4193, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4194 — a <c>RANGE</c> frame used a numeric-
