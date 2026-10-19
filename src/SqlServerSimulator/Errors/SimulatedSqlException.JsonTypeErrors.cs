@@ -115,9 +115,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException JsonIndexNeedsClusteredPrimaryKey(string tableName) =>
         new($"Table '{tableName}' needs to have a clustered primary key with less than 32 columns in it in order to create a JSON index on it.", 13672, 16, 1);
 
-    /// <summary>Msg 13681: the column already carries a JSON index, named here.</summary>
+    /// <summary>
+    /// Msg 13681: the column already carries a JSON index, named here — as
+    /// though under <c>XACT_ABORT</c>: uncaught it ends the batch and rolls the
+    /// transaction back, caught it dooms the transaction (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
     internal static SimulatedSqlException JsonIndexAlreadyOnColumn(string existingIndexName, string columnName, string tableName) =>
-        new($"A JSON index '{existingIndexName}' already exists on column '{columnName}' on table '{tableName}', and multiple JSON indexes per column are not allowed.", 13681, 16, 1);
+        new($"A JSON index '{existingIndexName}' already exists on column '{columnName}' on table '{tableName}', and multiple JSON indexes per column are not allowed.", 13681, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 13685 state 2: <c>DROP_EXISTING = ON</c> found no JSON index of that name on the column.</summary>
     internal static SimulatedSqlException JsonIndexNotFound(string indexName, string columnName, string tableName) =>

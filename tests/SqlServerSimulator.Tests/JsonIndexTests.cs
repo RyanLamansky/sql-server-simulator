@@ -238,4 +238,39 @@ public sealed class JsonIndexTests
     [DataRow("alter index all on t rebuild")]
     public void AlterIndex_AcceptsWhatAJsonIndexTakes(string statement)
         => AreEqual(1, new Simulation().ExecuteScalar($"{Indexed} {statement}; select 1"));
+
+    /// <summary>
+    /// The next statement may follow a CREATE JSON INDEX at once, while a
+    /// keyword that can't start one is Msg 156 (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateJsonIndex_TheNextStatementFollows()
+    {
+        AreEqual(1, new Simulation().ExecuteScalar($"{Table} create json index ji on t (d) for ('$.a')\nselect 1"));
+        AreEqual(2, new Simulation().ExecuteScalar($"{Table} begin create json index ji on t (d) end select 2"));
+        _ = new Simulation().AssertSqlError($"{Table} create json index ji on t (d) for ('$.a') where id > 1", 156);
+    }
+
+    /// <summary>
+    /// A second JSON index on a column ends the batch as under XACT_ABORT,
+    /// rolling its transaction back, and dooms the transaction when caught
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SecondJsonIndex_AbortsAsUnderXactAbort()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{Table} create json index ji on t (d); create table w (a int)");
+        using var connection = simulation.CreateOpenConnection();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; insert w values (1); create json index j2 on t (d); select 9").ExecuteNonQuery());
+        AreEqual("0|0", connection.CreateCommand("select concat(@@trancount, '|', (select count(*) from w))").ExecuteScalar());
+        AreEqual(-1, connection.CreateCommand("""
+            begin tran;
+            declare @x int;
+            begin try create json index j2 on t (d) end try begin catch set @x = xact_state() end catch;
+            rollback;
+            select @x
+            """).ExecuteScalar());
+    }
 }
