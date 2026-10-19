@@ -654,6 +654,10 @@ partial class Simulation
             IsWindowed = IsWindowedBody(body),
             VolatileColumns = body.VolatileColumns,
             UnstoredBody = body,
+            SeekExcluders = !correlated && body.UpdatabilityProfile is { Sources: [{ BackingTable: { } read }], Excluders: { Length: > 0 } excluders }
+                && ReferenceEquals(read, baseTable) && !IsRowLimitedBody(body) && !IsWindowedBody(body)
+                ? excluders
+                : null,
             IsDerivedTable = isDerivedTable,
             IsCorrelated = correlated,
             PartitionedBase = partitionedBase,

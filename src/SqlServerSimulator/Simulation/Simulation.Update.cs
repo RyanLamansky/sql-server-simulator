@@ -792,7 +792,7 @@ partial class Simulation
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
         IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek);
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek, sourceView);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -828,7 +828,7 @@ partial class Simulation
             && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => (writeOrder != WriteOrder.AsRead || table.Heap.ReadLiveRow(address.Page, address.Slot) is null) && JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null, targetWait, throughIndex)
             && where is not null)
         {
-            rowSource = MutationRowSource(table, where, context.Batch, out seek);
+            rowSource = MutationRowSource(table, where, context.Batch, out seek, sourceView);
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
@@ -1456,8 +1456,17 @@ partial class Simulation
     /// <see cref="MutationRowSource(HeapTable, BooleanExpression?, BatchContext)"/>,
     /// with the seek's rows in <paramref name="seek"/> when it seeks.
     /// </summary>
-    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch, out IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek)
+    /// <remarks>
+    /// A write through a CTE or derived table also seeks on its body's own
+    /// <c>WHERE</c> (<see cref="View.SeekExcluders"/>), which every row it
+    /// reaches passes anyway, so <c>WITH c AS (SELECT … WHERE Id = @id)
+    /// UPDATE c …</c> seeks the key as the same <c>UPDATE</c> written on the
+    /// table does.
+    /// </remarks>
+    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch, out IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek, View? throughView = null)
     {
+        if (throughView?.SeekExcluders is { } excluders)
+            where = where is null ? BooleanExpression.AndAll(excluders) : BooleanExpression.And(where, BooleanExpression.AndAll(excluders));
         seek = where is null ? null : Selection.SeekMutationTarget(table, where, batch);
         if (seek is null && !batch.IsSkipping)
             IndexUsageAccounting.NoteRead(batch, table, null, seek: false);

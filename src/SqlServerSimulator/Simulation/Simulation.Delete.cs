@@ -238,7 +238,7 @@ partial class Simulation
         // target's rows or seek cache at all: another session redefining the
         // table meanwhile left them in a layout the walk decoded wrongly.
         IEnumerable<(int Page, int Slot, byte[] Bytes)>? seek = null;
-        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek);
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch, out seek, sourceView);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
@@ -276,7 +276,7 @@ partial class Simulation
             && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => (writeOrder != WriteOrder.AsRead || table.Heap.ReadLiveRow(address.Page, address.Slot) is null) && JudgeRow(address.Page, address.Slot, prior, out _), targetWait, throughIndex)
             && where is not null)
         {
-            rowSource = MutationRowSource(table, where, context.Batch, out seek);
+            rowSource = MutationRowSource(table, where, context.Batch, out seek, sourceView);
         }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();

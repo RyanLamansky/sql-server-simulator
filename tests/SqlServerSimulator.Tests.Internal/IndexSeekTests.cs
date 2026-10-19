@@ -2596,6 +2596,21 @@ public sealed class IndexSeekTests
         AreEqual("5,500", Seq(ReadRows(c, "select val from t where id <> 2 order by id")));
     }
 
+    /// <summary>
+    /// A write through a CTE or derived table seeks on its body's own WHERE,
+    /// as the same write on the table does, where it scanned every row.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @id int = 2; with c as (select id, val from t where id = @id) update c set val = 999")]
+    [DataRow("update d set val = 999 from (select id, val from t where id = 2) d")]
+    public void WriteThroughAFilteredBody_SeeksTarget(string sql)
+    {
+        var c = FreshT();
+        AssertCacheResolved(ExecTraced(c, sql));
+        AreEqual(999, Convert.ToInt32(ReadVal(c, "select val from t where id = 2")));
+        AreEqual("5,500", Seq(ReadRows(c, "select val from t where id <> 2 order by id")));
+    }
+
     [TestMethod]
     public void DeleteByPrimaryKey_SeeksTarget()
     {

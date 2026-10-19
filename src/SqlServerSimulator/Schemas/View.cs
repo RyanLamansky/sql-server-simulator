@@ -263,6 +263,14 @@ internal sealed class View(
     public Parser.Selection? UnstoredBody;
 
     /// <summary>
+    /// The <c>WHERE</c> conjuncts of <see cref="UnstoredBody"/> when it reads
+    /// <see cref="BaseTable"/> directly, row by row (no <c>TOP</c>, window or
+    /// correlation): a write through it seeks the table on them beside its
+    /// own <c>WHERE</c>, as every row it reaches passes them. Null otherwise.
+    /// </summary>
+    public Parser.BooleanExpression[]? SeekExcluders;
+
+    /// <summary>
     /// The partitioned view a write through this view reaches — the view
     /// itself when it is one: a stored <c>UNION ALL</c> view each of whose
     /// branches reads one table plainly, or a single-source level over one,
