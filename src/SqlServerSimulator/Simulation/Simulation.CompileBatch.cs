@@ -413,6 +413,8 @@ partial class Simulation
             // Server 2025: two misplaced CREATE DEFAULTs report one each, as
             // does one after a syntax error).
             recovery.HasDispatchedStatement = true;
+            // So is the module whose body the rest of the batch reads as.
+            recovery.MisplacedModuleProcedure = compileBatch.MisplacedModuleProcedure;
             // Past a schema-bound body's header, the rest of the batch is still
             // that body, which recovery reads as statements.
             if (compileBatch.Parser.SchemaBoundBody != SchemaBoundBody.None)
@@ -426,7 +428,14 @@ partial class Simulation
                 && (restart + 4 >= masked.Length || (!char.IsLetterOrDigit(masked[restart + 4]) && masked[restart + 4] != '_'));
             try
             {
-                _ = this.BindWithoutRunning(recovery, []);
+                try
+                {
+                    _ = this.BindWithoutRunning(recovery, []);
+                }
+                finally
+                {
+                    compileBatch.MisplacedModuleProcedure ??= recovery.MisplacedModuleProcedure;
+                }
                 if (startsWithWith)
                     errors.Add(CteAfterUnterminatedStatement(compileBatch, masked, restart));
                 break;

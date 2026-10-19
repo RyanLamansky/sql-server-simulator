@@ -65,7 +65,7 @@ partial class Simulation
     private static bool TryParseCreateTrigger(ParserContext context, bool isAlter, bool createOrAlter)
     {
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch(isAlter ? "ALTER TRIGGER" : "CREATE TRIGGER");
+            throw MisplacedModule(context, isAlter ? "ALTER TRIGGER" : "CREATE TRIGGER");
 
         context.MoveNextRequired();
         if (context.Token is not Name)

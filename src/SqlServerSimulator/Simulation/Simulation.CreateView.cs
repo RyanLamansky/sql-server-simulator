@@ -67,7 +67,7 @@ partial class Simulation
         // CREATE OR ALTER reports under the plain CREATE label (probe-confirmed
         // — real names the statement by the verb it started with).
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch(isAlter ? "ALTER VIEW" : "CREATE VIEW");
+            throw MisplacedModule(context, isAlter ? "ALTER VIEW" : "CREATE VIEW");
 
         context.MoveNextRequired();
         if (context.Token is not Name)

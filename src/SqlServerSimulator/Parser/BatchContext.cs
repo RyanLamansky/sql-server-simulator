@@ -820,6 +820,16 @@ internal sealed partial class BatchContext
     public bool HasDispatchedStatement;
 
     /// <summary>
+    /// The first module <c>CREATE</c> the batch held past its first
+    /// statement (Msg 111): the procedure's name, or empty for a view,
+    /// function, trigger, schema, default or rule. Real reads the rest of the
+    /// batch as that module's body, so every later Msg 111 names the
+    /// procedure, or none (probed 2026-10-19 against SQL Server 2025). Null
+    /// until one is met.
+    /// </summary>
+    public string? MisplacedModuleProcedure;
+
+    /// <summary>
     /// The line a <c>SET SHOWPLAN_*</c> switch is refused at here (Msg 1067
     /// state 1), or null where one may still stand as the batch's first
     /// statement: 0 once a statement other than a bare scalar

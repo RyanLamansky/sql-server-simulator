@@ -31,6 +31,22 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Msg 111 for a module <c>CREATE</c> past its batch's first statement,
+    /// naming the procedure whose body the batch's first such statement makes
+    /// of the rest — <paramref name="procedureName"/> for a procedure that is
+    /// that statement — or none (see <see cref="BatchContext.MisplacedModuleProcedure"/>).
+    /// </summary>
+    private static SimulatedSqlException MisplacedModule(ParserContext context, string statementKind, string procedureName = "")
+    {
+        var batch = context.Batch;
+        batch.MisplacedModuleProcedure ??= procedureName;
+        var misplaced = SimulatedSqlException.MustBeFirstStatementInBatch(statementKind);
+        if (batch.MisplacedModuleProcedure.Length != 0)
+            misplaced.Errors[0].Procedure = batch.MisplacedModuleProcedure;
+        return misplaced;
+    }
+
+    /// <summary>
     /// Parses <c>CREATE [OR ALTER] PROCEDURE schema.name [(@p1 type [=
     /// default] [OUTPUT], ...)] [WITH options] AS body</c>. The body source
     /// is captured between the <c>AS</c> keyword (exclusive) and the
@@ -74,13 +90,11 @@ partial class Simulation
             // Real attributes the refusal to the procedure it would have
             // created, by its bare name (probed 2026-09-26 against SQL
             // Server 2025).
-            var misplaced = SimulatedSqlException.MustBeFirstStatementInBatch("CREATE/ALTER PROCEDURE");
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextRequired();
-            if (context.Token is Name)
-                misplaced.Errors[0].Procedure = BatchContext.ParseObjectName(context).Leaf;
+            var name = context.Token is Name ? BatchContext.ParseObjectName(context).Leaf : "";
             context.RestoreCheckpoint(checkpoint);
-            throw misplaced;
+            throw MisplacedModule(context, "CREATE/ALTER PROCEDURE", name);
         }
 
         context.MoveNextRequired();

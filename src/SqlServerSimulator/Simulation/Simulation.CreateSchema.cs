@@ -55,7 +55,7 @@ partial class Simulation
     private bool TryParseCreateSchema(ParserContext context)
     {
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE SCHEMA");
+            throw MisplacedModule(context, "CREATE SCHEMA");
 
         context.MoveNextRequired();
         string? schemaName = null;

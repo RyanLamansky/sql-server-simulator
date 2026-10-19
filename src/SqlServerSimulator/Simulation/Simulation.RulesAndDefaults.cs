@@ -27,7 +27,7 @@ partial class Simulation
     private static bool TryParseCreateDefaultOrRule(ParserContext context, bool isRule)
     {
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch(isRule ? "CREATE RULE" : "CREATE DEFAULT");
+            throw MisplacedModule(context, isRule ? "CREATE RULE" : "CREATE DEFAULT");
 
         context.MoveNextRequired();
         if (context.Token is not Name)

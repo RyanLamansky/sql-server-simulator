@@ -1077,6 +1077,20 @@ public sealed class StoredProcedureTests
     [DataRow("select 1; alter procedure p3 as select 1", "p3")]
     public void AMisplacedProcedure_IsTheMessagesProcedure(string batch, string procedure)
         => AreEqual(procedure, new Simulation().AssertSqlError(batch, 111).Errors[0].Procedure);
+
+    /// <summary>
+    /// The batch's first misplaced module makes its body of the rest, so a
+    /// procedure names every later Msg 111 and a view names none, a procedure
+    /// after it included (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1\ncreate procedure p2 as select 1\ncreate view v2 as select 1 a", "p2|p2")]
+    [DataRow("select 1\ncreate view v1 as select 1 a\ncreate procedure p1 as select 1", "|")]
+    public void TheFirstMisplacedModule_NamesTheLaterMsg111s(string batch, string procedures)
+    {
+        var ex = new Simulation().AssertSqlError(batch, 111);
+        AreEqual(procedures, string.Join("|", ex.Errors.Where(static e => e.Number == 111).Select(static e => e.Procedure)));
+    }
     // ---- probed 2026-10-02 against SQL Server 2025 ----
 
     private static List<SimulatedError> InfoMessages(Simulation simulation, string commandText)
