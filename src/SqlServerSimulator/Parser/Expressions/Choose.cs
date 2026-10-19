@@ -14,7 +14,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class Choose : Expression
 {
     private readonly Expression indexExpr;
-    private readonly Expression[] values;
+    /// <summary>The values the index picks among, which a data mask meets as a CASE's arms.</summary>
+    internal readonly Expression[] Values;
     private SqlType? cachedResultType;
 
     public Choose(ParserContext context)
@@ -27,7 +28,7 @@ internal sealed class Choose : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (list.Count == 0)
             throw SimulatedSqlException.FunctionRequiresNArguments("choose", 2);
-        this.values = [.. list];
+        this.Values = [.. list];
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -37,9 +38,9 @@ internal sealed class Choose : Expression
         if (idxValue.IsNull)
             return SqlValue.Null(resultType);
         var idx = StringScalars.CoerceLengthArgument(idxValue);
-        if (idx < 1 || idx > this.values.Length)
+        if (idx < 1 || idx > this.Values.Length)
             return SqlValue.Null(resultType);
-        var picked = this.values[idx - 1].Run(runtime);
+        var picked = this.Values[idx - 1].Run(runtime);
         return picked.IsNull
             ? SqlValue.Null(resultType)
             : picked.Type != resultType ? Cast.CoerceArm(picked, resultType, runtime.Batch) : picked;
@@ -53,9 +54,9 @@ internal sealed class Choose : Expression
         // numeric(2, 1); probed 2026-10-01), and a bare NULL has no type to
         // contribute (probed 2026-09-25 against SQL Server 2025: CHOOSE(2,
         // NULL, 'x') is 'x').
-        var t = PromoteValueArms(this.values, batch, resolveColumnType, "CHOOSE");
+        var t = PromoteValueArms(this.Values, batch, resolveColumnType, "CHOOSE");
         this.cachedResultType = t;
-        this.namingArm = FirstDecimalArm(this.values, batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm(this.Values, batch, resolveColumnType);
         return t;
     }
 
@@ -63,7 +64,7 @@ internal sealed class Choose : Expression
 
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
-    internal override string DebugDisplay() => $"CHOOSE({this.indexExpr.DebugDisplay()}, ...{this.values.Length} values)";
+    internal override string DebugDisplay() => $"CHOOSE({this.indexExpr.DebugDisplay()}, ...{this.Values.Length} values)";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.indexExpr).Children(this.values);
+    internal override void Describe(NodeShape shape) => shape.Child(this.indexExpr).Children(this.Values);
 }

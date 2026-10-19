@@ -86,6 +86,14 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
                     return Combine(caseExpression.ValueArms, columnMask, typeOf, functionResults);
                 case Iif iif:
                     return Combine(iif.ValueArms, columnMask, typeOf, functionResults);
+                // Both meet their arms as a CASE does, real expanding COALESCE
+                // into one; ISNULL is a function of its own and taints (probed
+                // 2026-10-19 against SQL Server 2025: COALESCE(email_col,
+                // 'none') reads 'nXXX@XXXX.com', ISNULL 'xxxx').
+                case Coalesce coalesce:
+                    return Combine(coalesce.Arguments, columnMask, typeOf, functionResults);
+                case Choose choose:
+                    return Combine(choose.Values, columnMask, typeOf, functionResults);
                 case NullIf nullIf:
                     return Of(nullIf.First, columnMask, typeOf, functionResults) ?? Taint(expression, columnMask, functionResults);
             }

@@ -12,7 +12,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class Coalesce : Expression
 {
-    private readonly Expression[] arguments;
+    /// <summary>The arguments, in order, which a data mask meets as a CASE's arms.</summary>
+    internal readonly Expression[] Arguments;
 
     /// <summary>
     /// Whether a leading argument real folds to a <em>non-NULL</em> constant
@@ -60,15 +61,15 @@ internal sealed class Coalesce : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (args.TrueForAll(IsUntypedNullLiteral))
             throw SimulatedSqlException.AllCoalesceArgumentsAreNull();
-        this.arguments = [.. args];
-        this.settledArm = SettleArgument(this.arguments, context);
+        this.Arguments = [.. args];
+        this.settledArm = SettleArgument(this.Arguments, context);
         // A constant-NULL argument drops out of the walk; the first constant
         // non-NULL one answers for the call. A fold that raises, or an argument
         // real can't fold, stops the walk — the arguments behind it are then
         // live.
-        for (var i = 0; i < this.arguments.Length - 1; i++)
+        for (var i = 0; i < this.Arguments.Length - 1; i++)
         {
-            if (!ConstantFolding.TryFold(this.arguments[i], context, out var folded))
+            if (!ConstantFolding.TryFold(this.Arguments[i], context, out var folded))
                 return;
             if (!folded.IsNull)
             {
@@ -132,14 +133,14 @@ internal sealed class Coalesce : Expression
         _ => false,
     };
 
-    internal override bool ParallelSafe => AllParallelSafe(this.arguments);
+    internal override bool ParallelSafe => AllParallelSafe(this.Arguments);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         SqlValue value = default;
-        for (var i = 0; i < this.arguments.Length; i++)
+        for (var i = 0; i < this.Arguments.Length; i++)
         {
-            value = this.arguments[i].Run(runtime);
+            value = this.Arguments[i].Run(runtime);
             if (!value.IsNull)
                 return this.cachedResultType is { } target && value.Type != target ? Cast.CoerceArm(value, target, runtime.Batch) : value;
         }
@@ -153,8 +154,8 @@ internal sealed class Coalesce : Expression
     // by the shared PromoteValueArms seam.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(this.arguments, batch, resolveColumnType), batch, resolveColumnType);
-        this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
+        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(this.Arguments, batch, resolveColumnType), batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm(this.Arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }
 
@@ -162,7 +163,7 @@ internal sealed class Coalesce : Expression
 
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
-    internal override XmlTyping ResultXmlTyping => SharedXmlTyping(this.arguments);
+    internal override XmlTyping ResultXmlTyping => SharedXmlTyping(this.Arguments);
 
     /// <summary>
     /// COALESCE takes its nullability from the CASE it desugars to —
@@ -185,21 +186,21 @@ internal sealed class Coalesce : Expression
     internal override bool ResultIsNullable(NullabilityContext context)
     {
         var promoted = context.TypeOf(this);
-        if (FoldsIntoMaxConstant(this.settledArm, this.arguments, promoted, context))
+        if (FoldsIntoMaxConstant(this.settledArm, this.Arguments, promoted, context))
             return true;
         if (this.settledArm is { } settled)
             return settled.ResultIsNullable(context) || ArmConversionIsNullable(settled, promoted, context);
-        for (var i = 0; i < this.arguments.Length - 1; i++)
+        for (var i = 0; i < this.Arguments.Length - 1; i++)
         {
-            if (IsNullConstant(this.arguments[i]))
+            if (IsNullConstant(this.Arguments[i]))
                 continue;
-            if (this.arguments[i].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[i], promoted, context))
+            if (this.Arguments[i].ResultIsNullable(context) || ArmConversionIsNullable(this.Arguments[i], promoted, context))
                 return true;
         }
 
         // The last argument is the desugared CASE's ELSE: it contributes its
         // own nullability rather than an IS NOT NULL test.
-        return this.arguments[^1].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[^1], promoted, context);
+        return this.Arguments[^1].ResultIsNullable(context) || ArmConversionIsNullable(this.Arguments[^1], promoted, context);
     }
 
     // The desugared CASE's first constant non-NULL test is TRUE, so every
@@ -207,19 +208,19 @@ internal sealed class Coalesce : Expression
     // `COALESCE(b, 5, a)` never reads `a`.
     internal override void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
     {
-        for (var i = 0; i < this.arguments.Length - 1; i++)
+        for (var i = 0; i < this.Arguments.Length - 1; i++)
         {
-            if (!context.TryFold(this.arguments[i], out var folded) || folded.IsNull)
+            if (!context.TryFold(this.Arguments[i], out var folded) || folded.IsNull)
                 continue;
-            for (var j = i + 1; j < this.arguments.Length; j++)
-                _ = foldedAway.Add(this.arguments[j]);
+            for (var j = i + 1; j < this.Arguments.Length; j++)
+                _ = foldedAway.Add(this.Arguments[j]);
             return;
         }
     }
 
-    internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
+    internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.Arguments.Select(a => a.DebugDisplay()))})";
 
-    internal override void Describe(NodeShape shape) => shape.Children(this.arguments);
+    internal override void Describe(NodeShape shape) => shape.Children(this.Arguments);
 
     // Real desugars COALESCE to a CASE and folds an all-literal one, so
     // `ORDER BY COALESCE(NULL, 1)` is Msg 408 while `ORDER BY ISNULL(NULL, 1)`
@@ -232,7 +233,7 @@ internal sealed class Coalesce : Expression
         {
             if (this.decidedByLeadingValue)
                 return true;
-            foreach (var argument in this.arguments)
+            foreach (var argument in this.Arguments)
             {
                 if (!argument.IsWrittenConstant)
                     return false;

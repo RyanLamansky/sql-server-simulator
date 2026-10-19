@@ -692,4 +692,31 @@ public sealed class DataMaskingTests
             "create user u without login; grant unmask to u; deny unmask (d) on dbo.m to u");
         AreEqual("1|0", sim.ExecuteScalar("execute as user = 'u'; select concat_ws('|', has_perms_by_name(null, 'DATABASE', 'UNMASK'), has_perms_by_name('dbo.m', 'OBJECT', 'UNMASK'))"));
     }
+
+    /// <summary>
+    /// COALESCE and CHOOSE meet their arms' masks as a CASE does — a lone masked
+    /// column keeps its function, two that differ read default() — where
+    /// ISNULL taints (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("coalesce(em, 'none')", "aXXX@XXXX.com|nXXX@XXXX.com")]
+    [DataRow("coalesce(x, em)", "pXXX@XXXX.com|qXXX@XXXX.com")]
+    [DataRow("choose(1, em, 'z')", "aXXX@XXXX.com|")]
+    [DataRow("coalesce(em, ph)", "xxxx|")]
+    [DataRow("isnull(em, 'none')", "xxxx|xxxx")]
+    public void CaseFamilyFunctions_MeetTheirArmsMasks(string expression, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table m (id int, em varchar(50) masked with (function = 'email()') null, ph varchar(20) masked with (function = 'partial(2, \"XX\", 1)') null, x varchar(20) null)",
+            "insert m values (1, 'alice@example.com', '5551234567', 'plain'), (2, null, null, 'q')",
+            "create user u without login; grant select on m to u");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand($"execute as user = 'u'; select {expression} from m order by id");
+        using var reader = command.ExecuteReader();
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add(reader.IsDBNull(0) ? "" : reader.GetString(0));
+        AreEqual(expected, string.Join("|", values));
+    }
 }
