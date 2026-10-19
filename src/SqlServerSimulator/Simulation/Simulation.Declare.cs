@@ -277,7 +277,10 @@ partial class Simulation
 
         // A declaration with no initializer leaves real's compile no line.
         if (!initialized)
+        {
             context.Batch.LastCompiledLine = -1;
+            context.Batch.CurrentStatement.DeclaresOnly = true;
+        }
         return legacyLobRefusal is not null ? throw legacyLobRefusal : rowsAffected;
     }
 

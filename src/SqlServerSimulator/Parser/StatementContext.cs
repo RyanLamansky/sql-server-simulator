@@ -488,6 +488,14 @@ internal sealed class StatementContext
     public bool SuppressErrorReset;
 
     /// <summary>
+    /// The statement declared scalar variables with no initializer, which
+    /// leaves a <c>SET SHOWPLAN_*</c> after it the batch's first statement
+    /// (see <see cref="BatchContext.ShowplanRefusalLine"/>). Reset by
+    /// <see cref="BeginDispatch"/>.
+    /// </summary>
+    public bool DeclaresOnly;
+
+    /// <summary>
     /// DDL events this statement raised, appended by the statement's own
     /// processor once its work succeeded and drained by the dispatch loop,
     /// which fires the matching database-scope DDL triggers. Null until a DDL
@@ -570,6 +578,7 @@ internal sealed class StatementContext
     {
         this.DispatchSerial++;
         this.SuppressErrorReset = false;
+        this.DeclaresOnly = false;
         this.ReportedIgnoredDuplicate = false;
         this.ReportedNoiseWords = false;
         this.NullEliminated = false;

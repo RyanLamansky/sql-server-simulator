@@ -2620,6 +2620,8 @@ public sealed partial class Simulation
                 requireSemicolonBeforeCte = true;
                 atBatchStart = false;
                 batch.HasDispatchedStatement = true;
+                if (!batch.CurrentStatement.DeclaresOnly)
+                    batch.ShowplanRefusalLine = 0;
                 if (!nestedBlock)
                     batch.TopLevelStatementsDispatched++;
 

@@ -98,6 +98,8 @@ partial class Simulation
         batch.ErrorSignaled = false;
 
         batch.TryFrameDepth++;
+        var outerShowplanRefusal = batch.ShowplanRefusalLine;
+        batch.ShowplanRefusalLine ??= tryBegin!.LineNumber;
         // The session-wide companion: whether an XACT_ABORT-promoted error
         // rolls back or merely dooms depends on any frame on the stack holding
         // a TRY, including one in a caller a procedure body can't see.
@@ -116,6 +118,7 @@ partial class Simulation
         {
             batch.TryFrameDepth--;
             batch.Connection.OpenTryFrames--;
+            batch.ShowplanRefusalLine = outerShowplanRefusal;
         }
 
         // A GOTO out of the TRY body leaves the cursor mid-block with a jump

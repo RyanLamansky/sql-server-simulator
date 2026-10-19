@@ -30,8 +30,9 @@ internal static class XeStatementEvents
     /// text as the events place it, or null for one real fires none for: a
     /// block, <c>IF</c> / <c>WHILE</c> (whose condition real reports as a
     /// statement of its own, which the simulator doesn't split out), a
-    /// <c>TRY</c> / <c>CATCH</c>, a label and a <c>DECLARE</c> initializing
-    /// nothing (probed 2026-10-16 against SQL Server 2025).
+    /// <c>TRY</c> / <c>CATCH</c>, a label, a <c>DECLARE</c> initializing
+    /// nothing (probed 2026-10-16 against SQL Server 2025) and a <c>SET</c> of
+    /// <c>QUOTED_IDENTIFIER</c> alone (probed 2026-10-19).
     /// </summary>
     public static XeStatement? Place(BatchContext batch, int start)
     {
@@ -64,6 +65,11 @@ internal static class XeStatementEvents
         }
         if (word.Equals("CREATE", StringComparison.OrdinalIgnoreCase) && FirstWord(statement.AsSpan(6).TrimStart()).Equals("SCHEMA", StringComparison.OrdinalIgnoreCase))
             return null;
+        // Nor a SET of QUOTED_IDENTIFIER alone, which takes effect as the
+        // batch compiles, though one in a list reports itself (probed
+        // 2026-10-19 against SQL Server 2025).
+        if (word.Equals("SET", StringComparison.OrdinalIgnoreCase) && SetsQuotedIdentifierAlone(statement.AsSpan(3)))
+            return null;
         // A statement carrying a secret reports its label alone (probed
         // 2026-10-16 against SQL Server 2025).
         if (SecretStatements.MayCarry(statement) && SecretStatements.Label(statement) is { } label)
@@ -72,6 +78,16 @@ internal static class XeStatementEvents
         var offset = module is not null && batch.ModuleDefinitionText is not null ? batch.ModuleBodyOffset() : 0;
         return new XeStatement(statement, batch.CurrentStatement.StartLine + batch.LineOffset, 2 * (offset + start), end < 0 && module is null ? -1 : 2 * (offset + through),
             batch.ModuleObjectId, module, Parser.Expressions.ObjectProperty.FindObject(module ?? batch.CurrentDatabase, batch.ModuleObjectId), CountsRows(word), recorded);
+    }
+
+    private static bool SetsQuotedIdentifierAlone(ReadOnlySpan<char> afterSet)
+    {
+        var rest = afterSet.TrimStart();
+        var option = rest[..Math.Min(rest.Length, "QUOTED_IDENTIFIER".Length)];
+        if (!option.Equals("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var value = FirstWord(rest["QUOTED_IDENTIFIER".Length..].TrimStart());
+        return value.Equals("ON", StringComparison.OrdinalIgnoreCase) || value.Equals("OFF", StringComparison.OrdinalIgnoreCase);
     }
 
     private static ReadOnlySpan<char> FirstWord(ReadOnlySpan<char> text)

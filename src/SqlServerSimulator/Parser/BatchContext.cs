@@ -820,6 +820,17 @@ internal sealed partial class BatchContext
     public bool HasDispatchedStatement;
 
     /// <summary>
+    /// The line a <c>SET SHOWPLAN_*</c> switch is refused at here (Msg 1067
+    /// state 1), or null where one may still stand as the batch's first
+    /// statement: 0 once a statement other than a bare scalar
+    /// <c>DECLARE</c> has run ahead or inside an <c>IF</c> or <c>WHILE</c>
+    /// body, the <c>BEGIN TRY</c>'s own line inside a <c>TRY</c>, while a
+    /// <c>BEGIN … END</c> block leaves it as it was (probed 2026-10-19 against
+    /// SQL Server 2025).
+    /// </summary>
+    public int? ShowplanRefusalLine;
+
+    /// <summary>
     /// Marks the outermost (top-level) batch. When <see langword="true"/>, a
     /// statement-terminating error outside any TRY frame is emitted as a
     /// <see cref="SimulatedErrorOutcome"/> and the batch continues to the next

@@ -302,25 +302,29 @@ partial class Simulation
 
     /// <summary>
     /// A <c>SET SHOWPLAN_*</c> switch inside a module refuses the
-    /// <c>CREATE</c> with Msg 1067 state 1 at line 0, and turning one on must
-    /// be the batch's only statement: after another it is Msg 1067 state 1 at
-    /// line 0, ahead of one state 2 at its own line, either as the batch
-    /// compiles, so none of it runs; turning one off may sit beside anything
-    /// (probed 2026-10-04 against SQL Server 2025). Cursor on the <c>ON</c> /
-    /// <c>OFF</c>.
+    /// <c>CREATE</c> with Msg 1067 state 1 at line 0, and one on or off must
+    /// be the batch's first statement — a bare scalar <c>DECLARE</c> ahead of
+    /// it aside, in no <c>IF</c>, <c>WHILE</c> or <c>TRY</c> though a
+    /// <c>BEGIN … END</c> block may hold it — or it is Msg 1067 state 1 (see
+    /// <see cref="BatchContext.ShowplanRefusalLine"/>); turning one on must
+    /// also end the batch, or the statement after it is Msg 1067 state 2 at
+    /// its own line. Each refuses as the batch compiles, so none of it runs
+    /// (probed 2026-10-04 and 2026-10-19 against SQL Server 2025). Cursor on
+    /// the <c>ON</c> / <c>OFF</c>.
     /// </summary>
     private static void RequireShowplanAlone(ParserContext context, bool on)
     {
         var batch = context.Batch;
         if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false })
             throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(0);
+        if (batch.ShowplanRefusalLine is { } line)
+            throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(line);
         if (!on)
             return;
-        if (batch.BlockDepth > 0 || batch.HasDispatchedStatement)
-            throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(0);
+        // The END closing a block around it may follow.
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextOptional();
-        while (next is Operator { Character: ';' })
+        while (next is Operator { Character: ';' } or ReservedKeyword { Keyword: Keyword.End })
             next = context.GetNextOptional();
         context.RestoreCheckpoint(checkpoint);
         if (next is not null)

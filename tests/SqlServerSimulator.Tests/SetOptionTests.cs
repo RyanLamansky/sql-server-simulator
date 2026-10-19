@@ -278,9 +278,8 @@ public sealed class SetOptionTests
     }
 
     /// <summary>
-    /// A SHOWPLAN switch turned on must stand alone, in no module or list,
-    /// while one turned off may sit anywhere outside a module (probed
-    /// 2026-10-04 against SQL Server 2025).
+    /// A SHOWPLAN switch turned on must stand alone, in no module or list
+    /// (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
     [TestMethod]
     public void Showplan_MustStandAlone()
@@ -293,6 +292,41 @@ public sealed class SetOptionTests
         _ = sim.AssertSqlError("create proc dbo.p as set showplan_text off", 1067);
         AreEqual(1, sim.ExecuteScalar("set showplan_text off; select 1"));
     }
+
+    /// <summary>
+    /// A SHOWPLAN switch, on or off, must be the batch's first statement: a
+    /// bare scalar DECLARE may precede it and a BEGIN … END block hold it,
+    /// while any other statement ahead, an IF, a WHILE or a TRY refuses the
+    /// batch as it compiles (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("set nocount on; set showplan_xml off", 0)]
+    [DataRow("declare @x int = 1; set showplan_all off", 0)]
+    [DataRow("declare @t table (a int); set showplan_text off", 0)]
+    [DataRow("set showplan_text off; set showplan_xml off; select 2", 0)]
+    [DataRow("if 1 = 1 set showplan_text off", 0)]
+    [DataRow("while 1 = 0 set showplan_text off", 0)]
+    [DataRow("\n\nbegin try\n set showplan_text off end try begin catch end catch", 3)]
+    [DataRow("begin try select 1; set showplan_text off end try begin catch end catch", 0)]
+    [DataRow("begin try select 1 end try begin catch end catch; set showplan_text off", 0)]
+    public void Showplan_AfterAnotherStatementOrUnderControlFlow_IsRefused(string batch, int line)
+    {
+        var error = new Simulation().AssertSqlError(batch, 1067).Errors[0];
+        AreEqual((1, line), (error.State, error.LineNumber));
+    }
+
+    [TestMethod]
+    [DataRow("declare @x int, @y int; set showplan_text off")]
+    [DataRow("declare @x int; set showplan_all on")]
+    [DataRow("begin set showplan_text on end")]
+    [DataRow("begin begin set showplan_xml on end end")]
+    [DataRow("declare @x int; begin set showplan_text off end")]
+    public void Showplan_AfterABareDeclareOrInABlock_Runs(string batch)
+        => _ = new Simulation().ExecuteNonQuery(batch);
+
+    [TestMethod]
+    public void Showplan_OnInABlock_StillEndsTheBatch()
+        => AreEqual(2, new Simulation().AssertSqlError("begin set showplan_text on end; select 1", 1067).Errors[0].State);
 
     /// <summary>
     /// A function body may SET ANSI_NULLS and QUOTED_IDENTIFIER, which it

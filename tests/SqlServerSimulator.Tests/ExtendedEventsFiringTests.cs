@@ -259,6 +259,18 @@ public sealed class ExtendedEventsFiringTests
         }), string.Join("\n", Summaries(RingBuffer(sim), "row_count", "last_row_count", "offset", "offset_end")));
     }
 
+    // A SET of QUOTED_IDENTIFIER alone fires no statement event, though one
+    // naming it in a list does (probed 2026-10-19 against SQL Server 2025).
+    [TestMethod]
+    public void StatementEvents_SkipALoneQuotedIdentifier()
+    {
+        var sim = WithSession("add event sqlserver.sql_statement_completed (where sqlserver.client_app_name = N'app') add target package0.ring_buffer");
+        using var client = Client(sim, "app");
+        Run(client, "set quoted_identifier on; set ansi_nulls, quoted_identifier on; set   quoted_identifier   off; select 9");
+        AreEqual("sql_statement_completed statement=set ansi_nulls, quoted_identifier on; |sql_statement_completed statement=select 9",
+            string.Join("|", Summaries(RingBuffer(sim), "statement")));
+    }
+
     // Each statement ends where SQL Server 2025 ended the same batch's: the
     // statements real's grammar ends at their last token leave out the
     // separator and comment after them (MERGE keeps the terminator it

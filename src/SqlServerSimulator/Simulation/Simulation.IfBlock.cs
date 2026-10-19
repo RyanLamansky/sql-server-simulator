@@ -93,6 +93,7 @@ partial class Simulation
         var thenSkip = !condResult;
 
         var hadElse = false;
+        batch.ShowplanRefusalLine ??= 0;
         batch.BlockDepth++;
         try
         {
@@ -327,6 +328,7 @@ partial class Simulation
         var outerSkipping = batch.IsSkipping || bindError is not null;
 
         batch.LoopDepth++;
+        batch.ShowplanRefusalLine ??= 0;
         batch.BlockDepth++;
         try
         {

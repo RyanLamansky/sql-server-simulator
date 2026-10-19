@@ -36,7 +36,7 @@ The value-taking options refuse a value their grammar has no slot for (probed 20
 - `TEXTSIZE` takes no variable (Msg 102 at it); `ROWCOUNT` takes an integer variable, any other type — a string holding a number, a decimal — being Msg 507.
 - `DATEFIRST` given a string or NULL is Msg 2743 state 3, `DATEFORMAT` and `LANGUAGE` given a number or NULL Msg 2743 state 2, and `DEADLOCK_PRIORITY` given NULL or a string other than its three names Msg 2755; each ends only the statement.
 - `SET OFFSETS keyword [, …] ON | OFF` parses and is discarded; `SET FIPS_FLAGGER` takes `'ENTRY'`, `'FULL'`, `'INTERMEDIATE'` or `OFF`, another level being Msg 102 state 3 at it.
-- A `SET SHOWPLAN_*` in a procedure, function or trigger body refuses the `CREATE` with Msg 1067 state 1 at line 0, and turning one on must be the batch's only statement — Msg 1067 state 1 at line 0 after another statement or in a list, state 2 ahead of one — while turning one off may sit anywhere else.
+- A `SET SHOWPLAN_*` in a procedure, function or trigger body refuses the `CREATE` with Msg 1067 state 1 at line 0, and one on or off must be the batch's first statement — Msg 1067 state 1 at line 0 after another statement or under an `IF` or `WHILE`, at the `BEGIN TRY`'s line inside a `TRY` — where a bare scalar `DECLARE` doesn't count and a `BEGIN … END` block may hold it; turning one on must also stand alone, in no list (state 1) and with nothing after it (state 2).
 - `SET IDENTITY_INSERT`'s refusals (Msg 1088, 8105, 8106, 8107) name the table as written and end the batch (`EndingBatch`).
 
 ## `@@OPTIONS`, `SESSIONPROPERTY` and `sys.dm_exec_sessions`
