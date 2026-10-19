@@ -1705,7 +1705,10 @@ internal readonly partial struct SqlValue
         if (this.IsNull || this.Type is XmlSqlType)
             return this.CoerceTo(SqlType.Xml);
         if (SqlType.IsStringCategory(this.Type))
-            return FromXml(XmlWellFormedness.Canonical(this.AsString, SqlType.IsNationalStringCategory(this.Type), preserveWhitespace));
+        {
+            var national = SqlType.IsNationalStringCategory(this.Type);
+            return FromXml(XmlWellFormedness.Canonical(national ? this.AsString : RedecodeDeclaredXml(this.AsString, this.Type.Collation), national, preserveWhitespace));
+        }
         if (this.Type is VarbinarySqlType or BinarySqlType)
         {
             var (text, national) = DecodeXmlBytes(this.AsBytes);
@@ -1758,6 +1761,30 @@ internal readonly partial struct SqlValue
             }
         }
         return (StrictXmlEncoding(encoding).GetString(bytes), false);
+    }
+
+    /// <summary>
+    /// A <c>varchar</c> document read as its bytes in its own code page under
+    /// the single-byte or UTF-8 encoding its declaration names, as real reads
+    /// it (probed 2026-10-19 against SQL Server 2025: <c>'Ã©'</c> declared
+    /// <c>utf-8</c> is <c>é</c>, and a bare <c>é</c> declared <c>utf-8</c> is
+    /// Msg 9420); a 16-bit or unrecognized name reaches the parse as written,
+    /// which reports it.
+    /// </summary>
+    private static string RedecodeDeclaredXml(string text, Collation? collation)
+    {
+        if (Ascii.IsValid(text) || collation is null || DeclaredXmlEncoding().Match(text) is not { Success: true } declared)
+            return text;
+        try
+        {
+            return Encoding.GetEncoding(declared.Groups[1].Value) is not (UnicodeEncoding or UTF32Encoding) and var named && named.CodePage != collation.StorageEncoding.CodePage
+                ? StrictXmlEncoding(named).GetString(collation.StorageEncoding.GetBytes(text))
+                : text;
+        }
+        catch (ArgumentException)
+        {
+            return text;
+        }
     }
 
     private static Encoding StrictXmlEncoding(Encoding encoding) =>

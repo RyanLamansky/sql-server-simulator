@@ -87,6 +87,18 @@ public sealed class XmlCanonicalFormTests
     public void BinarySource_InvalidUtf8_RaisesMsg9420()
         => new Simulation().AssertSqlError("select cast(0x3C613EE93C2F613E as xml)", 9420, "XML parsing: line 1, character 4, illegal xml character");
 
+    /// <summary>
+    /// A varchar document is read as its code page's bytes under the encoding
+    /// its declaration names (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void VarcharSource_DeclaredUtf8_ReadsItsBytesAsUtf8()
+        => AreEqual("<a>é</a>", new Simulation().ExecuteScalar("select cast(cast('<?xml version=\"1.0\" encoding=\"utf-8\"?><a>Ã©</a>' as xml) as nvarchar(max))"));
+
+    [TestMethod]
+    public void VarcharSource_DeclaredUtf8_LatinByteIsMsg9420()
+        => new Simulation().AssertSqlError("select cast('<?xml version=\"1.0\" encoding=\"utf-8\"?><a>é</a>' as xml)", 9420, "XML parsing: line 1, character 42, illegal xml character");
+
     /// <summary>A column or variable stores the same canonical text.</summary>
     [TestMethod]
     [DataRow("create table t (x xml); insert t values ('<a  b=''1''></a>'); select cast(x as nvarchar(max)) from t")]
