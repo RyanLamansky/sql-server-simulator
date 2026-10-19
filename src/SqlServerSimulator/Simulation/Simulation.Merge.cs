@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -1403,6 +1404,7 @@ partial class Simulation
         Token? firstMatched = null;
         Token? firstBySource = null;
         List<(string Family, Token FirstClause)>? outOfOrder = null;
+        SimulatedSqlException? arityRefusal = null;
 
         // See ParseMerge's commentary on `targetColumns` — view target's
         // user-facing column shape is OutputColumns; base shape otherwise.
@@ -1524,18 +1526,41 @@ partial class Simulation
 
             // An action reads its clause's side too, and misses there with the
             // ordinary binder errors (probed 2026-09-28).
-            var clause = ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
+            WhenClause clause;
+            try
             {
-                WhenClauseKind.Matched => scope.Both,
-                WhenClauseKind.NotMatchedByTarget => scope.SourceOnly,
-                _ => scope.TargetOnly,
-            });
+                clause = ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
+                {
+                    WhenClauseKind.Matched => scope.Both,
+                    WhenClauseKind.NotMatchedByTarget => scope.SourceOnly,
+                    _ => scope.TargetOnly,
+                });
+            }
+            catch (SimulatedSqlException refused) when (refused.Number is 109 or 110 or 213 && arityRefusal is null)
+            {
+                // An insert action's arity refusal reports with the clause-order
+                // refusals after it and nothing else, so the clauses read on
+                // past it (probed 2026-10-19 against SQL Server 2025).
+                arityRefusal = refused;
+                continue;
+            }
             // A family takes each action at most once.
             if (clauses.Exists(earlier => earlier.Kind == kind && earlier.Action == clause.Action))
                 throw SimulatedSqlException.MergeActionRepeated(kind == WhenClauseKind.Matched ? "WHEN MATCHED" : "WHEN NOT MATCHED BY SOURCE", clause.Action == MergeActionKind.Update ? "UPDATE" : "DELETE");
             clauses.Add(clause);
         }
 
+        if (arityRefusal is not null)
+        {
+            if (outOfOrder is null)
+                ExceptionDispatchInfo.Throw(arityRefusal);
+            List<SimulatedSqlException> report = [arityRefusal];
+            for (var i = outOfOrder.Count - 1; i >= 0; i--)
+                report.Add(SimulatedSqlException.MergeUnconditionalMustBeLast(outOfOrder[i].Family).PinLine(outOfOrder[i].FirstClause.LineNumber + context.Batch.LineOffset));
+            var whole = SimulatedSqlException.Aggregate(report);
+            whole.PreemptsBindReport = true;
+            throw whole;
+        }
         if (outOfOrder is not null)
         {
             // Real reports the families last written first (probed 2026-10-19

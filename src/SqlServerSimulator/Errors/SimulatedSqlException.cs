@@ -357,6 +357,15 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool PreemptsBinderErrors;
 
     /// <summary>
+    /// Set on an error a statement's binder report gives way to whole when a
+    /// re-read for the report meets it — a <c>MERGE</c> insert action's arity
+    /// refusal joined by the statement's clause-order refusals, which real
+    /// reports without the actions' names, Msg 213 included (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    internal bool PreemptsBindReport;
+
+    /// <summary>
     /// Leaves <paramref name="errors"/> as real reports them: when one preempts
     /// the binder's (<see cref="PreemptsBinderErrors"/>), only those and the
     /// Msg 1087 of a table variable used without a declaration, which real

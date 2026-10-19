@@ -207,6 +207,8 @@ public sealed partial class BinderErrorReportTests
     [DataRow("merge t using u on t.a = u.a when matched then update set t.a = 1, x.b = 2, a = 3;", "4104:1:x.b")]
     [DataRow("merge t using u on t.a = u.a when matched then update set a = 1, a = 2, x.b = 3;", "4104:1:x.b 264:1:a")]
     [DataRow("merge t using u on t.a = u.a when matched then update set x.b = 1, a = 2, a = 3 when not matched then insert (a, a) values (1, 2);", "4104:1:x.b")]
+    [DataRow("merge t using u on t.a = u.a when matched then delete when matched and u.d = 1 then update set a = 2 when not matched then insert (a) values (1, 1);", "110:1: 5324:1:WHEN MATCHED")]
+    [DataRow("merge t using u on t.a = u.a\nwhen matched then delete\nwhen matched and u.d = 1 then update set x1 = 2\nwhen not matched then insert values (1);", "213:1: 5324:2:WHEN MATCHED")]
     [DataRow("update t set a = 1, a = x1", "207:1:x1 264:1:a")]
     [DataRow("update t set a = 1, a = 3 where x1 = 1", "207:1:x1")]
     [DataRow("update t set a = 1, a = 3 output x1", "207:1:x1 264:1:a")]

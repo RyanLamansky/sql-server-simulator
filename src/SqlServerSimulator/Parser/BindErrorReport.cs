@@ -586,7 +586,7 @@ internal sealed class BindErrorReport(string command)
     /// <param name="lineOffset">Added to a reference's own line, for a body read from text of its own.</param>
     public SimulatedSqlException? Build(SimulatedSqlException? stopper, int statementLine, bool parameterized, int lineOffset = 0)
     {
-        if (stopper is { Class: <= 15 } && stopper.Number is not (130 or 147 or 1087))
+        if ((stopper is { Class: <= 15 } && stopper.Number is not (130 or 147 or 1087)) || stopper is { PreemptsBindReport: true })
             return stopper;
         if (this.entries.Count == 0)
             return null;
