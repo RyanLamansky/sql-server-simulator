@@ -124,6 +124,11 @@ internal sealed class CharIndex : Expression
             throw SimulatedSqlException.ImplicitConversionNotAllowed(SimulatedSqlException.FamilyRootName(haystackType), "varbinary");
         if (needleType is BinarySqlType or VarbinarySqlType)
             return this.binaryResultType = ResultType(haystackType);
+        // A string needle can't search an image's bytes: Msg 206 naming the
+        // needle's family as a bounded varchar / nvarchar, whatever its width
+        // (probed 2026-10-19 against SQL Server 2025).
+        if (haystackType is ImageSqlType)
+            throw SimulatedSqlException.OperandTypeClash("image", needleType is NCharSqlType or NVarcharSqlType or SystemNameSqlType ? "nvarchar" : "varchar");
         StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
         StringScalars.RequireSettledCollation(haystackType, "charindex");
         StringScalars.RequireResolvableCollations("charindex", needleType, haystackType);

@@ -26,6 +26,21 @@ public sealed class LegacyLobTests
     public void BinarySubstring_Slices(string expression, string expectedHex) =>
         AreEqual(expectedHex, Convert.ToHexString((byte[])new Simulation().ExecuteScalar($"select {expression}")!));
 
+    /// <summary>
+    /// A binary needle searches an <c>image</c>'s bytes, and a string one is
+    /// Msg 206 naming its family as a bounded type (probed 2026-10-19 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CharIndex_OverImage()
+    {
+        var simulation = new Simulation();
+        AreEqual("2|0|2", simulation.ExecuteScalar(
+            "select concat_ws('|', charindex(0x02, cast(0x010203 as image)), charindex(0x02, cast(0x010203 as image), 3), charindex(cast(0x0203 as varbinary(max)), cast(0x01020302 as image)))"));
+        simulation.AssertSqlError("select charindex(cast('a' as varchar(max)), cast(null as image))", 206, "Operand type clash: image is incompatible with varchar");
+        simulation.AssertSqlError("select charindex(N'a', cast(0x01 as image))", 206, "Operand type clash: image is incompatible with nvarchar");
+    }
+
     [TestMethod]
     [DataRow("substring(vb, 2, 3)", "020304")]
     [DataRow("substring(bn, 4, 4)", "04050000")]                          // binary(10) reads through its 0x00 padding

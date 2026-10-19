@@ -196,5 +196,4 @@ Msg 7133 is what forces the classic initialization dance: a cell that has never 
 - **`TEXTPTR` in a joined `UPDATE` / `DELETE`, a write through a join view, or a `MERGE`** raises `NotSupportedException`: those statements' row resolvers don't carry a row locator.
   A single-target `UPDATE` / `DELETE` and every read path do.
 - **`READTEXT` / `WRITETEXT` / `UPDATETEXT` through a view or a `#temp` table** resolve like any other `table.column` reference, so a view name reaches the view's own object rather than the base table's column and reports Msg 7125.
-- Binary `CHARINDEX` — `CHARINDEX(<varbinary>, <image>)` is real's binary search and the simulator's Msg 8116 (see [`scalars.md`](scalars.md#divergences)).
 - `SUBSTRING` over a `binary` / `varbinary` value under `SET ANSI_PADDING OFF` isn't distinguished; the simulator always reads the padded form.

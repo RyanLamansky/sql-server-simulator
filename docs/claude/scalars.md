@@ -258,6 +258,7 @@ The projection-schema result type for `LEN` is always `int`; the other functions
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
 A **binary needle** searches bytes — a `binary(n)` haystack's padding included, the result `bigint` over a `varbinary(max)` haystack — and a string haystack beside it is Msg 257 (probed 2026-10-02 against SQL Server 2025; EF Core translates `byte[].Contains` to it).
+An `image` haystack takes a binary needle too, and a string needle over one is Msg 206 naming `varchar` or `nvarchar` (probed 2026-10-19 against SQL Server 2025).
 Its result is `bigint` over a `varchar(max)` / `nvarchar(max)` haystack and `int` otherwise, a `text` / `ntext` haystack or a MAX needle included (probed 2026-10-01 against SQL Server 2025).
 
 **`UPPER` / `LOWER` map by the argument's collation** (`CaseMap`), and none of real's tables is the modern Unicode one .NET's `TextInfo` applies (probed 2026-09-28 against SQL Server 2025, every BMP character under two dozen collations).
@@ -479,7 +480,6 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 ### Divergences
 
 - **`TRIM` of a binary** answers its `varchar` rendering on real (`TRIM(0x41)` is `A`) and raises Msg 8116 here.
-- **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
 
 ## Type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND` / `CRYPT_GEN_RANDOM`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL).
