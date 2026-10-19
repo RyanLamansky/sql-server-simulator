@@ -448,6 +448,15 @@ public class LinkedServerTests
             select concat(s, '|', l, '|', m, '|', r) from #h
             """));
         AreEqual(15600, local.AssertSqlError("exec sp_addlinkedsrvlogin 'X', 'maybe'", 15600).Number);
+        // A caller's transaction is refused, the procedure going on to return
+        // 1 (probed 2026-10-18 against SQL Server 2025).
+        AreEqual(17, local.AssertSqlError("begin tran; exec sp_addlinkedsrvlogin 'X'", 15002).LineNumber);
+        AreEqual(11, local.AssertSqlError("begin tran; exec sp_droplinkedsrvlogin 'X', null", 15002).LineNumber);
+        AreEqual("15600/0|0|r", local.ExecuteScalar("""
+            declare @e int;
+            begin try exec sp_addlinkedsrvlogin 'X', 'maybe' end try begin catch set @e = error_number() end catch;
+            select concat(@e, '/', (select string_agg(concat(local_principal_id, '|', cast(uses_self_credential as int), '|', remote_name), ';') from sys.linked_logins))
+            """));
         AreEqual(80, local.AssertSqlError("exec sp_addlinkedsrvlogin 'X', 'false', 'nosuch'", 15007).LineNumber);
         AreEqual(56, local.AssertSqlError("exec sp_dropserver 'X'", 15190).LineNumber);
         _ = local.ExecuteNonQuery("exec sp_droplinkedsrvlogin 'X', null");

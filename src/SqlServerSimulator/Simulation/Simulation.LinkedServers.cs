@@ -475,10 +475,13 @@ partial class Simulation
     /// Body for <c>sp_addlinkedsrvlogin (@rmtsrvname, @useself = 'TRUE',
     /// @locallogin = NULL, @rmtuser = NULL, @rmtpassword = NULL)</c>: maps a
     /// login — every login when <c>@locallogin</c> is NULL — to itself or to a
-    /// remote login, replacing its earlier mapping. <c>@useself</c> takes
-    /// <c>true</c> or <c>false</c> (Msg 15600), the server must exist (Msg
-    /// 15015) and the login too (Msg 15007), as real checks them (probed
-    /// 2026-10-05 against SQL Server 2025).
+    /// remote login, replacing its earlier mapping. It refuses a caller's
+    /// transaction (Msg 15002), a caller without <c>ALTER ANY LINKED
+    /// SERVER</c> (Msg 15247) and a <c>@useself</c> other than <c>true</c> or
+    /// <c>false</c> (Msg 15600) ahead of its own transaction, and a missing
+    /// server (Msg 15015) or login (Msg 15007) inside it, rolling it back, each
+    /// with a <c>RAISERROR</c> it goes on past (probed 2026-10-05 and captured
+    /// 2026-10-18 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpAddLinkedSrvLogin(BatchContext batch, string calledAs)
     {
@@ -487,24 +490,98 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_addlinkedsrvlogin", calledAs, arguments, AddLinkedSrvLoginParameters);
-        RequireAlterAnyLinkedServer(batch);
-        var useSelf = (values[1].IsNull ? null
+        const string Procedure = "sp_addlinkedsrvlogin";
+        var useSelf = values[1].IsNull ? null
             : BuiltInToken.Equals(values[1].AsString.Trim(), "true") ? true
             : BuiltInToken.Equals(values[1].AsString.Trim(), "false") ? (bool?)false
-            : null)
-            ?? throw SimulatedSqlException.InvalidSystemProcedureOption("sp_addlinkedsrvlogin");
-        var linkedServer = RequireLinkedServer(batch, values[0]);
-        var principal = LinkedLoginPrincipal(batch, values[2]);
-        _ = linkedServer.Logins.RemoveAll(login => login.LocalPrincipalId == principal);
-        linkedServer.Logins.Add(new LinkedLogin(principal, useSelf, useSelf || values[3].IsNull ? null : values[3].AsString, batch.CurrentStatement.UtcNow));
+            : null;
+        var gate = LinkedLoginGate(batch, Procedure)
+            ?? (useSelf is null ? ("OIISI", SimulatedSqlException.InvalidSystemProcedureOption(Procedure)) : null);
+        if (gate is var (before, refusal))
+        {
+            foreach (var step in ProcedureSteps(batch, before))
+                yield return step;
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, refusal, "S"))
+                yield return outcome;
+            yield break;
+        }
+        // A self-mapping clears the remote login ahead of the transaction.
+        var self = useSelf!.Value;
+        foreach (var step in ProcedureSteps(batch, self ? "OIISIIS" : "OIISII"))
+            yield return step;
+        foreach (var outcome in LinkedLoginChange(batch, Procedure, values[0], values[2], linkedServer =>
+        {
+            var principal = LinkedLoginPrincipal(batch, values[2]);
+            _ = linkedServer.Logins.RemoveAll(login => login.LocalPrincipalId == principal);
+            linkedServer.Logins.Add(new LinkedLogin(principal, self, self || values[3].IsNull ? null : values[3].AsString, batch.CurrentStatement.UtcNow));
+        }, found: values[2].IsNull ? "SI" : "SIISI"))
+        {
+            yield return outcome;
+        }
+    }
+
+    /// <summary>
+    /// The refusal the login-mapping procedures open with, and the statements
+    /// ahead of it: a caller's transaction (Msg 15002), then a caller without
+    /// the permission (Msg 15247); null when neither applies (captured
+    /// 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    private static (string Before, SimulatedSqlException Refusal)? LinkedLoginGate(BatchContext batch, string procedure) =>
+        batch.Connection.CurrentTransaction is not null ? ("OI", SimulatedSqlException.ProcedureCannotRunInTransaction(procedure))
+        : !batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterAnyLinkedServer) ? ("OII", SimulatedSqlException.UserDoesNotHavePermission())
+        : null;
+
+    /// <summary>
+    /// A login-mapping procedure's transaction of its own: the server looked
+    /// up, then the login, <paramref name="change"/> made and
+    /// <paramref name="found"/>'s statements run, or the transaction rolled
+    /// back ahead of the refusal of a missing server (Msg 15015) or login (Msg
+    /// 15007); then the status assignment (captured 2026-10-18 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> LinkedLoginChange(BatchContext batch, string procedure, SqlValue serverName, SqlValue loginName, Action<LinkedServer> change, string found)
+    {
+        var name = serverName.IsNull ? "(null)" : serverName.AsString;
+        var simulation = batch.Connection.Simulation;
+        var refusal = !simulation.ActiveLinkedServers.TryGetValue(name, out var linkedServer) ? SimulatedSqlException.LinkedServerDoesNotExist(name)
+            : !loginName.IsNull && !BuiltInToken.Comparer.Equals(loginName.AsString, "sa") && !simulation.Logins.ContainsKey(loginName.AsString) ? SimulatedSqlException.NotAValidLogin(loginName.AsString)
+            : null;
+        foreach (var outcome in ProcedureTransactionSteps(batch, Changed(), rollsBack: refusal is not null))
+            yield return outcome;
+        if (refusal is not null)
+        {
+            foreach (var outcome in RaisedAndGoneOn(batch, procedure, refusal, "S"))
+                yield return outcome;
+            yield break;
+        }
+        yield return StatementDone(batch, StatementDoneKind.Select, 1);
+
+        IEnumerable<SimulatedStatementOutcome> Changed()
+        {
+            yield return StatementDone(batch, StatementDoneKind.Condition);
+            if (linkedServer is null)
+                yield break;
+            foreach (var step in ProcedureSteps(batch, "SII"))
+                yield return step;
+            if (refusal is not null)
+            {
+                foreach (var step in ProcedureSteps(batch, "II"))
+                    yield return step;
+                yield break;
+            }
+            change(linkedServer);
+            foreach (var step in ProcedureSteps(batch, found))
+                yield return step;
+        }
     }
 
     /// <summary>
     /// Body for <c>sp_droplinkedsrvlogin (@rmtsrvname, @locallogin)</c>, both
     /// required: removes a login's mapping — every login's when
-    /// <c>@locallogin</c> is NULL — doing nothing when there is none; Msg 15015
-    /// for an unknown server and 15007 for an unknown login (probed 2026-10-05
-    /// against SQL Server 2025).
+    /// <c>@locallogin</c> is NULL — doing nothing when there is none, refusing
+    /// as <see cref="InvokeSpAddLinkedSrvLogin"/> does but for the
+    /// <c>@useself</c> it takes none of (probed 2026-10-05 and captured
+    /// 2026-10-18 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpDropLinkedSrvLogin(BatchContext batch, string calledAs)
     {
@@ -513,10 +590,25 @@ partial class Simulation
             yield break;
 
         var values = BindSystemProcedureArguments("sp_droplinkedsrvlogin", calledAs, arguments, DropLinkedSrvLoginParameters);
-        RequireAlterAnyLinkedServer(batch);
-        var linkedServer = RequireLinkedServer(batch, values[0]);
-        var principal = LinkedLoginPrincipal(batch, values[1]);
-        _ = linkedServer.Logins.RemoveAll(login => login.LocalPrincipalId == principal);
+        const string Procedure = "sp_droplinkedsrvlogin";
+        if (LinkedLoginGate(batch, Procedure) is var (before, refusal))
+        {
+            foreach (var step in ProcedureSteps(batch, before))
+                yield return step;
+            foreach (var outcome in RaisedAndGoneOn(batch, Procedure, refusal, "S"))
+                yield return outcome;
+            yield break;
+        }
+        foreach (var step in ProcedureSteps(batch, "OII"))
+            yield return step;
+        foreach (var outcome in LinkedLoginChange(batch, Procedure, values[0], values[1], linkedServer =>
+        {
+            var principal = LinkedLoginPrincipal(batch, values[1]);
+            _ = linkedServer.Logins.RemoveAll(login => login.LocalPrincipalId == principal);
+        }, found: values[1].IsNull ? "" : "SII"))
+        {
+            yield return outcome;
+        }
     }
 
     /// <summary>

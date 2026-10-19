@@ -104,6 +104,44 @@ public sealed class SystemProcedureStepTests
         this.SystemProcedure_ClosesItsStatements(arrange, sql, expected);
 
     /// <summary>
+    /// The login-mapping pair refuses a caller's transaction, then the
+    /// permission (and <c>sp_addlinkedsrvlogin</c> an <c>@useself</c> other
+    /// than true or false) ahead of its own transaction, and a missing server
+    /// or login inside it, rolled back; a self-mapping assigns once more ahead
+    /// of the transaction, and a named login is looked up in it (captured
+    /// 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedsrvlogin 'ls'", "OIISIIS<BISIISI>CS=0")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedsrvlogin 'ls', 'false', null, 'ru', 'rp'", "OIISII<BISIISI>CS=0")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedsrvlogin 'ls', 'true', 'sa'", "OIISIIS<BISIISIISI>CS=0")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedsrvlogin 'ls', 'x'", "OIISI{ERR 15600}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("", "exec sp_addlinkedsrvlogin 'nope'", "OIISIIS<BI^K{ERR 15015}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_addlinkedsrvlogin 'ls', 'true', 'nobody'", "OIISIIS<BISIIII^K{ERR 15007}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls'; begin tran", "exec sp_addlinkedsrvlogin 'ls'", "OI{ERR 15002}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_droplinkedsrvlogin 'ls', null", "OII<BISII>CS=0")]
+    [DataRow("exec sp_addlinkedserver 'ls'", "exec sp_droplinkedsrvlogin 'ls', 'sa'", "OII<BISIISII>CS=0")]
+    [DataRow("", "exec sp_droplinkedsrvlogin 'nope', null", "OII<BI^K{ERR 15015}{DONEINPROC F6 MORE|ERROR 0}S=1")]
+    public void LinkedLoginProcedures_CloseTheirStatementsAndRefusals(string arrange, string sql, string expected) =>
+        this.SystemProcedure_ClosesItsStatements(arrange, sql, expected);
+
+    /// <summary>
+    /// ODBC's enumerations through <c>sp_tables</c> — the databases under a
+    /// qualifier of <c>%</c>, the owners under an owner of <c>%</c>, the
+    /// table types under a type of <c>%</c>, the rest empty — each run their
+    /// own conditions and return through a <c>RETURN</c>; an empty qualifier
+    /// otherwise lists nothing after a condition and two assignments more
+    /// (captured 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "exec sp_tables '', '', '%'", "I|#U=0")]
+    [DataRow("", "exec sp_tables '', '%', ''", "II|#U=0")]
+    [DataRow("", "exec sp_tables '', '', '', '%'", "III|#U=0")]
+    [DataRow("", "exec sp_tables 'z_t', 'dbo', ''", "IIIIIISSSISIISSIII|#=0")]
+    public void SpTablesEnumerations_CloseTheirStatements(string arrange, string sql, string expected) =>
+        this.SystemProcedure_ClosesItsStatements(arrange, sql, expected);
+
+    /// <summary>
     /// A refusal a system procedure raises with a <c>RAISERROR</c> follows
     /// the statements ahead of its check and precedes those it goes on to;
     /// an ODBC catalog procedure's then returns -6, most of them through a

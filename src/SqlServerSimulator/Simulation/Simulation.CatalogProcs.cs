@@ -197,6 +197,16 @@ partial class Simulation
     /// database name (another is Msg 15250); <c>@table_type</c> is a quoted
     /// comma-list (<c>"'TABLE','VIEW'"</c>). Rows sort by TABLE_TYPE,
     /// TABLE_QUALIFIER, TABLE_OWNER, TABLE_NAME (probe-confirmed).
+    /// <para>
+    /// ODBC's three enumerations answer apart (captured 2026-10-18 against SQL
+    /// Server 2025): a qualifier of <c>%</c> with an empty name and owner lists
+    /// the databases but <c>model</c>, whatever the type; an owner of
+    /// <c>%</c> with an empty name and qualifier lists the owners the listing
+    /// would name; and a type of <c>%</c> with the other three empty lists the
+    /// three table types — each after its own conditions and ending in a
+    /// <c>RETURN</c>. An empty qualifier otherwise matches no database rather
+    /// than being refused.
+    /// </para>
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpTables(BatchContext batch)
     {
@@ -205,6 +215,14 @@ partial class Simulation
             yield break;
 
         var (tableName, tableOwner, tableQualifier, tableType, usePattern) = ParseSpTablesArgs(arguments);
+        if (SpTablesEnumeration(batch, tableName, tableOwner, tableQualifier, tableType) is var (enumerationSteps, enumeration))
+        {
+            foreach (var step in ProcedureSteps(batch, enumerationSteps))
+                yield return step;
+            yield return enumeration;
+            yield return StatementDone(batch, StatementDoneKind.Return);
+            yield break;
+        }
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
         var nullRemarks = SqlValue.Null(CatalogVarchar254);
@@ -267,9 +285,8 @@ partial class Simulation
         }
 
         rows.Sort(CompareSpTablesRows);
-        // A qualifier of % with an empty name and owner enumerates the
-        // databases rather than naming one.
-        if (CatalogQualifierRefusal(batch, "sp_tables", tableQualifier is "%" && tableName is "" && tableOwner is "" ? null : tableQualifier, "IIIIII", 86) is { } refused)
+        // An empty qualifier names no database, which isn't refused.
+        if (CatalogQualifierRefusal(batch, "sp_tables", tableQualifier is "" ? null : tableQualifier, "IIIIII", 86) is { } refused)
         {
             foreach (var outcome in refused)
                 yield return outcome;
@@ -277,7 +294,58 @@ partial class Simulation
         }
         foreach (var step in ProcedureSteps(batch, SpTablesSteps(tableName, tableOwner, tableQualifier, tableType, usePattern, exactFound)))
             yield return step;
-        yield return new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, rows) { OrderColumns = [4, 1, 2, 3], ColumnWireFlags = SpTablesWireFlags };
+    }
+
+    /// <summary>
+    /// <c>sp_tables</c>' columns, each computed, as real's describe them
+    /// (captured 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    private static readonly byte[] SpTablesWireFlags = [ColumnCharacter.Computed, ColumnCharacter.Computed, ColumnCharacter.Computed, ColumnCharacter.Computed, ColumnCharacter.Computed];
+
+    /// <summary>
+    /// One of the ODBC enumerations <see cref="InvokeSpTables"/> answers apart,
+    /// with the conditions it runs ahead of its result: the databases, the
+    /// owners or the table types; null for an ordinary listing.
+    /// </summary>
+    private static (string Steps, SimulatedSqlResultSet Result)? SpTablesEnumeration(BatchContext batch, string? tableName, string? tableOwner, string? tableQualifier, string? tableType)
+    {
+        if (tableName is not "")
+            return null;
+        var nullName = SqlValue.Null(SqlType.SystemName);
+        var nullType = SqlValue.Null(CatalogVarchar32);
+        var nullRemarks = SqlValue.Null(CatalogVarchar254);
+        if (tableOwner is "" && tableQualifier is "%")
+        {
+            var databases = batch.Connection.Simulation.Databases.EnumerateValues()
+                .Where(static database => database.Name != Simulation.ModelDatabaseName)
+                .Select(static database => database.Name)
+                .Order(Collation.Baseline);
+            List<SqlValue[]> databaseRows = [.. databases.Select(name => (SqlValue[])[SqlValue.FromSystemName(name), nullName, nullName, nullType, nullRemarks])];
+            return ("I", new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, databaseRows) { OrderColumns = [1], ColumnWireFlags = SpTablesWireFlags });
+        }
+        if (tableOwner is "%" && tableQualifier is "")
+        {
+            var database = batch.CurrentDatabase;
+            var visible = PermissionEnforcement.ObjectVisibility(batch, database);
+            var owners = new SortedSet<string>(StringComparer.OrdinalIgnoreCase) { "INFORMATION_SCHEMA", "sys" };
+            foreach (var (_, schema) in database.Schemas)
+            {
+                if (schema.HeapTables.EnumerateValues().Any(table => visible?.Invoke(table) != false)
+                    || schema.Views.EnumerateValues().Any(view => visible?.Invoke(view) != false))
+                {
+                    _ = owners.Add(schema.Name);
+                }
+            }
+            List<SqlValue[]> ownerRows = [.. owners.Select(owner => (SqlValue[])[nullName, SqlValue.FromSystemName(owner), nullName, nullType, nullRemarks])];
+            return ("II", new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, ownerRows) { OrderColumns = [2], ColumnWireFlags = SpTablesWireFlags });
+        }
+        if (tableOwner is "" && tableQualifier is "" && tableType is "%")
+        {
+            List<SqlValue[]> typeRows = [.. ((string[])["SYSTEM TABLE", "TABLE", "VIEW"]).Select(type => (SqlValue[])[nullName, nullName, nullName, SqlValue.FromString(CatalogVarchar32, type), nullRemarks])];
+            return ("III", new SimulatedSqlResultSet(SpTablesSchema, SpTablesColumnNames, typeRows) { ColumnWireFlags = SpTablesWireFlags });
+        }
+        return null;
     }
 
     // Sort order: TABLE_TYPE, TABLE_QUALIFIER, TABLE_OWNER, TABLE_NAME — all

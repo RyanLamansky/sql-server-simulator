@@ -247,6 +247,10 @@ partial class Simulation
         var program = new StringBuilder("IIII");
         if (tableQualifier is not null)
             _ = program.Append('I');
+        // An empty qualifier runs a condition and two assignments more
+        // (captured 2026-10-18 against SQL Server 2025).
+        if (tableQualifier is "")
+            _ = program.Append("ISS");
         _ = program.Append("SI");
         if (tableType is null)
         {

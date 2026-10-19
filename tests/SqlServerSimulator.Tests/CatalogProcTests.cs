@@ -79,6 +79,27 @@ public sealed class CatalogProcTests
         AreEqual("VIEW", rows[0]["TABLE_TYPE"]);
     }
 
+    /// <summary>
+    /// ODBC's enumerations: a qualifier of % with an empty name and owner
+    /// lists the databases but model, an owner of % with an empty name and
+    /// qualifier the owners, a type of % with the rest empty the three table
+    /// types, and an empty qualifier otherwise lists nothing (probed
+    /// 2026-10-18 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_tables '', '', '%'", "master|||;msdb|||;other|||;simulated|||;tempdb|||")]
+    [DataRow("exec sp_tables @table_name = '', @table_owner = '', @table_qualifier = '%', @table_type = \"'VIEW'\"", "master|||;msdb|||;other|||;simulated|||;tempdb|||")]
+    [DataRow("exec sp_tables '', '%', ''", "|dbo||;|INFORMATION_SCHEMA||;|sys||")]
+    [DataRow("exec sp_tables '', '', '', '%'", "|||SYSTEM TABLE;|||TABLE;|||VIEW")]
+    [DataRow("exec sp_tables 'fixt', 'dbo', ''", "")]
+    [DataRow("exec sp_tables '', '%', 'simulated'", "")]
+    public void SpTables_OdbcEnumerations(string sql, string expected)
+    {
+        var sim = NewFixture();
+        _ = sim.ExecuteNonQuery("create database other");
+        AreEqual(expected, string.Join(";", Run(sim, sql).Select(r => $"{r["TABLE_QUALIFIER"]}|{r["TABLE_OWNER"]}|{r["TABLE_NAME"]}|{r["TABLE_TYPE"]}")));
+    }
+
     [TestMethod]
     public void SpTables_NameLikePattern()
     {

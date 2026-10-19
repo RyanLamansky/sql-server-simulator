@@ -55,7 +55,6 @@ partial class Simulation
         ["sp_table_privileges"] = [[2, 3, 6, 5]],
         ["sp_table_privileges_rowset"] = [[4, 5, 6, 1, 2]],
         ["sp_table_types"] = [[1, 2, 3]],
-        ["sp_tables"] = [[4, 1, 2, 3]],
         ["sp_tables_ex"] = [[4, 1, 2, 3]],
         ["sp_tables_rowset"] = [[4, 2, 3]],
         ["sp_who2"] = [[0]],
