@@ -189,7 +189,9 @@ internal sealed class RegexpScalar : Expression
         {
             RegexpScalarKind.Count => SqlValue.FromInt32(RegexpArguments.Matches(regex, text, startIndex).Count()),
             RegexpScalarKind.Instr => SqlValue.FromInt32(Position(regex, text, startIndex, occurrence, returnOption, group)),
-            RegexpScalarKind.Replace => SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(Replace(regex, text, replacement, startIndex, occurrence), resultType)),
+            RegexpScalarKind.Replace => resultType is CharSqlType or NCharSqlType
+                ? SqlValue.UnpaddedFixedLength(resultType, StringScalars.ClipToFamilyCap(Replace(regex, text, replacement, startIndex, occurrence), resultType))
+                : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(Replace(regex, text, replacement, startIndex, occurrence), resultType)),
             _ => Substring(regex, text, startIndex, occurrence, group, resultType),
         };
     }
@@ -389,7 +391,17 @@ internal sealed class RegexpScalar : Expression
         if (StringScalars.IsMaxForm(inputType))
             return inputType;
         if (this.kind == RegexpScalarKind.Replace)
-            return StringScalars.ContainerResultType(inputType, batch);
+        {
+            // A fixed-length input keeps its family at the container width,
+            // its value unpadded (probed 2026-10-19 against SQL Server 2025:
+            // char(5) is char(8000), DATALENGTH 5).
+            return inputType switch
+            {
+                CharSqlType => CharSqlType.Get(8000, inputType.Collation ?? batch.CurrentDatabase.Collation, inputType.Coercibility),
+                NCharSqlType => NCharSqlType.Get(4000, inputType.Collation ?? batch.CurrentDatabase.Collation, inputType.Coercibility),
+                _ => StringScalars.ContainerResultType(inputType, batch),
+            };
+        }
         var width = StringScalars.DeclaredWidth(inputType);
         return width > 0
             ? StringScalars.SizedResultType(inputType, width, batch)

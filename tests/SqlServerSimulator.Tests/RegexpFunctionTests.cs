@@ -383,6 +383,20 @@ public sealed class RegexpFunctionTests
             insert t values ('x1')
             """, 547);
     }
+
+    /// <summary>
+    /// REGEXP_REPLACE over a char or nchar keeps its family at the container
+    /// width, char(8000) / nchar(4000), with its value unpadded (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RegexpReplace_OverAFixedLengthString_KeepsItsFamilyUnpadded()
+        => AreEqual("char|8000|5|nchar|8000|10", new Simulation().ExecuteScalar("""
+            declare @c char(5) = 'ab', @n nchar(5) = N'ab';
+            select concat_ws('|', cast(sql_variant_property(regexp_replace(@c, 'b', 'x'), 'BaseType') as varchar(10)), cast(sql_variant_property(regexp_replace(@c, 'b', 'x'), 'MaxLength') as int),
+                datalength(regexp_replace(@c, 'b', 'x')), cast(sql_variant_property(regexp_replace(@n, 'b', 'x'), 'BaseType') as varchar(10)),
+                cast(sql_variant_property(regexp_replace(@n, 'b', 'x'), 'MaxLength') as int), datalength(regexp_replace(@n, 'b', 'x')))
+            """));
 }
 
 internal static class RegexpTestExtensions

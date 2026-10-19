@@ -64,6 +64,11 @@ internal sealed class DataLength(ParserContext context) : Expression
             // A binary(N) is measured by its bytes, which CONVERT's style 2
             // over '' leaves short of N.
             BinarySqlType => value.AsBytes.Length,
+            // So is a char(N) or nchar(N), which REGEXP_REPLACE leaves short
+            // of N (probed 2026-10-19 against SQL Server 2025); every other
+            // one is padded to N already.
+            CharSqlType => value.Type.GetVariableByteCount(value),
+            NCharSqlType => value.AsString.Length * 2,
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

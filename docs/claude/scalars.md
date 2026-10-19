@@ -1083,11 +1083,10 @@ The two rowset members instead report a TVF's **Msg 313** / **Msg 8144** at stat
 ### Result types
 
 - `REGEXP_COUNT` / `REGEXP_INSTR` → `int`.
-- `REGEXP_REPLACE` → the **input's** family at container width (`varchar(8000)` / `nvarchar(4000)`), independent of the replacement's family, with MAX carried through unbounded.
+- `REGEXP_REPLACE` → the **input's** family at container width (`varchar(8000)` / `nvarchar(4000)`, a `char` / `nchar` input `char(8000)` / `nchar(4000)` with its value unpadded, so its `DATALENGTH` is the value's own; probed 2026-10-19), independent of the replacement's family, with MAX carried through unbounded.
   A grown result **truncates silently** at that width rather than raising Msg 8152.
 - `REGEXP_SUBSTR` → the input's own declared width (`varchar(10)` in → `varchar(10)` out; `char(5)` in → `varchar(5)`), MAX carried through.
 
-Not modeled yet: a `char` / `nchar` input keeps its fixed-width family through `REGEXP_REPLACE` on real — `REGEXP_REPLACE(CAST('b' AS char(1)), 'b', 'z')` describes its column as `char`, where the simulator's is `varchar` (probed 2026-10-04 against SQL Server 2025).
 
 ### Per-member semantics
 
