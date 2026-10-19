@@ -277,6 +277,38 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Binds a call's body as the batch compiles: one that no longer binds — a
+    /// missing object, column or qualifier — refuses the batch there, as a
+    /// view's does, so nothing ahead of it runs (probed 2026-10-19 against SQL
+    /// Server 2025). An argument that isn't a written constant binds as a typed
+    /// NULL, its value being the run's; any other failure is left for the run.
+    /// </summary>
+    internal static void BindInlineTvfBody(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
+        var bound = new Expression?[arguments.Length];
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            var argument = arguments[i];
+            bound[i] = argument is null or Parser.Expressions.TableValuedArgument || argument.IsWrittenConstant || i >= inline.Parameters.Length
+                ? argument
+                : new Parser.Expressions.Value(SqlValue.Null(inline.Parameters[i].Type));
+        }
+        try
+        {
+#if DEBUG
+            using var principalIndependent = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+            _ = ParseInlineTvfCall(batch, inline, bound, name);
+        }
+        catch (SimulatedSqlException error) when (!error.BindsWithBatch)
+        {
+        }
+        catch (NotSupportedException)
+        {
+        }
+    }
+
+    /// <summary>
     /// The body of a call of <paramref name="inline"/> a browse statement
     /// flattens, as it does a view's (see <see cref="ParserContext.BrowseFlatten"/>):
     /// its columns describe down to the tables the body reads, which carry their

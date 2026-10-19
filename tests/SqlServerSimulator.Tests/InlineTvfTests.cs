@@ -372,13 +372,13 @@ public sealed class InlineTvfTests
     /// <summary>
     /// A view's or inline function's body that no longer binds reports its
     /// error at the line of the batch that created the module — the header
-    /// and any leading lines counted — and a view's refuses the referencing
-    /// batch as it compiles, so nothing ahead of it runs (probed 2026-10-19
-    /// against SQL Server 2025).
+    /// and any leading lines counted — and refuses the referencing batch as
+    /// it compiles, so nothing ahead of it runs (probed 2026-10-19 against
+    /// SQL Server 2025).
     /// </summary>
     [TestMethod]
     [DataRow("create view vw as\nselect t.id\nfrom t\njoin u on u.id = t.id", "select 'first'; select * from vw", 4)]
-    [DataRow("\ncreate function f() returns table as\nreturn\nselect t.id\nfrom t\njoin u on u.id = t.id", "select * from f()", 6)]
+    [DataRow("\ncreate function f() returns table as\nreturn\nselect t.id\nfrom t\njoin u on u.id = t.id", "select 'first'; select * from f()", 6)]
     public void ABodyThatNoLongerBinds_ReportsTheCreatingBatchsLine(string module, string query, int line)
     {
         var sim = new Simulation();
@@ -392,6 +392,15 @@ public sealed class InlineTvfTests
         });
         AreEqual(208, error.Number);
         AreEqual(line, error.Errors[0].LineNumber);
+    }
+
+    /// <summary>A call whose argument reads a column binds its body as the batch compiles too (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void ACorrelatedCallsBodyThatNoLongerBinds_RefusesTheBatch()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (id int, v int); create table u (id int)", "create function f(@x int) returns table as return select t.id from t join u on u.id = t.id where t.v = @x", "drop table u");
+        _ = sim.AssertSqlError("select 'first'; select * from t cross apply f(t.v) z", 208);
     }
 
     /// <summary>

@@ -1702,7 +1702,11 @@ internal sealed partial class Selection
                         // An inline function's body expands into the query, and
                         // the scalar functions it calls inline with it.
                         if (function is InlineTableValuedFunction expanded)
+                        {
                             InlinedScalarCalls.Note(context, expanded);
+                            if (context.Batch.IsSkipping)
+                                Simulation.BindInlineTvfBody(context.Batch, expanded, tvfArgs, objectName);
+                        }
                         // A browse statement flattens an inline function as it
                         // does a view, its body carrying its tables' hidden
                         // browse columns after the function's own.
