@@ -575,13 +575,16 @@ partial class Simulation
                 is ConversionFamily.Char or ConversionFamily.NChar or ConversionFamily.Text
                 or ConversionFamily.NText or ConversionFamily.Xml,
             // Binary reaches the exact numerics but not float / real, and
-            // reaches the UDTs, whose storage form is binary.
+            // reaches the UDTs, whose storage form is binary; rowversion
+            // reaches none of the Unicode strings, uniqueidentifier, xml,
+            // sql_variant or the UDTs (probed 2026-10-19 against SQL Server 2025).
             ConversionFamily.Binary => targetFamily switch
             {
                 ConversionFamily.Numeric => !SqlType.IsApproximateNumericCategory(target),
-                ConversionFamily.Char or ConversionFamily.NChar or ConversionFamily.Binary
-                    or ConversionFamily.Image or ConversionFamily.DateTime or ConversionFamily.Guid
-                    or ConversionFamily.Xml or ConversionFamily.Variant or ConversionFamily.Udt => true,
+                ConversionFamily.NChar or ConversionFamily.Guid or ConversionFamily.Xml or ConversionFamily.Variant
+                    or ConversionFamily.Udt => source is not RowVersionSqlType,
+                ConversionFamily.Char or ConversionFamily.Binary or ConversionFamily.Image
+                    or ConversionFamily.DateTime => true,
                 _ => false,
             },
             ConversionFamily.Image => targetFamily is ConversionFamily.Binary or ConversionFamily.Image,
@@ -618,9 +621,6 @@ partial class Simulation
         NCharSqlType or NVarcharSqlType or SystemNameSqlType => ConversionFamily.NChar,
         TextSqlType => ConversionFamily.Text,
         NTextSqlType => ConversionFamily.NText,
-        // rowversion rides the binary family: real treats timestamp more
-        // narrowly than varbinary here (it declines nvarchar and sql_variant),
-        // which the simulator doesn't reproduce.
         BinarySqlType or VarbinarySqlType or RowVersionSqlType => ConversionFamily.Binary,
         ImageSqlType => ConversionFamily.Image,
         DateTimeSqlType or SmallDateTimeSqlType => ConversionFamily.DateTime,

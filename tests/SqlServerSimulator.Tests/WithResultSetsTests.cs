@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -143,6 +144,32 @@ public sealed class WithResultSetsTests
             "exec dbo.p with result sets ((x varbinary(10)))", 11538);
     }
 
+    /// <summary>
+    /// A rowversion column reaches fewer types than varbinary does: the
+    /// Unicode strings, uniqueidentifier, xml, sql_variant and the UDTs are
+    /// Msg 11538, while varchar, the integers and binary still convert
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("nvarchar(10)", true)]
+    [DataRow("nchar(10)", true)]
+    [DataRow("uniqueidentifier", true)]
+    [DataRow("xml", true)]
+    [DataRow("sql_variant", true)]
+    [DataRow("hierarchyid", true)]
+    [DataRow("varchar(10)", false)]
+    [DataRow("bigint", false)]
+    [DataRow("varbinary(8)", false)]
+    public void RowVersion_ReachesFewerTypesThanVarbinary(string declared, bool refused)
+    {
+        var sim = WithProcedure("select cast(0x01 as timestamp) as a");
+        var command = $"exec dbo.p with result sets ((x {declared}))";
+        if (refused)
+            _ = sim.AssertSqlError(command, 11538);
+        else
+            _ = sim.ExecuteScalar(command);
+    }
+
     [TestMethod]
     public void ImplicitConversionPairs_AreAccepted()
     {
@@ -157,6 +184,25 @@ public sealed class WithResultSetsTests
             WithProcedure("select 1 as a").ExecuteScalar(
                 "exec dbo.p with result sets ((x datetime))"));
     }
+
+    /// <summary>
+    /// Pairs the gate allows convert their values as a <c>CAST</c> would
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as money)", "varbinary(8)", "0x0000000000002710")]
+    [DataRow("cast(1.5 as float)", "varbinary(8)", "0x3FF8000000000000")]
+    [DataRow("cast(1 as money)", "float", "1")]
+    [DataRow("cast(1.5 as float)", "money", "1.5000")]
+    [DataRow("'abc'", "image", "0x616263")]
+    [DataRow("0x0000101F00000000", "datetime", "1911-04-21 00:00:00.000")]
+    public void AllowedPairs_ConvertTheirValues(string value, string declared, string expected)
+        => AreEqual(expected, WithProcedure($"select {value} as a").ExecuteScalar($"exec dbo.p with result sets ((x {declared}))") switch
+        {
+            byte[] bytes => "0x" + Convert.ToHexString(bytes),
+            DateTime moment => moment.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+            var other => other.ToInvariantString(),
+        });
 
     [TestMethod]
     public void ValueConversionFailure_Raises8114()

@@ -867,11 +867,6 @@ A set something other than a module's `SELECT` sends — a DML statement's `OUTP
 Msg 11536 belongs to the `EXECUTE` statement itself and leaves `ERROR_PROCEDURE()` NULL.
 The module's rows stream as its client reads them, as an `EXEC` without the clause does ([`data-reader.md`](data-reader.md#rows-go-out-as-the-reader-reads-them)): a `REPEATABLE READ` reader two rows in holds the keys of the twenty rows produced, and a value failing at row 1,500 raises once the client reads there (probed 2026-10-09 against SQL Server 2025).
 
-**Not modeled yet**:
-- **`rowversion`** rides the binary family in the implicit-conversion matrix; real treats `timestamp` more narrowly than `varbinary` there (it declines `nvarchar` and `sql_variant`).
-- A pair the gate **allows** but `SqlValue.CoerceTo` hasn't built raises that path's own error rather than converting — `money` / `float` → `varbinary`, `money` ↔ `float`, `<string>` → `image` / `hierarchyid`, `varbinary` → `datetime`.
-  The same gaps show for a plain `CAST`, so they close there, not here.
-
 **Divergence**: a set a module sends other than through a `SELECT` of its own converts as its reader reads it, outside the statement that sent it, so a failure there isn't that statement's to catch.
 
 ## Replacing a module — `ALTER` / `CREATE OR ALTER`
