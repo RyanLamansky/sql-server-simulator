@@ -1013,6 +1013,10 @@ partial class Simulation
             if (context.Token is not Operator { Character: '.' } && TryConsumeAssignmentOperator(context) is not null)
             {
                 context.MoveNextRequired();
+                // A cursor assigned to an undeclared variable is refused at
+                // the CURSOR (probed 2026-10-19 against SQL Server 2025).
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Cursor })
+                    throw SimulatedSqlException.MustDeclareCursorAssignmentTarget(variableToken.Value);
                 _ = Expression.Parse(context);
             }
             throw SimulatedSqlException.MustDeclareSetTarget(variableToken.Value, context);

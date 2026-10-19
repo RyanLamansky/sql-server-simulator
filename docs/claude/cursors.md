@@ -327,7 +327,7 @@ Refcount changes flow through `RebindCursorVariable` (release old, increment new
 
 **Cursor OUTPUT parameters** (`CREATE PROC p @c CURSOR VARYING OUTPUT AS …`): the parameter parses as `IsCursor` (output-only), seeds an unallocated cursor variable in the proc's child frame, and — after the body `SET`s + `OPEN`s a cursor on it — the invocation binds that cursor back into the caller's cursor variable (refcounted, so it survives the proc frame's `TeardownFrameCursors`).
 The EXEC `@c OUTPUT` argument carries the caller's variable name through `ProcArgument.CursorVariableName`.
-Probed 2026-09-29 against SQL Server 2025: the parameter must be written `CURSOR VARYING OUTPUT`, in that order (**Msg 1051**, at CREATE); only an argument written `OUTPUT` receives the cursor, and only an open one; a scalar variable passed there is **Msg 206** and a cursor variable already holding a cursor **Msg 16951**, both before the body runs.
+Probed 2026-09-29 against SQL Server 2025: the parameter must be written `CURSOR VARYING OUTPUT`, in that order (**Msg 1051**, at CREATE, which leaves it and every later parameter undeclared, so the body's uses of them follow as Msg 137; probed 2026-10-19); only an argument written `OUTPUT` receives the cursor, and only an open one; a scalar variable passed there is **Msg 206** and a cursor variable already holding a cursor **Msg 16951**, both before the body runs.
 `DEALLOCATE` of an unallocated cursor variable is Msg 16950, as `OPEN` and `FETCH` of one are.
 
 ## Declaration grammar refusals
@@ -453,5 +453,4 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
 - **DECLARE CURSOR inside an un-taken `IF` branch** still parses (and resolves names in) its SELECT — the same eager-resolution quirk all statements share.
 - **FAST_FORWARD settles two more redundant operators at OPEN** that real's optimizer drops and then reads live: a `GROUP BY` over a key that carries an aggregate (`SELECT a, MAX(b) FROM t GROUP BY a`), and a set operation whose other branch a contradiction empties (`UNION … WHERE 1 = 0`) (probed 2026-10-17 against SQL Server 2025).
 - **Msg 1049's line** varies between runs on real (0 in most placements, a small number in others); the simulator reports 0.
-- **A cursor parameter missing `VARYING OUTPUT`** is Msg 1051 alone, where real goes on to report the body's uses of the parameter as undeclared variables (Msg 137).
 - **`sp_describe_cursor_tables`' server name** is the simulator's `@@SERVERNAME`, and object ids are the simulator's own.

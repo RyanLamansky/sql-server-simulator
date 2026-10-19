@@ -117,6 +117,12 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareSetTarget(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 1);
 
     /// <summary>
+    /// Msg 137 at state 3: an undeclared variable a <c>SET</c> assigns a
+    /// <c>CURSOR</c> definition to (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MustDeclareCursorAssignmentTarget(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 3);
+
+    /// <summary>
     /// <see cref="MustDeclareSetTarget(string)"/> raised once the assignment
     /// has parsed — a <c>SET</c>'s or a <c>SELECT</c> item's — at the line of
     /// the assignment's last token rather than the token the parser stands on,

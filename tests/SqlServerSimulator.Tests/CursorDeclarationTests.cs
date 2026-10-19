@@ -129,6 +129,37 @@ public sealed class CursorDeclarationTests
     public void CursorParameter_NeedsVaryingOutput(string parameter)
         => _ = new Simulation().AssertSqlError($"create proc p {parameter} as select 1", 1051);
 
+    /// <summary>
+    /// Msg 1051 leaves that parameter and every later one undeclared, so the
+    /// body's uses of them follow as Msg 137 — state 3 for a cursor assigned
+    /// to one (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CursorParameter_WithoutVaryingOutput_LeavesItAndLaterOnesUndeclared()
+    {
+        var ex = new Simulation().AssertSqlError("create procedure p @x int, @c cursor, @y int as select @x, @y; open @c; set @c = cursor for select 1", 1051);
+        AreEqual("1051:2,137:2,137:2,137:3", string.Join(",", ex.Errors.Select(static e => $"{e.Number}:{e.State}")));
+    }
+
+    /// <summary>
+    /// A cursor variable the batch never declares is Msg 137 as the batch
+    /// compiles, so none of it runs (probed 2026-10-19 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("fetch next from @c", 2)]
+    [DataRow("close @c", 2)]
+    [DataRow("open @c", 2)]
+    [DataRow("deallocate @c", 2)]
+    [DataRow("set @c = cursor for select 1", 3)]
+    public void UndeclaredCursorVariable_RefusesTheBatch(string statement, int state)
+    {
+        var simulation = new Simulation();
+        var ex = simulation.AssertSqlError($"create table ran (a int); {statement}", 137);
+        AreEqual(state, ex.Errors[0].State);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name = 'ran'"));
+    }
+
     /// <summary>DEALLOCATE of an unallocated cursor variable is Msg 16950.</summary>
     [TestMethod]
     public void Deallocate_UnallocatedVariable_Msg16950()

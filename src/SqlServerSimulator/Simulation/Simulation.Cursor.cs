@@ -686,12 +686,17 @@ partial class Simulation
 
     /// <summary>
     /// Reads a cursor reference at the current position — <c>@c</c> (variable),
-    /// <c>GLOBAL name</c>, or bare <c>name</c> — advancing past it.
+    /// <c>GLOBAL name</c>, or bare <c>name</c> — advancing past it. A variable
+    /// the batch never declares is Msg 137 as the batch compiles (probed
+    /// 2026-10-19 against SQL Server 2025), so none of the batch runs.
     /// </summary>
     private static CursorReference ReadCursorReference(ParserContext context)
     {
         if (context.Token is AtPrefixedString variable)
         {
+            var batch = context.Batch;
+            if (!batch.HasCursorVariable(variable.Value) && !batch.Variables.ContainsKey(variable.Value) && !batch.HasTableVariable(variable.Value))
+                throw SimulatedSqlException.MustDeclareScalarVariable(variable.Value);
             context.MoveNextOptional();
             return new CursorReference(variable.Value, isVariable: true, globalQualified: false);
         }

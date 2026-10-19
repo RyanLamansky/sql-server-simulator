@@ -1109,6 +1109,13 @@ partial class Simulation
         {
             bind();
         }
+        // A cursor parameter's Msg 1051 comes ahead of the body's own
+        // reports, which name the parameters it left undeclared (probed
+        // 2026-10-19 against SQL Server 2025).
+        catch (SimulatedSqlException error) when (error.Class == 15 && held.Errors[0].Number == 1051)
+        {
+            throw SimulatedSqlException.Aggregate([held, error]);
+        }
         catch (SimulatedSqlException error) when (error.Class != 15)
         {
         }

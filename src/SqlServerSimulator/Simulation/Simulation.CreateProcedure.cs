@@ -137,7 +137,11 @@ partial class Simulation
             if (!openParen && context.Token is ReservedKeyword { Keyword: Keyword.With or Keyword.As })
                 break;
 
-            var parameter = ParseProcedureParameter(context, parameters.Count + 1, declarationErrors);
+            if (ParseProcedureParameter(context, parameters.Count + 1, declarationErrors) is not { } parameter)
+            {
+                SkipToProcedureOptions(context, openParen);
+                break;
+            }
             if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, parameter.Name)))
                 throw SimulatedSqlException.VariableAlreadyDeclared(parameter.Name);
             parameters.Add(parameter);
@@ -403,12 +407,40 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Passes over the rest of a parameter list a cursor parameter's Msg 1051
+    /// ended, to the <c>WITH</c> or <c>AS</c> after it: real declares none of
+    /// the parameters from that one on, so the body's uses of them are Msg 137
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private static void SkipToProcedureOptions(ParserContext context, bool openParen)
+    {
+        var depth = openParen ? 1 : 0;
+        while (context.Token is { } token)
+        {
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' } when --depth == 0 && openParen:
+                    context.MoveNextRequired();
+                    return;
+                case ReservedKeyword { Keyword: Keyword.With or Keyword.As } when depth == 0:
+                    return;
+            }
+            context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
     /// Parses one entry in a <c>CREATE PROCEDURE</c> parameter list:
-    /// <c>@name type [= default] [OUTPUT]</c>. Cursor on entry: the leading
+    /// <c>@name type [= default] [OUTPUT]</c>, or null for a cursor parameter
+    /// missing <c>VARYING OUTPUT</c>, whose Msg 1051 joins
+    /// <paramref name="declarationErrors"/>. Cursor on entry: the leading
     /// <c>@</c> or parameter name token. Cursor on exit: the trailing
     /// separator (<c>,</c>, <c>)</c>, or the <c>WITH</c>/<c>AS</c> keyword).
     /// </summary>
-    private static ProcedureParameter ParseProcedureParameter(ParserContext context, int ordinal, List<SimulatedSqlException> declarationErrors)
+    private static ProcedureParameter? ParseProcedureParameter(ParserContext context, int ordinal, List<SimulatedSqlException> declarationErrors)
     {
         if (context.Token is not AtPrefixedString variable)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -418,12 +450,14 @@ partial class Simulation
         // Cursor parameter: `@c CURSOR VARYING OUTPUT`, the two options
         // required and in that order (Msg 1051 otherwise; probed 2026-09-29
         // against SQL Server 2025).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Cursor })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Cursor } cursorKeyword)
         {
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Varying })
-                throw SimulatedSqlException.CursorParameterNeedsVaryingOutput();
-            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
-                throw SimulatedSqlException.CursorParameterNeedsVaryingOutput();
+            var varying = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Varying };
+            if (!varying || context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            {
+                declarationErrors.Add(SimulatedSqlException.CursorParameterNeedsVaryingOutput().PinLine(cursorKeyword.LineNumber + context.Batch.LineOffset));
+                return null;
+            }
             context.MoveNextRequired();
             return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: true, isCursor: true);
         }
