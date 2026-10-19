@@ -170,9 +170,25 @@ partial class Simulation
         try
         {
             if (token.CanBeCanceled)
-                _ = token.WaitHandle.WaitOne(delay);
+            {
+                // A CommandTimeout running out first ends the wait at its
+                // deadline, whenever the timer behind it gets to fire.
+                var connection = batch.Connection;
+                while (!token.IsCancellationRequested)
+                {
+                    var rest = delay - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                    if (rest <= TimeSpan.Zero)
+                        break;
+                    var timedRest = connection.RemainingBeforeDeadline() is { } left && left < rest ? left : rest;
+                    if (token.WaitHandle.WaitOne(timedRest))
+                        break;
+                    connection.CancelIfPastDeadline();
+                }
+            }
             else
+            {
                 Thread.Sleep(delay);
+            }
         }
         finally
         {

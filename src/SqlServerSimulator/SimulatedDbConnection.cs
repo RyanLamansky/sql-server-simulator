@@ -1348,6 +1348,7 @@ public sealed class SimulatedDbConnection : DbConnection
         // the same inherent ambiguity.)
         if (timeout is { } span)
             fresh.CancelAfter(span);
+        this.executionDeadline = timeout is { } armed ? DeadlineAfter(armed) : 0;
         this.executionCancelledByUser = false;
         this.TransactionIdAtExecutionStart = this.Simulation.LastAllocatedTransactionId;
         this.AttentionEndedWrite = false;
@@ -1374,6 +1375,45 @@ public sealed class SimulatedDbConnection : DbConnection
     private TimeSpan? executionTimeout;
 
     /// <summary>
+    /// When the armed <c>CommandTimeout</c> runs out, as a
+    /// <see cref="System.Diagnostics.Stopwatch"/> timestamp, 0 while none is
+    /// armed or it is paused. The timer behind <c>CancelAfter</c> fires on the
+    /// thread pool, which a loaded host can run late, so a wait reaching the
+    /// deadline settles it here instead (<see cref="RemainingBeforeDeadline"/>,
+    /// <see cref="CancelIfPastDeadline"/>).
+    /// </summary>
+    private long executionDeadline;
+
+    private static long DeadlineAfter(TimeSpan timeout) =>
+        System.Diagnostics.Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+
+    /// <summary>How long the armed <c>CommandTimeout</c> has left, null while none runs.</summary>
+    internal TimeSpan? RemainingBeforeDeadline()
+    {
+        var deadline = Volatile.Read(ref this.executionDeadline);
+        if (deadline == 0)
+            return null;
+        var left = deadline - System.Diagnostics.Stopwatch.GetTimestamp();
+        return left <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)left / System.Diagnostics.Stopwatch.Frequency);
+    }
+
+    /// <summary>Cancels the current execution as its timer would once the armed <c>CommandTimeout</c> has run out.</summary>
+    internal void CancelIfPastDeadline()
+    {
+        var deadline = Volatile.Read(ref this.executionDeadline);
+        if (deadline == 0 || System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
+            return;
+        try
+        {
+            Volatile.Read(ref this.executionCancellation).Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The scope ended with its connection.
+        }
+    }
+
+    /// <summary>
     /// Stops the current execution's <c>CommandTimeout</c> while a statement
     /// waits on its client to read the rows it sent (see
     /// <see cref="ResultStream"/>): SqlClient counts only the time a call spends
@@ -1383,6 +1423,7 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         if (this.executionTimeout is null)
             return;
+        Volatile.Write(ref this.executionDeadline, 0);
         try
         {
             Volatile.Read(ref this.executionCancellation).CancelAfter(Timeout.InfiniteTimeSpan);
@@ -1406,7 +1447,10 @@ public sealed class SimulatedDbConnection : DbConnection
         try
         {
             if (!source.IsCancellationRequested)
+            {
+                Volatile.Write(ref this.executionDeadline, DeadlineAfter(timeout));
                 source.CancelAfter(timeout);
+            }
         }
         catch (ObjectDisposedException)
         {
