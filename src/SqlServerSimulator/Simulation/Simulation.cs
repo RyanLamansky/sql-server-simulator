@@ -3338,13 +3338,15 @@ public sealed partial class Simulation
     /// refusal real settles compiling a statement it deferred — a DML
     /// <c>TOP</c>'s written constant, a nested <c>NEXT VALUE FOR</c> (probed
     /// 2026-10-06), and an <c>INSERT … SELECT *</c>'s count against its column
-    /// list, Msg 120 / 121 (probed 2026-10-09). An error not listed keeps a
+    /// list, Msg 120 / 121 (probed 2026-10-09), and a write naming an identity,
+    /// rowversion or computed column, Msg 8102 / 271 / 272 / 273 (probed
+    /// 2026-10-19). An error not listed keeps a
     /// run-time error's handling.
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
-            || ex.Number is 107 or 108 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709
+            || ex.Number is 107 or 108 or 120 or 121 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 271 or 272 or 273 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8102 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709
             // A table hint's index and granularity refusals (probed 2026-10-16
             // against SQL Server 2025).
             || ex.Number is 307 or 308 or 309 or 315 or 316 or 362 or 363 or 365 or 651

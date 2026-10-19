@@ -46,6 +46,20 @@ public sealed class DeferredCompileRefusalTests
         HasCount(1, error.Errors);
     }
 
+    /// <summary>A write naming an identity, rowversion or computed column over a created table ends the batch past its TRY (probed 2026-10-19 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("update t set id = 5", 8102)]
+    [DataRow("update t set rv = 0x01", 272)]
+    [DataRow("update t set c = 1", 271)]
+    [DataRow("insert t (v, rv) values (1, 0x01)", 273)]
+    [DataRow("insert t (v, c) values (1, 1)", 271)]
+    public void ColumnRefusalOverACreatedTable_EndsTheBatchPastTheTry(string statement, int number)
+    {
+        var (rows, error) = Run(new Simulation(), $"select 'first';\ncreate table t (id int identity, v int, rv rowversion, c as v + 1);\nbegin try {statement}; end try begin catch select 'caught' end catch;\nselect 'after'");
+        CollectionAssert.AreEqual(new object[] { "first" }, rows);
+        AreEqual(number, error.Number);
+    }
+
     [TestMethod]
     [DataRow("select 'first';\ndelete top (-1) from e")]
     [DataRow("select 'first';\ncreate table t (a int);\ninsert top (-1) into t values (1)")]
