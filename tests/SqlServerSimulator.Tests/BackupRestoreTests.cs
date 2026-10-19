@@ -269,6 +269,26 @@ public sealed class BackupRestoreTests
             simulation.AssertSqlError(@"backup database d to disk = N'C:\nodir\d.bak'", 3201).Errors[0].Message);
     }
 
+    /// <summary>
+    /// The host's file callback refusing with an IO exception reads as the
+    /// operating-system error real reports for the same failure, writing or
+    /// reading.
+    /// </summary>
+    [TestMethod]
+    [DataRow(typeof(FileNotFoundException), "2(The system cannot find the file specified.)")]
+    [DataRow(typeof(DirectoryNotFoundException), "3(The system cannot find the path specified.)")]
+    [DataRow(typeof(UnauthorizedAccessException), "5(Access is denied.)")]
+    [DataRow(typeof(IOException), "5(Access is denied.)")]
+    public void OpenBackupFile_Throwing_IsTheOperatingSystemError(Type exception, string osError)
+    {
+        var simulation = new Simulation { OpenBackupFile = (_, _) => throw (Exception)Activator.CreateInstance(exception)! };
+        _ = simulation.ExecuteNonQuery("create database d");
+        AreEqual($"Cannot open backup device '/b/d.bak'. Operating system error {osError}.",
+            simulation.AssertSqlError("backup database d to disk = N'/b/d.bak'", 3201).Errors[0].Message);
+        AreEqual($"Cannot open backup device '/b/d.bak'. Operating system error {osError}.",
+            simulation.AssertSqlError("restore database d from disk = N'/b/d.bak' with replace", 3201).Errors[0].Message);
+    }
+
     [TestMethod]
     public void Restore_WaitsForASessionUsingTheDatabaseToLeave()
     {
