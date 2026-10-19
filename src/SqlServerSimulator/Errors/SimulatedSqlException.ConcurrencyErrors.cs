@@ -276,6 +276,22 @@ partial class SimulatedSqlException
         new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, state);
 
     /// <summary>
+    /// Msg 8635 — an <c>INDEX</c> hint naming a spatial index beside a
+    /// predicate on its column the index can't answer, the state naming why:
+    /// 3 a comparand other than 1, 4 a comparator it doesn't take, 9 a method
+    /// comparing no other instance, 10 an <c>OR</c> around it (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SpatialIndexHintNoPlan(byte state) =>
+        new($"The query processor could not produce a query plan for a query with a spatial index hint.  Reason: {state switch
+        {
+            3 => "Spatial indexes do not support the comparand supplied in the predicate",
+            4 => "Spatial indexes do not support the comparator supplied in the predicate",
+            9 => "Could not find required binary spatial method in a condition",
+            _ => "Could not find required comparison predicate",
+        }}.  Try removing the index hints or removing SET FORCEPLAN.", 8635, 16, state);
+
+    /// <summary>
     /// Msg 363 — a <c>FORCESEEK</c> naming seek columns of a spatial index
     /// (probed 2026-10-16 against SQL Server 2025).
     /// </summary>

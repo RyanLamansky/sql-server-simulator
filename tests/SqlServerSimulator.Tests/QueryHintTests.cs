@@ -1176,6 +1176,37 @@ public sealed class QueryHintTests
     }
 
     /// <summary>
+    /// An INDEX hint naming a spatial index needs a predicate the index
+    /// answers: a binary method of its column compared = 1 or its STDistance
+    /// below a value, written on the comparison's left; otherwise the batch
+    /// fails as it compiles with Msg 8635, the lowest state among the
+    /// conjuncts reading the column, or Msg 8622 where none does (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("g.STIntersects(geometry::Point(1, 1, 0)) = 1", 0, 0)]
+    [DataRow("geometry::Point(1, 1, 0).STWithin(g) = 1 and id > 0", 0, 0)]
+    [DataRow("g.STDistance(geometry::Point(1, 1, 0)) <= 5", 0, 0)]
+    [DataRow("id = 1", 8622, 1)]
+    [DataRow("g.STIntersects(geometry::Point(1, 1, 0)) = 0", 8635, 3)]
+    [DataRow("g.STIntersects(geometry::Point(1, 1, 0)) = 1.0", 8635, 3)]
+    [DataRow("g.STDistance(geometry::Point(1, 1, 0)) > 5", 8635, 4)]
+    [DataRow("g.STIsValid() = 1", 8635, 9)]
+    [DataRow("1 = g.STIntersects(geometry::Point(1, 1, 0))", 8635, 9)]
+    [DataRow("g.STIntersects(geometry::Point(1, 1, 0)) = 1 or id = 2", 8635, 10)]
+    [DataRow("g.STArea() > 5 and g.STIntersects(geometry::Point(1, 1, 0)) = 0", 8635, 3)]
+    public void ASpatialIndexHint_NeedsAPredicateItAnswers(string where, int number, int state)
+    {
+        var sql = $"create table s (id int primary key, g geometry); create spatial index sx on s(g) with (bounding_box = (0, 0, 10, 10)); select * from s with (index(sx)) where {where}";
+        if (number == 0)
+        {
+            _ = new Simulation().ExecuteNonQuery(sql);
+            return;
+        }
+        AreEqual(state, new Simulation().AssertSqlError(sql, number).Errors[0].State);
+    }
+
+    /// <summary>
     /// NOEXPAND reads an indexed view's own index, which FORCESEEK has to
     /// seek (probed 2026-10-16 against SQL Server 2025).
     /// </summary>

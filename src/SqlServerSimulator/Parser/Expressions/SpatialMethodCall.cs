@@ -182,9 +182,9 @@ internal sealed class SpatialMethodCall : Expression
         ["ShortestLineTo"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
-    private readonly Expression target;
-    private readonly string memberName;
-    private readonly Expression[] arguments;
+    public readonly Expression target;
+    public readonly string memberName;
+    public readonly Expression[] arguments;
     private readonly bool writtenAsMethod;
 
     private SpatialMethodCall(Expression target, string memberName, Expression[] arguments, bool writtenAsMethod)

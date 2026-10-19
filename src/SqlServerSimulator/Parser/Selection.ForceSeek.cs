@@ -110,6 +110,8 @@ partial class Selection
             conjuncts ??= CollectConjuncts(excluders, joins);
             if (HintsUnimpliedFilteredIndex(batch, source, i, sources, table, conjuncts))
                 throw SimulatedSqlException.ForceSeekPlanInfeasible();
+            if (source.ForcedAccessPath is not { ForceSeek: true } && SpatialIndexHintRefusal(batch, source, i, sources, table, conjuncts) is { } spatialRefusal)
+                throw spatialRefusal;
             if (source.ForcedAccessPath is not { } hints)
                 continue;
 
@@ -148,6 +150,91 @@ partial class Selection
             throw SimulatedSqlException.ForceSeekPlanInfeasible();
         }
         return false;
+    }
+
+    /// <summary>
+    /// What an <c>INDEX</c> hint naming a spatial index meets when no
+    /// top-level conjunct is a predicate the index answers — a binary method
+    /// of its column (or taking it) compared <c>= 1</c>, or its
+    /// <c>STDistance</c> below a value: Msg 8635 for the first conjunct reading
+    /// the column through a method that can't serve, the lowest state among
+    /// several, Msg 8622 when none reads it so (probed 2026-10-19 against SQL
+    /// Server 2025); null when one serves or no spatial index is named.
+    /// </summary>
+    private static SimulatedSqlException? SpatialIndexHintRefusal(BatchContext batch, FromSource source, int index, FromSource[] sources, HeapTable table, List<BooleanExpression> conjuncts)
+    {
+        if (source.WrittenHints?.IndexArguments is not { } arguments || table.SpatialIndexes.Count == 0)
+            return null;
+        var collation = batch.CurrentDatabase.Collation;
+        var spatial = table.SpatialIndexes.Find(candidate => arguments.Exists(argument => argument.Name is { } name ? collation.Equals(candidate.Name, name) : argument.Id == candidate.IndexId));
+        if (spatial is null)
+            return null;
+        var probe = new ForceSeekProbe(batch, source, index, sources, [spatial.ColumnOrdinal - 1]);
+        byte? refusal = null;
+        foreach (var conjunct in conjuncts)
+        {
+            switch (SpatialConjunctVerdict(conjunct, probe))
+            {
+                case 0:
+                    return null;
+                // The lowest state wins: a comparand over a comparator over a
+                // method comparing nothing over an OR.
+                case { } state when refusal is null || state < refusal:
+                    refusal = state;
+                    break;
+            }
+        }
+        return refusal is { } reason ? SimulatedSqlException.SpatialIndexHintNoPlan(reason) : SimulatedSqlException.ForceSeekPlanInfeasible();
+    }
+
+    /// <summary>
+    /// 0 when <paramref name="conjunct"/> is a predicate the spatial index
+    /// answers, the Msg 8635 state naming why not when it reads the index's
+    /// column through a spatial method, null when it doesn't.
+    /// </summary>
+    private static byte? SpatialConjunctVerdict(BooleanExpression conjunct, ForceSeekProbe probe)
+    {
+        // Only a method written on the comparison's left is a candidate:
+        // `1 = s.STIntersects(@p)` and `5 > s.STDistance(@p)` find none.
+        if (conjunct.TryGetEqualityOperands(out var left, out var right))
+        {
+            if (OnColumn(left, probe) is not { } call)
+                return OnColumn(right, probe) is not null ? 9 : Mentions(conjunct, probe) ? 10 : null;
+            if (!IsBinaryMethod(call.memberName))
+                return BuiltInToken.Equals(call.memberName, "STDistance") ? (byte)4 : (byte)9;
+            return right is Expressions.Value { Constant: { IsNull: false } one } && one.Type.Category == SqlTypeCategory.Integer && Expressions.MathScalars.AsLong(one) == 1 ? (byte)0 : (byte)3;
+        }
+        if (conjunct.TryGetRangeOperands(out var lower, out var op, out var upper))
+        {
+            if (OnColumn(lower, probe) is not { } call)
+                return OnColumn(upper, probe) is not null ? 9 : Mentions(conjunct, probe) ? 10 : null;
+            if (!BuiltInToken.Equals(call.memberName, "STDistance"))
+                return IsBinaryMethod(call.memberName) ? (byte)4 : (byte)9;
+            return op is RangeComparison.Less or RangeComparison.LessOrEqual ? (byte)0 : (byte)4;
+        }
+        return Mentions(conjunct, probe) ? 10 : null;
+
+        static bool IsBinaryMethod(string member) =>
+            BuiltInToken.EqualsAny(member, "Filter", "STContains", "STEquals", "STIntersects", "STOverlaps", "STTouches", "STWithin");
+
+        // A spatial method reading the column: called on it, or, a binary
+        // one, taking it as the other instance.
+        static Expressions.SpatialMethodCall? OnColumn(Expression expression, ForceSeekProbe probe) =>
+            expression is Expressions.SpatialMethodCall call
+                && (probe.IsSeekColumn(call.target) || (call.arguments is [var argument, ..] && IsBinaryMethod(call.memberName) && probe.IsSeekColumn(argument)))
+                ? call
+                : null;
+
+        static bool Mentions(BooleanExpression conjunct, ForceSeekProbe probe)
+        {
+            var found = false;
+            conjunct.Walk((node, _) =>
+            {
+                found |= node is Expression expression && OnColumn(expression, probe) is not null;
+                return !found;
+            });
+            return found;
+        }
     }
 
     /// <summary>Whether source <paramref name="index"/> is an <c>APPLY</c>'s body, which a predicate of the reading query doesn't reach.</summary>
