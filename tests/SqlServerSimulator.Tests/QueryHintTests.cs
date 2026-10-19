@@ -1176,6 +1176,30 @@ public sealed class QueryHintTests
     }
 
     /// <summary>
+    /// An index on a computed column, persisted or not, seeks under the
+    /// options an index on one needs to be built, and under any other no hint
+    /// can use it (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "select * from c with (forceseek) where d = 4", 0)]
+    [DataRow("", "select * from c with (forceseek) where p = 6", 0)]
+    [DataRow("set quoted_identifier off; ", "select * from c with (forceseek) where d = 4", 8622)]
+    [DataRow("set ansi_nulls off; ", "select * from c with (forceseek) where p = 6", 8622)]
+    [DataRow("set ansi_warnings off; ", "select * from c with (index(ixp)) where p = 6", 8622)]
+    [DataRow("set numeric_roundabort on; ", "select * from c with (index(ixd)) where d = 4", 8622)]
+    [DataRow("set arithabort off; ", "select * from c with (forceseek) where p = 6", 0)]
+    [DataRow("set quoted_identifier off; ", "select * from c with (forceseek) where a = 2", 0)]
+    public void AComputedColumnsIndex_SeeksUnderItsOptionsAlone(string options, string query, int number)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table c (id int primary key, a int, d as a * 2, p as a * 3 persisted); create index ixd on c (d); create index ixp on c (p); create index ixa on c (a)");
+        if (number == 0)
+            _ = simulation.ExecuteNonQuery(options + query);
+        else
+            _ = simulation.AssertSqlError(options + query, number);
+    }
+
+    /// <summary>
     /// An INDEX hint naming a spatial index needs a predicate the index
     /// answers: a binary method of its column compared = 1 or its STDistance
     /// below a value, written on the comparison's left; otherwise the batch

@@ -186,7 +186,7 @@ The simulator accepting what real rejects is the more dangerous divergence direc
 This is the standing list: each entry names the error real raises that the simulator doesn't, and the linked deep-dive carries the detail.
 Entries are verified against the simulator, so one that no longer reproduces is removed rather than re-worded.
 
-- **`FORCESEEK` residue** — under `QUOTED_IDENTIFIER OFF` a seek on a computed column's index is taken where real raises **Msg 8622** → [`query-hints.md`](query-hints.md#not-enforced).
+No entry is open.
 
 The opposite direction — the simulator refusing what real accepts — includes CLR registration: a `SAFE` assembly referencing the APIs the simulator's own verification denies (Msg 6218 / 6211), which real registers, an assembly real would trust for its signature, and a reference to another assembly registered in the database (Msg 6503 here) → [`clr-assemblies.md`](clr-assemblies.md#not-modeled-yet).
 It also includes the deterministic nesting caps, which sit below real's stack-dependent thresholds (paren 500 and subquery 83 against real's 1015 / 168, deep function nesting surfacing Msg 8631 rather than Msg 191 on tight threads) to keep Msg 191 firing with headroom before the stack probe; closing that wants a slimmer function-argument recursion frame → [`grammar.md`](grammar.md#expression-depth-limits-msg-8631--msg-191--msg-125).

@@ -112,6 +112,12 @@ partial class Selection
                 throw SimulatedSqlException.ForceSeekPlanInfeasible();
             if (source.ForcedAccessPath is not { ForceSeek: true } && SpatialIndexHintRefusal(batch, source, i, sources, table, conjuncts) is { } spatialRefusal)
                 throw spatialRefusal;
+            if (source.WrittenHints is { IndexArguments.Count: > 0 } written)
+            {
+                table.SettleIndexIds();
+                if (table.Indexes.Exists(named => NamedByIndexHint(batch, written, named.Name, named.IndexId) && UnusableUnderSessionOptions(batch, table, named)))
+                    throw SimulatedSqlException.ForceSeekPlanInfeasible();
+            }
             if (source.ForcedAccessPath is not { } hints)
                 continue;
 
@@ -386,18 +392,41 @@ partial class Selection
         var leads = new HashSet<int>();
         foreach (var owner in EnumerateKeyOwners(table))
         {
-            (string Name, int[] Ordinals, int IndexId, bool Disabled) described = owner switch
+            (string Name, int Lead, int IndexId, bool Disabled) described = owner switch
             {
-                KeyConstraint key => (key.Name, key.StorageOrdinals, key.IndexId, key.IsDisabled),
-                Storage.Index index => (index.Name, index.KeyStorageOrdinals, index.IndexId, index.IsDisabled),
-                _ => ("", [], -1, true),
+                KeyConstraint key => (key.Name, key.StorageOrdinals is [var first, ..] ? first : -1, key.IndexId, key.IsDisabled),
+                // A non-persisted computed key has no storage slot, so it
+                // leads by its stand-in (see ForceSeekProbe.IsSeekColumn).
+                Storage.Index index => (index.Name, index.KeyStorageOrdinals is [var first, ..] ? first >= 0 ? first : UnstoredLead(index.KeyFullOrdinals[0]) : -1, index.IndexId, index.IsDisabled),
+                _ => ("", -1, -1, true),
             };
-            var (name, ordinals, indexId, disabled) = described;
-            if (!disabled && ordinals.Length != 0 && ordinals[0] >= 0 && NamedByIndexHint(batch, hints, name, indexId))
-                _ = leads.Add(ordinals[0]);
+            var (name, lead, indexId, disabled) = described;
+            if (!disabled && lead != -1 && NamedByIndexHint(batch, hints, name, indexId)
+                && !(owner is Storage.Index computedKeyed && UnusableUnderSessionOptions(batch, table, computedKeyed)))
+            {
+                _ = leads.Add(lead);
+            }
         }
         return leads;
     }
+
+    /// <summary>
+    /// The seek lead standing for a key column with no storage slot — a
+    /// non-persisted computed column, which real's index seeks as any other
+    /// (probed 2026-10-19 against SQL Server 2025) — by its position among the
+    /// table's columns, below every storage ordinal and the -1 of none.
+    /// </summary>
+    private static int UnstoredLead(int fullOrdinal) => -2 - fullOrdinal;
+
+    /// <summary>
+    /// Whether real's optimizer leaves <paramref name="index"/> out under the
+    /// session's options: one keyed on a computed column, persisted or not,
+    /// needs the options an index on one does to be built (Msg 1934's set), or
+    /// no hint can use it (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private static bool UnusableUnderSessionOptions(BatchContext batch, HeapTable table, Storage.Index index) =>
+        Array.Exists(index.KeyFullOrdinals, ordinal => ordinal >= 0 && table.Columns[ordinal].Computed is not null)
+        && Simulation.IncorrectSetOptionNames(batch.Parser) is not null;
 
     /// <summary>
     /// Whether a <c>FORCESEEK</c> on a view or CTE reference can be honored:
@@ -758,7 +787,7 @@ partial class Selection
             if (index != sourceIndex)
                 return false;
             var ordinal = source.StorageOrdinals is { } ordinals ? ordinals[column] : column;
-            return leadingOrdinals.Contains(ordinal);
+            return leadingOrdinals.Contains(ordinal < 0 ? UnstoredLead(column) : ordinal);
         }
 
         /// <summary>
