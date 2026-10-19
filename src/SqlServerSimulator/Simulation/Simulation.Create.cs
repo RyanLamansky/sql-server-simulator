@@ -2523,6 +2523,12 @@ partial class Simulation
             context.RestoreCheckpoint(atColumnName);
             throw SimulatedSqlException.ColumnDefinitionWithoutDataType(columnName.Value);
         }
+        else if (context.Token is ReservedKeyword { Keyword: Keyword.Not } notForReplication)
+        {
+            // `NOT FOR REPLICATION` where the type belongs is Msg 102 naming the
+            // NOT as written (probed 2026-10-19 against SQL Server 2025).
+            throw SimulatedSqlException.SyntaxErrorNear(notForReplication);
+        }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
         {
@@ -2932,9 +2938,24 @@ partial class Simulation
             nullable = false;
         }
 
-        var (resolvedType, maxLength, aliasIsNullable, aliasType) = ResolveTypeReference(
-            context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: ordinalOffset + heapColumns.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
+        SqlType resolvedType;
+        int? maxLength;
+        bool? aliasIsNullable;
+        AliasType? aliasType;
+        try
+        {
+            (resolvedType, maxLength, aliasIsNullable, aliasType) = ResolveTypeReference(
+                context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
+                index: ordinalOffset + heapColumns.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
+        }
+        catch (SimulatedSqlException missing) when (missing.Number == 2715 && context.Token is not (null or Operator { Character: ',' or ')' or ';' } or ReservedKeyword { Keyword: not Keyword.With }))
+        {
+            // A word the definition can't read past a missing type is the
+            // parse's error, which comes first (probed 2026-10-19 against SQL
+            // Server 2025: `c generated always as row start` is Msg 102 near
+            // `always`, `c masked with (…)` Msg 156 near `with`).
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
         // A #temp table's types resolve in tempdb, where the current
         // database's alias types don't exist (probed 2026-09-26 against SQL
         // Server 2025); a table variable's resolve here.

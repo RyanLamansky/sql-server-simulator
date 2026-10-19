@@ -210,7 +210,6 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 ## Divergences / residuals
 
 - **Syntax-error recovery where the simulator's parser restarts differently from real's grammar**: past a `CREATE FUNCTION`'s Msg 181 (an `OUTPUT` parameter), a `WITH SCHEMABINDING` after the return type is real's Msg 319 and Msg 156 near the body's `BEGIN` here (probed 2026-10-06).
-- **A table column's name before `NOT FOR REPLICATION`, `GENERATED`, `MASKED` or `ENCRYPTED`** is Msg 156 near `not` or a Msg 2715 for the word read as a type here, where real raises Msg 102 near `not`, near `always`, or Msg 156 near the `WITH` with its Msg 319 (probed 2026-10-16 against SQL Server 2025).
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
 
 Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).
