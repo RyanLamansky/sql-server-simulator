@@ -52,7 +52,8 @@ Real's procedures are T-SQL, and their errors behave as such:
 - **Categories.** msdb ships real's 21, user ones numbered from 100; a job category is `LOCAL` or `MULTI-SERVER`, an alert or operator category `NONE`, and the default `LOCAL` with `@class = 'ALERT'` is refused.
   `sp_update_category` renames any of a class's categories, a shipped one included, trimming its names; a name the class already holds, the category's own included, is Msg 14261, and a missing category is the Msg 2786 real's procedure meets formatting its own Msg 14262 (probed 2026-10-19 against SQL Server 2025).
 - **`sp_update_operator` is refused**: it belongs to the `Agent XPs` component, off as the stopped Agent leaves it, so once its arguments bind it is Msg 15281 at line 0 with the caller's return code unset (probed 2026-10-19 against SQL Server 2025).
-- **Operators, alerts, notifications.** An alert watches exactly one condition (Msg 14500) that no other alert watches (Msg 14501); `has_notification` is the notification methods ORed together, recomputed as operators and notifications go.
+- **Operators, alerts, notifications.** An alert watches exactly one condition (Msg 14500) that no other alert watches (Msg 14501), its response and job checked by `sp_verify_alert` — `@enabled` 0 or 1, a delay of at least 0, an event-description mask 0 to 7, a job with a target server (Msg 14527) — and an empty text stored as NULL; `has_notification` is the notification methods ORed together, recomputed as operators and notifications go.
+  `sp_update_alert` lays the arguments given over the alert and runs the same checks, though not the condition-taken one, so two alerts may come to watch one condition; it finds the alert only as written, takes `@occurrence_count` only as 0, refuses a new name an alert holds — the alert's own included — keeps the name for an empty one, and notifies only of a change beyond the counters and dates (probed 2026-10-19 against SQL Server 2025).
   `sp_help_alert` refuses an `@alert_name` or `@alert_id` no alert has (Msg 14262), while a category with none lists nothing.
 
 `sysjobs_view`, `sysschedules_localserver_view` and `sysoriginatingservers_view` are seeded views and `dbo.agent_datetime(@date, @time)` a seeded function reading the integers through a style-120 string, so its out-of-range input is the conversion's own Msg 241, 242 or 8115.
@@ -76,5 +77,5 @@ The three Agent roles are seeded in msdb with real's memberships (`SQLAgentOpera
 ## Not modeled yet
 
 - Starting the Agent, and with it running a job's T-SQL steps, writing history and activity, schedules' next run dates, and the `$(ESCAPE_SQUOTE(…))` tokens.
-- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262), `sp_update_alert`, `sp_help_jobcount`, `sp_help_jobs_in_schedule` and the multi-server (MSX / TSX) procedures.
+- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262), `sp_help_jobcount`, `sp_help_jobs_in_schedule` and the multi-server (MSX / TSX) procedures.
 - The procedures as catalog objects: `msdb.sys.procedures`, `OBJECT_ID('msdb.dbo.sp_add_job')` and `sp_helptext` don't list them.

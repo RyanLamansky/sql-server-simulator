@@ -191,24 +191,8 @@ partial class Simulation
             throw SimulatedSqlException.AgentAlreadyExists("@name", name).AtAgentSite(71, verifier);
         var messageId = call.Int(1)!.Value;
         var severity = call.Int(2)!.Value;
-        var conditions = (messageId != 0 ? 1 : 0) + (severity != 0 ? 1 : 0) + (call.IsNull(12) ? 0 : 1) + (call.IsNull(14) ? 0 : 1);
-        if (conditions != 1)
-            throw SimulatedSqlException.AgentAlertNeedsCondition().AtAgentSite(81, verifier);
-        if (severity is < 0 or > 25)
-            throw SimulatedSqlException.AgentInvalidValue("@severity", "0..25").AtAgentSite(88, verifier);
-        // The engine's own messages aren't catalogued here, so any number
-        // below the user range stands for one; a user message must have been
-        // added with sp_addmessage.
-        if (messageId != 0 && (messageId < 1 || (messageId >= 50000
-            && this.AgentScalar(batch, "select 1 from sys.messages where message_id = @id", ("id", SqlValue.FromInt32(messageId))) is null)))
-        {
-            throw SimulatedSqlException.AgentDoesNotExist("@message_id", messageId.ToString(CultureInfo.InvariantCulture)).AtAgentSite(102, verifier);
-        }
-        if (call.Text(7) is { } database && !this.Databases.ContainsKey(database))
-            throw SimulatedSqlException.HelpDatabaseDoesNotExist(database).AtAgentSite(158, verifier);
-        var jobId = SqlValue.FromGuid(Guid.Empty);
-        if (!call.IsNull(9) || !call.IsNull(10))
-            jobId = AgentJobId(this.ResolveAgentJob(batch, call.Guid(9), call.Text(10)));
+        var jobId = this.VerifyAgentAlert(batch, messageId, severity, call.Int(3)!.Value, call.Int(4)!.Value, call.Int(6)!.Value, EmptyAsNull(call.Text(7)),
+            !call.IsNull(12), !call.IsNull(14), call.Guid(9), call.Text(10));
         var categoryId = 98;
         if (call.Text(13) is { } category)
         {
@@ -220,8 +204,8 @@ partial class Simulation
             where message_id = @message and severity = @severity and isnull(database_name, N'') = isnull(@database, N'')
                 and isnull(event_description_keyword, N'') = isnull(@keyword, N'') and performance_condition is null and @performance is null
             """,
-            ("message", SqlValue.FromInt32(messageId)), ("severity", SqlValue.FromInt32(severity)), ("database", call.Values[7]),
-            ("keyword", call.Values[8]), ("performance", call.Values[12])) is { } existing)
+            ("message", SqlValue.FromInt32(messageId)), ("severity", SqlValue.FromInt32(severity)), ("database", AgentNText(EmptyAsNull(call.Text(7)))),
+            ("keyword", AgentNText(EmptyAsNull(call.Text(8)))), ("performance", call.Values[12])) is { } existing)
         {
             throw SimulatedSqlException.AgentAlertConditionTaken(existing.AsString).AtAgentSite(177, "msdb.dbo.sp_add_alert_internal");
         }
@@ -234,8 +218,148 @@ partial class Simulation
                 0, 0, 0, @job, 0, 0, @performance, @category)
             """,
             ("name", SqlValue.FromNVarchar(name)), ("message", SqlValue.FromInt32(messageId)), ("severity", SqlValue.FromInt32(severity)),
-            ("enabled", call.Values[3]), ("delay", call.Values[4]), ("text", call.Values[5]), ("include", call.Values[6]), ("database", call.Values[7]),
-            ("keyword", call.Values[8]), ("job", jobId), ("performance", call.Values[12]), ("category", SqlValue.FromInt32(categoryId)));
+            ("enabled", call.Values[3]), ("delay", call.Values[4]), ("text", AgentNText(EmptyAsNull(call.Text(5)))), ("include", call.Values[6]),
+            ("database", AgentNText(EmptyAsNull(call.Text(7)))), ("keyword", AgentNText(EmptyAsNull(call.Text(8)))), ("job", jobId), ("performance", call.Values[12]),
+            ("category", SqlValue.FromInt32(categoryId)));
+    }
+
+    /// <summary>
+    /// <c>sp_verify_alert</c>'s checks of an alert's condition and response, in
+    /// its order: exactly one condition (Msg 14500), a severity 0 to 25
+    /// (14266), a message that exists (14262), <c>@enabled</c> 0 or 1, a
+    /// delay of no fewer than 0 seconds and an event-description mask 0 to 7
+    /// (14266), a database that exists (15010) and a job that exists and has a
+    /// target server (14527) — answering the job's id, or the empty one for
+    /// none, which the empty id names too (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    private SqlValue VerifyAgentAlert(BatchContext batch, int messageId, int severity, int enabled, int delay, int include, string? database, bool hasPerformance, bool hasWmi, Guid? jobGuid, string? jobName)
+    {
+        const string verifier = "sp_verify_alert";
+        var conditions = (messageId != 0 ? 1 : 0) + (severity != 0 ? 1 : 0) + (hasPerformance ? 1 : 0) + (hasWmi ? 1 : 0);
+        if (conditions != 1)
+            throw SimulatedSqlException.AgentAlertNeedsCondition().AtAgentSite(81, verifier);
+        if (severity is < 0 or > 25)
+            throw SimulatedSqlException.AgentInvalidValue("@severity", "0..25").AtAgentSite(88, verifier);
+        // The engine's own messages aren't catalogued here, so any number
+        // below the user range stands for one; a user message must have been
+        // added with sp_addmessage.
+        if (messageId != 0 && (messageId < 1 || (messageId >= 50000
+            && this.AgentScalar(batch, "select 1 from sys.messages where message_id = @id", ("id", SqlValue.FromInt32(messageId))) is null)))
+        {
+            throw SimulatedSqlException.AgentDoesNotExist("@message_id", messageId.ToString(CultureInfo.InvariantCulture)).AtAgentSite(102, verifier);
+        }
+        if (enabled is not (0 or 1))
+            throw SimulatedSqlException.AgentInvalidValue("@enabled", "0, 1").AtAgentSite(133, verifier);
+        if (delay < 0)
+            throw SimulatedSqlException.AgentInvalidValue("@delay_between_responses", "0..n seconds").AtAgentSite(141, verifier);
+        if (include is < 0 or > 7)
+            throw SimulatedSqlException.AgentInvalidValue("@include_event_description_in", "1..7 [1 = E-mail, 2 = Pager, 4 = NetSend]").AtAgentSite(151, verifier);
+        if (database is not null && !this.Databases.ContainsKey(database))
+            throw SimulatedSqlException.HelpDatabaseDoesNotExist(database).AtAgentSite(158, verifier);
+        // The empty id names no job, which clears an alert's.
+        if (jobName is null && (jobGuid ?? Guid.Empty) == Guid.Empty)
+            return SqlValue.FromGuid(Guid.Empty);
+        var job = this.ResolveAgentJob(batch, jobGuid, jobName);
+        var jobId = AgentJobId(job);
+        if (jobId.AsGuid != Guid.Empty && this.AgentScalar(batch, "select 1 from dbo.sysjobservers where job_id = @id", ("id", jobId)) is null)
+            throw SimulatedSqlException.AgentAlertJobNotTargeted(job["name"].AsString).AtAgentSite(197, verifier);
+        return jobId;
+    }
+
+    /// <summary>An alert's text argument, an empty one meaning none, as <c>sp_verify_alert</c> reads it.</summary>
+    private static string? EmptyAsNull(string? text) => text is { Length: 0 } ? null : text;
+
+    private static readonly SystemProcedureParameter[] SpUpdateAlertParameters =
+    [
+        AgentRequired("name", AgentName, 128),
+        AgentParameter("new_name", AgentName, 128),
+        AgentParameter("enabled", SqlType.TinyInt),
+        AgentParameter("message_id", SqlType.Int32),
+        AgentParameter("severity", SqlType.Int32),
+        AgentParameter("delay_between_responses", SqlType.Int32),
+        AgentParameter("notification_message", AgentText, 512),
+        AgentParameter("include_event_description_in", SqlType.TinyInt),
+        AgentParameter("database_name", AgentName, 128),
+        AgentParameter("event_description_keyword", AgentText, 100),
+        AgentParameter("job_id", SqlType.UniqueIdentifier),
+        AgentParameter("job_name", AgentName, 128),
+        AgentParameter("occurrence_count", SqlType.Int32),
+        AgentParameter("count_reset_date", SqlType.Int32),
+        AgentParameter("count_reset_time", SqlType.Int32),
+        AgentParameter("last_occurrence_date", SqlType.Int32),
+        AgentParameter("last_occurrence_time", SqlType.Int32),
+        AgentParameter("last_response_date", SqlType.Int32),
+        AgentParameter("last_response_time", SqlType.Int32),
+        AgentParameter("raise_snmp_trap", SqlType.TinyInt),
+        AgentParameter("performance_condition", AgentText, 512),
+        AgentParameter("category_name", AgentName, 128),
+        AgentParameter("wmi_namespace", AgentName, 128),
+        AgentParameter("wmi_query", AgentText, 512),
+    ];
+
+    /// <summary>
+    /// <c>sp_update_alert</c>: the alert named exactly as written (Msg 14262),
+    /// an occurrence count only reset to 0 (14266), then the arguments given
+    /// laid over the alert and checked as <see cref="VerifyAgentAlert"/> checks
+    /// a new one — a new name, even the alert's own, that an alert holds is
+    /// Msg 14261, and the category last (14262). An empty new name keeps the
+    /// name and an empty text clears its column; only a change beyond the
+    /// counters and dates sends the stopped Agent's notice (probed 2026-10-19
+    /// against SQL Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpUpdateAlert(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_update_alert", SpUpdateAlertParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_update_alert", grantedRole: null);
+        var name = call.Text(0)!;
+        var alert = this.AgentRows(batch, "sysalerts", "name = @name", [("name", SqlValue.FromNVarchar(name))]) is [var found] ? found
+            : throw SimulatedSqlException.AgentDoesNotExist("@name", name).AtAgentSite(120);
+        if (call.Int(12) is { } count && count != 0)
+            throw SimulatedSqlException.AgentInvalidValue("@occurrence_count", "0").AtAgentSite(127);
+        if (EmptyAsNull(call.Text(1)?.Trim()) is { } newName
+            && this.AgentScalar(batch, "select 1 from dbo.sysalerts where name = @name", ("name", SqlValue.FromNVarchar(newName))) is not null)
+        {
+            throw SimulatedSqlException.AgentAlreadyExists("@name", newName).AtAgentSite(71, "sp_verify_alert");
+        }
+        string? Kept(int index, string column) => call.IsNull(index) ? alert[column] is { IsNull: false } kept ? kept.AsString : null : EmptyAsNull(call.Text(index));
+        var messageId = call.Int(3) ?? alert["message_id"].AsInt32;
+        var severity = call.Int(4) ?? alert["severity"].AsInt32;
+        var enabled = call.Int(2) ?? alert["enabled"].CoerceTo(SqlType.Int32).AsInt32;
+        var delay = call.Int(5) ?? alert["delay_between_responses"].AsInt32;
+        var include = call.Int(7) ?? alert["include_event_description"].CoerceTo(SqlType.Int32).AsInt32;
+        var database = Kept(8, "database_name");
+        var performance = Kept(20, "performance_condition");
+        var verifiedJob = this.VerifyAgentAlert(batch, messageId, severity, enabled, delay, include, database, performance is not null, !call.IsNull(22), call.Guid(10), call.Text(11));
+        var jobId = call.IsNull(10) && call.IsNull(11) ? alert["job_id"] : verifiedJob;
+        var categoryId = alert["category_id"];
+        if (call.Text(21) is { } category)
+        {
+            categoryId = this.AgentScalar(batch, "select category_id from dbo.syscategories where name = @name and category_class = 2", ("name", SqlValue.FromNVarchar(category)))
+                ?? throw SimulatedSqlException.AgentDoesNotExist("@category_name", category).AtAgentSite(263, "sp_verify_alert");
+        }
+        _ = this.AgentSql(batch, """
+            update dbo.sysalerts set name = @name, message_id = @message, severity = @severity, enabled = @enabled, delay_between_responses = @delay,
+                notification_message = @text, include_event_description = @include, database_name = @database, event_description_keyword = @keyword,
+                job_id = @job, occurrence_count = isnull(@count, occurrence_count), count_reset_date = isnull(@resetDate, count_reset_date),
+                count_reset_time = isnull(@resetTime, count_reset_time), last_occurrence_date = isnull(@occurredDate, last_occurrence_date),
+                last_occurrence_time = isnull(@occurredTime, last_occurrence_time), last_response_date = isnull(@respondedDate, last_response_date),
+                last_response_time = isnull(@respondedTime, last_response_time), performance_condition = @performance, category_id = @category
+            where id = @id
+            """,
+            ("name", SqlValue.FromNVarchar(EmptyAsNull(call.Text(1)?.Trim()) ?? name)), ("message", SqlValue.FromInt32(messageId)),
+            ("severity", SqlValue.FromInt32(severity)), ("enabled", SqlValue.FromByte((byte)enabled)), ("delay", SqlValue.FromInt32(delay)),
+            ("text", AgentNText(Kept(6, "notification_message"))), ("include", SqlValue.FromByte((byte)include)), ("database", AgentNText(database)),
+            ("keyword", AgentNText(Kept(9, "event_description_keyword"))), ("job", jobId), ("count", call.Values[12]), ("resetDate", call.Values[13]),
+            ("resetTime", call.Values[14]), ("occurredDate", call.Values[15]), ("occurredTime", call.Values[16]), ("respondedDate", call.Values[17]),
+            ("respondedTime", call.Values[18]), ("performance", AgentNText(performance)), ("category", categoryId), ("id", alert["id"]));
+        var changesDefinition = false;
+        for (var i = 1; i < call.Values.Length; i++)
+            changesDefinition |= i is not (>= 12 and <= 18) && !call.IsNull(i);
+        if (changesDefinition)
+            yield return AgentNotRunningNotice(batch);
+        AgentReturn(batch, returnCodeVar, 0);
     }
 
     private static readonly SystemProcedureParameter[] SpDeleteAlertParameters = [AgentRequired("name", AgentName, 128)];

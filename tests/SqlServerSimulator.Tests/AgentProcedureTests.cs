@@ -702,4 +702,55 @@ public sealed class AgentProcedureTests
         AreEqual(7, simulation.ExecuteScalar("declare @rc int = 7; begin try exec @rc = msdb.dbo.sp_update_operator @name = N'none' end try begin catch end catch; select @rc"));
         _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_operator", 201);
     }
+
+    /// <summary>
+    /// sp_add_alert and sp_update_alert share sp_verify_alert's checks of the
+    /// response — @enabled, the delay, the event-description mask — and of a
+    /// job, which needs a target server (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    [DataRow("@enabled = 3", 14266, 133)]
+    [DataRow("@delay_between_responses = -1", 14266, 141)]
+    [DataRow("@include_event_description_in = 8", 14266, 151)]
+    [DataRow("@job_name = N'j'", 14527, 197)]
+    public void AddAlert_VerifiesTheResponse(string arguments, int number, int line)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec msdb.dbo.sp_add_job @job_name = N'j'");
+        var refused = simulation.AssertSqlError($"exec msdb.dbo.sp_add_alert @name = N'a', @severity = 17, {arguments}", number);
+        AreEqual(("sp_verify_alert", line), (refused.Errors[0].Procedure, refused.Errors[0].LineNumber));
+    }
+
+    /// <summary>
+    /// sp_update_alert lays the arguments given over the alert, verifies the
+    /// result as sp_add_alert verifies a new one, and notifies the stopped
+    /// Agent only of a change beyond the counters (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void UpdateAlert_LaysTheArgumentsOverTheAlert()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            use msdb;
+            exec sp_add_alert @name = N'a', @severity = 17;
+            exec sp_add_alert @name = N'b', @severity = 18;
+            exec sp_add_job @job_name = N'j';
+            exec sp_add_jobserver @job_name = N'j';
+            """);
+        CollectionAssert.AreEqual(new[] { "22022:SQLServerAgent is not currently running so it cannot be notified of this action." },
+            Messages(simulation, "exec msdb.dbo.sp_update_alert @name = N'a', @new_name = N' c ', @enabled = 0, @notification_message = N'm', @database_name = N'', @job_name = N'j'"));
+        AreEqual("c|0|17|m|NULL|1", simulation.ExecuteScalar("""
+            select name + '|' + cast(enabled as varchar) + '|' + cast(severity as varchar) + '|' + notification_message + '|' + isnull(database_name, 'NULL')
+                + '|' + cast((select count(*) from msdb.dbo.sysjobs as j where j.job_id = a.job_id) as varchar)
+            from msdb.dbo.sysalerts as a where name = N'c'
+            """));
+        IsEmpty(Messages(simulation, "exec msdb.dbo.sp_update_alert @name = N'c', @occurrence_count = 0, @count_reset_date = 20200101"));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_alert @name = N' c '", 14262);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_alert @name = N'c', @occurrence_count = 5", 14266);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_alert @name = N'c', @new_name = N'C'", 14261);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_alert @name = N'c', @message_id = 2627", 14500);
+        var category = simulation.AssertSqlError("exec msdb.dbo.sp_update_alert @name = N'c', @category_name = N'none'", 14262);
+        AreEqual(263, category.Errors[0].LineNumber);
+        AreEqual(1, simulation.ExecuteScalar("use msdb; exec sp_update_alert @name = N'c', @job_id = '00000000-0000-0000-0000-000000000000'; select count(*) from sysalerts where name = N'c' and job_id = '00000000-0000-0000-0000-000000000000'"));
+    }
 }

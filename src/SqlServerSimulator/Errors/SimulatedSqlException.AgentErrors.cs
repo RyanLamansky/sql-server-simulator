@@ -69,6 +69,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AgentJobNotTargeted(string jobName, string server) =>
         new($"Job '{jobName}' is not currently targeted at server '{server}'.", 14270, 16, 1);
 
+    /// <summary>Msg 14527: an alert's job that no target server has.</summary>
+    internal static SimulatedSqlException AgentAlertJobNotTargeted(string jobName) =>
+        new($"Job \"{jobName}\" cannot be used by an alert. It should first be associated with a server by calling sp_add_jobserver.", 14527, 16, 1);
+
     /// <summary>Msg 14274: <c>sp_add_job</c> handed a job id, which only a job an MSX server sends carries.</summary>
     internal static SimulatedSqlException AgentJobFromMsx() =>
         new("Cannot add, update, or delete a job (or its steps or schedules) that originated from an MSX server.", 14274, 16, 1);

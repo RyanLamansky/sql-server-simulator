@@ -24,7 +24,7 @@ partial class Simulation
         "sp_delete_notification", "sp_delete_operator", "sp_delete_schedule", "sp_detach_schedule", "sp_enum_sqlagent_subsystems", "sp_help_alert",
         "sp_help_category", "sp_help_job", "sp_help_jobactivity", "sp_help_jobhistory", "sp_help_jobschedule",
         "sp_help_jobserver", "sp_help_jobstep", "sp_help_operator", "sp_help_schedule", "sp_purge_jobhistory",
-        "sp_start_job", "sp_stop_job", "sp_update_category", "sp_update_job", "sp_update_jobschedule", "sp_update_jobstep", "sp_update_operator", "sp_update_schedule",
+        "sp_start_job", "sp_stop_job", "sp_update_alert", "sp_update_category", "sp_update_job", "sp_update_jobschedule", "sp_update_jobstep", "sp_update_operator", "sp_update_schedule",
     ];
 
     /// <summary>
@@ -120,6 +120,7 @@ partial class Simulation
         "sp_purge_jobhistory" => this.InvokeSpPurgeJobHistory(batch, returnCodeVar),
         "sp_start_job" => this.InvokeSpStartStopJob(batch, returnCodeVar, start: true),
         "sp_stop_job" => this.InvokeSpStartStopJob(batch, returnCodeVar, start: false),
+        "sp_update_alert" => this.InvokeSpUpdateAlert(batch, returnCodeVar),
         "sp_update_category" => this.InvokeSpUpdateCategory(batch, returnCodeVar),
         "sp_update_job" => this.InvokeSpUpdateJob(batch, returnCodeVar),
         "sp_update_jobschedule" => this.InvokeSpUpdateJobSchedule(batch, returnCodeVar),
