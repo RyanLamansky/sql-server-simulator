@@ -215,7 +215,9 @@ partial class Simulation
             return true;
         });
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true, partners: partners);
+        var committed = CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true, partners: partners);
+        positionedCursor?.Cursor.RefreshOptimisticSnapshot();
+        return committed;
 
         // The target row the current tuple shows when every level's own WHERE
         // passes it — together they gate candidacy exactly as the composed

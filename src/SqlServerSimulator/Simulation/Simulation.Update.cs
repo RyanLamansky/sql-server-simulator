@@ -888,7 +888,9 @@ partial class Simulation
         if (positionedCursor is null)
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
-        return CommitUpdate(context, table, affected, output, setOrdinals, sourceView, rowsLocked: true);
+        var committed = CommitUpdate(context, table, affected, output, setOrdinals, sourceView, rowsLocked: true);
+        positionedCursor?.Cursor.RefreshOptimisticSnapshot();
+        return committed;
 
         // Judges the row at rows[i] again as rowBytes, replacing its entry;
         // false when it no longer qualifies.

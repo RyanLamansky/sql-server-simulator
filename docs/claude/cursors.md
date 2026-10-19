@@ -367,7 +367,7 @@ A slot a view stamps is matched against the **view's** output columns rather tha
   Locks release on CLOSE, the last DEALLOCATE, frame teardown (LOCAL), and connection dispose (`ReleaseScrollLocks`).
   See [`locking.md`](locking.md).
 - **OPTIMISTIC** holds no lock.
-  At each FETCH the row's full stored bytes are snapshotted (`optimisticSnapshot`); a positioned UPDATE / DELETE re-reads the live bytes at the row's address and, if they differ (a value change, a rowversion bump, or the row's deletion), raises the optimistic-conflict chain: **Msg 16947** (`"No rows were updated or deleted."`, class 16 state 1 — the number a SqlClient consumer catches) plus the descriptive class-0 **Msg 16934** (`"Optimistic concurrency check failed. The row was modified outside of this cursor."`) and **Msg 3621**, all reproduced in `SimulatedSqlException.Errors`.
+  At each FETCH, and after the cursor's own positioned UPDATE, the row's full stored bytes are snapshotted (`optimisticSnapshot`); a positioned UPDATE / DELETE re-reads the live bytes at the row's address and, if they differ (a value change, a rowversion bump, or the row's deletion), raises the optimistic-conflict chain: **Msg 16947** (`"No rows were updated or deleted."`, class 16 state 1 — the number a SqlClient consumer catches) plus the descriptive class-0 **Msg 16934** (`"Optimistic concurrency check failed. The row was modified outside of this cursor."`) and **Msg 3621**, all reproduced in `SimulatedSqlException.Errors`.
   A full-row byte compare subsumes both of real SQL Server's detection bases — the rowversion column when the table has one (its bytes change on any update), a column checksum otherwise.
   The compare comes after the write's U has waited out the row's other writers (`Cursor.CheckOptimisticConflict`), as real's does (probed 2026-10-03 against SQL Server 2025: `LCK_M_U`, then the conflict chain for a row deleted and inserted again meanwhile); comparing first let the write find its row gone afterwards and report success having changed nothing.
 - **A KEYSET cursor reads committed rows.**
@@ -447,8 +447,6 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
   Real SQL Server may report a transient positive count for a freshly-opened dynamic cursor before the first fetch (asynchronous population heuristic); the simulator doesn't model the transition.
 - **A deleted keyset member's row follows the projection's inferred nullability**, so where that isn't inferred (a join, a deferred source) every column reads NULL where real zeroes the NOT NULL ones.
   A NOT NULL `geography` / `geometry` column reads NULL too: real sends a zero-length spatial value, which the parsed value model can't carry.
-- **OPTIMISTIC double-positioned-DML without an intervening FETCH** falsely conflicts: the snapshot is refreshed only at FETCH, so a second `UPDATE … WHERE CURRENT OF` on the same row (without re-fetching) sees its own first UPDATE as an out-of-band change.
-  Pathological — well-formed cursor loops always FETCH between positioned mutations.
 - **OPTIMISTIC over a forwarded (oversize) UPDATE**: detection reads `Heap.ReadSlotBytes` at the row's address.
   A fits-in-place rewrite returns the new bytes (conflict detected); an oversize rewrite that installs a forwarding pointer isn't followed by `ReadSlotBytes`, so such a change may go undetected.
   The common small-value case is exact.

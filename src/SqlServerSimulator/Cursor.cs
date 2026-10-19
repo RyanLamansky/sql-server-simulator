@@ -542,6 +542,20 @@ internal sealed class Cursor(
     }
 
     /// <summary>
+    /// Re-reads the current row into the <see cref="CursorConcurrency.Optimistic"/>
+    /// snapshot once the cursor's own positioned <c>UPDATE</c> wrote it, which
+    /// is no out-of-band change: a second one before any <c>FETCH</c> writes
+    /// too (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    internal void RefreshOptimisticSnapshot()
+    {
+        if (this.optimisticSnapshot is not { } snapshot || this.CurrentRids is not { } rids)
+            return;
+        for (var i = 0; i < rids.Length; i++)
+            snapshot[i] = rids[i] is { } rid ? this.BaseTables[i].Heap.ReadSlotBytes(rid.Page, rid.Slot) : null;
+    }
+
+    /// <summary>
     /// The index of the first identity slot a positioned <c>WHERE CURRENT OF</c>
     /// naming <paramref name="table"/> — written directly, or through
     /// <paramref name="throughView"/> — addresses, or <c>-1</c> when the cursor

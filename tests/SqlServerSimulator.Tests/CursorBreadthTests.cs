@@ -293,6 +293,35 @@ public sealed class CursorBreadthTests
         AreEqual(16947, ex.Number);
     }
 
+    /// <summary>
+    /// The cursor's own positioned UPDATE is no out-of-band change: a second
+    /// one and a positioned DELETE before any FETCH write too, while a plain
+    /// UPDATE between them still conflicts (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Optimistic_ItsOwnPositionedUpdate_IsNoConflict()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int primary key, a int); insert t values (1,10),(2,20);
+            declare c cursor keyset optimistic for select id, a from t;
+            open c; fetch next from c;
+            update t set a = 11 where current of c;
+            update t set a = 12 where current of c;
+            delete t where current of c;
+            close c; deallocate c
+            """);
+        AreEqual("2:20", sim.ExecuteScalar("select string_agg(concat(id, ':', a), ',') from t"));
+        AreEqual(16947, sim.AssertSqlError("""
+            declare c cursor keyset optimistic for select id, a from t;
+            open c; fetch next from c;
+            update t set a = 21 where current of c;
+            update t set a = 99 where id = 2;
+            update t set a = 22 where current of c
+            """, 16947).Number);
+    }
+
     [TestMethod]
     public void Optimistic_NoOutOfBandChange_PositionedUpdateSucceeds()
     {
