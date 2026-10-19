@@ -1102,6 +1102,7 @@ Not modeled yet: a `char` / `nchar` input keeps its fixed-width family through `
 ### The rowset members
 
 `REGEXP_MATCHES` projects `(match_id bigint, start_position int, end_position int, match_value <input type>, substring_matches varchar(max))`.
+**Divergence**: `substring_matches` is `varchar(max)` here throughout, which is what real's `sp_describe_first_result_set` reports, while the value real sends is the native `json` type — a `SELECT … INTO` makes a `json` column, SqlClient reads its type as `json`, and its `DATALENGTH` is the binary form's (101 for a one-capture match) (probed 2026-10-19 against SQL Server 2025).
 `substring_matches` is `varchar(max)` whatever the input's family.
 It carries one JSON object per capture group with the group's 1-based `start` and its `length`, `null` members for a group that didn't participate, and — when the pattern has **no** capture group — a single entry for the whole match.
 
