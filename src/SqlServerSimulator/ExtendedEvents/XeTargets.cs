@@ -168,11 +168,14 @@ internal sealed class HistogramTarget(SessionTarget target) : XeTargetState(targ
 
 /// <summary>
 /// <c>pair_matching</c>: each <c>begin_event</c> kept as an orphan until an
-/// <c>end_event</c> pairs with it.
+/// <c>end_event</c> whose matching columns and actions read the values its
+/// own did pairs with it, the oldest such begin first, while an end no begin
+/// waits for stays as an orphan itself, in arrival order (probed 2026-10-19
+/// against SQL Server 2025).
 /// </summary>
 internal sealed class PairMatchingTarget(SessionTarget target) : XeTargetState(target)
 {
-    private readonly List<string> orphans = [];
+    private readonly List<(bool Begin, string Key, string Xml)> orphans = [];
     private long matched;
 
     public override void Accept(XeFiring firing, SessionEvent sessionEvent, XeEventRecord record)
@@ -181,20 +184,54 @@ internal sealed class PairMatchingTarget(SessionTarget target) : XeTargetState(t
         var name = sessionEvent.Event.Package.Name + "." + sessionEvent.Event.Name;
         if (name.Equals(this.Target.FieldText("begin_event"), StringComparison.OrdinalIgnoreCase))
         {
-            this.orphans.Add(record.Xml);
+            this.orphans.Add((true, this.MatchingKey(firing, sessionEvent, "begin"), record.Xml));
+            return;
         }
-        else if (name.Equals(this.Target.FieldText("end_event"), StringComparison.OrdinalIgnoreCase) && this.orphans.Count != 0)
+        if (!name.Equals(this.Target.FieldText("end_event"), StringComparison.OrdinalIgnoreCase))
+            return;
+        var key = this.MatchingKey(firing, sessionEvent, "end");
+        for (var i = 0; i < this.orphans.Count; i++)
         {
-            this.orphans.RemoveAt(0);
-            this.matched++;
+            if (this.orphans[i].Begin && string.Equals(this.orphans[i].Key, key, StringComparison.Ordinal))
+            {
+                this.orphans.RemoveAt(i);
+                this.matched++;
+                return;
+            }
         }
+        this.orphans.Add((false, key, record.Xml));
+    }
+
+    /// <summary>The values an event's <c>&lt;side&gt;_matching_columns</c> and <c>_actions</c> name, in order.</summary>
+    private string MatchingKey(XeFiring firing, SessionEvent sessionEvent, string side)
+    {
+        var key = new StringBuilder();
+        foreach (var name in Names(this.Target.FieldText(side + "_matching_columns")))
+        {
+            foreach (var column in sessionEvent.Event.DataColumns)
+            {
+                if (column.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    _ = key.Append(firing.Field(column).XmlText);
+            }
+            _ = key.Append('\u001F');
+        }
+        foreach (var name in Names(this.Target.FieldText(side + "_matching_actions")))
+        {
+            var dot = name.LastIndexOf('.');
+            if (dot > 0 && XeMetadata.Instance.Find(name[..dot], name[(dot + 1)..], "action") is { } action)
+                _ = key.Append(XeContextValues.Value(action.Package.Name, action.Name, firing)?.XmlText);
+            _ = key.Append('\u001F');
+        }
+        return key.ToString();
+
+        static string[] Names(string? list) => list is null ? [] : list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     public override string TargetData()
     {
         var builder = new StringBuilder("<PairingTarget truncated=\"0\" orphanCount=\"").Append(this.orphans.Count)
             .Append("\" matchedCount=\"").Append(this.matched).Append("\" droppedCount=\"0\">");
-        foreach (var xml in this.orphans)
+        foreach (var (_, _, xml) in this.orphans)
             _ = builder.Append(xml);
         return builder.Append("</PairingTarget>").ToString();
     }

@@ -259,6 +259,31 @@ public sealed class ExtendedEventsFiringTests
         }), string.Join("\n", Summaries(RingBuffer(sim), "row_count", "last_row_count", "offset", "offset_end")));
     }
 
+    // pair_matching pairs an end with the oldest begin its matching columns
+    // agree with, and keeps an end no begin waits for as an orphan, in
+    // arrival order (probed 2026-10-19 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("(where sqlserver.client_app_name = N'app' and statement = N'select 2')", "(where sqlserver.client_app_name = N'app')", "1|sql_statement_completed:select 1")]
+    [DataRow("(where sqlserver.client_app_name = N'app')", "(where sqlserver.client_app_name = N'app' and statement = N'select 2')", "1|sql_statement_starting:select 1")]
+    public void PairMatching_PairsByItsColumns_AndKeepsAnUnmatchedEnd(string begins, string ends, string expected)
+    {
+        var sim = WithSession($"""
+            add event sqlserver.sql_statement_starting {begins},
+            add event sqlserver.sql_statement_completed {ends}
+            add target package0.pair_matching (set begin_event = 'sqlserver.sql_statement_starting', begin_matching_columns = 'statement',
+                end_event = 'sqlserver.sql_statement_completed', end_matching_columns = 'statement')
+            """);
+        using (var client = Client(sim, "app"))
+            Run(client, "select 1; select 2");
+        AreEqual(expected, sim.ExecuteScalar("""
+            select concat(d.value('(/PairingTarget/@matchedCount)[1]', 'int'), '|',
+                (select string_agg(concat(x.value('@name', 'varchar(40)'), ':', x.value('(data[@name="statement"]/value)[1]', 'nvarchar(50)')), ',')
+                from d.nodes('/PairingTarget/event') n(x)))
+            from (select cast(t.target_data as xml) d from sys.dm_xe_session_targets t join sys.dm_xe_sessions x on x.address = t.event_session_address
+                where x.name = 's' and t.target_name = 'pair_matching') q
+            """));
+    }
+
     // A SET of QUOTED_IDENTIFIER alone fires no statement event, though one
     // naming it in a list does (probed 2026-10-19 against SQL Server 2025).
     [TestMethod]
