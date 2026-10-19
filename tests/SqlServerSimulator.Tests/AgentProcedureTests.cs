@@ -608,4 +608,98 @@ public sealed class AgentProcedureTests
                 weekday_pager_start_time, weekday_pager_end_time, saturday_pager_start_time, saturday_pager_end_time, sunday_pager_start_time, sunday_pager_end_time,
                 pager_days, isnull(netsend_address, ''), last_netsend_date, last_netsend_time, category_name) from #o
             """));
+
+    /// <summary>
+    /// sp_update_category renames within the class, trimming its names, to a
+    /// name the class doesn't hold, itself included; a missing category meets
+    /// the Msg 2786 real's own procedure raises formatting its Msg 14262, and a
+    /// NULL new name the UPDATE's Msg 515 (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void UpdateCategory_RenamesWithinTheClass()
+    {
+        var simulation = new Simulation();
+        AreEqual("0|mine2", simulation.ExecuteScalar("""
+            use msdb;
+            exec sp_add_category @name = N'mine';
+            declare @rc int;
+            exec @rc = sp_update_category @class = ' job ', @name = N' MINE ', @new_name = N' mine2 ';
+            select cast(@rc as varchar) + '|' + name from syscategories where category_id = 100
+            """));
+        var missing = simulation.AssertSqlError("exec msdb.dbo.sp_update_category 'ALERT', N'mine2', N'x'", 2786);
+        AreEqual(("msdb.dbo.sp_update_category", 35), (missing.Errors[0].Procedure, missing.Errors[0].LineNumber));
+        var taken = simulation.AssertSqlError("exec msdb.dbo.sp_update_category 'JOB', N'mine2', N'MINE2'", 14261);
+        AreEqual(("The specified @new_name ('MINE2') already exists.", 46), (taken.Errors[0].Message, taken.Errors[0].LineNumber));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_category 'BOGUS', N'mine2', N'x'", 14266);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_category 'JOB', N'mine2', null", 515);
+        AreEqual(0, simulation.ExecuteScalar("declare @rc int; exec @rc = msdb.dbo.sp_update_category 'JOB', null, N'x'; select @rc"));
+    }
+
+    /// <summary>
+    /// sp_help_job verifies a named job before anything else, refuses a filter
+    /// beside one (Msg 14280), and lets @execution_status and @description
+    /// beside one filter its details row instead (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void HelpJob_VerifiesTheJobBeforeItsArguments()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec msdb.dbo.sp_add_job @job_name = N'j'");
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_job @job_name = N'none', @enabled = 1", 14262);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_job @job_name = N'none', @job_aspect = 'BOGUS'", 14262);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_job @job_name = N'j', @enabled = 1", 14280);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_job @job_name = N'j', @date_comparator = '='", 14280);
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_job @job_name = N'j', @job_aspect = 'BOGUS', @execution_status = 1", 14266);
+        using var connection = simulation.CreateOpenConnection();
+        using var reader = connection.CreateCommand("exec msdb.dbo.sp_help_job @job_name = N'j', @job_aspect = 'JOB', @description = N'x'").ExecuteReader();
+        IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// The deletion procedures' refusals and answers as real gives them
+    /// (probed 2026-10-19): a category, a target server, a schedule detached,
+    /// and job history purged.
+    /// </summary>
+    [TestMethod]
+    public void DeletionProcedures_RemoveWhatTheyName()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            use msdb;
+            exec sp_add_category @name = N'cat';
+            exec sp_add_job @job_name = N'j', @category_name = N'cat';
+            exec sp_add_jobserver @job_name = N'j';
+            exec sp_add_schedule @schedule_name = N's', @freq_type = 4, @freq_interval = 1;
+            exec sp_attach_schedule @job_name = N'j', @schedule_name = N's';
+            """);
+        AreEqual("0|0", simulation.ExecuteScalar("""
+            use msdb;
+            exec sp_delete_category @class = 'JOB', @name = N'cat';
+            select cast(category_id as varchar) + '|' + cast((select count(*) from syscategories where name = N'cat') as varchar) from sysjobs where name = N'j'
+            """));
+        simulation.AssertSqlError("exec msdb.dbo.sp_delete_category @class = 'JOB', @name = N'cat'", 14262, "The specified @name ('cat') does not exist.");
+        AreEqual(0, simulation.ExecuteScalar("use msdb; exec sp_delete_jobserver @job_name = N'j', @server_name = N'(local)'; select count(*) from sysjobservers"));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_delete_jobserver @job_name = N'j', @server_name = N'(local)'", 14270);
+        AreEqual(0, simulation.ExecuteScalar("use msdb; exec sp_detach_schedule @job_name = N'j', @schedule_name = N's'; select count(*) from sysjobschedules"));
+        simulation.AssertSqlError("exec msdb.dbo.sp_detach_schedule @job_name = N'j', @schedule_name = N's'", 14262, "The specified @schedule_name ('s') does not exist.");
+        AreEqual(0, simulation.ExecuteScalar("declare @rc int; exec @rc = msdb.dbo.sp_purge_jobhistory @job_name = N'j'; select @rc"));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_purge_jobhistory @job_name = N'none'", 14262);
+        AreEqual(6, simulation.ExecuteScalar("create table #s (subsystem nvarchar(40), description nvarchar(512), subsystem_dll nvarchar(255), agent_exe nvarchar(255), start_entry_point nvarchar(30), event_entry_point nvarchar(30), stop_entry_point nvarchar(30), max_worker_threads int, subsystem_id int); insert #s exec msdb.dbo.sp_enum_sqlagent_subsystems; select count(*) from #s"));
+    }
+
+    /// <summary>
+    /// sp_update_operator belongs to the 'Agent XPs' component, which the
+    /// stopped Agent's configuration turns off: once its arguments bind it is
+    /// Msg 15281 at line 0, the caller's return code unset (probed 2026-10-19).
+    /// </summary>
+    [TestMethod]
+    public void UpdateOperator_IsBlockedWithAgentXpsOff()
+    {
+        var simulation = new Simulation();
+        var blocked = simulation.AssertSqlError("declare @rc int = 7; exec @rc = msdb.dbo.sp_update_operator @name = N'none'", 15281);
+        AreEqual(("SQL Server blocked access to procedure 'dbo.sp_update_operator' of component 'Agent XPs' because this component is turned off as part of the security configuration for this server. A system administrator can enable the use of 'Agent XPs' by using sp_configure. For more information about enabling 'Agent XPs', search for 'Agent XPs' in SQL Server Books Online.", 0),
+            (blocked.Errors[0].Message, blocked.Errors[0].LineNumber));
+        AreEqual(7, simulation.ExecuteScalar("declare @rc int = 7; begin try exec @rc = msdb.dbo.sp_update_operator @name = N'none' end try begin catch end catch; select @rc"));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_update_operator", 201);
+    }
 }

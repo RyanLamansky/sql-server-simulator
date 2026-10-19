@@ -50,6 +50,8 @@ Real's procedures are T-SQL, and their errors behave as such:
   `sp_delete_job` deletes the schedules it leaves unused unless `@delete_unused_schedule = 0`.
 - **Descriptions.** `@include_description = 1` writes `sp_get_schedule_description`'s text, its times the stored integers as they are (*Every day at 233000*).
 - **Categories.** msdb ships real's 21, user ones numbered from 100; a job category is `LOCAL` or `MULTI-SERVER`, an alert or operator category `NONE`, and the default `LOCAL` with `@class = 'ALERT'` is refused.
+  `sp_update_category` renames any of a class's categories, a shipped one included, trimming its names; a name the class already holds, the category's own included, is Msg 14261, and a missing category is the Msg 2786 real's procedure meets formatting its own Msg 14262 (probed 2026-10-19 against SQL Server 2025).
+- **`sp_update_operator` is refused**: it belongs to the `Agent XPs` component, off as the stopped Agent leaves it, so once its arguments bind it is Msg 15281 at line 0 with the caller's return code unset (probed 2026-10-19 against SQL Server 2025).
 - **Operators, alerts, notifications.** An alert watches exactly one condition (Msg 14500) that no other alert watches (Msg 14501); `has_notification` is the notification methods ORed together, recomputed as operators and notifications go.
   `sp_help_alert` refuses an `@alert_name` or `@alert_id` no alert has (Msg 14262), while a category with none lists nothing.
 
@@ -74,5 +76,5 @@ The three Agent roles are seeded in msdb with real's memberships (`SQLAgentOpera
 ## Not modeled yet
 
 - Starting the Agent, and with it running a job's T-SQL steps, writing history and activity, schedules' next run dates, and the `$(ESCAPE_SQUOTE(…))` tokens.
-- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262), `sp_update_operator`, `sp_update_alert`, `sp_update_category`, `sp_help_jobcount`, `sp_help_jobs_in_schedule` and the multi-server (MSX / TSX) procedures.
+- `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262), `sp_update_alert`, `sp_help_jobcount`, `sp_help_jobs_in_schedule` and the multi-server (MSX / TSX) procedures.
 - The procedures as catalog objects: `msdb.sys.procedures`, `OBJECT_ID('msdb.dbo.sp_add_job')` and `sp_helptext` don't list them.

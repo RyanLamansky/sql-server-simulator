@@ -461,6 +461,88 @@ partial class Simulation
         AgentReturn(batch, returnCodeVar, 0);
     }
 
+    private static readonly SystemProcedureParameter[] SpUpdateOperatorParameters =
+    [
+        AgentRequired("name", AgentName, 128),
+        AgentParameter("new_name", AgentName, 128),
+        AgentParameter("enabled", SqlType.TinyInt),
+        AgentParameter("email_address", AgentText, 100),
+        AgentParameter("pager_address", AgentText, 100),
+        AgentParameter("weekday_pager_start_time", SqlType.Int32),
+        AgentParameter("weekday_pager_end_time", SqlType.Int32),
+        AgentParameter("saturday_pager_start_time", SqlType.Int32),
+        AgentParameter("saturday_pager_end_time", SqlType.Int32),
+        AgentParameter("sunday_pager_start_time", SqlType.Int32),
+        AgentParameter("sunday_pager_end_time", SqlType.Int32),
+        AgentParameter("pager_days", SqlType.TinyInt),
+        AgentParameter("netsend_address", AgentText, 100),
+        AgentParameter("category_name", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_update_operator</c>, which with <c>Agent XPs</c> off — the
+    /// stopped Agent's configuration — is Msg 15281 once its arguments bind,
+    /// at line 0 with the caller's return code unset, whatever they name
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpUpdateOperator(BatchContext batch)
+    {
+        if (BindAgentCall(batch, "sp_update_operator", SpUpdateOperatorParameters) is null)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_update_operator", grantedRole: null);
+        var refusal = SimulatedSqlException.ComponentBlocked("sp_update_operator", "Agent XPs", Database.DefaultSchemaName).AtAgentSite(0);
+        refusal.SystemProcedureBindingError = true;
+        throw refusal;
+    }
+
+    private static readonly SystemProcedureParameter[] SpUpdateCategoryParameters =
+    [
+        AgentRequired("class", AgentVarchar, 8),
+        AgentRequired("name", AgentName, 128),
+        AgentRequired("new_name", AgentName, 128),
+    ];
+
+    /// <summary>
+    /// <c>sp_update_category</c>: renames a category of the class, a shipped
+    /// one included, its names trimmed and matched under msdb's collation, to a
+    /// name no category of the class has — itself included (Msg 14261). One
+    /// that doesn't exist raises the Msg 2786 real's procedure meets formatting
+    /// its own Msg 14262; a NULL name renames nothing, and a NULL new name is
+    /// the UPDATE's Msg 515, answering 515 (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpUpdateCategory(BatchContext batch, string? returnCodeVar)
+    {
+        if (BindAgentCall(batch, "sp_update_category", SpUpdateCategoryParameters) is not { } call)
+            yield break;
+        this.RequireAgentExecute(batch, "sp_update_category", grantedRole: null);
+        var categoryClass = AgentCategoryClass(call.Text(0), 30, "sp_verify_category");
+        if (call.Text(1)?.Trim() is not { } name)
+        {
+            AgentReturn(batch, returnCodeVar, 0);
+            yield break;
+        }
+        var classValue = SqlValue.FromInt32(categoryClass);
+        var id = this.AgentScalar(batch, "select category_id from dbo.syscategories where name = @name and category_class = @class", ("name", SqlValue.FromNVarchar(name)), ("class", classValue))
+            ?? throw SimulatedSqlException.RaiserrorTypeMismatch(2).AtAgentSite(35);
+        var newName = call.Text(2)?.Trim();
+        if (newName is not null
+            && this.AgentScalar(batch, "select 1 from dbo.syscategories where name = @name and category_class = @class", ("name", SqlValue.FromNVarchar(newName)), ("class", classValue)) is not null)
+        {
+            throw SimulatedSqlException.AgentAlreadyExists("@new_name", newName).AtAgentSite(46);
+        }
+        if (newName is null)
+        {
+            var refusal = SimulatedSqlException.CannotInsertNull("name", "msdb.dbo.syscategories", "UPDATE").AtAgentSite(58);
+            refusal.SystemProcedureReturnCode = 515;
+            // It ends the procedure's UPDATE, which real follows with Msg 3621.
+            batch.CurrentStatement.WritesRows = true;
+            throw refusal;
+        }
+        _ = this.AgentSql(batch, "update dbo.syscategories set name = @name where category_id = @id", ("name", SqlValue.FromNVarchar(newName)), ("id", id));
+        AgentReturn(batch, returnCodeVar, 0);
+    }
+
     private static readonly SystemProcedureParameter[] SpHelpCategoryParameters =
     [
         AgentParameter("class", AgentVarchar, SqlValue.FromVarchar("JOB")),

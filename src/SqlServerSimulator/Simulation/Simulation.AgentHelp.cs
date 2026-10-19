@@ -71,17 +71,21 @@ partial class Simulation
     /// <c>sp_help_job</c>: with a job named, its details by <c>@job_aspect</c>
     /// — <c>ALL</c> (the default) prints a heading before each of the four
     /// sets — and with none, every job the caller sees that the filters keep,
-    /// in job-id order. A job together with a filter is Msg 14280.
+    /// in job-id order. A job that doesn't exist is Msg 14262, then a job
+    /// together with a filter Msg 14280 — save <c>@execution_status</c> and
+    /// <c>@description</c>, which beside a job filter only its details row
+    /// (probed 2026-10-19 against SQL Server 2025).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpJob(BatchContext batch, string? returnCodeVar)
     {
         if (BindAgentCall(batch, "sp_help_job", SpHelpJobParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_help_job", AgentUserRoleId);
-        var filtered = false;
-        for (var i = 3; i < 13; i++)
-            filtered |= !call.IsNull(i);
         var named = !call.IsNull(0) || !call.IsNull(1);
+        var job = named ? this.ResolveAgentJob(batch, call.Guid(0), call.Text(1)) : null;
+        var filtered = false;
+        for (var i = 3; i < 12; i++)
+            filtered |= i != 8 && !call.IsNull(i);
         if (named && filtered)
             throw SimulatedSqlException.AgentHelpJobMixedArguments().AtAgentSite(74);
         if (!named)
@@ -93,8 +97,8 @@ partial class Simulation
         var aspect = (call.Text(2) ?? "ALL").Trim().ToUpperInvariant();
         if (aspect is not ("ALL" or "JOB" or "SCHEDULES" or "STEPS" or "TARGETS"))
             throw SimulatedSqlException.AgentInvalidValue("@job_aspect", "JOB, STEPS, SCHEDULES, TARGETS, ALL").AtAgentSite(86);
-        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
-        var jobId = AgentJobId(job);
+        var namedJob = job!;
+        var jobId = AgentJobId(namedJob);
         var all = aspect == "ALL";
         if (all)
         {
@@ -102,7 +106,13 @@ partial class Simulation
             yield return AgentPrint(batch, "sp_help_job", 97, 0, "=================");
         }
         if (all || aspect == "JOB")
-            yield return this.AgentResultSet(AgentJobColumns, this.AgentJobRows(batch, [job]));
+        {
+            // Beside a job, the two arguments that aren't filters to Msg 14280
+            // still filter its details row.
+            var shown = call.IsNull(8) && (call.Text(12) is not { } description
+                || this.AgentScalar(batch, "select 1 from dbo.sysjobs where job_id = @id and description like @description", ("id", jobId), ("description", SqlValue.FromNVarchar(description))) is not null);
+            yield return this.AgentResultSet(AgentJobColumns, this.AgentJobRows(batch, shown ? [namedJob] : []));
+        }
         if (all)
         {
             yield return AgentPrint(batch, "sp_help_job", 116, 0, " ");
