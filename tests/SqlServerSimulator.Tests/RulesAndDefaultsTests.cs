@@ -216,6 +216,20 @@ public sealed class RulesAndDefaultsTests
         AreEqual((byte)state, error.State);
     }
 
+    /// <summary>
+    /// Each misplaced module statement reports its own Msg 111 at its line,
+    /// a syntax error's restart included (probed 2026-10-19 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1;\ncreate default d1 as 1;\ncreate default d2 as 2;", "111@2|111@3")]
+    [DataRow("select 1;\ncreate rule r1 as @x > 0\ncreate view v as select 1 as a", "111@2|111@3")]
+    [DataRow("select 1 +;\ncreate default d1 as 2;", "102@1|111@2")]
+    [DataRow("select 1 +\ncreate default d1 as 2", "156@2|111@2")]
+    [DataRow("create schema s1 create table t (a int) create default d1 as 1", "156@1")]
+    public void EveryMisplacedCreate_ReportsItsOwnMsg111(string batch, string expected)
+        => AreEqual(expected, string.Join('|', new Simulation().AssertSqlError(batch, int.Parse(expected[..3], System.Globalization.CultureInfo.InvariantCulture)).Errors.Select(static e => $"{e.Number}@{e.LineNumber}")));
+
     [TestMethod]
     public void ANameTaken_IsMsg2714State3()
         => AreEqual((byte)3, WithRuleAndDefault().AssertSqlError("create default t as 1", 2714).Errors[0].State);

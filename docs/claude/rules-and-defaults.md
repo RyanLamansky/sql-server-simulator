@@ -36,7 +36,3 @@ Each procedure prints real's confirmation from the line of real's source that pr
 A rule judges the value an INSERT writes to every bound column — a default and an implicit NULL included — and the value an UPDATE or MERGE sets, never a column the statement doesn't set, so rebinding a stricter rule leaves existing rows alone until they're written.
 A false answer is Msg 513 followed by Msg 3621; UNKNOWN passes.
 NOT NULL is checked before the rule.
-
-## Not modeled yet
-
-- A second `CREATE DEFAULT` / `CREATE RULE` later in a batch whose first one was misplaced: real reports a Msg 111 for each.

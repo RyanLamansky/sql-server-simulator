@@ -408,6 +408,11 @@ partial class Simulation
             }
             recovery.LineOffset = compileBatch.LineOffset;
             recovery.ErrorProcedureName = compileBatch.ErrorProcedureName;
+            // A restart is never its batch's first statement, so a module
+            // CREATE there is Msg 111 again (probed 2026-10-19 against SQL
+            // Server 2025: two misplaced CREATE DEFAULTs report one each, as
+            // does one after a syntax error).
+            recovery.HasDispatchedStatement = true;
             // Past a schema-bound body's header, the rest of the batch is still
             // that body, which recovery reads as statements.
             if (compileBatch.Parser.SchemaBoundBody != SchemaBoundBody.None)

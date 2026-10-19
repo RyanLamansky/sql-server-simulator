@@ -129,6 +129,7 @@ An error a grammar action raises rather than the token stream — Msg 319 for a 
 It walks the simulator's own statement parser rather than real's grammar, so where that parser reads a restart differently the report diverges; see [Divergences / residuals](#divergences--residuals).
 What it carries past the blanking, each probed 2026-09-30 against SQL Server 2025:
 
+- **A restart is never its batch's first statement**, so a module `CREATE` there is Msg 111 again: two misplaced `CREATE DEFAULT`s report one each, at their own lines, and so does one a syntax error stops at (`SELECT 1 + CREATE VIEW …`), while a `CREATE SCHEMA` element list's refusal stands on the word after its `CREATE`, where real resumes (probed 2026-10-19 against SQL Server 2025).
 - **A module body recovers too.** A procedure's, trigger's or function's body — bound on its own child batch at `CREATE` — restarts on a child batch with the body's own frame, so a restart reads its `RETURN`, parameters and return table as the body does, and every variable and table variable the failed walk had declared.
   An inline function's body, parsed as one query, restarts as statements, which is what makes `RETURN SELECT 1 + FROM (SELECT 1 a) q` Msg 156 then Msg 102 at `q`.
 - **An `END` closing a block the blanked text opened** is the block's end, not Msg 102, and an `END TRY`'s `BEGIN CATCH` opens with it; a `CASE` the error left open is abandoned, so its `END` closes the enclosing block instead.

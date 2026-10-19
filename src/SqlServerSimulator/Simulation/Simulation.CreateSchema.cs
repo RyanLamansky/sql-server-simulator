@@ -245,7 +245,11 @@ partial class Simulation
     {
         var checkpoint = context.SaveCheckpoint();
         var kind = context.GetNextRequired();
-        context.RestoreCheckpoint(checkpoint);
+        if (kind is ReservedKeyword { Keyword: Keyword.Table or Keyword.View or Keyword.Index })
+            context.RestoreCheckpoint(checkpoint);
+        // A refusal stands on the word after CREATE, where real's parser
+        // resumes, so `create schema s1 create schema s2` reports no Msg 111
+        // for the second (probed 2026-10-19 against SQL Server 2025).
         return kind switch
         {
             ReservedKeyword { Keyword: Keyword.Table or Keyword.View } => this.TryParseCreate(context),
