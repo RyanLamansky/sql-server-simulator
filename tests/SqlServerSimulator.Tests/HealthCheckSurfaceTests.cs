@@ -20,6 +20,7 @@ public sealed class HealthCheckSurfaceTests
     [DataRow("sys.dm_os_buffer_pool_extension_configuration", -817648642, 1)]
     [DataRow("sys.dm_os_cluster_nodes", -39192848, 0)]
     [DataRow("sys.dm_os_loaded_modules", -1035533931, 1)]
+    [DataRow("sys.dm_os_memory_nodes", -46687631, 2)]
     [DataRow("sys.dm_os_windows_info", -39745214, 1)]
     [DataRow("sys.dm_xtp_transaction_stats", -995830047, 1)]
     [DataRow("sys.resource_governor_configuration", -253, 1)]

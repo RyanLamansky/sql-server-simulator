@@ -66,6 +66,32 @@ public sealed class PreparedStatementProcedureTests
             select @o;
             """));
 
+    /// <summary>
+    /// <c>sp_cursorunprepare</c> releases a prepared cursor's handle, answering
+    /// 0, and a handle that isn't one is Msg 8179 answering its number
+    /// (probed 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CursorUnprepare_ReleasesTheHandle_AndRefusesAnUnknownOne()
+    {
+        var simulation = new Simulation();
+        using (var reader = simulation.ExecuteReader("""
+            create table t (a int primary key);
+            declare @h int, @rc int;
+            exec sp_cursorprepare @h output, null, N'select a from t', 1, 1, 1;
+            exec @rc = sp_cursorunprepare @h;
+            select @rc
+            """))
+        {
+            // The prepare describes the cursor's columns ahead of the status.
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(0, reader.GetInt32(0));
+        }
+        var error = simulation.AssertSqlError("exec sp_cursorunprepare 12345", 8179).Errors[0];
+        AreEqual((8, "Could not find prepared statement with handle 12345.", "sp_cursorunprepare"), (error.State, error.Message, error.Procedure));
+    }
+
     [TestMethod]
     [DataRow("exec sp_prepare", (byte)11, "Procedure or function 'sp_prepare' expects parameter '@handle', which was not supplied.", "sp_prepare")]
     [DataRow("exec sp_execute", (byte)12, "Procedure or function 'sp_execute' expects parameter '@handle', which was not supplied.", "sp_execute")]

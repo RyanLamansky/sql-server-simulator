@@ -429,4 +429,14 @@ public sealed class ServiceBrokerConversationTests
         _ = simulation.ExecuteNonQuery("alter database c set trustworthy on");
         AreEqual("0|1", Rows(simulation, "use c; select (select count(*) from sys.transmission_queue), (select count(*) from b.dbo.bq)"));
     }
+
+    /// <summary>A dialog's initiator joins a conversation group of its own, which <c>sys.conversation_groups</c> lists.</summary>
+    [TestMethod]
+    public void BeginDialog_ListsItsConversationGroup()
+        => AreEqual("0|1|1", Rows(Broker(), """
+            select count(*) from sys.conversation_groups;
+            declare @d uniqueidentifier; begin dialog @d from service init to service 'targ' with encryption = off;
+            select count(*) from sys.conversation_groups;
+            select count(*) from sys.conversation_groups g join sys.services s on s.service_id = g.service_id where s.name = 'init' and g.is_system = 0
+            """).Replace(";", "|", StringComparison.Ordinal));
 }
