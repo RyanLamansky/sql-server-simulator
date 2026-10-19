@@ -575,7 +575,7 @@ public sealed class BackupRestoreTests
             "alter role reader add member u",
             "create type app.code from nvarchar(10) not null",
             "create xml schema collection app.xs as N'<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"e\" type=\"xsd:int\"/></xsd:schema>'",
-            "create type app.rows as table (id int primary key, label nvarchar(20) default (N'none'), check (id > 0))",
+            "create type app.rows as table (id int primary key, label nvarchar(20) default (N'none'), check (id > 0), index ix_label unique nonclustered (label desc, id))",
             "create sequence app.numbers as bigint start with 100 increment by 5",
             """
             create table app.parent (
