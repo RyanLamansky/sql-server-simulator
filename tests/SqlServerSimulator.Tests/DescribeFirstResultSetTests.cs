@@ -51,6 +51,32 @@ public sealed class DescribeFirstResultSetTests
         return string.Join(" | ", lines);
     }
 
+    /// <summary>
+    /// A legacy LOB describes as unbounded, its TDS length 2³¹ − 1 (an
+    /// ntext's one byte short), and a FOR XML / FOR JSON stream's column
+    /// leaves its identity, updatable and computed flags NULL (probed
+    /// 2026-10-19 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select nt, t, i from lob", "-1:0:1:0|-1:0:1:0|-1:0:1:0")]
+    [DataRow("select 1 a for xml raw", "-1:-:-:-")]
+    [DataRow("select 1 a for json path", "-1:-:-:-")]
+    public void LegacyLobsAndStreams(string tsql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table lob (nt ntext, t text, i image);
+            select string_agg(concat_ws(':', max_length, isnull(str(is_identity_column, 1), '-'), isnull(str(is_updateable, 1), '-'), isnull(str(is_computed_column, 1), '-')), '|') within group (order by column_ordinal)
+            from sys.dm_exec_describe_first_result_set(N'{tsql}', null, 0)
+            """));
+
+    [TestMethod]
+    public void LegacyLobTdsLengths()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table lob (nt ntext, t text, i image)");
+        AreEqual("nt null ntext -1 - updateable - 99 2147483646 | t null text -1 - updateable - 35 2147483647 | i null image -1 - updateable - 34 2147483647",
+            Describe(sim, "select nt, t, i from lob"));
+    }
+
     [TestMethod]
     public void BaseTableColumns()
         => AreEqual(

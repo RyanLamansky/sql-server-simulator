@@ -187,6 +187,13 @@ partial class Simulation
         var origin = result.ColumnOrigins?[index];
         var name = result.ColumnNames[index];
         var (maxLength, precision, scale) = BuiltInResources.GetSysColumnMetadata(new HeapColumn(string.Empty, type, maxLength: null, nullable: true));
+        // A legacy LOB describes as unbounded where sys.columns reads its
+        // 16-byte pointer, and a FOR XML / FOR JSON stream's column leaves its
+        // identity, updatable, computed and column-set flags NULL (probed
+        // 2026-10-19 against SQL Server 2025).
+        if (type is TextSqlType or NTextSqlType or ImageSqlType)
+            maxLength = -1;
+        var streamed = result.Schema.Length == 1 && name is Selection.ForXmlColumnName or Selection.ForJsonColumnName;
         var collation = type.Category == SqlTypeCategory.String ? type.Collation : null;
         var (tdsType, tdsLength) = DescribeTdsType(type, !nullable, numeric, maxLength);
         var codec = collation is null ? null : Network.TdsCollationCodec.For(collation);
@@ -227,19 +234,19 @@ partial class Simulation
             SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && (collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase) || collation.Name.Contains("_BIN", StringComparison.OrdinalIgnoreCase)))),
             SqlValue.FromBoolean(false),
             nullName, nullName, nullName, nullName, nullName,
-            SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),
+            streamed ? nullBit : SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),
             nullBit,
             // Describing reads a column's COLMETADATA character: updatable,
             // computed, a sparse column set — a grouped query's grouping
             // columns as updatable as any (probed 2026-10-17 against SQL
             // Server 2025).
-            SqlValue.FromBoolean(result.ColumnWireFlags is { } updatableFlags
+            streamed ? nullBit : SqlValue.FromBoolean(result.ColumnWireFlags is { } updatableFlags
                 ? ColumnCharacter.IsUpdatable(updatableFlags[index])
                 : !result.IsGrouped && origin is { Identity: null } && (origin.Computed is null || origin.GraphKind != GraphColumnKind.None) && type != SqlType.RowVersion),
-            SqlValue.FromBoolean(result.ColumnWireFlags is { } computedFlags
+            streamed ? nullBit : SqlValue.FromBoolean(result.ColumnWireFlags is { } computedFlags
                 ? ColumnCharacter.IsComputed(computedFlags[index])
                 : origin is { Computed: not null, GraphKind: GraphColumnKind.None } || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
-            SqlValue.FromBoolean(result.ColumnWireFlags is { } setFlags && (setFlags[index] & ColumnCharacter.ColumnSet) != 0),
+            streamed ? nullBit : SqlValue.FromBoolean(result.ColumnWireFlags is { } setFlags && (setFlags[index] & ColumnCharacter.ColumnSet) != 0),
             nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),
             SqlValue.FromInt32(tdsLength),
@@ -263,7 +270,8 @@ partial class Simulation
     /// The TDS type token and length real reports for a column: the
     /// fixed-length token for a NOT NULL fixed-width type and the nullable
     /// variant otherwise (as COLMETADATA carries them), 17 for decimal, 65535
-    /// for a MAX type and 8100 for xml, and a vector's own 245.
+    /// for a MAX type, 8100 for xml, a legacy LOB's 2³¹ − 1 (an ntext's one byte
+    /// short), and a vector's own 245.
     /// </summary>
     private static (int TypeId, int Length) DescribeTdsType(SqlType type, bool notNull, bool numeric, short maxLength) => type switch
     {
@@ -280,6 +288,8 @@ partial class Simulation
         DateTimeSqlType => (notNull ? 61 : 111, 8),
         DecimalSqlType => (numeric ? 108 : 106, 17),
         XmlSqlType => (241, 8100),
+        NTextSqlType => (99, 2147483646),
+        TextSqlType or ImageSqlType => (type.SystemTypeId, 2147483647),
         // rowversion travels as BIGBINARY and sql_variant at 8009 (probed
         // 2026-10-04 against SQL Server 2025).
         SqlVariantSqlType => (98, 8009),
