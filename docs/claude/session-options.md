@@ -159,6 +159,9 @@ While either option is on the session skips the plan cache and the compiled-batc
 
 ## Not modeled yet
 
+- A batch turning `PARSEONLY` on and then off around a statement over a missing table: real's outcome follows no rule the probes have pinned (probed 2026-10-19 against SQL Server 2025).
+  `SET PARSEONLY ON; SELECT x FROM nowhere; SET PARSEONLY OFF;` reports the Msg 208 and leaves the option off; wrapped in `BEGIN TRY … END TRY` it reports nothing and leaves it on, the next batch unrun; with a `SELECT 'p'` ahead of the failing one it sends that row, then nothing, and leaves the option on.
+  The simulator settles the option from the batch's last `SET` as it parses, as it does for every other batch, and reports the Msg 208.
 - `FIPS_FLAGGER`'s warnings real's own internal statements send: a second `ALTER TABLE` at line 1 after one adding a `CHECK` constraint, the `TOP` / `ORDER` of an `UPDATE STATISTICS`'s sampling queries, the second `CONVERT` or `TOP` of a statement real parameterizes or inserts into a table variable from, and a procedure's `CREATE PROCEDURE` and name as its first call compiles it — only the body's own statements are flagged then.
   Statements outside the probed set (`DROP DATABASE`, `RESTORE`, `ALTER SCHEMA` …) aren't flagged, and a select-list alias repeated across a set operation's branches is flagged per occurrence where real flags the first (probed 2026-10-17 against SQL Server 2025).
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
