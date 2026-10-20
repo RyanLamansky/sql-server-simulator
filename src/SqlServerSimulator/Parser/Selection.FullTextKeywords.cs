@@ -88,13 +88,14 @@ partial class Selection
 
     /// <summary>
     /// The initial crawl of a just-created full-text index over a table whose
-    /// key isn't an integer: its rows take document ids in key order.
+    /// key doesn't serve as its document ids: its rows take document ids in
+    /// key order.
     /// </summary>
     internal static void CrawlFullTextDocuments(HeapTable table)
     {
         var index = table.FullTextIndex!;
         var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
-        if (SqlType.IsIntegerCategory(table.StoredColumns[keyStorageOrdinal].Type))
+        if (Schemas.FullTextIndex.KeysItsDocuments(table.StoredColumns[keyStorageOrdinal].Type))
             return;
         List<SqlValue> keys = [];
         foreach (var bytes in table.Rows)
@@ -106,14 +107,15 @@ partial class Selection
     }
 
     /// <summary>
-    /// Gives a row just written to a table with a full-text index over a
-    /// non-integer key its document id, in write order as real's crawl does.
+    /// Gives a row just written to a table with a full-text index over a key
+    /// that doesn't serve as its document ids its document id, in write order
+    /// as real's crawl does.
     /// </summary>
     internal static void NoteFullTextDocument(HeapTable table, ReadOnlySpan<byte> image)
     {
         var index = table.FullTextIndex!;
         var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
-        if (!SqlType.IsIntegerCategory(table.StoredColumns[keyStorageOrdinal].Type))
+        if (!Schemas.FullTextIndex.KeysItsDocuments(table.StoredColumns[keyStorageOrdinal].Type))
             _ = index.DocumentIdFor(RowDecoder.DecodeColumn(table.StoredColumns.AsSpan(), image, keyStorageOrdinal, table.Heap));
     }
 
@@ -170,7 +172,7 @@ partial class Selection
         }
         var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
         var keyType = table.StoredColumns[keyStorageOrdinal].Type;
-        var integerKey = SqlType.IsIntegerCategory(keyType);
+        var integerKey = Schemas.FullTextIndex.KeysItsDocuments(keyType);
         List<(SqlValue Key, byte[] Row)> rows = [];
         foreach (var bytes in table.Rows)
             rows.Add((RowDecoder.DecodeColumn(table.StoredColumns, bytes, keyStorageOrdinal, table.Heap), bytes));

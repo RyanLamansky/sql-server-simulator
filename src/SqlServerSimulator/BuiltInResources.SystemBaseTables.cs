@@ -81,6 +81,77 @@ internal static partial class BuiltInResources
         spatialIndexed.Sort(static (x, y) => x.Index.ObjectId.CompareTo(y.Index.ObjectId));
         foreach (var (table, index) in spatialIndexed)
             yield return SpatialIndexTable(table, index);
+        var fullTextIndexed = new List<HeapTable>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                if (table.FullTextIndex is { InternalTableObjectIds.Length: 5 })
+                    fullTextIndexed.Add(table);
+            }
+        }
+        fullTextIndexed.Sort(static (x, y) => x.FullTextIndex!.InternalTableObjectIds[0].CompareTo(y.FullTextIndex!.InternalTableObjectIds[0]));
+        foreach (var table in fullTextIndexed)
+        {
+            foreach (var fullTextTable in FullTextIndexTables(table, table.FullTextIndex!))
+                yield return fullTextTable;
+        }
+    }
+
+    /// <summary>
+    /// The internal tables a full-text index keeps, each named after its
+    /// table's object id (probed 2026-10-20 against SQL Server 2025): its
+    /// average document lengths (<c>fulltext_avdl_</c>), its document-id filter
+    /// (<c>fulltext_docidfilter_</c>), a map of each key to its document id
+    /// (<c>fulltext_index_docidmap_</c>, only for a key that doesn't serve as
+    /// the id), its documents' status (<c>fulltext_index_docidstatus_</c>) and
+    /// its indexed document ids (<c>fulltext_indexeddocid_</c>), each with
+    /// real's columns and indexes. Their rowsets hold nothing here.
+    /// </summary>
+    private static IEnumerable<SystemTableObject> FullTextIndexTables(HeapTable table, FullTextIndex index)
+    {
+        var suffix = table.ObjectId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var ids = index.InternalTableObjectIds;
+        static SystemTableColumn Column(int id, string name, int userTypeId, short maxLength, byte precision) =>
+            new(id, name, userTypeId, maxLength, precision, 0, nullable: false, hidden: false, null, 0, null);
+        static SystemTableIndex Unique(int id, string name, params int[] columnIds) =>
+            new(id, name, (byte)(id == 1 ? 1 : 2), unique: true, allowPageLocks: true, [.. columnIds.Select(static (columnId, i) => new SystemIndexKey(columnId, i + 1, false, false))]);
+        var docid = Column(1, "docid", 127, 8, 19);
+        var status = Column(2, "status", 48, 1, 3);
+        var ts = Column(3, "ts", 189, 8, 0);
+        yield return FullTextTable("fulltext_avdl_" + suffix, ids[0], 211,
+            [Column(1, "colid", 56, 4, 10), Column(2, "pid", 56, 4, 10), Column(3, "doc_cnt", 127, 8, 19), Column(4, "ave_doc_len", 56, 4, 10)], [Unique(1, "clust", 1, 2)]);
+        yield return FullTextTable("fulltext_docidfilter_" + suffix, ids[1], 215, [docid, status, ts], [Unique(1, "i1", 1, 3)]);
+        var key = table.StoredColumns[Parser.Selection.ResolveFullTextKeyOrdinal(table)];
+        if (!FullTextIndex.KeysItsDocuments(key.Type))
+        {
+            var (maxLength, precision, scale) = GetSysColumnMetadata(key);
+            yield return FullTextTable("fulltext_index_docidmap_" + suffix, ids[2], 216,
+                [docid, new SystemTableColumn(2, "ftkey", key.UserTypeId, maxLength, precision, scale, nullable: false, hidden: false, null, 0, key.Collation, key)],
+                [Unique(1, "i1", 1), Unique(2, "i2", 2)]);
+        }
+        yield return FullTextTable("fulltext_index_docidstatus_" + suffix, ids[3], 213, [docid, status, ts, Column(4, "retrycount", 48, 1, 3)],
+            [Unique(1, "i1", 1), Unique(2, "i2", 2, 1), Unique(3, "i3", 2, 3, 1)]);
+        yield return FullTextTable("fulltext_indexeddocid_" + suffix, ids[4], 214, [docid], [Unique(1, "i1", 1)]);
+
+        SystemTableObject FullTextTable(string name, int objectId, byte internalType, SystemTableColumn[] columns, SystemTableIndex[] indexes)
+        {
+            var definition = new SystemTableDefinition(name[..name.LastIndexOf('_')], columns, indexes);
+            var heapColumns = definition.HeapColumns("");
+            var clusteredKeys = indexes[0].Keys.Select(static key => key.ColumnId - 1).ToArray();
+            var rowsets = new List<SystemRowset>();
+            foreach (var each in indexes)
+            {
+                var keys = each.Keys.Select(static key => key.ColumnId - 1).ToList();
+                var leaf = each.Id == 1 ? [.. Enumerable.Range(0, columns.Length)] : keys.Concat(clusteredKeys.Where(ordinal => !keys.Contains(ordinal))).ToArray();
+                var (leafMax, leafMin, leafColumns) = RecordLength(heapColumns, leaf, uniquifier: false, locator: false, header: each.Id == 1 ? 4 : 1);
+                var (upperMax, upperMin, _) = RecordLength(heapColumns, [.. keys], uniquifier: false, locator: false, header: 7);
+                var partitionId = ((long)(uint)objectId << 16) | (uint)each.Id;
+                rowsets.Add(new SystemRowset(each.Id, partitionId, 0, 0, 2, (short)leafColumns, leafMax, (short)leafMin, (short)upperMax, (short)upperMin,
+                    allowsNullableKeys: true, isDataRowFormat: each.Id == 1, isNotVersioned: false, [new SystemAllocationUnit(PartitionCensus.AllocationUnitId(partitionId, 1), 1, 0, 0, 0)]));
+            }
+            return new SystemTableObject(name, objectId, isInternal: true, Database.SysSchemaId, table.ObjectId, index.CreateDate, index.CreateDate, internalType, lobDataSpaceId: 0, definition, [.. rowsets], []);
+        }
     }
 
     /// <summary>

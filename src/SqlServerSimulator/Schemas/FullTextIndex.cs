@@ -35,6 +35,26 @@ internal sealed class FullTextIndex(
     public readonly List<FullTextIndexColumn> Columns = columns;
 
     /// <summary>
+    /// Whether a key of <paramref name="keyType"/> serves as its row's document
+    /// id — an <c>int</c>, <c>bigint</c> or <c>smallint</c> — where any other,
+    /// a <c>tinyint</c> included, is mapped to ids the index assigns, which
+    /// real keeps in a <c>fulltext_index_docidmap</c> table (probed 2026-10-20
+    /// against SQL Server 2025).
+    /// </summary>
+    public static bool KeysItsDocuments(SqlType keyType) => keyType is Int32SqlType or BigIntSqlType or SmallIntSqlType;
+
+    /// <summary>
+    /// The object ids of the index's internal tables — its average document
+    /// lengths, document-id filter, document-id map, document status and
+    /// indexed document ids — the map's unused when the key serves as the
+    /// document ids.
+    /// </summary>
+    public int[] InternalTableObjectIds = [];
+
+    /// <summary>When the index was created, which its internal tables report as their dates.</summary>
+    public DateTime CreateDate;
+
+    /// <summary>
     /// <c>sys.fulltext_indexes.is_enabled</c>: <c>ALTER FULLTEXT INDEX …
     /// DISABLE</c> clears it, and so does dropping the last column. A disabled
     /// index still answers searches, as real's keeps answering from what it

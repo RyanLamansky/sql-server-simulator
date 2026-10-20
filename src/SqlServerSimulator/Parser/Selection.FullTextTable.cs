@@ -117,7 +117,7 @@ internal sealed partial class Selection
     /// index was created without one (the BACPAC path can leave the name
     /// empty).
     /// </summary>
-    private static int ResolveFullTextKeyOrdinal(HeapTable table)
+    internal static int ResolveFullTextKeyOrdinal(HeapTable table)
     {
         var index = table.FullTextIndex!;
         foreach (var keyConstraint in table.KeyConstraints)

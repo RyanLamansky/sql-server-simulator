@@ -339,6 +339,8 @@ partial class Simulation
             StoplistOff = options.StoplistOff,
             // An index created without columns starts disabled.
             IsEnabled = columns.Count > 0,
+            InternalTableObjectIds = [.. Enumerable.Range(0, 5).Select(_ => context.CurrentDatabase.AllocateObjectId())],
+            CreateDate = context.Batch.CurrentStatement.UtcNow,
         };
         Selection.CrawlFullTextDocuments(table);
         // Change tracking can't follow WRITETEXT / UPDATETEXT into a legacy

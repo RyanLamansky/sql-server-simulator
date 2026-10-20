@@ -180,4 +180,45 @@ public sealed class FullTextKeywordViewTests
     [DataRow("select * from sys.dm_fts_index_keywords('db', 'name')", 245)]
     public void Arguments_AreCheckedAsRealChecksThem(string query, int number) =>
         _ = Seeded().AssertSqlError(query, number);
+
+    /// <summary>
+    /// A tinyint key is mapped to document ids the index assigns, as any key
+    /// but an int, bigint or smallint is, where those serve as the ids
+    /// (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void TinyintKey_IsMappedToDocumentIds() =>
+        AreEqual("apple:1 banana:2", Rows(new Simulation(), """
+            create fulltext catalog cat as default;
+            create table c (id tinyint not null constraint pk primary key, body nvarchar(200));
+            insert c values (7, N'apple'), (9, N'banana');
+            create fulltext index on c (body) key index pk;
+            select display_term, document_id from sys.dm_fts_index_keywords_by_document(db_id(), object_id('c')) where display_term in ('apple', 'banana') order by 1
+            """));
+
+    /// <summary>
+    /// A full-text index keeps four internal tables named after its table,
+    /// and a fifth mapping each key to its document id when the key doesn't
+    /// serve as the id, each with real's columns and indexes (probed
+    /// 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void InternalTables_ListedAsReal()
+    {
+        var simulation = Seeded();
+        _ = simulation.ExecuteNonQuery("create table g (k uniqueidentifier not null constraint gpk primary key, body nvarchar(200)); create fulltext index on g (body) key index gpk;");
+        AreEqual("fulltext_avdl:211:clust fulltext_docidfilter:215:i1 fulltext_index_docidstatus:213:i1,i2,i3 fulltext_indexeddocid:214:i1", Rows(simulation, """
+            select left(it.name, len(it.name) - len(concat('_', object_id('t')))) collate database_default, it.internal_type,
+                (select string_agg(i.name, ',') within group (order by i.index_id) from sys.indexes i where i.object_id = it.object_id)
+            from sys.internal_tables it where it.parent_id = object_id('t') order by it.name
+            """));
+        AreEqual("docid:bigint:8 ftkey:uniqueidentifier:16", Rows(simulation, """
+            select c.name, type_name(c.user_type_id), c.max_length from sys.columns c join sys.internal_tables it on it.object_id = c.object_id
+            where it.parent_id = object_id('g') and it.internal_type = 216 order by c.column_id
+            """));
+        AreEqual("2:13:10:19:16 3:21:18:27:24", Rows(simulation, """
+            select p.index_id, p.max_leaf_length, p.min_leaf_length, p.max_internal_length, p.min_internal_length from sys.system_internals_partitions p
+            join sys.internal_tables it on it.object_id = p.object_id where it.parent_id = object_id('t') and it.internal_type = 213 and p.index_id > 1 order by 1
+            """));
+    }
 }
