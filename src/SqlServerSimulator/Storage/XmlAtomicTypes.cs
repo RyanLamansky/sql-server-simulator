@@ -298,6 +298,26 @@ internal static class XmlAtomicTypes
 
     private static bool IsBinary(XmlTypeCode code) => code is XmlTypeCode.HexBinary or XmlTypeCode.Base64Binary;
 
+    /// <summary>
+    /// The family an item typed <paramref name="typeName"/> compares and
+    /// converts implicitly within — <c>number</c>, <c>boolean</c>,
+    /// <c>string</c> (<c>xs:anyURI</c> included) or its own primitive's name
+    /// — or null for an untyped or unknown type, which converts to any
+    /// (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public static string? ComparisonFamily(string typeName)
+    {
+        if (!typeName.StartsWith("xs:", StringComparison.Ordinal) || Resolve(typeName[3..]) is not { } type)
+            return null;
+        var (family, primitive) = CastGroup(type);
+        return family switch
+        {
+            CastFamily.String => "string",
+            CastFamily.NumberOrBoolean => primitive == XmlTypeCode.Boolean ? "boolean" : "number",
+            _ => primitive == XmlTypeCode.AnyUri ? "string" : primitive.ToString(),
+        };
+    }
+
     private enum CastFamily
     {
         String,

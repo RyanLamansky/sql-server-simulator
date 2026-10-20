@@ -1523,6 +1523,10 @@ internal sealed class XmlQueryParser(
         // Msg 2371: both read the sequence a predicate is filtering, so real
         // refuses them anywhere else — a FLWOR's return clause included
         // (probe-confirmed).
+        // Their arity is checked first (probed 2026-10-20 against SQL Server
+        // 2025: `last(1)` is Msg 2238).
+        if (local is "last" or "position" && arguments.Length > 0)
+            throw SimulatedSqlException.XQueryTooManyArguments(this.method, local);
         return this.predicateDepth == 0 && local is "last" or "position"
             ? throw SimulatedSqlException.XQueryPositionOutsidePredicate(this.method, local)
             : this.BuildBuiltIn(local, arguments);
@@ -1597,6 +1601,16 @@ internal sealed class XmlQueryParser(
         return XmlAtomicTypes.RankTypeName(rank);
     }
 
+    /// <summary>
+    /// <c>min</c> / <c>max</c>: a number over numbers and untyped values, and
+    /// over a string, date-time or other ordered type that type, its items
+    /// compared as values of it (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private XmlFunctionCallExpr BuildExtreme(XmlFunctionId id, XmlQueryExpr[] arguments, string local) =>
+        arguments.Length == 1 && XmlAtomicTypes.ComparisonFamily(arguments[0].TypeName) is { } and not ("number" or "boolean")
+            ? this.Build(id, arguments, local, 1, 1, XmlStaticKind.String, arguments[0].TypeName, occurrence: XmlOccurrence.ZeroOrOne)
+            : this.Build(id, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments));
+
     /// <summary><c>data()</c>, which atomizes its argument as <c>value()</c> does.</summary>
     private XmlFunctionCallExpr BuildData(XmlQueryExpr[] arguments, string local)
     {
@@ -1636,8 +1650,8 @@ internal sealed class XmlQueryParser(
             "last" => this.Build(XmlFunctionId.Last, arguments, local, 0, 0, XmlStaticKind.Number, "xs:integer"),
             "local-name" => this.Build(XmlFunctionId.LocalName, arguments, local, 0, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Item),
             "lower-case" => this.Build(XmlFunctionId.LowerCase, arguments, local, 1, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
-            "max" => this.Build(XmlFunctionId.Max, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments)),
-            "min" => this.Build(XmlFunctionId.Min, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments)),
+            "max" => this.BuildExtreme(XmlFunctionId.Max, arguments, local),
+            "min" => this.BuildExtreme(XmlFunctionId.Min, arguments, local),
             "namespace-uri" => this.Build(XmlFunctionId.NamespaceUri, arguments, local, 0, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Item),
             "not" => this.Build(XmlFunctionId.Not, arguments, local, 1, 1, XmlStaticKind.Boolean, "xs:boolean", XmlArgumentRule.Condition),
             "number" => arguments.Length == 1 && arguments[0].Kind != XmlStaticKind.Node
@@ -1699,12 +1713,62 @@ internal sealed class XmlQueryParser(
             }
         }
         RequireParameterTypes(id, arguments, this.method);
+        RequireNumericArgument(id, arguments, name, this.method);
+        RequireHomogeneousArgument(id, arguments, name, this.method);
         return new XmlFunctionCallExpr(
             id,
             arguments,
             kind,
             occurrenceFromArgument ? arguments[0].Occurrence : occurrence,
             typeName);
+    }
+
+    /// <summary>
+    /// Msg 9308: <c>floor</c>, <c>ceiling</c>, <c>round</c>, <c>sum</c> and
+    /// <c>avg</c> over an argument typed as something other than a number or
+    /// untyped — a string, boolean or date, or a sequence holding one, quoted
+    /// item by item when its items differ (probed 2026-10-20 against SQL
+    /// Server 2025: <c>'xs:integer , xs:string'</c>).
+    /// </summary>
+    private static void RequireNumericArgument(XmlFunctionId id, XmlQueryExpr[] arguments, string name, string method)
+    {
+        if (id is not (XmlFunctionId.Floor or XmlFunctionId.Ceiling or XmlFunctionId.Round or XmlFunctionId.Sum or XmlFunctionId.Avg) || arguments.Length != 1)
+            return;
+        var argument = arguments[0];
+        var items = argument is XmlSequenceExpr sequence ? sequence.Items : [argument];
+        if (Array.TrueForAll(items, static item => item.AtomizedKind() is XmlStaticKind.Number or XmlStaticKind.Untyped || item is XmlSequenceExpr { IsEmpty: true }))
+            return;
+        var type = items.Length > 1 && !Array.TrueForAll(items, item => item.TypeName == items[0].TypeName)
+            ? string.Join(" , ", items.Select(static item => item.AtomizedTypeName()))
+            : argument.AtomizedTypeName();
+        throw SimulatedSqlException.XQueryArithmeticOperandType(method, $"{name}()", type);
+    }
+
+    /// <summary>
+    /// Msg 9311: <c>min</c>, <c>max</c> and <c>distinct-values</c> over a
+    /// written sequence whose items' types don't compare — a number beside a
+    /// string — naming the first two families met, an integer as
+    /// <c>xs:decimal</c> (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private static void RequireHomogeneousArgument(XmlFunctionId id, XmlQueryExpr[] arguments, string name, string method)
+    {
+        if (id is not (XmlFunctionId.Min or XmlFunctionId.Max or XmlFunctionId.DistinctValues) || arguments is not [XmlSequenceExpr { Items.Length: > 1 } sequence])
+            return;
+        string? firstFamily = null;
+        string? firstType = null;
+        foreach (var item in sequence.Items)
+        {
+            if (XmlAtomicTypes.ComparisonFamily(item.TypeName) is not { } family)
+                continue;
+            var type = family == "number" && XmlAtomicTypes.NumericRank(item.TypeName) <= 2 ? "xs:decimal" : item.TypeName;
+            if (firstFamily is null)
+            {
+                (firstFamily, firstType) = (family, type);
+                continue;
+            }
+            if (family != firstFamily)
+                throw SimulatedSqlException.XQueryHeterogeneousSequenceIn(method, $"{name}()", firstType!, type);
+        }
     }
 
     /// <summary>
@@ -1726,9 +1790,19 @@ internal sealed class XmlQueryParser(
             };
             if (expectsString is not { } stringParameter)
                 return;
+            // A string parameter takes a string, xs:anyURI or untyped value,
+            // a number parameter a number or untyped one; a number parameter's
+            // type is quoted optional after an optional argument (probed
+            // 2026-10-20 against SQL Server 2025).
+            var family = XmlAtomicTypes.ComparisonFamily(arguments[i].TypeName);
             var kind = arguments[i].AtomizedKind();
-            if (stringParameter ? kind is XmlStaticKind.Number or XmlStaticKind.Boolean : kind == XmlStaticKind.String)
-                throw SimulatedSqlException.XQueryCannotImplicitlyConvert(method, arguments[i].AtomizedTypeName(), stringParameter ? "xs:string" : "xs:decimal");
+            if (stringParameter ? family is not (null or "string") : kind == XmlStaticKind.String || family is not (null or "number"))
+            {
+                throw SimulatedSqlException.XQueryCannotImplicitlyConvert(
+                    method,
+                    arguments[i].AtomizedTypeName(),
+                    stringParameter ? "xs:string" : arguments[i].Occurrence == XmlOccurrence.ZeroOrOne ? "xs:decimal ?" : "xs:decimal");
+            }
         }
     }
 
@@ -1753,8 +1827,13 @@ internal sealed class XmlQueryParser(
         var rightKind = right.AtomizedKind();
         if (leftKind == XmlStaticKind.Untyped || rightKind == XmlStaticKind.Untyped)
             return;
-        if (leftKind != rightKind)
+        // A date-time, binary or other primitive compares only with its own
+        // kind, not with a string (probed 2026-10-20 against SQL Server 2025).
+        if (leftKind != rightKind
+            || (XmlAtomicTypes.ComparisonFamily(left.TypeName) is { } leftFamily && XmlAtomicTypes.ComparisonFamily(right.TypeName) is { } rightFamily && leftFamily != rightFamily))
+        {
             throw SimulatedSqlException.XQueryOperatorTypeMismatch(method, op, left.AtomizedTypeName(), right.AtomizedTypeName());
+        }
     }
 
     private (string? Operator, XmlComparisonForm Form) TryComparisonOperator()

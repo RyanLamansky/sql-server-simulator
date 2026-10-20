@@ -318,20 +318,21 @@ internal sealed class XmlSequenceExpr(XmlQueryExpr[] items)
         Array.TrueForAll(items, item => item.TypeName == items[0].TypeName) ? items[0].TypeName : "xdt:anyAtomicType";
 
     /// <summary>Whether this is the empty sequence <c>()</c> as written.</summary>
-    public bool IsEmpty => this.items.Length == 0;
+    public bool IsEmpty => this.Items.Length == 0;
 
-    private readonly XmlQueryExpr[] items = items;
+    /// <summary>The items as written.</summary>
+    public readonly XmlQueryExpr[] Items = items;
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
     {
-        foreach (var item in this.items)
+        foreach (var item in this.Items)
             item.Evaluate(frame, results);
     }
 
-    public override string NodeTypeBase() => this.items.Length switch
+    public override string NodeTypeBase() => this.Items.Length switch
     {
-        1 => this.items[0].NodeTypeBase(),
-        > 1 when Array.TrueForAll(this.items, item => item.IsAttributeOnly) => "attribute(*,xdt:untypedAtomic)",
+        1 => this.Items[0].NodeTypeBase(),
+        > 1 when Array.TrueForAll(this.Items, item => item.IsAttributeOnly) => "attribute(*,xdt:untypedAtomic)",
         _ => base.NodeTypeBase(),
     };
 }
@@ -1492,6 +1493,22 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
 #pragma warning disable CA1308 // fn:lower-case() lowercases by definition; the result is the contract.
                 results.Add(XmlQueryValues.SingleString(this.arguments[0].Evaluate(frame)).ToLowerInvariant());
 #pragma warning restore CA1308
+                return;
+            case XmlFunctionId.Max when this.Kind == XmlStaticKind.String:
+            case XmlFunctionId.Min when this.Kind == XmlStaticKind.String:
+                // An ordered non-numeric type compares by its value's text,
+                // which for the canonical date-time forms of one zone is the
+                // value order.
+                object? extreme = null;
+                foreach (var item in this.arguments[0].Evaluate(frame))
+                {
+                    var atom = XmlQueryValues.Atomize(item);
+                    var order = extreme is null ? 0 : string.CompareOrdinal(XmlQueryValues.StringValue(atom), XmlQueryValues.StringValue(extreme));
+                    if (extreme is null || (this.id == XmlFunctionId.Max ? order > 0 : order < 0))
+                        extreme = atom;
+                }
+                if (extreme is not null)
+                    results.Add(extreme);
                 return;
             case XmlFunctionId.Max:
                 if (this.ExactExtreme(frame, max: true) is { } exactMax)

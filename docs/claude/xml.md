@@ -441,6 +441,20 @@ A step whose declarations settle one type takes it over the name-keyed rule: an 
 `value()` and `data()` refuse atomizing complex content — **Msg 9314**, mixed content and `xs:anyType` included, naming a named type or else the element's name in its schema's target namespace — and empty content (**Msg 2213**), ahead of `value()`'s singleton check.
 All probed 2026-10-20 against SQL Server 2025.
 
+### Argument types
+
+A function's argument and a comparison's operands are checked against the families a typed value compares and converts within — number, boolean, string (`xs:anyURI` included) or its own primitive (`XmlAtomicTypes.ComparisonFamily`), an untyped value fitting any (probed 2026-10-20 against SQL Server 2025):
+
+| shape | error |
+|---|---|
+| a string parameter (`contains`, `substring`'s first, `upper-case` …) given a number, boolean or date-time | **Msg 2364** `… to 'xs:string'`; a number parameter given a string or date **Msg 2364** `… to 'xs:decimal'`, `'xs:decimal ?'` after an optional argument |
+| `floor`, `ceiling`, `round`, `sum`, `avg` over a non-number | **Msg 9308**, a written sequence of differing types quoted item by item (`'xs:integer , xs:string'`) |
+| `min`, `max`, `distinct-values` over a written sequence of families that don't compare | **Msg 9311** naming the first two, an integer as `xs:decimal` |
+| a comparison between two families — a date and a string, a date and a `dateTime` | **Msg 2234** |
+| `last(…)` / `position(…)` with an argument | **Msg 2238**, ahead of the predicate-context check |
+
+`min` / `max` over a string, date-time or other ordered type answer that type, comparing the items' values; over numbers and untyped values they answer a number.
+
 ### Arguments, outer references and the context node
 
 Every XQuery argument, and `value()`'s type, is a string literal — parenthesized or not — and anything else (a variable, an expression, `NULL`) is **Msg 8172** naming the argument's position and the method, which stops the batch as it compiles, a `TRY` around it included (probed 2026-10-06 against SQL Server 2025).
@@ -464,7 +478,6 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
   A static type error the simulator meets building an operator ahead of a syntax error later in the expression wins, where real parses the whole expression first: `<a/><b>` is Msg 2373 here and real's Msg 2209 near `<eof>` (probed 2026-10-20).
   Real also splits its generic syntax errors further than the simulator does — a path that ends mid-step is its **Msg 9341** (`Syntax error near '<eof>', expected a step expression.`) where the simulator reports 2209 — and a construct keyword written without the token that identifies it (`for i in …`, `if 1=1 then …`) is real's 2209 near the *keyword* while the simulator names the token it stopped on.
 - **`position()` / `last()` legality is lexical.** The simulator allows them anywhere inside a written predicate, so a FLWOR nested in one can read them; real's rule is its own binder's.
-- `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.
 - **Exact numbers are `numeric(38, 10)`, as real's are** (probed 2026-10-06 against SQL Server 2025): a decimal literal keeps ten fractional digits rounded half away from zero, more than 28 integer digits is **Msg 2342**, a result past that range is the empty sequence, and an integer keeps every digit (`Storage/XmlExactDecimal.cs`) — a value a `double` can't carry travels as its digits.
   The [arithmetic types](#arithmetic-types) decide the rendering and the decimal scale rules, and real's decimal scale follows each operand's own digits where the simulator applies the six-digit rule to every quotient and product.
 - **A constructed node re-parses.** Each evaluation splices the enclosed sequences into the literal markup and parses the result, so a value carrying markup-significant text is escaped by position rather than kept as a node identity; the serialized answer matches real for every probed shape.

@@ -825,6 +825,14 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: Heterogeneous sequences are not allowed: found '{atomicType}' and '{nodeType}'", 2210, 16, 1);
 
     /// <summary>
+    /// Msg 9311: a function comparing its argument's items — <c>min</c>,
+    /// <c>max</c>, <c>distinct-values</c> — over a sequence of types that don't
+    /// compare (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryHeterogeneousSequenceIn(string method, string function, string firstType, string secondType) =>
+        new($"XQuery [{method}()]: Heterogeneous sequences are not allowed in '{function}', found '{firstType}' and '{secondType}'.", 9311, 16, 1);
+
+    /// <summary>
     /// Msg 2371: <c>position()</c> or <c>last()</c> outside a predicate, where
     /// there is no sequence for it to read. Probe-confirmed wording against SQL
     /// Server 2025.

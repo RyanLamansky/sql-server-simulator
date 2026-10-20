@@ -329,4 +329,30 @@ public sealed class XmlTypedAtomicTests
     [DataRow("xs:hexBinary(\"0102\")", "base64Binary", "AQI=")]
     public void Cast_WithinAFamily_Converts(string operand, string target, string expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = ''; select @x.value('string(({operand.Replace("'", "''", StringComparison.Ordinal)}) cast as xs:{target}?)', 'nvarchar(60)')"));
+    [TestMethod]
+    [DataRow("contains(xs:date(\"2024-01-01\"), \"2\")", 2364, "Cannot implicitly convert from 'xs:date ?' to 'xs:string'")]
+    [DataRow("substring(\"abc\", xs:date(\"2024-01-01\"))", 2364, "Cannot implicitly convert from 'xs:date ?' to 'xs:decimal ?'")]
+    [DataRow("floor(\"1\")", 9308, "The argument of 'floor()' must be of a single numeric primitive type or 'http://www.w3.org/2004/07/xpath-datatypes#untypedAtomic'. Found argument of type 'xs:string'.")]
+    [DataRow("round(true())", 9308, "The argument of 'round()' must be of a single numeric primitive type or 'http://www.w3.org/2004/07/xpath-datatypes#untypedAtomic'. Found argument of type 'xs:boolean'.")]
+    [DataRow("sum((1, \"a\"))", 9308, "The argument of 'sum()' must be of a single numeric primitive type or 'http://www.w3.org/2004/07/xpath-datatypes#untypedAtomic'. Found argument of type 'xs:integer , xs:string'.")]
+    [DataRow("sum((\"1\", \"2\"))", 9308, "The argument of 'sum()' must be of a single numeric primitive type or 'http://www.w3.org/2004/07/xpath-datatypes#untypedAtomic'. Found argument of type 'xs:string +'.")]
+    [DataRow("max((1, \"a\"))", 9311, "Heterogeneous sequences are not allowed in 'max()', found 'xs:decimal' and 'xs:string'.")]
+    [DataRow("distinct-values((1, \"1\"))", 9311, "Heterogeneous sequences are not allowed in 'distinct-values()', found 'xs:decimal' and 'xs:string'.")]
+    [DataRow("last(1)", 2238, "Too many arguments in call to function 'last()'")]
+    [DataRow("xs:date(\"2024-01-01\") = \"2024-01-01\"", 2234, "The operator \"=\" cannot be applied to \"xs:date ?\" and \"xs:string\" operands.")]
+    [DataRow("xs:date(\"2024-01-01\") = xs:dateTime(\"2024-01-01T00:00:00Z\")", 2234, "The operator \"=\" cannot be applied to \"xs:date ?\" and \"xs:dateTime ?\" operands.")]
+    public void ArgumentAndOperandTypes_AreCheckedByFamily(string expression, int number, string message) =>
+        new Simulation().AssertSqlError(
+            $"declare @x xml = N'<r/>'; select @x.value('string({expression.Replace("'", "''", StringComparison.Ordinal)})', 'nvarchar(60)')",
+            number,
+            "XQuery [value()]: " + message);
+
+    [TestMethod]
+    [DataRow("max((\"b\", \"a\", \"c\"))", "c")]
+    [DataRow("min((\"b\", \"a\", \"c\"))", "a")]
+    [DataRow("max((\"10\", \"9\"))", "9")]
+    [DataRow("max((xs:date(\"2024-01-01\"), xs:date(\"2023-05-05\")))", "2024-01-01")]
+    [DataRow("min((xs:date(\"2024-01-01\"), xs:date(\"2024-02-01\")))", "2024-01-01")]
+    public void MinMax_CompareAnOrderedTypesValues(string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r/>'; select @x.value('string({expression.Replace("'", "''", StringComparison.Ordinal)})', 'nvarchar(20)')"));
 }
