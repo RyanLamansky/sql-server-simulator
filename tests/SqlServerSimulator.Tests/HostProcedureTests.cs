@@ -134,5 +134,11 @@ public sealed class HostProcedureTests
         AreEqual("The database '[nope]' does not exist. Supply a valid database name. To see available databases, use sys.databases.",
             sim.AssertSqlError("exec sp_clean_db_free_space 'nope'", 15010).Errors[0].Message);
         _ = sim.AssertSqlError("exec sp_clean_db_file_free_space 'd'", 201);
+        // Without CONTROL SERVER the cleaning's own batch is refused, and the
+        // caller's goes on (probed 2026-10-20).
+        _ = sim.ExecuteNonQuery("create login l with password = 'Zz!12345678x', check_policy = off; use d; create user l for login l");
+        sim.AssertSqlError("use d; execute as login = 'l'; exec sp_clean_db_free_space 'd'; revert; create table after_refusal (a int)", 14260,
+            "You do not have sufficient permission to run this command. Contact your system administrator.");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from d.sys.tables where name = 'after_refusal'"));
     }
 }

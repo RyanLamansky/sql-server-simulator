@@ -111,6 +111,9 @@ public sealed class PlanGuideTests
         // A name in use whose guide covers the same statement is the statement match, whatever the hints.
         Refused("exec sp_create_plan_guide N'G1', N'select * from t where a = 1', N'SQL', NULL, NULL, N'OPTION (MAXDOP 2)'", 10502);
         Refused("exec sp_create_plan_guide N'x', N'select * from t where a = @0', N'TEMPLATE', NULL, N'@0 int', NULL", 10522);
+        _ = simulation.ExecuteNonQuery("exec sp_create_plan_guide N'g2', N'select * from t where a = @0', N'TEMPLATE', NULL, N'@0 int', N'OPTION(PARAMETERIZATION FORCED)'");
+        // A template guide over a statement another covers (probed 2026-10-20).
+        Refused("exec sp_create_plan_guide N'g3', N'select * from t where a = @0', N'TEMPLATE', NULL, N'@0 int', N'OPTION(PARAMETERIZATION FORCED)'", 10529);
     }
 
     [TestMethod]
