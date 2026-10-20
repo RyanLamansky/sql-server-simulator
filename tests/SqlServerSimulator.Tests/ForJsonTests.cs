@@ -409,4 +409,17 @@ public class ForJsonTests
     [DataRow("geography::Point(1, 2, 4326)")]
     public void SpatialColumn_IsMsg13604(string value)
         => new Simulation().AssertSqlError($"select {value} as a for json path", 13604, "FOR JSON cannot serialize CLR objects. Cast CLR types explicitly into one of the supported types in FOR JSON queries.");
+    [TestMethod]
+    [DataRow("select value from openjson('[1]') for json auto")]
+    [DataRow("select value from openjson('[1]') as o for json auto")]
+    [DataRow("select value from string_split('a,b', ',') for json auto")]
+    [DataRow("select value from generate_series(1, 2) for json auto")]
+    public void AutoOverAConstructedRowsetAlone_HasNoTable(string query) =>
+        new Simulation().AssertSqlError(query, 13600);
+
+    [TestMethod]
+    [DataRow("select o.value, v from openjson('[1]') o cross join (values (2)) t(v) for json auto", "[{\"value\":\"1\",\"v\":2}]")]
+    [DataRow("select v, o.value from (values (2)) t(v) cross join openjson('[1]') o for json auto", "[{\"v\":2,\"value\":\"1\"}]")]
+    public void AutoPlacesAConstructedRowsetsColumnsAsComputed(string query, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar(query));
 }

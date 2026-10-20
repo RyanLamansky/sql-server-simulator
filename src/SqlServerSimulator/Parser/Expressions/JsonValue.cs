@@ -152,12 +152,12 @@ internal sealed class JsonValue : Expression
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         var strict = path.Mode == JsonPathMode.Strict;
         if (!found || nodes.Count == 0 || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : this.NullResult(jsonValue.Type, batch);
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(JsonText.StrictMissState(jsonValue.Type)) : this.NullResult(jsonValue.Type, batch);
         if (nodes.Count > 1)
         {
             return !strict ? this.NullResult(jsonValue.Type, batch)
                 : isJson ? throw SimulatedSqlException.JsonScalarNotFound()
-                : throw SimulatedSqlException.JsonStrictPathNotFound(2);
+                : throw SimulatedSqlException.JsonStrictPathNotFound(JsonText.StrictMissState(jsonValue.Type));
         }
         return this.Answer(nodes[0], path.Mode, jsonValue.Type, batch);
     }
@@ -185,7 +185,9 @@ internal sealed class JsonValue : Expression
         {
             // There is no scalar to hand back, which lax mode answers as NULL
             // and strict raises Msg 13623 for.
-            return mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonScalarNotFound() : this.NullResult(documentType, batch);
+            return mode == JsonPathMode.Strict
+                ? throw SimulatedSqlException.JsonScalarNotFound(documentType is not JsonSqlType && SqlType.IsMaxLength(documentType) ? (byte)1 : (byte)2)
+                : this.NullResult(documentType, batch);
         }
         if (this.returningType is not null)
             return this.Convert(element, mode == JsonPathMode.Strict, batch);

@@ -978,6 +978,7 @@ The rules are heuristic and were probed one at a time against SQL Server 2025; t
 | computed columns | any expression that isn't a bare column reference — including a CAST or function call **over another table's column**, and aggregates — joins the level of the nearest *preceding* table column; one that precedes every table column joins the first level, ahead of that level's own columns |
 | all-computed projection | one level, named after the first FROM source (`select 1 as a from t` → `<t a="1"/>`) |
 | no FROM clause | **Msg 6800** (FOR XML) / **Msg 13600** (FOR JSON) |
+| a constructed rowset — `OPENJSON`, `STRING_SPLIT`, `GENERATE_SERIES`, the `REGEXP_` rowsets | no table: its columns place as computed ones, and a FROM of nothing else is Msg 6800 / 13600, aliased or not; the `sys.fn_*` functions and user functions are tables, unaliased ones named as written (probed 2026-10-20) |
 | row grouping | an outer level collapses **consecutive** rows whose values for that level are all equal (two NULLs count as equal); the same values after an intervening different row open a **new** element |
 | innermost level | never collapses — one element / object per row, even for two identical rows |
 | `xml` column in a level | that level never collapses at all: SQL Server can't compare `xml`, so every row opens a fresh element (`AutoLevel.AlwaysRestarts`) |

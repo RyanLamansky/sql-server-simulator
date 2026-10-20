@@ -401,4 +401,33 @@ public sealed class JsonContainsTests
     [DataRow("json_path_exists(@j, 'append $.a')")]
     public void AppendPrefixOutsideJsonModify(string call) =>
         AssertSqlError($"declare @j nvarchar(max) = N'{{\"a\":[1]}}'; select {call}", 13607, 14, "JSON path is not properly formatted. Unexpected character 'a' is found at position 0.");
+    [TestMethod]
+    [DataRow("nvarchar(max)", "json_value(@j, 'strict $.zz')", 13608, (byte)2)]
+    [DataRow("nvarchar(100)", "json_value(@j, 'strict $.zz')", 13608, (byte)1)]
+    [DataRow("json", "json_value(@j, 'strict $.zz')", 13608, (byte)5)]
+    [DataRow("nvarchar(max)", "json_value(@j, 'strict $.b')", 13623, (byte)1)]
+    [DataRow("nvarchar(100)", "json_value(@j, 'strict $.b')", 13623, (byte)2)]
+    [DataRow("nvarchar(max)", "json_query(@j, 'strict $.zz')", 13608, (byte)2)]
+    [DataRow("nvarchar(100)", "json_query(@j, 'strict $.b[*][9]' with array wrapper)", 13608, (byte)1)]
+    [DataRow("nvarchar(max)", "json_query(@j, 'strict $.b[*]')", 13624, (byte)4)]
+    [DataRow("json", "json_query(@j, 'strict $.b[*]')", 13624, (byte)2)]
+    public void StrictMiss_StatesFollowTheDocumentType(string type, string call, int number, byte state)
+    {
+        var ex = new Simulation().AssertSqlError($$"""declare @j {{type}} = N'{"b":[1,"x",{"c":2}]}'; select {{call}}""", number);
+        AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("[1,\"x\",{\"c\":2}]", "1,x,{\"c\":2}")]
+    [DataRow("[\"a\\\"b\",\"c\\/d\"]", "a\\\"b,c\\/d")]
+    [DataRow("[ [1, 2] , {\"c\" : 2} ]", "[1, 2],{\"c\" : 2}")]
+    [DataRow("[true,1e2,2.0]", "true,1e2,2.0")]
+    [DataRow("[1,null]", null)]
+    [DataRow("[1]", null)]
+    public void QueryOverMaxText_JoinsSeveralValues(string array, string? expected) =>
+        AreEqual(expected ?? (object)DBNull.Value, new Simulation().ExecuteScalar($$"""declare @j nvarchar(max) = N'{"b":{{array}}}'; select json_query(@j, '$.b[*]')"""));
+
+    [TestMethod]
+    public void QueryOverBoundedText_LeavesSeveralValuesNull() =>
+        AreEqual(DBNull.Value, new Simulation().ExecuteScalar("""declare @j nvarchar(100) = N'{"b":[1,2]}'; select json_query(@j, '$.b[*]')"""));
 }

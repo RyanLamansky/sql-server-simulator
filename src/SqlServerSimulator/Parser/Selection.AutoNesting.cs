@@ -36,8 +36,10 @@ partial class Selection
                 : "FOR XML AUTO over a set-operation result isn't modeled; use FOR XML PATH.");
         }
 
-        // No FROM clause at all: AUTO has no table to name a level after.
-        if (sourceNames.Length == 0)
+        // No FROM clause at all, or only sources AUTO doesn't count as tables:
+        // there is no table to name a level after.
+        var nonTables = inner.AutoNonTables;
+        if (sourceNames.Length == 0 || (nonTables is not null && Array.TrueForAll(nonTables, static nonTable => nonTable)))
             throw forJson ? SimulatedSqlException.ForJsonAutoRequiresTable() : SimulatedSqlException.ForXmlAutoRequiresTable();
 
         var levels = new List<AutoLevel>();
@@ -52,6 +54,8 @@ partial class Selection
         for (var i = 0; i < columnSource.Length; i++)
         {
             var source = columnSource[i];
+            if (source >= 0 && nonTables is not null && nonTables[source])
+                source = -1;
             if (source < 0)
             {
                 if (current < 0)
@@ -71,7 +75,7 @@ partial class Selection
         }
 
         if (levels.Count == 0)
-            levels.Add(new AutoLevel(AutoLevelName(sourceNames, 0, forJson)));
+            levels.Add(new AutoLevel(AutoLevelName(sourceNames, nonTables is null ? 0 : Array.IndexOf(nonTables, false), forJson)));
         levels[0].Columns.InsertRange(0, leading);
 
         // SQL Server can't compare xml, so a level holding an xml column never

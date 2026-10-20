@@ -2330,6 +2330,8 @@ internal sealed partial class Selection
         {
             ConstructsRows = true,
             CatalogColumns = constructsColumns ? null : BuiltInResources.RealComputedColumns("sys." + writtenName, plan.ColumnNames),
+            NotAutoTable = constructsColumns,
+            RowsetFunctionName = writtenName,
         };
     }
 

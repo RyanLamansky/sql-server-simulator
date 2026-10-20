@@ -121,7 +121,7 @@ internal sealed class JsonQuery : Expression
         var nodes = new List<JsonElement>();
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         if (!found || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(resultType);
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(JsonText.StrictMissState(jsonValue.Type)) : SqlValue.Null(resultType);
 
         var sb = new StringBuilder("[");
         for (var i = 0; i < nodes.Count; i++)
@@ -141,7 +141,11 @@ internal sealed class JsonQuery : Expression
     /// A path with SQL Server 2025's advanced accessors and no wrapper: one
     /// selected value answers as a plain path's would; several are NULL, or
     /// Msg 13624 under <c>strict</c> (probed 2026-09-27 against SQL Server
-    /// 2025). Over text, <c>last</c> and a list are refused outright.
+    /// 2025). Over text, <c>last</c> and a list are refused outright. Over a
+    /// <c>(max)</c> string, though, several are each one's text as the
+    /// document wrote it — a string's between its quotes — joined by commas,
+    /// NULL where one is a JSON null, and strict's refusal is state 4
+    /// (probed 2026-10-20).
     /// </summary>
     private static SqlValue ExtractAdvanced(SqlValue jsonValue, in JsonPath path, SqlType resultType)
     {
@@ -151,9 +155,24 @@ internal sealed class JsonQuery : Expression
         var nodes = new List<JsonElement>();
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         if (!found || nodes.Count == 0 || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(resultType);
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(JsonText.StrictMissState(jsonValue.Type)) : SqlValue.Null(resultType);
+        var maxText = !isJson && SqlType.IsMaxLength(jsonValue.Type);
         if (nodes.Count > 1)
-            return strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(2) : SqlValue.Null(resultType);
+        {
+            if (strict)
+                throw SimulatedSqlException.JsonObjectOrArrayNotFound(maxText ? (byte)4 : (byte)2);
+            if (!maxText || nodes.Exists(static node => node.ValueKind == JsonValueKind.Null))
+                return SqlValue.Null(resultType);
+            var joined = new StringBuilder();
+            for (var i = 0; i < nodes.Count; i++)
+            {
+                if (i > 0)
+                    _ = joined.Append(',');
+                var raw = nodes[i].GetRawText();
+                _ = nodes[i].ValueKind == JsonValueKind.String ? joined.Append(raw, 1, raw.Length - 2) : joined.Append(raw);
+            }
+            return SqlValue.FromString(resultType, joined.ToString());
+        }
         var subtree = JsonSubtree.Extract(nodes[0], path.Mode, ScalarState(resultType));
         return subtree is null ? SqlValue.Null(resultType)
             : isJson ? SqlValue.FromJson(subtree)

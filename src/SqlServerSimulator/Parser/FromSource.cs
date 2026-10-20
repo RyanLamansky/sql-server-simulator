@@ -100,6 +100,12 @@ internal sealed class FromSource(
     /// <summary>A table value constructor whose cells read an enclosing or <c>APPLY</c>-left row.</summary>
     public bool ConstructorReadsOuterRow;
 
+    /// <summary>Set on a built-in rowset function AUTO mode doesn't count as a table — see <see cref="Selection.AutoNonTables"/>.</summary>
+    public bool NotAutoTable;
+
+    /// <summary>A built-in rowset function's written name, which names its AUTO level when no alias does.</summary>
+    public string? RowsetFunctionName;
+
     /// <summary>
     /// The table hints of a base-table source written with <c>FORCESEEK</c>,
     /// or with <c>FORCESCAN</c> beside an <c>INDEX</c> hint, which the query

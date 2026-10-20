@@ -185,15 +185,24 @@ internal static class JsonText
     /// far as the problem, else the strict-mode Msg 13608. Returns without
     /// raising for a lax path over a document with nothing wrong ahead of it —
     /// the caller answers NULL. The strict miss is state 5 over a <c>json</c>
-    /// document and 1 over text (probed 2026-09-26 against SQL Server 2025).
+    /// document, 2 over a <c>(max)</c> string and 1 over a bounded one
+    /// (probed 2026-09-26 and 2026-10-20 against SQL Server 2025).
     /// </summary>
     public static void RaiseUnresolved(in JsonScan scan, JsonWalkResult result, JsonPathMode mode, SqlType documentType)
     {
         if (result is not JsonWalkResult.Abandoned && scan.HasError)
             throw scan.Error();
         if (mode == JsonPathMode.Strict)
-            throw SimulatedSqlException.JsonStrictPathNotFound(documentType is JsonSqlType ? (byte)5 : (byte)1);
+            throw SimulatedSqlException.JsonStrictPathNotFound(StrictMissState(documentType));
     }
+
+    /// <summary>
+    /// The state of a JSON_VALUE / JSON_QUERY strict path's Msg 13608: 5 over a
+    /// <c>json</c> document, 2 over a <c>(max)</c> string, 1 over a bounded one
+    /// (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public static byte StrictMissState(SqlType documentType) =>
+        documentType is JsonSqlType ? (byte)5 : SqlType.IsMaxLength(documentType) ? (byte)2 : (byte)1;
 
     private enum State
     {

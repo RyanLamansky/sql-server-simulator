@@ -2410,6 +2410,7 @@ internal sealed partial class Selection
         selection.BranchFromSources = sources;
         selection.ClauseExpressions = ClauseExpressionsOf(fromClause, joins, orderBy);
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
+        selection.AutoNonTables = Array.ConvertAll(sources, static source => source.NotAutoTable);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         selection.ColumnWireFlags = WireFlagsOf(expressions, sources, fromClause.AllGroupingExpressions, ColumnNullabilityContext(sources, joins, fromClause.GroupingSetsWritten, parseBatch, resolveColumnType), out selection.ColumnDerivedWireFlags, out selection.DescribedProjections);
         selection.IsGrouped = isGrouped;
@@ -2739,7 +2740,7 @@ internal sealed partial class Selection
     {
         var names = new string?[sources.Length];
         for (var i = 0; i < sources.Length; i++)
-            names[i] = sources[i].AutoElementName ?? sources[i].Qualifier;
+            names[i] = sources[i].AutoElementName ?? sources[i].Qualifier ?? sources[i].RowsetFunctionName;
         return names;
     }
 

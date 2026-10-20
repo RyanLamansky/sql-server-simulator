@@ -64,6 +64,14 @@ internal sealed partial class Selection
     internal string?[]? AutoSourceNames;
 
     /// <summary>
+    /// Per FROM source, parallel to <see cref="AutoSourceNames"/>, whether
+    /// AUTO mode leaves it out as a table: <c>OPENJSON</c>, <c>STRING_SPLIT</c>,
+    /// <c>GENERATE_SERIES</c> and the <c>REGEXP_</c> rowsets, whose columns
+    /// serialize as computed ones (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal bool[]? AutoNonTables;
+
+    /// <summary>
     /// Per projection column, the index into <see cref="AutoSourceNames"/> of
     /// the FROM source it reads, or -1 when the column is an expression
     /// (SQL Server's "computed column", which joins the level of the table

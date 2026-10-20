@@ -58,11 +58,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 13623: a <c>strict</c>-mode JSON path under JSON_VALUE resolved to
     /// an object or an array, which JSON_VALUE has no scalar to return for.
-    /// Lax mode returns NULL instead. Probe-confirmed State 2 against
-    /// SQL Server 2025.
+    /// Lax mode returns NULL instead. State 2, but 1 over a <c>(max)</c>
+    /// string document (probed 2026-10-20 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException JsonScalarNotFound() =>
-        new("Scalar value cannot be found in the specified JSON path.", 13623, 16, 2) { AbortsAsUnderXactAbort = true };
+    internal static SimulatedSqlException JsonScalarNotFound(byte state = 2) =>
+        new("Scalar value cannot be found in the specified JSON path.", 13623, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13624: a <c>strict</c>-mode JSON path under JSON_QUERY (or an
