@@ -249,9 +249,16 @@ internal sealed class XmlProlog(string? defaultElementNamespace, Dictionary<stri
 }
 
 /// <summary>A literal or otherwise constant single item.</summary>
-internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string typeName)
+internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string typeName, bool signed = false)
     : XmlQueryExpr(kind, XmlOccurrence.ExactlyOne, typeName)
 {
+    /// <summary>
+    /// Whether a unary <c>+</c> was written ahead of the literal, which makes
+    /// it a computed value to the static types — a positional predicate of
+    /// <c>+1</c> doesn't narrow (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public readonly bool Signed = signed;
+
     /// <summary>
     /// The literal item. Public so the compiler can read a written string back
     /// out — the argument of a <c>sql:</c> accessor is a name, not a value.
@@ -520,15 +527,17 @@ internal sealed class XmlStep(
         predicates);
 
     /// <summary>
-    /// A positional predicate narrows a sequence to at most one item; a
-    /// filtering one doesn't, which is why <c>/r/a[@x="1"]</c> is still
-    /// <c>*</c> on real while <c>(/r/a)[1]</c> is <c>?</c>.
+    /// A literal position or <c>last()</c> narrows a sequence to at most one
+    /// item; a filtering predicate doesn't, which is why <c>/r/a[@x="1"]</c>
+    /// is still <c>*</c> on real while <c>(/r/a)[1]</c> is <c>?</c>, and
+    /// neither does a computed position — <c>last() - 1</c>, <c>+1</c>, a
+    /// cast or a function's (probed 2026-10-20 against SQL Server 2025).
     /// </summary>
     public static XmlOccurrence Narrow(XmlOccurrence occurrence, XmlQueryExpr[] predicates)
     {
         foreach (var predicate in predicates)
         {
-            if (predicate.Kind == XmlStaticKind.Number)
+            if (predicate is XmlLiteralExpr { Kind: XmlStaticKind.Number, Signed: false } or XmlFunctionCallExpr { IsLast: true })
                 return XmlOccurrence.ZeroOrOne;
         }
         return occurrence;
@@ -1369,6 +1378,9 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
 {
     private readonly XmlFunctionId id = id;
     private readonly XmlQueryExpr[] arguments = arguments;
+
+    /// <summary>Whether this is <c>last()</c>, which narrows a predicated sequence as a literal position does.</summary>
+    public readonly bool IsLast = id == XmlFunctionId.Last;
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
     {

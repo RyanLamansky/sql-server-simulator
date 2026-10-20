@@ -348,6 +348,7 @@ Real settles it statically, so it fires while the SQL statement parses and over 
 
 Real types an expression off its **shape**, never the instance, and refuses a construct that admits at most one item but got a sequence.
 Cardinality multiplies along a path, and only a *positional* predicate narrows a step — a filtering one leaves it plural.
+A position narrows only as a numeric literal, parenthesized or not, or `last()`: a computed one — `last() - 1`, `+1`, `xs:integer("1")`, `count(…)`, a `sql:variable` — selects positionally but leaves the type plural, and a double (`[1e0]`) is no predicate at all, **Msg 2203** (probed 2026-10-20 against SQL Server 2025).
 So `(/r/a)[1]` and `/r[1]/a[1]` are singular while `/r/a[1]`, `/r/a[@x="1"]` and `/r/a[@x="1"][1]` are not (probe-confirmed one shape at a time).
 
 Five constructs take the check, and each reports **Msg 2389** naming the method that carried the expression:

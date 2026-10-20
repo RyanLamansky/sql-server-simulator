@@ -715,7 +715,9 @@ internal sealed class XmlQueryParser(
         var negate = this.Current == '-';
         this.index++;
         var operand = this.ParseUnary();
-        return negate ? this.Arithmetic(operand, null, '-', "-") : operand;
+        return negate ? this.Arithmetic(operand, null, '-', "-")
+            : operand is XmlLiteralExpr { Signed: false } literal ? new XmlLiteralExpr(literal.Value, literal.Kind, literal.TypeName, signed: true)
+            : operand;
     }
 
     private XmlQueryExpr ParsePathExpr()
@@ -1092,8 +1094,13 @@ internal sealed class XmlQueryParser(
             if (this.Current != ']')
                 throw SimulatedSqlException.XQuerySyntaxErrorExpecting(this.method, this.CurrentToken(), "]");
             this.index++;
-            if (predicate.Kind is XmlStaticKind.String or XmlStaticKind.Untyped)
+            // A double or float isn't a predicate's numeric type either
+            // (probed 2026-10-20 against SQL Server 2025: `[1e0]`).
+            if (predicate.Kind is XmlStaticKind.String or XmlStaticKind.Untyped
+                || (predicate.Kind == XmlStaticKind.Number && predicate.TypeName is "xs:double" or "xs:float"))
+            {
                 throw SimulatedSqlException.XQueryPredicateNotBooleanOrNumeric(this.method, predicate.AtomizedTypeName());
+            }
             (predicates ??= []).Add(predicate);
         }
     }

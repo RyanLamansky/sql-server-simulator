@@ -407,4 +407,32 @@ public sealed class XmlPredicateTests
     public void StaticDiagnosticsFireOverAnEmptyRowset() =>
         _ = new Simulation().AssertSqlError(
             "create table dbo.doc (body xml); select body.query('/r/p[b eq 1]') from dbo.doc", 2389);
+    [TestMethod]
+    [DataRow("1", 1)]
+    [DataRow("1.0", 1)]
+    [DataRow("(1)", 1)]
+    [DataRow("last()", 2)]
+    public void LiteralPosition_NarrowsToASingleton(string position, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r><a>1</a><a>2</a></r>'; select @x.value('(/r/a)[{position}]', 'int')"));
+
+    [TestMethod]
+    [DataRow("last() - 1")]
+    [DataRow("+1")]
+    [DataRow("2 + 0")]
+    [DataRow("xs:integer(\"1\")")]
+    [DataRow("count(/r/a)")]
+    [DataRow("position()")]
+    [DataRow("sql:variable(\"@i\")")]
+    public void ComputedPosition_LeavesTheSequencePlural(string position) =>
+        new Simulation().AssertSqlError(
+            $"declare @i int = 1; declare @x xml = N'<r><a>1</a><a>2</a></r>'; select @x.value('(/r/a)[{position.Replace("'", "''", StringComparison.Ordinal)}]', 'int')",
+            2389,
+            "XQuery [value()]: 'value()' requires a singleton (or empty sequence), found operand of type 'xdt:untypedAtomic *'");
+
+    [TestMethod]
+    public void DoublePosition_IsNoPredicate() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = N'<r><a>1</a></r>'; select @x.value('(/r/a)[1e0]', 'int')",
+            2203,
+            "XQuery [value()]: Only 'http://www.w3.org/2001/XMLSchema#decimal?', 'http://www.w3.org/2001/XMLSchema#boolean?' or 'node()*' expressions allowed as predicates, found 'xs:double'");
 }
