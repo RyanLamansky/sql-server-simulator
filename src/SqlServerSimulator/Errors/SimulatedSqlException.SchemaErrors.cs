@@ -46,8 +46,9 @@ partial class SimulatedSqlException
         new($"There is already an object named '{name}' in the database.", 2714, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
-    /// Msg 2714 for <c>CREATE SYNONYM</c> (state 8) and <c>CREATE SCHEMA</c>
-    /// (state 6, followed there by Msg 2759), which unlike the other objects'
+    /// Msg 2714 for <c>CREATE SYNONYM</c> (state 8), <c>CREATE SCHEMA</c>
+    /// (state 6, followed there by Msg 2759) and <c>CREATE EVENT
+    /// NOTIFICATION</c> (state 21, probed 2026-10-20), which unlike the other objects'
     /// end only their statement and leave the transaction committable (probed
     /// 2026-09-24 against SQL Server 2025) — and for a temp table a batch
     /// creates twice (state 1), a compile error, so nothing the batch holds

@@ -130,7 +130,7 @@ partial class Simulation
         if (Array.Exists(parent == EventNotificationParent.Server ? simulation.ServerEventNotifications : database.EventNotifications,
             other => other.Parent == parent && ReferenceEquals(other.Queue, queue) && database.Collation.Equals(other.Name, name)))
         {
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(name, 21);
+            throw SimulatedSqlException.NameTakenEndingOnlyStatement(name, 21);
         }
         if (parent != EventNotificationParent.Server)
             database.RejectWriteWhenReadOnly();

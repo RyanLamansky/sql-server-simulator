@@ -87,6 +87,9 @@ partial class Simulation
 
         if (batch.IsSkipping)
             return;
+        // A doomed transaction refuses a change of security context as it
+        // refuses a write (probed 2026-10-20 against SQL Server 2025).
+        RejectWriteInDoomedTransaction(batch.Connection);
 
         targetName ??= targetVariable!.Run(new RuntimeContext(NoColumnResolver, batch)) is { IsNull: false } value
             ? value.CoerceTo(Storage.SqlType.NVarchar).AsString
@@ -226,7 +229,8 @@ partial class Simulation
 
     /// <summary>
     /// Applies <c>REVERT</c>: pops one impersonation frame (a stray REVERT at
-    /// the base identity is a silent no-op). Entered with the cursor on the
+    /// the base identity is a silent no-op), refused in a doomed transaction
+    /// as a write is (Msg 3930), whether or not it has a frame to pop. Entered with the cursor on the
     /// <c>REVERT</c> keyword; the optional <c>WITH COOKIE = @c</c> tail parses
     /// and discards.
     /// </summary>
@@ -260,6 +264,7 @@ partial class Simulation
         }
         if (batch.IsSkipping)
             return;
+        RejectWriteInDoomedTransaction(batch.Connection);
         var presented = presentedValue is { IsNull: false } value ? value.AsBytes : null;
         var depth = context.Connection.Security.ImpersonationDepth;
         context.Connection.Security.Revert(context.CurrentDatabase.Name, presented);

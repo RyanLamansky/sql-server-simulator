@@ -171,20 +171,32 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException EventTypeAlreadySpecified(string eventType) =>
         new($"\"{eventType}\" has already been specified as an event type.", 1095, 15, 1);
 
-    /// <summary>Mimics SQL Server error 2104 state 5: <c>CREATE EVENT NOTIFICATION</c> without its permission.</summary>
+    /// <summary>
+    /// Mimics SQL Server error 2104 state 5: <c>CREATE EVENT NOTIFICATION</c>
+    /// without its permission, which ends the batch and rolls back as under
+    /// <c>XACT_ABORT</c>, dooming the transaction when caught (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
     internal static SimulatedSqlException EventNotificationPermissionDenied(string name) =>
-        new($"Cannot create the event notification '{name}', because you do not have permission.", 2104, 14, 5);
+        new($"Cannot create the event notification '{name}', because you do not have permission.", 2104, 14, 5) { AbortsAsUnderXactAbort = true };
 
-    /// <summary>Mimics SQL Server error 2116: <c>'current database'</c> naming a database with no broker id — <c>master</c> or <c>model</c>.</summary>
+    /// <summary>
+    /// Mimics SQL Server error 2116: <c>'current database'</c> naming a
+    /// database with no broker id — <c>master</c> or <c>model</c> — which ends
+    /// the batch as under <c>XACT_ABORT</c> (probed 2026-10-20 against SQL
+    /// Server 2025).
+    /// </summary>
     internal static SimulatedSqlException EventNotificationTargetNotBrokerDatabase(string databaseName) =>
-        new($"Cannot CREATE EVENT NOTIFICATION to database '{databaseName}' because it is not a valid broker database.", 2116, 16, 1);
+        new($"Cannot CREATE EVENT NOTIFICATION to database '{databaseName}' because it is not a valid broker database.", 2116, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 2102: a server's event notification, which
-    /// sends from msdb (state 2), created by a login with no user there.
+    /// sends from msdb (state 2), created by a login with no user there, which
+    /// ends the batch as under <c>XACT_ABORT</c> (probed 2026-10-20 against
+    /// SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException EventNotificationNoUser(string name, string loginName, string databaseName, byte state) =>
-        new($"Cannot create event notification '{name}' since there is no user for login '{loginName}' in database '{databaseName}'.", 2102, 16, state);
+        new($"Cannot create event notification '{name}' since there is no user for login '{loginName}' in database '{databaseName}'.", 2102, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 15151 for <c>DROP EVENT NOTIFICATION</c>, which

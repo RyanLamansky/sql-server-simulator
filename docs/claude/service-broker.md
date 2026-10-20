@@ -118,6 +118,7 @@ A database's and its queues' notifications sit on `Database.EventNotifications`,
 - A name is unique per parent — the database and each queue apart — Msg 2714 state 21 otherwise; notifications aren't in `sys.objects`.
 - `'current database'` reads as the database's broker id, which `broker_instance` then reports, and in `master` or `model` is Msg 2116; any other string is accepted as written.
 - The permission is `CREATE DATABASE DDL EVENT NOTIFICATION` on a database, `ALTER` on the queue, and on the server `CREATE DDL EVENT NOTIFICATION` for DDL events and `CREATE TRACE EVENT NOTIFICATION` for trace ones, each Msg 2104 state 5; a server notification needs its login to have a user in msdb (Msg 2102 state 2), where its dialog begins, and the checks run after `'current database'`'s.
+  Msg 2104, 2102 and 2116 end the batch and roll back as under `XACT_ABORT`, dooming a transaction when caught, where a name taken (Msg 2714 state 21) ends only its statement (probed 2026-10-20 against SQL Server 2025).
 - `WITH FAN_IN` shows as `creator_sid` (the creator's sid); `principal_id` is the creator, a server notification's its login's server principal.
 - `DROP` drops the whole list or none: a missing name, or one the principal may not drop, is Msg 15151, which ends the batch.
 - `CREATE` and `DROP` of a database's or queue's notification raise `CREATE_EVENT_NOTIFICATION` / `DROP_EVENT_NOTIFICATION`, whose `EVENTDATA()` names the target (`TargetSchemaName`, `TargetObjectName`, `TargetObjectType` `Database` or `SERVICE QUEUE`); a server's raises neither.

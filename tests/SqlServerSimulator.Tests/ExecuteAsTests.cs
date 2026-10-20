@@ -570,4 +570,28 @@ public sealed class ExecuteAsTests
         _ = connection.CreateCommand("revert").ExecuteNonQuery();
         AreEqual("dbo", connection.CreateCommand("select user_name()").ExecuteScalar());
     }
+
+    [TestMethod]
+    [Description("A doomed transaction refuses EXECUTE AS and REVERT as it refuses a write (Msg 3930), a REVERT with no frame to pop included, the impersonation staying (probed 2026-10-20 against SQL Server 2025).")]
+    public void ExecuteAsAndRevert_RefusedInADoomedTransaction()
+        => AreEqual("3930|3930|3930|zu|-1", new Simulation().ExecuteScalar("""
+            create user zu without login;
+            declare @r varchar(100) = '', @x int;
+            begin tran;
+            set xact_abort on;
+            begin try set @x = cast('x' as int); end try begin catch end catch
+            set xact_abort off;
+            begin try revert; end try begin catch set @r += cast(error_number() as varchar) + '|'; end catch
+            begin try execute as user = 'zu'; end try begin catch set @r += cast(error_number() as varchar) + '|'; end catch
+            rollback;
+            execute as user = 'zu';
+            begin tran;
+            set xact_abort on;
+            begin try set @x = cast('x' as int); end try begin catch end catch
+            set xact_abort off;
+            begin try revert; end try begin catch set @r += cast(error_number() as varchar) + '|'; end catch
+            select @r + user_name() + '|' + cast(xact_state() as varchar);
+            rollback;
+            revert
+            """));
 }

@@ -229,6 +229,38 @@ public sealed class ServiceBrokerEventNotificationTests
             """));
     }
 
+    /// <summary>
+    /// A creation refused for permission (Msg 2104), for a login with no user
+    /// in msdb (2102) or for a database with no broker (2116) ends the batch
+    /// and rolls back as under XACT_ABORT, dooming the transaction when caught,
+    /// where a name taken (2714) ends only its statement (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void Refusals_EndTheBatchOrOnlyTheStatement()
+    {
+        var simulation = WithTarget();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int);
+            create user u without login;
+            create login l with password = 'Zz!12345678x', check_policy = off;
+            create user l for login l;
+            use master;
+            grant create ddl event notification to l;
+            """);
+        using var connection = simulation.CreateOpenConnection();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; insert t values (1); execute as user = 'u'; create event notification n on database for create_table to service 'ens', 'current database'; select 1").ExecuteNonQuery());
+        AreEqual("0|0", Rows(connection, "revert; select concat(@@trancount, '|', (select count(*) from t))"));
+        AreEqual("2104|-1", Rows(connection, "begin tran; execute as user = 'u'; begin try create event notification n on database for create_table to service 'ens', 'current database' end try begin catch select concat(error_number(), '|', xact_state()) end catch; rollback; revert"));
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; insert t values (2); execute as login = 'l'; create event notification n on server for create_database to service 'ens', 'current database'; select 1").ExecuteNonQuery());
+        AreEqual("0|0", Rows(connection, "revert; select concat(@@trancount, '|', (select count(*) from t))"));
+        var noBroker = Throws<SimulatedSqlException>(() => connection.CreateCommand("use master; begin tran; create event notification n on server for create_database to service 'ens', 'current database'; select 1").ExecuteNonQuery());
+        AreEqual("2116", string.Join(",", noBroker.Errors.Where(static error => error.Class > 10).Select(static error => error.Number)));
+        AreEqual("0", Rows(connection, "use simulated; select @@trancount"));
+        _ = connection.CreateCommand("create event notification n on database for create_table to service 'ens', 'current database'").ExecuteNonQuery();
+        AreEqual(2714, Throws<SimulatedSqlException>(() => Rows(connection, "begin tran; create event notification n on database for create_table to service 'ens', 'current database'; select 'after'")).Number);
+        AreEqual("1|1", Rows(connection, "select concat(xact_state(), '|', @@trancount); rollback"));
+    }
+
     [TestMethod]
     public void DdlTrigger_SeesCreateAndDropEventNotification()
     {
