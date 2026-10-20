@@ -889,10 +889,15 @@ Appended after them (real orders these interleaved; the simulator appends since 
 Values are the fresh-index defaults.
 DacFx's XML-index reverse-engineering query reads the `fill_factor` / `is_padded` / `allow_*_locks` / `is_disabled` / `xml_index_type` / `path_id` tail.
 
-**`XML_SCHEMA_NAMESPACE(relational_schema, collection_name)`** (`Parser/Expressions/XmlSchemaNamespaceFunction.cs`): returns the collection's XSD as `xml` — the simulator returns the raw `CREATE XML SCHEMA COLLECTION … AS '…'` source text, where real reconstructs a normalized XSD from component metadata (divergence).
+**`XML_SCHEMA_NAMESPACE(relational_schema, collection_name [, namespace])`** (`Parser/Expressions/XmlSchemaNamespaceFunction.cs`): returns the collection's XSD as `xml`, regenerated from its components as real does (`Schemas/XmlSchemaNamespaceWriter.cs`, probed 2026-10-20 against SQL Server 2025) — byte-identical across the probed shapes and all six AdventureWorks collections:
+- one `xsd:schema` per namespace in namespace order, prefixed `xsd`, the target namespace bound as `t` and each other one it references as `ns1`, `ns2`, … with its `xsd:import`;
+- the globals sorted by kind code (`A`, `C`, `E`, `G`, `K`, `L`, `M`, `S`, `U`), then by name ordinally;
+- annotations dropped, every default value omitted, an underived complex type a restriction of `xsd:anyType`, `blockDefault` / `finalDefault` spelled out on each component, an untyped element `xsd:anyType`, a wildcard's namespaces in the order written;
+- `elementFormDefault` / `attributeFormDefault` qualified when most of the namespace's local declarations are, each one that differs carrying its own `form`.
+
+A third argument narrows the answer to that namespace's schema, compared exactly; a namespace with no components there, `NULL` included, is **Msg 6312**.
 Unresolved pair → Msg 6314 at execution (probe-confirmed wording incl. the space before the colon; real raises 6314 even for the built-in `sys` collection, which the simulator doesn't register — the natural miss matches).
-NULL argument → Msg 8116.
-The three-argument namespace-filtering form → `NotSupportedException`.
+A NULL first or second argument → Msg 8116.
 DacFx's bacpac export calls this per user collection while scripting `sys.xml_schema_collections`.
 
 ## FOR XML result serialization

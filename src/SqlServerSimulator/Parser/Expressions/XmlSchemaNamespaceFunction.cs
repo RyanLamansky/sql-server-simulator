@@ -3,18 +3,16 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
-/// SQL <c>XML_SCHEMA_NAMESPACE(relational_schema, collection_name)</c>:
-/// returns an XML schema collection's XSD content typed as <c>xml</c>.
-/// The simulator returns the raw source text captured from
-/// <c>CREATE XML SCHEMA COLLECTION … AS '…'</c>; real SQL Server
-/// reconstructs a normalized XSD from its internal component metadata — a
-/// documented divergence. An unresolved schema/collection pair raises
+/// SQL <c>XML_SCHEMA_NAMESPACE(relational_schema, collection_name [, namespace])</c>:
+/// an XML schema collection's XSD typed as <c>xml</c>, regenerated from its
+/// components as real does (<see cref="Schemas.XmlSchemaNamespaceWriter"/>),
+/// the third argument narrowing it to one namespace's schema (Msg 6312 when
+/// that namespace holds none). An unresolved schema/collection pair raises
 /// Msg 6314 at execution (probe-confirmed: real raises 6314 even for the
 /// built-in <c>sys</c> collection, which the simulator doesn't register, so
 /// the natural miss matches). A NULL argument raises Msg 8116, and so does
 /// one that isn't a string, while compiling (probed 2026-09-26 against SQL
-/// Server 2025). The three-argument namespace-filtering form is not modeled.
-/// DacFx's bacpac
+/// Server 2025). DacFx's bacpac
 /// export reads this per user collection while scripting
 /// <c>sys.xml_schema_collections</c>.
 /// </summary>
@@ -45,9 +43,15 @@ internal sealed class XmlSchemaNamespaceFunction : Expression
         {
             throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName);
         }
-        return this.namespaceArg is null
-            ? SqlValue.FromXml(collection.XsdText)
-            : throw new NotSupportedException("The three-argument XML_SCHEMA_NAMESPACE(schema, collection, namespace) form is not modeled; use the two-argument form.");
+        var components = collection.GetComponents();
+        if (this.namespaceArg is null)
+            return SqlValue.FromXml(components.Components.Count == 0 ? collection.XsdText : Schemas.XmlSchemaNamespaceWriter.Write(components, null)!);
+        // A NULL namespace names none, real's 6312 quoting it as empty.
+        var namespaceValue = this.namespaceArg.Run(runtime);
+        var namespaceName = namespaceValue.IsNull ? string.Empty : namespaceValue.CoerceTo(SqlType.NVarchar).AsString;
+        return !namespaceValue.IsNull && Schemas.XmlSchemaNamespaceWriter.Write(components, namespaceName) is { } schemaText
+            ? SqlValue.FromXml(schemaText)
+            : throw SimulatedSqlException.XmlSchemaNamespaceNotInCollection(namespaceName, collectionName);
     }
 
     private static string RequireName(SqlValue value, int argumentIndex)
@@ -59,7 +63,7 @@ internal sealed class XmlSchemaNamespaceFunction : Expression
     {
         RequireName(this.schemaArg, 1);
         RequireName(this.nameArg, 2);
-        if (this.namespaceArg is not null)
+        if (this.namespaceArg is not null && !IsUntypedNullLiteral(this.namespaceArg))
             RequireName(this.namespaceArg, 3);
         return SqlType.Xml;
 

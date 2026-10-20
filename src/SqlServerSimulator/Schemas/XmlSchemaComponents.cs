@@ -57,6 +57,9 @@ internal sealed class XmlSchemaComponent(int id, int namespaceId, bool isQualifi
     public bool DisallowNamespaces;
     public string[] WildcardNamespaces = [];
 
+    /// <summary>A wildcard's namespaces as its declaration wrote them, the absent namespace as the empty string, which <c>XML_SCHEMA_NAMESPACE</c> writes back in that order.</summary>
+    public string[] WildcardNamespacesAsWritten = [];
+
     /// <summary>
     /// A simple type's whitespace handling, P(reserve) / R(eplace) /
     /// C(ollapse), which its restrictions' value facets are normalized by.
@@ -455,6 +458,7 @@ internal sealed class XmlSchemaComponentBuilder
             // namespace (##local, or ##targetNamespace without one) last.
             var named = new SortedSet<string>(StringComparer.Ordinal);
             var absent = false;
+            var written = new List<string>();
             foreach (var token in tokens)
             {
                 var resolved = token switch
@@ -463,12 +467,15 @@ internal sealed class XmlSchemaComponentBuilder
                     "##targetNamespace" => targetNamespace,
                     _ => token,
                 };
+                if (!written.Contains(resolved))
+                    written.Add(resolved);
                 if (resolved.Length == 0)
                     absent = true;
                 else
                     _ = named.Add(resolved);
             }
             component.WildcardNamespaces = absent ? [.. named, string.Empty] : [.. named];
+            component.WildcardNamespacesAsWritten = [.. written];
         }
         return component;
     }

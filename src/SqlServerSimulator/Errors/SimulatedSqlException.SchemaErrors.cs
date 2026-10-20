@@ -4161,6 +4161,14 @@ partial class SimulatedSqlException
         new($"Invalid usage of the option {option} in the CREATE SPATIAL INDEX statement.", 153, 15, state);
 
     /// <summary>
+    /// Msg 6312: <c>XML_SCHEMA_NAMESPACE</c>'s third argument names a namespace
+    /// the collection holds no components in, compared exactly (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaNamespaceNotInCollection(string namespaceName, string collectionName) =>
+        new($"Could not find schema components with target namespace '{namespaceName}' in collection '{collectionName}'.", 6312, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 6314: <c>XML_SCHEMA_NAMESPACE</c> named a
     /// schema/collection pair that doesn't resolve. Probe-confirmed wording
     /// against SQL Server 2025, including the space before the colon and
