@@ -280,10 +280,11 @@ All probed 2026-09-28 against SQL Server 2025.
 A node `.query()` returns is written out of its document, so a namespace declared on an ancestor is out of scope; real re-binds it where it is used, choosing the prefix (probed 2026-09-28 against SQL Server 2025):
 
 1. a declaration inside the written subtree, kept as written;
-2. the query's own prolog — a `declare namespace` prefix, or the default element namespace for an element name — and then the prefixes every XQuery context predeclares (`xs`, `xsi`, `xdt`, `sql`);
+2. the query's own prolog — the `declare namespace` prefix declared last for the namespace, or the default element namespace for an element name — and then the prefixes every XQuery context predeclares (`xs`, `xsi`, `xdt`, `sql`);
 3. a generated `p1`, `p2`, … counted across the whole result and skipping any prefix already bound — `p10`, `p11`, … once `p` itself is bound.
 
 So `/r/a` over `<r xmlns:p="urn:p"><a><p:b/></a></r>` is `<a><p1:b xmlns:p1="urn:p"/></a>`, a namespace declared but never used on the way down isn't written at all, an element's own binding precedes its attributes and an attribute's lands just ahead of it.
+A node a direct constructor's enclosed expression copies is written the same way, from the bindings the constructor's literal start tags have open at that position (`XmlLiteralScopes`), so `<a xmlns:q="urn:t"><b>{/t:r/t:i}</b></a>` writes `<q:i>` and `<x>{/t:r/t:i}</x>` the prolog's `<t:i xmlns:t="urn:t">` (probed 2026-10-20).
 A `.nodes()` row's `c.query('.')` has no prolog of its own, which is why it writes `<p1:a xmlns:p1="urn:p"/>` for an element whose prefix the document declared above it.
 
 ### FLWOR, quantified and conditional expressions

@@ -1308,7 +1308,7 @@ internal sealed class XmlQueryParser(
         if (this.Current == '}')
         {
             this.index++;
-            return new XmlConstructedNodeExpr([$"<{name}{declarations}/>"], [], [], local, declared);
+            return new XmlConstructedNodeExpr([$"<{name}{declarations}/>"], [], [], local, declared, this.defaultNamespace, this.prefixes);
         }
 
         var content = this.ParseExpr();
@@ -1316,7 +1316,7 @@ internal sealed class XmlQueryParser(
         if (this.Current != '}')
             throw SimulatedSqlException.XQuerySyntaxErrorExpecting(this.method, this.CurrentToken(), "}");
         this.index++;
-        return new XmlConstructedNodeExpr([$"<{name}{declarations}>", $"</{name}>"], [content], [false], local, declared);
+        return new XmlConstructedNodeExpr([$"<{name}{declarations}>", $"</{name}>"], [content], [false], local, declared, this.defaultNamespace, this.prefixes);
     }
 
     /// <summary>
@@ -2092,7 +2092,7 @@ internal sealed class XmlQueryParser(
         literals.Add(segment.ToString());
         var name = ConstructedElementName(literals[0]);
         (literals[0], var declared) = this.DeclarePrologNamespaces(literals[0], name, literals);
-        return new XmlConstructedNodeExpr([.. literals], [.. enclosed], [.. inAttribute], name, declared);
+        return new XmlConstructedNodeExpr([.. literals], [.. enclosed], [.. inAttribute], name, declared, this.defaultNamespace, this.prefixes);
     }
 
     /// <summary>

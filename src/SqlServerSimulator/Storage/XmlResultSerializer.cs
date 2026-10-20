@@ -48,6 +48,9 @@ internal sealed class XmlResultSerializer(string? defaultElementNamespace, Dicti
     /// <summary>Writes one node and its subtree.</summary>
     public void Append(StringBuilder text, XPathNavigator node) => this.AppendNode(text, node, []);
 
+    /// <summary>Writes one node and its subtree where <paramref name="scope"/>'s bindings are already in effect.</summary>
+    public void Append(StringBuilder text, XPathNavigator node, Dictionary<string, string> scope) => this.AppendNode(text, node, scope);
+
     private void AppendNode(StringBuilder text, XPathNavigator node, Dictionary<string, string> scope)
     {
         switch (node.NodeType)
@@ -198,14 +201,19 @@ internal sealed class XmlResultSerializer(string? defaultElementNamespace, Dicti
 
     private string? PrologPrefixFor(string uri)
     {
+        // The prefix declared last for the namespace (probed 2026-10-20
+        // against SQL Server 2025).
+        string? last = null;
         if (this.prologPrefixes is not null)
         {
             foreach (var (prefix, candidateUri) in this.prologPrefixes)
             {
                 if (candidateUri == uri)
-                    return prefix;
+                    last = prefix;
             }
         }
+        if (last is not null)
+            return last;
 
         // The prefixes every XQuery static context predeclares bind their own
         // namespaces too: an ancestor's xsi binding is re-declared as xsi.

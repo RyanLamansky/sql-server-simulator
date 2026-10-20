@@ -340,3 +340,115 @@ internal static class XmlAttributeHoisting
         }
     }
 }
+
+/// <summary>
+/// The namespace bindings a direct constructor's literal text has in effect
+/// at each enclosed expression: the declarations on the start tags still open
+/// there, the innermost winning.
+/// </summary>
+internal static class XmlLiteralScopes
+{
+    /// <summary>
+    /// One scope per enclosed expression, the <em>i</em>-th one's read from the
+    /// literals ahead of it — <paramref name="literals"/>[0..i] — whose tags an
+    /// enclosed expression's own output never opens or closes.
+    /// </summary>
+    public static Dictionary<string, string>[] Of(string[] literals)
+    {
+        var scopes = new Dictionary<string, string>[Math.Max(literals.Length - 1, 0)];
+        var open = new List<Dictionary<string, string>>();
+        for (var i = 0; i < scopes.Length; i++)
+        {
+            Scan(literals[i], open);
+            var scope = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var bindings in open)
+            {
+                foreach (var (prefix, uri) in bindings)
+                    scope[prefix] = uri;
+            }
+            scopes[i] = scope;
+        }
+        return scopes;
+    }
+
+    /// <summary>Advances the open-tag stack over one literal stretch.</summary>
+    private static void Scan(string text, List<Dictionary<string, string>> open)
+    {
+        var index = 0;
+        while ((index = text.IndexOf('<', index)) >= 0)
+        {
+            if (Skip(text, ref index, "<!--", "-->") || Skip(text, ref index, "<![CDATA[", "]]>") || Skip(text, ref index, "<?", "?>"))
+                continue;
+            if (index + 1 < text.Length && text[index + 1] == '/')
+            {
+                if (open.Count > 0)
+                    open.RemoveAt(open.Count - 1);
+                index = Math.Max(text.IndexOf('>', index), index + 1);
+                continue;
+            }
+
+            // A start tag: its xmlns attributes, up to the `>` outside quotes,
+            // pushed unless it closes itself.
+            var bindings = new Dictionary<string, string>(StringComparer.Ordinal);
+            var position = index + 1;
+            char? quote = null;
+            var attributeStart = -1;
+            for (; position < text.Length; position++)
+            {
+                var c = text[position];
+                if (quote is { } q)
+                {
+                    if (c == q)
+                    {
+                        quote = null;
+                        Record(text, attributeStart, position, bindings);
+                    }
+                    continue;
+                }
+                if (c is '"' or '\'')
+                {
+                    quote = c;
+                    continue;
+                }
+                if (c == '>')
+                    break;
+                if (char.IsWhiteSpace(text[position - 1]) && !char.IsWhiteSpace(c))
+                    attributeStart = position;
+            }
+            if (position >= text.Length)
+                return;
+            if (text[position - 1] != '/')
+                open.Add(bindings);
+            index = position + 1;
+        }
+    }
+
+    private static bool Skip(string text, ref int index, string opener, string closer)
+    {
+        if (string.CompareOrdinal(text, index, opener, 0, opener.Length) != 0)
+            return false;
+        var end = text.IndexOf(closer, index + opener.Length, StringComparison.Ordinal);
+        index = end < 0 ? text.Length : end + closer.Length;
+        return true;
+    }
+
+    /// <summary>Records <c>xmlns[:p]="uri"</c> when the attribute ending at <paramref name="closingQuote"/> is one.</summary>
+    private static void Record(string text, int attributeStart, int closingQuote, Dictionary<string, string> bindings)
+    {
+        if (attributeStart < 0)
+            return;
+        var attribute = text.AsSpan(attributeStart, closingQuote + 1 - attributeStart);
+        var equals = attribute.IndexOf('=');
+        if (equals < 0)
+            return;
+        var name = attribute[..equals].Trim();
+        var value = attribute[(equals + 1)..].Trim();
+        if (value.Length < 2)
+            return;
+        value = value[1..^1];
+        if (name.SequenceEqual("xmlns"))
+            bindings[string.Empty] = value.ToString();
+        else if (name.StartsWith("xmlns:", StringComparison.Ordinal))
+            bindings[name[6..].ToString()] = value.ToString();
+    }
+}

@@ -1212,9 +1212,26 @@ internal sealed class XmlConditionalExpr(XmlQueryExpr condition, XmlQueryExpr th
 /// and hoisted onto its element after the parse (see
 /// <see cref="XmlAttributeHoisting"/>).
 /// </summary>
-internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] enclosed, bool[] inAttribute, string elementName, string[] prologDeclarations)
+internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] enclosed, bool[] inAttribute, string elementName, string[] prologDeclarations, string? defaultNamespace, Dictionary<string, string> prefixes)
     : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic", constructed: true)
 {
+    /// <summary>The prolog's default element namespace, which a copied element in it is written under.</summary>
+    private readonly string? defaultNamespace = defaultNamespace;
+
+    /// <summary>
+    /// The prolog's prefixes, which name a namespace a node copied into the
+    /// constructor needs where its position binds none.
+    /// </summary>
+    private readonly Dictionary<string, string> prefixes = prefixes;
+
+    /// <summary>
+    /// Per enclosed expression, the namespace bindings the literal text binds
+    /// at its position — the start tags open there — which a copied node
+    /// writes its names under rather than declaring them again (probed
+    /// 2026-10-20 against SQL Server 2025); built on first evaluation.
+    /// </summary>
+    private Dictionary<string, string>[]? enclosedScopes;
+
     private readonly string[] literals = literals;
     private readonly XmlQueryExpr[] enclosed = enclosed;
     private readonly bool[] inAttribute = inAttribute;
@@ -1231,9 +1248,10 @@ internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] e
     {
         var text = new System.Text.StringBuilder(this.literals[0]);
         List<XPathNavigator>? attributes = null;
+        var scopes = this.enclosedScopes ??= XmlLiteralScopes.Of(this.literals);
         for (var i = 0; i < this.enclosed.Length; i++)
         {
-            XmlQueryEngine.AppendSequence(text, this.enclosed[i].Evaluate(frame), this.inAttribute[i], ref attributes);
+            XmlQueryEngine.AppendSequence(text, this.enclosed[i].Evaluate(frame), this.inAttribute[i], ref attributes, this.defaultNamespace, this.prefixes, scopes[i]);
             _ = text.Append(this.literals[i + 1]);
         }
         var root = System.Xml.Linq.XDocument.Parse(text.ToString(), System.Xml.Linq.LoadOptions.PreserveWhitespace).Root!;

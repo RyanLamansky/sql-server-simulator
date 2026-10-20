@@ -272,7 +272,7 @@ internal static class XmlQueryEngine
     /// attribute value everything atomizes, since an attribute can't hold
     /// nodes.
     /// </summary>
-    internal static void AppendSequence(StringBuilder text, List<object> items, bool isAttribute, ref List<XPathNavigator>? attributes)
+    internal static void AppendSequence(StringBuilder text, List<object> items, bool isAttribute, ref List<XPathNavigator>? attributes, string? defaultNamespace = null, Dictionary<string, string>? prefixes = null, Dictionary<string, string>? scope = null)
     {
         var previousWasAtomic = false;
         XmlResultSerializer? serializer = null;
@@ -289,7 +289,7 @@ internal static class XmlQueryEngine
                         previousWasAtomic = false;
                         continue;
                     case XPathNavigator node:
-                        (serializer ??= new XmlResultSerializer(null, null)).Append(text, node);
+                        (serializer ??= new XmlResultSerializer(defaultNamespace, prefixes)).Append(text, node, scope ?? []);
                         previousWasAtomic = false;
                         continue;
                     case XmlEmptyTextNode:

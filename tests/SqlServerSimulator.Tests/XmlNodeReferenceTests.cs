@@ -115,4 +115,15 @@ public sealed class XmlNodeReferenceTests
     [TestMethod]
     public void NodesColumn_TestedForNull_IsFine() =>
         AreEqual(1, Scalar("declare @x xml = '<r><a/></r>'; select 1 from @x.nodes('/r/a') n(c) where c is not null"));
+    [TestMethod]
+    [DataRow("declare namespace t=\"urn:t\"; <x>{ /t:r/t:i[1] }</x>", "<x><t:i xmlns:t=\"urn:t\">1</t:i></x>")]
+    [DataRow("<x>{ /*:r/*:i[1] }</x>", "<x><p1:i xmlns:p1=\"urn:t\">1</p1:i></x>")]
+    [DataRow("declare namespace t=\"urn:t\"; declare namespace u=\"urn:t\"; <x>{ /t:r/t:i[1] }</x>", "<x><u:i xmlns:u=\"urn:t\">1</u:i></x>")]
+    [DataRow("declare namespace t=\"urn:t\"; declare namespace u=\"urn:t\"; /t:r/t:i[1]", "<u:i xmlns:u=\"urn:t\">1</u:i>")]
+    [DataRow("declare default element namespace \"urn:t\"; <x>{ /r/i[1] }</x>", "<x xmlns=\"urn:t\"><i>1</i></x>")]
+    [DataRow("declare namespace t=\"urn:t\"; <t:x>{ /t:r/t:i[1] }</t:x>", "<t:x xmlns:t=\"urn:t\"><t:i>1</t:i></t:x>")]
+    [DataRow("declare namespace t=\"urn:t\"; <a xmlns:q=\"urn:t\"><b>{/t:r/t:i[1]}</b></a>", "<a xmlns:q=\"urn:t\"><b><q:i>1</q:i></b></a>")]
+    [DataRow("declare namespace t=\"urn:t\"; <a><b xmlns=\"urn:t\"/>{/t:r/t:i[1]}</a>", "<a><b xmlns=\"urn:t\"/><t:i xmlns:t=\"urn:t\">1</t:i></a>")]
+    public void CopiedNode_TakesTheBindingItsPositionOrThePrologHas(string query, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r xmlns=\"urn:t\"><i>1</i></r>'; select cast(@x.query('{query}') as nvarchar(max))"));
 }
