@@ -193,4 +193,38 @@ public sealed class TypedXmlPathTypingTests
     [DataRow("select @x.value('(/a\n/b\n)[1] + \n\"x\"', 'int')", 2)]
     public void XQueryError_ReportsTheLineTheArgumentPlacesIt(string statement, int line) =>
         AreEqual(line, Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("declare @x xml = '<a/>';\n" + statement)).Errors[0].LineNumber);
+    private const string ListCollection = """
+        create xml schema collection zl as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t" xmlns="urn:t" elementFormDefault="qualified">
+        <xs:simpleType name="L"><xs:list itemType="xs:int"/></xs:simpleType>
+        <xs:element name="r"><xs:complexType><xs:sequence><xs:element name="l" type="L"/></xs:sequence></xs:complexType></xs:element></xs:schema>'
+        """;
+
+    [TestMethod]
+    [DataRow("sum(/t:r/t:l)", "6")]
+    [DataRow("count(/t:r/t:l)", "1")]
+    [DataRow("count(data(/t:r/t:l))", "3")]
+    [DataRow("avg(/t:r/t:l)", "2")]
+    [DataRow("max(/t:r/t:l)", "3")]
+    [DataRow("data((/t:r/t:l)[1])[3]", "3")]
+    [DataRow("/t:r/t:l = 2", "true")]
+    [DataRow("(data(/t:r/t:l))[1] instance of xs:int", "true")]
+    [DataRow("distinct-values(data(/t:r/t:l))[2]", "2")]
+    [DataRow("string((/t:r/t:l)[1])", "1 2 3")]
+    public void ListTypedElement_AtomizesIntoItsItems(string path, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(ListCollection);
+        AreEqual(expected, simulation.ExecuteScalar($"declare @x xml(zl) = N'<r xmlns=\"urn:t\"><l>1 2 3</l></r>'; select @x.value('{Prolog}{path}', 'nvarchar(20)')"));
+    }
+
+    [TestMethod]
+    [DataRow("(/t:r/t:l)[1]", "'value()' requires a singleton (or empty sequence), found operand of type 'xs:int *'")]
+    [DataRow("(/t:r/t:l)[1] + 1", "'+' requires a singleton (or empty sequence), found operand of type 'xs:int *'")]
+    [DataRow("(/t:r/t:l)[1] eq 2", "'eq' requires a singleton (or empty sequence), found operand of type 'xs:int *'")]
+    public void ListTypedElement_IsNoSingleton(string path, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(ListCollection);
+        simulation.AssertSqlError($"declare @x xml(zl) = null; select @x.value('{Prolog}{path}', 'int')", 2389, "XQuery [value()]: " + message);
+    }
 }

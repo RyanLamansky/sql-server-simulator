@@ -178,7 +178,10 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
     /// value-comparison and atomic-argument diagnostics quote
     /// (<c>xdt:untypedAtomic *</c>).
     /// </summary>
-    public string AtomizedTypeName() => this.TypeName == "empty" ? this.TypeName : (this.AtomizedDisplay() ?? this.TypeName) + OccurrenceSuffix(this.Occurrence);
+    public string AtomizedTypeName() => this.TypeName == "empty" ? this.TypeName : (this.AtomizedDisplay() ?? this.TypeName) + OccurrenceSuffix(this.AtomizesToList() ? XmlOccurrence.Many : this.Occurrence);
+
+    /// <summary>Whether the nodes are of a list type, so atomizing them yields a sequence however few they are.</summary>
+    public virtual bool AtomizesToList() => false;
 
     /// <summary>The atomized type's name where the diagnostics write one other than <see cref="TypeName"/>, a user-derived simple type's.</summary>
     public virtual string? AtomizedDisplay() => null;
@@ -356,6 +359,8 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
     public override XmlSchemaPathType? SchemaPathType() => this.source.SchemaPathType();
 
     public override string? AtomizedDisplay() => this.source.AtomizedDisplay();
+
+    public override bool AtomizesToList() => this.source.AtomizesToList();
 }
 
 /// <summary>The document root of the instance being queried — an absolute path's start.</summary>
@@ -396,6 +401,8 @@ internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
 
     public override string? AtomizedDisplay() =>
         this.steps.Length == 0 ? this.start.AtomizedDisplay() : this.steps[^1].AtomizedDisplay;
+
+    public override bool AtomizesToList() => this.steps.Length == 0 ? this.start.AtomizesToList() : this.steps[^1].AtomizesToList;
 
     private static XmlOccurrence PathOccurrence(XmlQueryExpr start, XmlStep[] steps)
     {
@@ -489,6 +496,9 @@ internal sealed class XmlStep(
 
     /// <summary>The type the step's node notation writes, where the collection settles one (<c>t{urn:t}:MyInt</c>, <c>#anonymous</c>).</summary>
     public string? NodeTypeNotation;
+
+    /// <summary>Whether the step's elements are of a list type, each atomizing into a sequence of <see cref="TypeName"/> items.</summary>
+    public bool AtomizesToList;
 
     /// <summary>
     /// A name test's name as real's static types write it — under the prefix
@@ -914,6 +924,9 @@ internal sealed class XmlVariableBinding(string name, int slot, XmlQueryExpr sou
 
     /// <summary>The atomized type name a reference's diagnostics write, where it isn't <see cref="TypeName"/>.</summary>
     public readonly string? AtomizedDisplay = source.AtomizedDisplay();
+
+    /// <summary>Whether a reference's nodes are of a list type.</summary>
+    public readonly bool AtomizesToList = source.AtomizesToList();
 }
 
 /// <summary>
@@ -992,6 +1005,8 @@ internal sealed class XmlVariableRefExpr(XmlVariableBinding binding)
     public override XmlSchemaPathType? SchemaPathType() => this.binding.SchemaType;
 
     public override string? AtomizedDisplay() => this.binding.AtomizedDisplay;
+
+    public override bool AtomizesToList() => this.binding.AtomizesToList;
 }
 
 /// <summary>One <c>order by</c> item: its key expression and its direction.</summary>
@@ -1370,6 +1385,29 @@ internal enum XmlFunctionId
 
     /// <summary><c>fn:upper-case</c>.</summary>
     UpperCase,
+}
+
+/// <summary>
+/// The items a list-typed element's value holds — each node's string value
+/// split on whitespace — where an operation atomizes it: <c>data()</c>, the
+/// aggregates, a general comparison (probed 2026-10-20 against SQL Server
+/// 2025: <c>sum(/r/l)</c> over <c>&lt;l&gt;1 2 3&lt;/l&gt;</c> is 6).
+/// </summary>
+internal sealed class XmlListAtomizeExpr(XmlQueryExpr source)
+    : XmlQueryExpr(source.AtomizedKind(), XmlOccurrence.Many, source.TypeName)
+{
+    private readonly XmlQueryExpr source = source;
+
+    public override void Evaluate(in XmlQueryFrame frame, List<object> results)
+    {
+        foreach (var item in this.source.Evaluate(frame))
+        {
+            foreach (var part in XmlQueryValues.StringValue(item).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                results.Add(new XmlUntypedAtomic(part));
+        }
+    }
+
+    public override string? AtomizedDisplay() => this.source.AtomizedDisplay();
 }
 
 /// <summary>A call to one of the built-in XQuery functions.</summary>

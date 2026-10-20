@@ -232,6 +232,7 @@ Validation and the result's canonical text ride .NET's built-in datatypes and `X
 
 | shape | answer |
 |---|---|
+| a source type with no conversion to the target, settled from the two types (`XmlAtomicTypes.CastAllowed`): a string or untyped value converts to anything and anything to a string, a number or boolean to a number or boolean, and every other primitive only to itself, the two binary types counting as one — so a number to a date, `xs:dateTime` to `xs:date` and `xs:date` to `xs:integer` are all refused (probed 2026-10-20, every pair of thirteen primitives) | **Msg 2365** while compiling, ahead of the value check |
 | a literal the type doesn't admit (`xs:integer("abc")`, `"300" cast as xs:byte?`, and `NaN` or a number past `xs:double` / `xs:float`'s range — `INF` and `-INF` are admitted) | **Msg 9319** while compiling |
 | a value read from the instance that doesn't convert | the empty sequence |
 | a plural or empty operand | **Msg 2365** (`Cannot explicitly convert from 'xdt:untypedAtomic *' to 'xs:integer'`, `'empty'` for `()`) |
@@ -435,6 +436,7 @@ A name nothing there reaches is refused while the batch compiles, quoting the co
 A content wildcard admits by its namespace constraint and its `processContents`: `skip` leaves the element untyped, `lax` types it as a global declaration of the name or else `xs:anyType`, and `strict` — an attribute wildcard's default — admits only a globally declared name.
 A parent step reaches an `xs:anyType` element, whose children are too.
 A predicate's context and a `for` variable carry the step's type without its occurrence.
+An element of a list type atomizes into a sequence of its item type: `data()`, the aggregates and a general comparison see each item, `count()` the one element, and `value()`, arithmetic and a value comparison refuse it as no singleton, quoting `xs:int *` (`XmlListAtomizeExpr`, probed 2026-10-20).
 A step whose declarations settle one type takes it over the name-keyed rule: an element of simple content atomizes as its base, and the diagnostics quote a user-derived simple type by its own name (`t{urn:t}:MyInt`) or `<anonymous>`, its node notation the element's type (`element(t{urn:t}:sc,#anonymous)`), while comparisons and arithmetic follow the primitive it restricts.
 `value()` and `data()` refuse atomizing complex content — **Msg 9314**, mixed content and `xs:anyType` included, naming a named type or else the element's name in its schema's target namespace — and empty content (**Msg 2213**), ahead of `value()`'s singleton check.
 All probed 2026-10-20 against SQL Server 2025.

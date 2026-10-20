@@ -263,8 +263,10 @@ internal sealed class XmlSchemaPathType
     /// type's own name, a user-derived type's or <c>&lt;anonymous&gt;</c>; and
     /// the element's type in node notation. Nulls where the types differ or
     /// the content isn't simple (probed 2026-10-20 against SQL Server 2025).
+    /// A list type answers its item type, with <c>List</c> set: such an element
+    /// atomizes into a sequence of its items.
     /// </summary>
-    public (string? Primitive, string? Atomized, string? Node) SettledType(XmlSchemaNotation notation)
+    public (string? Primitive, string? Atomized, string? Node, bool List) SettledType(XmlSchemaNotation notation)
     {
         if (this.elements.Length == 0 || this.elements[0].NodeKind is not null)
             return default;
@@ -275,9 +277,12 @@ internal sealed class XmlSchemaPathType
                 return default;
         }
         var node = TypeNotation(type, notation);
-        return SimpleTypeOf(type) is { } simple && XmlStaticTyping.TypeNameOf(simple) is { } primitive
-            ? (primitive, AtomizedNotation(simple, notation), node)
-            : (null, null, node);
+        var simple = SimpleTypeOf(type);
+        if (simple is { Datatype.Variety: XmlSchemaDatatypeVariety.List } && ListItemType(simple) is { } item && XmlStaticTyping.TypeNameOf(item) is { } itemPrimitive)
+            return (itemPrimitive, AtomizedNotation(item, notation), node, true);
+        return simple is not null && XmlStaticTyping.TypeNameOf(simple) is { } primitive
+            ? (primitive, AtomizedNotation(simple, notation), node, false)
+            : (null, null, node, false);
     }
 
     /// <summary>
@@ -301,6 +306,17 @@ internal sealed class XmlSchemaPathType
             found = attributeType;
         }
         return found is not null && XmlStaticTyping.TypeNameOf(found) is { } primitive ? (primitive, AtomizedNotation(found, notation)) : default;
+    }
+
+    /// <summary>A list type's item type, through restrictions of the list.</summary>
+    private static XmlSchemaSimpleType? ListItemType(XmlSchemaSimpleType list)
+    {
+        for (XmlSchemaType? current = list; current is XmlSchemaSimpleType simple; current = current.BaseXmlSchemaType)
+        {
+            if (simple.Content is XmlSchemaSimpleTypeList { BaseItemType: { } item })
+                return item;
+        }
+        return null;
     }
 
     /// <summary>The simple type an element typed <paramref name="type"/> atomizes as: its own, or its simple content's.</summary>

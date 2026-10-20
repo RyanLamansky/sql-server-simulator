@@ -307,4 +307,26 @@ public sealed class XmlTypedAtomicTests
         AreEqual("<x>1</x><x>2</x>", Query("declare default function namespace \"urn:x\"; /r/x"));
         QueryError("declare boundary-space preserve; <a> </a>", 2209, "XQuery [query()]: Syntax error near 'declare'");
     }
+    [TestMethod]
+    [DataRow("1.0", "date")]
+    [DataRow("1", "anyURI")]
+    [DataRow("1e0", "gYear")]
+    [DataRow("true()", "dateTime")]
+    [DataRow("xs:date(\"2024-01-01\")", "integer")]
+    [DataRow("xs:dateTime(\"2024-01-01T00:00:00Z\")", "date")]
+    [DataRow("xs:time(\"10:00:00\")", "dateTime")]
+    [DataRow("xs:hexBinary(\"01\")", "integer")]
+    [DataRow("xs:anyURI(\"http://a\")", "boolean")]
+    public void Cast_BetweenUnrelatedPrimitives_IsRefused(string operand, string target) =>
+        AreEqual(2365, Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar($"declare @x xml = ''; select @x.value('string(({operand.Replace("'", "''", StringComparison.Ordinal)}) cast as xs:{target}?)', 'nvarchar(60)')")).Number);
+
+    [TestMethod]
+    [DataRow("1.5", "boolean", "true")]
+    [DataRow("true()", "integer", "1")]
+    [DataRow("\"2024-02-29\"", "date", "2024-02-29")]
+    [DataRow("xs:date(\"2024-01-01\")", "string", "2024-01-01")]
+    [DataRow("xs:base64Binary(\"AQI=\")", "hexBinary", "0102")]
+    [DataRow("xs:hexBinary(\"0102\")", "base64Binary", "AQI=")]
+    public void Cast_WithinAFamily_Converts(string operand, string target, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = ''; select @x.value('string(({operand.Replace("'", "''", StringComparison.Ordinal)}) cast as xs:{target}?)', 'nvarchar(60)')"));
 }

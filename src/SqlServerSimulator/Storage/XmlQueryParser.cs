@@ -432,7 +432,7 @@ internal sealed class XmlQueryParser(
             RequireSingleton(right, op, this.method);
         }
         RequireComparableTypes(left, right, op, this.method);
-        return new XmlComparisonExpr(left, right, op, form == XmlComparisonForm.Value);
+        return new XmlComparisonExpr(AtomizeList(left), AtomizeList(right), op, form == XmlComparisonForm.Value);
     }
 
     private XmlQueryExpr ParseAdditive()
@@ -688,8 +688,11 @@ internal sealed class XmlQueryParser(
         RequireNotConstructed(operand, "data()", this.method);
         if (operand is XmlSequenceExpr { IsEmpty: true } || IsPlural(operand))
             throw SimulatedSqlException.XQueryCannotConvert(this.method, operand.AtomizedTypeName(), quotedTarget);
-        if (target is { Datatype.TypeCode: System.Xml.Schema.XmlTypeCode.QName or System.Xml.Schema.XmlTypeCode.Notation })
+        if (target is { Datatype.TypeCode: System.Xml.Schema.XmlTypeCode.QName or System.Xml.Schema.XmlTypeCode.Notation }
+            || !XmlAtomicTypes.CastAllowed(operand.TypeName, target))
+        {
             throw SimulatedSqlException.XQueryCannotConvert(this.method, operand.AtomizedTypeName(), quotedTarget);
+        }
 
         var cast = new XmlCastExpr(operand, target, targetName);
         if (operand is XmlLiteralExpr literal && XmlCastExpr.Convert(literal.Value, target, targetName) is null)
@@ -1007,8 +1010,9 @@ internal sealed class XmlQueryParser(
         string? nodeTypeNotation = null;
         if (axis == XmlAxis.Attribute && from?.AttributeType(local, uri, this.notation) is (string attributePrimitive, var attributeDisplay))
             (typeName, atomizedDisplay) = (attributePrimitive, attributeDisplay);
-        else if (schemaType?.SettledType(this.notation) is var (primitive, display, node) && node is not null)
-            (typeName, atomizedDisplay, nodeTypeNotation) = (primitive, display, node);
+        var atomizesToList = false;
+        if (axis != XmlAxis.Attribute && schemaType?.SettledType(this.notation) is var (primitive, display, node, list) && node is not null)
+            (typeName, atomizedDisplay, nodeTypeNotation, atomizesToList) = (primitive, display, node, list);
         if (atomizedDisplay == typeName)
             atomizedDisplay = null;
         return new XmlStep(
@@ -1020,6 +1024,7 @@ internal sealed class XmlQueryParser(
             NotationName = uri.Length == 0 ? null : this.notation.Name(new System.Xml.XmlQualifiedName(local, uri)),
             AtomizedDisplay = atomizedDisplay,
             NodeTypeNotation = nodeTypeNotation,
+            AtomizesToList = atomizesToList,
         };
     }
 
@@ -1604,8 +1609,18 @@ internal sealed class XmlQueryParser(
         return call;
     }
 
-    /// <summary>Checks one call against the library's signature for that name.</summary>
-    private XmlFunctionCallExpr BuildBuiltIn(string local, XmlQueryExpr[] arguments) =>
+    /// <summary>A list-typed operand split into its items where an operation atomizes it; anything else as it is.</summary>
+    private static XmlQueryExpr AtomizeList(XmlQueryExpr operand) => operand.AtomizesToList() ? new XmlListAtomizeExpr(operand) : operand;
+
+    /// <summary>Checks one call against the library's signature for that name, the atomizing ones splitting a list-typed argument.</summary>
+    private XmlFunctionCallExpr BuildBuiltIn(string local, XmlQueryExpr[] arguments)
+    {
+        if (local is "avg" or "data" or "distinct-values" or "max" or "min" or "sum")
+            arguments = Array.ConvertAll(arguments, AtomizeList);
+        return this.BuildBuiltInChecked(local, arguments);
+    }
+
+    private XmlFunctionCallExpr BuildBuiltInChecked(string local, XmlQueryExpr[] arguments) =>
         local switch
         {
             "avg" => this.Build(XmlFunctionId.Avg, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments, averaging: true)),
@@ -1723,7 +1738,7 @@ internal sealed class XmlQueryParser(
     /// </summary>
     internal static void RequireSingleton(XmlQueryExpr operand, string construct, string method)
     {
-        if (XmlQueryExpr.IsPlural(operand.Occurrence))
+        if (XmlQueryExpr.IsPlural(operand.Occurrence) || operand.AtomizesToList())
             throw SimulatedSqlException.XQueryNotSingleton(method, construct, operand.AtomizedTypeName());
     }
 

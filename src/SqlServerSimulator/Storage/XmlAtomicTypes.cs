@@ -197,6 +197,8 @@ internal static class XmlAtomicTypes
             bool boolean => TryCastText(NumericRank(code) > 0 ? (boolean ? "1" : "0") : (boolean ? "true" : "false"), target, targetName),
             double number => CastNumber(number, RenderExact(number), target, targetName),
             XmlTypedAtomic { Kind: XmlStaticKind.Number } typed => CastNumber(typed.Number, typed.Text, target, targetName),
+            XmlTypedAtomic { TypeName: "xs:base64Binary" or "xs:hexBinary" } binary when IsBinary(code) && binary.TypeName != "xs:" + target.QualifiedName.Name
+                => TryCastText(code == XmlTypeCode.HexBinary ? Convert.ToHexString(Convert.FromBase64String(binary.Text)) : Convert.ToBase64String(Convert.FromHexString(binary.Text)), target, targetName),
             _ => TryCastText(XmlQueryValues.StringValue(item), target, targetName),
         };
     }
@@ -271,6 +273,51 @@ internal static class XmlAtomicTypes
                 XmlStaticKind.Number),
             _ => new XmlTypedAtomic(targetName, canonical, double.NaN, XmlStaticKind.String),
         };
+    }
+
+    /// <summary>
+    /// Whether real's <c>cast as</c> and constructor functions convert an
+    /// item typed <paramref name="sourceName"/> to <paramref name="target"/> at
+    /// all (probed 2026-10-20 against SQL Server 2025, every pair of the
+    /// string, numeric, boolean, date-time, binary and URI types): an untyped
+    /// or string item converts to anything and anything to a string; a number
+    /// or boolean to a number or boolean; everything else only to its own
+    /// primitive, the two binary types counting as one — so <c>xs:dateTime</c>
+    /// to <c>xs:date</c> is refused, as is a number to a date.
+    /// </summary>
+    public static bool CastAllowed(string sourceName, XmlSchemaSimpleType? target)
+    {
+        if (target is null || !sourceName.StartsWith("xs:", StringComparison.Ordinal) || Resolve(sourceName[3..]) is not { } source)
+            return true;
+        var (sourceGroup, sourcePrimitive) = CastGroup(source);
+        var (targetGroup, targetPrimitive) = CastGroup(target);
+        return sourceGroup == CastFamily.String || targetGroup == CastFamily.String
+            || (sourceGroup == CastFamily.NumberOrBoolean ? targetGroup == CastFamily.NumberOrBoolean
+                : sourcePrimitive == targetPrimitive || (IsBinary(sourcePrimitive) && IsBinary(targetPrimitive)));
+    }
+
+    private static bool IsBinary(XmlTypeCode code) => code is XmlTypeCode.HexBinary or XmlTypeCode.Base64Binary;
+
+    private enum CastFamily
+    {
+        String,
+        NumberOrBoolean,
+        Other,
+    }
+
+    private static (CastFamily Family, XmlTypeCode Primitive) CastGroup(XmlSchemaSimpleType type)
+    {
+        var code = type.Datatype?.TypeCode ?? XmlTypeCode.String;
+        if (code is XmlTypeCode.Boolean || IsNumeric(type))
+            return (CastFamily.NumberOrBoolean, code);
+        for (XmlSchemaType? current = type; current is not null; current = current.BaseXmlSchemaType)
+        {
+            if (current.TypeCode == XmlTypeCode.String)
+                return (CastFamily.String, XmlTypeCode.String);
+            if (current.BaseXmlSchemaType is not XmlSchemaSimpleType || current.BaseXmlSchemaType.TypeCode == XmlTypeCode.AnyAtomicType)
+                return (CastFamily.Other, current.TypeCode);
+        }
+        return (CastFamily.Other, code);
     }
 
     /// <summary>
