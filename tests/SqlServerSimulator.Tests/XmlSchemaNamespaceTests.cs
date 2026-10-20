@@ -99,6 +99,26 @@ public sealed class XmlSchemaNamespaceTests
     }
 
     [TestMethod]
+    public void SqlTypesAndXmlNamespaces_TakeTheirFixedPrefixes()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(@"create xml schema collection zq1 as N'<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" xmlns:sqltypes=""http://schemas.microsoft.com/sqlserver/2004/sqltypes"" targetNamespace=""urn:s"" xmlns=""urn:s""><xs:import namespace=""http://schemas.microsoft.com/sqlserver/2004/sqltypes""/><xs:element name=""v"" type=""sqltypes:varchar""/><xs:element name=""m"" type=""sqltypes:money""/></xs:schema>';
+            create xml schema collection zq2 as N'<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" targetNamespace=""urn:x""><xs:import namespace=""http://www.w3.org/XML/1998/namespace""/><xs:element name=""e""><xs:complexType><xs:simpleContent><xs:extension base=""xs:string""><xs:attribute ref=""xml:lang""/></xs:extension></xs:simpleContent></xs:complexType></xs:element></xs:schema>';");
+        AreEqual(@"<xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema"" xmlns:sqlt=""http://schemas.microsoft.com/sqlserver/2004/sqltypes"" xmlns:t=""urn:s"" targetNamespace=""urn:s""><xsd:import namespace=""http://schemas.microsoft.com/sqlserver/2004/sqltypes""/><xsd:element name=""m"" type=""sqlt:money""/><xsd:element name=""v"" type=""sqlt:varchar""/></xsd:schema>", simulation.ExecuteScalar("select cast(xml_schema_namespace(N'dbo', N'zq1') as nvarchar(max))"));
+        AreEqual(@"<xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema"" xmlns:t=""urn:x"" targetNamespace=""urn:x""><xsd:import namespace=""http://www.w3.org/XML/1998/namespace""/><xsd:element name=""e""><xsd:complexType><xsd:simpleContent><xsd:extension base=""xsd:string""><xsd:attribute ref=""xml:lang""/></xsd:extension></xsd:simpleContent></xsd:complexType></xsd:element></xsd:schema>", simulation.ExecuteScalar("select cast(xml_schema_namespace(N'dbo', N'zq2') as nvarchar(max))"));
+    }
+
+    [TestMethod]
+    public void ReferenceIntoNoNamespace_UndeclaredDefault()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(@"create xml schema collection zq3 as N'<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema""><xs:element name=""n"" type=""xs:int""/></xs:schema>';
+            alter xml schema collection zq3 add N'<xs:schema xmlns:xs=""http://www.w3.org/2001/XMLSchema"" targetNamespace=""urn:y"" xmlns=""urn:y""><xs:import/><xs:element name=""r""><xs:complexType><xs:sequence><xs:element ref=""n"" xmlns=""""/></xs:sequence></xs:complexType></xs:element></xs:schema>';");
+        AreEqual(@"<xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema""><xsd:element name=""n"" type=""xsd:int""/></xsd:schema><xsd:schema xmlns:xsd=""http://www.w3.org/2001/XMLSchema"" xmlns:ns1="""" xmlns:t=""urn:y"" targetNamespace=""urn:y""><xsd:import/><xsd:element name=""r""><xsd:complexType><xsd:complexContent><xsd:restriction base=""xsd:anyType""><xsd:sequence><xsd:element ref=""ns1:n""/></xsd:sequence></xsd:restriction></xsd:complexContent></xsd:complexType></xsd:element></xsd:schema>", simulation.ExecuteScalar("select cast(xml_schema_namespace(N'dbo', N'zq3') as nvarchar(max))"));
+        AreEqual(1, simulation.ExecuteScalar("declare @x xml(zq3) = N'<r xmlns=\"urn:y\"><n xmlns=\"\">1</n></r>'; select @x.value('(//n)[1]', 'int')"));
+    }
+
+    [TestMethod]
     public void NamespaceArgument_NarrowsToOneSchema()
     {
         var simulation = new Simulation();

@@ -194,11 +194,15 @@ internal sealed class XmlSchemaComponentBuilder
         {
             var settings = new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment };
             using var reader = XmlReader.Create(new StringReader(xsdText), settings);
-            while (reader.Read())
+            _ = reader.Read();
+            while (!reader.EOF)
             {
                 if (reader.NodeType != XmlNodeType.Element)
+                {
+                    _ = reader.Read();
                     continue;
-                if (XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                }
+                if (XmlSchemaCollection.ReadSchemaDocument(reader) is { } schema)
                     documents.Add(schema);
             }
         }

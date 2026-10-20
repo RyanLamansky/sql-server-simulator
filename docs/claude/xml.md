@@ -892,6 +892,7 @@ DacFx's XML-index reverse-engineering query reads the `fill_factor` / `is_padded
 
 **`XML_SCHEMA_NAMESPACE(relational_schema, collection_name [, namespace])`** (`Parser/Expressions/XmlSchemaNamespaceFunction.cs`): returns the collection's XSD as `xml`, regenerated from its components as real does (`Schemas/XmlSchemaNamespaceWriter.cs`, probed 2026-10-20 against SQL Server 2025) — byte-identical across the probed shapes and all six AdventureWorks collections:
 - one `xsd:schema` per namespace in namespace order, prefixed `xsd`, the target namespace bound as `t` and each other one it references as `ns1`, `ns2`, … with its `xsd:import`;
+  the `sqltypes` namespace is always `sqlt`, the XML namespace `xml` with its import but no declaration, and a reference into no namespace from a namespaced schema binds `xmlns:ns1=""` (`ref="ns1:n"`);
 - the globals sorted by kind code (`A`, `C`, `E`, `G`, `K`, `L`, `M`, `S`, `U`), then by name ordinally;
 - annotations dropped, every default value omitted, an underived complex type a restriction of `xsd:anyType`, `blockDefault` / `finalDefault` spelled out on each component, an untyped element `xsd:anyType`, a wildcard's namespaces in the order written;
 - `elementFormDefault` / `attributeFormDefault` qualified when most of the namespace's local declarations are, each one that differs carrying its own `form`.

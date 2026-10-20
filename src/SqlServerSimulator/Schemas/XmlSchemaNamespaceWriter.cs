@@ -16,6 +16,8 @@ namespace SqlServerSimulator.Schemas;
 internal sealed class XmlSchemaNamespaceWriter
 {
     private const string XsdNamespace = "http://www.w3.org/2001/XMLSchema";
+    private const string XmlNamespace = "http://www.w3.org/XML/1998/namespace";
+    private const string SqlTypesNamespace = "http://schemas.microsoft.com/sqlserver/2004/sqltypes";
     private const int Unbounded = int.MaxValue;
 
     private readonly XmlSchemaComponentSet set;
@@ -80,9 +82,11 @@ internal sealed class XmlSchemaNamespaceWriter
             this.WriteGlobal(body, global);
 
         _ = text.Append("<xsd:schema xmlns:xsd=\"").Append(XsdNamespace).Append('"');
+        // The XML namespace's prefix is predeclared; every other one is bound,
+        // the absent namespace too, as real binds it (xmlns:ns1="").
         foreach (var (uri, prefix) in this.foreign)
         {
-            if (uri.Length > 0)
+            if (uri != XmlNamespace)
                 AppendAttribute(text, "xmlns:" + prefix, uri);
         }
         if (namespaceName.Length > 0)
@@ -485,10 +489,17 @@ internal sealed class XmlSchemaNamespaceWriter
             return uri.Length == 0 ? component.Name! : "t:" + component.Name;
         if (!this.foreign.TryGetValue(uri, out var prefix))
         {
-            prefix = uri.Length == 0 ? string.Empty : "ns" + (this.foreign.Count(static pair => pair.Key.Length > 0) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            // sqltypes and the XML namespace keep prefixes of their own
+            // (probed 2026-10-20 against SQL Server 2025).
+            prefix = uri switch
+            {
+                SqlTypesNamespace => "sqlt",
+                XmlNamespace => "xml",
+                _ => "ns" + (this.foreign.Count(static pair => pair.Key is not (SqlTypesNamespace or XmlNamespace)) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            };
             this.foreign[uri] = prefix;
         }
-        return uri.Length == 0 ? component.Name! : prefix + ":" + component.Name;
+        return prefix + ":" + component.Name;
     }
 
     /// <summary>A <c>block</c> or <c>final</c> value: the set members in order, or <c>#all</c> when every one is set; null for none.</summary>

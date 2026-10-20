@@ -187,6 +187,18 @@ internal sealed class XmlSchemaCollection(
     }
 
     /// <summary>
+    /// The schema document the reader stands on, read from its own markup
+    /// and leaving the reader past it. A subtree reader would lose an
+    /// <c>xmlns=""</c> undeclaration inside the document, giving a reference
+    /// into no namespace the enclosing default namespace.
+    /// </summary>
+    internal static System.Xml.Schema.XmlSchema? ReadSchemaDocument(System.Xml.XmlReader reader)
+    {
+        using var document = System.Xml.XmlReader.Create(new System.IO.StringReader(reader.ReadOuterXml()));
+        return System.Xml.Schema.XmlSchema.Read(document, null);
+    }
+
+    /// <summary>
     /// The collection's XSD compiled into a schema set, or null when it won't
     /// compile. Post-compilation the set carries the resolved infoset — every
     /// element's own <c>ElementSchemaType</c>, every complex type's
@@ -221,11 +233,15 @@ internal sealed class XmlSchemaCollection(
             // the text is read as a fragment and each root added in turn.
             var settings = new System.Xml.XmlReaderSettings { ConformanceLevel = System.Xml.ConformanceLevel.Fragment };
             using var reader = System.Xml.XmlReader.Create(new System.IO.StringReader(xsdText), settings);
-            while (reader.Read())
+            _ = reader.Read();
+            while (!reader.EOF)
             {
                 if (reader.NodeType != System.Xml.XmlNodeType.Element)
+                {
+                    _ = reader.Read();
                     continue;
-                if (System.Xml.Schema.XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                }
+                if (ReadSchemaDocument(reader) is { } schema)
                     _ = set.Add(schema);
             }
 
@@ -255,13 +271,17 @@ internal sealed class XmlSchemaCollection(
         {
             var settings = new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment };
             using var reader = XmlReader.Create(new System.IO.StringReader(addedText), settings);
-            while (reader.Read())
+            _ = reader.Read();
+            while (!reader.EOF)
             {
                 if (reader.NodeType != XmlNodeType.Element)
+                {
+                    _ = reader.Read();
                     continue;
+                }
                 if (reader.NamespaceURI != XsdNamespace || reader.LocalName != "schema")
                     throw SimulatedSqlException.XmlSchemaDocumentExpected();
-                if (System.Xml.Schema.XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                if (ReadSchemaDocument(reader) is { } schema)
                     added.Add(schema);
             }
         }
