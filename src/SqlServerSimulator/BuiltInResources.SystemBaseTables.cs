@@ -42,6 +42,85 @@ internal static partial class BuiltInResources
         tracked.Sort(static (x, y) => x.ObjectId.CompareTo(y.ObjectId));
         foreach (var table in tracked)
             yield return ChangeTrackingTable(table, table.ChangeTracking!);
+        var jsonIndexed = new List<(HeapTable Table, JsonIndex Index)>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                foreach (var index in table.JsonIndexes)
+                    jsonIndexed.Add((table, index));
+            }
+        }
+        jsonIndexed.Sort(static (x, y) => x.Index.InternalTableObjectId.CompareTo(y.Index.InternalTableObjectId));
+        foreach (var (table, index) in jsonIndexed)
+            yield return JsonIndexTable(table, index);
+    }
+
+    /// <summary>
+    /// The internal table a JSON index keeps its paths in,
+    /// <c>json_index_&lt;table id&gt;_&lt;index id&gt;</c>: the path, array
+    /// index, value, status, full path and full value columns, then a copy of
+    /// each primary-key column in key order named <c>posting_&lt;n&gt;</c>,
+    /// clustered non-uniquely under the index's own name on the first three,
+    /// with <c>json_index_posting_col_nci</c> over the postings, dated by the
+    /// index's creation and disabled with it (probed 2026-10-20 against SQL
+    /// Server 2025). Its
+    /// rowsets hold nothing here, where real's hold a row per indexed value.
+    /// </summary>
+    private static SystemTableObject JsonIndexTable(HeapTable table, JsonIndex index)
+    {
+        // Built per read, as a rename changes the clustered index's name.
+        var definition = JsonIndexDefinition(table, index.Name);
+        var objectId = index.InternalTableObjectId;
+        static SystemAllocationUnit Unit(long partitionId, byte type) =>
+            new(PartitionCensus.AllocationUnitId(partitionId, type), type, 0, 0, 0);
+        var clustered = ((long)(uint)objectId << 16) | 1;
+        var postings = ((long)(uint)objectId << 16) | 2;
+        var columns = definition.HeapColumns("");
+        var postingOrdinals = Enumerable.Range(6, definition.Columns.Length - 6).ToArray();
+        var (leafMax, leafMin, leafColumns) = RecordLength(columns, [.. Enumerable.Range(0, definition.Columns.Length)], uniquifier: true, locator: false, header: 4);
+        var (postingMax, postingMin, postingColumns) = RecordLength(columns, [.. postingOrdinals, 0, 1, 2], uniquifier: true, locator: false, header: 1);
+        var postingWidth = postingMin - 1;
+        return new SystemTableObject(
+            string.Create(System.Globalization.CultureInfo.InvariantCulture, $"json_index_{table.ObjectId}_{index.IndexId}"), objectId, isInternal: true, Database.SysSchemaId, table.ObjectId,
+            index.CreateDate, index.CreateDate, internalType: 235, lobDataSpaceId: Database.PrimaryFilegroupId, definition,
+            [
+                new SystemRowset(1, clustered, 0, 0, 2, (short)leafColumns, leafMax, (short)leafMin, 2648, 7, allowsNullableKeys: true, isDataRowFormat: true, isNotVersioned: false,
+                    [Unit(clustered, 1), Unit(clustered, 2), Unit(clustered, 3)]),
+                new SystemRowset(2, postings, 0, 0, 2, (short)postingColumns, postingMax, (short)postingMin, 2648, (short)(7 + postingWidth), allowsNullableKeys: true, isDataRowFormat: false, isNotVersioned: false,
+                    [Unit(postings, 1), Unit(postings, 3)]),
+            ],
+            [],
+            indexesDisabled: index.IsDisabled,
+            parentMinorId: index.IndexId);
+    }
+
+    private static SystemTableDefinition JsonIndexDefinition(HeapTable table, string indexName)
+    {
+        var columns = new List<SystemTableColumn>
+        {
+            new(1, "json_path", 167, 630, 0, 0, nullable: false, hidden: false, null, 0, "Latin1_General_100_BIN2_UTF8"),
+            new(2, "json_array_index", 165, 512, 0, 0, nullable: true, hidden: false, null, 0, null),
+            new(3, "sql_value", 98, 8016, 0, 0, nullable: true, hidden: false, null, 0, null),
+            new(4, "status", 52, 2, 5, 0, nullable: true, hidden: false, null, 0, null),
+            new(5, "full_json_path", 167, 8000, 0, 0, nullable: true, hidden: false, null, 0, "Latin1_General_100_BIN2_UTF8"),
+            new(6, "full_json_value", 231, -1, 0, 0, nullable: true, hidden: false, null, 0, "srv"),
+        };
+        var primaryKey = table.KeyConstraints.Find(static key => key.Kind == KeyConstraintKind.PrimaryKey);
+        var postingKeys = new List<SystemIndexKey>();
+        foreach (var ordinal in primaryKey?.FullOrdinals ?? [])
+        {
+            var key = table.Columns[ordinal];
+            var (maxLength, precision, scale) = GetSysColumnMetadata(key);
+            columns.Add(new SystemTableColumn(columns.Count + 1, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"posting_{columns.Count - 5}"), key.UserTypeId, maxLength, precision, scale,
+                nullable: false, hidden: false, null, 0, key.Collation, key));
+            postingKeys.Add(new SystemIndexKey(columns.Count, postingKeys.Count + 1, false, false));
+        }
+        return new SystemTableDefinition("json_index", [.. columns],
+        [
+            new SystemTableIndex(1, indexName, 1, unique: false, allowPageLocks: true, [new SystemIndexKey(1, 1, false, false), new SystemIndexKey(2, 2, false, false), new SystemIndexKey(3, 3, false, false)]),
+            new SystemTableIndex(2, "json_index_posting_col_nci", 2, unique: false, allowPageLocks: true, [.. postingKeys]),
+        ]);
     }
 
     /// <summary>
@@ -451,7 +530,7 @@ internal static partial class BuiltInResources
             yield return Row(table.ObjectId, table.Name, table.ParentObjectId,
                 table.CreateDate is { } created ? SqlValue.FromDateTime(created) : databaseDate,
                 table.ModifyDate is { } modified ? SqlValue.FromDateTime(modified) : databaseDate,
-                table.InternalType, 0, table.LobDataSpaceId);
+                table.InternalType, table.ParentMinorId, table.LobDataSpaceId);
         }
         foreach (var (_, schema) in database.Schemas)
         {

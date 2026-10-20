@@ -108,6 +108,9 @@ public sealed class JsonIndexTests
     [DataRow("create json index ji on t(zz)", 1911, (byte)7, "Column name 'zz' does not exist in the target table, index or view.")]
     [DataRow("create json index ji on nosuch(d)", 1088, (byte)3, "Cannot find the object \"nosuch\" because it does not exist or you do not have permissions.")]
     [DataRow("create table #u (id int primary key, d json); create json index ji on #u(d)", 13675, (byte)1, "Cannot create a JSON index on temp objects. '#u' is identified as a temp object.")]
+    [DataRow("create json index ji on #nosuch(d)", 1088, (byte)3, "Cannot find the object \"#nosuch\" because it does not exist or you do not have permissions.")]
+    [DataRow("set quoted_identifier off; create json index ji on t(d)", 1934, (byte)1, "CREATE JSON INDEX failed because the following SET options have incorrect settings: 'QUOTED_IDENTIFIER'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.")]
+    [DataRow("create json index ji on t(d); set quoted_identifier off; create json index j2 on t(d)", 13681, (byte)1, "A JSON index 'ji' already exists on column 'd' on table 't', and multiple JSON indexes per column are not allowed.")]
     [DataRow("create json index ji on t(d); create json index j2 on t(d)", 13681, (byte)1, "A JSON index 'ji' already exists on column 'd' on table 't', and multiple JSON indexes per column are not allowed.")]
     [DataRow("create json index ji on t(d); create json index ji on t(e)", 1913, (byte)3, "The operation failed because an index or statistics with name 'ji' already exists on table 't'.")]
     [DataRow("create index ji on t(id); create json index ji on t(d)", 1913, (byte)3, "The operation failed because an index or statistics with name 'ji' already exists on table 't'.")]
@@ -272,5 +275,56 @@ public sealed class JsonIndexTests
             rollback;
             select @x
             """).ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A JSON index keeps its paths in an internal table,
+    /// json_index_&lt;table id&gt;_&lt;index id&gt;, which the catalog lists
+    /// with its columns — the primary key's copied as postings — and its two
+    /// indexes, renamed and disabled with the JSON index and gone with it; a
+    /// rollback takes the index back (probed 2026-10-20 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void InternalTable_ListsItsShape()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table u (a varchar(20) not null, b datetime2(3) not null, c decimal(9, 2) not null, d json, constraint pk primary key (b, a, c));
+            create json index ji on u (d);
+            """);
+        AreEqual("1|1|235|JSON_INDEX_TABLE|1216000", simulation.ExecuteScalar("""
+            select concat_ws('|', iif(it.name = concat('json_index_', object_id('u'), '_1216000'), 1, 0), o.is_ms_shipped, it.internal_type, it.internal_type_desc collate database_default, it.parent_minor_id)
+            from sys.internal_tables it join sys.objects o on o.object_id = it.object_id where it.parent_id = object_id('u')
+            """));
+        AreEqual("json_path:varchar:630:0,json_array_index:varbinary:512:1,sql_value:sql_variant:8016:1,status:smallint:2:1,full_json_path:varchar:8000:1,full_json_value:nvarchar:-1:1,posting_1:datetime2:7:0,posting_2:varchar:20:0,posting_3:decimal:5:0",
+            simulation.ExecuteScalar("""
+                select string_agg(concat_ws(':', c.name collate database_default, type_name(c.user_type_id), c.max_length, c.is_nullable), ',') within group (order by c.column_id)
+                from sys.columns c join sys.internal_tables it on it.object_id = c.object_id where it.parent_id = object_id('u')
+                """));
+        AreEqual("ji:1:CLUSTERED:0:1,2,3;json_index_posting_col_nci:2:NONCLUSTERED:0:7,8,9", simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', x.name, x.index_id, x.type_desc, x.is_disabled, x.keys), ';') within group (order by x.index_id)
+            from (
+                select i.name collate database_default name, i.index_id, i.type_desc collate database_default type_desc, i.is_disabled,
+                    (select string_agg(ic.column_id, ',') within group (order by ic.key_ordinal) from sys.index_columns ic where ic.object_id = i.object_id and ic.index_id = i.index_id) keys
+                from sys.indexes i join sys.internal_tables it on it.object_id = i.object_id where it.parent_id = object_id('u')) x
+            """));
+        AreEqual("25220|18|10", simulation.ExecuteScalar("""
+            select concat_ws('|', p.max_leaf_length, p.min_leaf_length, p.max_null_bit_used) from sys.system_internals_partitions p
+            join sys.internal_tables it on it.object_id = p.object_id where it.parent_id = object_id('u') and p.index_id = 1
+            """));
+        AreEqual("jr|1;json_index_posting_col_nci|1", simulation.ExecuteScalar("""
+            exec sp_rename 'u.ji', 'jr', 'INDEX';
+            alter index jr on u disable;
+            select string_agg(concat(i.name collate database_default, '|', i.is_disabled), ';') within group (order by i.index_id)
+            from sys.indexes i join sys.internal_tables it on it.object_id = i.object_id where it.parent_id = object_id('u')
+            """));
+        AreEqual(0, simulation.ExecuteScalar("drop index jr on u; select count(*) from sys.internal_tables where internal_type = 235"));
+        AreEqual("0|0", simulation.ExecuteScalar("""
+            begin tran;
+            create json index ji on u (d);
+            rollback;
+            select concat((select count(*) from sys.indexes where object_id = object_id('u') and type = 9), '|', (select count(*) from sys.internal_tables where internal_type = 235))
+            """));
     }
 }

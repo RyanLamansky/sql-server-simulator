@@ -87,6 +87,8 @@ The paths are string literals kept as written (`$` without `FOR`), each well-for
 `WITH` takes `FILLFACTOR` (Msg 129 outside 1-100), `PAD_INDEX`, `ALLOW_ROW_LOCKS`, `ALLOW_PAGE_LOCKS`, `OPTIMIZE_FOR_ARRAY_SEARCH`, `DATA_COMPRESSION`, `MAXDOP` and `DROP_EXISTING` (Msg 13685 when no JSON index of that name is on the column); another index option is Msg 153 State 35 and an unknown one Msg 155 then 153.
 `sys.indexes` lists it as type 9 `JSON`, `sys.index_columns`, `INDEXPROPERTY` and `INDEX_COL` see its column, and `sys.json_indexes` / `sys.json_index_paths` carry its options and paths.
 `ALTER INDEX … DISABLE` / `REBUILD` / `REORGANIZE`, `sp_rename` and `DROP INDEX … ON` work — `SET` and the resumable forms are Msg 13688, a `PARTITION = n` on `REBUILD` / `REORGANIZE` Msg 7731 state 5, `REBUILD` with `ONLINE` / `IGNORE_DUP_KEY` / `STATISTICS_INCREMENTAL` / `SORT_IN_TEMPDB` / `STATISTICS_NORECOMPUTE` / `XML_COMPRESSION` turned on Msg 153 (states 37 / 36 / 40 / 42 / 43 / 45, the option named in capitals except the two lower-case ones), `REORGANIZE` of a disabled one Msg 1973 and `COMPRESS_ALL_ROW_GROUPS = ON` Msg 35375 (probed 2026-09-30 against SQL Server 2025) — the `table.index` form of the drop is Msg 3766; the index blocks `DROP COLUMN` / `ALTER COLUMN` (Msg 5074, ahead of the type grid) and dropping the primary key (Msg 3767); a name shared with any other index on the table is Msg 1913.
+A missing temp table is Msg 1088 ahead of Msg 13675, and once nothing else refuses the index a SET option an indexed view would refuse is Msg 1934 naming `CREATE JSON INDEX`, acting as under `XACT_ABORT` (probed 2026-10-20 against SQL Server 2025).
+Each index keeps an [internal table](catalog-views.md#system-base-tables-and-internal-tables), `json_index_<table id>_<index id>` (internal type 235, `JSON_INDEX_TABLE`, `parent_minor_id` the index): the path, array index, value, status, full path and full value columns and a `posting_<n>` copy of each primary-key column, clustered non-uniquely under the index's own name and indexed by `json_index_posting_col_nci` over the postings, renamed and disabled with the index (probed 2026-10-20).
 
 ## Catalog surfaces
 
@@ -103,9 +105,6 @@ Over the TDS endpoint a client that negotiates json support (SqlClient 6+) recei
 - **Real refused an `append` path beside another `JSON_MODIFY` over json in one select list** with Msg 13656 (`JSON data type cannot be used when its feature switch is off.`), though either call alone worked, and the same Msg 13656 (State 8) met a `SET @j.modify('append …', …)` that followed a `SELECT @j = …` in its batch (probed 2026-09-27); the simulator runs them.
   The triggering shape isn't pinned down: re-probed 2026-10-07 on CU7 (17.0.4065.4) and RTM-GDR (17.0.1135.8), over sqlcmd and SqlClient, at compatibility levels 150–170, with `PREVIEW_FEATURES` on and off, over variables and a json table column, in SELECT, UPDATE and `.modify`, every form answered — so the 2026-09-27 probe differed in a way this record doesn't capture.
 - **The size model is fitted, not derived**: documents shaped unlike any probed one (very long property names, objects past 64 KB) may report a different `DATALENGTH`.
-- **A JSON index accelerates nothing**: it is catalog metadata, and reads never consult it.
+- **A JSON index accelerates nothing**: it is catalog metadata, and reads never consult it, and its internal table's rowsets hold no rows where real's hold a row per indexed value.
 - **A deferred statement's Msg 8116 / 313 / 8144 from the `modify` method ends only its statement**, where real ends the batch.
 
-## Not modeled yet
-
-- A JSON index's internal table (`json_index_<object_id>_<index_id>` in `sys.objects` and `sys.internal_tables`) and the internal index `sys.indexes` lists beside it.

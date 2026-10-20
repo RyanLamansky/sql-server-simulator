@@ -16,7 +16,9 @@ internal sealed class JsonIndex(
     bool isPadded,
     bool allowRowLocks,
     bool allowPageLocks,
-    bool optimizeForArraySearch)
+    bool optimizeForArraySearch,
+    int internalTableObjectId,
+    DateTime createDate)
 {
     /// <summary>The first <c>index_id</c> of real's JSON-index range; a table's next is one past its highest.</summary>
     public const int IndexIdBase = 1216000;
@@ -45,4 +47,10 @@ internal sealed class JsonIndex(
 
     /// <summary>Set by <c>ALTER INDEX … DISABLE</c>, cleared by <c>REBUILD</c>.</summary>
     public bool IsDisabled;
+
+    /// <summary>The object id of the index's internal table, <c>json_index_&lt;table id&gt;_&lt;index id&gt;</c>.</summary>
+    public readonly int InternalTableObjectId = internalTableObjectId;
+
+    /// <summary>When the index was created, which its internal table reports as its dates.</summary>
+    public readonly DateTime CreateDate = createDate;
 }

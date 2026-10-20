@@ -18,12 +18,14 @@ partial class Simulation
     /// The refusals, all real's: a filegroup, a <c>WHERE</c> or <c>FOR</c>
     /// after <c>WITH</c> is a syntax error; an option real's index grammar
     /// knows but this statement doesn't take is Msg 153 state 35, an unknown
-    /// one Msg 155 then 153; a temp table Msg 13675; a column that isn't
+    /// one Msg 155 then 153; a temp table Msg 13675 (a missing one Msg 1088); a column that isn't
     /// <c>json</c> Msg 13680; a table without a clustered primary key Msg
     /// 13672; a second JSON index on the column Msg 13681; a path with an
     /// advanced accessor Msg 13683 (state 2 for <c>[*]</c>, 3 for the rest)
     /// and two paths where one is the other or leads to it — names compared
-    /// without case, the mode keyword ignored — Msg 13683 state 1.
+    /// without case, the mode keyword ignored — Msg 13683 state 1; and, once
+    /// nothing else refuses it, a SET option an indexed view would refuse Msg
+    /// 1934.
     /// </remarks>
     internal static bool TryParseCreateJsonIndex(ParserContext context)
     {
@@ -61,10 +63,12 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (tableName.Leaf.StartsWith('#'))
-            throw SimulatedSqlException.JsonIndexOnTempObject(tableName.Leaf);
+        // A temp name that names no table is the missing object's error
+        // (probed 2026-10-20 against SQL Server 2025).
         if (!context.Batch.TryResolveTable(tableName, out var table) || table.IsTableVariable)
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(tableName.ToString(), state: 3);
+        if (tableName.Leaf.StartsWith('#'))
+            throw SimulatedSqlException.JsonIndexOnTempObject(tableName.Leaf);
 
         var collation = context.Batch.CurrentDatabase.Collation;
         var ordinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, columnName));
@@ -98,11 +102,18 @@ partial class Simulation
             throw SimulatedSqlException.JsonIndexAlreadyOnColumn(onColumn.Name, column.Name, table.Name);
         }
 
+        // The SET options are checked once the index would otherwise be
+        // made, and their refusal acts as under XACT_ABORT (probed 2026-10-20
+        // against SQL Server 2025).
+        if (IncorrectSetOptionNames(context) is { } setOptions)
+            throw SimulatedSqlException.IncorrectSetOptionsForXmlMethod("CREATE JSON INDEX", setOptions);
+
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         var indexId = replaced?.IndexId ?? NextJsonIndexId(table);
+        var position = replaced is null ? table.JsonIndexes.Count : table.JsonIndexes.IndexOf(replaced);
         if (replaced is not null)
             _ = table.JsonIndexes.Remove(replaced);
-        table.JsonIndexes.Add(new JsonIndex(
+        var created = new JsonIndex(
             indexName,
             ordinal,
             indexId,
@@ -111,7 +122,16 @@ partial class Simulation
             options.PadIndex,
             options.AllowRowLocks,
             options.AllowPageLocks,
-            options.OptimizeForArraySearch));
+            options.OptimizeForArraySearch,
+            (table.OwningDatabase ?? context.CurrentDatabase).AllocateObjectId(),
+            context.Batch.CurrentStatement.UtcNow);
+        table.JsonIndexes.Insert(position, created);
+        RecordDdlUndo(context, () =>
+        {
+            _ = table.JsonIndexes.Remove(created);
+            if (replaced is not null)
+                table.JsonIndexes.Insert(position, replaced);
+        });
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

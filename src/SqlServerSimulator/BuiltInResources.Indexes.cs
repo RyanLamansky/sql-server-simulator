@@ -844,7 +844,7 @@ internal static partial class BuiltInResources
                 yield return BuildIndexRow(
                     index.Name is { } indexName ? SqlValue.FromSystemName(indexName) : nullName, systemObjectId, SqlValue.FromInt32(index.Id), SqlValue.FromByte(index.Type),
                     index.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc }, index.Unique ? trueBit : falseBit, primaryDataSpace,
-                    falseBit, falseBit, falseBit, nullFilter, falseBit, falseBit, falseBit, trueBit, index.AllowPageLocks ? trueBit : falseBit,
+                    falseBit, falseBit, falseBit, nullFilter, falseBit, systemTable.IndexesDisabled ? trueBit : falseBit, falseBit, trueBit, index.AllowPageLocks ? trueBit : falseBit,
                     SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
             }
         }
