@@ -278,9 +278,11 @@ partial class Simulation
     /// Msg 16929 state 2. Each write runs through
     /// <paramref name="runWrite"/>, as a positioned <c>UPDATE</c> / <c>DELETE
     /// … WHERE CURRENT OF</c> or an <c>INSERT</c> whose values are the
-    /// variables <paramref name="valueNames"/> name, and reports its row count
-    /// twice for an UPDATE or DELETE, once for an INSERT (probed 2026-10-11 and
-    /// 2026-10-16 against SQL Server 2025).
+    /// variables <paramref name="valueNames"/> name. An INSERT reports its row
+    /// count; an UPDATE or DELETE reports the row it found, then what it wrote
+    /// — once, 0, for a row gone, and only the 1 ahead of its error for a write
+    /// that fails (probed 2026-10-11, 2026-10-16 and 2026-10-20 against SQL
+    /// Server 2025).
     /// </summary>
     internal static ApiCursorOperating OperateApiCursor(SimulatedDbConnection connection, int handle, int optype, int rownum, string table, List<string> valueNames, Func<string, int> runWrite)
     {
@@ -294,6 +296,7 @@ partial class Simulation
         if (table.Length == 0 && api.Cursor.BaseTables is [var only, ..])
             table = "[" + only.Name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
+        var positioned = false;
         try
         {
             if ((optype & 0x4) != 0)
@@ -325,15 +328,20 @@ partial class Simulation
             if ((optype & 0x3) == 0)
                 return operating;
 
+            positioned = true;
             var affected = runWrite((optype & 0x2) != 0
                 ? $"DELETE FROM {table} WHERE CURRENT OF {api.InternalName};"
                 : $"UPDATE {table} SET {string.Join(", ", valueNames.Select(static value => "[" + value.TrimStart('@').Replace("]", "]]", StringComparison.Ordinal) + "] = " + value))} WHERE CURRENT OF {api.InternalName};");
             operating.Counts.Add(affected);
-            operating.Counts.Add(affected);
+            if (affected > 0)
+                operating.Counts.Add(affected);
         }
         catch (SimulatedSqlException failure)
         {
+            // A positioned write found its row before it failed.
             operating.Counts.Clear();
+            if (positioned)
+                operating.Counts.Add(1);
             operating.Error = failure;
             operating.ReturnStatus = failure.Number;
         }

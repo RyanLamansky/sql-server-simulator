@@ -83,4 +83,22 @@ public sealed class CaughtWriteCountWireTests
         AreEqual("0,1", counts);
         AreEqual("id,c", shape);
     }
+
+    /// <summary>
+    /// A positioned sp_cursor UPDATE or DELETE closes with a DONE for the row
+    /// it found, then one for what it wrote — a row gone sends only its 0 —
+    /// and one that fails sends the found row's ahead of its error (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_cursor @c, 1, 1, N't', @v = 50; exec sp_cursor @c, 2, 1, N't'; exec sp_cursor @c, 4, 1, N't', @id = 7, @v = 1; exec sp_cursor @c, 1, 1, N't', @v = 60", "0,1,1,1,1,1,1,0")]
+    [DataRow("exec sp_cursor @c, 1, 1, N't', @v = 500", "0,1,1")]
+    [DataRow("begin try exec sp_cursor @c, 1, 1, N't', @v = 500 end try begin catch end catch", "0,1,1,0")]
+    public async Task PositionedCursorWrite_CountsTheFoundRowThenTheWrite(string sql, string completed)
+    {
+        var (counts, _) = await RunAsync(
+            "create table t (id int primary key, v int check (v < 100)); insert t values (1, 10), (2, 20)",
+            "declare @c int, @s int = 1, @o int = 4, @r int; exec sp_cursoropen @c output, N'select id, v from t', @s output, @o output, @r output; exec sp_cursorfetch @c, 2, 1, 1; " + sql);
+        AreEqual(completed, counts);
+    }
 }

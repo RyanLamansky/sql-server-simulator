@@ -448,16 +448,27 @@ partial class Simulation
         var operating = OperateApiCursor(batch.Connection, handle, optype, rownum, table, valueNames, write =>
         {
             var affected = 0;
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, write, variables, viaSystemProcedure: true))
+            try
             {
-                switch (outcome)
+                foreach (var outcome in this.ExecuteDynamicBatch(batch, write, variables, viaSystemProcedure: true))
                 {
-                    case SimulatedErrorOutcome failed:
-                        throw failed.Exception;
-                    case SimulatedNonQuery { RecordsAffected: >= 0 } counted:
-                        affected += counted.RecordsAffected;
-                        break;
+                    switch (outcome)
+                    {
+                        case SimulatedErrorOutcome failed:
+                            throw failed.Exception;
+                        case SimulatedNonQuery { RecordsAffected: >= 0 } counted:
+                            affected += counted.RecordsAffected;
+                            break;
+                    }
                 }
+            }
+            catch (SimulatedSqlException)
+            {
+                // The write's error ends the call as a write of its own:
+                // Msg 3621 follows it, or a TRY catching it gets its count
+                // of 0 (probed 2026-10-20 against SQL Server 2025).
+                batch.CurrentStatement.WritesRows = true;
+                throw;
             }
             return affected;
         });

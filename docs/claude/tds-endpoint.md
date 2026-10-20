@@ -335,9 +335,10 @@ Each fetch's RIDs are buffered on the ApiCursor for positioned DML.
 
 **sp_cursor**(@cursor, @optype, @rownum, @table, @col=value…) — positioned DML against the last fetch buffer, @rownum 1-based into it. optype 0x1 UPDATE (named `@col` params become `SET [col] = @col`), 0x2 DELETE, 0x20 SETPOSITION (no DML, just repositions), and 0x4 INSERT, which needs no fetched row (named `@col` params become the new row's columns).
 A positioned UPDATE or DELETE reports its row in two DONEINPROC tokens and an INSERT in one, each of current command `0x7D` (probed 2026-10-11 against SQL Server 2025: the OLE DB provider writes a linked server's INSERT, and an UPDATE without a WHERE, through these).
+The first counts the row it found and the second what it wrote: a row gone sends one, counting 0, and a write that fails sends the first ahead of its error (probed 2026-10-20).
 Empty buffer → **Msg 16931** (`There are no rows in the current fetch buffer.`) + Msg 3621; @rownum past the buffer → **Msg 16930** (`The requested row is not in the fetch buffer.`) + Msg 3621; in both the return status is the primary Msg number.
 An UPDATE or DELETE through a read-only cursor is **Msg 16929** state 2 from `sp_cursor`, ahead of the buffer checks, and an empty `@table` names the cursor's own table (probed 2026-10-16 against SQL Server 2025).
-A DML enforcement failure surfaces the engine error and returns its number.
+A DML enforcement failure surfaces the engine error and returns its number, ending the call as a write: Msg 3621 follows it, and a `TRY` catching it gets its count of 0 (probed 2026-10-20).
 
 **sp_cursorprepexec**(@prep OUT, @cursor OUT, @paramdef, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) — prepares (stores statement + declaration-parsed parameter names in a per-session handle map) and opens in one call, returning both handles; the parameterized statement's bindings are the trailing params.
 **sp_cursorexecute**(@prep, @cursor OUT, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT, params…) re-opens the stored statement with fresh param values, yielding a **new** cursor handle (probe-confirmed).

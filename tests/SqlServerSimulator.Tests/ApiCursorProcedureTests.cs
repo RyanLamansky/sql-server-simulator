@@ -136,6 +136,26 @@ public sealed class ApiCursorProcedureTests
         AreEqual(state, error.Errors[0].State);
     }
 
+    /// <summary>
+    /// What an open cursor refuses: a SETPOSITION given a table or values
+    /// (Msg 16914), a value written without its column's name (16936), and a
+    /// TEXTPTR_ONLY or TEXTDATA column that isn't text, ntext or image (16926)
+    /// (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_cursor @c, 32, 1, N't', 5", 16914, (byte)2)]
+    [DataRow("exec sp_cursor @c, 4, 1, N't', 5", 16936, (byte)1)]
+    [DataRow("exec sp_cursoroption @c, 1, 2", 16926, (byte)1)]
+    [DataRow("exec sp_cursoroption @c, 3, 9", 16926, (byte)1)]
+    public void OpenCursor_RefusesAsRealRefuses(string sql, int number, byte state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int primary key, v int, tx text); insert t values (1, 10, 'a')");
+        var error = simulation.AssertSqlError("declare @c int; exec sp_cursoropen @c output, N'select id, v, tx from t', 1, 4; exec sp_cursorfetch @c, 2, 1, 1; " + sql, number);
+        AreEqual(state, error.Errors[0].State);
+        _ = simulation.ExecuteNonQuery("declare @c int; exec sp_cursoropen @c output, N'select id, v, tx from t', 1, 4; exec sp_cursoroption @c, 1, 3; exec sp_cursoroption @c, 3, 0");
+    }
+
     [TestMethod]
     public void Prepared_OpensByHandle_FromTheirOwnNumbering()
     {
@@ -183,6 +203,27 @@ public sealed class ApiCursorProcedureTests
         CollectionAssert.AreEqual(new[] { "id|v;1|99;3|30;7|70" }, ResultSets(connection, "select * from t order by id"));
         var readOnly = Throws<SimulatedSqlException>(() => ResultSets(connection, "declare @c int; exec sp_cursoropen @c output, N'select * from t', 8, 1; exec sp_cursorfetch @c, 2, 0, 1; exec sp_cursor @c, 2, 1, N't'"));
         AreEqual((16929, (byte)2), (readOnly.Errors[0].Number, readOnly.Errors[0].State));
+    }
+
+    /// <summary>
+    /// A positioned UPDATE reports the row it found, then what it wrote, and
+    /// one that fails reports the found row ahead of its error, which ends the
+    /// call as a write: Msg 3621 follows it, or a TRY catching it gets its
+    /// count of 0 (probed 2026-10-20; the wire tests hold each DONE).
+    /// </summary>
+    [TestMethod]
+    public void Positioned_WriteCounts_AndAFailedWrite()
+    {
+        using var connection = Seeded();
+        _ = connection.CreateCommand("alter table t add check (v < 100)").ExecuteNonQuery();
+        const string open = "declare @c int; exec sp_cursoropen @c output, N'select * from t', 1, 4; exec sp_cursorfetch @c, 2, 1, 1;";
+        AreEqual(-1, connection.CreateCommand(open).ExecuteNonQuery());
+        AreEqual(2, connection.CreateCommand(open + "exec sp_cursor @c, 1, 1, N't', @v = 50").ExecuteNonQuery());
+        AreEqual(1, connection.CreateCommand(open + "begin try exec sp_cursor @c, 1, 1, N't', @v = 500 end try begin catch end catch").ExecuteNonQuery());
+        var failed = Throws<SimulatedSqlException>(() => connection.CreateCommand(open + "exec sp_cursor @c, 1, 1, N't', @v = 500").ExecuteNonQuery());
+        AreEqual((547, 3621), (failed.Errors[0].Number, failed.Errors[^1].Number));
+        var duplicate = Throws<SimulatedSqlException>(() => connection.CreateCommand(open + "exec sp_cursor @c, 4, 0, N't', @id = 2, @v = 1").ExecuteNonQuery());
+        AreEqual((2627, 3621), (duplicate.Errors[0].Number, duplicate.Errors[^1].Number));
     }
 
     [TestMethod]
