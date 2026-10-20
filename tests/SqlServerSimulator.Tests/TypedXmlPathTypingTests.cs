@@ -72,6 +72,29 @@ public sealed class TypedXmlPathTypingTests
             "XQuery [value()]: " + message);
 
     [TestMethod]
+    [DataRow("/t:r", "t:zz[1]", 2263, "There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:r,t{urn:t}:RT)\".")]
+    [DataRow("/t:r/t:i", "(t:i)[1]", 2263, "There is no element named \"{urn:t}:i\" in the type \"element(t{urn:t}:i,xs:int)\".")]
+    [DataRow("/t:r", ".", 9314, "Cannot implicitly atomize or apply 'fn:data()' to complex content elements, found type 't{urn:t}:RT' within inferred type 'element(t{urn:t}:r,t{urn:t}:RT)'.")]
+    [DataRow("/t:r", "(/t:zz)[1]", 2262, "There is no element named '{urn:t}:zz'")]
+    [DataRow("/t:r/t:i", "(../t:zz)[1]", 9314, "Cannot implicitly atomize or apply 'fn:data()' to complex content elements, found type 'xs:anyType' within inferred type 'element(t{urn:t}:zz,xs:anyType) ?'.")]
+    [DataRow("/t:r", "(t:c/t:zz)[1]", 2263, "There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:c,#anonymous) ?\".")]
+    [DataRow("/t:r", "(@zz)[1]", 2219, "There is no attribute named '@zz' in the type 'element(t{urn:t}:r,t{urn:t}:RT)'.")]
+    [DataRow("//t:c", "(t:zz)[1]", 2263, "There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:c,#anonymous)\".")]
+    [DataRow("/t:a/t:*", "(t:zz)[1]", 2263, "There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:i,xs:int) | element(t{urn:t}:j,xs:int)\".")]
+    public void NodesRow_IsTypedAsOneNodeOfItsPath(string rows, string path, int number, string message) =>
+        Typed().AssertSqlError(
+            $"declare @x xml(zsc) = null; select c.value('{Prolog}{path}', 'nvarchar(9)') from @x.nodes('{Prolog}{rows}') n(c)",
+            number,
+            "XQuery [value()]: " + message);
+
+    [TestMethod]
+    public void NestedNodesRow_IsTypedFromItsOwnRow() =>
+        Typed().AssertSqlError(
+            $"declare @x xml(zsc) = null; select c2.value('{Prolog}(t:zz)[1]', 'int') from @x.nodes('{Prolog}/t:r') n(c) cross apply c.nodes('{Prolog}t:c') m(c2)",
+            2263,
+            "XQuery [value()]: There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:c,#anonymous)\".");
+
+    [TestMethod]
     public void DeclaredSteps_Read() =>
         AreEqual("1|9|s|2.50|ab|1", Typed().ExecuteScalar($"""
             declare @x xml(zsc) = N'<r xmlns="urn:t"><i>1</i><c><n>ab</n></c><h>s</h><sc>2.5</sc></r>';

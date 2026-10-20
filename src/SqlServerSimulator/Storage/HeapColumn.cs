@@ -251,6 +251,13 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public bool XmlNodesRow;
 
     /// <summary>
+    /// For the node column a <c>.nodes()</c> source produces over a typed
+    /// instance, what the schema types each row's node as — the path's type,
+    /// one node at a time — or null where the collection doesn't type it.
+    /// </summary>
+    public XmlSchemaPathType? XmlNodesSchemaType;
+
+    /// <summary>
     /// The column was declared <c>xml(DOCUMENT …)</c>: a write holding anything
     /// but one top-level element is Msg 6901 (<c>sys.columns.is_xml_document</c>).
     /// </summary>

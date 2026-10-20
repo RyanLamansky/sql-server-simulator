@@ -215,7 +215,8 @@ internal sealed class XmlMethodCall : Expression
         {
             try
             {
-                xquery = XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context), !ReceivesNodesRow(target, context));
+                var nodesRow = ReceiverNodesRow(target, context);
+                xquery = XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context), nodesRow is null, nodesRow?.XmlNodesSchemaType);
             }
             catch (SimulatedSqlException ex) when (ex.XQueryOffset is { } offset && argumentToken is not null)
             {
@@ -328,15 +329,16 @@ internal sealed class XmlMethodCall : Expression
     }
 
     /// <summary>
-    /// Whether the receiver is a <c>.nodes()</c> row, whose context item is a
-    /// node inside its instance rather than the instance's document.
+    /// The receiver's column when it is a <c>.nodes()</c> row, whose context
+    /// item is a node inside its instance rather than the instance's document;
+    /// null for any other receiver.
     /// </summary>
-    private static bool ReceivesNodesRow(Expression target, ParserContext context)
+    private static HeapColumn? ReceiverNodesRow(Expression target, ParserContext context)
     {
         if (target is not Reference reference || context.ScopeSources is not { } sources)
-            return false;
+            return null;
         var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
-        return sourceIndex >= 0 && sources[sourceIndex].Columns[columnIndex].XmlNodesRow;
+        return sourceIndex >= 0 && sources[sourceIndex].Columns[columnIndex] is { XmlNodesRow: true } column ? column : null;
     }
 
     /// <summary>

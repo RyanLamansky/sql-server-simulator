@@ -31,13 +31,21 @@ internal sealed class XmlSchemaPathType
     /// <summary>Whether the elements are the document's children, which real writes as an interleave of optional items.</summary>
     private readonly bool documentChildren;
 
-    private XmlSchemaPathType(XmlSchemaSet schemas, bool document, bool anyElement, Entry[] elements, bool documentChildren)
+    /// <summary>
+    /// Whether these are what <c>//</c> reaches from the document node, whose
+    /// union real writes with the document in it — a notation not modeled —
+    /// so a step finding nothing here goes unrefused.
+    /// </summary>
+    private readonly bool fromDocument;
+
+    private XmlSchemaPathType(XmlSchemaSet schemas, bool document, bool anyElement, Entry[] elements, bool documentChildren, bool fromDocument = false)
     {
         this.schemas = schemas;
         this.document = document;
         this.anyElement = anyElement;
         this.elements = elements;
         this.documentChildren = documentChildren;
+        this.fromDocument = fromDocument;
     }
 
     /// <summary>
@@ -76,10 +84,20 @@ internal sealed class XmlSchemaPathType
     /// </summary>
     public XmlSchemaPathType? DescendantOrSelf()
     {
-        if (this.document || this.anyElement)
+        if (this.anyElement)
             return null;
         var reached = new List<Entry>();
         var expanded = new HashSet<XmlSchemaType>();
+        if (this.document)
+        {
+            foreach (XmlSchemaElement global in this.schemas.GlobalElements.Values)
+            {
+                Add(reached, new(global.QualifiedName, global.ElementSchemaType));
+                if (!this.Descend(global.ElementSchemaType, reached, expanded))
+                    return null;
+            }
+            return new(this.schemas, document: false, anyElement: false, [.. reached], documentChildren: false, fromDocument: true);
+        }
         foreach (var element in this.elements)
         {
             if (element.NodeKind is not null)
@@ -182,7 +200,7 @@ internal sealed class XmlSchemaPathType
 
         if (matched.Count > 0)
             return new(this.schemas, document: false, anyElement: false, [.. matched], documentChildren: this.document);
-        if (test is not (XmlNodeTestKind.Name or XmlNodeTestKind.AnyNamespace))
+        if (test is not (XmlNodeTestKind.Name or XmlNodeTestKind.AnyNamespace) || this.fromDocument)
             return null;
 
         var uri = test == XmlNodeTestKind.Name ? namespaceUri : string.Empty;
@@ -192,7 +210,7 @@ internal sealed class XmlSchemaPathType
                 ? SimulatedSqlException.XQueryNoSuchTopLevelElement(method, localName)
                 : SimulatedSqlException.XQueryNoSuchTopLevelNamespacedElement(method, $"{{{uri}}}:{localName}");
         }
-        var type = this.Render(notation) + XmlQueryExpr.OccurrenceSuffix(occurrence);
+        var type = this.Render(notation, occurrence);
         throw uri.Length == 0
             ? SimulatedSqlException.XQueryNoSuchElementInType(method, localName, type)
             : SimulatedSqlException.XQueryNoSuchNamespacedElementInType(method, $"{{{uri}}}:{localName}", type);
@@ -232,7 +250,7 @@ internal sealed class XmlSchemaPathType
             }
         }
 
-        var contextType = this.Render(notation) + XmlQueryExpr.OccurrenceSuffix(occurrence);
+        var contextType = this.Render(notation, occurrence);
         throw namespaceUri.Length == 0
             ? SimulatedSqlException.XQueryNoSuchAttributeInType(method, "@" + localName, contextType)
             : SimulatedSqlException.XQueryNoSuchNamespacedAttributeInType(method, $"@{{{namespaceUri}}}:{localName}", contextType);
@@ -272,9 +290,9 @@ internal sealed class XmlSchemaPathType
             if (element.Type is not XmlSchemaComplexType complex)
                 continue;
             if (IsAnyType(complex) || complex.ContentType is XmlSchemaContentType.ElementOnly or XmlSchemaContentType.Mixed)
-                throw SimulatedSqlException.XQueryAtomizesComplexContent(method, FoundTypeOf(element, notation), this.Render(notation) + XmlQueryExpr.OccurrenceSuffix(occurrence));
+                throw SimulatedSqlException.XQueryAtomizesComplexContent(method, FoundTypeOf(element, notation), this.Render(notation, occurrence));
             if (complex.ContentType == XmlSchemaContentType.Empty)
-                throw SimulatedSqlException.XQueryAtomizesEmptyContent(method, FoundTypeOf(element, notation), this.Render(notation) + XmlQueryExpr.OccurrenceSuffix(occurrence));
+                throw SimulatedSqlException.XQueryAtomizesEmptyContent(method, FoundTypeOf(element, notation), this.Render(notation, occurrence));
         }
     }
 
@@ -419,14 +437,21 @@ internal sealed class XmlSchemaPathType
     private static bool IsAnyType(XmlSchemaType type) =>
         type.QualifiedName.Name == "anyType" && type.QualifiedName.Namespace == XmlAtomicTypes.SchemaNamespace;
 
-    /// <summary>Real's notation for these elements, without an occurrence indicator.</summary>
-    private string Render(XmlSchemaNotation notation)
+    /// <summary>
+    /// Real's notation for <paramref name="occurrence"/> of these elements: a
+    /// union is parenthesized only where an occurrence indicator follows it,
+    /// as a <c>.nodes()</c> row's single node goes without (probed 2026-10-20
+    /// against SQL Server 2025).
+    /// </summary>
+    private string Render(XmlSchemaNotation notation, XmlOccurrence occurrence)
     {
+        var suffix = XmlQueryExpr.OccurrenceSuffix(occurrence);
         if (this.elements.Length == 1)
-            return ElementNotation(this.elements[0], notation);
-        var separator = this.documentChildren ? " ? & " : " | ";
-        var items = string.Join(separator, this.elements.Select(element => ElementNotation(element, notation)));
-        return this.documentChildren ? $"({items} ?)" : $"({items})";
+            return ElementNotation(this.elements[0], notation) + suffix;
+        if (this.documentChildren)
+            return $"({string.Join(" ? & ", this.elements.Select(element => ElementNotation(element, notation)))} ?){suffix}";
+        var union = string.Join(" | ", this.elements.Select(element => ElementNotation(element, notation)));
+        return suffix.Length == 0 ? union : $"({union}){suffix}";
     }
 
     private static string ElementNotation(Entry element, XmlSchemaNotation notation) =>

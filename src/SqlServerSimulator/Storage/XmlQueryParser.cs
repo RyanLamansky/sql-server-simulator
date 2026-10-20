@@ -25,7 +25,8 @@ internal sealed class XmlQueryParser(
     XmlStaticTyping? typing = null,
     XmlSqlAccessorScope? sqlAccessors = null,
     string? contextNodeType = null,
-    bool documentContext = false)
+    bool documentContext = false,
+    XmlSchemaPathType? contextSchemaType = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -69,11 +70,17 @@ internal sealed class XmlQueryParser(
     private string? predicateContextType;
 
     /// <summary>
-    /// The document node of a typed receiver whose context item is its
-    /// instance's document — not a <c>.nodes()</c> row — which an absolute
-    /// path's steps are typed from; null where the receiver is untyped.
+    /// The document node of a typed receiver, which an absolute path's steps
+    /// are typed from; null where the receiver is untyped.
     /// </summary>
-    private readonly XmlSchemaPathType? documentType = documentContext && typing?.Schemas is { } schemas ? XmlSchemaPathType.Document(schemas) : null;
+    private readonly XmlSchemaPathType? documentType = typing?.Schemas is { } schemas ? XmlSchemaPathType.Document(schemas) : null;
+
+    /// <summary>
+    /// The schema type of the receiver's context item: its document, or for a
+    /// <c>.nodes()</c> row the node it stands on, typed by the row's path
+    /// one node at a time (null where that path isn't typed).
+    /// </summary>
+    private readonly XmlSchemaPathType? receiverType = documentContext && typing?.Schemas is { } documentSchemas ? XmlSchemaPathType.Document(documentSchemas) : contextSchemaType;
 
     /// <summary>The schema type of the context item: the document at the top, a predicate's step inside it.</summary>
     private XmlSchemaPathType? schemaContext;
@@ -99,7 +106,7 @@ internal sealed class XmlQueryParser(
     /// <summary>Parses the whole body, rejecting anything left over.</summary>
     public XmlQueryExpr ParseBody()
     {
-        this.schemaContext = this.documentType;
+        this.schemaContext = this.receiverType;
         var expression = this.ParseExpr();
         this.SkipWhitespace();
         return this.index < this.text.Length ? throw this.SyntaxError() : expression;
@@ -719,8 +726,9 @@ internal sealed class XmlQueryParser(
             reached = this.documentType;
             if (this.TryConsume('/'))
             {
-                steps.Add(DescendantOrSelfStep());
-                steps.Add(this.ParseStep(null, occurrence));
+                var descendants = reached?.DescendantOrSelf();
+                steps.Add(DescendantOrSelfStep(descendants));
+                steps.Add(this.ParseStep(descendants, XmlOccurrence.Many));
             }
             else if (this.StartsStep())
             {
@@ -1088,7 +1096,7 @@ internal sealed class XmlQueryParser(
         if (c == '.')
         {
             this.index++;
-            return new XmlContextItemExpr(this.predicateContextType);
+            return new XmlContextItemExpr(this.predicateContextType, this.schemaContext);
         }
         if (c is '"' or '\'')
             return new XmlLiteralExpr(this.ReadQuoted(c), XmlStaticKind.String, "xs:string");

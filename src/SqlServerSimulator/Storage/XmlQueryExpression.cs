@@ -260,11 +260,17 @@ internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string ty
 
 /// <summary>
 /// The context item, <c>.</c> — atomizing as <paramref name="typeName"/> inside
-/// a predicate on a simply typed step, else untyped.
+/// a predicate on a simply typed step, else untyped — and carrying
+/// <paramref name="schemaType"/>, what a typed receiver's collection types it
+/// as.
 /// </summary>
-internal sealed class XmlContextItemExpr(string? typeName = null) : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, typeName ?? "xdt:untypedAtomic")
+internal sealed class XmlContextItemExpr(string? typeName = null, XmlSchemaPathType? schemaType = null) : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, typeName ?? "xdt:untypedAtomic")
 {
+    private readonly XmlSchemaPathType? schemaType = schemaType;
+
     public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(frame.Context.Clone());
+
+    public override XmlSchemaPathType? SchemaPathType() => this.schemaType;
 
     public override string NodeTypeBase() =>
         "document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }";

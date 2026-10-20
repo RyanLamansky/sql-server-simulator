@@ -417,8 +417,8 @@ All probed 2026-09-28 against SQL Server 2025.
 
 ### A schema collection types each step structurally
 
-Over a typed receiver whose context item is its document — not a `.nodes()` row — each child step is also typed from the collection's declarations (`Storage/XmlSchemaPathType.cs`): the document's children are the global elements, and an element's are its type's content model's, a type derived from it included (an instance may name one with `xsi:type`) and each child's substitution group.
-A name nothing there reaches is refused while the batch compiles, quoting the context's type in real's notation — the query's own prefix for a namespace (`element(t{urn:t}:r,t{urn:t}:RT) *`), `{urn:t}:r` under a default element namespace, `#anonymous` for an anonymous type, `(A | B)` for a union, the document's children as an interleave `(A ? & B ?)`, and `//`'s union with `comment | processing-instruction | text` after each element's own descendants:
+Over a typed receiver each child step is also typed from the collection's declarations (`Storage/XmlSchemaPathType.cs`), from the document node — or, for a `.nodes()` row, from the node it stands on, typed as one node of the row's path (`HeapColumn.XmlNodesSchemaType`) while an absolute path still starts at the document: the document's children are the global elements, and an element's are its type's content model's, a type derived from it included (an instance may name one with `xsi:type`) and each child's substitution group.
+A name nothing there reaches is refused while the batch compiles, quoting the context's type in real's notation — the query's own prefix for a namespace (`element(t{urn:t}:r,t{urn:t}:RT) *`), `{urn:t}:r` under a default element namespace, `#anonymous` for an anonymous type, `(A | B)` for a union (bare where no occurrence follows, as on a row), the document's children as an interleave `(A ? & B ?)`, and `//`'s union with `comment | processing-instruction | text` after each element's own descendants:
 
 | step | error |
 |---|---|
@@ -444,7 +444,7 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 ### Not modeled yet
 
-- **Structural typing past what the model follows**: a `.nodes()` row's steps, `//` from the document node or over a content wildcard, and a `*` step over one stay untyped, so real's refusals there — an `xs:anyType` element's Msg 9314 — are missed; a lax attribute wildcard's attribute isn't typed `xdt:anyAtomicType`, which real's Msg 2389 quotes (probed 2026-10-20).
+- **Structural typing past what the model follows**: `//` over a content wildcard and a `*` step over one stay untyped, and `//` from the document node types what it reaches without refusing a name it doesn't (real quotes a union holding the document, a notation not modeled), so real's refusals there — an `xs:anyType` element's Msg 9314 — are missed; a lax attribute wildcard's attribute isn't typed `xdt:anyAtomicType`, which real's Msg 2389 quotes (probed 2026-10-20).
 - **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences

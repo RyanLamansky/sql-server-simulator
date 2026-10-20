@@ -49,7 +49,8 @@ internal static class XmlQueryEngine
         XmlSqlAccessorScope? sqlAccessors = null,
         Parser.ForXmlNamespaces? statementNamespaces = null,
         string? contextNodeType = null,
-        bool documentContext = false)
+        bool documentContext = false,
+        XmlSchemaPathType? contextSchemaType = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery, displayMethod ?? method);
 
@@ -67,7 +68,7 @@ internal static class XmlQueryEngine
         // stays the bare discriminator the rules below switch on, while
         // `display` is what real writes between the diagnostics' brackets.
         var display = displayMethod ?? method;
-        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors, contextNodeType, documentContext);
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors, contextNodeType, documentContext, contextSchemaType);
         var bodyStart = xquery.TrimEnd().Length - body.Length;
         XmlQueryExpr compiled;
         try
