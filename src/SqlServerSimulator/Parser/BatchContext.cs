@@ -556,6 +556,16 @@ internal sealed partial class BatchContext
     public List<SimulatedSqlException>? CreateTimeBindErrors;
 
     /// <summary>
+    /// Set once the walk under <see cref="CreateTimeBinding"/> gathered a
+    /// <c>CREATE TABLE</c>'s missing XML schema collection (Msg 6314) or a
+    /// constraint it couldn't create (Msg 1750): real's report ends there, so
+    /// later binder errors, a second such one included, go unreported, while a
+    /// later <c>DECLARE</c>'s missing type still replaces the report as it
+    /// would have (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public bool BindReportClosed;
+
+    /// <summary>
     /// Set by the first table-variable default the walk under
     /// <see cref="CreateTimeBinding"/> met naming a sequence that doesn't exist
     /// (<see cref="SimulatedSqlException.TableVariableDefaultSequenceMissing"/>),

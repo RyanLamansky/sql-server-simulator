@@ -414,6 +414,14 @@ internal sealed class StatementContext
     public bool BindsDeferredSource;
 
     /// <summary>
+    /// Set once the statement is known to be a <c>CREATE TABLE</c>, whose
+    /// binder errors a module body binding at <c>CREATE</c> leaves for the
+    /// compile when the module runs, as real does (probed 2026-10-20 against
+    /// SQL Server 2025).
+    /// </summary>
+    public bool CreatesTable;
+
+    /// <summary>
     /// Set in skip mode when a statement whose write target doesn't exist was
     /// read to its end before raising its deferred name-resolution error, so a
     /// compile walk resumes at the statement after it rather than stopping
@@ -618,6 +626,7 @@ internal sealed class StatementContext
         this.SendsRows = false;
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
+        this.CreatesTable = false;
         this.DeferredReadToEnd = false;
         this.ObjectEventPhases = null;
         this.AuditedAccesses = null;

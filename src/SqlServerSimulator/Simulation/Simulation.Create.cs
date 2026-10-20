@@ -123,6 +123,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Rule }:
                 return TryParseCreateDefaultOrRule(context, isRule: true);
             case ReservedKeyword { Keyword: Keyword.Table }:
+                context.Batch.CurrentStatement.CreatesTable = true;
                 break;
             default:
                 return false;

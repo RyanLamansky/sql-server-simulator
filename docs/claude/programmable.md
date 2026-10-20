@@ -122,6 +122,11 @@ Procedures, triggers, scalar UDFs and multi-statement TVFs all report their run 
 
 **An illegal explicit conversion ends the report where it is.** Real gathers name-resolution errors across the whole body but stops at a **Msg 529**, so a body whose first statement carries one reports it alone even when a later statement names a missing column, while a name error found first reports with the conversion behind it (probed 2026-08-05).
 The conversion itself is settled from the two types — see [`casting.md`](casting.md#conversion-legality-is-settled-while-compiling) — so it reaches the bind through the same projection typing every other binder error does.
+A `CREATE TABLE`'s missing XML schema collection (Msg 6314) or constraint it can't create (Msg 1911 then Msg 1750) ends the report the same way, in a batch's compile as in a body's; a later `DECLARE`'s missing type still replaces the whole report, as it does any (probed 2026-10-20 against SQL Server 2025).
+
+**A body's `CREATE TABLE` binds when the module runs, not at `CREATE`.**
+Its bad computed column, constraint column, type, xml collection, precision or duplicate column waits, and the `CREATE` succeeds, but for an invalid collation (Msg 448), a temporary table the body creates twice (Msg 2714) and its parse-phase errors (Msg 128), which refuse it.
+The first run's compile then reports the error before any of the body runs, as a statement-ending error the caller's `TRY` catches (probed 2026-10-20 against SQL Server 2025); the bind marks the statement (`StatementContext.CreatesTable`) and drops the error rather than gathering it.
 
 **Severity 15 is real's parse phase and preempts the whole report**: a body with a bad column on one line and an undeclared variable on the next reports only Msg 137, and Msg 195 / 156 / 1075 behave the same.
 The simulator reproduces that by letting a severity-15 error propagate on sight rather than gathering it — with one guard.

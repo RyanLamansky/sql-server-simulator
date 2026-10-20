@@ -491,4 +491,27 @@ public sealed partial class BinderErrorReportTests
         _ = simulation.ExecuteNonQuery("use zz; exec ('create view pv as select id, v from t1 union all select id, v from t2'); exec ('create view vu as select a from t union all select b from t');");
         AreEqual(expected, Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("use zz; " + statement))));
     }
+    [TestMethod]
+    [DataRow("create table x1 (x xml(nosuch1)); create table x2 (x xml(nosuch2)); select x1 from t", "6314:1:nosuch1")]
+    [DataRow("select x1 from t; create table x3 (x xml(nosuch1)); select x2 from t", "207:1:x1 6314:1:nosuch1")]
+    [DataRow("create table x1 (a int primary key (nocol)); create table x2 (a int, b as nocol2)", "1911:1:nocol 1750:1:")]
+    [DataRow("create table x1 (x xml(nosuch1)); declare @b xml(nosuch2)", "6314:1:nosuch2")]
+    public void CreateTableErrorEndsTheReport(string statement, string expected) => AreEqual(expected, Report(statement));
+
+    [TestMethod]
+    public void ModuleBodyCreateTableBindsWhenTheModuleRuns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Setup);
+        AreEqual("207:1:x2", Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(
+            "create procedure p0 as create table x1 (a int, b as x1); create table x2 (x xml(nosuch)); select x2 from t"))));
+        _ = simulation.ExecuteNonQuery("create procedure p as print 'ran'; create table x1 (a int, b as nocol); create table x2 (x xml(nosuch)); create table x3 (a int, b as nocol2)");
+        AreEqual("caught 207", simulation.ExecuteScalar("""
+            begin try exec p end try begin catch select 'caught ' + ltrim(error_number()) end catch
+            """));
+        AreEqual("207:1:nocol 6314:1:nosuch", Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("exec p"))));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name like 'x_'"));
+        AreEqual("448:1:nosuchcoll", Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(
+            "create procedure p2 as create table x4 (a varchar(10) collate nosuchcoll)"))));
+    }
 }

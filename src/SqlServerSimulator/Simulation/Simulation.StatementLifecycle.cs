@@ -879,7 +879,15 @@ partial class Simulation
                 // (probe-confirmed). Severity 15 is real's parse phase,
                 // which preempts the whole report rather than joining it,
                 // so those keep propagating from the arm below.
-                bindErrors.Insert(Math.Min(this.gatheredBefore, bindErrors.Count), ex);
+                // A module body binding at CREATE leaves its CREATE TABLE
+                // statements to the compile when the module runs, but for an
+                // invalid collation or a temporary table the body creates
+                // twice (probed 2026-10-20).
+                if (!batch.BindReportClosed && !(batch.CurrentStatement.CreatesTable && !batch.CompilingForRun && ex.Number is not (448 or 2714)))
+                {
+                    bindErrors.Insert(Math.Min(this.gatheredBefore, bindErrors.Count), ex);
+                    batch.BindReportClosed = ex.Number == 6314 || ex.Errors.Any(static entry => entry.Number == 1750);
+                }
                 this.Ending = StatementEnding.GatheredBindError;
 
                 // An illegal explicit conversion ends the report where it
