@@ -169,6 +169,7 @@ public sealed class AuditDdlTests
             """));
         _ = sim.AssertSqlError("use master; alter server audit specification s add (logout_group)", 33229);
         _ = sim.AssertSqlError("use master; drop server audit specification s", 33071);
+        sim.AssertSqlError("use master; create server audit specification s for server audit a", 15530, "The audit specification with name \"s\" already exists.");
         sim.AssertSqlError("use master; create server audit specification t for server audit a", 33230, "An audit specification for audit 'a' already exists.");
         sim.AssertSqlError("use master; create server audit specification t for server audit nope", 33073, "Cannot find audit 'nope' or you do not have the required permissions.");
         _ = sim.AssertSqlError("use master; create server audit specification t for server audit a add (nope_group)", 102);
@@ -199,6 +200,7 @@ public sealed class AuditDdlTests
         _ = sim.AssertSqlError("create database audit specification e for server audit a add (select (a) on dbo.t by public)", 33211);
         sim.AssertSqlError("create database audit specification e for server audit a add (select on dbo.t by nobody)", 15151, "Cannot find the user 'nobody', because it does not exist or you do not have permission.");
         _ = sim.AssertSqlError("create database audit specification e for server audit a add (failed_login_group)", 102);
+        sim.AssertSqlError("create database audit specification d for server audit a", 15530, "The audit specification with name \"d\" already exists.");
         _ = sim.AssertSqlError("create database audit specification e for server audit a", 33230);
         _ = sim.AssertSqlError("drop database audit specification d", 33071);
     }

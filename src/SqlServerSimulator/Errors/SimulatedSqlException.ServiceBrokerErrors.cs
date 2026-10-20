@@ -41,9 +41,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ConversationHandleNotFound(Guid handle, byte state) =>
         new($"The conversation handle \"{handle.ToString().ToUpperInvariant()}\" is not found.", 8426, 16, state);
 
-    /// <summary>Msg 8418: a NULL conversation handle — state 5, or 6 for a <c>RELATED_CONVERSATION</c>.</summary>
+    /// <summary>Msg 8418: a NULL conversation handle — state 5, 6 for a <c>RELATED_CONVERSATION</c>, 20 for <c>RECEIVE … WHERE</c>'s.</summary>
     internal static SimulatedSqlException ConversationHandleMissing(byte state = 5) =>
         new("The conversation handle is missing. Specify a conversation handle.", 8418, 16, state);
+
+    /// <summary>Msg 8420: a NULL conversation group where a statement needs one, such as <c>RECEIVE … WHERE conversation_group_id</c>'s.</summary>
+    internal static SimulatedSqlException ConversationGroupMissing(byte state) =>
+        new("The conversation group is missing. Specify a conversation group.", 8420, 16, state);
 
     /// <summary>Msg 8429: <c>SEND</c> on an endpoint that has ended or errored, naming its state code.</summary>
     internal static SimulatedSqlException EndpointStateRefusesSend(string state) =>

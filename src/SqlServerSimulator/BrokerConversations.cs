@@ -209,12 +209,13 @@ internal sealed class BrokerRuntime(Simulation simulation)
 
     /// <summary>
     /// The endpoint <paramref name="handle"/> names in <paramref name="database"/>
-    /// as <paramref name="owner"/> sees it, or null — a closed one too, which
-    /// no statement reaches.
+    /// as <paramref name="owner"/> sees it, or null — a closed one too unless
+    /// <paramref name="closed"/>, as only <c>END CONVERSATION … WITH
+    /// CLEANUP</c> reaches one (probed 2026-10-20 against SQL Server 2025).
     /// </summary>
-    public ConversationEndpoint? Find(Database database, Guid handle, object owner) =>
+    public ConversationEndpoint? Find(Database database, Guid handle, object owner, bool closed = false) =>
         this.Endpoints.TryGetValue(new(database, handle), out var endpoint)
-            && endpoint.State != EndpointState.Closed && Sees(endpoint.PendingOwner, owner)
+            && (closed || endpoint.State != EndpointState.Closed) && Sees(endpoint.PendingOwner, owner)
             ? endpoint
             : null;
 

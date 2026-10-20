@@ -277,12 +277,13 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
-    /// Set beside <see cref="WritesRows"/> by the rewrite <c>ALTER TABLE …
-    /// ALTER COLUMN</c> runs, which counts no rows: one a <c>TRY</c> catches
-    /// leaves the statement's DONE without a count (probed 2026-10-19 against
-    /// SQL Server 2025).
+    /// Set beside <see cref="WritesRows"/> by a write that counts no rows —
+    /// the rewrite <c>ALTER TABLE … ALTER COLUMN</c> runs, and the
+    /// conversation statements but <c>RECEIVE</c>: one a <c>TRY</c> catches
+    /// leaves the statement's DONE without a count (probed 2026-10-19 and
+    /// 2026-10-20 against SQL Server 2025).
     /// </summary>
-    public bool RewritesTable;
+    public bool CountsNoRows;
 
     /// <summary>
     /// Set by <c>WRITETEXT</c> and <c>UPDATETEXT</c> once they reach their
@@ -609,7 +610,7 @@ internal sealed class StatementContext
         this.NullEliminated = false;
         this.OwesOverflowNotice = this.OwesDivideByZeroNotice = false;
         this.WritesRows = false;
-        this.RewritesTable = false;
+        this.CountsNoRows = false;
         this.WritesText = false;
         this.ClientOutputShape = null;
         this.SentWrittenRows = false;

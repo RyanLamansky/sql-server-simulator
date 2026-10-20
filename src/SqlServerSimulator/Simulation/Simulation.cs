@@ -2996,13 +2996,13 @@ public sealed partial class Simulation
     /// <c>INSERT</c> whose trigger's <c>UPDATE</c> failed reports two.
     /// A statement whose <c>OUTPUT</c> clause returns rows reports through the
     /// empty result set instead. Null for any other statement, a
-    /// <c>WRITETEXT</c>, <c>UPDATETEXT</c> or an <c>ALTER COLUMN</c>'s rewrite
-    /// among them, which count nothing.
+    /// <c>WRITETEXT</c>, <c>UPDATETEXT</c>, an <c>ALTER COLUMN</c>'s rewrite
+    /// or a conversation statement among them, which count nothing.
     /// </summary>
     private static SimulatedStatementOutcome? CaughtWriteCount(BatchContext batch)
     {
         var statement = batch.CurrentStatement;
-        if (!statement.WritesRows || statement.WritesText || statement.RewritesTable || statement.SentWrittenRows)
+        if (!statement.WritesRows || statement.WritesText || statement.CountsNoRows || statement.SentWrittenRows)
             return null;
         SimulatedStatementOutcome count = statement.ClientOutputShape is var (schema, names)
             ? new SimulatedSqlResultSet(schema, names, Array.Empty<byte[]>(), 0) { EndedByError = true, ErrorCaught = true }
@@ -3072,9 +3072,13 @@ public sealed partial class Simulation
     /// nothing earns it too, all of it running within the firing statement,
     /// while a function's Msg 208 ending the body earns none (probed
     /// 2026-10-06).
+    /// A <c>RECEIVE … WHERE</c> naming a missing or no conversation (Msg 8418,
+    /// 8420 or 8426 at state 20) earns it where those numbers elsewhere earn
+    /// none (probed 2026-10-20).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
+        || (error.Number is 8418 or 8420 or 8426 && error.State == 20)
         || (error.Number == 3908 && batch.CurrentStatement.WritesRows)
         || ((batch.CurrentStatement.WritesText || error.EndedTextWrite) && error.Number is 518 or 4002 or 4022 or 7116 or 7123 or 7125 or 7133 or 7135)
         || error.EndedColumnRewrite

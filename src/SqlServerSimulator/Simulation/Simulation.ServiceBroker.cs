@@ -91,7 +91,14 @@ partial class Simulation
 
     /// <summary>Runs the conversation statement at the cursor within the statement's atomic scope.</summary>
     private static SimulatedStatementOutcome RunBrokerStatement(ParserContext context, BrokerStatement statement) =>
-        RunMutation(context, context => statement switch
+        RunMutation(context, context =>
+        {
+            context.Batch.CurrentStatement.CountsNoRows = statement is not (BrokerStatement.Receive or BrokerStatement.WaitForReceive);
+            return RunBrokerStatementBody(context, statement);
+        });
+
+    private static SimulatedStatementOutcome RunBrokerStatementBody(ParserContext context, BrokerStatement statement) =>
+        statement switch
         {
             BrokerStatement.BeginDialog => ParseBeginDialog(context),
             BrokerStatement.BeginTimer => ParseBeginConversationTimer(context),
@@ -102,7 +109,7 @@ partial class Simulation
             BrokerStatement.MoveConversation => ParseMoveConversation(context),
             BrokerStatement.WaitForReceive => ParseReceive(context, waits: true),
             _ => ParseGetConversationGroup(context, waits: true),
-        });
+        };
 
     private static SimulatedNonQuery NoBrokerCount => new(0, countsRowsReturned: true);
 
@@ -836,9 +843,12 @@ partial class Simulation
         lock (broker.Gate)
         {
             broker.FireDue(now);
-            var endpoint = broker.Find(database, id, batch.Connection.LockOwner) ?? throw SimulatedSqlException.ConversationHandleNotFound(id, 1);
+            var endpoint = broker.Find(database, id, batch.Connection.LockOwner, closed: cleanup) ?? throw SimulatedSqlException.ConversationHandleNotFound(id, 1);
             _ = broker.LockGroup(batch, endpoint.Group, skipWhenHeld: false);
-            if (!cleanup && endpoint.State is EndpointState.StartedOutbound or EndpointState.Conversing)
+            // A dialog that has sent nothing has no target to tell, so its end
+            // only removes the initiator, an error included (probed 2026-10-20
+            // against SQL Server 2025).
+            if (!cleanup && endpoint.State == EndpointState.Conversing)
             {
                 var sequence = endpoint.SendSequence;
                 SetSendSequence(batch, broker, endpoint, sequence + 1);
@@ -1101,7 +1111,16 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             RequireNextOperator(context, '=');
             context.MoveNextRequired();
-            filter = ParseBrokerOperand(context);
+            // The operand is a variable or a character literal, compared with
+            // the column — anything else, NULL included, is a syntax error
+            // (probed 2026-10-20 against SQL Server 2025).
+            if (context.Token is not (AtPrefixedString or Literal { Value.Type: VarcharSqlType or NVarcharSqlType }))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            filter = Expression.Parse(context);
+            var filterType = filter.GetSqlType(batch, static name => throw SimulatedSqlException.InvalidColumnName(name));
+            // Real's compile reports a handle's clash twice, a group's once.
+            if (SqlType.OperandPairError(TypePairOperation.Compare, new TypePairOperand(SqlType.UniqueIdentifier), new TypePairOperand(filterType, filter), "equal to") is { } clash)
+                throw byGroup ? clash : SimulatedSqlException.Aggregate([clash, clash.CopyOfError()]);
         }
         var timeout = 0L;
         if (waits)
@@ -1133,9 +1152,27 @@ partial class Simulation
             if (limit < 0)
                 throw SimulatedSqlException.TopRowCountMustNotBeNegative();
         }
+        // A failure from here on sends the statement's empty result set
+        // ahead of a CATCH block's output.
+        if (!assigns && into is null)
+            batch.CurrentStatement.ClientOutputShape = (schema, [.. items.Select(static item => item.Name)]);
         Guid? filterId = null;
         if (filter is not null)
-            filterId = EvaluateGuid(batch, filter);
+        {
+            // A handle must name a conversation of the database, if not one
+            // of this queue's, where a group that names none receives nothing.
+            filterId = EvaluateGuid(batch, filter)
+                ?? throw (byGroup ? SimulatedSqlException.ConversationGroupMissing(20) : SimulatedSqlException.ConversationHandleMissing(20));
+            if (!byGroup)
+            {
+                var broker = batch.Connection.Simulation.Broker;
+                lock (broker.Gate)
+                {
+                    if (broker.Find(batch.CurrentDatabase, filterId.Value, batch.Connection.LockOwner) is null)
+                        throw SimulatedSqlException.ConversationHandleNotFound(filterId.Value, 20);
+                }
+            }
+        }
 
         var received = TakeMessages(batch, queue, limit, filterId, byGroup, timeout, lockOnly: false, out _);
         var rows = new List<SqlValue[]>(received.Count);
@@ -1340,6 +1377,7 @@ partial class Simulation
         if (waits)
         {
             context.MoveNextRequired(); // (
+            context.MoveNextRequired(); // GET
         }
         context.MoveNextRequired(); // CONVERSATION
         if (!IsKeyWord(context.GetNextRequired(), "GROUP"))
@@ -1363,7 +1401,7 @@ partial class Simulation
         if (batch.IsSkipping)
             return NoBrokerCount;
         if (!batch.TryResolveQueue(queueName, out var queue))
-            throw SimulatedSqlException.InvalidObjectName(queueName, 12);
+            throw SimulatedSqlException.InvalidObjectName(queueName, 11);
         RequireQueueReceive(batch, queue, 42);
         _ = TakeMessages(batch, queue, null, null, byGroup: false, timeout, lockOnly: true, out var group);
         AssignBrokerVariable(batch, variable, group is { } id ? SqlValue.FromGuid(id) : SqlValue.Null(SqlType.UniqueIdentifier));

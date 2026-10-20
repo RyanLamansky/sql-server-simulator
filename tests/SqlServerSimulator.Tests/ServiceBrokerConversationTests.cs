@@ -159,6 +159,14 @@ public sealed class ServiceBrokerConversationTests
     [DataRow("receive top (-1) * from tq", 127)]
     [DataRow("receive * from nope", 208)]
     [DataRow("receive * from tq where message_type_name = 'x'", 102)]
+    [DataRow("declare @h uniqueidentifier, @t nvarchar(256); begin dialog @h from service init to service @t", 8421)]
+    [DataRow("declare @h uniqueidentifier, @t uniqueidentifier; begin dialog @h from service init to service 'targ' with encryption = off; send on conversation @h; select @t = conversation_handle from sys.conversation_endpoints where is_initiator = 0; end conversation @t; send on conversation @h", 8429)]
+    [DataRow("declare @h uniqueidentifier = newid(); receive * from tq where conversation_handle = @h", 8426)]
+    [DataRow("declare @h uniqueidentifier; receive * from tq where conversation_handle = @h", 8418)]
+    [DataRow("declare @g uniqueidentifier; receive * from tq where conversation_group_id = @g", 8420)]
+    [DataRow("receive * from tq where conversation_handle = null", 156)]
+    [DataRow("receive * from tq where conversation_handle = newid()", 102)]
+    [DataRow("receive * from tq where conversation_handle = 0x00", 102)]
     [DataRow("receive c = message_body from tq", 102)]
     public void Statements_RefuseAsRealDoes(string sql, int number)
     {
@@ -439,4 +447,82 @@ public sealed class ServiceBrokerConversationTests
             select count(*) from sys.conversation_groups;
             select count(*) from sys.conversation_groups g join sys.services s on s.service_id = g.service_id where s.name = 'init' and g.is_system = 0
             """).Replace(";", "|", StringComparison.Ordinal));
+
+    /// <summary>
+    /// A dialog that has sent nothing has no target to tell: ending it, with
+    /// an error or without, only removes the initiator; and CLEANUP reaches a
+    /// target endpoint already CLOSED, which nothing else finds (probed
+    /// 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void EndConversation_BeforeASend_AndCleanupOfAClosedTarget()
+    {
+        var simulation = Broker();
+        AreEqual("0|0", Rows(simulation, """
+            declare @h uniqueidentifier, @e uniqueidentifier;
+            begin dialog @h from service init to service 'targ' with encryption = off;
+            end conversation @h;
+            begin dialog @e from service init to service 'targ' with encryption = off;
+            end conversation @e with error = 5 description = N'x';
+            select count(*) from sys.conversation_endpoints;
+            select count(*) from tq
+            """).Replace(";", "|", StringComparison.Ordinal));
+        AreEqual("False|CD;True|DI;True|DI", Rows(simulation, """
+            declare @h uniqueidentifier, @t uniqueidentifier;
+            begin dialog @h from service init to service 'targ' with encryption = off;
+            send on conversation @h;
+            select @t = conversation_handle from sys.conversation_endpoints where is_initiator = 0;
+            end conversation @t;
+            select is_initiator, state from sys.conversation_endpoints order by is_initiator;
+            end conversation @t with cleanup;
+            select is_initiator, state from sys.conversation_endpoints order by is_initiator
+            """));
+        _ = simulation.AssertSqlError("""
+            declare @t uniqueidentifier;
+            select @t = conversation_handle from sys.conversation_endpoints where is_initiator = 1;
+            end conversation @t;
+            select @t = conversation_handle from sys.conversation_endpoints where is_initiator = 0;
+            end conversation @t
+            """, 8426);
+    }
+
+    /// <summary>
+    /// A conversation statement a TRY catches reports no count, where a
+    /// RECEIVE sends its empty result set ahead of the CATCH block's; a
+    /// RECEIVE naming a missing conversation is followed by Msg 3621, and a
+    /// handle its operand can't compare with clashes twice, as real's compile
+    /// reports it (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void CaughtConversationStatements_AndReceivesRefusals()
+    {
+        var simulation = Broker();
+        using var connection = simulation.CreateOpenConnection();
+        AreEqual(-1, connection.CreateCommand("begin try end conversation '00000000-0000-0000-0000-000000000001' end try begin catch end catch").ExecuteNonQuery());
+        using (var reader = connection.CreateCommand("declare @h uniqueidentifier = newid(); begin try receive conversation_handle from tq where conversation_handle = @h end try begin catch select error_number() end catch").ExecuteReader())
+        {
+            AreEqual("conversation_handle", reader.GetName(0));
+            IsFalse(reader.Read());
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(8426, reader.GetInt32(0));
+        }
+        var missing = simulation.AssertSqlError("declare @h uniqueidentifier = newid(); receive * from tq where conversation_handle = @h", 8426);
+        AreEqual((byte)20, missing.Errors[0].State);
+        AreEqual(3621, missing.Errors[^1].Number);
+        var clash = simulation.AssertSqlError("declare @h int = 1; receive * from tq where conversation_handle = @h", 206);
+        HasCount(2, clash.Errors);
+        AreEqual("Operand type clash: uniqueidentifier is incompatible with int", clash.Errors[1].Message);
+        HasCount(1, simulation.AssertSqlError("declare @h int = 1; receive * from tq where conversation_group_id = @h", 206).Errors);
+        AreEqual("", Rows(simulation, "declare @g uniqueidentifier = newid(); receive * from tq where conversation_group_id = @g"));
+    }
+
+    /// <summary>WAITFOR (GET CONVERSATION GROUP …) waits for a group as GET does; a missing queue is Msg 208 at state 11 (probed 2026-10-20).</summary>
+    [TestMethod]
+    public void WaitForGetConversationGroup()
+    {
+        var simulation = Broker();
+        AreEqual("NULL", Rows(simulation, "declare @g uniqueidentifier = newid(); waitfor (get conversation group @g from tq), timeout 10; select @g"));
+        AreEqual((byte)11, simulation.AssertSqlError("declare @g uniqueidentifier; waitfor (get conversation group @g from nope), timeout 10", 208).Errors[0].State);
+    }
 }

@@ -58,10 +58,14 @@ Its rowset is fifteen columns, `status` through `message_enqueue_time`.
   The failed message and every later one are held, "Service Broker received an error message on this conversation…".
 - `RECEIVE [TOP (n)] columns FROM queue [INTO @t] [WHERE conversation_handle | conversation_group_id = x]` takes the ready messages of one conversation group no other transaction holds — the first in `queuing_order` — locks the group for its transaction, and returns them, assigns them (`@v = column`, never mixed with returned columns: Msg 8447), or inserts them.
   A column alias is `AS` or juxtaposition; `alias = column` is Msg 102, and so is any other `WHERE`.
+  The `WHERE` operand is a variable or a character literal, anything else (`NULL`, a call, a parenthesized value, a number) Msg 102 or 156; one that can't compare with a `uniqueidentifier` is a compile error, a handle's reported twice (probed 2026-10-20 against SQL Server 2025).
+  A handle must name a conversation of the database (Msg 8426), though another queue's receives nothing, while a group naming none receives nothing; a NULL is Msg 8418 or 8420 — each at state 20 with Msg 3621 after it.
+  A `TRY` catching a `RECEIVE`'s error gets its empty result set first, where the other conversation statements report no count.
   A rollback puts the messages back; a queue with poison-message handling is disabled by the fifth `RECEIVE` in a row that a rollback undid, which the next `RECEIVE` meets as Msg 9617.
 - `WAITFOR (RECEIVE …) [, TIMEOUT ms]` and `WAITFOR (GET CONVERSATION GROUP @g FROM q) [, TIMEOUT ms]` wait on the broker's gate, a cancel or `CommandTimeout` ending them, and record `BROKER_RECEIVE_WAITFOR` (which `sys.dm_exec_requests` reports); at the timeout `RECEIVE` returns its empty set and `GET` a NULL group.
 - `END CONVERSATION @h` sends the far side an EndDialog (`DISCONNECTED_INBOUND`), or with `WITH ERROR = n DESCRIPTION = 'text'` an Error carrying them (`ERROR`, n from 1, Msg 8165 state 3); the initiator's endpoint then goes, a target's stays `CLOSED`, and the endpoint's messages leave its queue and the transmission queue.
-  `WITH CLEANUP` drops the endpoint telling no one.
+  A dialog that has sent nothing (`STARTED_OUTBOUND`) has no target to tell, so its end, an error included, only removes the initiator.
+  `WITH CLEANUP` drops the endpoint telling no one, a `CLOSED` target's included, which every other statement treats as not found (probed 2026-10-20).
 - `BEGIN CONVERSATION TIMER (@h) TIMEOUT = n` puts a DialogTimer message (sequence -2) on the endpoint's own queue n seconds later; an expired `LIFETIME` errors both sides with -8489.
   Neither runs on a clock of its own: both fire when a statement next reads the broker's state.
 - `MOVE CONVERSATION @h TO @g` moves an endpoint and its queued messages to another group of its service (Msg 8439 otherwise).
