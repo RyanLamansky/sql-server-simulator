@@ -808,11 +808,9 @@ The views are row-cached (see [`catalog-views.md`](catalog-views.md#cross-statem
 - **A text .NET's schema object model can't read** lists no components and draws no component ids.
   The compile checks real runs at `CREATE` refuse most such texts first.
 
-**Internal node-table + statistics surface (for DacFx export).**
-DacFx's XML-index reverse-engineering query doesn't read `sys.xml_indexes` alone — it INNER JOINs `sys.index_columns` (one row per XML index: the indexed xml column, `index_column_id` 1, `key_ordinal` 0) *and* an internal "node table" per **primary** index (`sys.objects` type `IT` / `INTERNAL_TABLE`, named `xml_index_nodes_<tableObjectId>_<primaryIndexId>` (the index's own 256000-range `index_id`, probe-confirmed), parent = base table, `schema_id` = sys, `is_ms_shipped` = 1) joined to `sys.stats` (one row per XML index, `name` = the index name, on the node table's `object_id`; a primary owns its node table, secondaries share their primary's — `stats_id` sequential within a node table).
-Modeled from probe (SQL Server 2025); without them DacFx NREs client-side (`SqlFullTextIndexColumnSpecifierPopulator`-style orphaned-parent) and emits no `SqlXmlIndex` elements.
-A primary XML index allocates its node-table object id at CREATE (`XmlIndex.InternalTableObjectId`); `EnumerateXmlIndexStats` resolves each index (primary or secondary) to its owning node table.
-This is the only place the simulator surfaces a type-`IT` object.
+**The node table (for DacFx export).**
+DacFx's XML-index reverse-engineering query doesn't read `sys.xml_indexes` alone — it INNER JOINs `sys.index_columns` (one row per XML index: the indexed xml column, `index_column_id` 1, `key_ordinal` 0) *and* the internal node table each **primary** owns ([an internal table](catalog-views.md#system-base-tables-and-internal-tables), `xml_index_nodes_<table id>_<primary index id>`, internal type 202, `parent_minor_id` the primary) joined to `sys.stats` on it; without them DacFx NREs client-side and emits no `SqlXmlIndex` elements.
+The node table carries real's eleven columns and a `pk<n>` copy of each primary-key column, a unique clustered index under the primary's name keyed on the key columns then the node id, and a nonclustered index under each secondary's name — `VALUE` on (`value`, `hid`), `PATH` on (`hid`, `value`), `PROPERTY` on the key columns then `hid` and `value` — numbered within the node table, a dropped one's id left unused, each with its statistic and its rowsets' record lengths (probed 2026-10-20 against SQL Server 2025); the rowsets hold no rows, where real's hold the documents' nodes.
 
 **`sys.xml_indexes`** (full 26-col shape, probe-confirmed against SQL Server 2025 WWI).
 The load-bearing core keeps its original positions: `object_id` / `name` / `index_id` / `type` (=3) / `type_desc` (`XML`) / `using_xml_index_id` (NULL for primary) / `secondary_type` (char(1): `P`/`V`/`R`) / `secondary_type_desc` / `is_primary_key` (always false).
@@ -823,6 +821,9 @@ Ordinary indexes keep the small ids starting at 1; spatial indexes have their ow
 A new index takes one past the table's highest surviving XML id, so a dropped top id is reused while a dropped middle one isn't (probed 2026-09-26: with 256000–256002 on a table, dropping the primary at 256000 with its secondary at 256002 gives the next index 256002).
 
 `DROP INDEX name ON table` drops an XML index, and a primary takes the secondaries built over it along (probed 2026-09-26).
+`ALTER INDEX` takes `DISABLE` — a primary's taking its enabled secondaries with a Msg 3750 apiece naming the node table — `REBUILD`, which brings back only the index named and sets its fill factor, padding and lock options, `REORGANIZE` and `SET` of the lock options; a secondary under a disabled primary is Msg 1987, a disabled index refuses `REORGANIZE` and `SET` (Msg 1973) and one without page locks `REORGANIZE` (Msg 1943 on the node table), and a partition number is Msg 7731 state 4, `ONLINE`, `IGNORE_DUP_KEY` or `STATISTICS_INCREMENTAL` on and any `DATA_COMPRESSION` Msg 153, as `SET`'s `OPTIMIZE_FOR_SEQUENTIAL_KEY` is (probed 2026-10-20 against SQL Server 2025).
+A disabled XML index leaves its documents readable and its table writable.
+`PAUSE`, `RESUME` and `ABORT` are a `NotSupportedException`: real fails an assertion and ends the session over a `PAUSE`.
 The deprecated `DROP INDEX table.name` form is refused for XML and spatial indexes alike with Msg 3749 — while compiling, so nothing ahead of it in the batch runs, and even under `IF EXISTS`.
 While either kind is on a table its primary key can't be dropped (Msg 3734 then Msg 3727).
 A `#temp` table takes XML indexes as a permanent one does; a full-text index refuses it (Msg 208 state 48, where a missing table is state 49).

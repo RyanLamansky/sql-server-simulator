@@ -271,4 +271,83 @@ public sealed class DisabledIndexTests
             316,
             "The index ID 2 on table \"dbo.t\" (specified in the FROM clause) is disabled or resides in a filegroup which is not online.");
     }
+
+    // --- XML, spatial and JSON indexes (probed 2026-10-20) ---
+
+    private const string ExtendedIndexes = """
+        create table t (a int not null primary key, x xml, g geometry, j json, b int);
+        create index n on t (b);
+        create primary xml index xp on t (x);
+        create xml index xv on t (x) using xml index xp for value;
+        create spatial index sp on t (g) with (bounding_box = (0, 0, 10, 10));
+        create json index ji on t (j);
+        """;
+
+    private static List<string> Warnings(Simulation simulation, string sql)
+    {
+        var messages = new List<string>();
+        using var connection = simulation.CreateOpenConnection();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static error => $"{error.Number}:{error.Message}"));
+        _ = connection.CreateCommand(sql).ExecuteNonQuery();
+        return messages;
+    }
+
+    [TestMethod]
+    public void DisablingTheClusteredIndex_TakesEveryIndexKindWithIt()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(ExtendedIndexes);
+        var nodes = simulation.ExecuteScalar("select name from sys.internal_tables where internal_type = 202");
+        CollectionAssert.AreEqual(new[]
+        {
+            "3750:Warning: Index 'n' on table 't' was disabled as a result of disabling the clustered index on the table.",
+            $"3750:Warning: Index 'xv' on table '{nodes}' was disabled as a result of disabling the clustered index on the table.",
+            "3750:Warning: Index 'xp' on table 't' was disabled as a result of disabling the clustered index on the table.",
+            "3750:Warning: Index 'sp' on table 't' was disabled as a result of disabling the clustered index on the table.",
+            "3750:Warning: Index 'ji' on table 't' was disabled as a result of disabling the clustered index on the table.",
+        }, Warnings(simulation, "alter index all on t disable"));
+        AreEqual(6, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and is_disabled = 1"));
+        simulation.AssertSqlError("alter index n on t rebuild", 1987, "Cannot alter nonclustered index 'n' on table 't' because its clustered index is disabled.");
+        simulation.AssertSqlError("alter index xp on t set (allow_row_locks = off)", 1987, "Cannot alter primary xml index 'xp' on table 't' because its clustered index is disabled.");
+        simulation.AssertSqlError("alter index sp on t reorganize", 1987, "Cannot alter EXTENDED INDEX 'sp' on table 't' because its clustered index is disabled.");
+        simulation.AssertSqlError("alter index ji on t rebuild", 1987, "Cannot alter JSON index 'ji' on table 't' because its clustered index is disabled.");
+        simulation.AssertSqlError("alter index xv on t rebuild", 1987, "Cannot alter XML INDEX 'xv' on table 't' because its primary xml index is disabled.");
+        // A spatial or JSON index keeps a rebuild of every index from running.
+        _ = simulation.AssertSqlError("alter index all on t rebuild", 8655);
+        AreEqual(6, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and is_disabled = 1"));
+        _ = simulation.ExecuteNonQuery("drop index sp on t; drop index ji on t; alter index all on t rebuild");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and is_disabled = 1"));
+    }
+
+    [TestMethod]
+    public void XmlIndex_TakesTheAlterIndexForms()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a int not null primary key, x xml);
+            insert t values (1, '<r><a>1</a></r>');
+            create primary xml index xp on t (x);
+            create xml index xv on t (x) using xml index xp for value;
+            create xml index xh on t (x) using xml index xp for path;
+            alter index xv on t disable;
+            """);
+        var nodes = simulation.ExecuteScalar("select name from sys.internal_tables where internal_type = 202");
+        CollectionAssert.AreEqual(new[] { $"3750:Warning: Index 'xh' on table '{nodes}' was disabled as a result of disabling the clustered index on the table." },
+            Warnings(simulation, "alter index xp on t disable"));
+        // The documents still read, and the table still takes rows.
+        AreEqual(1, simulation.ExecuteScalar("insert t values (2, '<r/>'); select x.value('(/r/a)[1]', 'int') from t where a = 1"));
+        simulation.AssertSqlError("alter index xp on t reorganize", 1973, "Cannot perform the specified operation on disabled index 'xp' on table 't'.");
+        // Rebuilding the primary brings back only the primary.
+        AreEqual("xp:0:70:1,xv:1:0:0,xh:1:0:0", simulation.ExecuteScalar("""
+            alter index xp on t rebuild with (fillfactor = 70, pad_index = on);
+            select string_agg(concat(name, ':', cast(is_disabled as int), ':', fill_factor, ':', cast(is_padded as int)), ',') within group (order by index_id) from sys.indexes where object_id = object_id('t') and type = 3
+            """));
+        AreEqual("0", simulation.ExecuteScalar("alter index xv on t rebuild; alter index xp on t set (allow_page_locks = off); select concat(allow_page_locks, '') from sys.indexes where name = 'xp'"));
+        simulation.AssertSqlError("alter index xp on t reorganize", 1943, $"The index \"xp\" on table \"{nodes}\" cannot be reorganized because page level locking is disabled.");
+        simulation.AssertSqlError("alter index xp on t rebuild partition = 1", 7731, "Cannot specify partition number in Alter index statement to rebuild or reorganize a partition of XML INDEX 'xp'.");
+        simulation.AssertSqlError("alter index xp on t rebuild with (online = on)", 153, "Invalid usage of the option ONLINE in the ALTER INDEX REBUILD statement.");
+        simulation.AssertSqlError("alter index xv on t rebuild with (data_compression = none)", 153, "Invalid usage of the option data_compression in the ALTER INDEX REBUILD statement.");
+        simulation.AssertSqlError("alter index xp on t set (optimize_for_sequential_key = on)", 153, "Invalid usage of the option OPTIMIZE_FOR_SEQUENTIAL_KEY in the ALTER INDEX SET statement.");
+        _ = simulation.ExecuteNonQuery("alter index xp on t rebuild with (online = off, ignore_dup_key = off, xml_compression = on, sort_in_tempdb = on, maxdop = 1)");
+    }
 }

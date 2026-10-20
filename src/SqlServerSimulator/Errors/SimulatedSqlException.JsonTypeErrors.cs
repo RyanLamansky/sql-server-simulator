@@ -139,21 +139,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException JsonIndexAlterOptionsInvalid() =>
         new("One or more of the specified ALTER INDEX options is invalid for a JSON index.", 13688, 16, 1);
 
-    /// <summary>Msg 7731 state 5: a <c>REBUILD</c> / <c>REORGANIZE</c> of a JSON index naming a partition number.</summary>
-    internal static SimulatedSqlException PartitionNumberOnJsonIndex(string indexName) =>
-        new($"Cannot specify partition number in Alter index statement to rebuild or reorganize a partition of JSON index '{indexName}'.", 7731, 16, 5);
+    /// <summary>
+    /// Msg 7731: a <c>REBUILD</c> / <c>REORGANIZE</c> of a JSON index (state 5)
+    /// or an XML one (state 4, probed 2026-10-20) naming a partition number.
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberOnJsonIndex(string indexName, bool xml = false) =>
+        new($"Cannot specify partition number in Alter index statement to rebuild or reorganize a partition of {(xml ? "XML INDEX" : "JSON index")} '{indexName}'.", 7731, 16, xml ? (byte)4 : (byte)5);
 
     /// <summary>
     /// Msg 153: a <c>REBUILD</c> option a JSON index refuses when turned on; the state names the option
     /// (<c>ONLINE</c> 37, <c>STATISTICS_INCREMENTAL</c> 40, <c>IGNORE_DUP_KEY</c> 36, <c>SORT_IN_TEMPDB</c> 42,
-    /// <c>STATISTICS_NORECOMPUTE</c> 43, <c>XML_COMPRESSION</c> 45).
+    /// <c>STATISTICS_NORECOMPUTE</c> 43, <c>XML_COMPRESSION</c> 45) — and one an XML index's
+    /// <c>REBUILD</c> or <c>SET</c> refuses (<c>IGNORE_DUP_KEY</c> 2, <c>ONLINE</c> 3, <c>DATA_COMPRESSION</c> 4,
+    /// <c>STATISTICS_INCREMENTAL</c> 5, <c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c> 6).
     /// </summary>
-    internal static SimulatedSqlException InvalidJsonIndexRebuildOption(string optionName, byte state) =>
-        new($"Invalid usage of the option {optionName} in the ALTER INDEX REBUILD statement.", 153, 15, state);
+    internal static SimulatedSqlException InvalidJsonIndexRebuildOption(string optionName, byte state, string statement = "ALTER INDEX REBUILD") =>
+        new($"Invalid usage of the option {optionName} in the {statement} statement.", 153, 15, state);
 
-    /// <summary>Msg 35375 state 3: <c>REORGANIZE … COMPRESS_ALL_ROW_GROUPS = ON</c> over an index that isn't a clustered columnstore.</summary>
-    internal static SimulatedSqlException CompressAllRowGroupsNeedsColumnstore() =>
-        new("ALTER INDEX REORGANIZE statement option COMPRESS_ALL_ROW_GROUPS can only be used with clustered columnstore indexes.", 35375, 16, 3);
+    /// <summary>
+    /// Msg 35375: <c>REORGANIZE … COMPRESS_ALL_ROW_GROUPS = ON</c> over an
+    /// index that isn't a clustered columnstore — state 3 for a JSON index,
+    /// 2 for an XML one (probed 2026-10-20).
+    /// </summary>
+    internal static SimulatedSqlException CompressAllRowGroupsNeedsColumnstore(byte state = 3) =>
+        new("ALTER INDEX REORGANIZE statement option COMPRESS_ALL_ROW_GROUPS can only be used with clustered columnstore indexes.", 35375, 16, state);
 
     /// <summary>Msg 153 state 35: an index option <c>CREATE JSON INDEX</c> doesn't take, echoed as written.</summary>
     internal static SimulatedSqlException InvalidJsonIndexOption(string optionName) =>

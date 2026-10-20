@@ -54,6 +54,108 @@ internal static partial class BuiltInResources
         jsonIndexed.Sort(static (x, y) => x.Index.InternalTableObjectId.CompareTo(y.Index.InternalTableObjectId));
         foreach (var (table, index) in jsonIndexed)
             yield return JsonIndexTable(table, index);
+        var xmlIndexed = new List<(HeapTable Table, XmlIndex Primary)>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                foreach (var index in table.XmlIndexes)
+                {
+                    if (index.IsPrimary)
+                        xmlIndexed.Add((table, index));
+                }
+            }
+        }
+        xmlIndexed.Sort(static (x, y) => x.Primary.InternalTableObjectId.CompareTo(y.Primary.InternalTableObjectId));
+        foreach (var (table, primary) in xmlIndexed)
+            yield return XmlNodeTable(table, primary);
+    }
+
+    /// <summary>
+    /// The node table a primary XML index keeps the shredded document in,
+    /// <c>xml_index_nodes_&lt;table id&gt;_&lt;index id&gt;</c>: the node id,
+    /// tag, type, value, path id and nil / type flag columns, then a copy of
+    /// each primary-key column in key order named <c>pk&lt;n&gt;</c>, clustered
+    /// uniquely under the primary's name on the key columns then the node id,
+    /// and each secondary's index under its name — a <c>VALUE</c> one on the
+    /// value and path id, a <c>PATH</c> one on the path id and value, a
+    /// <c>PROPERTY</c> one on the key columns, path id and value — each
+    /// disabled with its index (probed 2026-10-20 against SQL Server 2025).
+    /// Its rowsets hold nothing here, where real's hold the documents' nodes.
+    /// </summary>
+    private static SystemTableObject XmlNodeTable(HeapTable table, XmlIndex primary)
+    {
+        var collation = table.OwningDatabase?.Collation ?? Collation.Baseline;
+        var secondaries = table.XmlIndexes.FindAll(index => !index.IsPrimary && collation.Equals(index.UsingPrimaryIndexName, primary.Name));
+        secondaries.Sort(static (x, y) => x.NodeIndexId.CompareTo(y.NodeIndexId));
+        var columns = new List<SystemTableColumn>
+        {
+            new(1, "id", 165, 900, 0, 0, nullable: false, hidden: false, null, 0, null),
+            new(2, "nid", 56, 4, 10, 0, nullable: false, hidden: false, null, 0, null),
+            new(3, "tagname", 231, 8000, 0, 0, nullable: true, hidden: false, null, 0, "Latin1_General_BIN"),
+            new(4, "taguri", 231, 8000, 0, 0, nullable: true, hidden: false, null, 0, "Latin1_General_BIN"),
+            new(5, "tid", 56, 4, 10, 0, nullable: true, hidden: false, null, 0, null),
+            new(6, "value", 98, 8016, 0, 0, nullable: true, hidden: false, null, 0, null),
+            new(7, "lvalue", 231, -1, 0, 0, nullable: true, hidden: false, null, 0, "UNICODE_CODEPOINT"),
+            new(8, "lvaluebin", 165, -1, 0, 0, nullable: true, hidden: false, null, 0, null),
+            new(9, "hid", 167, 900, 0, 0, nullable: true, hidden: false, null, 0, "Latin1_General_BIN"),
+            new(10, "xsinil", 104, 1, 1, 0, nullable: false, hidden: false, null, 0, null),
+            new(11, "xsitype", 104, 1, 1, 0, nullable: false, hidden: false, null, 0, null),
+        };
+        var keyColumnIds = new List<int>();
+        var primaryKey = table.KeyConstraints.Find(static key => key.Kind == KeyConstraintKind.PrimaryKey);
+        foreach (var ordinal in primaryKey?.FullOrdinals ?? [])
+        {
+            var key = table.Columns[ordinal];
+            var (maxLength, precision, scale) = GetSysColumnMetadata(key);
+            columns.Add(new SystemTableColumn(columns.Count + 1, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"pk{keyColumnIds.Count + 1}"), key.UserTypeId, maxLength, precision, scale,
+                nullable: false, hidden: false, null, 0, key.Collation, key));
+            keyColumnIds.Add(columns.Count);
+        }
+        // The clustered index lists the node id first but keys it last.
+        SystemIndexKey[] clusteredKeys = [new SystemIndexKey(1, keyColumnIds.Count + 1, false, false), .. keyColumnIds.Select(static (id, i) => new SystemIndexKey(id, i + 1, false, false))];
+        var indexes = new List<SystemTableIndex> { new(1, primary.Name, 1, unique: true, allowPageLocks: primary.AllowPageLocks, clusteredKeys, primary.IsDisabled) };
+        foreach (var secondary in secondaries)
+        {
+            int[] keyIds = secondary.SecondaryType switch
+            {
+                XmlSecondaryIndexType.Value => [6, 9],
+                XmlSecondaryIndexType.Property => [.. keyColumnIds, 9, 6],
+                _ => [9, 6],
+            };
+            indexes.Add(new SystemTableIndex(secondary.NodeIndexId, secondary.Name, 2, unique: false, allowPageLocks: secondary.AllowPageLocks,
+                [.. keyIds.Select(static (id, i) => new SystemIndexKey(id, i + 1, false, false))], secondary.IsDisabled));
+        }
+        var definition = new SystemTableDefinition("xml_index_nodes", [.. columns], [.. indexes]);
+        var heapColumns = definition.HeapColumns("");
+        var objectId = primary.InternalTableObjectId;
+        static SystemAllocationUnit Unit(long partitionId, byte type) =>
+            new(PartitionCensus.AllocationUnitId(partitionId, type), type, 0, 0, 0);
+        // A row's locator into the clustered index is its key columns and node id.
+        int[] locatorOrdinals = [.. keyColumnIds.Select(static id => id - 1), 0];
+        var (leafMax, leafMin, leafColumns) = RecordLength(heapColumns, [.. Enumerable.Range(0, columns.Count)], uniquifier: false, locator: false, header: 4);
+        var (upperMax, upperMin, _) = RecordLength(heapColumns, locatorOrdinals, uniquifier: false, locator: false, header: 7);
+        var clustered = ((long)(uint)objectId << 16) | 1;
+        var rowsets = new List<SystemRowset>
+        {
+            new(1, clustered, 0, 0, 2, (short)leafColumns, leafMax, (short)leafMin, (short)upperMax, (short)upperMin, allowsNullableKeys: true, isDataRowFormat: true, isNotVersioned: false,
+                [Unit(clustered, 1), Unit(clustered, 2), Unit(clustered, 3)]),
+        };
+        foreach (var index in indexes.Skip(1))
+        {
+            var ordinals = index.Keys.Select(static key => key.ColumnId - 1).ToList();
+            foreach (var locator in locatorOrdinals)
+            {
+                if (!ordinals.Contains(locator))
+                    ordinals.Add(locator);
+            }
+            var (max, min, count) = RecordLength(heapColumns, [.. ordinals], uniquifier: false, locator: false, header: 1);
+            var partitionId = ((long)(uint)objectId << 16) | (uint)index.Id;
+            rowsets.Add(new SystemRowset(index.Id, partitionId, 0, 0, 2, (short)count, max, (short)min, 2648, (short)upperMin, allowsNullableKeys: true, isDataRowFormat: false, isNotVersioned: false,
+                [Unit(partitionId, 1), Unit(partitionId, 3)]));
+        }
+        return new SystemTableObject(Simulation.XmlNodeTableName(table, primary), objectId, isInternal: true, Database.SysSchemaId, table.ObjectId,
+            table.CreateDate, table.ModifyDate, internalType: 202, lobDataSpaceId: Database.PrimaryFilegroupId, definition, [.. rowsets], [], parentMinorId: primary.IndexId);
     }
 
     /// <summary>
@@ -70,7 +172,7 @@ internal static partial class BuiltInResources
     private static SystemTableObject JsonIndexTable(HeapTable table, JsonIndex index)
     {
         // Built per read, as a rename changes the clustered index's name.
-        var definition = JsonIndexDefinition(table, index.Name);
+        var definition = JsonIndexDefinition(table, index.Name, index.IsDisabled);
         var objectId = index.InternalTableObjectId;
         static SystemAllocationUnit Unit(long partitionId, byte type) =>
             new(PartitionCensus.AllocationUnitId(partitionId, type), type, 0, 0, 0);
@@ -91,11 +193,10 @@ internal static partial class BuiltInResources
                     [Unit(postings, 1), Unit(postings, 3)]),
             ],
             [],
-            indexesDisabled: index.IsDisabled,
             parentMinorId: index.IndexId);
     }
 
-    private static SystemTableDefinition JsonIndexDefinition(HeapTable table, string indexName)
+    private static SystemTableDefinition JsonIndexDefinition(HeapTable table, string indexName, bool disabled)
     {
         var columns = new List<SystemTableColumn>
         {
@@ -118,8 +219,8 @@ internal static partial class BuiltInResources
         }
         return new SystemTableDefinition("json_index", [.. columns],
         [
-            new SystemTableIndex(1, indexName, 1, unique: false, allowPageLocks: true, [new SystemIndexKey(1, 1, false, false), new SystemIndexKey(2, 2, false, false), new SystemIndexKey(3, 3, false, false)]),
-            new SystemTableIndex(2, "json_index_posting_col_nci", 2, unique: false, allowPageLocks: true, [.. postingKeys]),
+            new SystemTableIndex(1, indexName, 1, unique: false, allowPageLocks: true, [new SystemIndexKey(1, 1, false, false), new SystemIndexKey(2, 2, false, false), new SystemIndexKey(3, 3, false, false)], disabled),
+            new SystemTableIndex(2, "json_index_posting_col_nci", 2, unique: false, allowPageLocks: true, [.. postingKeys], disabled),
         ]);
     }
 
@@ -531,20 +632,6 @@ internal static partial class BuiltInResources
                 table.CreateDate is { } created ? SqlValue.FromDateTime(created) : databaseDate,
                 table.ModifyDate is { } modified ? SqlValue.FromDateTime(modified) : databaseDate,
                 table.InternalType, table.ParentMinorId, table.LobDataSpaceId);
-        }
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var t in CatalogTables(schema, batch).OrderBy(static t => t.ObjectId))
-            {
-                foreach (var xmlIndex in t.XmlIndexes)
-                {
-                    if (xmlIndex.IsPrimary)
-                    {
-                        yield return Row(xmlIndex.InternalTableObjectId, $"xml_index_nodes_{t.ObjectId}_{xmlIndex.IndexId}", t.ObjectId,
-                            SqlValue.FromDateTime(t.CreateDate), SqlValue.FromDateTime(t.ModifyDate), 202, xmlIndex.IndexId, Database.PrimaryFilegroupId);
-                    }
-                }
-            }
         }
     }
 

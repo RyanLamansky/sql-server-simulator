@@ -809,7 +809,7 @@ internal static partial class BuiltInResources
                 // An XML index lands where the table's rows are, a partition
                 // scheme included (probed 2026-10-05 against SQL Server 2025).
                 foreach (var xmlIndex in table.XmlIndexes.OrderBy(index => index.IndexId))
-                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId), xml: xmlIndex);
+                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId), disabled: xmlIndex.IsDisabled, xml: xmlIndex);
                 foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
                     yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc, disabled: spatialIndex.IsDisabled);
                 foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
@@ -844,7 +844,7 @@ internal static partial class BuiltInResources
                 yield return BuildIndexRow(
                     index.Name is { } indexName ? SqlValue.FromSystemName(indexName) : nullName, systemObjectId, SqlValue.FromInt32(index.Id), SqlValue.FromByte(index.Type),
                     index.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc }, index.Unique ? trueBit : falseBit, primaryDataSpace,
-                    falseBit, falseBit, falseBit, nullFilter, falseBit, systemTable.IndexesDisabled ? trueBit : falseBit, falseBit, trueBit, index.AllowPageLocks ? trueBit : falseBit,
+                    falseBit, falseBit, falseBit, nullFilter, falseBit, index.Disabled ? trueBit : falseBit, falseBit, trueBit, index.AllowPageLocks ? trueBit : falseBit,
                     SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
             }
         }
@@ -1772,71 +1772,6 @@ internal static partial class BuiltInResources
                     primaryRoleDesc,
                     nullName, // replica_name
                 ];
-            }
-        }
-        // XML-index statistics live on the owning primary's internal node
-        // table (sys.objects type IT), one per index, stats_id sequential
-        // within that node table (probe-confirmed). DacFx's XML-index export
-        // joins sys.stats to the node table by (object_id, name = index name).
-        foreach (var (internalTableObjectId, statsId, indexName) in EnumerateXmlIndexStats(database, batch))
-        {
-            yield return
-            [
-                SqlValue.FromInt32(internalTableObjectId),
-                SqlValue.FromSystemName(indexName),
-                SqlValue.FromInt32(statsId),
-                falseBit, // auto_created
-                falseBit, // user_created
-                falseBit, // no_recompute
-                falseBit, // has_filter
-                nullFilter,
-                falseBit, // is_temporary
-                falseBit, // is_incremental
-                falseBit, // has_persisted_sample
-                zeroInt,  // stats_generation_method
-                methodDesc,
-                falseBit, // auto_drop
-                primaryRole,
-                primaryRoleDesc,
-                nullName, // replica_name
-            ];
-        }
-    }
-
-    /// <summary>
-    /// Walks every table's XML indexes, resolving each index to the
-    /// <c>object_id</c> of the internal node table it belongs to (a primary
-    /// owns one; a secondary shares its primary's) and assigning a
-    /// per-node-table sequential <c>stats_id</c>. Used by
-    /// <see cref="EnumerateSysStats"/> and the internal-table + stats surface
-    /// DacFx's XML-index reverse-engineering joins through.
-    /// </summary>
-    private static IEnumerable<(int InternalTableObjectId, int StatsId, string IndexName)> EnumerateXmlIndexStats(Database database, Parser.BatchContext batch)
-    {
-        foreach (var (_, schema) in database.Schemas)
-        {
-            foreach (var table in CatalogTables(schema, batch))
-            {
-                if (table.XmlIndexes.Count == 0)
-                    continue;
-                var primaryNodeTable = new Dictionary<string, int>(database.Collation);
-                foreach (var ix in table.XmlIndexes)
-                {
-                    if (ix.IsPrimary)
-                        primaryNodeTable[ix.Name] = ix.InternalTableObjectId;
-                }
-                var nextStatsId = new Dictionary<int, int>();
-                foreach (var ix in table.XmlIndexes)
-                {
-                    var nodeTableId = ix.IsPrimary
-                        ? ix.InternalTableObjectId
-                        : ix.UsingPrimaryIndexName is { } u && primaryNodeTable.TryGetValue(u, out var v) ? v : 0;
-                    if (nodeTableId == 0)
-                        continue;
-                    var statsId = nextStatsId.TryGetValue(nodeTableId, out var cur) ? cur + 1 : 1;
-                    nextStatsId[nodeTableId] = statsId;
-                    yield return (nodeTableId, statsId, ix.Name);
-                }
             }
         }
     }

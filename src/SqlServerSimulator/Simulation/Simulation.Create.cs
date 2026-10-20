@@ -1393,8 +1393,8 @@ partial class Simulation
                 }
                 if (statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.AlterTable)
                     ValidateIndexOptionValue(context, name, statement);
-                if (jsonRefusal is { State: 0 } && valueToken is ReservedKeyword { Keyword: Keyword.On })
-                    jsonRefusal.Note(name);
+                if (jsonRefusal is { State: 0 })
+                    jsonRefusal.Note(name, valueToken is ReservedKeyword { Keyword: Keyword.On });
                 maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
                 if (valueToken is ReservedKeyword { Keyword: Keyword.On })
                 {
@@ -1761,18 +1761,36 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The first option a <c>REBUILD</c> of a JSON index refuses when it is turned on, noted while the
-    /// clause parses and raised once the index has resolved (probed 2026-09-30 against SQL Server 2025:
-    /// a partition number is refused ahead of it, and the same options off are accepted).
+    /// The first option a <c>REBUILD</c> of a JSON index, or with
+    /// <paramref name="xml"/> an XML one, refuses, noted while the clause
+    /// parses and raised once the index has resolved (probed 2026-09-30 and
+    /// 2026-10-20 against SQL Server 2025: a partition number is refused ahead
+    /// of it, and a JSON index takes the same options off).
     /// </summary>
-    internal sealed class JsonRebuildRefusal
+    internal sealed class JsonRebuildRefusal(bool xml = false)
     {
         public byte State;
         public string Name = "";
 
-        public void Note(string written)
+        public void Note(string written, bool on)
         {
-            // Two names are reported in lower case and the rest in capitals, whatever was written.
+            // Some names are reported in lower case and the rest in capitals,
+            // whatever was written. An XML index refuses DATA_COMPRESSION
+            // whatever its value (probed 2026-10-20 against SQL Server 2025).
+            if (xml)
+            {
+                (State, Name) = written switch
+                {
+                    _ when on && written.Equals("IGNORE_DUP_KEY", StringComparison.OrdinalIgnoreCase) => ((byte)2, "ignore_dup_key"),
+                    _ when on && written.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) => ((byte)3, "ONLINE"),
+                    _ when written.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase) => ((byte)4, "data_compression"),
+                    _ when on && written.Equals("STATISTICS_INCREMENTAL", StringComparison.OrdinalIgnoreCase) => ((byte)5, "statistics_incremental"),
+                    _ => ((byte)0, ""),
+                };
+                return;
+            }
+            if (!on)
+                return;
             (State, Name) = written switch
             {
                 _ when written.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) => ((byte)37, "ONLINE"),

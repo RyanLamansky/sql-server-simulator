@@ -3302,6 +3302,26 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException NonclusteredOnDisabledClustered(string indexName, string tableName) =>
         new($"Cannot create nonclustered index '{indexName}' on table '{tableName}' because its clustered index is disabled.", 1987, 16, 2);
 
+    /// <summary>
+    /// Mimics SQL Server error 1987 state 1: an <c>ALTER INDEX</c>
+    /// <c>REBUILD</c>, <c>REORGANIZE</c> or <c>SET</c> of an index that rests
+    /// on a disabled one — <paramref name="kind"/> naming it as real does
+    /// (<c>nonclustered index</c>, <c>primary xml index</c>, <c>EXTENDED
+    /// INDEX</c> for a spatial one, <c>JSON index</c>) under a disabled
+    /// clustered index, or <c>XML INDEX</c> under a disabled primary XML index
+    /// (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterOnDisabledParent(string kind, string indexName, string tableName, bool parentIsPrimaryXml = false) =>
+        new($"Cannot alter {kind} '{indexName}' on table '{tableName}' because its {(parentIsPrimaryXml ? "primary xml" : "clustered")} index is disabled.", 1987, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1943: <c>REORGANIZE</c> of an index whose page
+    /// locks are off, an XML index's named on its node table (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReorganizeWithoutPageLocks(string indexName, string tableName) =>
+        new($"The index \"{indexName}\" on table \"{tableName}\" cannot be reorganized because page level locking is disabled.", 1943, 16, 1);
+
     /// <summary>Mimics SQL Server error 3745: <c>ONLINE = ON</c> dropping a nonclustered index (probed 2026-10-05).</summary>
     internal static SimulatedSqlException OnlyClusteredIndexDropsOnline() =>
         new("Only a clustered index can be dropped online.", 3745, 16, 1);

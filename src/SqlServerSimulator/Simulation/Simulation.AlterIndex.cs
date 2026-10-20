@@ -119,6 +119,7 @@ partial class Simulation
         var tableName = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context));
         var targetColumnstore = TargetsColumnstoreIndex(context, tableName, indexName);
         var targetsJson = TargetsJsonIndex(context, tableName, indexName);
+        var targetsXml = indexName is not null && TargetsXmlIndex(context, tableName, indexName);
         context.MoveNextRequired();
 
         var form = context.Token switch
@@ -178,7 +179,7 @@ partial class Simulation
                     context.MoveNextRequired();
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
-                jsonRefusal = targetsJson ? new JsonRebuildRefusal() : null;
+                jsonRefusal = targetsJson ? new JsonRebuildRefusal() : targetsXml ? new JsonRebuildRefusal(xml: true) : null;
                 rebuildOptions = ParseOptionalIndexWithClause(
                     context,
                     targetsJson ? IndexOptionStatement.RebuildJsonIndex : targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild,
@@ -223,6 +224,8 @@ partial class Simulation
             {
                 if (collation.Equals(constraint.Name, indexName))
                 {
+                    if (!constraint.IsClustered)
+                        RejectAlterUnderDisabledClustered(table, form, "nonclustered index", constraint.Name, tableName.ToString());
                     var constraintPartition = RejectNamedIndexTarget(context.Batch, form, partitionNumber, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, table.Name, constraint.IsDisabled, tableName.ToString());
                     ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch, tableName.ToString(), constraintPartition);
                     ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
@@ -235,6 +238,8 @@ partial class Simulation
             {
                 if (collation.Equals(index.Name, indexName))
                 {
+                    if (!index.IsClustered)
+                        RejectAlterUnderDisabledClustered(table, form, "nonclustered index", index.Name, tableName.ToString());
                     var indexPartition = RejectNamedIndexTarget(context.Batch, form, partitionNumber, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, table.Name, index.IsDisabled, tableName.ToString());
                     ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions, tableName.ToString(), indexPartition);
                     ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
@@ -251,6 +256,7 @@ partial class Simulation
             {
                 if (collation.Equals(jsonIndex.Name, indexName))
                 {
+                    RejectAlterUnderDisabledClustered(table, form, "JSON index", jsonIndex.Name, tableName.ToString());
                     if (form == AlterIndexForm.Set && jsonIndex.IsDisabled)
                         throw SimulatedSqlException.OperationOnDisabledIndex(jsonIndex.Name, tableName.ToString());
                     if (form is AlterIndexForm.Set or AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
@@ -274,6 +280,14 @@ partial class Simulation
                 }
             }
 
+            if (table.XmlIndexes.Find(xml => collation.Equals(xml.Name, indexName)) is { } xmlIndex)
+            {
+                AlterXmlIndex(context.Batch, table, xmlIndex, form, ignoreDupKey, rebuildOptions, partitionNumber, jsonRefusal, compressAllRowGroups, tableName.ToString());
+                ExtendedEvents.XeObjectEvents.NoteIndexNamed(context.Batch, ExtendedEvents.XeEventKind.ObjectAltered, table, indexName!);
+                RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
+                return true;
+            }
+
             // A hypothetical index takes every form and nothing changes but
             // its disabled flag (probed 2026-10-02 and 2026-10-05 against SQL
             // Server 2025).
@@ -289,6 +303,7 @@ partial class Simulation
             // SQL Server 2025).
             if (table.SpatialIndexes.Find(spatial => collation.Equals(spatial.Name, indexName)) is { } spatialIndex)
             {
+                RejectAlterUnderDisabledClustered(table, form, "EXTENDED INDEX", spatialIndex.Name, tableName.ToString());
                 if (form == AlterIndexForm.Reorganize && spatialIndex.IsDisabled)
                     throw SimulatedSqlException.OperationOnDisabledIndex(spatialIndex.Name, tableName.ToString());
                 if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
@@ -333,6 +348,12 @@ partial class Simulation
                 throw SimulatedSqlException.AlterIndexAllUnalignedIndex(firstTarget.Name, unaligned);
         }
 
+        // A rebuild of every index can't reach a spatial or JSON index while
+        // the clustered one is disabled, and rebuilds nothing (probed
+        // 2026-10-20 against SQL Server 2025).
+        if (form == AlterIndexForm.Rebuild && DisabledClusteredName(table) is { } disabledClustered && (table.SpatialIndexes.Count > 0 || table.JsonIndexes.Count > 0))
+            throw SimulatedSqlException.QueryProcessorDisabledIndex(disabledClustered, table.Name);
+
         // ALL: constraints first, matching real's abort-on-first-refusal — a
         // constraint-backed index is present in every table that has a key, so
         // an IGNORE_DUP_KEY set over ALL raises Msg 1979 before touching
@@ -361,6 +382,17 @@ partial class Simulation
         // A JSON index takes no SET, and ALL reaches it after the relational ones.
         if (form == AlterIndexForm.Set && table.JsonIndexes.Count > 0)
             throw SimulatedSqlException.JsonIndexAlterOptionsInvalid();
+        // A rebuild of every index brings the XML, spatial and JSON ones back
+        // into service with the rest (probed 2026-10-20 against SQL Server 2025).
+        if (form == AlterIndexForm.Rebuild)
+        {
+            foreach (var xmlIndex in table.XmlIndexes)
+                xmlIndex.IsDisabled = false;
+            foreach (var spatialIndex in table.SpatialIndexes)
+                spatialIndex.IsDisabled = false;
+            foreach (var jsonIndex in table.JsonIndexes)
+                jsonIndex.IsDisabled = false;
+        }
         RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
     }
@@ -610,6 +642,150 @@ partial class Simulation
             if (!batch.IsSkipping)
                 batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.IndexDisabledWithClusteredMessage(batch, identity.Name!, table.Name));
         }
+        // Then each primary XML index, its secondaries ahead of it and named
+        // on its node table, then the spatial and JSON indexes (probed
+        // 2026-10-20 against SQL Server 2025).
+        foreach (var primary in table.XmlIndexes.Where(static index => index.IsPrimary).OrderBy(static index => index.IndexId))
+        {
+            DisableXmlSecondaries(batch, table, primary);
+            if (!primary.IsDisabled)
+                Disable(primary.Name, () => primary.IsDisabled = true);
+        }
+        foreach (var spatialIndex in table.SpatialIndexes.OrderBy(static index => index.IndexId))
+        {
+            if (!spatialIndex.IsDisabled)
+                Disable(spatialIndex.Name, () => spatialIndex.IsDisabled = true);
+        }
+        foreach (var jsonIndex in table.JsonIndexes.OrderBy(static index => index.IndexId))
+        {
+            if (!jsonIndex.IsDisabled)
+                Disable(jsonIndex.Name, () => jsonIndex.IsDisabled = true);
+        }
+
+        void Disable(string name, Action disable)
+        {
+            disable();
+            if (!batch.IsSkipping)
+                batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.IndexDisabledWithClusteredMessage(batch, name, table.Name));
+        }
+    }
+
+    /// <summary>
+    /// Disables the enabled secondary XML indexes over <paramref name="primary"/>
+    /// as it is disabled, with a Msg 3750 apiece naming its node table, in
+    /// index id order (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private static void DisableXmlSecondaries(BatchContext batch, HeapTable table, XmlIndex primary)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        foreach (var secondary in table.XmlIndexes.Where(index => !index.IsPrimary && collation.Equals(index.UsingPrimaryIndexName, primary.Name)).OrderBy(static index => index.IndexId))
+        {
+            if (secondary.IsDisabled)
+                continue;
+            secondary.IsDisabled = true;
+            if (!batch.IsSkipping)
+                batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.IndexDisabledWithClusteredMessage(batch, secondary.Name, XmlNodeTableName(table, primary)));
+        }
+    }
+
+    /// <summary>The name of a primary XML index's node table.</summary>
+    internal static string XmlNodeTableName(HeapTable table, XmlIndex primary) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"xml_index_nodes_{table.ObjectId}_{primary.IndexId}");
+
+    /// <summary>The name of <paramref name="table"/>'s clustered index when it is disabled, else null.</summary>
+    private static string? DisabledClusteredName(HeapTable table)
+    {
+        foreach (var identity in table.IndexIdentities())
+        {
+            switch (identity)
+            {
+                case { Constraint: { IsClustered: true, IsDisabled: true } key }:
+                    return key.Name;
+                case { Index: { IsClustered: true, IsDisabled: true } index }:
+                    return index.Name;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Refuses (Msg 1987) a <c>REBUILD</c>, <c>REORGANIZE</c> or <c>SET</c> of an
+    /// index that rests on the table's clustered index while that is disabled,
+    /// ahead of the index's own refusals (probed 2026-10-20 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void RejectAlterUnderDisabledClustered(HeapTable table, AlterIndexForm form, string kind, string indexName, string writtenTableName)
+    {
+        if (form is AlterIndexForm.Rebuild or AlterIndexForm.Reorganize or AlterIndexForm.Set && DisabledClusteredName(table) is not null)
+            throw SimulatedSqlException.AlterOnDisabledParent(kind, indexName, writtenTableName);
+    }
+
+    /// <summary>
+    /// <c>ALTER INDEX</c> of an XML index (probed 2026-10-20 against SQL Server
+    /// 2025): <c>DISABLE</c>, which takes a primary's secondaries with it;
+    /// <c>REBUILD</c>, which brings back only the index named and sets the
+    /// fill factor, padding and lock options; <c>REORGANIZE</c>; and
+    /// <c>SET</c> of the lock options. A secondary under a disabled primary is
+    /// Msg 1987, as a primary under a disabled clustered index is; a disabled
+    /// index refuses <c>REORGANIZE</c> and <c>SET</c> (Msg 1973), and one
+    /// without page locks <c>REORGANIZE</c> (Msg 1943, naming its node table);
+    /// a partition number is Msg 7731 and the options it can't take Msg 153.
+    /// </summary>
+    private static void AlterXmlIndex(BatchContext batch, HeapTable table, XmlIndex index, AlterIndexForm form, bool? ignoreDupKey, IndexOptions options, Expression? partitionNumber, JsonRebuildRefusal? refusal, bool compressAllRowGroups, string writtenTableName)
+    {
+        // Real fails an assertion and ends the session over a PAUSE (probed
+        // 2026-10-20), so the resumable forms aren't answered.
+        if (form is AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
+            throw new NotSupportedException("ALTER INDEX … RESUME, PAUSE or ABORT naming an XML index, over which SQL Server 2025 fails an assertion and ends the session, is not modeled.");
+        if (partitionNumber is not null)
+            throw SimulatedSqlException.PartitionNumberOnJsonIndex(index.Name, xml: true);
+        if (refusal is { State: not 0 })
+            throw SimulatedSqlException.InvalidJsonIndexRebuildOption(refusal.Name, refusal.State);
+        if (form == AlterIndexForm.Set)
+        {
+            if (ignoreDupKey == true)
+                throw SimulatedSqlException.InvalidJsonIndexRebuildOption("ignore_dup_key", 2, "ALTER INDEX SET");
+            if (options.OptimizeForSequentialKey is not null)
+                throw SimulatedSqlException.InvalidJsonIndexRebuildOption("OPTIMIZE_FOR_SEQUENTIAL_KEY", 6, "ALTER INDEX SET");
+        }
+        var collation = batch.CurrentDatabase.Collation;
+        var primary = index.IsPrimary ? index : table.XmlIndexes.Find(other => other.IsPrimary && collation.Equals(other.Name, index.UsingPrimaryIndexName));
+        if (form is AlterIndexForm.Rebuild or AlterIndexForm.Reorganize or AlterIndexForm.Set)
+        {
+            if (index.IsPrimary)
+                RejectAlterUnderDisabledClustered(table, form, "primary xml index", index.Name, writtenTableName);
+            else if (primary is { IsDisabled: true })
+                throw SimulatedSqlException.AlterOnDisabledParent("XML INDEX", index.Name, writtenTableName, parentIsPrimaryXml: true);
+        }
+        switch (form)
+        {
+            case AlterIndexForm.Disable:
+                if (index.IsPrimary)
+                    DisableXmlSecondaries(batch, table, index);
+                index.IsDisabled = true;
+                break;
+            case AlterIndexForm.Rebuild:
+                index.IsDisabled = false;
+                index.FillFactor = options.FillFactor ?? index.FillFactor;
+                index.IsPadded = options.PadIndex ?? index.IsPadded;
+                index.AllowRowLocks = options.AllowRowLocks ?? index.AllowRowLocks;
+                index.AllowPageLocks = options.AllowPageLocks ?? index.AllowPageLocks;
+                break;
+            case AlterIndexForm.Reorganize:
+                if (index.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, writtenTableName);
+                if (compressAllRowGroups)
+                    throw SimulatedSqlException.CompressAllRowGroupsNeedsColumnstore(state: 2);
+                if (!index.AllowPageLocks)
+                    throw SimulatedSqlException.ReorganizeWithoutPageLocks(index.Name, XmlNodeTableName(table, primary ?? index));
+                break;
+            default:
+                if (index.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, writtenTableName);
+                index.AllowRowLocks = options.AllowRowLocks ?? index.AllowRowLocks;
+                index.AllowPageLocks = options.AllowPageLocks ?? index.AllowPageLocks;
+                break;
+        }
     }
 
     private static void ApplyToIndex(
@@ -793,6 +969,15 @@ partial class Simulation
                 return index.IsColumnstore;
         }
         return table.KeyConstraints.Exists(key => collation.Equals(key.Name, indexName)) ? false : null;
+    }
+
+    /// <summary>Whether the named index is an XML index; false while the batch is skipping or the table doesn't resolve.</summary>
+    private static bool TargetsXmlIndex(ParserContext context, MultiPartName tableName, string indexName)
+    {
+        if (context.Batch.IsSkipping || !context.Batch.TryResolveTable(tableName, out var table))
+            return false;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        return table.XmlIndexes.Exists(index => collation.Equals(index.Name, indexName));
     }
 
     /// <summary>

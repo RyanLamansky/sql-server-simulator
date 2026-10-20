@@ -89,7 +89,8 @@ While an index is disabled:
 - **A clustered one locks the whole table**: every query and every DML raises **Msg 8655** naming the index, because on real the clustered index *is* the table's storage.
   `RejectDisabledClusteredIndex` is the gate, called from the base-table query row source (`Selection`) and the four DML targets (`ProcessHeapInsert`, UPDATE, DELETE, MERGE).
   DDL is deliberately **not** gated — `ALTER INDEX … REBUILD` and `DROP INDEX` keep working on a locked table, which is how real recovers it, so the gate sits at those entry points rather than at table resolution.
-  Since a `PRIMARY KEY` defaults clustered, `ALTER INDEX ALL … DISABLE` is the usual way a table ends up locked, and `ALL … REBUILD` is the way back.
+  Since a `PRIMARY KEY` defaults clustered, `ALTER INDEX ALL … DISABLE` is the usual way a table ends up locked, and `ALL … REBUILD` is the way back — but not while the table has a spatial or JSON index, where it is Msg 8655 and rebuilds nothing.
+  Disabling a clustered index disables, with a Msg 3750 apiece, the nonclustered indexes and keys, then each primary XML index after its secondaries (named on its node table), the spatial and the JSON indexes, each not already disabled; while it is disabled a `REBUILD`, `REORGANIZE` or `SET` of any of them is Msg 1987 (`nonclustered index`, `primary xml index`, `EXTENDED INDEX`, `JSON index`) ahead of its own refusals (probed 2026-10-20 against SQL Server 2025).
 - **`SET (…)` against it raises Msg 1973**.
 - **A nonclustered one holds no storage**: it keeps its `sys.indexes` and `sys.stats` rows but has no `sys.partitions`, `sys.allocation_units` or `sys.dm_db_partition_stats` row (probed 2026-10-02).
 - **A FOREIGN KEY resting on it is disabled with it** — see [`foreign-keys.md`](foreign-keys.md#validation-at-create).

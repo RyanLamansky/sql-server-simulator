@@ -500,6 +500,10 @@ partial class Simulation
             nextIndexId,
             internalTableObjectId)
         {
+            // A secondary's index on its primary's node table is numbered
+            // after that table's highest, a dropped one's id left unused
+            // (probed 2026-10-20 against SQL Server 2025).
+            NodeIndexId = isPrimary ? 1 : 1 + table.XmlIndexes.Where(existing => !existing.IsPrimary && collation.Equals(existing.UsingPrimaryIndexName, usingPrimaryName)).Select(static existing => existing.NodeIndexId).DefaultIfEmpty(1).Max(),
             FillFactor = options.FillFactor,
             IsPadded = options.PadIndex,
             AllowRowLocks = options.AllowRowLocks,
@@ -798,6 +802,12 @@ internal sealed class XmlIndex(
 
     /// <summary><c>ALLOW_PAGE_LOCKS</c>, on unless written off.</summary>
     public bool AllowPageLocks = true;
+
+    /// <summary>Set by <c>ALTER INDEX … DISABLE</c> — of the index, of its primary, or of the table's clustered index — and cleared by <c>REBUILD</c>.</summary>
+    public bool IsDisabled;
+
+    /// <summary>The <c>index_id</c> of the index's own index on its primary's node table: 1, the clustered one, for a primary.</summary>
+    public int NodeIndexId;
 }
 
 /// <summary>

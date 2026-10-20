@@ -1109,4 +1109,45 @@ public sealed class XmlTests
     [TestMethod]
     public void IsNullOverXml_IsNullable()
         => IsTrue(new Simulation().ColumnNullability("declare @x xml; select isnull(@x, '<b/>')")[0]);
+
+    /// <summary>
+    /// A primary XML index's node table lists its columns — the primary key
+    /// copied as pk1, pk2 — its clustered index under the primary's name, keyed
+    /// on the key columns then the node id, and a nonclustered one per
+    /// secondary, numbered within the node table (probed 2026-10-20 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void PrimaryXmlIndex_NodeTableCatalog()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a varchar(20) not null, b datetime2(3) not null, x xml, constraint pk primary key (b, a));
+            create primary xml index xp on t (x);
+            create xml index xv on t (x) using xml index xp for value;
+            create xml index xr on t (x) using xml index xp for property;
+            create xml index xh on t (x) using xml index xp for path;
+            drop index xr on t;
+            """);
+        AreEqual("id:varbinary:900,nid:int:4,tagname:nvarchar:8000,taguri:nvarchar:8000,tid:int:4,value:sql_variant:8016,lvalue:nvarchar:-1,lvaluebin:varbinary:-1,hid:varchar:900,xsinil:bit:1,xsitype:bit:1,pk1:datetime2:7,pk2:varchar:20",
+            simulation.ExecuteScalar("""
+                select string_agg(concat_ws(':', c.name collate database_default, type_name(c.user_type_id), c.max_length), ',') within group (order by c.column_id)
+                from sys.columns c join sys.internal_tables it on it.object_id = c.object_id where it.parent_id = object_id('t')
+                """));
+        AreEqual("xp:1:1:1/3,12/1,13/2;xv:2:0:6/1,9/2;xh:4:0:9/1,6/2", simulation.ExecuteScalar("""
+            select string_agg(concat(x.name, ':', x.index_id, ':', x.u, ':', x.keys), ';') within group (order by x.index_id)
+            from (
+                select i.name collate database_default name, i.index_id, cast(i.is_unique as int) u,
+                    (select string_agg(concat(ic.column_id, '/', ic.key_ordinal), ',') within group (order by ic.index_column_id) from sys.index_columns ic where ic.object_id = i.object_id and ic.index_id = i.index_id) keys
+                from sys.indexes i join sys.internal_tables it on it.object_id = i.object_id where it.parent_id = object_id('t')) x
+            """));
+        AreEqual("1:41878:20:943:14,2:9857:8:2648:14,4:9857:8:2648:14", simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', p.index_id, p.max_leaf_length, p.min_leaf_length, p.max_internal_length, p.min_internal_length), ',') within group (order by p.index_id)
+            from sys.system_internals_partitions p join sys.internal_tables it on it.object_id = p.object_id where it.parent_id = object_id('t')
+            """));
+        AreEqual("xp:1,xv:2,xh:4", simulation.ExecuteScalar("""
+            select string_agg(concat(s.name collate database_default, ':', s.stats_id), ',') within group (order by s.stats_id)
+            from sys.stats s join sys.internal_tables it on it.object_id = s.object_id where it.parent_id = object_id('t')
+            """));
+    }
 }

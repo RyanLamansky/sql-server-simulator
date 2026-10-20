@@ -112,8 +112,11 @@ internal sealed class SystemTableColumn(int id, string name, int userTypeId, sho
 }
 
 /// <summary>One index of a <see cref="SystemTableDefinition"/>: the heap (index 0, no name) or a clustered or nonclustered index.</summary>
-internal sealed class SystemTableIndex(int id, string? name, byte type, bool unique, bool allowPageLocks, SystemIndexKey[] keys)
+internal sealed class SystemTableIndex(int id, string? name, byte type, bool unique, bool allowPageLocks, SystemIndexKey[] keys, bool disabled = false)
 {
+    /// <summary>Whether the index reports itself disabled, as a disabled XML or JSON index's own indexes do.</summary>
+    public readonly bool Disabled = disabled;
+
     public readonly int Id = id;
     public readonly string? Name = name;
     public readonly byte Type = type;
@@ -138,13 +141,10 @@ internal readonly struct SystemIndexKey(int columnId, int keyOrdinal, bool desce
 /// <c>sys.objects</c> row, the rowsets <c>sys.partitions</c> lists for it and
 /// the identity values its columns have handed out.
 /// </summary>
-internal sealed class SystemTableObject(string name, int objectId, bool isInternal, int schemaId, int parentObjectId, DateTime? createDate, DateTime? modifyDate, byte internalType, int lobDataSpaceId, SystemTableDefinition definition, SystemRowset[] rowsets, (int ColumnId, long Value)[] identityLastValues, bool indexesDisabled = false, int parentMinorId = 0)
+internal sealed class SystemTableObject(string name, int objectId, bool isInternal, int schemaId, int parentObjectId, DateTime? createDate, DateTime? modifyDate, byte internalType, int lobDataSpaceId, SystemTableDefinition definition, SystemRowset[] rowsets, (int ColumnId, long Value)[] identityLastValues, int parentMinorId = 0)
 {
-    /// <summary><c>sys.internal_tables.parent_minor_id</c>: the index a JSON index's internal table serves, else 0.</summary>
+    /// <summary><c>sys.internal_tables.parent_minor_id</c>: the index a JSON index's internal table or an XML index's node table serves, else 0.</summary>
     public readonly int ParentMinorId = parentMinorId;
-
-    /// <summary>Whether every index of the table reports itself disabled, as a disabled JSON index's internal table's do.</summary>
-    public readonly bool IndexesDisabled = indexesDisabled;
 
     public readonly string Name = name;
     public readonly int ObjectId = objectId;
