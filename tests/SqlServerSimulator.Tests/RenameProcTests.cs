@@ -168,7 +168,9 @@ public sealed class RenameProcTests
 
     /// <summary>
     /// sp_rename's own argument checks, in real's order and at real's lines:
-    /// the binder's refusals, then an unrecognized @objtype, a NULL @newname, a
+    /// the binder's refusals — more arguments than parameters, named or not,
+    /// counting before a missing or unknown name (probed 2026-10-20) — then an
+    /// unrecognized @objtype, a NULL @newname, a
     /// NULL @objname, an empty @newname (after sp_validname's own error) and an
     /// unparseable @objname (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
@@ -177,6 +179,7 @@ public sealed class RenameProcTests
     [DataRow("exec sp_rename 'dbo.t', 't9', 'OBJECT', 'x'", 8144, 0, "Procedure or function sp_rename has too many arguments specified.")]
     [DataRow("exec sp_rename @obj = 'dbo.t', @newname = 't9'", 201, 0, "Procedure or function 'sp_rename' expects parameter '@objname', which was not supplied.")]
     [DataRow("exec sp_rename @objname = 'dbo.t', @newname = 't9', @x = 1", 8145, 0, "@x is not a parameter for procedure sp_rename.")]
+    [DataRow("exec sp_rename @objname = 'dbo.t', @newname = 't9', @objtype = null, @x = 1", 8144, 0, "Procedure or function sp_rename has too many arguments specified.")]
     [DataRow("exec sp_rename 'dbo.t', 't9', 'TABLE'", 15249, 90, "Error: Explicit @objtype 'TABLE' is unrecognized.")]
     [DataRow("exec sp_rename 'dbo.t', null", 15223, 96, "Error: The input parameter 'NewName' is not allowed to be null.")]
     [DataRow("exec sp_rename null, 'x'", 15223, 101, "Error: The input parameter 'OldName' is not allowed to be null.")]

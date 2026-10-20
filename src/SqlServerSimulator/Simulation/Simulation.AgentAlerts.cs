@@ -243,8 +243,10 @@ partial class Simulation
             throw SimulatedSqlException.AgentInvalidValue("@severity", "0..25").AtAgentSite(88, verifier);
         // The engine's own messages aren't catalogued here, so any number
         // below the user range stands for one; a user message must have been
-        // added with sp_addmessage.
-        if (messageId != 0 && (messageId < 1 || (messageId >= 50000
+        // added with sp_addmessage, except RAISERROR's own 50000, which real
+        // takes though sys.messages lists no row for it (probed 2026-10-20
+        // against SQL Server 2025).
+        if (messageId != 0 && (messageId < 1 || (messageId > 50000
             && this.AgentScalar(batch, "select 1 from sys.messages where message_id = @id", ("id", SqlValue.FromInt32(messageId))) is null)))
         {
             throw SimulatedSqlException.AgentDoesNotExist("@message_id", messageId.ToString(CultureInfo.InvariantCulture)).AtAgentSite(102, verifier);

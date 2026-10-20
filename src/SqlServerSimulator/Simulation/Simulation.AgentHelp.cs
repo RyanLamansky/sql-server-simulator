@@ -433,16 +433,42 @@ partial class Simulation
         AgentParameter("include_description", SqlType.Bit, SqlValue.FromBoolean(false)),
     ];
 
-    /// <summary><c>sp_help_jobschedule</c>: the job's schedules, or the one named, with their descriptions on request.</summary>
+    /// <summary>
+    /// <c>sp_help_jobschedule</c>: the job's schedules, or the one of them
+    /// named, or by <c>@schedule_id</c> alone the schedule of the one job using
+    /// it (Msg 14369 for more, 14262 for none), with their descriptions on
+    /// request. Neither a job nor a schedule id is Msg 14273, as is a schedule
+    /// id beside a job or a schedule name (probed 2026-10-20 against SQL
+    /// Server 2025).
+    /// </summary>
     private IEnumerable<SimulatedStatementOutcome> InvokeSpHelpJobSchedule(BatchContext batch, string? returnCodeVar)
     {
         if (BindAgentCall(batch, "sp_help_jobschedule", SpHelpJobScheduleParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_help_jobschedule", AgentUserRoleId);
-        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
-        var filter = call.Text(2) is not null ? "and s.name = @name" : call.Int(3) is not null ? "and s.schedule_id = @id" : null;
-        yield return this.AgentJobSchedulesResultSet(batch, AgentJobId(job), filter, call.Values[4].AsBoolean,
-            ("name", AgentNText(call.Text(2))), ("id", SqlValue.FromInt32(call.Int(3) ?? 0)));
+        var jobNamed = !call.IsNull(0) || !call.IsNull(1);
+        var scheduleId = call.Int(3);
+        if (!jobNamed && scheduleId is null)
+            throw SimulatedSqlException.AgentHelpJobScheduleNeedsIdentifier().AtAgentSite(44);
+        if (scheduleId is { } id)
+        {
+            if (jobNamed || call.Text(2) is not null)
+                throw SimulatedSqlException.AgentHelpJobScheduleNeedsIdentifier().AtAgentSite(52);
+            var scheduleKey = SqlValue.FromInt32(id);
+            var users = this.AgentSql(batch, "select job_id from dbo.sysjobschedules where schedule_id = @id", ("id", scheduleKey));
+            yield return users switch
+            {
+                [[var onlyJob]] => this.AgentJobSchedulesResultSet(batch, onlyJob, "and s.schedule_id = @id", call.Values[4].AsBoolean, ("id", scheduleKey)),
+                [] => throw SimulatedSqlException.AgentDoesNotExist("@schedule_id", id.ToString(CultureInfo.InvariantCulture)).AtAgentSite(80),
+                _ => throw SimulatedSqlException.AgentScheduleUsedByManyJobs(id).AtAgentSite(70),
+            };
+            AgentReturn(batch, returnCodeVar, 0);
+            yield break;
+        }
+        var jobId = AgentJobId(this.ResolveAgentJob(batch, call.Guid(0), call.Text(1)));
+        var named = call.Text(2) is { } scheduleName ? this.ResolveAgentSchedule(batch, null, scheduleName, attachedTo: jobId)["schedule_id"] : (SqlValue?)null;
+        yield return this.AgentJobSchedulesResultSet(batch, jobId, named is null ? null : "and s.schedule_id = @id", call.Values[4].AsBoolean,
+            ("id", named ?? SqlValue.FromInt32(0)));
         AgentReturn(batch, returnCodeVar, 0);
     }
 

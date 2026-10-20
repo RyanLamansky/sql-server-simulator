@@ -785,8 +785,17 @@ partial class Simulation
         if (BindAgentCall(batch, procedure, start ? SpStartJobParameters : SpStopJobParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, procedure, AgentUserRoleId);
-        if (!start && call.IsNull(0) && call.IsNull(1) && call.IsNull(2))
-            throw SimulatedSqlException.AgentStopJobNeedsIdentifier().AtAgentSite(35);
+        if (!start)
+        {
+            if ((call.IsNull(0) ? 0 : 1) + (call.IsNull(1) ? 0 : 1) + (call.IsNull(2) ? 0 : 1) != 1)
+                throw SimulatedSqlException.AgentStopJobNeedsIdentifier().AtAgentSite(35);
+            if (call.Text(2) is { } originatingServer)
+            {
+                if (IsAgentLocalServer(originatingServer))
+                    throw new NotSupportedException("sp_stop_job's @originating_server naming the local server, which stops every job the server owns, is not modeled.");
+                throw SimulatedSqlException.AgentNoJobsFromServer(originatingServer.ToUpperInvariant()).AtAgentSite(46);
+            }
+        }
         var job = this.ResolveAgentJob(batch, call.Guid(1), call.Text(0));
         var mayRun = AgentIsSysadmin(batch) || AgentOwns(batch, job) || this.AgentInRole(batch, AgentOperatorRoleId);
         // A start checks the caller first, a stop the job's server first

@@ -784,4 +784,89 @@ public sealed class AgentProcedureTests
         _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobs_in_schedule @schedule_name = N's', @schedule_id = 8", 14373);
         _ = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobcount @schedule_id = 99", 14262);
     }
+
+    /// <summary>
+    /// An Agent procedure binds its arguments as a T-SQL procedure's are
+    /// bound: more than it has parameters is Msg 8144 whatever their names,
+    /// and any to sp_enum_sqlagent_subsystems, which has none, Msg 8146 at
+    /// state 1 (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec msdb.dbo.sp_delete_category @class = N'JOB', @name = N'c', @dummy = 1", 8144, 2, "Procedure or function sp_delete_category has too many arguments specified.")]
+    [DataRow("exec msdb.dbo.sp_help_category @dummy = 1", 8145, 1, "@dummy is not a parameter for procedure sp_help_category.")]
+    [DataRow("exec msdb.dbo.sp_enum_sqlagent_subsystems @x = 1", 8146, 1, "Procedure sp_enum_sqlagent_subsystems has no parameters and arguments were supplied.")]
+    public void Arguments_CountBeforeTheirNames(string call, int number, int state, string message)
+    {
+        var refused = new Simulation().AssertSqlError(call, number);
+        AreEqual((message, (byte)state), (refused.Errors[0].Message, refused.Errors[0].State));
+    }
+
+    /// <summary>
+    /// sp_stop_job takes exactly one of a job's name, its id or an originating
+    /// server (Msg 14232), and a server no job came from is Msg 14268 named in
+    /// upper case; sp_attach_schedule and sp_detach_schedule call the job
+    /// verifier by its qualified name, which its errors carry (probed
+    /// 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void JobIdentifiers_StopJobAndScheduleAttachment()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("exec msdb.dbo.sp_add_job @job_name = N'j'");
+        var both = simulation.AssertSqlError("exec msdb.dbo.sp_stop_job @job_name = N'j', @job_id = '00000000-0000-0000-0000-000000000000'", 14232);
+        AreEqual(("Specify either a job_name, job_id, or an originating_server.", "msdb.dbo.sp_stop_job", 35), (both.Errors[0].Message, both.Errors[0].Procedure, both.Errors[0].LineNumber));
+        _ = simulation.AssertSqlError("exec msdb.dbo.sp_stop_job @job_name = N'j', @originating_server = N'x'", 14232);
+        var origin = simulation.AssertSqlError("exec msdb.dbo.sp_stop_job @originating_server = N'far'", 14268);
+        AreEqual(("There are no jobs at this server that originated from server 'FAR'.", 46), (origin.Errors[0].Message, origin.Errors[0].LineNumber));
+        AreEqual("msdb.dbo.sp_verify_job_identifiers", simulation.AssertSqlError("exec msdb.dbo.sp_detach_schedule @schedule_name = N's'", 14294).Errors[0].Procedure);
+        AreEqual("msdb.dbo.sp_verify_job_identifiers", simulation.AssertSqlError("exec msdb.dbo.sp_attach_schedule @job_name = N'none', @schedule_name = N's'", 14262).Errors[0].Procedure);
+        AreEqual("sp_verify_job_identifiers", simulation.AssertSqlError("exec msdb.dbo.sp_add_jobschedule @job_name = N'none', @name = N's'", 14262).Errors[0].Procedure);
+    }
+
+    /// <summary>
+    /// sp_help_jobschedule names a job, optionally with one of its schedules,
+    /// or a schedule id alone, which answers for the one job using it
+    /// (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void HelpJobSchedule_ByJobOrBySchedule()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            use msdb;
+            exec sp_add_job @job_name = N'j1';
+            exec sp_add_job @job_name = N'j2';
+            exec sp_add_schedule @schedule_name = N'one', @freq_type = 1;
+            exec sp_add_schedule @schedule_name = N'two', @freq_type = 1;
+            exec sp_add_schedule @schedule_name = N'none', @freq_type = 1;
+            exec sp_attach_schedule @job_name = N'j1', @schedule_name = N'one';
+            exec sp_attach_schedule @job_name = N'j1', @schedule_name = N'two';
+            exec sp_attach_schedule @job_name = N'j2', @schedule_name = N'two';
+            """);
+        var (one, two) = (simulation.ExecuteScalar("select schedule_id from msdb.dbo.sysschedules where name = N'one'"), simulation.ExecuteScalar("select schedule_id from msdb.dbo.sysschedules where name = N'two'"));
+        AreEqual(one, simulation.ExecuteScalar($"exec msdb.dbo.sp_help_jobschedule @schedule_id = {one}"));
+        AreEqual(two, simulation.ExecuteScalar("exec msdb.dbo.sp_help_jobschedule @job_name = N'j2', @schedule_name = N'two'"));
+        var many = simulation.AssertSqlError($"exec msdb.dbo.sp_help_jobschedule @schedule_id = {two}", 14369);
+        AreEqual(70, many.Errors[0].LineNumber);
+        AreEqual(80, simulation.AssertSqlError("declare @id int = (select schedule_id from msdb.dbo.sysschedules where name = N'none'); exec msdb.dbo.sp_help_jobschedule @schedule_id = @id", 14262).Errors[0].LineNumber);
+        var unattached = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobschedule @job_name = N'j2', @schedule_name = N'one'", 14262);
+        AreEqual(("The specified @schedule_name ('one') does not exist.", "msdb.dbo.sp_verify_schedule_identifiers", 138),
+            (unattached.Errors[0].Message, unattached.Errors[0].Procedure, unattached.Errors[0].LineNumber));
+        var neither = simulation.AssertSqlError("exec msdb.dbo.sp_help_jobschedule @schedule_name = N'one'", 14273);
+        AreEqual(("You must provide either @job_id or @job_name (and, optionally, @schedule_name), or @schedule_id.", 44), (neither.Errors[0].Message, neither.Errors[0].LineNumber));
+        AreEqual(52, simulation.AssertSqlError("exec msdb.dbo.sp_help_jobschedule @job_name = N'j1', @schedule_id = 1", 14273).Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// An alert may name RAISERROR's own message 50000, which sys.messages
+    /// lists no row for, but no other user number not added (probed
+    /// 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void AddAlert_TakesMessage50000()
+    {
+        var simulation = new Simulation();
+        AreEqual(50000, simulation.ExecuteScalar("use msdb; exec sp_add_alert @name = N'a', @message_id = 50000; select message_id from sysalerts where name = N'a'"));
+        simulation.AssertSqlError("exec msdb.dbo.sp_add_alert @name = N'b', @message_id = 50001", 14262, "The specified @message_id ('50001') does not exist.");
+    }
 }

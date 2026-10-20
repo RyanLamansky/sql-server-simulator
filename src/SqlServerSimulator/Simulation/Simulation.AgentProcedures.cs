@@ -181,7 +181,9 @@ partial class Simulation
 
     /// <summary>
     /// Parses and binds an Agent procedure's arguments as a T-SQL procedure's
-    /// are bound: Msg 8144 for a positional argument too many, Msg 201 (state
+    /// are bound: Msg 8146 (state 1) for any argument to one declaring no
+    /// parameters, Msg 8144 for more arguments than parameters, named or not
+    /// (probed 2026-10-20 against SQL Server 2025), Msg 201 (state
     /// 4) for a required one left out, Msg 8145 for a name that is no
     /// parameter, and Msg 8114 (state 1) for a value that won't convert; each
     /// at line 0, leaving the caller's return code unset. Null while the
@@ -194,6 +196,10 @@ partial class Simulation
             return null;
         try
         {
+            if (parameters.Length == 0 && arguments.Count > 0)
+                throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure);
+            if (arguments.Count > parameters.Length)
+                throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
             var supplied = new ProcArgument?[parameters.Length];
             string? unknownName = null;
             for (var i = 0; i < arguments.Count; i++)
@@ -208,10 +214,6 @@ partial class Simulation
                         unknownName ??= name;
                         continue;
                     }
-                }
-                else if (i >= parameters.Length)
-                {
-                    throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
                 }
                 supplied[slot] = argument;
             }
@@ -407,16 +409,17 @@ partial class Simulation
     /// The job a call names by <c>@job_id</c> or <c>@job_name</c>, as
     /// <c>sp_verify_job_identifiers</c> finds it: exactly one of the two
     /// (Msg 14294), the name trimmed and matched under msdb's collation, among
-    /// the jobs the caller may see (Msg 14262 for one it can't).
+    /// the jobs the caller may see (Msg 14262 for one it can't), raised under
+    /// the <paramref name="verifier"/> name the calling procedure gives it.
     /// </summary>
-    private AgentRow ResolveAgentJob(BatchContext batch, Guid? jobId, string? jobName)
+    private AgentRow ResolveAgentJob(BatchContext batch, Guid? jobId, string? jobName, string verifier = "sp_verify_job_identifiers")
     {
         // An empty name names nothing (probed 2026-10-16: sp_delete_job of the
         // job sp_add_job made under N'' is Msg 14294).
         if (jobName is not null && jobName.Trim().Length == 0)
             jobName = null;
         if ((jobId is null) == (jobName is null))
-            throw SimulatedSqlException.AgentSupplyEither("@job_id", "@job_name", "job").AtAgentSite(25, "sp_verify_job_identifiers");
+            throw SimulatedSqlException.AgentSupplyEither("@job_id", "@job_name", "job").AtAgentSite(25, verifier);
         var rows = jobName is { } name
             ? this.AgentRows(batch, "sysjobs", "name = @name", ("name", SqlValue.FromNVarchar(name.Trim())))
             : this.AgentRows(batch, "sysjobs", "job_id = @id", ("id", SqlValue.FromGuid(jobId!.Value)));
@@ -430,7 +433,7 @@ partial class Simulation
         throw (jobName is { } missing
             ? SimulatedSqlException.AgentDoesNotExist("@job_name", missing)
             : SimulatedSqlException.AgentDoesNotExist("@job_id", jobId!.Value.ToString("D").ToUpperInvariant()))
-            .AtAgentSite(jobName is null ? 41 : 67, "sp_verify_job_identifiers");
+            .AtAgentSite(jobName is null ? 41 : 67, verifier);
     }
 
     /// <summary>Whether the caller owns <paramref name="job"/>.</summary>

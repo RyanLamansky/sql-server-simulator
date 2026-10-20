@@ -289,7 +289,7 @@ partial class Simulation
         if (BindAgentCall(batch, "sp_attach_schedule", SpAttachScheduleParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_attach_schedule", AgentUserRoleId);
-        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
+        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1), QualifiedJobVerifier);
         var schedule = this.ResolveAgentSchedule(batch, call.Int(2), call.Text(3));
         if (!AgentIsSysadmin(batch) && !AgentOwns(batch, job))
             throw SimulatedSqlException.AgentAttachNotOwner().AtAgentSite(48);
@@ -318,6 +318,14 @@ partial class Simulation
             end
             """, ("job", jobId), ("schedule", scheduleId))!.Value.AsInt32 == 1;
 
+    /// <summary>
+    /// The name <c>sp_attach_schedule</c> and <c>sp_detach_schedule</c> call
+    /// <c>sp_verify_job_identifiers</c> by, which its errors carry (probed
+    /// 2026-10-20 against SQL Server 2025; the other job procedures call it
+    /// unqualified).
+    /// </summary>
+    private const string QualifiedJobVerifier = "msdb.dbo.sp_verify_job_identifiers";
+
     private static readonly SystemProcedureParameter[] SpDetachScheduleParameters =
     [
         AgentParameter("job_id", SqlType.UniqueIdentifier),
@@ -339,7 +347,7 @@ partial class Simulation
         if (BindAgentCall(batch, "sp_detach_schedule", SpDetachScheduleParameters) is not { } call)
             yield break;
         this.RequireAgentExecute(batch, "sp_detach_schedule", AgentUserRoleId);
-        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1));
+        var job = this.ResolveAgentJob(batch, call.Guid(0), call.Text(1), QualifiedJobVerifier);
         var schedule = this.ResolveAgentSchedule(batch, call.Int(2), call.Text(3), attachedTo: AgentJobId(job));
         if (!AgentIsSysadmin(batch) && !AgentOwns(batch, job))
             throw SimulatedSqlException.AgentDetachNotOwner().AtAgentSite(74);

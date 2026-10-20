@@ -24,8 +24,9 @@ They write msdb's tables through T-SQL run in msdb as its `dbo` (`AgentSql`), so
 Real's procedures are T-SQL, and their errors behave as such:
 
 - Binding is a T-SQL procedure's: Msg 201 at state 4, Msg 8114 at state 1, the caller's return code unset.
+  More arguments than parameters is Msg 8144 whatever their names, ahead of a missing or unknown one (probed 2026-10-20 against SQL Server 2025, as for a user procedure and the master system procedures).
 - Each refusal is a `RAISERROR` at a line of real's source, very often in the verification procedure the called one delegates to — `sp_verify_job`, `sp_verify_jobstep`, `sp_verify_schedule`, `sp_verify_job_identifiers`, `msdb.dbo.sp_verify_schedule_identifiers` … — which `ERROR_PROCEDURE()` and the client both report (`SimulatedSqlException.AgentSite`).
-  Some inner names arrive schema-qualified and some don't, as real names them; the called procedure itself is named as the call wrote it (`msdb..sp_delete_alert` included, probed 2026-10-18 against SQL Server 2025), Database Mail's too.
+  Some inner names arrive schema-qualified and some don't, as real names them — even one verifier per caller: `sp_attach_schedule` and `sp_detach_schedule` call `msdb.dbo.sp_verify_job_identifiers`, the other job procedures the bare name; the called procedure itself is named as the call wrote it (`msdb..sp_delete_alert` included, probed 2026-10-18 against SQL Server 2025), Database Mail's too.
 - Outside a `TRY` the procedure goes on to its `RETURN (1)`; under one the error transfers control before the `RETURN`, so the caller's return code keeps its value.
   `sp_add_alert` answers 0 even when it refuses.
 - `sp_add_job` of a NULL name is its INSERT's own Msg 515, at its line 148 with the Msg 3621 that follows, and answers 515.
@@ -71,7 +72,8 @@ The three Agent roles are seeded in msdb with real's memberships (`SQLAgentOpera
 ## Divergences
 
 - msdb's Agent tables are heaps here, so a bare `SELECT` reads them in insertion order where real's clustered indexes read `sysjobs` in `job_id` order and `sysjobsteps` by job and step; the procedures order their own results as real's do.
-- A system message an alert names is assumed to exist below 50000 (sys.messages holds only `sp_addmessage`'s user messages here); real refuses a number its catalog lacks.
+- A system message an alert names is assumed to exist below 50000 (sys.messages holds only `sp_addmessage`'s user messages here); real refuses a number its catalog lacks, such as 1.
+  Both take RAISERROR's own 50000, which real's catalog lists no row for.
 - The data collector's schedules are dated by the simulation's creation where real's carry the instance's install date.
 
 ## Not modeled yet
@@ -79,3 +81,4 @@ The three Agent roles are seeded in msdb with real's memberships (`SQLAgentOpera
 - Starting the Agent, and with it running a job's T-SQL steps, writing history and activity, schedules' next run dates, and the `$(ESCAPE_SQUOTE(…))` tokens.
 - `sp_add_proxy` and the proxy procedures (`sysproxies` is seeded empty, and a step naming a proxy is Msg 14262) and the multi-server (MSX / TSX) procedures.
 - The procedures as catalog objects: `msdb.sys.procedures`, `OBJECT_ID('msdb.dbo.sp_add_job')` and `sp_helptext` don't list them.
+- `sp_stop_job @originating_server` naming the local server, which would stop every job it owns, is a `NotSupportedException`.

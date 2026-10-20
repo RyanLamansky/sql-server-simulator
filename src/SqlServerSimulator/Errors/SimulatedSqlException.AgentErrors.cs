@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace SqlServerSimulator;
 
 // What msdb's SQL Server Agent procedures raise, in SQL Server 2025's numbers
@@ -52,9 +54,21 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AgentInvalidValue(string parameter, string validValues) =>
         new($"The specified '{parameter}' is invalid (valid values are: {validValues}).", 14266, 16, 1);
 
-    /// <summary>Msg 14232: <c>sp_stop_job</c> given nothing to name a job by.</summary>
+    /// <summary>Msg 14232: <c>sp_stop_job</c> given other than exactly one of the three ways to name its jobs.</summary>
     internal static SimulatedSqlException AgentStopJobNeedsIdentifier() =>
         new("Specify either a job_name, job_id, or an originating_server.", 14232, 16, 1);
+
+    /// <summary>Msg 14273: <c>sp_help_jobschedule</c> given neither a job nor a schedule id, or a schedule id beside either.</summary>
+    internal static SimulatedSqlException AgentHelpJobScheduleNeedsIdentifier() =>
+        new("You must provide either @job_id or @job_name (and, optionally, @schedule_name), or @schedule_id.", 14273, 16, 1);
+
+    /// <summary>Msg 14369: <c>sp_help_jobschedule</c>'s <c>@schedule_id</c> naming a schedule more than one job uses.</summary>
+    internal static SimulatedSqlException AgentScheduleUsedByManyJobs(int scheduleId) =>
+        new(string.Create(CultureInfo.InvariantCulture, $"The schedule ID \"{scheduleId}\" is used by more than one job. Specify the job_id."), 14369, 16, 1);
+
+    /// <summary>Msg 14268: <c>sp_stop_job</c>'s <c>@originating_server</c> naming a server no job here came from, written in upper case.</summary>
+    internal static SimulatedSqlException AgentNoJobsFromServer(string server) =>
+        new($"There are no jobs at this server that originated from server '{server}'.", 14268, 16, 1);
 
     /// <summary>Msg 14256 / 14257: a job started or stopped that targets no server.</summary>
     internal static SimulatedSqlException AgentJobHasNoServer(bool start, string jobName, Guid jobId) =>

@@ -77,7 +77,7 @@ partial class Simulation
     /// Refuses an argument list a system procedure whose own parser reads the
     /// values can't bind, as real's parameter binder refuses it, before the
     /// procedure runs: any argument to one declaring no parameters is Msg 8146,
-    /// a positional argument past <paramref name="parameterNames"/> Msg 8144,
+    /// more arguments than <paramref name="parameterNames"/>, named or not, Msg 8144,
     /// one of the leading <paramref name="required"/> parameters left out (or
     /// given <c>DEFAULT</c>) Msg 201, and a name that is no parameter Msg 8145,
     /// in that order (probed 2026-10-04 against SQL Server 2025: sp_rename,
@@ -94,12 +94,8 @@ partial class Simulation
                     throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure, state: 2);
                 return;
             }
-            var positional = 0;
-            foreach (var argument in arguments)
-            {
-                if (argument.Name is null && ++positional > parameterNames.Length)
-                    throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
-            }
+            if (arguments.Count > parameterNames.Length)
+                throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
             for (var i = 0; i < required; i++)
             {
                 var parameterName = parameterNames[i];
@@ -125,6 +121,8 @@ partial class Simulation
     {
         if (parameters.Length == 0 && arguments.Count > 0)
             throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure, state: 2);
+        if (arguments.Count > parameters.Length)
+            throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
         var supplied = new ProcArgument?[parameters.Length];
         string? unknownName = null;
         for (var i = 0; i < arguments.Count; i++)
@@ -139,10 +137,6 @@ partial class Simulation
                     unknownName ??= name;
                     continue;
                 }
-            }
-            else if (i >= parameters.Length)
-            {
-                throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
             }
             supplied[slot] = argument;
         }
