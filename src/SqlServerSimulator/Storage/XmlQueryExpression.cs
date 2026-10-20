@@ -764,7 +764,8 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
                     results.Add(item);
                 return;
             }
-            results.Add(XmlAtomicTypes.Number(-XmlQueryValues.SingleNumber(leftItems), this.TypeName));
+            if (XmlQueryValues.SingleNumberOrNone(leftItems) is { } operand)
+                results.Add(XmlAtomicTypes.Number(-operand, this.TypeName));
             return;
         }
         var rightItems = this.right.Evaluate(frame);
@@ -782,8 +783,10 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
             }
             return;
         }
-        var leftValue = XmlQueryValues.SingleNumber(leftItems);
-        var rightValue = XmlQueryValues.SingleNumber(rightItems);
+        // An operand that won't convert to a number is the empty sequence
+        // (probed 2026-10-20 against SQL Server 2025).
+        if (XmlQueryValues.SingleNumberOrNone(leftItems) is not { } leftValue || XmlQueryValues.SingleNumberOrNone(rightItems) is not { } rightValue)
+            return;
         var value = this.op switch
         {
             '*' => leftValue * rightValue,
@@ -1391,9 +1394,10 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                 results.Add(!XmlQueryValues.EffectiveBoolean(this.arguments[0].Evaluate(frame)));
                 return;
             case XmlFunctionId.Number:
-                results.Add(XmlAtomicTypes.Number(
-                    this.arguments.Length == 0 ? XmlQueryValues.ToNumber(new XmlUntypedAtomic(frame.Context.Value)) : this.Number(frame, 0),
-                    this.TypeName));
+                // A value that won't convert is the empty sequence, not NaN
+                // (probed 2026-10-20 against SQL Server 2025).
+                if ((this.arguments.Length == 0 ? XmlQueryValues.NumberOrNone(new XmlUntypedAtomic(frame.Context.Value)) : XmlQueryValues.SingleNumberOrNone(this.arguments[0].Evaluate(frame))) is { } converted)
+                    results.Add(XmlAtomicTypes.Number(converted, this.TypeName));
                 return;
             case XmlFunctionId.Position:
                 results.Add((double)frame.Position);
@@ -1483,7 +1487,8 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                 results.Add(whole);
             return;
         }
-        results.Add(XmlAtomicTypes.Number(operation(XmlQueryValues.SingleNumber(items)), this.TypeName));
+        if (XmlQueryValues.SingleNumberOrNone(items) is { } rounded)
+            results.Add(XmlAtomicTypes.Number(operation(rounded), this.TypeName));
     }
 
     /// <summary>
@@ -1522,11 +1527,20 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
         return sum;
     }
 
+    /// <summary>
+    /// The numbers of the argument's items, an aggregate passing over one that
+    /// won't convert (probed 2026-10-20 against SQL Server 2025: <c>sum</c> of
+    /// 10, <c>"20x"</c>, an empty element and 5 is 15, and of the second alone
+    /// 0).
+    /// </summary>
     private List<double> Numbers(in XmlQueryFrame frame, int index)
     {
         var numbers = new List<double>();
         foreach (var item in this.arguments[index].Evaluate(frame))
-            numbers.Add(XmlQueryValues.ToNumber(XmlQueryValues.Atomize(item)));
+        {
+            if (XmlQueryValues.NumberOrNone(XmlQueryValues.Atomize(item)) is { } number)
+                numbers.Add(number);
+        }
         return numbers;
     }
 }
@@ -1577,6 +1591,20 @@ internal static class XmlQueryValues
 
     /// <summary>The first item's numeric form; empty sequence answers NaN.</summary>
     public static double SingleNumber(List<object> items) => items.Count == 0 ? double.NaN : ToNumber(Atomize(items[0]));
+
+    /// <summary>
+    /// The first item's numeric form, or null for the empty sequence or a value
+    /// that won't convert, which arithmetic and the numeric functions answer
+    /// with the empty sequence (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public static double? SingleNumberOrNone(List<object> items) => items.Count == 0 ? null : NumberOrNone(Atomize(items[0]));
+
+    /// <summary>The item as a number, or null when it is text that won't convert.</summary>
+    public static double? NumberOrNone(object item) => item switch
+    {
+        bool or double or XmlTypedAtomic { Kind: XmlStaticKind.Number } => ToNumber(item),
+        _ => double.TryParse(StringValue(item), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : null,
+    };
 
     /// <summary>
     /// The item as a number. A value that won't parse answers NaN, which makes

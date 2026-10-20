@@ -1764,6 +1764,9 @@ internal sealed class XmlQueryParser(
         var quote = '\0';
         var valueExpressions = 0;
         var valueHasText = false;
+        // The elements left open, innermost last, and where the tag being read began.
+        var open = new Stack<string>();
+        var tagStart = 0;
 
         void FlushContent()
         {
@@ -1838,14 +1841,18 @@ internal sealed class XmlQueryParser(
                 }
                 if (c == '>')
                 {
+                    var tagName = TagName(this.text, tagStart + (closingTag ? 2 : 1));
                     _ = segment.Append('>');
                     this.index++;
                     inTag = false;
                     if (!closingTag)
                     {
+                        open.Push(tagName);
                         depth++;
                         continue;
                     }
+                    if (open.TryPop(out var opened) && opened != tagName)
+                        throw SimulatedSqlException.XQueryExpectedEndTag(this.method, opened);
                     depth--;
                     if (depth == 0)
                         return this.Finish(literals, enclosed, inAttribute, segment);
@@ -1887,6 +1894,7 @@ internal sealed class XmlQueryParser(
                     continue;
                 }
                 inTag = true;
+                tagStart = this.index;
                 closingTag = this.Peek(1) == '/';
                 _ = segment.Append(c);
                 this.index++;
@@ -1915,7 +1923,20 @@ internal sealed class XmlQueryParser(
             _ = content.Append(c);
             this.index++;
         }
+        // The text ended inside a start tag, or inside an element's content.
+        if (inTag && !closingTag)
+            throw SimulatedSqlException.XQueryEndInsideStartTag(this.method, this.text.AsSpan(tagStart).Contains('='));
+        if (open.TryPeek(out var unclosed))
+            throw SimulatedSqlException.XQueryExpectedEndTag(this.method, unclosed);
         throw this.SyntaxError();
+
+        static string TagName(string text, int start)
+        {
+            var end = start;
+            while (end < text.Length && IsNameChar(text[end]))
+                end++;
+            return text[start..end];
+        }
     }
 
     private XmlConstructedNodeExpr Finish(

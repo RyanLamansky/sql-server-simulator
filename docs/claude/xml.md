@@ -203,6 +203,7 @@ An empty or whitespace-only argument is **Msg 6306** (`Invalid XQuery expression
 | direct element `<out a="{…}">{…}</out>` | arbitrary nesting; an enclosed expression contributes its nodes in element content and its atomized text in an attribute value, adjacent atomics space-separated within one expression but not across two (`<a>{1}  {2}</a>` is `<a>12</a>`); `{{` / `}}` are the literal-brace escapes |
 | direct comment `<!-- c -->` / processing instruction `<?t d?>` | literal text, braces included, at top level or inside an element; a comment with `--` or a trailing `-` is **Msg 9322**, a target of `xml` in any case **Msg 2294**, whitespace ahead of the target **Msg 2278**, and the whitespace between target and data isn't data |
 | computed `element name {…}` | the content a direct constructor takes |
+| unterminated or mismatched direct element | **Msg 2267** naming the innermost element left open, for text ending in an element's content or an end tag naming another element; text ending inside a start tag **Msg 2222** (`Invalid source character 0x1a … near '<none>'`, `'='` once an attribute was written; probed 2026-10-20) |
 | computed `attribute name {…}` | the content atomized and space-joined, an empty body the empty string; `xmlns` is **Msg 9316** |
 | computed `text {…}` | a single expression (a comma is **Msg 2205**, an empty body Msg 2209), atomized and space-joined; `()` builds no node, `""` an empty one |
 
@@ -241,6 +242,8 @@ A number casts to an integer type by truncating (`xs:integer(1.7)` is 1) and to 
 An atomic item's type is its static one, so `1 instance of xs:decimal` is true and `1.5 instance of xs:integer` false.
 
 ### Arithmetic types
+
+An untyped value that won't convert to `xs:double` — text, an empty element — is the empty sequence rather than `NaN`: arithmetic over it, `floor` / `ceiling` / `round` and `number()` are empty (NULL to `value()`), and `sum` / `avg` / `min` / `max` pass over it, `sum` of nothing else being 0 and `avg` empty, while a comparison against it is false (probed 2026-10-20 against SQL Server 2025).
 
 An arithmetic result takes XQuery's promotion of its operands' static types — integer below decimal below float below double, an untyped operand counting as `xs:double`, and `div` over two integers `xs:decimal` — and renders by it (`XmlAtomicTypes`):
 
@@ -429,6 +432,7 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 - `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — resolve.
 - Msg 2209's quoted token comes from the simulator's own recursive-descent cursor, so a malformed expression may name a different token than real's parser does.
+  A static type error the simulator meets building an operator ahead of a syntax error later in the expression wins, where real parses the whole expression first: `<a/><b>` is Msg 2373 here and real's Msg 2209 near `<eof>` (probed 2026-10-20).
   Real also splits its generic syntax errors further than the simulator does — a path that ends mid-step is its **Msg 9341** (`Syntax error near '<eof>', expected a step expression.`) where the simulator reports 2209 — and a construct keyword written without the token that identifies it (`for i in …`, `if 1=1 then …`) is real's 2209 near the *keyword* while the simulator names the token it stopped on.
 - **`position()` / `last()` legality is lexical.** The simulator allows them anywhere inside a written predicate, so a FLWOR nested in one can read them; real's rule is its own binder's.
 - `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.

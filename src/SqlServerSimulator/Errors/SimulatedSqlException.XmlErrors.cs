@@ -747,6 +747,24 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: Syntax error near '{token}'", 2209, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 2267: a direct element constructor whose
+    /// element the text ends inside, or whose end tag names another element —
+    /// naming the innermost element left open (probed 2026-10-20 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryExpectedEndTag(string method, string name) =>
+        new($"XQuery [{method}()]: Expected end tag '{name}'", 2267, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 2222: a direct element constructor's start tag
+    /// the text ends inside, reported as the end-of-file character 0x1a near
+    /// <c>'='</c> once an attribute was written, else <c>'&lt;none&gt;'</c>
+    /// (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryEndInsideStartTag(string method, bool attributeWritten) =>
+        new($"XQuery [{method}()]: Invalid source character 0x1a found in an identifier near '{(attributeWritten ? "=" : "<none>")}'.", 2222, 16, 1);
+
+    /// <summary>
     /// Msg 9303: a construct whose grammar names the one word that belongs at
     /// the cursor — <c>if</c>'s <c>then</c> / <c>else</c>, a quantified
     /// expression's <c>in</c> / <c>satisfies</c>, a FLWOR's <c>return</c>, a

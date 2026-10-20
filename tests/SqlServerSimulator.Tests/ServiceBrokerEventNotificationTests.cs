@@ -261,6 +261,26 @@ public sealed class ServiceBrokerEventNotificationTests
         AreEqual("1|1", Rows(connection, "select concat(xact_state(), '|', @@trancount); rollback"));
     }
 
+    /// <summary>
+    /// A notification to a service the database doesn't carry, or one that
+    /// doesn't take the notification contract, errors its dialog and holds
+    /// what it sends on the transmission queue (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    public void UnreachableService_ErrorsTheDialogAndHoldsTheMessage()
+    {
+        using var connection = WithTarget().CreateOpenConnection();
+        AreEqual("ERROR|s|1;ERROR|zz_nosuch|1;s|Service Broker received an error message on this conversatio;zz_nosuch|Service Broker received an error message on this conversatio;0",
+            Rows(connection, """
+                create event notification n1 on database for create_table to service 'zz_nosuch', 'current database';
+                create event notification n2 on database for create_table to service 's', 'current database';
+                create table t1 (a int);
+                select state_desc, far_service, cast(is_initiator as int) from sys.conversation_endpoints where far_service in ('s', 'zz_nosuch') order by far_service;
+                select to_service_name, left(transmission_status, 60) from sys.transmission_queue order by to_service_name;
+                select count(*) from q
+                """));
+    }
+
     [TestMethod]
     public void DdlTrigger_SeesCreateAndDropEventNotification()
     {

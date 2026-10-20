@@ -1150,4 +1150,44 @@ public sealed class XmlTests
             from sys.stats s join sys.internal_tables it on it.object_id = s.object_id where it.parent_id = object_id('t')
             """));
     }
+
+    /// <summary>
+    /// A value that won't convert to a number is the empty sequence to
+    /// XQuery's arithmetic and numeric functions, number() included, and an
+    /// aggregate passes over it (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("(/r/i)[2] + 1", null)]
+    [DataRow("(/r/i)[3] + 1", null)]
+    [DataRow("-(/r/i)[2]", null)]
+    [DataRow("(/r/i)[1] div (/r/i)[3]", null)]
+    [DataRow("floor((/r/i)[2])", null)]
+    [DataRow("number((/r/i)[2])", null)]
+    [DataRow("sum(/r/i)", 15d)]
+    [DataRow("avg(/r/i)", 7.5)]
+    [DataRow("min(/r/i)", 5d)]
+    [DataRow("sum(/r/i[2])", 0d)]
+    [DataRow("avg(/r/i[2])", null)]
+    [DataRow("count((/r/i)[2] + 1)", 0d)]
+    public void UnconvertibleNumbers_AreTheEmptySequence(string expression, double? expected)
+    {
+        var value = new Simulation().ExecuteScalar($"declare @x xml = N'<r><i>10</i><i>20boldtail</i><i/><i>5</i></r>'; select @x.value('{expression}', 'float')");
+        AreEqual(expected, value is DBNull ? null : (double?)value);
+    }
+
+    /// <summary>
+    /// A direct constructor the text ends inside an element of, or whose end
+    /// tag names another element, is Msg 2267 naming the innermost element
+    /// left open; one the text ends inside the start tag of, Msg 2222 (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("<a>text", 2267, "Expected end tag 'a'")]
+    [DataRow("<a><b></b>", 2267, "Expected end tag 'a'")]
+    [DataRow("<a><b></a>", 2267, "Expected end tag 'b'")]
+    [DataRow("<a></b>", 2267, "Expected end tag 'a'")]
+    [DataRow("<a", 2222, "Invalid source character 0x1a found in an identifier near '<none>'.")]
+    [DataRow("<a b=\"1\"", 2222, "Invalid source character 0x1a found in an identifier near '='.")]
+    public void UnterminatedConstructor_RefusesAsReal(string constructor, int number, string message) =>
+        new Simulation().AssertSqlError($"declare @x xml = N'<r/>'; select @x.query('{constructor}')", number, $"XQuery [query()]: {message}");
 }
