@@ -81,13 +81,16 @@ internal sealed partial class XmlSchemaCompiler
     /// meets, its references resolving against <paramref name="existingText"/>
     /// too (an <c>ALTER … ADD</c>'s collection), or returns when there is none.
     /// Text the reader can't get through is left to whatever reads it next.
+    /// <paramref name="roundTripWarnings"/> collects, as each added simple
+    /// type compiles, the names Msg 6966 warns of — so a refusal leaves the
+    /// ones compiled ahead of it, which real sends after the error.
     /// </summary>
-    public static void Reject(string addedText, string? existingText)
+    public static void Reject(string addedText, string? existingText, List<string> roundTripWarnings)
     {
         if (ReadDocuments(addedText, existing: false) is not { } added)
             return;
         var existing = existingText is null ? [] : ReadDocuments(existingText, existing: true) ?? [];
-        var compiler = new XmlSchemaCompiler(added, existing);
+        var compiler = new XmlSchemaCompiler(added, existing) { roundTripWarnings = roundTripWarnings };
         compiler.ReadTopLevel();
         compiler.ReadDeclarations();
         compiler.CompileComponents();

@@ -9,6 +9,9 @@ internal sealed partial class XmlSchemaCompiler
     /// <summary>The definitions compiled so far, by the node declaring them; a definition that failed silently maps to null.</summary>
     private readonly Dictionary<XsdNode, XsdType?> compiledTypes = [];
 
+    /// <summary>The names of the added simple types Msg 6966 warns of, in compile order; see <see cref="Reject"/>.</summary>
+    private List<string> roundTripWarnings = [];
+
     /// <summary>The definitions being compiled, which a reference back to closes a loop.</summary>
     private readonly HashSet<XsdNode> compilingTypes = [];
 
@@ -214,7 +217,26 @@ internal sealed partial class XmlSchemaCompiler
             _ = this.compilingTypes.Remove(definition);
         }
         this.compiledTypes[definition] = type;
+        if (!definition.IsExisting && type is SimpleXsdType simple && WarnsOfRoundTripping(simple))
+            this.roundTripWarnings.Add(simple.Name);
         return type;
+    }
+
+    /// <summary>
+    /// Whether real warns of <paramref name="type"/> with Msg 6966: a
+    /// restriction of a numeric, boolean, duration or date-time primitive
+    /// that a <c>pattern</c> facet restricts, its own or a base's (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private static bool WarnsOfRoundTripping(SimpleXsdType type)
+    {
+        if (type.Base is null || type.Variety != SimpleVariety.Atomic || type.BuiltIn is not { } builtIn)
+            return false;
+        var patterned = false;
+        for (var current = type; current is not null && !patterned; current = current.Base)
+            patterned = current.Facets.Exists(static facet => facet.Name == "pattern");
+        return patterned && Storage.XmlAtomicTypes.ComparisonFamily("xs:" + builtIn.QualifiedName.Name) is "number" or "boolean"
+            or "Duration" or "DateTime" or "Time" or "Date" or "GYearMonth" or "GYear" or "GMonthDay" or "GDay" or "GMonth";
     }
 
     private static string FinalOf(XsdNode definition)

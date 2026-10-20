@@ -127,6 +127,27 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Compiles a schema collection's added text (<see cref="XmlSchemaCompiler.Reject"/>),
+    /// queuing Msg 6966 for each type it warns of as the statement's message —
+    /// a refusal's included, for the types compiled ahead of it, which real
+    /// sends after the error and a <c>CATCH</c> doesn't swallow (probed
+    /// 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private static void RejectSchemaText(ParserContext context, string addedText, string? existingText)
+    {
+        var roundTripWarnings = new List<string>();
+        try
+        {
+            XmlSchemaCompiler.Reject(addedText, existingText, roundTripWarnings);
+        }
+        finally
+        {
+            foreach (var warned in roundTripWarnings)
+                context.Batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.XmlSchemaPatternRoundTripMessage(context.Batch, warned));
+        }
+    }
+
+    /// <summary>
     /// Parses <c>CREATE XML SCHEMA COLLECTION [schema.]name AS '&lt;xsd&gt;…'</c>.
     /// Cursor enters on the <c>XML</c> contextual keyword; caller has matched
     /// <c>CREATE</c>. The XSD text is stored verbatim; no XSD parsing or
@@ -237,7 +258,7 @@ partial class Simulation
 
         // The text is read as XML first, its parse errors real's own.
         _ = XmlWellFormedness.Canonical(xsdText, SqlType.IsNationalStringCategory(literalValue.Type));
-        XmlSchemaCompiler.Reject(xsdText, existingText: null);
+        RejectSchemaText(context, xsdText, existingText: null);
         var documents = XmlSchemaComponentBuilder.CountDocuments(xsdText);
         var componentCount = XmlSchemaComponentBuilder.Build(xsdText, [new(documents, 0)]).Components.Count;
         ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
@@ -249,8 +270,6 @@ partial class Simulation
             Segments = [new(documents, restoring ? 0 : database.AllocateXmlComponentIds(componentCount))],
         };
         RecordSlotUndo<XmlSchemaCollection>(context, ownerSchema.XmlSchemaCollections, name.Leaf, null);
-        foreach (var warned in XmlSchemaRoundTripWarnings.Of(ownerSchema.XmlSchemaCollections[name.Leaf].GetComponents(), 0))
-            context.Batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.XmlSchemaPatternRoundTripMessage(context.Batch, warned));
         ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, ownerSchema.Database, id, "SX", 0, name.Leaf);
         RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
@@ -272,6 +291,7 @@ partial class Simulation
     /// can't alter (ALTER on its schema), is Msg 6347 either way.
     /// </remarks>
     internal static bool TryParseAlterXmlSchemaCollection(ParserContext context)
+
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Schema })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -309,7 +329,7 @@ partial class Simulation
         // Every compile refusal comes ahead of a redeclared component's, and
         // the added text's own names don't collide with the collection's
         // (probed 2026-10-16 against SQL Server 2025).
-        XmlSchemaCompiler.Reject(added, previousText);
+        RejectSchemaText(context, added, previousText);
         try
         {
             collection.RejectRedeclaredComponents(added);
@@ -328,8 +348,6 @@ partial class Simulation
         var firstComponentId = context.CurrentDatabase.AllocateXmlComponentIds(AddedComponents());
         collection.XsdText = previousText + added;
         collection.Segments = [.. previousSegments, new(documents, firstComponentId)];
-        foreach (var warned in XmlSchemaRoundTripWarnings.Of(collection.GetComponents(), firstComponentId))
-            context.Batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.XmlSchemaPatternRoundTripMessage(context.Batch, warned));
         collection.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         collection.AlteredAt = Interlocked.Increment(ref context.Connection.Simulation.XmlSchemaCollectionAlterations);
         RecordDdlUndo(context, () =>

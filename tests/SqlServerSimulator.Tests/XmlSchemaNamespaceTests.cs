@@ -146,4 +146,23 @@ public sealed class XmlSchemaNamespaceTests
             new[] { "6966:Warning: Type 'N" + Tail },
             Messages(simulation, """alter xml schema collection zw add N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:simpleType name="N"><xs:restriction base="xs:float"><xs:pattern value="1"/></xs:restriction></xs:simpleType></xs:schema>'"""));
     }
+    [TestMethod]
+    public void RoundTripWarnings_FollowCompileOrder_AndOutliveARefusal()
+    {
+        const string Tail = "' is restricted by a facet 'pattern' that may impede full round-tripping of instances of this type";
+        CollectionAssert.AreEqual(
+            new[] { "6966:Warning: Type '{urn:w}A" + Tail, "6966:Warning: Type '{urn:w}H" + Tail },
+            Messages(new Simulation(), """
+                create xml schema collection zw as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:w" xmlns="urn:w">
+                <xs:simpleType name="H"><xs:restriction base="A"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType>
+                <xs:simpleType name="A"><xs:restriction base="xs:int"><xs:pattern value="1"/></xs:restriction></xs:simpleType></xs:schema>'
+                """));
+        CollectionAssert.AreEqual(
+            new[] { "6966:Warning: Type '{urn:w}A" + Tail },
+            Messages(new Simulation(), """
+                begin try create xml schema collection zw as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:w" xmlns="urn:w">
+                <xs:simpleType name="A"><xs:restriction base="xs:int"><xs:pattern value="1"/></xs:restriction></xs:simpleType>
+                <xs:simpleType name="H"><xs:restriction base="A"><xs:maxInclusive value="5"/></xs:restriction></xs:simpleType></xs:schema>' end try begin catch end catch
+                """));
+    }
 }
