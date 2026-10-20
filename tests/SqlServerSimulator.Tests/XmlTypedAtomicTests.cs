@@ -355,4 +355,11 @@ public sealed class XmlTypedAtomicTests
     [DataRow("min((xs:date(\"2024-01-01\"), xs:date(\"2024-02-01\")))", "2024-01-01")]
     public void MinMax_CompareAnOrderedTypesValues(string expression, string expected) =>
         AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r/>'; select @x.value('string({expression.Replace("'", "''", StringComparison.Ordinal)})', 'nvarchar(20)')"));
+    [TestMethod]
+    [DataRow("xs:dateTime(\"2024-01-01T10:00:00+01:00\") = xs:dateTime(\"2024-01-01T09:00:00Z\")", "true")]
+    [DataRow("xs:time(\"10:00:00Z\") eq xs:time(\"11:00:00+01:00\")", "true")]
+    [DataRow("xs:dateTime(\"2024-01-01T10:00:00-05:00\") > xs:dateTime(\"2024-01-01T12:00:00Z\")", "true")]
+    [DataRow("xs:date(\"2024-01-01\") < xs:date(\"2024-01-02\")", "true")]
+    public void DateTimes_CompareByTheInstantTheyName(string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r/>'; select @x.value('string({expression.Replace("'", "''", StringComparison.Ordinal)})', 'nvarchar(9)')"));
 }

@@ -1818,7 +1818,46 @@ internal static class XmlQueryValues
             var rightNumber = ToNumber(right);
             return !double.IsNaN(leftNumber) && !double.IsNaN(rightNumber) && Satisfies(leftNumber.CompareTo(rightNumber), op);
         }
+        if ((DateTimeTypeOf(left) ?? DateTimeTypeOf(right)) is { } dateTimeType
+            && TryInstant(StringValue(left), dateTimeType, out var leftInstant)
+            && TryInstant(StringValue(right), dateTimeType, out var rightInstant))
+        {
+            return Satisfies(leftInstant.CompareTo(rightInstant), op);
+        }
         return Satisfies(string.CompareOrdinal(StringValue(left), StringValue(right)), op);
+    }
+
+    private static string? DateTimeTypeOf(object item) =>
+        item is XmlTypedAtomic { TypeName: "xs:date" or "xs:dateTime" or "xs:time" } typed ? typed.TypeName : null;
+
+    /// <summary>
+    /// The instant a date-time value names, which is what two of them compare
+    /// by — <c>10:00:00+01:00</c> equals <c>09:00:00Z</c> — a value without a
+    /// zone taken as UTC (probed 2026-10-20 against SQL Server 2025); false for
+    /// a value outside what <see cref="DateTimeOffset"/> holds, which compares
+    /// by its text instead.
+    /// </summary>
+    private static bool TryInstant(string text, string type, out DateTimeOffset instant)
+    {
+        var hasZone = text.EndsWith('Z') || (text.Length > 6 && text[^6] is '+' or '-' && text[^3] == ':');
+        var zone = hasZone ? (text.EndsWith('Z') ? "Z" : text[^6..]) : "Z";
+        var body = hasZone ? text[..^(zone == "Z" ? 1 : 6)] : text;
+        var dateTime = type switch
+        {
+            "xs:date" => body + "T00:00:00",
+            "xs:time" => "1972-12-31T" + body,
+            _ => body,
+        };
+        try
+        {
+            instant = XmlConvert.ToDateTimeOffset(dateTime + zone);
+            return true;
+        }
+        catch (Exception e) when (e is FormatException or ArgumentException or OverflowException)
+        {
+            instant = default;
+            return false;
+        }
     }
 
     private static bool Satisfies(int comparison, string op) => op switch
