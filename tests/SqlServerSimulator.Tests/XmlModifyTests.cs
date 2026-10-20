@@ -207,6 +207,24 @@ public sealed class XmlModifyTests
             2264,
             "XQuery [modify()]: Only non-document nodes may be deleted, found 'document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }'");
 
+    /// <summary>
+    /// The root (<c>/</c>) is the document node too, and a parent step is an
+    /// element or the document, which only <c>insert into</c> takes; a
+    /// positional predicate marks either at most one (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete /", 2264, "Only non-document nodes may be deleted, found 'document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }'")]
+    [DataRow("delete (/r/a)[1]/..", 2264, "Only non-document nodes may be deleted, found 'element(*,xdt:untyped) | document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }'")]
+    [DataRow("insert <b/> after (/)[1]", 2249, "The target of 'insert before/after' must be an element/PI/comment/text node, found 'document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * } ?'")]
+    [DataRow("insert <b/> after ((/r/a)[1]/..)[1]", 2249, "The target of 'insert before/after' must be an element/PI/comment/text node, found '(element(*,xdt:untyped) | document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }) ?'")]
+    [DataRow("replace value of ((/r/a)[1]/..)[1] with \"x\"", 9306, "The target of 'replace value of' cannot be a union type, found '(element(*,xdt:untyped) | document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }) ?'.")]
+    public void RootAndParentTargets_RefuseAsReal(string dml, int number, string message) =>
+        new Simulation().AssertSqlError($"declare @x xml = '<r><a/></r>'; set @x.modify('{dml}'); select @x", number, $"XQuery [modify()]: {message}");
+
+    [TestMethod]
+    public void InsertIntoAParentStep_Inserts() =>
+        AreEqual("<r><a/><b/></r>", ModifyVariable("<r><a/></r>", "insert <b/> into ((/r/a)[1]/..)[1]"));
+
     [TestMethod]
     public void Modify_NullVariable_Raises5302() =>
         new Simulation().AssertSqlError(

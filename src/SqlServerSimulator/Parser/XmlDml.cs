@@ -55,8 +55,16 @@ internal enum XmlDmlNodeKind
     /// <summary>A <c>processing-instruction()</c> node test.</summary>
     ProcessingInstruction,
 
-    /// <summary>The context (document) node, written <c>.</c>.</summary>
+    /// <summary>The context (document) node, written <c>.</c> or <c>/</c>.</summary>
     Document,
+
+    /// <summary>
+    /// A parent step (<c>..</c>), whose static type real gives as an element
+    /// or the document: <c>insert into</c> takes it, while <c>delete</c>,
+    /// <c>insert before</c> / <c>after</c> and <c>replace value of</c> refuse
+    /// it whatever it reaches (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    ElementOrDocument,
 }
 
 /// <summary>
@@ -119,8 +127,16 @@ internal sealed class XmlDmlItem(XmlDmlTerm term)
 /// the instance holds exactly one matching node, while
 /// <c>(/r/a/text())[1]</c> is <c>text ?</c> and accepted.
 /// </summary>
-internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNodeKind kind, string name, bool singleton, XmlSqlAccessorRef[] accessors)
+internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNodeKind kind, string name, bool singleton, XmlSqlAccessorRef[] accessors, bool predicated)
 {
+    /// <summary>
+    /// True when a positional predicate over the whole path made it at most
+    /// one, which real marks with <c>?</c> even on the document node that
+    /// <c>.</c> and <c>/</c> name exactly (probed 2026-10-20 against SQL
+    /// Server 2025).
+    /// </summary>
+    public readonly bool Predicated = predicated;
+
     /// <summary>The <c>sql:variable</c> / <c>sql:column</c> slots the path's predicates read, filled per row.</summary>
     public readonly XmlSqlAccessorRef[] Accessors = accessors;
 
@@ -148,8 +164,11 @@ internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNo
     /// </summary>
     public string Describe()
     {
+        const string document = "document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }";
         if (this.Kind == XmlDmlNodeKind.Document)
-            return "document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }";
+            return this.Predicated ? document + " ?" : document;
+        if (this.Kind == XmlDmlNodeKind.ElementOrDocument)
+            return this.Predicated ? $"(element(*,xdt:untyped) | {document}) ?" : "element(*,xdt:untyped) | " + document;
         var occurrence = this.Singleton ? " ?" : " *";
         return this.Kind switch
         {

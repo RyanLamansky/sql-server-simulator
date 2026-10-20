@@ -66,7 +66,7 @@ internal sealed class XmlDmlParser(
     private XmlDml ParseDelete()
     {
         var target = this.ParsePath(this.text.Length);
-        return target.Kind == XmlDmlNodeKind.Document
+        return target.Kind is XmlDmlNodeKind.Document or XmlDmlNodeKind.ElementOrDocument
             ? throw SimulatedSqlException.XmlDmlOnlyNodesDeletable(this.method, target.Describe())
             : XmlDml.CreateDelete(target, this.method);
     }
@@ -86,6 +86,8 @@ internal sealed class XmlDmlParser(
         // unbracketed path reports 2337 whatever it selects.
         if (!target.Singleton)
             throw SimulatedSqlException.XmlDmlReplaceTargetNotSingleton(this.method, target.Describe());
+        if (target.Kind == XmlDmlNodeKind.ElementOrDocument)
+            throw SimulatedSqlException.XmlDmlReplaceTargetUnion(this.method, target.Describe());
         if (target.Kind is not (XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Text) && !this.TargetHasSimpleTypedContent(target))
             throw SimulatedSqlException.XmlDmlReplaceTargetNotSimpleContent(this.method, target.Describe());
 
@@ -240,10 +242,10 @@ internal sealed class XmlDmlParser(
             throw SimulatedSqlException.XmlDmlAttributeInsertHasPosition(this.method, contentExpression.NodeTypeBase());
         if (positional)
         {
-            if (target.Kind is XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Document)
+            if (target.Kind is XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Document or XmlDmlNodeKind.ElementOrDocument)
                 throw SimulatedSqlException.XmlDmlInsertBeforeAfterTargetKind(this.method, target.Describe());
         }
-        else if (target.Kind is not (XmlDmlNodeKind.Element or XmlDmlNodeKind.Document))
+        else if (target.Kind is not (XmlDmlNodeKind.Element or XmlDmlNodeKind.Document or XmlDmlNodeKind.ElementOrDocument))
         {
             throw SimulatedSqlException.XmlDmlInsertIntoTargetKind(this.method, target.Describe());
         }
@@ -453,11 +455,11 @@ internal sealed class XmlDmlParser(
         var accessors = new XmlSqlAccessorScope(this.ResolveContentAccessor);
         var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify", accessors, this.Typing);
         this.ResolveAccessorNames(accessors);
-        if (analyzed == ".")
-            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton: true, [.. accessors.Accessors]);
+        if (analyzed is "." or "/")
+            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton: true, [.. accessors.Accessors], predicated: singleton);
 
         var (kind, name) = ClassifyStep(LastStep(analyzed));
-        return new XmlDmlPath(body, compiled, kind, name, singleton, [.. accessors.Accessors]);
+        return new XmlDmlPath(body, compiled, kind, name, singleton, [.. accessors.Accessors], predicated: singleton);
     }
 
     /// <summary>Index of the <c>)</c> closing the parenthesis at position 0, or -1.</summary>
@@ -509,6 +511,8 @@ internal sealed class XmlDmlParser(
             return (XmlDmlNodeKind.Comment, string.Empty);
         if (step.StartsWith("processing-instruction(", StringComparison.Ordinal))
             return (XmlDmlNodeKind.ProcessingInstruction, string.Empty);
+        if (step is ".." || step.StartsWith("parent::", StringComparison.Ordinal))
+            return (XmlDmlNodeKind.ElementOrDocument, string.Empty);
         var localColon = step.LastIndexOf(':');
         return (XmlDmlNodeKind.Element, localColon >= 0 ? step[(localColon + 1)..] : step);
     }

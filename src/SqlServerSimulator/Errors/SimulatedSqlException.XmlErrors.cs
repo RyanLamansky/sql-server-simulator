@@ -929,6 +929,14 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: The target of 'replace' must be at most one node, found '{staticType}'", 2337, 16, 1);
 
     /// <summary>
+    /// Msg 9306: the <c>replace value of</c> target's static type is a union —
+    /// a parent step's element-or-document (probed 2026-10-20 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlDmlReplaceTargetUnion(string method, string staticType) =>
+        new($"XQuery [{method}()]: The target of 'replace value of' cannot be a union type, found '{staticType}'.", 9306, 16, 1);
+
+    /// <summary>
     /// Msg 2356: the <c>replace value of</c> target is a node whose value can't
     /// be written — an untyped element rather than an attribute or a
     /// <c>text()</c> node. Probe-confirmed wording against SQL Server 2025.

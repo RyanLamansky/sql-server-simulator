@@ -631,7 +631,8 @@ The messages quote that static type, and the simulator reproduces the notation: 
 | `replace value of` an untyped element (a typed one whose collection gives it simple content is accepted) | **Msg 2356** — `… must be a non-metadata attribute or an element with simple typed content, found 'element(a,xdt:untyped) ?'` |
 | `replace value of … with <b/>` | **Msg 9310** — `… The 'with' clause of 'replace value of' cannot contain constructed XML.` |
 | `replace value of` with no `with` | **Msg 2205** — `XQuery [modify()]: "with" was expected.` |
-| `delete .` or a `delete` of an atomic value | **Msg 2264** — `… Only non-document nodes may be deleted, found '…'` |
+| `delete .` / `delete /`, a parent step, or a `delete` of an atomic value | **Msg 2264** — `… Only non-document nodes may be deleted, found '…'` |
+| `replace value of` a parent step | **Msg 9306** — `… cannot be a union type, found '…'.`: a parent step is an element or the document, which only `insert into` takes, refused by `delete` and `insert before/after` too whatever it reaches; a positional predicate marks the type `?`, the document's included (probed 2026-10-20) |
 | the argument parses as XQuery but isn't XML-DML (`'/r'`, `'count(/r)'`, `'<a/>'`, a FLWOR) | **Msg 6305** — `XQuery data manipulation expression required in XML data type method.` |
 | the argument doesn't parse as XQuery either (`'('`, `'/r['`, a bare `'insert'`) | **Msg 2209** — `XQuery [modify()]: Syntax error near '<eof>'` |
 | the argument is empty or whitespace | **Msg 6306** — `Invalid XQuery expression passed to XML data type method.` |
