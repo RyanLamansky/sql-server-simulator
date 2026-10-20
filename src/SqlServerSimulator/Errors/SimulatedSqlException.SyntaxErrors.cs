@@ -621,6 +621,14 @@ partial class SimulatedSqlException
         new($"An action of type 'INSERT' is not allowed in the '{clauseType}' clause of a MERGE statement.", 10711, 15, 1);
 
     /// <summary>
+    /// Msg 10723: a <c>MERGE</c> update action's <c>SET @variable = column =
+    /// expression</c>, the UPDATE statement's form, which a MERGE refuses as
+    /// its batch compiles (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MergeVariableColumnAssignment() =>
+        new("In a MERGE statement, a variable cannot be set to a column and expression in the same assignment in the SET clause of an UPDATE action. Assignments of the form 'SET @variable = column = expression' are not valid in the SET clause of an UPDATE action in a MERGE statement. Modify the SET clause to only specify assignments of the form 'SET @variable = column' or 'SET @variable = expression'.", 10723, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 10714: a <c>MERGE</c> statement had more than
     /// one <c>WHEN NOT MATCHED [BY TARGET]</c> clause. Real SQL Server allows
     /// at most one INSERT branch (unlike <c>WHEN MATCHED</c> and <c>WHEN

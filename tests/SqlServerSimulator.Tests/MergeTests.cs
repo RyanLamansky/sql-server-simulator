@@ -1127,4 +1127,20 @@ public sealed class MergeTests
         _ = simulation.ExecuteNonQuery("merge t using (values (1, 5), (9, 9), (8, 8)) x (id, v) on t.id = x.id when matched then update set v = x.v when not matched then insert values (x.id, x.v);");
         AreEqual("I:3|U:3", simulation.ExecuteScalar("select string_agg(concat(k, ':', rc), '|') within group (order by k) from seen"));
     }
+    [TestMethod]
+    public void UpdateAction_AssignsAVariable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table zt (id int primary key, v int); insert zt values (1, 10), (2, 20); create table zs (id int, v int); insert zs values (2, 200)");
+        AreEqual("200|1", simulation.ExecuteScalar("declare @c int; merge zt t using zs s on t.id = s.id when matched then update set @c = s.v, v = 1; select concat(@c, '|', v) from zt where id = 2"));
+        AreEqual(1, simulation.ExecuteScalar("declare @c int; merge zt t using zs s on t.id = s.id when matched then update set @c = t.v; select @c"));
+    }
+
+    [TestMethod]
+    public void UpdateAction_VariableColumnAssignment_IsRefused()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table zt (id int primary key, v int); create table zs (id int, v int)");
+        _ = simulation.AssertSqlError("declare @c int; merge zt t using zs s on t.id = s.id when matched then update set @c = v = 5", 10723);
+    }
 }

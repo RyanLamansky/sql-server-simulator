@@ -1317,6 +1317,8 @@ partial class Simulation
             EnforceRule(destinationTable, newValues, ord, context.Batch);
         }
         WriteAssignedColumnSet(destinationTable, clause.Assignments!, newValues);
+        foreach (var variableAssignment in clause.VariableAssignments ?? [])
+            _ = variableAssignment.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
 
         StampUpdatedRow(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");

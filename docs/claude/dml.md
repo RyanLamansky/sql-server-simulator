@@ -466,6 +466,7 @@ Probe-confirmed schema-inference rules:
 - `WHEN NOT MATCHED [BY TARGET] [AND <cond>] THEN INSERT [(cols)] VALUES (exprs)` / `INSERT DEFAULT VALUES`
 - `WHEN NOT MATCHED BY SOURCE [AND <cond>] THEN UPDATE SET col = expr [, …]` / `DELETE`
 
+An update action's `SET` may also assign a variable, `@v = expression`, run against each updated row's values before the update so the last row's value stays; the UPDATE statement's `@v = column = expression` is **Msg 10723** as the batch compiles (probed 2026-10-20 against SQL Server 2025).
 An insert action's values follow `INSERT … VALUES`'s rules: a value may be `DEFAULT`, standing alone, and the column-list-less form lists a `rowversion` column, which takes only `DEFAULT` or a constant NULL (Msg 273 otherwise), while `DEFAULT` or a constant NULL for an identity column is Msg 339 ahead of Msg 544 (probed 2026-10-19 against SQL Server 2025).
 Its Msg 515 says "UPDATE fails." and names a different column from an `INSERT`'s: real checks the columns the action lists last to first — every column, for `DEFAULT VALUES` — and then the unlisted ones first to last, so `INSERT DEFAULT VALUES` over two NOT NULL columns names the second (probed 2026-10-19).
 

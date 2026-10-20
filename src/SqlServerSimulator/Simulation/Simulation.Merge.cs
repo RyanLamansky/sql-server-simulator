@@ -1801,6 +1801,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var assignments = new List<(int Ordinal, Expression Expr)>();
+        List<AssignmentExpression>? variableAssignments = null;
         // An action assigning a column twice binds none of its values (probed
         // 2026-10-19 against SQL Server 2025: `SET v = x1, v = 3` is the Msg
         // 264 alone).
@@ -1810,7 +1811,25 @@ partial class Simulation
         {
             while (true)
             {
-                if (context.GetNextRequired() is not StringToken first)
+                // `@v = expression` assigns the variable as each row updates
+                // (probed 2026-10-20 against SQL Server 2025); the UPDATE
+                // statement's `@v = column = expression` is Msg 10723 here.
+                if (context.GetNextRequired() is AtPrefixedString variable)
+                {
+                    var slot = context.Batch.GetVariableSlot(variable.Value);
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    var value = Expression.Parse(context);
+                    if (context.Token is Operator { Character: '=' })
+                        throw SimulatedSqlException.MergeVariableColumnAssignment();
+                    _ = value.GetSqlType(context.Batch, resolveType);
+                    (variableAssignments ??= []).Add(new AssignmentExpression(variable.Value, slot, value));
+                    if (context.Token is not Operator { Character: ',' })
+                        break;
+                    continue;
+                }
+                if (context.Token is not StringToken first)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 var setTarget = new MultiPartName(first.Value);
                 context.MoveNextRequired();
@@ -1914,7 +1933,10 @@ partial class Simulation
         }
 
         RejectColumnSetBesideSparse(destinationTable, assignments);
-        return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null);
+        return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null)
+        {
+            VariableAssignments = variableAssignments,
+        };
     }
 
     /// <summary>
@@ -2320,6 +2342,10 @@ partial class Simulation
         public readonly MergeActionKind Action = action;
         public readonly BooleanExpression? SearchCondition = searchCondition;
         public readonly List<(int Ordinal, Expression Expr)>? Assignments = assignments;
+
+        /// <summary>An <c>UPDATE</c> action's <c>SET @v = expression</c> assignments, run against each updated row's values before the update.</summary>
+        public List<AssignmentExpression>? VariableAssignments;
+
         public readonly HeapColumn[]? InsertColumns = insertColumns;
         public readonly Expression[]? InsertValues = insertValues;
 
