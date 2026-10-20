@@ -189,6 +189,9 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
     /// <summary>The un-suffixed node-form type name; only paths have one of their own.</summary>
     public virtual string NodeTypeBase() => this.TypeName;
 
+    /// <summary>What the receiver's schema collection types the expression's nodes as, or null where it doesn't.</summary>
+    public virtual XmlSchemaPathType? SchemaPathType() => null;
+
     /// <summary>The occurrence indicator real appends to a static type name.</summary>
     internal static string OccurrenceSuffix(XmlOccurrence occurrence) => occurrence switch
     {
@@ -328,6 +331,8 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
     }
 
     public override string NodeTypeBase() => this.source.NodeTypeBase();
+
+    public override XmlSchemaPathType? SchemaPathType() => this.source.SchemaPathType();
 }
 
 /// <summary>The document root of the instance being queried — an absolute path's start.</summary>
@@ -362,6 +367,9 @@ internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
 
     public override string NodeTypeBase() =>
         this.steps.Length == 0 ? this.start.NodeTypeBase() : this.steps[^1].NodeTypeBase();
+
+    public override XmlSchemaPathType? SchemaPathType() =>
+        this.steps.Length == 0 ? this.start.SchemaPathType() : this.steps[^1].SchemaType;
 
     private static XmlOccurrence PathOccurrence(XmlQueryExpr start, XmlStep[] steps)
     {
@@ -443,13 +451,24 @@ internal sealed class XmlStep(
     /// </summary>
     public readonly string? TypeName = typeName;
 
+    /// <summary>The element declarations the step's nodes may carry, or null where the collection doesn't type them.</summary>
+    public XmlSchemaPathType? SchemaType;
+
+    /// <summary>
+    /// A name test's name as real's static types write it — under the prefix
+    /// the query binds its namespace to (<c>t{urn:t}:a</c>) — or null for the
+    /// bare local name.
+    /// </summary>
+    public string? NotationName;
+
     /// <summary>The step's axis.</summary>
     public readonly XmlAxis Axis = axis;
     /// <summary>What the node test matches.</summary>
     public readonly XmlNodeTestKind TestKind = testKind;
     /// <summary>The name test's local name; empty for the other tests.</summary>
     public readonly string LocalName = localName;
-    private readonly string namespaceUri = namespaceUri;
+    /// <summary>The name test's namespace URI; empty for no namespace and for the other tests.</summary>
+    public readonly string NamespaceUri = namespaceUri;
     private readonly XmlQueryExpr[] predicates = predicates;
 
     /// <summary>
@@ -497,8 +516,8 @@ internal sealed class XmlStep(
             ? "attribute(*,xdt:untypedAtomic)"
             : "element(*,xdt:untyped)",
         _ => this.Axis == XmlAxis.Attribute
-            ? $"attribute({this.LocalName},{this.TypeName ?? "xdt:untypedAtomic"})"
-            : $"element({this.LocalName},{this.TypeName ?? "xdt:untyped"})",
+            ? $"attribute({this.NotationName ?? this.LocalName},{this.TypeName ?? "xdt:untypedAtomic"})"
+            : $"element({this.NotationName ?? this.LocalName},{this.TypeName ?? "xdt:untyped"})",
     };
 
     /// <summary>Runs the step over every item in <paramref name="context"/>.</summary>
@@ -676,10 +695,10 @@ internal sealed class XmlStep(
         XmlNodeTestKind.AnyNamespace => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
             && string.Equals(node.LocalName, this.LocalName, StringComparison.Ordinal),
         XmlNodeTestKind.AnyLocalName => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
-            && string.Equals(node.NamespaceURI, this.namespaceUri, StringComparison.Ordinal),
+            && string.Equals(node.NamespaceURI, this.NamespaceUri, StringComparison.Ordinal),
         _ => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
             && string.Equals(node.LocalName, this.LocalName, StringComparison.Ordinal)
-            && string.Equals(node.NamespaceURI, this.namespaceUri, StringComparison.Ordinal),
+            && string.Equals(node.NamespaceURI, this.NamespaceUri, StringComparison.Ordinal),
     };
 }
 
@@ -851,6 +870,9 @@ internal sealed class XmlVariableBinding(string name, int slot, XmlQueryExpr sou
 
     /// <summary>Un-suffixed node-form type name a reference to this variable carries.</summary>
     public readonly string NodeType = source.NodeTypeBase();
+
+    /// <summary>What the receiver's schema collection types a reference's nodes as, or null where it doesn't.</summary>
+    public readonly XmlSchemaPathType? SchemaType = source.SchemaPathType();
 }
 
 /// <summary>
@@ -925,6 +947,8 @@ internal sealed class XmlVariableRefExpr(XmlVariableBinding binding)
         results.AddRange(frame.Variables!.Read(this.binding.Slot));
 
     public override string NodeTypeBase() => this.binding.NodeType;
+
+    public override XmlSchemaPathType? SchemaPathType() => this.binding.SchemaType;
 }
 
 /// <summary>One <c>order by</c> item: its key expression and its direction.</summary>

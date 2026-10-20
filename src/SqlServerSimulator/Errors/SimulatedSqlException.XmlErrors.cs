@@ -1270,6 +1270,36 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: There is no element named '{name}' in the type '{staticType}'.", 2261, 16, 1);
 
     /// <summary>
+    /// Msg 2263: a child step naming an element in a namespace that no
+    /// declaration the context's schema type reaches carries (probed
+    /// 2026-10-20 against SQL Server 2025); Msg 2261 is the same refusal in no
+    /// namespace, with its own quotes.
+    /// </summary>
+    internal static SimulatedSqlException XQueryNoSuchNamespacedElementInType(string method, string name, string staticType) =>
+        new($"XQuery [{method}()]: There is no element named \"{name}\" in the type \"{staticType}\".", 2263, 16, 1);
+
+    /// <summary>Msg 2260: a step from a typed document naming a top-level element in no namespace the collection doesn't declare.</summary>
+    internal static SimulatedSqlException XQueryNoSuchTopLevelElement(string method, string name) =>
+        new($"XQuery [{method}()]: There is no element named '{name}'", 2260, 16, 1);
+
+    /// <summary>Msg 2262: <see cref="XQueryNoSuchTopLevelElement"/> for a name in a namespace, written <c>{uri}:local</c>.</summary>
+    internal static SimulatedSqlException XQueryNoSuchTopLevelNamespacedElement(string method, string name) =>
+        new($"XQuery [{method}()]: There is no element named '{name}'", 2262, 16, 1);
+
+    /// <summary>
+    /// Msg 9314: atomizing an element whose schema type has complex content,
+    /// mixed included — <c>value()</c> or <c>data()</c> over it — naming the
+    /// type (an anonymous one by its element's name) and the operand's
+    /// inferred type (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryAtomizesComplexContent(string method, string foundType, string inferredType) =>
+        new($"XQuery [{method}()]: Cannot implicitly atomize or apply 'fn:data()' to complex content elements, found type '{foundType}' within inferred type '{inferredType}'.", 9314, 16, 1);
+
+    /// <summary>Msg 2213: <see cref="XQueryAtomizesComplexContent"/> for an element whose type declares no content at all.</summary>
+    internal static SimulatedSqlException XQueryAtomizesEmptyContent(string method, string foundType, string inferredType) =>
+        new($"XQuery [{method}()]: Cannot atomize/apply data() on expression that contains type '{foundType}' within inferred type '{inferredType}'", 2213, 16, 1);
+
+    /// <summary>
     /// Msg 2342: a decimal or integer literal past the 28 integer digits real's
     /// <c>xs:decimal</c> holds (probed 2026-10-06 against SQL Server 2025).
     /// </summary>
@@ -1291,6 +1321,10 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XQueryNoSuchAttributeInType(string method, string name, string staticType) =>
         new($"XQuery [{method}()]: There is no attribute named '{name}' in the type '{staticType}'.", 2219, 16, 1);
+
+    /// <summary>Msg 2221: <see cref="XQueryNoSuchAttributeInType"/> for an attribute in a namespace, written <c>@{uri}:local</c>.</summary>
+    internal static SimulatedSqlException XQueryNoSuchNamespacedAttributeInType(string method, string name, string staticType) =>
+        new($"XQuery [{method}()]: There is no attribute named '{name}' in the type '{staticType}'.", 2221, 16, 1);
 
     /// <summary>
     /// Msg 9308: an arithmetic operand real types as neither numeric nor

@@ -116,11 +116,16 @@ public sealed class TypedXmlCardinalityTests
     /// <summary>
     /// A global element declaration carries no occurrence of its own — its
     /// cardinality comes from wherever it is referenced — so naming one does
-    /// not narrow anything. <c>t:r</c> is this collection's global element.
+    /// not narrow anything. <c>t:r</c> is this collection's global element, of
+    /// complex content, so <c>value()</c> refuses atomizing it, quoting the
+    /// unnarrowed <c>*</c> (probed 2026-10-20 against SQL Server 2025).
     /// </summary>
     [TestMethod]
     public void GlobalElementDeclaration_DoesNotNarrow()
-        => _ = WithTypedColumn().AssertSqlError($"select x.value('{Prolog}/t:r', 'nvarchar(50)') from tt", 2389);
+        => WithTypedColumn().AssertSqlError(
+            $"select x.value('{Prolog}/t:r', 'nvarchar(50)') from tt",
+            9314,
+            "XQuery [tt.x.value()]: Cannot implicitly atomize or apply 'fn:data()' to complex content elements, found type 't{urn:t}:r' within inferred type 'element(t{urn:t}:r,#anonymous) *'.");
 
     /// <summary>An XSD text that isn't XML is refused as real's XML parser refuses it (probed 2026-10-07 against SQL Server 2025).</summary>
     [TestMethod]

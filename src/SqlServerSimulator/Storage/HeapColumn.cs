@@ -247,6 +247,9 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public string? XmlNodeStaticType;
 
+    /// <summary>Set on the node column a <c>.nodes()</c> source produces, whose values are nodes inside an instance.</summary>
+    public bool XmlNodesRow;
+
     /// <summary>
     /// The column was declared <c>xml(DOCUMENT …)</c>: a write holding anything
     /// but one top-level element is Msg 6901 (<c>sys.columns.is_xml_document</c>).

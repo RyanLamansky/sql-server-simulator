@@ -48,7 +48,8 @@ internal static class XmlQueryEngine
         string? displayMethod = null,
         XmlSqlAccessorScope? sqlAccessors = null,
         Parser.ForXmlNamespaces? statementNamespaces = null,
-        string? contextNodeType = null)
+        string? contextNodeType = null,
+        bool documentContext = false)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery, displayMethod ?? method);
 
@@ -66,9 +67,37 @@ internal static class XmlQueryEngine
         // stays the bare discriminator the rules below switch on, while
         // `display` is what real writes between the diagnostics' brackets.
         var display = displayMethod ?? method;
-        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors, contextNodeType);
-        var compiled = parser.ParseBody();
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors, contextNodeType, documentContext);
+        var bodyStart = xquery.TrimEnd().Length - body.Length;
+        XmlQueryExpr compiled;
+        try
+        {
+            compiled = parser.ParseBody();
+        }
+        catch (SimulatedSqlException parseError)
+        {
+            // The parse places what it can — an operator's refusal at its
+            // left operand — and otherwise the error sits where it stopped.
+            parseError.XQueryOffset = bodyStart + (parseError.XQueryOffset ?? parser.Offset());
+            throw;
+        }
 
+        try
+        {
+            RequireMethodShape(compiled, method, display, parser);
+        }
+        catch (SimulatedSqlException shapeError)
+        {
+            shapeError.XQueryOffset ??= bodyStart;
+            throw;
+        }
+        compiled.Prolog = new XmlProlog(defaultNamespace, prefixes, typing is not null);
+        return compiled;
+    }
+
+    /// <summary>The refusals a method makes of a compiled expression's shape, which real places at the body's start.</summary>
+    private static void RequireMethodShape(XmlQueryExpr compiled, string method, string display, XmlQueryParser parser)
+    {
         // A node constructor is legal in query() and exist(), which hand the
         // node on, and refused by the two that would have to look inside it —
         // value() atomizes and nodes() addresses (probe-confirmed, each with
@@ -97,9 +126,10 @@ internal static class XmlQueryEngine
         // never a bare `/r/a` (probe-confirmed: Msg 2389 even when the instance
         // holds exactly one match).
         if (method.Equals("value", StringComparison.Ordinal))
+        {
+            parser.RequireAtomizable(compiled);
             XmlQueryParser.RequireSingleton(compiled, "value()", display);
-        compiled.Prolog = new XmlProlog(defaultNamespace, prefixes, typing is not null);
-        return compiled;
+        }
     }
 
     /// <summary>

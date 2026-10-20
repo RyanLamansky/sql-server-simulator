@@ -178,6 +178,7 @@ internal sealed class XmlMethodCall : Expression
 
         context.MoveNextRequired();
         string? xqueryText = null;
+        Token? argumentToken = null;
         SqlType valueType = SqlType.Xml;
         int? valueMaxLength = null;
         if (context.Token is not Operator { Character: ')' })
@@ -185,6 +186,7 @@ internal sealed class XmlMethodCall : Expression
             // Each of the four methods that reach here takes the XQuery
             // expression as its first argument; `.modify()`, the one that
             // doesn't, was refused above.
+            argumentToken = context.Token;
             var firstArg = Expression.Parse(context);
             xqueryText = ConstantString(firstArg, methodName, 1);
 
@@ -208,9 +210,27 @@ internal sealed class XmlMethodCall : Expression
         var receiverName = ResolveReceiverName(target, context);
         var display = DisplayMethod(receiverName, methodName);
         var accessorScope = new XmlSqlAccessorScope((isColumn, name) => ResolveAccessorType(isColumn, name, context, display));
-        var xquery = xqueryText is null
-            ? null
-            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context));
+        XmlQueryExpr? xquery = null;
+        if (xqueryText is not null)
+        {
+            try
+            {
+                xquery = XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context), !ReceivesNodesRow(target, context));
+            }
+            catch (SimulatedSqlException ex) when (ex.XQueryOffset is { } offset && argumentToken is not null)
+            {
+                // Real reports the line the argument's text places the error
+                // on, counted from the line the literal opens on (probed
+                // 2026-10-20 against SQL Server 2025).
+                var line = argumentToken.LineNumber + xqueryText.AsSpan(0, Math.Min(offset, xqueryText.Length)).Count('\n');
+                foreach (var error in ex.Errors)
+                {
+                    if (error.LineNumber == 0)
+                        error.LineNumber = line;
+                }
+                throw;
+            }
+        }
         return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName, [.. accessorScope.Accessors]);
     }
 
@@ -305,6 +325,18 @@ internal sealed class XmlMethodCall : Expression
         return (source.WrittenObjectName ?? source.Qualifier) is { } name
             ? $"{name}.{source.ColumnNames[columnIndex]}"
             : string.Empty;
+    }
+
+    /// <summary>
+    /// Whether the receiver is a <c>.nodes()</c> row, whose context item is a
+    /// node inside its instance rather than the instance's document.
+    /// </summary>
+    private static bool ReceivesNodesRow(Expression target, ParserContext context)
+    {
+        if (target is not Reference reference || context.ScopeSources is not { } sources)
+            return false;
+        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+        return sourceIndex >= 0 && sources[sourceIndex].Columns[columnIndex].XmlNodesRow;
     }
 
     /// <summary>

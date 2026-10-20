@@ -290,7 +290,7 @@ internal static class XmlSchemaValidation
         if (complex.ContentTypeParticle is not { } particle)
             return false;
 
-        var cursor = new ParticleCursor(children);
+        var cursor = new ParticleCursor(children, schemas);
         Match(particle, cursor, element);
         if (cursor.Index < children.Length)
         {
@@ -432,6 +432,12 @@ internal static class XmlSchemaValidation
         {
             case XmlSchemaElement declaration:
                 var wanted = NameOf(declaration);
+                if (cursor.Index < cursor.Children.Length && cursor.Children[cursor.Index].Name != wanted
+                    && SubstituteFor(declaration, cursor.Children[cursor.Index].Name, cursor.Schemas) is { } member)
+                {
+                    cursor.Bind(member);
+                    return true;
+                }
                 if (cursor.Index >= cursor.Children.Length || cursor.Children[cursor.Index].Name != wanted)
                 {
                     // What the model would have taken at this position, which
@@ -536,6 +542,26 @@ internal static class XmlSchemaValidation
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// The global declaration named <paramref name="name"/> in
+    /// <paramref name="head"/>'s substitution group, which an instance may write
+    /// in the head's place (probed 2026-10-20 against SQL Server 2025); null
+    /// when there is none or it is abstract.
+    /// </summary>
+    private static XmlSchemaElement? SubstituteFor(XmlSchemaElement head, XName name, XmlSchemaSet schemas)
+    {
+        if (schemas.GlobalElements[new XmlQualifiedName(name.LocalName, name.NamespaceName)] is not XmlSchemaElement member || member.IsAbstract)
+            return null;
+        var current = member;
+        for (var depth = 0; depth < 64 && current is not null && !current.SubstitutionGroup.IsEmpty; depth++)
+        {
+            if (current.SubstitutionGroup == head.QualifiedName)
+                return member;
+            current = schemas.GlobalElements[current.SubstitutionGroup] as XmlSchemaElement;
+        }
+        return null;
     }
 
     private static bool AnyBranchIsOptional(XmlSchemaChoice choice)
@@ -753,9 +779,12 @@ internal static class XmlSchemaValidation
     /// recursion report an over-occurring element (a name it already matched)
     /// apart from an unexpected one.
     /// </summary>
-    private sealed class ParticleCursor(XElement[] children)
+    private sealed class ParticleCursor(XElement[] children, XmlSchemaSet schemas)
     {
         public readonly XElement[] Children = children;
+
+        /// <summary>The collection's compiled schemas, whose global declarations a substitution group draws on.</summary>
+        public readonly XmlSchemaSet Schemas = schemas;
 
         public readonly List<(XElement Child, XmlSchemaElement? Declaration, XmlSchemaAny? Wildcard)> Bound = [];
 

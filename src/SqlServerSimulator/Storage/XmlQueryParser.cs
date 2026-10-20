@@ -24,7 +24,8 @@ internal sealed class XmlQueryParser(
     string method,
     XmlStaticTyping? typing = null,
     XmlSqlAccessorScope? sqlAccessors = null,
-    string? contextNodeType = null)
+    string? contextNodeType = null,
+    bool documentContext = false)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -67,13 +68,38 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private string? predicateContextType;
 
+    /// <summary>
+    /// The document node of a typed receiver whose context item is its
+    /// instance's document — not a <c>.nodes()</c> row — which an absolute
+    /// path's steps are typed from; null where the receiver is untyped.
+    /// </summary>
+    private readonly XmlSchemaPathType? documentType = documentContext && typing?.Schemas is { } schemas ? XmlSchemaPathType.Document(schemas) : null;
+
+    /// <summary>The schema type of the context item: the document at the top, a predicate's step inside it.</summary>
+    private XmlSchemaPathType? schemaContext;
+
+    /// <summary>How the schema types' names are written: under the prefixes the query binds.</summary>
+    private readonly XmlSchemaNotation notation = new(prefixes);
+
+    /// <summary>
+    /// Msg 9314 / 2213: atomizing <paramref name="operand"/> — <c>value()</c>'s
+    /// result or <c>data()</c>'s argument — where the schema types it as
+    /// elements with complex or no content.
+    /// </summary>
+    public void RequireAtomizable(XmlQueryExpr operand) =>
+        operand.SchemaPathType()?.RequireAtomizable(operand.Occurrence, this.notation, this.method);
+
     private int index;
     private int slotCount;
     private int predicateDepth;
 
+    /// <summary>The offset in the body the parse has reached, where an error it raises is placed.</summary>
+    public int Offset() => Math.Min(this.index, this.text.Length);
+
     /// <summary>Parses the whole body, rejecting anything left over.</summary>
     public XmlQueryExpr ParseBody()
     {
+        this.schemaContext = this.documentType;
         var expression = this.ParseExpr();
         this.SkipWhitespace();
         return this.index < this.text.Length ? throw this.SyntaxError() : expression;
@@ -396,6 +422,8 @@ internal sealed class XmlQueryParser(
 
     private XmlQueryExpr ParseAdditive()
     {
+        this.SkipWhitespace();
+        var start = this.index;
         var left = this.ParseMultiplicative();
         while (true)
         {
@@ -404,12 +432,32 @@ internal sealed class XmlQueryParser(
                 return left;
             var op = this.Current;
             this.index++;
-            left = this.Arithmetic(left, this.ParseMultiplicative(), op, op.ToString());
+            left = this.AnchoredArithmetic(start, left, this.ParseMultiplicative(), op, op.ToString());
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Arithmetic"/> for a binary operator, whose refusal real
+    /// places where its left operand starts, <paramref name="start"/> in the
+    /// body (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private XmlArithmeticExpr AnchoredArithmetic(int start, XmlQueryExpr left, XmlQueryExpr right, char op, string written)
+    {
+        try
+        {
+            return this.Arithmetic(left, right, op, written);
+        }
+        catch (SimulatedSqlException ex)
+        {
+            ex.XQueryOffset ??= start;
+            throw;
         }
     }
 
     private XmlQueryExpr ParseMultiplicative()
     {
+        this.SkipWhitespace();
+        var start = this.index;
         var left = this.ParseInstanceOf();
         while (true)
         {
@@ -417,15 +465,15 @@ internal sealed class XmlQueryParser(
             if (this.Current == '*')
             {
                 this.index++;
-                left = this.Arithmetic(left, this.ParseInstanceOf(), '*', "*");
+                left = this.AnchoredArithmetic(start, left, this.ParseInstanceOf(), '*', "*");
                 continue;
             }
             if (this.TryOperatorWord("div"))
-                left = this.Arithmetic(left, this.ParseInstanceOf(), '/', "div");
+                left = this.AnchoredArithmetic(start, left, this.ParseInstanceOf(), '/', "div");
             else if (this.AtWord("idiv"))
                 throw SimulatedSqlException.XQuerySyntaxNotSupported(this.method, "idiv");
             else if (this.TryOperatorWord("mod"))
-                left = this.Arithmetic(left, this.ParseInstanceOf(), 'm', "mod");
+                left = this.AnchoredArithmetic(start, left, this.ParseInstanceOf(), 'm', "mod");
             else
                 return left;
         }
@@ -660,24 +708,29 @@ internal sealed class XmlQueryParser(
         this.SkipWhitespace();
         XmlQueryExpr start;
         var steps = new List<XmlStep>();
+        // What the steps so far reach, and how many of it — the type a step
+        // naming nothing reachable is refused against.
+        XmlSchemaPathType? reached;
+        var occurrence = XmlOccurrence.ExactlyOne;
 
         if (this.TryConsume('/'))
         {
             start = new XmlRootExpr();
+            reached = this.documentType;
             if (this.TryConsume('/'))
             {
                 steps.Add(DescendantOrSelfStep());
-                steps.Add(this.ParseStep());
+                steps.Add(this.ParseStep(null, occurrence));
             }
             else if (this.StartsStep())
             {
-                steps.Add(this.ParseStep());
+                steps.Add(this.ParseStep(reached, occurrence));
             }
         }
         else if (this.StartsStep())
         {
             start = new XmlContextItemExpr();
-            var first = this.ParseStep();
+            var first = this.ParseStep(this.schemaContext, occurrence);
             this.RequireStepFromContextNode(first);
             steps.Add(first);
         }
@@ -687,10 +740,14 @@ internal sealed class XmlQueryParser(
             this.SkipWhitespace();
             if (this.Current == '[')
                 RequireNotConstructed(start, "'[]'", this.method);
-            var predicates = this.ParsePredicates();
+            var predicates = this.ParsePredicates(schemaType: start.SchemaPathType());
             if (predicates.Length > 0)
                 start = new XmlFilterExpr(start, predicates);
         }
+        occurrence = start.Occurrence;
+        foreach (var step in steps)
+            occurrence = XmlQueryExpr.Combine(occurrence, step.Occurrence);
+        reached = steps.Count > 0 ? steps[^1].SchemaType : start.SchemaPathType();
 
         while (true)
         {
@@ -700,11 +757,17 @@ internal sealed class XmlQueryParser(
             RequireNotConstructed(start, "'/'", this.method);
             this.index++;
             if (this.TryConsume('/'))
-                steps.Add(DescendantOrSelfStep());
-            var step = this.ParseStep();
+            {
+                reached = reached?.DescendantOrSelf();
+                steps.Add(DescendantOrSelfStep(reached));
+                occurrence = XmlQueryExpr.Combine(occurrence, XmlOccurrence.Many);
+            }
+            var step = this.ParseStep(reached, occurrence);
             this.RequireSelfStepPossible(start, steps, step);
             this.RequireTextStepPossible(start, steps, step);
             steps.Add(step);
+            occurrence = XmlQueryExpr.Combine(occurrence, step.Occurrence);
+            reached = step.SchemaType;
         }
         return steps.Count == 0 ? start : new XmlPathExpr(start, [.. steps]);
     }
@@ -760,18 +823,23 @@ internal sealed class XmlQueryParser(
         if (step.Axis != XmlAxis.Self || step.TestKind != XmlNodeTestKind.Name || steps.Count == 0)
             return;
         var previous = steps[^1];
-        if (previous.Axis != XmlAxis.Child || previous.TestKind != XmlNodeTestKind.Name || previous.LocalName == step.LocalName)
+        if (previous.Axis != XmlAxis.Child || previous.TestKind != XmlNodeTestKind.Name
+            || (previous.LocalName == step.LocalName && previous.NamespaceUri == step.NamespaceUri))
+        {
             return;
+        }
         var occurrence = start.Occurrence;
         foreach (var earlier in steps)
             occurrence = XmlQueryExpr.Combine(occurrence, earlier.Occurrence);
-        throw SimulatedSqlException.XQueryNoSuchElementInType(
-            this.method, step.LocalName, previous.NodeTypeBase() + XmlQueryExpr.OccurrenceSuffix(occurrence));
+        var type = previous.NodeTypeBase() + XmlQueryExpr.OccurrenceSuffix(occurrence);
+        throw step.NamespaceUri.Length == 0
+            ? SimulatedSqlException.XQueryNoSuchElementInType(this.method, step.LocalName, type)
+            : SimulatedSqlException.XQueryNoSuchNamespacedElementInType(this.method, $"{{{step.NamespaceUri}}}:{step.LocalName}", type);
     }
 
-    /// <summary>The <c>descendant-or-self::node()</c> step <c>//</c> expands to.</summary>
-    private static XmlStep DescendantOrSelfStep() =>
-        new(XmlAxis.DescendantOrSelf, XmlNodeTestKind.Node, string.Empty, string.Empty, []);
+    /// <summary>The <c>descendant-or-self::node()</c> step <c>//</c> expands to, reaching <paramref name="reached"/>.</summary>
+    private static XmlStep DescendantOrSelfStep(XmlSchemaPathType? reached = null) =>
+        new(XmlAxis.DescendantOrSelf, XmlNodeTestKind.Node, string.Empty, string.Empty, []) { SchemaType = reached };
 
     /// <summary>
     /// Whether the cursor sits on a location step rather than a primary
@@ -835,13 +903,19 @@ internal sealed class XmlQueryParser(
         return position;
     }
 
-    private XmlStep ParseStep()
+    /// <summary>
+    /// Parses one step from context nodes of schema type <paramref name="from"/>
+    /// (null where untyped), <paramref name="occurrence"/> of them, refusing a
+    /// name the type can't reach.
+    /// </summary>
+    private XmlStep ParseStep(XmlSchemaPathType? from, XmlOccurrence occurrence)
     {
         this.SkipWhitespace();
         if (this.Current == '.' && this.Peek(1) == '.')
         {
             this.index += 2;
-            return new XmlStep(XmlAxis.Parent, XmlNodeTestKind.Node, string.Empty, string.Empty, this.ParsePredicates());
+            var parentType = from?.Parent();
+            return new XmlStep(XmlAxis.Parent, XmlNodeTestKind.Node, string.Empty, string.Empty, this.ParsePredicates(schemaType: parentType)) { SchemaType = parentType };
         }
 
         var axis = XmlAxis.Child;
@@ -867,9 +941,11 @@ internal sealed class XmlQueryParser(
             {
                 this.index++;
                 var anyNamespaceLocal = this.ReadWord();
-                return new XmlStep(axis, XmlNodeTestKind.AnyNamespace, anyNamespaceLocal, string.Empty, this.ParsePredicates());
+                var anyNamespaceType = this.StepSchemaType(from, axis, XmlNodeTestKind.AnyNamespace, anyNamespaceLocal, string.Empty, occurrence);
+                return new XmlStep(axis, XmlNodeTestKind.AnyNamespace, anyNamespaceLocal, string.Empty, this.ParsePredicates(schemaType: anyNamespaceType)) { SchemaType = anyNamespaceType };
             }
-            return new XmlStep(axis, XmlNodeTestKind.Wildcard, string.Empty, string.Empty, this.ParsePredicates());
+            var wildcardType = this.StepSchemaType(from, axis, XmlNodeTestKind.Wildcard, string.Empty, string.Empty, occurrence);
+            return new XmlStep(axis, XmlNodeTestKind.Wildcard, string.Empty, string.Empty, this.ParsePredicates(schemaType: wildcardType)) { SchemaType = wildcardType };
         }
 
         var name = this.ReadWord();
@@ -879,13 +955,18 @@ internal sealed class XmlQueryParser(
         {
             this.index++;
             var prefix = name[..^1];
-            return this.prefixes.TryGetValue(prefix, out var prefixUri)
-                ? new XmlStep(axis, XmlNodeTestKind.AnyLocalName, string.Empty, prefixUri, this.ParsePredicates())
-                : throw SimulatedSqlException.XQueryUndeclaredNamespace(this.method, prefix);
+            if (!this.prefixes.TryGetValue(prefix, out var prefixUri))
+                throw SimulatedSqlException.XQueryUndeclaredNamespace(this.method, prefix);
+            var anyLocalType = this.StepSchemaType(from, axis, XmlNodeTestKind.AnyLocalName, string.Empty, prefixUri, occurrence);
+            return new XmlStep(axis, XmlNodeTestKind.AnyLocalName, string.Empty, prefixUri, this.ParsePredicates(schemaType: anyLocalType)) { SchemaType = anyLocalType };
         }
         if (NodeTestKind(name) is { } nodeTest && this.PeekIsOpenParen())
         {
             this.ConsumeEmptyArgumentList();
+            // An element whose content is elements alone holds no text node
+            // for the step to find (probed 2026-10-20 against SQL Server 2025).
+            if (nodeTest == XmlNodeTestKind.Text && axis == XmlAxis.Child && from?.HoldsNoText() == true)
+                throw SimulatedSqlException.XQueryStaticallyEmpty(this.method, "text()");
             return new XmlStep(axis, nodeTest, string.Empty, string.Empty, this.ParsePredicates());
         }
 
@@ -900,10 +981,34 @@ internal sealed class XmlQueryParser(
         _ = axis == XmlAxis.Attribute
             ? this.typing?.AttributeTypes.TryGetValue(local, out typeName)
             : this.typing?.ElementTypes.TryGetValue(local, out typeName);
+        var schemaType = this.StepSchemaType(from, axis, XmlNodeTestKind.Name, local, uri, occurrence);
         return new XmlStep(
-            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(typeName),
+            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(typeName, schemaType),
             axis == XmlAxis.Child && this.typing?.SingletonElements.Contains(local) == true,
-            typeName);
+            typeName)
+        {
+            SchemaType = schemaType,
+            NotationName = uri.Length == 0 ? null : this.notation.Name(new System.Xml.XmlQualifiedName(local, uri)),
+        };
+    }
+
+    /// <summary>
+    /// What a child step's nodes are typed as, from context nodes typed
+    /// <paramref name="from"/>, refusing a name nothing there declares; an
+    /// attribute step is checked against the attributes declared there and,
+    /// like every other axis, leaves its nodes untyped.
+    /// </summary>
+    private XmlSchemaPathType? StepSchemaType(XmlSchemaPathType? from, XmlAxis axis, XmlNodeTestKind test, string local, string uri, XmlOccurrence occurrence)
+    {
+        if (from is null)
+            return null;
+        if (axis == XmlAxis.Attribute)
+        {
+            if (test == XmlNodeTestKind.Name)
+                from.RequireAttribute(local, uri, occurrence, this.notation, this.method);
+            return null;
+        }
+        return axis == XmlAxis.Child ? from.Child(test, local, uri, occurrence, this.notation, this.method) : null;
     }
 
     /// <summary>
@@ -932,7 +1037,7 @@ internal sealed class XmlQueryParser(
     /// <c>xs:string</c> element is Msg 2234 (probed 2026-10-06 against SQL
     /// Server 2025).
     /// </summary>
-    private XmlQueryExpr[] ParsePredicates(string? contextType = null)
+    private XmlQueryExpr[] ParsePredicates(string? contextType = null, XmlSchemaPathType? schemaType = null)
     {
         List<XmlQueryExpr>? predicates = null;
         while (true)
@@ -943,9 +1048,12 @@ internal sealed class XmlQueryParser(
             this.index++;
             this.predicateDepth++;
             var enclosingContextType = this.predicateContextType;
+            var enclosingSchemaContext = this.schemaContext;
             this.predicateContextType = contextType;
+            this.schemaContext = schemaType;
             var predicate = this.ParseExprSingle();
             this.predicateContextType = enclosingContextType;
+            this.schemaContext = enclosingSchemaContext;
             this.predicateDepth--;
             this.SkipWhitespace();
             if (this.Current != ']')
@@ -1444,6 +1552,18 @@ internal sealed class XmlQueryParser(
         return XmlAtomicTypes.RankTypeName(rank);
     }
 
+    /// <summary><c>data()</c>, which atomizes its argument as <c>value()</c> does.</summary>
+    private XmlFunctionCallExpr BuildData(XmlQueryExpr[] arguments, string local)
+    {
+        var call = this.Build(
+            XmlFunctionId.Data, arguments, local, 1, 1,
+            arguments.Length == 1 ? arguments[0].AtomizedKind() : XmlStaticKind.Untyped,
+            arguments.Length == 1 ? arguments[0].TypeName : "xdt:untypedAtomic",
+            occurrenceFromArgument: true);
+        this.RequireAtomizable(arguments[0]);
+        return call;
+    }
+
     /// <summary>Checks one call against the library's signature for that name.</summary>
     private XmlFunctionCallExpr BuildBuiltIn(string local, XmlQueryExpr[] arguments) =>
         local switch
@@ -1453,11 +1573,7 @@ internal sealed class XmlQueryParser(
             "concat" => this.Build(XmlFunctionId.Concat, arguments, local, 2, int.MaxValue, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
             "contains" => this.Build(XmlFunctionId.Contains, arguments, local, 2, 2, XmlStaticKind.Boolean, "xs:boolean", XmlArgumentRule.Atomic),
             "count" => this.Build(XmlFunctionId.Count, arguments, local, 1, 1, XmlStaticKind.Number, "xs:integer"),
-            "data" => this.Build(
-                XmlFunctionId.Data, arguments, local, 1, 1,
-                arguments.Length == 1 ? arguments[0].AtomizedKind() : XmlStaticKind.Untyped,
-                arguments.Length == 1 ? arguments[0].TypeName : "xdt:untypedAtomic",
-                occurrenceFromArgument: true),
+            "data" => this.BuildData(arguments, local),
             "distinct-values" => this.Build(XmlFunctionId.DistinctValues, arguments, local, 1, 1, XmlStaticKind.Untyped, "xdt:untypedAtomic", occurrence: XmlOccurrence.Many),
             "empty" => this.Build(XmlFunctionId.Empty, arguments, local, 1, 1, XmlStaticKind.Boolean, "xs:boolean"),
             "false" => this.Build(XmlFunctionId.False, arguments, local, 0, 0, XmlStaticKind.Boolean, "xs:boolean"),

@@ -415,6 +415,24 @@ That is what real quotes (`'value()' requires a singleton …, found operand of 
 A `text()` step under a simply typed element is **Msg 9312** (`'text()' is not supported on simple typed or 'http://www.w3.org/2001/XMLSchema#anyType' elements, found 'element(d,xs:decimal) *'.`), in `.modify()`'s paths too, and a typed element marked `xsi:nil` reads as NULL through `.value()`.
 All probed 2026-09-28 against SQL Server 2025.
 
+### A schema collection types each step structurally
+
+Over a typed receiver whose context item is its document — not a `.nodes()` row — each child step is also typed from the collection's declarations (`Storage/XmlSchemaPathType.cs`): the document's children are the global elements, and an element's are its type's content model's, a type derived from it included (an instance may name one with `xsi:type`) and each child's substitution group.
+A name nothing there reaches is refused while the batch compiles, quoting the context's type in real's notation — the query's own prefix for a namespace (`element(t{urn:t}:r,t{urn:t}:RT) *`), `{urn:t}:r` under a default element namespace, `#anonymous` for an anonymous type, `(A | B)` for a union, the document's children as an interleave `(A ? & B ?)`, and `//`'s union with `comment | processing-instruction | text` after each element's own descendants:
+
+| step | error |
+|---|---|
+| a child in a namespace / in none | **Msg 2263** (double quotes, `"{urn:t}:zz"`) / **Msg 2261** |
+| a top-level element in a namespace / in none | **Msg 2262** / **Msg 2260**, naming no type |
+| an attribute in no namespace / in one | **Msg 2219** / **Msg 2221** |
+| `text()` under element-only or empty content | **Msg 2377**, statically empty |
+
+A content wildcard admits by its namespace constraint and its `processContents`: `skip` leaves the element untyped, `lax` types it as a global declaration of the name or else `xs:anyType`, and `strict` — an attribute wildcard's default — admits only a globally declared name.
+A parent step reaches an `xs:anyType` element, whose children are too.
+A predicate's context and a `for` variable carry the step's type without its occurrence.
+`value()` and `data()` refuse atomizing complex content — **Msg 9314**, mixed content and `xs:anyType` included, naming a named type or else the element's name in its schema's target namespace — and empty content (**Msg 2213**), ahead of `value()`'s singleton check.
+All probed 2026-10-20 against SQL Server 2025.
+
 ### Arguments, outer references and the context node
 
 Every XQuery argument, and `value()`'s type, is a string literal — parenthesized or not — and anything else (a variable, an expression, `NULL`) is **Msg 8172** naming the argument's position and the method, which stops the batch as it compiles, a `TRY` around it included (probed 2026-10-06 against SQL Server 2025).
@@ -426,12 +444,14 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 ### Not modeled yet
 
-- **A path step the collection's content models can't reach** — real's **Msg 2263** `There is no element named "{urn:t}:zz" in the type "element(t{urn:t}:r,#anonymous) *"` — answers the empty sequence: the binding types steps by name, not through each declaration's content model (probed 2026-10-20 against SQL Server 2025).
+- **Structural typing past what the model follows**: a `.nodes()` row's steps, `//` from the document node or over a content wildcard, and a `*` step over one stay untyped, so real's refusals there — an `xs:anyType` element's Msg 9314 — are missed; a lax attribute wildcard's attribute isn't typed `xdt:anyAtomicType`, which real's Msg 2389 quotes (probed 2026-10-20).
 - **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences
 
 - `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — resolve.
+- **The document's children interleave in declaration order**, which is real's for a collection without references or substitution groups; with them real's order is neither declaration nor component-id order (`g, h, r, xr, a` for `r, xr, g, h, a` whose type references `g` and `h` substitutes for it — probed 2026-10-20), so Msg 2263's quoted type lists them differently there.
+- An XQuery argument's compile error reports the line its text places it on, counted from the literal's own line: the token the parse stopped at, a binary operator's left operand, or the body's start for `value()`'s and the other methods' checks of the whole expression (probed 2026-10-20 against SQL Server 2025); where real's anchor is another token within a multi-line argument the line differs.
 - Msg 2209's quoted token comes from the simulator's own recursive-descent cursor, so a malformed expression may name a different token than real's parser does.
   A static type error the simulator meets building an operator ahead of a syntax error later in the expression wins, where real parses the whole expression first: `<a/><b>` is Msg 2373 here and real's Msg 2209 near `<eof>` (probed 2026-10-20).
   Real also splits its generic syntax errors further than the simulator does — a path that ends mid-step is its **Msg 9341** (`Syntax error near '<eof>', expected a step expression.`) where the simulator reports 2209 — and a construct keyword written without the token that identifies it (`for i in …`, `if 1=1 then …`) is real's 2209 near the *keyword* while the simulator names the token it stopped on.
@@ -486,6 +506,7 @@ Nine messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per 
 | a `use="required"` attribute left out | **Msg 6906** `Required attribute 'k' is missing. Location: …` |
 | a root element the collection declares nowhere — including one written in no namespace against a qualified schema, which real refuses rather than skipping — or a `strict` wildcard's child that nothing declares | **Msg 6913** `Declaration not found for element '…'. Location: …` |
 | character data inside an element-only type, or non-whitespace top-level text (CDATA and a character reference included) at `/` | **Msg 6909** `Text node is not allowed at this location, …` |
+| a substitution-group member in its head's place is no error: it takes the head's slot and validates against its own declaration (probed 2026-10-20) | — |
 | a second child an `xsd:all` member already took | **Msg 6911** `Found duplicate element 'b' in all content model. Location: …` (against the repeat); a required member left untaken is Msg 6908 naming only the missing ones |
 
 The expected-element list names what the model would have taken **at the position the walk stopped at**, not every name in the content particle — and a wildcard writes itself into it as `{uri}*` per namespace it names.

@@ -77,6 +77,7 @@ internal sealed partial class Selection
             {
                 XmlSchemaCollection = nodesCall.TargetSchemaCollection,
                 XmlNodeStaticType = nodesCall.XQuery.IsAttributeOnly ? nodesCall.XQuery.NodeTypeBase() : null,
+                XmlNodesRow = true,
             },
         ];
         return new FromSource(

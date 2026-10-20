@@ -664,6 +664,16 @@ public sealed partial class SimulatedSqlException : DbException
         return this;
     }
 
+    /// <summary>
+    /// For an error an XQuery argument raised while it compiled, the offset of
+    /// where real places it — the token the parse stopped at, an operator's
+    /// left operand, or the body's start for a check made once it parsed — in
+    /// the argument's text once the compile has seen it, and in the body while
+    /// the parse runs; the argument's own line in the statement is counted
+    /// from it.
+    /// </summary>
+    internal int? XQueryOffset;
+
     /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
     private bool linePinned;
 

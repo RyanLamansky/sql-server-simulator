@@ -15,8 +15,15 @@ internal sealed class XmlStaticTyping(
     FrozenSet<string> singletonElements,
     FrozenDictionary<string, string> elementTypes,
     FrozenDictionary<string, string> attributeTypes,
-    FrozenSet<string> nillableElements)
+    FrozenSet<string> nillableElements,
+    XmlSchemaSet? schemas)
 {
+    /// <summary>
+    /// The compiled collection, which types a path step by step
+    /// (<see cref="XmlSchemaPathType"/>); null when the XSD doesn't compile.
+    /// </summary>
+    public readonly XmlSchemaSet? Schemas = schemas;
+
     /// <summary>The element names declared at most once wherever they appear.</summary>
     public readonly FrozenSet<string> SingletonElements = singletonElements;
 
@@ -49,7 +56,8 @@ internal sealed class XmlStaticTyping(
             singletonElements,
             Consistent(elementTypes),
             Consistent(attributeTypes),
-            nillable.Where(pair => pair.Value).Select(pair => pair.Key).ToFrozenSet(StringComparer.Ordinal));
+            nillable.Where(pair => pair.Value).Select(pair => pair.Key).ToFrozenSet(StringComparer.Ordinal),
+            schemas);
     }
 
     private static FrozenDictionary<string, string> Consistent(Dictionary<string, string?> types) =>
