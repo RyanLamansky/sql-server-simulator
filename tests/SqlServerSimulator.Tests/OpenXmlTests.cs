@@ -659,6 +659,49 @@ public sealed class OpenXmlTests
             select * from openxml(@h, '/r/a') with (id int '[[')
             """, 6603);
 
+    /// <summary>
+    /// A pattern is read as MSXML reads it, its complaint naming the token it
+    /// stopped at — marked, or the end marked after the whole pattern — and a
+    /// column's pattern is read whatever the rows (probed 2026-10-20).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'/r/o['", "Expression expected.\r\n\n/r/o[<--")]
+    [DataRow("'/r/o)'", "Expected token 'eof' found ')'.\r\n\n/r/o-->)<--")]
+    [DataRow("'/r/o[1 2]'", "Expected token ']' found 'NUMBER'.\r\n\n/r/o[1 -->2<--]")]
+    [DataRow("'/r/@'", "NodeTest expected here.\r\n\n/r/@<--")]
+    [DataRow("'/r/o[@id=''1]'", "A string literal was not closed.\r\n\n/r/o[@id=-->'1]<--")]
+    [DataRow("'/r/zz:o'", "Reference to undeclared namespace prefix: 'zz'.")]
+    [DataRow("'/r/o[nosuch()]'", "Unknown method.\r\n\n/r/o[-->nosuch()<--]")]
+    [DataRow("'/r/o[last(1)]'", "Expected token ')' found 'NUMBER'.\r\n\n/r/o[last(-->1<--)]")]
+    [DataRow("'/r/o[substring(''a'')]'", "Expected token ',' found ')'.\r\n\n/r/o[substring('a'-->)<--]")]
+    [DataRow("'/r/o[concat(''a'')]'", "Invalid number of arguments.\r\n\n/r/o[concat(-->'a')<--]")]
+    [DataRow("'/r/o[not()]'", "Boolean parameter expected.\r\n\n/r/o[-->not()<--]")]
+    [DataRow("'$x'", "x may not appear to the right of / or // or be used with |.")]
+    [DataRow("'-/r'", "Expected token 'eof' found '-'.\r\n\n-->-<--/r")]
+    [DataRow("'/r/o', 1) with (id int, c varchar(5) 'count(l)'", "Expression does not return a DOM node.\r\n\n-->count(l)<--")]
+    [DataRow("'/r/zz', 1) with (id int, c varchar(5) '@id + 1'", "Expected token 'eof' found '+'.\r\n\n@id -->+<-- 1")]
+    public void Patterns_RefuseAsMsxmlReadsThem(string arguments, string message)
+    {
+        var withClause = arguments.Contains("with", StringComparison.Ordinal) ? "" : ", 1) with (id int";
+        new Simulation().AssertSqlError($"declare @h int; exec sp_xml_preparedocument @h output, '<r><o id=\"1\"/></r>'; select * from openxml(@h, {arguments}{withClause})", 6603, "XML parsing error: " + message);
+    }
+
+    /// <summary>A path ending in <c>//</c> reads the nodes beneath and including its last step (probed 2026-10-20).</summary>
+    [TestMethod]
+    public void TrailingDoubleSlash_ReadsTheSubtree() =>
+        AreEqual(2, new Simulation().ExecuteScalar("declare @h int; exec sp_xml_preparedocument @h output, '<r><o id=\"1\"/></r>'; select count(*) from openxml(@h, '/r//', 1) with (id int)"));
+
+    /// <summary>A failed prepare uses up its handle (probed 2026-10-20).</summary>
+    [TestMethod]
+    public void FailedPrepare_UsesUpItsHandle() =>
+        AreEqual(5, new Simulation().ExecuteScalar("""
+            declare @h int;
+            exec sp_xml_preparedocument @h output, '<r/>';
+            begin try exec sp_xml_preparedocument @h output, '<r>' end try begin catch end catch;
+            exec sp_xml_preparedocument @h output, '<r/>';
+            select @h
+            """));
+
     // ---- grammar ----
 
     /// <summary>

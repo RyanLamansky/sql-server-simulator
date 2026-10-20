@@ -78,6 +78,16 @@ internal sealed partial class Selection
             flagBits = flagsValue.IsNull ? 0 : ScalarArguments.CoerceProcedureParameter(flagsValue, SqlType.Int32);
         }
 
+        // MSXML reads every pattern before it evaluates one, so a column's
+        // refusal comes whatever the rows (probed 2026-10-20 against SQL
+        // Server 2025).
+        if (pattern.Length > 0)
+            Storage.MsxmlPatternCheck.Check(pattern, document.Namespaces);
+        foreach (var column in columns ?? [])
+        {
+            if (column.MetaProperty is null && column.ColumnPattern is { } colPattern)
+                Storage.MsxmlPatternCheck.Check(colPattern, document.Namespaces);
+        }
         var rows = document.SelectRows(pattern);
 
         // The edge table lists a node once however many matched subtrees hold

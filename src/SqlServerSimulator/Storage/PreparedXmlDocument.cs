@@ -118,6 +118,14 @@ internal sealed class PreparedXmlDocument
             Array.Reverse(names);
             return (0xC00CE553, $"The following tags were not closed: {string.Join(", ", names)}.", 0);
         }
+        // A start tag the text ends inside, attributes and all, which .NET
+        // reports with no element named (probed 2026-10-20 against SQL Server
+        // 2025: `<a b="1"`).
+        if (message.StartsWith("Unexpected end of file while parsing Name has occurred.", StringComparison.Ordinal)
+            || Matched(message, @"^Unexpected end of file has occurred\. The following elements are not closed: +Line") is not null)
+        {
+            return (0xC00CE55E, "Element was not closed.", line);
+        }
         if (Matched(message, @"^The '(.+?)' start tag on line \d+ position \d+ does not match the end tag of '(.+?)'\.") is { } mismatch)
             return (0xC00CE56D, $"End tag '{mismatch[2].Value}' does not match the start tag '{mismatch[1].Value}'.", line);
         if (message.StartsWith("Data at the root level is invalid.", StringComparison.Ordinal))
@@ -206,7 +214,10 @@ internal sealed class PreparedXmlDocument
     {
         try
         {
-            return context.SelectNodes(pattern, namespaces);
+            // MSXML reads a path ending in `//` as the nodes beneath and
+            // including its last step, which .NET writes `//.` (probed
+            // 2026-10-20 against SQL Server 2025).
+            return context.SelectNodes(pattern.TrimEnd().EndsWith("//", StringComparison.Ordinal) ? pattern.TrimEnd() + "." : pattern, namespaces);
         }
         catch (Exception ex) when (ex is XPathException or ArgumentException)
         {

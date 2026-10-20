@@ -32,6 +32,9 @@ public partial class Simulation
         static string? DocumentText(SqlValue value) =>
             value.IsNull ? null : value.CoerceTo(SqlType.NVarcharMax).AsString;
 
+        // A document that fails still uses up its handle (probed 2026-10-20
+        // against SQL Server 2025).
+        var handle = batch.Connection.NextPreparedXmlHandle();
         PreparedXmlDocument document;
         try
         {
@@ -46,7 +49,6 @@ public partial class Simulation
             throw;
         }
 
-        var handle = batch.Connection.NextPreparedXmlHandle();
         batch.Connection.PreparedXmlDocuments[handle] = document;
         if (args.HandleSlot is { } slot)
             slot.Value = SqlValue.FromInt32(handle).CoerceTo(slot.DeclaredType);

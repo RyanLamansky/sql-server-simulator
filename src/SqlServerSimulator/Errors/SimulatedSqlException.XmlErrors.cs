@@ -1028,8 +1028,10 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XmlDocumentParseFailed(string detail)
     {
+        // At the procedure's line 1, wherever the call sits in its batch
+        // (probed 2026-10-20 against SQL Server 2025).
         var error = new SimulatedSqlException($"The error description is '{detail}'.", 6602, 16, 2);
-        error.Errors[0].Procedure = "sp_xml_preparedocument";
+        error.PreserveDiagnostics(1, "sp_xml_preparedocument");
         return error;
     }
 
@@ -1042,6 +1044,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XmlPatternParseFailed(string detail, string pattern) =>
         new($"XML parsing error: {detail}\r\n\n{pattern}--><--", 6603, 16, 2);
+
+    /// <summary>
+    /// Msg 6603 state 2 as MSXML's own pattern reader words it: its complaint,
+    /// then — for a complaint about a place in the pattern — a blank line and
+    /// the pattern <paramref name="marked"/> there.
+    /// </summary>
+    internal static SimulatedSqlException XmlPatternInvalid(string detail, string? marked) =>
+        new(marked is null ? $"XML parsing error: {detail}" : $"XML parsing error: {detail}\r\n\n{marked}", 6603, 16, 2);
 
     /// <summary>
     /// Msg 8179 state 5: a document handle that <c>sp_xml_preparedocument</c>

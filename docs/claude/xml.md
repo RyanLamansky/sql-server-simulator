@@ -691,6 +691,7 @@ Probe-confirmed against SQL Server 2025:
 | lifetime | survives batch boundaries and a `ROLLBACK` (the store isn't transactional) |
 | visibility | one session only — another session reading the same number is Msg 8179 |
 | NULL, empty or omitted `@xmltext` | still allocates a handle, return code 0 |
+| a document that won't parse | uses up its handle, so the next allocation skips it (probed 2026-10-20); Msg 6602 sits at the procedure's line 1 wherever the call is |
 
 A handle the session never held — including one it already released — is **Msg 8179** state 5, `Could not find prepared statement with handle 99.` (real's shared wording with the cursor-handle family), and a NULL handle reports handle `0`.
 A document that won't parse sends **Msg 6601**, an informational message naming MSXML's error code, the line it stopped on and that line's text whole (`The XML parse error 0xc00ce56d occurred on line number 3, near the XML text "</c></a>".`), then raises **Msg 6602** state 2, `The error description is '…'.` with MSXML's description, both attributed to `sp_xml_preparedocument` at line 1; an error found at the end of the document — an element never closed, no top-level element — reports line 0 and an empty text, and a `TRY` catches Msg 6602 with Msg 6601 already sent (probed 2026-10-17 against SQL Server 2025).
@@ -741,7 +742,8 @@ Anything else after the prefix raises `NotSupportedException` naming it.
 
 OPENXML's patterns are XPath 1.0 — the dialect MSXML gives it — so the simulator runs both the rowpattern and every colpattern straight through `XmlNode.SelectNodes`, rather than the XQuery-subset translation the `xml` type's own methods take.
 Descendant shorthand (`//a`, `/root//a`), value and positional predicates (`a[@t="p"]`, `a[1]`, `a[b="bb"]`), named axes (`descendant::a`, `child::a`), wildcards, unions and a relative path all follow from that; an attribute rowpattern (`/root/a/@id`) makes each attribute a row.
-A pattern the engine refuses is **Msg 6603** state 2, whose text is the parser's complaint, a blank line, and the pattern carrying a `-->x<--` marker.
+Every pattern is first read as MSXML's own parser reads it (`Storage/MsxmlPatternCheck`), the rowpattern and each colpattern up front, whatever the rows: a pattern is a path or a union of paths, so anything after one is `Expected token 'eof' found '…'` and one naming no nodes — a literal, a number, a function call — `Expression does not return a DOM node.`, and inside predicates the full XPath grammar with MSXML's own complaints (`Expression expected.`, `Expected token ']' found 'NUMBER'`, `NodeTest expected here.`, `Unknown method.`, `A string literal was not closed.`, an undeclared prefix, a variable), each **Msg 6603** state 2 followed by a blank line and the pattern with `-->…<--` around the token it stopped at, or `<--` after the whole pattern when it stopped at its end (probed 2026-10-20 against SQL Server 2025).
+A path ending in `//` reads the nodes beneath and including its last step, as `//.` does.
 
 ### The edge table
 
@@ -767,10 +769,10 @@ Node ids follow real's numbering, which is not plain document order (probe-confi
   Real can also hold an element's own text back past them: in `<root><c id="1" nm="a"><o n="10">x</o><o n="11"/></c><c id="2" nm="b &amp; c"><nm>inner</nm></c></root>` the first read numbers `x` 7 but `inner` 20, after the six attribute texts, where the simulator gives `inner` 14 (probed 2026-10-02 against SQL Server 2025).
 - **The XML declaration and the DTD are not edge-table nodes.**
   Real reports a declaration as a nodetype-7 node named `xml` holding its pseudo-attributes as attribute children (numbering from 1, ahead of the document element's descendants); the simulator drops both, so a document with a prolog numbers as if it had none.
-- **A malformation no probe classified keeps .NET's wording.**
+- **A malformation no probe classified keeps .NET's wording** (a start tag the text ends inside, attributes and all, is classified: `0xc00ce55e`, `Element was not closed.`).
   Msg 6602 then quotes .NET's complaint and Msg 6601 names `0x80004005`; and the two parsers disagree on control characters — MSXML takes a raw `U+0001` in content and refuses `&#0;` (`0xc00ce51f`, `Invalid unicode character.`), where .NET does the reverse (probed 2026-10-17 against SQL Server 2025).
-- **Msg 6603's detail sentence comes from .NET's XPath engine**, not MSXML, so the quoted complaint differs from real's while the message shape, number, severity, state and procedure attribution match.
-  Its `-->x<--` marker also sits at the pattern's end rather than at the offending token, since .NET reports no position.
+- **A few of MSXML's pattern complaints aren't read**: a function argument of the wrong kind (`count(1, 2)`, which real refuses as no DOM node at the argument), and a pattern ending in a single `/`, which real reads; those reach .NET's XPath engine, whose own complaint Msg 6603 then quotes with its marker at the pattern's end.
+- **With an `@xpath_namespaces` document, real numbers one attribute value text node fewer** ahead of the first: `<r xmlns:p="urn:p">…` prepared with `<r xmlns:p="urn:p"/>` gives the first attribute's text 20 where the simulator gives 21 (probed 2026-10-20).
 - **XPath 1.0 is .NET's, not MSXML's.**
   The two agree across everything probed, but neither the function library nor the collation-sensitive string comparisons are byte-compared.
 
