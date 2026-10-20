@@ -191,6 +191,14 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 3750, $"Warning: Index '{index}' on table '{table}' was disabled as a result of disabling the clustered index on the table.");
 
     /// <summary>
+    /// Msg 6966, when a schema collection's simple type of a numeric, boolean,
+    /// duration or date-time primitive is restricted by a <c>pattern</c>, its
+    /// own or a base's (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError XmlSchemaPatternRoundTripMessage(BatchContext batch, string typeName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 6966, $"Warning: Type '{typeName}' is restricted by a facet 'pattern' that may impede full round-tripping of instances of this type");
+
+    /// <summary>
     /// Msg 1992, once per FOREIGN KEY that disabling the unique index it rests
     /// on took out of service (probed 2026-10-02 against SQL Server 2025).
     /// </summary>

@@ -109,4 +109,41 @@ public sealed class XmlSchemaNamespaceTests
         simulation.AssertSqlError("select xml_schema_namespace(N'dbo', N'zsc', N'URN:A')", 6312, "Could not find schema components with target namespace 'URN:A' in collection 'zsc'.");
         simulation.AssertSqlError("select xml_schema_namespace(N'dbo', N'zsc', null)", 6312, "Could not find schema components with target namespace '' in collection 'zsc'.");
     }
+    private static List<string> Messages(Simulation simulation, string commandText)
+    {
+        var messages = new List<string>();
+        using var connection = simulation.CreateOpenConnection();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static error => $"{error.Number}:{error.Message}"));
+        _ = connection.CreateCommand(commandText).ExecuteNonQuery();
+        return messages;
+    }
+
+    [TestMethod]
+    public void PatternOnANonStringType_WarnsOfRoundTripping()
+    {
+        var simulation = new Simulation();
+        var warned = Messages(simulation, """
+            create xml schema collection zw as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:w" xmlns="urn:w">
+            <xs:simpleType name="A"><xs:restriction base="xs:int"><xs:pattern value="1"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="H"><xs:restriction base="A"><xs:maxInclusive value="1"/></xs:restriction></xs:simpleType>
+            <xs:complexType name="T"><xs:sequence><xs:element name="le"><xs:simpleType><xs:restriction base="xs:int"><xs:pattern value="1"/></xs:restriction></xs:simpleType></xs:element></xs:sequence>
+            <xs:attribute name="la"><xs:simpleType><xs:restriction base="xs:date"><xs:pattern value=".*"/></xs:restriction></xs:simpleType></xs:attribute></xs:complexType>
+            <xs:simpleType name="B"><xs:restriction base="xs:anyURI"><xs:pattern value="1"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="S"><xs:restriction base="xs:string"><xs:pattern value="1"/></xs:restriction></xs:simpleType>
+            </xs:schema>'
+            """);
+        const string Tail = "' is restricted by a facet 'pattern' that may impede full round-tripping of instances of this type";
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "6966:Warning: Type '{urn:w}A" + Tail,
+                "6966:Warning: Type '{urn:w}H" + Tail,
+                "6966:Warning: Type '#xmlns(ns=urn:w) xs-nun(/complexType(ns:T)/sequence()/le/simpleType())" + Tail,
+                "6966:Warning: Type '#xmlns(ns=urn:w) xs-nun(/complexType(ns:T)/@la/simpleType())" + Tail,
+            },
+            warned);
+        CollectionAssert.AreEqual(
+            new[] { "6966:Warning: Type 'N" + Tail },
+            Messages(simulation, """alter xml schema collection zw add N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:simpleType name="N"><xs:restriction base="xs:float"><xs:pattern value="1"/></xs:restriction></xs:simpleType></xs:schema>'"""));
+    }
 }

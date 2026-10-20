@@ -699,3 +699,87 @@ internal sealed class XmlSchemaComponentBuilder
             : string.Join(' ', replaced.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 }
+
+/// <summary>
+/// The simple types a <c>CREATE</c> or <c>ALTER … ADD</c> of a schema
+/// collection warns of with Msg 6966: each restriction, in component order,
+/// whose primitive is numeric, boolean, a duration or a date-time and whose
+/// own facets or a base's include a <c>pattern</c> — named as real names it,
+/// <c>{uri}name</c> for a global and a schema component designator such as
+/// <c>#xmlns(ns=urn:w) xs-nun(/complexType(ns:T)/@la/simpleType())</c> for an
+/// anonymous one (probed 2026-10-20 against SQL Server 2025).
+/// </summary>
+internal static class XmlSchemaRoundTripWarnings
+{
+    public static List<string> Of(XmlSchemaComponentSet set, int firstComponentId)
+    {
+        var byId = new Dictionary<int, XmlSchemaComponent>();
+        foreach (var component in XmlSchemaSystemCollection.Components.Components)
+            byId[component.Id] = component;
+        foreach (var component in set.Components)
+            byId[component.Id] = component;
+
+        var names = new List<string>();
+        foreach (var component in set.Components)
+        {
+            if (component.Id < firstComponentId || component.Kind != 'S' || component.Derivation != 'R' || !Warns(component, byId))
+                continue;
+            names.Add(NameOf(component, set, byId));
+        }
+        return names;
+    }
+
+    private static bool Warns(XmlSchemaComponent type, Dictionary<int, XmlSchemaComponent> byId)
+    {
+        var patterned = false;
+        var current = type;
+        for (var depth = 0; depth < 64; depth++)
+        {
+            if (current.Id <= XmlSchemaSystemCollection.LastComponentId)
+            {
+                return patterned && Storage.XmlAtomicTypes.ComparisonFamily("xs:" + current.Name) is "number" or "boolean"
+                    or "Duration" or "DateTime" or "Time" or "Date" or "GYearMonth" or "GYear" or "GMonthDay" or "GDay" or "GMonth";
+            }
+            patterned |= current.Facets.Exists(static facet => facet.Kind == "PT");
+            if (current.BaseId is not int baseId || !byId.TryGetValue(baseId, out var next))
+                return false;
+            current = next;
+        }
+        return false;
+    }
+
+    private static string NameOf(XmlSchemaComponent type, XmlSchemaComponentSet set, Dictionary<int, XmlSchemaComponent> byId)
+    {
+        var uri = set.Namespaces[type.NamespaceId - 1];
+        if (type.ScopingId is null)
+            return uri.Length == 0 ? type.Name! : $"{{{uri}}}{type.Name}";
+
+        var prefix = uri.Length == 0 ? string.Empty : "ns:";
+        var steps = new List<string>();
+        for (var current = type; current is not null;)
+        {
+            // A local declaration's step is bare, qualified or not (probed
+            // 2026-10-20), as the compiler's own paths write it.
+            var isGlobal = current.ScopingId is null;
+            steps.Add(current.Kind switch
+            {
+                'E' => isGlobal ? prefix + current.Name : current.Name!,
+                'A' => "@" + (isGlobal ? prefix : string.Empty) + current.Name,
+                'M' when isGlobal => $"group({prefix}{current.Name})",
+                'M' => current.Compositor switch
+                {
+                    'C' => "choice()",
+                    'A' => "all()",
+                    _ => "sequence()",
+                },
+                'G' => $"attributeGroup({prefix}{current.Name})",
+                'C' or 'K' => isGlobal ? $"complexType({prefix}{current.Name})" : "complexType()",
+                _ => isGlobal ? $"simpleType({prefix}{current.Name})" : "simpleType()",
+            });
+            current = current.ScopingId is int scope ? byId.GetValueOrDefault(scope) : null;
+        }
+        steps.Reverse();
+        var path = "xs-nun(/" + string.Join('/', steps) + ")";
+        return uri.Length == 0 ? path : $"#xmlns(ns={uri}) {path}";
+    }
+}

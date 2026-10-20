@@ -249,6 +249,8 @@ partial class Simulation
             Segments = [new(documents, restoring ? 0 : database.AllocateXmlComponentIds(componentCount))],
         };
         RecordSlotUndo<XmlSchemaCollection>(context, ownerSchema.XmlSchemaCollections, name.Leaf, null);
+        foreach (var warned in XmlSchemaRoundTripWarnings.Of(ownerSchema.XmlSchemaCollections[name.Leaf].GetComponents(), 0))
+            context.Batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.XmlSchemaPatternRoundTripMessage(context.Batch, warned));
         ExtendedEvents.XeObjectEvents.Note(context.Batch, ExtendedEvents.XeEventKind.ObjectCreated, ownerSchema.Database, id, "SX", 0, name.Leaf);
         RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
@@ -326,6 +328,8 @@ partial class Simulation
         var firstComponentId = context.CurrentDatabase.AllocateXmlComponentIds(AddedComponents());
         collection.XsdText = previousText + added;
         collection.Segments = [.. previousSegments, new(documents, firstComponentId)];
+        foreach (var warned in XmlSchemaRoundTripWarnings.Of(collection.GetComponents(), firstComponentId))
+            context.Batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.XmlSchemaPatternRoundTripMessage(context.Batch, warned));
         collection.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         collection.AlteredAt = Interlocked.Increment(ref context.Connection.Simulation.XmlSchemaCollectionAlterations);
         RecordDdlUndo(context, () =>
