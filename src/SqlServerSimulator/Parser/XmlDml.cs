@@ -170,11 +170,13 @@ internal readonly struct XmlDmlPath(string body, XmlQueryExpr compiled, XmlDmlNo
         if (this.Kind == XmlDmlNodeKind.ElementOrDocument)
             return this.Predicated ? $"(element(*,xdt:untyped) | {document}) ?" : "element(*,xdt:untyped) | " + document;
         var occurrence = this.Singleton ? " ?" : " *";
+        // An element or attribute is written as the compiled path's last step
+        // types it — its namespace, and what a typed receiver's collection
+        // settles (probed 2026-10-20 against SQL Server 2025).
         return this.Kind switch
         {
-            XmlDmlNodeKind.Attribute => $"attribute({this.Name},xdt:untypedAtomic){occurrence}",
+            XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Element => this.Compiled.NodeTypeBase() + occurrence,
             XmlDmlNodeKind.Comment => $"comment{occurrence}",
-            XmlDmlNodeKind.Element => $"element({this.Name},xdt:untyped){occurrence}",
             XmlDmlNodeKind.ProcessingInstruction => $"processing-instruction{occurrence}",
             _ => $"text{occurrence}",
         };
@@ -313,8 +315,19 @@ internal sealed class XmlDml
         Schemas.XmlSchemaCollection? schemaCollection,
         string method)
     {
-        var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery, method);
-        return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection, method).ParseStatement();
+        try
+        {
+            var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery, method);
+            return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection, method).ParseStatement();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            // An XQuery compile error, which ends the batch's binder report
+            // as a read method's does (probed 2026-10-20 against SQL Server
+            // 2025); placed at the argument's start.
+            ex.XQueryOffset ??= 0;
+            throw;
+        }
     }
 
     /// <summary>

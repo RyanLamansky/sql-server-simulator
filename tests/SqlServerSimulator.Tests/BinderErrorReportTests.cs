@@ -514,4 +514,9 @@ public sealed partial class BinderErrorReportTests
         AreEqual("448:1:nosuchcoll", Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(
             "create procedure p2 as create table x4 (a varchar(10) collate nosuchcoll)"))));
     }
+    [TestMethod]
+    [DataRow("declare @x xml = '<a/>'; select x1 from t; select @x.value('/a', 'int'); select x2 from t", "207:1:x1 2389:1:value()")]
+    [DataRow("declare @x xml = '<a/>'; select @x.value('/a', 'int'); select @x.value('/b', 'int')", "2389:1:value()")]
+    [DataRow("declare @x xml = '<r/>'; set @x.modify('replace value of (/r)[1] with 2'); set @x.modify('replace value of /r/text() with 2')", "2356:1:replace value of")]
+    public void XQueryCompileErrorEndsTheReport(string statement, string expected) => AreEqual(expected, Report(statement));
 }

@@ -107,7 +107,7 @@ internal sealed class XmlModify : Expression
         // statement's own, so `SET @x.modify(…)` reports SELECT and an UPDATE
         // reports UPDATE (probe-confirmed).
         if (!context.Batch.CreateTimeBinding && Simulation.IncorrectSetOptionNames(context) is { } setOptions)
-            throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
+            throw SimulatedSqlException.IncorrectSetOptionsForXmlMethod(context.Batch.CurrentStatement.StatementVerb, setOptions);
 
         // A typed receiver contributes its schema collection: an element whose
         // declared type holds a value is a legal `replace value of` target,

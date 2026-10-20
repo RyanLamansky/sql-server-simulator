@@ -75,4 +75,16 @@ public sealed class XmlMethodContextTests
         AreEqual(0, sim.ExecuteScalar("select @@trancount"));
         AreEqual(1934, sim.ExecuteScalar("begin try exec p end try begin catch select error_number() end catch"));
     }
+    [TestMethod]
+    public void AModifyUnderQuotedIdentifierOff_EndsTheBatchToo()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "set quoted_identifier off",
+            "create procedure p as declare @x xml = '<a/>'; set @x.modify('delete /a'); select 'after'",
+            "set quoted_identifier on");
+        var ex = sim.AssertSqlError("exec p; select 'reached'", 1934);
+        Assert.StartsWith("SELECT failed because", ex.Errors[0].Message);
+        AreEqual(1934, sim.ExecuteScalar("begin try exec p end try begin catch select error_number() end catch"));
+    }
 }

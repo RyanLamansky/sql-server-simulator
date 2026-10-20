@@ -451,6 +451,7 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 - `.value()` casts go through the standard string→type coercion (`casting.md`'s flexible string→date-like parser), so the AdventureWorks `vJobCandidateEducation` / `vJobCandidateEmployment` / `vPersonDemographics` views — which wrap `.value()` date strings in `CONVERT(datetime, …, 101)` — resolve.
 - **The document's children interleave in declaration order**, which is real's for a collection without references or substitution groups; with them real's order is neither declaration nor component-id order (`g, h, r, xr, a` for `r, xr, g, h, a` whose type references `g` and `h` substitutes for it — probed 2026-10-20), so Msg 2263's quoted type lists them differently there.
+- An XQuery argument's compile error — a read method's or `.modify()`'s — ends the batch's binder report where it is, as Msg 529 does, so a batch reports the errors gathered before it and nothing after (probed 2026-10-20 against SQL Server 2025); within one select list, though, the simulator binds the statement's columns after its XQuery compiles, so a bad column written ahead of a refused method reports the method's error where real reports the column's alone.
 - An XQuery argument's compile error reports the line its text places it on, counted from the literal's own line: the token the parse stopped at, a binary operator's left operand, or the body's start for `value()`'s and the other methods' checks of the whole expression (probed 2026-10-20 against SQL Server 2025); where real's anchor is another token within a multi-line argument the line differs.
 - Msg 2209's quoted token comes from the simulator's own recursive-descent cursor, so a malformed expression may name a different token than real's parser does.
   A static type error the simulator meets building an operator ahead of a syntax error later in the expression wins, where real parses the whole expression first: `<a/><b>` is Msg 2373 here and real's Msg 2209 near `<eof>` (probed 2026-10-20).
@@ -582,7 +583,7 @@ Everywhere else:
 | the instance is NULL — an unassigned variable or a NULL cell in an updated row | **Msg 5302** — `Mutator 'modify()' on '@x' cannot be called on a null value.` (the name as written, `@` included for a variable); it ends the batch and rolls the transaction back as under `SET XACT_ABORT ON`, and dooms it inside `TRY` (probed 2026-10-02) |
 
 Real reaches Msg 8137 before the SET-option gate, so `.modify()` in a select list reports it even from a session holding `QUOTED_IDENTIFIER` the wrong way; the mutator positions take the gate (**Msg 1934**) like every other XML method, naming the statement's own verb — `SELECT` for `SET @x.modify(…)`, `UPDATE` for the UPDATE form.
-Every XML method's Msg 1934 behaves as under `XACT_ABORT`: uncaught it ends the batch, a procedure's caller's included, and rolls the transaction back, while a `TRY` catches it (probed 2026-10-16 against SQL Server 2025, a procedure created under `QUOTED_IDENTIFIER OFF`).
+Every XML method's Msg 1934, `.modify()`'s included, behaves as under `XACT_ABORT`: uncaught it ends the batch, a procedure's caller's included, and rolls the transaction back, while a `TRY` catches it (probed 2026-10-16 against SQL Server 2025, a procedure created under `QUOTED_IDENTIFIER OFF`).
 
 ### The three statements
 
@@ -680,6 +681,7 @@ An edited instance comes back **normalized**, which is what real does and the si
 
 Empty elements self-close with no space before the slash, the XML declaration and insignificant whitespace are dropped, CDATA folds into escaped text, and values take the same position-dependent escaping `FOR XML` applies (`Selection.AppendForXmlText` is shared, so element text escapes `&` `<` `>` CR and an attribute value adds `"` tab LF).
 Namespace declarations ride along as attributes and re-emit with their prefixes, an element in the default namespace in scope writing no prefix even where another binds its namespace too.
+A target's notation in the DML messages is its compiled step's, namespace and settled type included (`element(t{urn:t}:sc,#anonymous) ?`, probed 2026-10-20).
 An inserted constructor sheds a prolog binding its position already makes under any prefix and takes the position's own (`<t:i/>` under `xmlns="urn:t"` lands as `<i/>`), keeping it only for an attribute named under it (probed 2026-10-20 against SQL Server 2025).
 This is the only place an `xml` payload is re-serialized — an unmodified value keeps the text it was stored with, so the normalization is visible only after an edit.
 
