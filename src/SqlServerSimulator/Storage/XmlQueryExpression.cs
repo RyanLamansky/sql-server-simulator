@@ -300,16 +300,23 @@ internal sealed class XmlContextItemExpr(string? typeName = null, XmlSchemaPathT
 /// </summary>
 internal sealed class XmlSequenceExpr(XmlQueryExpr[] items)
     : XmlQueryExpr(
-        items.Length == 1 ? items[0].Kind : items.Length > 1 && items[0].Kind != XmlStaticKind.Node ? items[0].Kind : XmlStaticKind.Node,
-        items.Length switch
+        KindOf(NonEmpty(items)),
+        NonEmpty(items) switch
         {
-            0 => XmlOccurrence.ZeroOrOne,
-            1 => items[0].Occurrence,
-            _ => Array.TrueForAll(items, item => item.Occurrence is XmlOccurrence.ExactlyOne or XmlOccurrence.OneOrMore) ? XmlOccurrence.OneOrMore : XmlOccurrence.Many,
+            [] => XmlOccurrence.ZeroOrOne,
+            [var only] => only.Occurrence,
+            var typed => Array.TrueForAll(typed, item => item.Occurrence is XmlOccurrence.ExactlyOne or XmlOccurrence.OneOrMore) ? XmlOccurrence.OneOrMore : XmlOccurrence.Many,
         },
-        items.Length switch { 0 => "empty", 1 => items[0].TypeName, _ when items[0].Kind != XmlStaticKind.Node => SharedTypeName(items), _ => "xdt:untypedAtomic" },
+        NonEmpty(items) switch { [] => "empty", [var only] => only.TypeName, var typed when typed[0].Kind != XmlStaticKind.Node => SharedTypeName(typed), _ => "xdt:untypedAtomic" },
         Array.Exists(items, item => item.Constructed))
 {
+    /// <summary>The items a sequence's static type reads: the written ones but the empty sequences, which add nothing.</summary>
+    private static XmlQueryExpr[] NonEmpty(XmlQueryExpr[] items) =>
+        Array.Exists(items, static item => item is XmlSequenceExpr { IsEmpty: true }) ? Array.FindAll(items, static item => item is not XmlSequenceExpr { IsEmpty: true }) : items;
+
+    private static XmlStaticKind KindOf(XmlQueryExpr[] typed) =>
+        typed.Length == 1 ? typed[0].Kind : typed.Length > 1 && typed[0].Kind != XmlStaticKind.Node ? typed[0].Kind : XmlStaticKind.Node;
+
     /// <summary>
     /// The atomic type a sequence of atomics reports: the one they share, or
     /// real's <c>xdt:anyAtomicType</c> when they differ.

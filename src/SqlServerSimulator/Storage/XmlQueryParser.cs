@@ -395,6 +395,10 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private void RequireHomogeneous(XmlQueryExpr left, XmlQueryExpr right)
     {
+        // The empty sequence sits beside anything (probed 2026-10-20 against
+        // SQL Server 2025: `(1, ())`).
+        if (left is XmlSequenceExpr { IsEmpty: true } || right is XmlSequenceExpr { IsEmpty: true })
+            return;
         var leftIsNode = left.Kind == XmlStaticKind.Node;
         if (leftIsNode == (right.Kind == XmlStaticKind.Node))
             return;

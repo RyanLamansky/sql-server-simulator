@@ -727,4 +727,16 @@ public sealed class XmlModifyTests
             set @x.modify('replace value of (/r/a[@id = sql:variable("@id") - 1]/@id)[1] with sql:variable("@v")');
             select cast(@x as nvarchar(max))
             """));
+    [TestMethod]
+    [DataRow("data(/r/i)")]
+    [DataRow("(1, 2)")]
+    [DataRow("/r/i")]
+    public void ReplaceAttributeValue_WithSeveralItems_IsADuplicateAttribute(string value) =>
+        AreEqual(6308, new Simulation().ExecuteScalar($"declare @x xml = N'<r a=\"1\"><i>1</i><i>2</i></r>'; begin try set @x.modify('replace value of (/r/@a)[1] with {value}'); end try begin catch select error_number() end catch"));
+
+    [TestMethod]
+    [DataRow("data(/r/i[1])", "<r a=\"1\"><i>1</i><i>2</i></r>")]
+    [DataRow("((), 5)", "<r a=\"5\"><i>1</i><i>2</i></r>")]
+    public void ReplaceAttributeValue_WithOneItem_Replaces(string value, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r a=\"1\"><i>1</i><i>2</i></r>'; set @x.modify('replace value of (/r/@a)[1] with {value}'); select cast(@x as nvarchar(max))"));
 }

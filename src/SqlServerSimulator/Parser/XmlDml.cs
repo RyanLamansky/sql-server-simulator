@@ -529,6 +529,11 @@ internal sealed class XmlDml
                 throw SimulatedSqlException.XmlDmlReplaceWithEmptySequence();
             return string.Empty;
         }
+        // An attribute takes one value: several are real's duplicate
+        // attribute, raised as the edit runs (probed 2026-10-20 against SQL
+        // Server 2025), where an element's text takes them space-joined.
+        if (items.Count > 1 && target is XAttribute attribute)
+            throw SimulatedSqlException.XmlDuplicateAttribute(attribute.Name.LocalName);
         return XmlQueryValues.JoinAtomized(items);
     }
 
