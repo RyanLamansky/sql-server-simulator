@@ -30,7 +30,9 @@ internal sealed class SpatialIndex(
     short? level4Grid,
     int? cellsPerObject)
 {
+    /// <summary>The object id of the index's internal table, <c>extended_index_&lt;table id&gt;_&lt;index id&gt;</c>.</summary>
     public readonly int ObjectId = objectId;
+
     public readonly string Name = name;
     public readonly int IndexId = indexId;
 

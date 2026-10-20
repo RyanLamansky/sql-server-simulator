@@ -350,4 +350,29 @@ public sealed class DisabledIndexTests
         simulation.AssertSqlError("alter index xp on t set (optimize_for_sequential_key = on)", 153, "Invalid usage of the option OPTIMIZE_FOR_SEQUENTIAL_KEY in the ALTER INDEX SET statement.");
         _ = simulation.ExecuteNonQuery("alter index xp on t rebuild with (online = off, ignore_dup_key = off, xml_compression = on, sort_in_tempdb = on, maxdop = 1)");
     }
+
+    [TestMethod]
+    [Description("A spatial index keeps an internal table, extended_index_<table id>_<index id>, its key columns copied from pk0, clustered under the index's name and disabled with it (probed 2026-10-20 against SQL Server 2025).")]
+    public void SpatialIndex_InternalTable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table t (a varchar(20) not null, b datetime2(3) not null, g geometry, constraint pk primary key (b, a));
+            create spatial index sp on t (g) with (bounding_box = (0, 0, 10, 10));
+            alter index sp on t disable;
+            """);
+        AreEqual("1|207|EXTENDED_INDEXES|384000", simulation.ExecuteScalar("""
+            select concat_ws('|', iif(name = concat('extended_index_', object_id('t'), '_384000'), 1, 0), internal_type, internal_type_desc collate database_default, parent_minor_id)
+            from sys.internal_tables where parent_id = object_id('t')
+            """));
+        AreEqual("Id:binary:5,Attr:tinyint:1,pk0:datetime2:7,pk1:varchar:20", simulation.ExecuteScalar("""
+            select string_agg(concat_ws(':', c.name collate database_default, type_name(c.user_type_id), c.max_length), ',') within group (order by c.column_id)
+            from sys.columns c join sys.internal_tables it on it.object_id = c.object_id where it.parent_id = object_id('t')
+            """));
+        AreEqual("sp:1:1:1:44:17:46:19", simulation.ExecuteScalar("""
+            select concat_ws(':', i.name collate database_default, i.index_id, cast(i.is_unique as int), cast(i.is_disabled as int), p.max_leaf_length, p.min_leaf_length, p.max_internal_length, p.min_internal_length)
+            from sys.indexes i join sys.internal_tables it on it.object_id = i.object_id
+            join sys.system_internals_partitions p on p.object_id = i.object_id and p.index_id = i.index_id where it.parent_id = object_id('t')
+            """));
+    }
 }

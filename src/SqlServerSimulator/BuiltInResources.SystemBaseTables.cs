@@ -69,6 +69,59 @@ internal static partial class BuiltInResources
         xmlIndexed.Sort(static (x, y) => x.Primary.InternalTableObjectId.CompareTo(y.Primary.InternalTableObjectId));
         foreach (var (table, primary) in xmlIndexed)
             yield return XmlNodeTable(table, primary);
+        var spatialIndexed = new List<(HeapTable Table, SpatialIndex Index)>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                foreach (var index in table.SpatialIndexes)
+                    spatialIndexed.Add((table, index));
+            }
+        }
+        spatialIndexed.Sort(static (x, y) => x.Index.ObjectId.CompareTo(y.Index.ObjectId));
+        foreach (var (table, index) in spatialIndexed)
+            yield return SpatialIndexTable(table, index);
+    }
+
+    /// <summary>
+    /// The internal table a spatial index keeps its cells in,
+    /// <c>extended_index_&lt;table id&gt;_&lt;index id&gt;</c>: the cell id and
+    /// its attribute, then a copy of each primary-key column in key order named
+    /// <c>pk&lt;n&gt;</c> from 0, clustered uniquely under the index's name on
+    /// the cell then the key columns, disabled with it (probed 2026-10-20
+    /// against SQL Server 2025). Its rowset holds nothing here, where real's
+    /// holds a row per cell an object covers.
+    /// </summary>
+    private static SystemTableObject SpatialIndexTable(HeapTable table, SpatialIndex index)
+    {
+        var columns = new List<SystemTableColumn>
+        {
+            new(1, "Id", 173, 5, 0, 0, nullable: true, hidden: false, null, 0, null),
+            new(2, "Attr", 48, 1, 3, 0, nullable: true, hidden: false, null, 0, null),
+        };
+        var primaryKey = table.KeyConstraints.Find(static key => key.Kind == KeyConstraintKind.PrimaryKey);
+        foreach (var ordinal in primaryKey?.FullOrdinals ?? [])
+        {
+            var key = table.Columns[ordinal];
+            var (maxLength, precision, scale) = GetSysColumnMetadata(key);
+            columns.Add(new SystemTableColumn(columns.Count + 1, string.Create(System.Globalization.CultureInfo.InvariantCulture, $"pk{columns.Count - 2}"), key.UserTypeId, maxLength, precision, scale,
+                nullable: false, hidden: false, null, 0, key.Collation, key));
+        }
+        int[] keyOrdinals = [0, .. Enumerable.Range(2, columns.Count - 2)];
+        var definition = new SystemTableDefinition("extended_index", [.. columns],
+            [new SystemTableIndex(1, index.Name, 1, unique: true, allowPageLocks: true, [.. keyOrdinals.Select(static (ordinal, i) => new SystemIndexKey(ordinal + 1, i + 1, false, false))], index.IsDisabled)]);
+        var heapColumns = definition.HeapColumns("");
+        var (leafMax, leafMin, leafColumns) = RecordLength(heapColumns, [.. Enumerable.Range(0, columns.Count)], uniquifier: false, locator: false, header: 4);
+        var (upperMax, upperMin, _) = RecordLength(heapColumns, keyOrdinals, uniquifier: false, locator: false, header: 7);
+        var partitionId = ((long)(uint)index.ObjectId << 16) | 1;
+        return new SystemTableObject(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"extended_index_{table.ObjectId}_{index.IndexId}"), index.ObjectId, isInternal: true,
+            Database.SysSchemaId, table.ObjectId, table.CreateDate, table.ModifyDate, internalType: 207, lobDataSpaceId: 0, definition,
+            [
+                new SystemRowset(1, partitionId, 0, 0, 2, (short)leafColumns, leafMax, (short)leafMin, (short)upperMax, (short)upperMin, allowsNullableKeys: true, isDataRowFormat: true, isNotVersioned: false,
+                    [new SystemAllocationUnit(PartitionCensus.AllocationUnitId(partitionId, 1), 1, 0, 0, 0)]),
+            ],
+            [],
+            parentMinorId: index.IndexId);
     }
 
     /// <summary>

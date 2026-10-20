@@ -247,6 +247,8 @@ Statement dispatch: `Spatial` added to `ContextualKeyword` enum; CREATE SPATIAL 
 **`sys.spatial_index_tessellations`** (16-col, probe-confirmed): `object_id` / `index_id` / `tessellation_scheme` / `bounding_box_xmin`/`ymin`/`xmax`/`ymax` / `level_1_grid` + `level_1_grid_desc` / … / `level_4_grid` + `level_4_grid_desc` / `cells_per_object`.
 An AUTO scheme's levels surface as NULL; `level_*_grid_desc` translates 1/2/3 codes to `LOW` / `MEDIUM` / `HIGH`.
 
+Each spatial index keeps an [internal table](catalog-views.md#system-base-tables-and-internal-tables), `extended_index_<table id>_<index id>` (internal type 207, `EXTENDED_INDEXES`, `parent_minor_id` the index): the cell `Id` (`binary(5)`) and `Attr` (`tinyint`) and a `pk<n>` copy, numbered from 0, of each primary-key column, clustered uniquely under the index's name on the cell then the keys, disabled with it, its one in-row rowset empty here where real's holds the cells (probed 2026-10-20 against SQL Server 2025).
+
 **`sys.spatial_reference_systems`** (6-col): real's 393 rows (probed 2026-10-06), from the embedded `SpatialReferenceSystems.tsv`.
 
 `sys.types` rows for geography/geometry carry `system_type_id=240`, `user_type_id=130` / `129`; the `ResolveSimpleKeyword` arm + `GetSysColumnMetadata` `SpatialSqlType => (-1, 0, 0)` wiring is what lets `CREATE TABLE (g geography)` accept them.
