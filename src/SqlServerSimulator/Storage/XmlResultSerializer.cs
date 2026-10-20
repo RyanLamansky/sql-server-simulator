@@ -48,8 +48,20 @@ internal sealed class XmlResultSerializer(string? defaultElementNamespace, Dicti
     /// <summary>Writes one node and its subtree.</summary>
     public void Append(StringBuilder text, XPathNavigator node) => this.AppendNode(text, node, []);
 
-    /// <summary>Writes one node and its subtree where <paramref name="scope"/>'s bindings are already in effect.</summary>
-    public void Append(StringBuilder text, XPathNavigator node, Dictionary<string, string> scope) => this.AppendNode(text, node, scope);
+    /// <summary>
+    /// Writes one node and its subtree where <paramref name="scope"/>'s
+    /// bindings are already in effect — an enclosing constructor's, which a
+    /// name reuses but which don't move the generated prefixes to <c>p10</c>
+    /// (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public void Append(StringBuilder text, XPathNavigator node, Dictionary<string, string> scope)
+    {
+        this.inherited = scope;
+        this.AppendNode(text, node, scope);
+    }
+
+    /// <summary>The bindings the position written into already had, for <see cref="Generate"/>'s base prefix.</summary>
+    private Dictionary<string, string>? inherited;
 
     private void AppendNode(StringBuilder text, XPathNavigator node, Dictionary<string, string> scope)
     {
@@ -239,7 +251,7 @@ internal sealed class XmlResultSerializer(string? defaultElementNamespace, Dicti
     private string Generate(Dictionary<string, string> scope)
     {
         var basePrefix = "p";
-        while (this.IsBound(scope, basePrefix))
+        while (this.MovesBase(scope, basePrefix))
             basePrefix += "1";
         if (this.counter < 0)
             this.counter = basePrefix.Length == 1 ? 1 : 0;
@@ -251,6 +263,11 @@ internal sealed class XmlResultSerializer(string? defaultElementNamespace, Dicti
                 return candidate;
         }
     }
+
+    /// <summary>Whether a binding of <paramref name="prefix"/> moves the generated prefixes along: the prolog's, or the written subtree's own.</summary>
+    private bool MovesBase(Dictionary<string, string> scope, string prefix) =>
+        this.prologPrefixes?.ContainsKey(prefix) == true
+        || (scope.TryGetValue(prefix, out var uri) && !(this.inherited is { } outer && outer.TryGetValue(prefix, out var outerUri) && outerUri == uri));
 
     private bool IsBound(Dictionary<string, string> scope, string prefix) =>
         scope.ContainsKey(prefix) || this.prologPrefixes?.ContainsKey(prefix) == true;

@@ -32,7 +32,12 @@ internal sealed class XmlQueryParser(
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
 
     private readonly string text = text;
-    private readonly string? defaultNamespace = defaultNamespace;
+    /// <summary>
+    /// The default element namespace in effect, rebound with
+    /// <see cref="prefixes"/> by a direct constructor's own <c>xmlns</c>
+    /// attributes for the expressions inside it.
+    /// </summary>
+    private string? defaultNamespace = defaultNamespace;
     private readonly Dictionary<string, string> prefixes = prefixes;
     private readonly string method = method;
 
@@ -1911,6 +1916,11 @@ internal sealed class XmlQueryParser(
         // The elements left open, innermost last, and where the tag being read began.
         var open = new Stack<string>();
         var tagStart = 0;
+        // Per open element, the bindings its namespace declarations replaced,
+        // restored at its end tag: an element's xmlns attributes are in scope
+        // for the expressions it encloses (probed 2026-10-20 against SQL
+        // Server 2025: `<x xmlns="urn:d">{ /r/i }</x>` looks for urn:d names).
+        var rebound = new Stack<(string? Default, List<(string Prefix, string? Uri)> Prefixes)>();
 
         void FlushContent()
         {
@@ -1992,11 +2002,14 @@ internal sealed class XmlQueryParser(
                     if (!closingTag)
                     {
                         open.Push(tagName);
+                        rebound.Push(this.RebindDeclaredNamespaces(this.text[tagStart..this.index]));
                         depth++;
                         continue;
                     }
                     if (open.TryPop(out var opened) && opened != tagName)
                         throw SimulatedSqlException.XQueryExpectedEndTag(this.method, opened);
+                    if (rebound.TryPop(out var replaced))
+                        this.RestoreNamespaces(replaced);
                     depth--;
                     if (depth == 0)
                         return this.Finish(literals, enclosed, inAttribute, segment);
@@ -2080,6 +2093,42 @@ internal sealed class XmlQueryParser(
             while (end < text.Length && IsNameChar(text[end]))
                 end++;
             return text[start..end];
+        }
+    }
+
+    /// <summary>
+    /// Binds a start tag's <c>xmlns</c> / <c>xmlns:p</c> attributes for the
+    /// expressions its content encloses, answering what they replaced.
+    /// </summary>
+    private (string? Default, List<(string Prefix, string? Uri)> Prefixes) RebindDeclaredNamespaces(string startTag)
+    {
+        var opened = new List<Dictionary<string, string>>();
+        XmlLiteralScopes.Scan(startTag, opened);
+        var replaced = (Default: this.defaultNamespace, Prefixes: new List<(string Prefix, string? Uri)>());
+        if (opened.Count == 0)
+            return replaced;
+        foreach (var (prefix, uri) in opened[^1])
+        {
+            if (prefix.Length == 0)
+            {
+                this.defaultNamespace = uri.Length == 0 ? null : uri;
+                continue;
+            }
+            replaced.Prefixes.Add((prefix, this.prefixes.TryGetValue(prefix, out var before) ? before : null));
+            this.prefixes[prefix] = uri;
+        }
+        return replaced;
+    }
+
+    private void RestoreNamespaces((string? Default, List<(string Prefix, string? Uri)> Prefixes) replaced)
+    {
+        this.defaultNamespace = replaced.Default;
+        foreach (var (prefix, uri) in replaced.Prefixes)
+        {
+            if (uri is null)
+                _ = this.prefixes.Remove(prefix);
+            else
+                this.prefixes[prefix] = uri;
         }
     }
 

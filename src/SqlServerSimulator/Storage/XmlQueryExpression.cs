@@ -1256,7 +1256,7 @@ internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] e
         }
         var root = System.Xml.Linq.XDocument.Parse(text.ToString(), System.Xml.Linq.LoadOptions.PreserveWhitespace).Root!;
         if (attributes is not null)
-            XmlAttributeHoisting.Hoist(root, attributes);
+            XmlAttributeHoisting.Hoist(root, attributes, this.prefixes);
         foreach (var prefix in this.prologDeclarations)
             root.Attribute(prefix.Length == 0 ? "xmlns" : System.Xml.Linq.XNamespace.Xmlns + prefix)?.AddAnnotation(XmlPrologDeclaration.Instance);
         results.Add(root.CreateNavigator());

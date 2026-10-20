@@ -240,4 +240,21 @@ public sealed class XmlConstructorTests
         new Simulation().AssertSqlError(
             "select cast('<r/>' as xml).value('count(<a>1</a>)', 'int')", 2373, "XQuery [value()]: count() is not supported with constructed XML");
     }
+    [TestMethod]
+    [DataRow("<x xmlns=\"urn:d\">{ /r/i[1] }</x>", "<x xmlns=\"urn:d\"/>")]
+    [DataRow("<x xmlns:q=\"urn:p\">{ /r/q:j }</x>", "<x xmlns:q=\"urn:p\"><q:j q:z=\"q\">3</q:j></x>")]
+    [DataRow("declare default element namespace \"urn:d\"; <x xmlns=\"\">{ /r/i[1] }</x>", "<x xmlns=\"\"><i k=\"x\">1</i></x>")]
+    [DataRow("<x xmlns=\"urn:d\"><y xmlns=\"\">{ /r/i[1] }</y></x>", "<x xmlns=\"urn:d\"><y xmlns=\"\"><i k=\"x\">1</i></y></x>")]
+    [DataRow("<x>{ /r/*:j/@*:z }</x>", "<x xmlns:p1=\"urn:p\" p1:z=\"q\"/>")]
+    [DataRow("declare namespace p=\"urn:p\"; <x>{ /r/p:j/@p:z }</x>", "<x xmlns:p=\"urn:p\" p:z=\"q\"/>")]
+    [DataRow("<x xmlns:p=\"urn:other\">{ /r/*:j }</x>", "<x xmlns:p=\"urn:other\"><p1:j xmlns:p1=\"urn:p\" p1:z=\"q\">3</p1:j></x>")]
+    public void ConstructorNamespaces_BindForWhatTheyEnclose(string query, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = N'<r xmlns:p=\"urn:p\"><i k=\"x\">1</i><p:j p:z=\"q\">3</p:j></r>'; select cast(@x.query('{query}') as nvarchar(max))"));
+
+    [TestMethod]
+    public void ConstructorPrefix_EndsWithItsElement() =>
+        new Simulation().AssertSqlError(
+            "declare @x xml = N'<r/>'; select @x.query('<a><x xmlns:q=\"urn:p\"/>{ /r/q:j }</a>')",
+            2229,
+            "XQuery [query()]: The name \"q\" does not denote a namespace.");
 }

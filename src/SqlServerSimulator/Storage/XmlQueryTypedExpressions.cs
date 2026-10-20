@@ -310,9 +310,13 @@ internal static class XmlAttributeHoisting
     /// Moves each marked attribute onto its element, in document order. One
     /// that follows an element, comment or processing instruction is Msg 6307
     /// (text and atomic values before it are fine, probe-confirmed), and one
-    /// the element already carries is Msg 6308.
+    /// the element already carries is Msg 6308. A namespaced attribute the
+    /// element's scope doesn't bind is declared under the prefix the prolog
+    /// declared last for its namespace, else a generated <c>p1</c>, … — never
+    /// the prefix its document wrote (probed 2026-10-20 against SQL Server
+    /// 2025).
     /// </summary>
-    public static void Hoist(XElement root, List<XPathNavigator> attributes)
+    public static void Hoist(XElement root, List<XPathNavigator> attributes, Dictionary<string, string>? prologPrefixes = null)
     {
         var markers = new List<XProcessingInstruction>();
         foreach (var node in root.DescendantNodes())
@@ -334,9 +338,30 @@ internal static class XmlAttributeHoisting
             if (owner.Attribute(name) is not null)
                 throw SimulatedSqlException.XmlDuplicateAttribute(attribute.LocalName);
             if (attribute.NamespaceURI.Length > 0 && owner.GetPrefixOfNamespace(attribute.NamespaceURI) is null)
-                owner.Add(new XAttribute(XNamespace.Xmlns + (attribute.Prefix.Length > 0 ? attribute.Prefix : "p1"), attribute.NamespaceURI));
+                owner.Add(new XAttribute(XNamespace.Xmlns + PrefixFor(owner, attribute.NamespaceURI, prologPrefixes), attribute.NamespaceURI));
             owner.Add(new XAttribute(name, attribute.Value));
             marker.Remove();
+        }
+    }
+
+    private static string PrefixFor(XElement owner, string uri, Dictionary<string, string>? prologPrefixes)
+    {
+        string? last = null;
+        if (prologPrefixes is not null)
+        {
+            foreach (var (prefix, candidate) in prologPrefixes)
+            {
+                if (candidate == uri)
+                    last = prefix;
+            }
+        }
+        if (last is not null && owner.GetNamespaceOfPrefix(last) is null)
+            return last;
+        for (var n = 1; ; n++)
+        {
+            var generated = "p" + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (owner.GetNamespaceOfPrefix(generated) is null && prologPrefixes?.ContainsKey(generated) != true)
+                return generated;
         }
     }
 }
@@ -372,7 +397,7 @@ internal static class XmlLiteralScopes
     }
 
     /// <summary>Advances the open-tag stack over one literal stretch.</summary>
-    private static void Scan(string text, List<Dictionary<string, string>> open)
+    internal static void Scan(string text, List<Dictionary<string, string>> open)
     {
         var index = 0;
         while ((index = text.IndexOf('<', index)) >= 0)

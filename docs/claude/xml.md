@@ -207,6 +207,9 @@ An empty or whitespace-only argument is **Msg 6306** (`Invalid XQuery expression
 | computed `attribute name {…}` | the content atomized and space-joined, an empty body the empty string; `xmlns` is **Msg 9316** |
 | computed `text {…}` | a single expression (a comma is **Msg 2205**, an empty body Msg 2209), atomized and space-joined; `()` builds no node, `""` an empty one |
 
+A direct element's own `xmlns` / `xmlns:p` attributes bind for the expressions it encloses, to its end tag: `<x xmlns="urn:d">{ /r/i }</x>` looks for `urn:d` names and finds none, and a prefix declared there resolves inside it and nowhere after (probed 2026-10-20 against SQL Server 2025).
+An attribute an enclosed expression copies onto the element is declared, where the element's scope doesn't bind its namespace, under the prolog's last prefix for it or a generated `p1` — never the prefix its document wrote.
+
 Real takes only the **constant-QName** form of a computed name: a `{…}` name expression is **Msg 9315** whatever it holds, a string literal included.
 The computed comment and processing-instruction forms are **Msg 9326** and **Msg 9325**, in every method, `.modify()`'s insert content included.
 A constructor resolves its name through the [prolog](#the-xquery-subset) exactly as a path step does, so `declare default element namespace "urn:d"; <b/>` builds `<b xmlns="urn:d"/>`; a declared prefix the markup never writes isn't declared on the result, as real omits it.
