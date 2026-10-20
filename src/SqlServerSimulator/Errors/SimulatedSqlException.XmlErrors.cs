@@ -77,6 +77,23 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
+    /// <paramref name="parseError"/> followed by the informational Msg 6338,
+    /// which real sends after a style-2 conversion whose markup doesn't parse
+    /// (probed 2026-10-20 against SQL Server 2025); a <c>CATCH</c> reads the
+    /// parse error.
+    /// </summary>
+    internal static SimulatedSqlException FollowedByDtdStripped(SimulatedSqlException parseError)
+    {
+        SimulatedSqlException note = new("XML DTD has been stripped from one or more XML fragments.  External subsets, if any, have been ignored.", 6338, 0, 1);
+        List<SimulatedError> entries = [.. parseError.Errors, .. note.Errors];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            AbortsAsUnderXactAbort = parseError.AbortsAsUnderXactAbort,
+            CatchReadsFirstEntry = true,
+        };
+    }
+
+    /// <summary>
     /// Msg 6359: a value converted to <c>xml</c> carries a <c>DOCTYPE</c>,
     /// which only <c>CONVERT</c> style 2 admits. Probe-confirmed against SQL
     /// Server 2025 (2026-09-23), with or without an internal subset.

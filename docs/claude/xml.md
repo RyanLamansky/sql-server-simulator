@@ -1279,9 +1279,12 @@ A binary source is decoded in the encoding its bytes announce — a byte-order m
 The same pass answers the **canonical form** real serializes the stored value as, and that text is what the column or variable holds — so `CAST('<a b=''x''></a>' AS xml)` reads back as `<a b="x"/>` through a text cast, and SqlClient's own re-rendering of the value on the wire (`<a b="x" />`) matches what it renders for real (probed 2026-09-23; the rules are in the class's remarks).
 The declaration is dropped, which also keeps SqlClient from refusing a value whose declaration names an 8-bit encoding; whitespace-only text is dropped unless `CONVERT` style 1 or `xml:space="preserve"` keeps it.
 
+`CONVERT` styles 2 and 3 (3 keeps whitespace too) lift the `DOCTYPE`'s Msg 6359 with real's limited internal-subset support (`Convert.CoerceWithInternalSubset`, probed 2026-10-20 against SQL Server 2025): the subset's entities expand — in text and attribute values, nested, one holding markup parsed as markup — its attribute defaults apply (a `#FIXED` value isn't enforced), a tokenized attribute's value is whitespace-normalized, anything external is ignored, an external entity expanding to nothing, and the `DOCTYPE` is dropped.
+A document that doesn't parse reports the error its markup would without the `DOCTYPE`, positioned in the original text, then the informational **Msg 6338**; a `CATCH` reads the error.
+
 ### Not modeled yet
 
-- **`CONVERT` styles 2 and 3** — real's limited internal-subset DTD support, which strips the DTD, expands its entities and raises informational Msg 6338; a `DOCTYPE` under either raises `NotSupportedException`.
+- **`CONVERT` style 2 over a binary value carrying a `DOCTYPE`** raises `NotSupportedException`.
 
 ## Known gaps
 

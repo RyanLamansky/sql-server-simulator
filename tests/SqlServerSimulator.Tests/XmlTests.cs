@@ -1190,4 +1190,25 @@ public sealed class XmlTests
     [DataRow("<a b=\"1\"", 2222, "Invalid source character 0x1a found in an identifier near '='.")]
     public void UnterminatedConstructor_RefusesAsReal(string constructor, int number, string message) =>
         new Simulation().AssertSqlError($"declare @x xml = N'<r/>'; select @x.query('{constructor}')", number, $"XQuery [query()]: {message}");
+    [TestMethod]
+    [DataRow("<!DOCTYPE a [<!ENTITY e \"v\">]><a>&e;</a>", 2, "<a>v</a>")]
+    [DataRow("<!DOCTYPE a [<!ATTLIST a k CDATA \"d\">]><a/>", 2, "<a k=\"d\"/>")]
+    [DataRow("<!DOCTYPE a [<!ENTITY e \"x&f;y\"><!ENTITY f \"F\">]><a t=\"&e;\">&e;</a>", 2, "<a t=\"xFy\">xFy</a>")]
+    [DataRow("<!DOCTYPE a [<!ENTITY e \"<b>in</b>\">]><a>&e;</a>", 2, "<a><b>in</b></a>")]
+    [DataRow("<!DOCTYPE a SYSTEM \"x.dtd\"><a/>", 2, "<a/>")]
+    [DataRow("<!DOCTYPE a [<!ENTITY e SYSTEM \"x.txt\">]><a>&e;</a>", 2, "<a/>")]
+    [DataRow("<!DOCTYPE a [<!ATTLIST a k CDATA #FIXED \"f\">]><a k=\"g\"/>", 2, "<a k=\"g\"/>")]
+    [DataRow("<!DOCTYPE a [<!ATTLIST a k NMTOKENS #IMPLIED>]><a k=\"  x   y \"/>", 2, "<a k=\"x y\"/>")]
+    [DataRow("<!DOCTYPE a [<!ENTITY e \"v\">]><a>  &e;  <b/> </a>", 3, "<a>  v  <b/>&#x20;</a>")]
+    public void ConvertStyle2_ProcessesTheInternalSubset(string text, int style, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select convert(nvarchar(max), convert(xml, '{text}', {style}))"));
+
+    [TestMethod]
+    public void ConvertStyle2_ParseError_IsFollowedByTheStrippedNote()
+    {
+        var ex = new Simulation().AssertSqlError("select convert(xml, '<!DOCTYPE a [<!ENTITY e \"v\">]><a>&undefined;</a>', 2)", 9448);
+        AreEqual("XML parsing: line 1, character 44, well formed check: undeclared entity", ex.Errors[0].Message);
+        AreEqual(6338, ex.Errors[^1].Number);
+        AreEqual(9448, new Simulation().ExecuteScalar("declare @n int; begin try declare @x xml = convert(xml, '<!DOCTYPE a [<!ENTITY e \"v\">]><a>&undefined;</a>', 2) end try begin catch set @n = error_number() end catch; select @n"));
+    }
 }

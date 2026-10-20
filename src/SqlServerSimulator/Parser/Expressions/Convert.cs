@@ -217,10 +217,9 @@ internal sealed class ConvertExpression : Expression
     /// <summary>
     /// An <c>xml</c> target reads the style as whitespace and DTD handling
     /// rather than as a text layout, so a binary source isn't rendered as hex:
-    /// styles 1 and 3 keep whitespace-only text. Style 2's limited
-    /// internal-subset DTD support (and 3's, which is 1 and 2 together) isn't
-    /// built: a DTD under it raises <see cref="NotSupportedException"/> rather
-    /// than the Msg 6359 the style exists to lift.
+    /// styles 1 and 3 keep whitespace-only text, and 2 and 3 lift the Msg 6359
+    /// a <c>DOCTYPE</c> otherwise raises with limited internal-subset support
+    /// (<see cref="CoerceWithInternalSubset"/>).
     /// </summary>
     private static SqlValue CoerceToXmlWithStyle(SqlValue source, int style)
     {
@@ -234,8 +233,94 @@ internal sealed class ConvertExpression : Expression
         }
         catch (SimulatedSqlException ex) when (style is 2 or 3 && ex.Number == 6359)
         {
-            throw new NotSupportedException("CONVERT to xml with style 2 (internal-subset DTD support) isn't built.");
+            return CoerceWithInternalSubset(source, preserveWhitespace: style == 3);
         }
+    }
+
+    /// <summary>
+    /// Style 2's limited internal-subset DTD support (probed 2026-10-20
+    /// against SQL Server 2025): the subset's entities expand — in text and
+    /// attribute values, nested, an entity holding markup parsed as markup —
+    /// its attribute defaults apply, a tokenized attribute's value is
+    /// whitespace-normalized, anything external is ignored (an external
+    /// entity expands to nothing) and the <c>DOCTYPE</c> is dropped. A document
+    /// that doesn't parse reports the error its markup would without the
+    /// <c>DOCTYPE</c>, positioned in the original text, followed by the
+    /// informational Msg 6338.
+    /// </summary>
+    private static SqlValue CoerceWithInternalSubset(SqlValue source, bool preserveWhitespace)
+    {
+        if (source.Type.Category != SqlTypeCategory.String)
+            throw new NotSupportedException("CONVERT to xml with style 2 over a binary value carrying a DTD isn't built.");
+        var text = source.AsString;
+        var settings = new System.Xml.XmlReaderSettings
+        {
+            DtdProcessing = System.Xml.DtdProcessing.Parse,
+            XmlResolver = null,
+            ConformanceLevel = System.Xml.ConformanceLevel.Document,
+        };
+        System.Xml.Linq.XDocument document;
+        try
+        {
+            using var reader = System.Xml.XmlReader.Create(new StringReader(text), settings);
+            document = System.Xml.Linq.XDocument.Load(reader, preserveWhitespace ? System.Xml.Linq.LoadOptions.PreserveWhitespace : System.Xml.Linq.LoadOptions.None);
+        }
+        catch (System.Xml.XmlException)
+        {
+            try
+            {
+                _ = SqlValue.FromString(source.Type, WithoutDoctype(text)).CoerceToXml(preserveWhitespace);
+            }
+            catch (SimulatedSqlException parseError)
+            {
+                throw SimulatedSqlException.FollowedByDtdStripped(parseError);
+            }
+            throw new NotSupportedException("A DTD-specific XML parse failure under CONVERT style 2 isn't built.");
+        }
+
+        var markup = new System.Text.StringBuilder();
+        foreach (var node in document.Nodes())
+        {
+            if (node is not System.Xml.Linq.XDocumentType)
+                _ = markup.Append(node.ToString(System.Xml.Linq.SaveOptions.DisableFormatting));
+        }
+        return SqlValue.FromString(SqlType.NVarcharMax, markup.ToString()).CoerceToXml(preserveWhitespace);
+    }
+
+    /// <summary><paramref name="text"/> with its <c>DOCTYPE</c> blanked to spaces, so every other character keeps its line and column.</summary>
+    private static string WithoutDoctype(string text)
+    {
+        var start = text.IndexOf("<!DOCTYPE", StringComparison.Ordinal);
+        if (start < 0)
+            return text;
+        var depth = 0;
+        var quote = '\0';
+        var end = start;
+        for (; end < text.Length; end++)
+        {
+            var c = text[end];
+            if (quote != '\0')
+            {
+                if (c == quote)
+                    quote = '\0';
+                continue;
+            }
+            if (c is '"' or '\'')
+                quote = c;
+            else if (c == '[')
+                depth++;
+            else if (c == ']')
+                depth--;
+            else if (c == '>' && depth == 0)
+                break;
+        }
+        var blanked = text.ToCharArray();
+        for (var i = start; i <= end && i < blanked.Length; i++)
+        {
+            if (blanked[i] is not ('\n' or '\r'))
+                blanked[i] = ' ';
+        }
+        return new string(blanked);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
