@@ -33,6 +33,7 @@ public sealed partial class BacpacBuilder
     private readonly HashSet<string> _schemas = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<TableBuilder> _tables = [];
     private readonly Dictionary<string, string> _databaseOptions = new(StringComparer.Ordinal);
+    private readonly List<(string Option, string Value)> _scopedConfigurations = [];
     private readonly List<ProgrammableObjectDef> _programmableObjects = [];
     private readonly List<ExtendedPropertyDef> _extendedProperties = [];
     private readonly List<SequenceDef> _sequences = [];
@@ -83,6 +84,18 @@ public sealed partial class BacpacBuilder
     public BacpacBuilder DatabaseOption(string name, string value)
     {
         _databaseOptions[name] = value;
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlGenericDatabaseScopedConfigurationOptions</c> element as
+    /// DacFx writes one for a scoped configuration set in the database —
+    /// named by <paramref name="option"/> (<c>PREVIEW_FEATURES</c>), its
+    /// <c>GenericValue</c> <paramref name="value"/> (<c>ON</c>).
+    /// </summary>
+    public BacpacBuilder ScopedConfiguration(string option, string value)
+    {
+        _scopedConfigurations.Add((option, value));
         return this;
     }
 
@@ -625,6 +638,14 @@ public sealed partial class BacpacBuilder
             }
             model.Add(options);
         }
+        foreach (var (option, value) in _scopedConfigurations)
+        {
+            model.Add(new XElement(ns + "Element",
+                new XAttribute("Type", "SqlGenericDatabaseScopedConfigurationOptions"),
+                new XAttribute("Name", $"[{option}]"),
+                new XElement(ns + "Property", new XAttribute("Name", "GenericValueType"), new XAttribute("Value", "2")),
+                new XElement(ns + "Property", new XAttribute("Name", "GenericValue"), new XAttribute("Value", value))));
+        }
 
         // dbo is pre-seeded on every Database — emitting CREATE SCHEMA dbo
         // raises Msg 2714 (or similar). Real DACFx omits dbo from the
@@ -838,7 +859,9 @@ public sealed partial class BacpacBuilder
             case "varbinary" when isMax:
                 Encode8BytePrefixedBytes(stream, value as byte[]);
                 return;
-            case "xml":
+            // json and vector travel as their text (a sqlpackage 170.4 export
+            // of SQL Server 2025).
+            case "xml" or "json" or "vector":
                 Encode8BytePrefixedString(stream, value as string);
                 return;
             case "text" or "ntext":

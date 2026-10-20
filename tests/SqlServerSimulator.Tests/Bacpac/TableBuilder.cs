@@ -602,6 +602,23 @@ public sealed class TableBuilder
         }
 
         var (baseName, length, precision, scale, isMax) = ParseSqlType(sqlType);
+        // A vector's specifier is a kind of its own: its Dimension, and
+        // BaseType 1 for float16 (a sqlpackage 170.4 export of SQL Server 2025).
+        if (baseName == "vector")
+        {
+            var vector = new XElement(ns + "Element",
+                new XAttribute("Type", "SqlVectorTypeSpecifier"),
+                PropertyElement(ns, "Dimension", precision ?? length!));
+            if (scale is { } baseType && baseType.Equals("float16", StringComparison.OrdinalIgnoreCase))
+                vector.Add(PropertyElement(ns, "BaseType", "1"));
+            vector.Add(new XElement(ns + "Relationship",
+                new XAttribute("Name", "Type"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "References",
+                        new XAttribute("Name", "[vector]"),
+                        new XAttribute("ExternalSource", "BuiltIns")))));
+            return vector;
+        }
         var element = new XElement(ns + "Element",
             new XAttribute("Type", "SqlTypeSpecifier"),
             new XElement(ns + "Relationship",

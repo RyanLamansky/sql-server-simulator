@@ -194,6 +194,9 @@ internal static class ModelXmlReader
                 handled = (type, phase) switch
                 {
                     ("SqlDatabaseOptions", 1) => Run(() => EmitDatabaseOptions(element, connection, result, bracketedDb)),
+                    // Ahead of the tables, as PREVIEW_FEATURES gates a float16
+                    // vector column.
+                    ("SqlGenericDatabaseScopedConfigurationOptions", 1) => Run(() => EmitScopedConfiguration(element, name, connection)),
                     ("SqlSchema", 1) => Run(() => EmitSchema(name, connection)),
                     ("SqlUserDefinedDataType", 1) => Run(() => EmitUserDefinedDataType(element, name, connection)),
                     ("SqlSequence", 1) => Run(() => EmitSequence(element, name, connection)),
@@ -406,7 +409,7 @@ internal static class ModelXmlReader
     /// type on Skipped multiple times (once per pass).
     /// </summary>
     private static bool IsHandledByAnotherPhase(string type) => type
-        is "SqlDatabaseOptions" or "SqlSchema" or "SqlUserDefinedDataType"
+        is "SqlDatabaseOptions" or "SqlGenericDatabaseScopedConfigurationOptions" or "SqlSchema" or "SqlUserDefinedDataType"
         or "SqlSequence" or "SqlRole" or "SqlTableType" or "SqlXmlSchemaCollection"
         or "SqlLogin" or "SqlUser" or "SqlRoleMembership"
         or "SqlFullTextCatalog"
@@ -437,6 +440,24 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"CREATE SCHEMA {bracketedName};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER DATABASE SCOPED CONFIGURATION SET name = value</c> for a
+    /// <c>SqlGenericDatabaseScopedConfigurationOptions</c> element, which
+    /// DacFx names by the option (<c>[PREVIEW_FEATURES]</c>) and whose
+    /// <c>GenericValue</c> it writes as the statement takes it (<c>ON</c>).
+    /// </summary>
+    private static void EmitScopedConfiguration(XElement element, string? name, DbConnection connection)
+    {
+        var value = ReadStringProperty(element, "GenericValue");
+        if (string.IsNullOrEmpty(name) || value is null)
+            throw new InvalidDataException("bacpac: SqlGenericDatabaseScopedConfigurationOptions element missing its Name or GenericValue.");
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER DATABASE SCOPED CONFIGURATION SET {name.Trim('[', ']')} = {value};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -1276,7 +1297,7 @@ internal static class ModelXmlReader
         var typeSpec = columnElement.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "TypeSpecifier")
             ?.Elements(Ns + "Entry").Elements(Ns + "Element")
-            .FirstOrDefault(e => e.Attribute("Type")?.Value is "SqlTypeSpecifier" or "SqlXmlTypeSpecifier")
+            .FirstOrDefault(e => e.Attribute("Type")?.Value is "SqlTypeSpecifier" or "SqlXmlTypeSpecifier" or "SqlVectorTypeSpecifier")
             ?? throw new InvalidDataException($"bacpac: column '{qualifiedColumnName}' missing TypeSpecifier.");
 
         var typeDdl = TranslateTypeSpecifier(typeSpec);
@@ -1365,6 +1386,16 @@ internal static class ModelXmlReader
         var xmlCollectionRef = ReadSingleReference(typeSpec, "XmlSchemaCollection");
         if (xmlCollectionRef is not null)
             return $"{renderedTypeName}({xmlCollectionRef})";
+
+        // A vector column's SqlVectorTypeSpecifier carries its Dimension, and
+        // BaseType 1 for float16, absent for the default float32 (verified
+        // against a sqlpackage 170.4 export of SQL Server 2025).
+        if (typeSpec.Attribute("Type")?.Value == "SqlVectorTypeSpecifier")
+        {
+            var dimension = ReadStringProperty(typeSpec, "Dimension")
+                ?? throw new InvalidDataException("bacpac: SqlVectorTypeSpecifier missing Dimension.");
+            return ReadStringProperty(typeSpec, "BaseType") == "1" ? $"{renderedTypeName}({dimension}, float16)" : $"{renderedTypeName}({dimension})";
+        }
 
         var isMax = ReadBoolProperty(typeSpec, "IsMax", defaultValue: false);
         var length = ReadStringProperty(typeSpec, "Length");

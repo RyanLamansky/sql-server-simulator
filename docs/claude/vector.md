@@ -153,6 +153,5 @@ Duplicated vectors are the other gap: of several identical vectors real can leav
 
 ## Not modeled yet
 
-- Vector columns in BACPAC import.
 - The later vector-index version Microsoft documents — writable tables, `TOP (n) WITH APPROXIMATE`, iterative filtering, `FORCE_ANN_ONLY`, `sys.dm_db_vector_indexes` — which this release of SQL Server 2025 doesn't take.
 - A cascading `UPDATE` into a vector-indexed table, which writes it here; a cascading `DELETE` is refused as real's is.

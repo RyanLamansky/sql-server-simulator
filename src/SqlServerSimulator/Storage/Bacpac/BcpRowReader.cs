@@ -169,6 +169,10 @@ internal static class BcpRowReader
             // 2026-05-15). The MAX arms precede their bounded counterparts
             // below, which take a 2-byte prefix instead.
             XmlSqlType => EightByte(type, EightBytePayload.Xml),
+            // json and vector travel as their text, as nvarchar(max) does
+            // (verified against a sqlpackage 170.4 export of SQL Server 2025).
+            JsonSqlType => EightByte(type, EightBytePayload.Json),
+            VectorSqlType => EightByte(type, EightBytePayload.Vector),
             GeographySqlType => EightByte(type, EightBytePayload.Geography),
             GeometrySqlType => EightByte(type, EightBytePayload.Geometry),
             HierarchyIdSqlType => EightByte(type, EightBytePayload.HierarchyId),
@@ -257,6 +261,10 @@ internal static class BcpRowReader
         NVarcharMax,
         VarbinaryMax,
         Xml,
+        /// <summary>The json type's UTF-16 text, canonicalized as any text reaching the type is.</summary>
+        Json,
+        /// <summary>A vector's UTF-16 JSON-array text, parsed at the column's dimensions and base type.</summary>
+        Vector,
         /// <summary>
         /// Geography: read the length + N bytes, try
         /// <see cref="Spatial.SpatialBinaryCodec.TryDecode"/> for any 2D shape
@@ -306,6 +314,8 @@ internal static class BcpRowReader
             EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(SystemNameSqlType.Utf16LeDecode(data)),
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
+            EightBytePayload.Json => SqlValue.FromJson(JsonDocumentText.Canonicalize(Encoding.Unicode.GetString(data))),
+            EightBytePayload.Vector => SqlValue.FromVector((VectorSqlType)type, VectorSqlType.Parse(Encoding.Unicode.GetString(data), ((VectorSqlType)type).dimensions, float16: ((VectorSqlType)type).IsFloat16)),
             EightBytePayload.Geography => Spatial.SpatialBinaryCodec.TryDecode(data, isGeography: true) is { } geographyValue
                 ? SqlValue.FromGeography(geographyValue)
                 : SqlValue.Null(type),

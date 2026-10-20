@@ -170,8 +170,8 @@ Captured from a Microsoft Learn category-by-category audit; re-fetch <https://le
   Not modeled yet: internal-table statistics from `sp_createstats`, and `sp_password` and `ALTER LOGIN … WITH PASSWORD` on `sa` past the policy check ([`permissions.md`](permissions.md#not-modeled-yet)).
   **Deferred until requested:** real's system message rows in `sys.messages` / `sysmessages` (every language), and with them `FORMATMESSAGE` / `RAISERROR` over system ids and diagnostics in the session's language after `SET LANGUAGE`, the Msg 2786 / 2787 wording included — a large dump to carry in the assembly for consumers that may never ask.
   A broad surface — each proc is its own result-shape contract over the catalog views — that ships piecemeal by popularity, not as a bundle.
-- **SQL Server 2025's vector residue** — vector columns in BACPAC import, the later vector-index version, and a cascading `UPDATE` into a vector-indexed table → [`vector.md`](vector.md#not-modeled-yet).
-- **SQL Server 2025's `json` residue** — a JSON index's internal table and json columns in BACPAC import → [`json-type.md`](json-type.md#not-modeled-yet).
+- **SQL Server 2025's vector residue** — the later vector-index version and a cascading `UPDATE` into a vector-indexed table → [`vector.md`](vector.md#not-modeled-yet).
+- **SQL Server 2025's `json` residue** — a JSON index's internal table → [`json-type.md`](json-type.md#not-modeled-yet).
 
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 

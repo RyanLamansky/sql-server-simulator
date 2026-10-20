@@ -109,4 +109,3 @@ Over the TDS endpoint a client that negotiates json support (SqlClient 6+) recei
 ## Not modeled yet
 
 - A JSON index's internal table (`json_index_<object_id>_<index_id>` in `sys.objects` and `sys.internal_tables`) and the internal index `sys.indexes` lists beside it.
-- json columns in BACPAC import.

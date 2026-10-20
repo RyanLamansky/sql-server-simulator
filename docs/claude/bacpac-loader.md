@@ -144,7 +144,7 @@ Type matrix probe-confirmed against AdventureWorks2025 hex-dumps:
 | `time(N)` / `datetime2(N)` / `datetimeoffset(N)` specifically | **always the maximum width** — 5 / 8 / 10 bytes — with the value scaled to 7 fractional digits whatever N is | `0xFF` |
 | UDDT-aliased columns of any base type (e.g. `dbo.Flag` over bit, `dbo.OrderNumber` over nvarchar) | shaped as if nullable (1-byte / 2-byte / 8-byte prefix per base family) regardless of declared nullability | per base-family NULL sentinel |
 | Variable-length bounded (`nvarchar(N)`, `varchar(N)`, `nchar(N)`, `char(N)`, `varbinary(N)`, `binary(N)`) | 2-byte LE byte-length prefix + bytes | `0xFFFF` |
-| MAX types (`varchar(MAX)`, `nvarchar(MAX)`, `varbinary(MAX)`), `xml`, CLR-UDT family (`hierarchyid`, `geography`, `geometry`) | 8-byte LE length prefix + N bytes inline (NOT the TDS-PLP chunked encoding) | `0xFFFFFFFFFFFFFFFF` (-1 signed) |
+| MAX types (`varchar(MAX)`, `nvarchar(MAX)`, `varbinary(MAX)`), `xml`, `json`, `vector`, CLR-UDT family (`hierarchyid`, `geography`, `geometry`) | 8-byte LE length prefix + N bytes inline (NOT the TDS-PLP chunked encoding) | `0xFFFFFFFFFFFFFFFF` (-1 signed) |
 
 **Probe-confirmed corrections from the original first-cut matrix**:
 - `money` / `smallmoney` / `time(N)` / `datetime2(N)` / `datetimeoffset(N)` are fixed-raw with no prefix when NOT NULL (only nullable variants prefix).
@@ -210,6 +210,8 @@ The alias side-map (`TableColumnIsAlias`, consumed by the BCP decoder) is built 
 
 `SqlXmlSchemaCollection` elements dispatch in phase 1 (`EmitXmlSchemaCollection`), alongside the other type-namespace objects (UDDTs / table types) so they exist before any table that binds one.
 The element carries a single `SchemaExpression` property whose CDATA body is a **complete T-SQL string literal** — DACFx stores the `N'…'` prefix, the surrounding quotes, and any doubled embedded quotes verbatim — so the loader forwards it into `CREATE XML SCHEMA COLLECTION [schema].[name] AS <literal>` without re-wrapping.
+
+A `vector` column arrives as `SqlVectorTypeSpecifier`, its `Dimension` a property and `BaseType` 1 for `float16`; its values, like a `json` column's, are their UTF-16 text — a `float32` one written short (`[1E+10,-3.25]`), a `float16` one in `CAST`'s exponent form — and a `PREVIEW_FEATURES` setting the `float16` column needs arrives as a `SqlGenericDatabaseScopedConfigurationOptions` element, applied in phase 1 (a sqlpackage 170.4 export of SQL Server 2025, 2026-10-20).
 
 Typed-xml columns arrive as `SqlXmlTypeSpecifier` (vs `SqlTypeSpecifier` for every other type) carrying an `XmlSchemaCollection` relationship whose `References` names the bound `[schema].[collection]`.
 `TranslateTypeSpecifier` detects the relationship and emits `xml([schema].[collection])` instead of bare `xml`, so `HeapColumn.XmlSchemaCollection` binds and `sys.columns.xml_collection_id` reports the collection's id (0 when untyped).

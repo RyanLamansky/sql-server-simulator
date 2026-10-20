@@ -2680,6 +2680,29 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    [Description("json and vector columns import from the SqlVectorTypeSpecifier and the text DacFx writes for each value, a float16 vector under the PREVIEW_FEATURES scoped configuration the model carries; the values read back as SQL Server 2025 reads the exported rows (a sqlpackage 170.4 export, 2026-10-20).")]
+    public void JsonAndVectorColumns_ImportTheirText()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .ScopedConfiguration("PREVIEW_FEATURES", "ON")
+            .Table("dbo", "zj", t => t.Column("id", "int").Column("j", "json", nullable: true).Column("j2", "json")
+                .Row(1, "{\"a\":1,\"b\":[1,2,3]}", "[true,null]").Row(2, null, "{\"x\":\"é ?\"}").Row(3, "[\"str\"]", "[123.5]"))
+            .Table("dbo", "zv", t => t.Column("id", "int").Column("v", "vector(3)", nullable: true).Column("v2", "vector(2)")
+                .Row(1, "[1,2,3]", "[0.5,-1]").Row(2, null, "[1E+10,-3.25]"))
+            .Table("dbo", "zh", t => t.Column("id", "int").Column("h", "vector(2, float16)", nullable: true)
+                .Row(1, "[1.5000000e+000,-2.0000000e+000]"))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("1|[1.0000000e+000,2.0000000e+000,3.0000000e+000]|[5.0000000e-001,-1.0000000e+000];2|NULL|[1.0000000e+010,-3.2500000e+000]",
+            sim.ExecuteScalar("select string_agg(concat_ws('|', id, isnull(cast(v as nvarchar(max)), 'NULL'), cast(v2 as nvarchar(max))), ';') within group (order by id) from zv"));
+        AreEqual("[1.5000000e+000,-2.0000000e+000]|float16", sim.ExecuteScalar("select concat(cast(h as nvarchar(max)), '|', (select vector_base_type_desc from sys.columns where object_id = object_id('zh') and name = 'h')) from zh"));
+        AreEqual("1|{\"a\":1,\"b\":[1,2,3]}|[true,null]|30;2|NULL|{\"x\":\"é ?\"}|49;3|[\"str\"]|[123.5]|35",
+            sim.ExecuteScalar("select string_agg(concat_ws('|', id, isnull(cast(j as nvarchar(max)), 'NULL'), cast(j2 as nvarchar(max)), datalength(j2)), ';') within group (order by id) from zj"));
+    }
+
+    [TestMethod]
     [Description("A default declared inline keeps the server-generated name DacFx carries on its annotation.")]
     public void InlineDefault_KeepsItsGeneratedName()
     {
