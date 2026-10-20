@@ -82,9 +82,7 @@ internal sealed class Cast : Expression
     {
         if (collection is null || value.IsNull)
             return value;
-        if (document && XmlSchemaValidation.DocumentViolation(value.AsString) is var state and not 0)
-            throw SimulatedSqlException.XmlValidationNotADocument(state);
-        var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, value.AsString);
+        var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, value.AsString, document);
         return ReferenceEquals(canonical, value.AsString) ? value : SqlValue.FromXml(canonical);
     }
 

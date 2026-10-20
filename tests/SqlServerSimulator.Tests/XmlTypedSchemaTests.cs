@@ -55,6 +55,19 @@ public sealed class XmlTypedSchemaTests
         Error("select cast('<r/><r/>' as xml(document sc))", 6901, "XML Validation: XML instance must be a document.");
         Error("select cast('<r/>' as xml(nope))", 6314, "Collection specified does not exist in metadata : 'nope'");
     }
+    [TestMethod]
+    [DataRow("abc", false, 6909)]
+    [DataRow("<r/>abc", false, 6909)]
+    [DataRow("abc<r a=\"x\"/>", false, 6909)]
+    [DataRow("<r a=\"x\"/>abc", false, 6926)]
+    [DataRow("<![CDATA[x]]>", false, 6909)]
+    [DataRow("<r/><q/>abc", false, 6913)]
+    [DataRow("abc<r/>", true, 6909)]
+    [DataRow("<r/><r/>abc", true, 6901)]
+    [DataRow("<r/>abc<r/>", true, 6909)]
+    public void Cast_TopLevelTextIsRefusedWhereTheWalkMeetsIt(string value, bool document, int number) =>
+        AreEqual(number, Throws<SimulatedSqlException>(() => Scalar($"select cast('{value}' as xml({(document ? "document " : "")}sc))")).Number);
+
 
     [TestMethod]
     public void Cast_ContentAdmitsSeveralRoots_AndNullOrEmptyPassThrough()

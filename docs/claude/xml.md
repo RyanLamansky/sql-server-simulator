@@ -426,6 +426,7 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 
 ### Not modeled yet
 
+- **A path step the collection's content models can't reach** — real's **Msg 2263** `There is no element named "{urn:t}:zz" in the type "element(t{urn:t}:r,#anonymous) *"` — answers the empty sequence: the binding types steps by name, not through each declaration's content model (probed 2026-10-20 against SQL Server 2025).
 - **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences
@@ -484,7 +485,7 @@ Nine messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per 
 | an attribute the type doesn't declare | **Msg 6905** state 3, `Attribute 'q' is not permitted in this context. Location: …` |
 | a `use="required"` attribute left out | **Msg 6906** `Required attribute 'k' is missing. Location: …` |
 | a root element the collection declares nowhere — including one written in no namespace against a qualified schema, which real refuses rather than skipping — or a `strict` wildcard's child that nothing declares | **Msg 6913** `Declaration not found for element '…'. Location: …` |
-| character data inside an element-only type | **Msg 6909** `Text node is not allowed at this location, …` |
+| character data inside an element-only type, or non-whitespace top-level text (CDATA and a character reference included) at `/` | **Msg 6909** `Text node is not allowed at this location, …` |
 | a second child an `xsd:all` member already took | **Msg 6911** `Found duplicate element 'b' in all content model. Location: …` (against the repeat); a required member left untaken is Msg 6908 naming only the missing ones |
 
 The expected-element list names what the model would have taken **at the position the walk stopped at**, not every name in the content particle — and a wildcard writes itself into it as `{uri}*` per namespace it names.
@@ -494,6 +495,7 @@ That list is also what splits the two leftover-child errors: a model still willi
 So against `dec?`, `<v><nope/></v>` is 6965 and `<v><dec>1</dec><nope/></v>` is 6923 (each probed on its own).
 
 The value model stays CONTENT-typed under validation: several top-level elements are as legal as they are for untyped `xml`, provided the collection declares each of them — unless a `CAST` wrote `DOCUMENT`.
+Top-level text is not, and the walk meets it in document order alongside a `DOCUMENT` target's second root (Msg 6901), so `abc<r/>` and `<r/>abc<r/>` are Msg 6909 while `<r/><r/>abc` is Msg 6901 (probed 2026-10-20 against SQL Server 2025).
 Every one of these failures aborts as under `XACT_ABORT`, ending the batch and rolling the transaction back (probed 2026-09-28).
 
 ### The `xsi:` attributes
@@ -656,7 +658,8 @@ An edited instance comes back **normalized**, which is what real does and the si
 | `<r><a></a></r>` | `<r><a/></r>` |
 
 Empty elements self-close with no space before the slash, the XML declaration and insignificant whitespace are dropped, CDATA folds into escaped text, and values take the same position-dependent escaping `FOR XML` applies (`Selection.AppendForXmlText` is shared, so element text escapes `&` `<` `>` CR and an attribute value adds `"` tab LF).
-Namespace declarations ride along as attributes and re-emit with their prefixes.
+Namespace declarations ride along as attributes and re-emit with their prefixes, an element in the default namespace in scope writing no prefix even where another binds its namespace too.
+An inserted constructor sheds a prolog binding its position already makes under any prefix and takes the position's own (`<t:i/>` under `xmlns="urn:t"` lands as `<i/>`), keeping it only for an attribute named under it (probed 2026-10-20 against SQL Server 2025).
 This is the only place an `xml` payload is re-serialized — an unmodified value keeps the text it was stored with, so the normalization is visible only after an edit.
 
 ### Divergences

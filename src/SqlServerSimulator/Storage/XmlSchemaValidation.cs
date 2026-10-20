@@ -36,37 +36,57 @@ internal static class XmlSchemaValidation
     /// Validates <paramref name="xmlText"/> against <paramref name="collection"/>
     /// and returns its canonical serialization, raising real's own
     /// <c>XML Validation:</c> error for the first failure in document order.
+    /// Top-level text is one (Msg 6909 at <c>/</c>), and so, for a
+    /// <paramref name="document"/> target, is a second top-level element
+    /// (Msg 6901), each where the walk meets it: <c>abc&lt;r/&gt;</c> is the
+    /// text's error and <c>&lt;r/&gt;&lt;r/&gt;abc</c> the document's (probed
+    /// 2026-10-20 against SQL Server 2025).
     /// Returns the text unchanged when the collection's XSD doesn't compile or
     /// the text isn't parseable XML — the untyped behavior, since the parse
     /// error belongs to whoever stored the value.
     /// </summary>
-    internal static string ValidateAndNormalize(Schemas.XmlSchemaCollection collection, string xmlText)
+    internal static string ValidateAndNormalize(Schemas.XmlSchemaCollection collection, string xmlText, bool document)
     {
         if (collection.GetCompiledSchemas() is not { } schemas)
+        {
+            if (document && DocumentViolation(xmlText) is var state and not 0)
+                throw SimulatedSqlException.XmlValidationNotADocument(state);
             return xmlText;
+        }
 
-        XDocument document;
+        XDocument instance;
         try
         {
-            // CONTENT-typed, like every other xml value here: several top-level
-            // elements and top-level text are both legal, so the instance is
-            // read as a fragment under a synthetic root.
-            document = XDocument.Parse($"<{FragmentRoot}>{xmlText}</{FragmentRoot}>", LoadOptions.PreserveWhitespace);
+            // Read as a fragment under a synthetic root, so a CONTENT value's
+            // several top-level elements parse.
+            instance = XDocument.Parse($"<{FragmentRoot}>{xmlText}</{FragmentRoot}>", LoadOptions.PreserveWhitespace);
         }
         catch (XmlException)
         {
-            return xmlText;
+            return document ? throw SimulatedSqlException.XmlValidationNotADocument(1) : xmlText;
         }
 
         var changed = false;
-        foreach (var element in document.Root!.Elements())
+        var elements = 0;
+        foreach (var node in instance.Root!.Nodes())
         {
-            var declaration = GlobalElement(schemas, element.Name)
-                ?? throw SimulatedSqlException.XmlValidationDeclarationNotFound(QualifiedName(element.Name), LocationOf(element));
-            changed |= ValidateElement(element, declaration, schemas);
+            switch (node)
+            {
+                case XText text when !string.IsNullOrWhiteSpace(text.Value):
+                    throw SimulatedSqlException.XmlValidationTextNotAllowed("/");
+                case XElement element:
+                    if (document && ++elements > 1)
+                        throw SimulatedSqlException.XmlValidationNotADocument(1);
+                    var declaration = GlobalElement(schemas, element.Name)
+                        ?? throw SimulatedSqlException.XmlValidationDeclarationNotFound(QualifiedName(element.Name), LocationOf(element));
+                    changed |= ValidateElement(element, declaration, schemas);
+                    break;
+            }
         }
 
-        return changed ? Reserialize(document) : xmlText;
+        if (document && elements == 0)
+            throw SimulatedSqlException.XmlValidationNotADocument(2);
+        return changed ? Reserialize(instance) : xmlText;
     }
 
     /// <summary>

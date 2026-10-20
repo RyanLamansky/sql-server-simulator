@@ -416,6 +416,15 @@ public sealed class XmlModifyTests
         AreEqual(
             "<r xmlns=\"urn:d\"><a /><b xmlns=\"\" /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r xmlns=\"urn:d\"><a/></r>'; set @x.modify('declare namespace d=\"urn:d\"; insert <b/> into (/d:r)[1]'); select @x"));
+    [TestMethod]
+    [DataRow("<r xmlns=\"urn:t\"><i/></r>", "<t:i/>", "<r xmlns=\"urn:t\"><i/><i/></r>")]
+    [DataRow("<p:r xmlns:p=\"urn:t\"><p:i/></p:r>", "<t:i><t:j>t:x</t:j></t:i>", "<p:r xmlns:p=\"urn:t\"><p:i/><p:i><p:j>t:x</p:j></p:i></p:r>")]
+    [DataRow("<r xmlns=\"urn:t\" xmlns:p=\"urn:t\"><i/></r>", "<t:i/>", "<r xmlns=\"urn:t\" xmlns:p=\"urn:t\"><i/><i/></r>")]
+    [DataRow("<r xmlns=\"urn:t\"><i/></r>", "<t:i t:a=\"1\"/>", "<r xmlns=\"urn:t\"><i/><i xmlns:t=\"urn:t\" t:a=\"1\"/></r>")]
+    [DataRow("<r xmlns=\"urn:t\"><i/></r>", "<t:i xmlns:z=\"urn:z\"/>", "<r xmlns=\"urn:t\"><i/><i xmlns:z=\"urn:z\"/></r>")]
+    public void Insert_ConstructorTakesTheBindingItsPositionHas(string document, string constructor, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @x xml = '{document}'; set @x.modify('declare namespace t=\"urn:t\"; insert {constructor} as last into (/*)[1]'); select cast(@x as nvarchar(max))"));
+
 
     [TestMethod]
     public void Insert_ConstructorTakesAPrologPrefix() =>

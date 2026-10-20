@@ -381,8 +381,13 @@ internal sealed class XmlDml
         switch (node)
         {
             case XElement element:
-                var name = NameOf(element.Name, element);
                 var ownDefault = element.Attributes().FirstOrDefault(a => a.IsNamespaceDeclaration && a.Name.Namespace == XNamespace.None);
+                // The default namespace in scope names an element of its own
+                // namespace ahead of any prefix bound to it too (probed
+                // 2026-10-20 against SQL Server 2025).
+                var name = element.Name.Namespace != XNamespace.None && element.Name.Namespace == (ownDefault is not null ? XNamespace.Get(ownDefault.Value) : inScopeDefault)
+                    ? element.Name.LocalName
+                    : NameOf(element.Name, element);
                 // A prefixed name carries its own binding; an unprefixed one
                 // reads the default namespace, so it needs a declaration when
                 // the scope it sits in doesn't already bind exactly that.
@@ -630,10 +635,16 @@ internal sealed class XmlDml
 
     /// <summary>
     /// Removes the namespace declarations a constructed element took from the
-    /// prolog that its insertion point already makes: real writes such a
-    /// binding only where the new position doesn't have it, so <c>declare default element namespace
+    /// prolog whose namespace its insertion point already binds: real writes
+    /// such a binding only where the new position doesn't have it, and names
+    /// the element by the binding the position has, so <c>declare default element namespace
     /// "urn:d"; insert &lt;b/&gt;</c> under a <c>urn:d</c> parent comes back as
-    /// a plain <c>&lt;b/&gt;</c> (probe-confirmed).
+    /// a plain <c>&lt;b/&gt;</c> (probe-confirmed), and <c>declare namespace
+    /// t="urn:t"; insert &lt;t:i/&gt;</c> as <c>&lt;i/&gt;</c> under
+    /// <c>xmlns="urn:t"</c> or <c>&lt;p:i/&gt;</c> under <c>xmlns:p="urn:t"</c>
+    /// (probed 2026-10-20 against SQL Server 2025). A binding an attribute of
+    /// the subtree is named under stays, while a QName in its text doesn't
+    /// keep one.
     /// </summary>
     private static void DropInheritedDeclarations(XElement element)
     {
@@ -641,11 +652,22 @@ internal sealed class XmlDml
             return;
         foreach (var declaration in element.Attributes().Where(a => a.Annotation<XmlPrologDeclaration>() is not null).ToList())
         {
-            var inherited = declaration.Name.Namespace == XNamespace.None
-                ? parent.GetDefaultNamespace().NamespaceName
-                : parent.GetNamespaceOfPrefix(declaration.Name.LocalName)?.NamespaceName;
+            var prefixed = declaration.Name.Namespace != XNamespace.None;
+            var inherited = prefixed
+                ? parent.GetNamespaceOfPrefix(declaration.Name.LocalName)?.NamespaceName
+                : parent.GetDefaultNamespace().NamespaceName;
             if (inherited == declaration.Value)
+            {
                 declaration.Remove();
+                continue;
+            }
+
+            var uri = XNamespace.Get(declaration.Value);
+            if ((parent.GetPrefixOfNamespace(uri) is { Length: > 0 } || parent.GetDefaultNamespace() == uri)
+                && !(prefixed && element.DescendantsAndSelf().Attributes().Any(a => a.Name.Namespace == uri)))
+            {
+                declaration.Remove();
+            }
         }
     }
 
