@@ -147,6 +147,15 @@ public sealed class RulesAndDefaultsTests
     [DataRow("exec sp_unbindefault 't.q'", 15236, 73)]
     [DataRow("exec sp_unbindrule 't.q'", 15238, 79)]
     [DataRow("exec sp_unbindrule 'nope'", 15148, 137)]
+    // The name is checked ahead of everything else (probed 2026-10-20).
+    [DataRow("exec sp_unbindefault 'a.b.c.d'", 15253, 41)]
+    [DataRow("exec sp_unbindrule '[t.q'", 15253, 47)]
+    [DataRow("exec sp_bindefault 'nope', 't.q.'", 15253, 62)]
+    [DataRow("exec sp_bindrule 'nope', 'a.b.c.d'", 15253, 62)]
+    [DataRow("exec sp_unbindefault 't..q'", 15084, 48)]
+    [DataRow("exec sp_unbindrule 'simulated..t'", 15084, 54)]
+    [DataRow("exec sp_bindefault 'nope', 'a..b', 'x'", 15076, 70)]
+    [DataRow("exec sp_bindrule 'r_pos', 'a..b'", 15077, 70)]
     public void TheBindingProcedures_RefuseWhereRealDoes(string statement, int number, int line)
     {
         var sim = WithRuleAndDefault("create table t (id int identity, q int, c as q + 1, dq int default 1)");

@@ -20,6 +20,7 @@ An object still bound anywhere is Msg 3716 (state 3 for a default, 1 for a rule)
 ## Binding
 
 `@objname` with a dot names a column (`table.column`, schema optional); without one it names an alias type, a built-in type being Msg 4185 and anything else Msg 15148.
+Ahead of everything else the procedures check the name itself: one that won't parse, ends in an empty part or has more than three is Msg 15253, and three parts whose middle is empty name a database — the current one's too — Msg 15084 to the unbinding pair, 15076 to `sp_bindefault` and 15077 to `sp_bindrule` (probed 2026-10-20 against SQL Server 2025).
 A bound default sets `HeapColumn.Default` to its expression, which every insert path already reads, alongside `HeapColumn.BoundDefault`; `DefaultConstraint` stays null, and the two kinds exclude each other (Msg 15103 binding over a constraint, Msg 1781 adding a constraint over a binding).
 A default refuses identity columns (Msg 15102) and computed, sparse, rowversion, MAX, xml and CLR columns (Msg 15101); a rule refuses the same kinds plus text / ntext / image (Msg 15107).
 Binding again replaces the previous binding silently.

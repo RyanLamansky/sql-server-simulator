@@ -183,6 +183,7 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, objectParameter);
         if (targetName is null)
             throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, "objname");
+        RefuseBindTargetName(targetName, isRule, unbinding: false);
         var futureOnly = futureOnlyText is not null;
         if (futureOnly && !BuiltInToken.Equals(futureOnlyText, "futureonly"))
             throw SimulatedSqlException.BindUsage(isRule);
@@ -284,6 +285,7 @@ partial class Simulation
         var (targetName, futureOnlyText, _) = ParseBindingArgs(arguments, procedureName, "objname", "futureonly", null);
         if (targetName is null)
             throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, "objname");
+        RefuseBindTargetName(targetName, isRule, unbinding: true);
         var futureOnly = futureOnlyText is not null && BuiltInToken.Equals(futureOnlyText, "futureonly");
 
         (HeapColumn? Column, AliasType? AliasType) target;
@@ -405,6 +407,43 @@ partial class Simulation
             values[slot] = CatalogStringArg(arg);
         }
         return (values[0], values[1], values[2]);
+    }
+
+    /// <summary>
+    /// The first checks a binding procedure makes of its <c>@objname</c>, ahead
+    /// of everything else it checks: a name that won't parse, ends in an empty
+    /// part or has more than three is Msg 15253, and three parts whose middle
+    /// is empty name a database — this one's too — which is Msg 15084 to the
+    /// unbinding procedures, 15076 to <c>sp_bindefault</c> and 15077 to
+    /// <c>sp_bindrule</c> (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    private static void RefuseBindTargetName(string written, bool isRule, bool unbinding)
+    {
+        if (!ObjectId.TryParseObjectName(written, out var name) || name.Count > 3)
+            throw SimulatedSqlException.HelpNameIsNotAnIdentifier(written);
+        if (name.Count == 3 && HasEmptyMiddlePart(written))
+            throw SimulatedSqlException.BindTargetNotInCurrentDatabase(unbinding ? 15084 : isRule ? 15077 : 15076);
+    }
+
+    /// <summary>Whether <paramref name="written"/> holds two dots in a row outside its quoted parts, after a part of its own.</summary>
+    private static bool HasEmptyMiddlePart(string written)
+    {
+        var close = '\0';
+        for (var i = 0; i < written.Length - 1; i++)
+        {
+            var c = written[i];
+            if (close != '\0')
+            {
+                if (c == close)
+                    close = '\0';
+                continue;
+            }
+            if (c is '[' or '"')
+                close = c == '[' ? ']' : '"';
+            else if (c == '.' && written[i + 1] == '.' && i > 0)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

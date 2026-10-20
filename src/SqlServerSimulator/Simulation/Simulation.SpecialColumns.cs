@@ -157,14 +157,6 @@ partial class Simulation
             yield return StatementDone(batch, StatementDoneKind.Return);
     }
 
-    // Real's procedure raises these itself, so they carry its name and the
-    // line of its source that raises them.
-    private static SimulatedSqlException RaisedAt(SimulatedSqlException exception, string procedureName, int line)
-    {
-        exception.PreserveDiagnostics(line, procedureName);
-        return exception;
-    }
-
     private static string? CatalogChar1Arg(ProcArgument arg) =>
         CatalogStringArg(arg) is { Length: > 1 } text ? text[..1] : CatalogStringArg(arg);
 

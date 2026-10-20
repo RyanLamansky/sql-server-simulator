@@ -62,6 +62,18 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BindTargetDoesNotExist(string name) =>
         new($"The data type or table column '{name}' does not exist or you do not have permission.", 15148, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 15084 / 15076 / 15077 — a binding procedure's
+    /// <c>@objname</c> naming a database: the unbinding procedures', then
+    /// <c>sp_bindefault</c>'s and <c>sp_bindrule</c>'s wordings.
+    /// </summary>
+    internal static SimulatedSqlException BindTargetNotInCurrentDatabase(int number) => new(number switch
+    {
+        15076 => "Default, table, and user data types must be in the current database.",
+        15077 => "Rule, table, and user data type must be in the current database.",
+        _ => "The column or user data type must be in the current database.",
+    }, number, 16, 1);
+
     /// <summary>Mimics SQL Server's Msg 4185 — a binding procedure's <c>@objname</c> naming a system type.</summary>
     internal static SimulatedSqlException ActionNotAllowedOnSystemType() =>
         new("This action cannot be performed on a system type.", 4185, 16, 1);
