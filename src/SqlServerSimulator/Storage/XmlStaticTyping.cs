@@ -126,7 +126,7 @@ internal sealed class XmlStaticTyping(
     /// primitive a user-derived atomic type restricts. A list or union has no
     /// single atomic type and answers null.
     /// </summary>
-    private static string? TypeNameOf(XmlSchemaSimpleType type)
+    internal static string? TypeNameOf(XmlSchemaSimpleType type)
     {
         if (type.Datatype is not { Variety: XmlSchemaDatatypeVariety.Atomic } datatype)
             return null;

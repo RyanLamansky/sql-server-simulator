@@ -69,6 +69,9 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private string? predicateContextType;
 
+    /// <summary>The name the context item's atomized type is written with inside those predicates, where it isn't <see cref="predicateContextType"/>.</summary>
+    private string? predicateContextDisplay;
+
     /// <summary>
     /// The document node of a typed receiver, which an absolute path's steps
     /// are typed from; null where the receiver is untyped.
@@ -990,13 +993,26 @@ internal sealed class XmlQueryParser(
             ? this.typing?.AttributeTypes.TryGetValue(local, out typeName)
             : this.typing?.ElementTypes.TryGetValue(local, out typeName);
         var schemaType = this.StepSchemaType(from, axis, XmlNodeTestKind.Name, local, uri, occurrence);
+
+        // Where the declarations settle the step's type, it decides over the
+        // name-keyed guess, simple content included.
+        string? atomizedDisplay = null;
+        string? nodeTypeNotation = null;
+        if (axis == XmlAxis.Attribute && from?.AttributeType(local, uri, this.notation) is (string attributePrimitive, var attributeDisplay))
+            (typeName, atomizedDisplay) = (attributePrimitive, attributeDisplay);
+        else if (schemaType?.SettledType(this.notation) is var (primitive, display, node) && node is not null)
+            (typeName, atomizedDisplay, nodeTypeNotation) = (primitive, display, node);
+        if (atomizedDisplay == typeName)
+            atomizedDisplay = null;
         return new XmlStep(
-            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(typeName, schemaType),
+            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(typeName, schemaType, atomizedDisplay),
             axis == XmlAxis.Child && this.typing?.SingletonElements.Contains(local) == true,
             typeName)
         {
             SchemaType = schemaType,
             NotationName = uri.Length == 0 ? null : this.notation.Name(new System.Xml.XmlQualifiedName(local, uri)),
+            AtomizedDisplay = atomizedDisplay,
+            NodeTypeNotation = nodeTypeNotation,
         };
     }
 
@@ -1043,9 +1059,10 @@ internal sealed class XmlQueryParser(
     /// carries <paramref name="contextType"/> — the simple type the step's
     /// element or attribute is declared with, so <c>/r/s[. = 1]</c> over an
     /// <c>xs:string</c> element is Msg 2234 (probed 2026-10-06 against SQL
-    /// Server 2025).
+    /// Server 2025), written as <paramref name="contextDisplay"/> where a
+    /// user-derived type names it.
     /// </summary>
-    private XmlQueryExpr[] ParsePredicates(string? contextType = null, XmlSchemaPathType? schemaType = null)
+    private XmlQueryExpr[] ParsePredicates(string? contextType = null, XmlSchemaPathType? schemaType = null, string? contextDisplay = null)
     {
         List<XmlQueryExpr>? predicates = null;
         while (true)
@@ -1056,11 +1073,14 @@ internal sealed class XmlQueryParser(
             this.index++;
             this.predicateDepth++;
             var enclosingContextType = this.predicateContextType;
+            var enclosingContextDisplay = this.predicateContextDisplay;
+            this.predicateContextDisplay = contextDisplay;
             var enclosingSchemaContext = this.schemaContext;
             this.predicateContextType = contextType;
             this.schemaContext = schemaType;
             var predicate = this.ParseExprSingle();
             this.predicateContextType = enclosingContextType;
+            this.predicateContextDisplay = enclosingContextDisplay;
             this.schemaContext = enclosingSchemaContext;
             this.predicateDepth--;
             this.SkipWhitespace();
@@ -1096,7 +1116,7 @@ internal sealed class XmlQueryParser(
         if (c == '.')
         {
             this.index++;
-            return new XmlContextItemExpr(this.predicateContextType, this.schemaContext);
+            return new XmlContextItemExpr(this.predicateContextType, this.schemaContext, this.predicateContextDisplay);
         }
         if (c is '"' or '\'')
             return new XmlLiteralExpr(this.ReadQuoted(c), XmlStaticKind.String, "xs:string");

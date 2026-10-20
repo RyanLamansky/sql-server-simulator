@@ -430,6 +430,7 @@ A name nothing there reaches is refused while the batch compiles, quoting the co
 A content wildcard admits by its namespace constraint and its `processContents`: `skip` leaves the element untyped, `lax` types it as a global declaration of the name or else `xs:anyType`, and `strict` — an attribute wildcard's default — admits only a globally declared name.
 A parent step reaches an `xs:anyType` element, whose children are too.
 A predicate's context and a `for` variable carry the step's type without its occurrence.
+A step whose declarations settle one type takes it over the name-keyed rule: an element of simple content atomizes as its base, and the diagnostics quote a user-derived simple type by its own name (`t{urn:t}:MyInt`) or `<anonymous>`, its node notation the element's type (`element(t{urn:t}:sc,#anonymous)`), while comparisons and arithmetic follow the primitive it restricts.
 `value()` and `data()` refuse atomizing complex content — **Msg 9314**, mixed content and `xs:anyType` included, naming a named type or else the element's name in its schema's target namespace — and empty content (**Msg 2213**), ahead of `value()`'s singleton check.
 All probed 2026-10-20 against SQL Server 2025.
 
@@ -445,7 +446,6 @@ A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:unty
 ### Not modeled yet
 
 - **Structural typing past what the model follows**: `//` over a content wildcard and a `*` step over one stay untyped, and `//` from the document node types what it reaches without refusing a name it doesn't (real quotes a union holding the document, a notation not modeled), so real's refusals there — an `xs:anyType` element's Msg 9314 — are missed; a lax attribute wildcard's attribute isn't typed `xdt:anyAtomicType`, which real's Msg 2389 quotes (probed 2026-10-20).
-- **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences
 

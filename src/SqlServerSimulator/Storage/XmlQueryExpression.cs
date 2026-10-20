@@ -178,7 +178,10 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
     /// value-comparison and atomic-argument diagnostics quote
     /// (<c>xdt:untypedAtomic *</c>).
     /// </summary>
-    public string AtomizedTypeName() => this.TypeName == "empty" ? this.TypeName : this.TypeName + OccurrenceSuffix(this.Occurrence);
+    public string AtomizedTypeName() => this.TypeName == "empty" ? this.TypeName : (this.AtomizedDisplay() ?? this.TypeName) + OccurrenceSuffix(this.Occurrence);
+
+    /// <summary>The atomized type's name where the diagnostics write one other than <see cref="TypeName"/>, a user-derived simple type's.</summary>
+    public virtual string? AtomizedDisplay() => null;
 
     /// <summary>
     /// Real's static-type notation without atomization — what a diagnostic over
@@ -262,11 +265,16 @@ internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string ty
 /// The context item, <c>.</c> — atomizing as <paramref name="typeName"/> inside
 /// a predicate on a simply typed step, else untyped — and carrying
 /// <paramref name="schemaType"/>, what a typed receiver's collection types it
-/// as.
+/// as, and written as <paramref name="display"/> where a user-derived type
+/// names it.
 /// </summary>
-internal sealed class XmlContextItemExpr(string? typeName = null, XmlSchemaPathType? schemaType = null) : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, typeName ?? "xdt:untypedAtomic")
+internal sealed class XmlContextItemExpr(string? typeName = null, XmlSchemaPathType? schemaType = null, string? display = null) : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, typeName ?? "xdt:untypedAtomic")
 {
     private readonly XmlSchemaPathType? schemaType = schemaType;
+
+    private readonly string? display = display;
+
+    public override string? AtomizedDisplay() => this.display;
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(frame.Context.Clone());
 
@@ -339,6 +347,8 @@ internal sealed class XmlFilterExpr(XmlQueryExpr source, XmlQueryExpr[] predicat
     public override string NodeTypeBase() => this.source.NodeTypeBase();
 
     public override XmlSchemaPathType? SchemaPathType() => this.source.SchemaPathType();
+
+    public override string? AtomizedDisplay() => this.source.AtomizedDisplay();
 }
 
 /// <summary>The document root of the instance being queried — an absolute path's start.</summary>
@@ -376,6 +386,9 @@ internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
 
     public override XmlSchemaPathType? SchemaPathType() =>
         this.steps.Length == 0 ? this.start.SchemaPathType() : this.steps[^1].SchemaType;
+
+    public override string? AtomizedDisplay() =>
+        this.steps.Length == 0 ? this.start.AtomizedDisplay() : this.steps[^1].AtomizedDisplay;
 
     private static XmlOccurrence PathOccurrence(XmlQueryExpr start, XmlStep[] steps)
     {
@@ -461,6 +474,16 @@ internal sealed class XmlStep(
     public XmlSchemaPathType? SchemaType;
 
     /// <summary>
+    /// The atomized type's name where it isn't <see cref="TypeName"/> — a
+    /// user-derived simple type's own, or <c>&lt;anonymous&gt;</c> — which the
+    /// diagnostics quote while the primitive decides the semantics.
+    /// </summary>
+    public string? AtomizedDisplay;
+
+    /// <summary>The type the step's node notation writes, where the collection settles one (<c>t{urn:t}:MyInt</c>, <c>#anonymous</c>).</summary>
+    public string? NodeTypeNotation;
+
+    /// <summary>
     /// A name test's name as real's static types write it — under the prefix
     /// the query binds its namespace to (<c>t{urn:t}:a</c>) — or null for the
     /// bare local name.
@@ -522,8 +545,8 @@ internal sealed class XmlStep(
             ? "attribute(*,xdt:untypedAtomic)"
             : "element(*,xdt:untyped)",
         _ => this.Axis == XmlAxis.Attribute
-            ? $"attribute({this.NotationName ?? this.LocalName},{this.TypeName ?? "xdt:untypedAtomic"})"
-            : $"element({this.NotationName ?? this.LocalName},{this.TypeName ?? "xdt:untyped"})",
+            ? $"attribute({this.NotationName ?? this.LocalName},{this.NodeTypeNotation ?? this.TypeName ?? "xdt:untypedAtomic"})"
+            : $"element({this.NotationName ?? this.LocalName},{this.NodeTypeNotation ?? this.TypeName ?? "xdt:untyped"})",
     };
 
     /// <summary>Runs the step over every item in <paramref name="context"/>.</summary>
@@ -879,6 +902,9 @@ internal sealed class XmlVariableBinding(string name, int slot, XmlQueryExpr sou
 
     /// <summary>What the receiver's schema collection types a reference's nodes as, or null where it doesn't.</summary>
     public readonly XmlSchemaPathType? SchemaType = source.SchemaPathType();
+
+    /// <summary>The atomized type name a reference's diagnostics write, where it isn't <see cref="TypeName"/>.</summary>
+    public readonly string? AtomizedDisplay = source.AtomizedDisplay();
 }
 
 /// <summary>
@@ -955,6 +981,8 @@ internal sealed class XmlVariableRefExpr(XmlVariableBinding binding)
     public override string NodeTypeBase() => this.binding.NodeType;
 
     public override XmlSchemaPathType? SchemaPathType() => this.binding.SchemaType;
+
+    public override string? AtomizedDisplay() => this.binding.AtomizedDisplay;
 }
 
 /// <summary>One <c>order by</c> item: its key expression and its direction.</summary>

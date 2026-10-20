@@ -257,6 +257,73 @@ internal sealed class XmlSchemaPathType
     }
 
     /// <summary>
+    /// How these elements atomize and are written, when every one carries the
+    /// same type: the primitive their simple type — or simple content's —
+    /// restricts, which their comparisons and arithmetic follow; the atomized
+    /// type's own name, a user-derived type's or <c>&lt;anonymous&gt;</c>; and
+    /// the element's type in node notation. Nulls where the types differ or
+    /// the content isn't simple (probed 2026-10-20 against SQL Server 2025).
+    /// </summary>
+    public (string? Primitive, string? Atomized, string? Node) SettledType(XmlSchemaNotation notation)
+    {
+        if (this.elements.Length == 0 || this.elements[0].NodeKind is not null)
+            return default;
+        var type = this.elements[0].Type;
+        foreach (var element in this.elements)
+        {
+            if (element.NodeKind is not null || !ReferenceEquals(element.Type, type))
+                return default;
+        }
+        var node = TypeNotation(type, notation);
+        return SimpleTypeOf(type) is { } simple && XmlStaticTyping.TypeNameOf(simple) is { } primitive
+            ? (primitive, AtomizedNotation(simple, notation), node)
+            : (null, null, node);
+    }
+
+    /// <summary>
+    /// What an attribute step from these elements is declared with, when every
+    /// element's type declares it the same way: its primitive and its
+    /// atomized type's own name; nulls otherwise.
+    /// </summary>
+    public (string? Primitive, string? Atomized) AttributeType(string localName, string namespaceUri, XmlSchemaNotation notation)
+    {
+        XmlSchemaSimpleType? found = null;
+        if (this.document || this.anyElement || this.elements.Length == 0)
+            return default;
+        foreach (var element in this.elements)
+        {
+            if (element.Type is not XmlSchemaComplexType complex
+                || complex.AttributeUses[new XmlQualifiedName(localName, namespaceUri)] is not XmlSchemaAttribute { AttributeSchemaType: { } attributeType }
+                || (found is not null && !ReferenceEquals(found, attributeType)))
+            {
+                return default;
+            }
+            found = attributeType;
+        }
+        return found is not null && XmlStaticTyping.TypeNameOf(found) is { } primitive ? (primitive, AtomizedNotation(found, notation)) : default;
+    }
+
+    /// <summary>The simple type an element typed <paramref name="type"/> atomizes as: its own, or its simple content's.</summary>
+    private static XmlSchemaSimpleType? SimpleTypeOf(XmlSchemaType? type)
+    {
+        for (var current = type; current is not null; current = current.BaseXmlSchemaType)
+        {
+            switch (current)
+            {
+                case XmlSchemaSimpleType simple:
+                    return simple;
+                case XmlSchemaComplexType complex when complex.ContentType != XmlSchemaContentType.TextOnly || IsAnyType(complex):
+                    return null;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>An atomized simple type's name: a built-in's <c>xs:</c> one, a user-derived one's own, or <c>&lt;anonymous&gt;</c>.</summary>
+    private static string AtomizedNotation(XmlSchemaSimpleType simple, XmlSchemaNotation notation) =>
+        simple.QualifiedName.IsEmpty ? "<anonymous>" : TypeNotation(simple, notation);
+
+    /// <summary>
     /// Whether a <c>text()</c> child step can only be empty: every element's
     /// content is elements alone or nothing.
     /// </summary>

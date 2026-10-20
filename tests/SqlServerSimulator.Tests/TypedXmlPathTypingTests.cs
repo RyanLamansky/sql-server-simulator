@@ -95,6 +95,37 @@ public sealed class TypedXmlPathTypingTests
             "XQuery [value()]: There is no element named \"{urn:t}:zz\" in the type \"element(t{urn:t}:c,#anonymous)\".");
 
     [TestMethod]
+    [DataRow("/t:r/t:mi", 2389, "'value()' requires a singleton (or empty sequence), found operand of type 't{urn:t}:MyInt *'")]
+    [DataRow("/t:r/t:m2", 2389, "'value()' requires a singleton (or empty sequence), found operand of type 't{urn:t}:My2 *'")]
+    [DataRow("/t:r/t:an", 2389, "'value()' requires a singleton (or empty sequence), found operand of type '<anonymous> *'")]
+    [DataRow("/t:r/t:sc", 2389, "'value()' requires a singleton (or empty sequence), found operand of type 'xs:decimal *'")]
+    [DataRow("/t:r/t:sn", 2389, "'value()' requires a singleton (or empty sequence), found operand of type 't{urn:t}:MyInt *'")]
+    [DataRow("/t:r/@ma", 2389, "'value()' requires a singleton (or empty sequence), found operand of type 't{urn:t}:MyInt *'")]
+    [DataRow("/t:r/t:sc[. = \"a\"]", 2234, "The operator \"=\" cannot be applied to \"xs:decimal\" and \"xs:string\" operands.")]
+    [DataRow("/t:r/t:mi[. = \"a\"]", 2234, "The operator \"=\" cannot be applied to \"t{urn:t}:MyInt\" and \"xs:string\" operands.")]
+    [DataRow("/t:r/t:mi/text()", 9312, "'text()' is not supported on simple typed or 'http://www.w3.org/2001/XMLSchema#anyType' elements, found 'element(t{urn:t}:mi,t{urn:t}:MyInt) *'.")]
+    [DataRow("/t:r/t:sc/text()", 9312, "'text()' is not supported on simple typed or 'http://www.w3.org/2001/XMLSchema#anyType' elements, found 'element(t{urn:t}:sc,#anonymous) *'.")]
+    public void DerivedSimpleTypesAndSimpleContent_AreQuotedByTheirOwnNames(string path, int number, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create xml schema collection zd as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t" xmlns="urn:t" elementFormDefault="qualified">
+            <xs:simpleType name="MyInt"><xs:restriction base="xs:int"><xs:maxInclusive value="100"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="My2"><xs:restriction base="MyInt"><xs:minInclusive value="1"/></xs:restriction></xs:simpleType>
+            <xs:element name="r"><xs:complexType><xs:sequence>
+            <xs:element name="mi" type="MyInt" maxOccurs="3"/><xs:element name="m2" type="My2" maxOccurs="3"/>
+            <xs:element name="an" maxOccurs="3"><xs:simpleType><xs:restriction base="xs:string"><xs:maxLength value="3"/></xs:restriction></xs:simpleType></xs:element>
+            <xs:element name="sc" maxOccurs="3"><xs:complexType><xs:simpleContent><xs:extension base="xs:decimal"><xs:attribute name="u" type="xs:string"/></xs:extension></xs:simpleContent></xs:complexType></xs:element>
+            <xs:element name="sn" maxOccurs="3"><xs:complexType><xs:simpleContent><xs:extension base="MyInt"/></xs:simpleContent></xs:complexType></xs:element>
+            </xs:sequence><xs:attribute name="ma" type="MyInt"/></xs:complexType></xs:element></xs:schema>'
+            """);
+        simulation.AssertSqlError(
+            $"declare @x xml(zd) = null; select @x.value('{Prolog}{path}', 'int')",
+            number,
+            "XQuery [value()]: " + message);
+    }
+
+    [TestMethod]
     public void DeclaredSteps_Read() =>
         AreEqual("1|9|s|2.50|ab|1", Typed().ExecuteScalar($"""
             declare @x xml(zsc) = N'<r xmlns="urn:t"><i>1</i><c><n>ab</n></c><h>s</h><sc>2.5</sc></r>';
