@@ -469,7 +469,7 @@ partial class Simulation
             _ => null,
         };
         if (model is null)
-            return false;
+            return RefuseOptionValue(context);
         if (context.Batch.IsSkipping)
             return true;
 
@@ -515,7 +515,7 @@ partial class Simulation
     private static bool TryParseAlterDatabaseSetBooleanOption(ParserContext context, Database target, DatabaseBooleanOption option)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
-            return false;
+            return RefuseOptionValue(context);
         if (context.Batch.IsSkipping)
             return true;
         RejectSystemDatabaseFlag(target, option);
@@ -690,13 +690,8 @@ partial class Simulation
     /// through to the caller's Msg 102 path on bad trailers.
     /// </summary>
     /// <remarks>
-    /// The enum value may tokenize as either a bare identifier (e.g.
-    /// BULK_LOGGED) or a reserved keyword (e.g. FULL, GLOBAL, NONE) —
-    /// both shapes occur across the RECOVERY / PAGE_VERIFY /
-    /// CURSOR_DEFAULT enums. No per-option closed value set is checked for
-    /// the discarding kinds; real SQL Server validates at execution time and
-    /// the simulator doesn't model the underlying behavior. QUERY_STORE is
-    /// the exception — it retains what it parses, so its values are checked.
+    /// Each option takes its own closed set of values, as real's grammar does:
+    /// a word outside it is <see cref="RefuseOptionValue"/>'s Msg 102 at state 6.
     /// </remarks>
     private static bool ConsumeDatabaseOptionTail(ParserContext context, Database target, string name, AlterDatabaseOptionKind kind)
     {
@@ -710,7 +705,7 @@ partial class Simulation
                     // option's name (probed 2026-10-09 against SQL Server 2025).
                     if (context.Token is Operator { Character: '=' })
                         context.RestoreCheckpoint(atName);
-                    return false;
+                    return RefuseOptionValue(context);
                 }
                 // AUTO_CREATE_STATISTICS ON takes an optional (INCREMENTAL = ON | OFF).
                 bool? incremental = null;
@@ -752,13 +747,13 @@ partial class Simulation
                 return true;
             case AlterDatabaseOptionKind.EqualsOnOff:
                 if (!ConsumeEqualsOnOff(context))
-                    return false;
+                    return RefuseOptionValue(context);
                 if (!context.Batch.IsSkipping)
                     LogDatabaseOption(context.Batch, target, BuiltInToken.Equals(name, "OPTIMIZED_LOCKING") ? "optimized_locking" : "accelerated_database_recovery", context.Token is ReservedKeyword { Keyword: Keyword.On } ? "ON" : "OFF");
                 return true;
             case AlterDatabaseOptionKind.EnumIdent:
-                if (context.GetNextRequired() is not (Name or ReservedKeyword))
-                    return false;
+                if (context.GetNextRequired() is not Name { Value: var word } || !TakesEnumValue(name, word))
+                    return RefuseOptionValue(context);
                 if (!context.Batch.IsSkipping)
                 {
                     var enumValue = context.Token!.Source.ToString();
@@ -949,6 +944,22 @@ partial class Simulation
     private static bool IsBareWord(Token? token, string word) =>
         token is Name name && name.Value.Equals(word, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// A value an <c>ALTER DATABASE … SET</c> option doesn't take: a word there
+    /// is Msg 102 near it at state 6, as real reports one (probed 2026-10-21
+    /// against SQL Server 2025: <c>RECOVERY MAYBE</c>, <c>ANSI_NULLS MAYBE</c>,
+    /// <c>PAGE_VERIFY BOGUS</c>, <c>TARGET_RECOVERY_TIME = 60 BOGUS</c>); any
+    /// other token answers false, for the ordinary syntax error at it.
+    /// </summary>
+    private static bool RefuseOptionValue(ParserContext context) =>
+        context.Token is Name ? throw SimulatedSqlException.SyntaxErrorNear(context.Token, state: 6) : false;
+
+    /// <summary>Whether the enumerated option <paramref name="name"/> takes <paramref name="value"/>.</summary>
+    private static bool TakesEnumValue(string name, string value) =>
+        BuiltInToken.Equals(name, "CURSOR_DEFAULT") ? BuiltInToken.EqualsAny(value, "GLOBAL", "LOCAL")
+        : BuiltInToken.Equals(name, "PAGE_VERIFY") ? BuiltInToken.EqualsAny(value, "CHECKSUM", "NONE", "TORN_PAGE_DETECTION")
+        : BuiltInToken.Equals(name, "PARAMETERIZATION") && BuiltInToken.EqualsAny(value, "FORCED", "SIMPLE");
+
     private static bool ConsumeEqualsOnOff(ParserContext context) =>
         context.GetNextRequired() switch
         {
@@ -968,6 +979,8 @@ partial class Simulation
         {
             return false;
         }
+        if (!BuiltInToken.Equals(unit, "SECONDS") && !BuiltInToken.Equals(unit, "MINUTES"))
+            return RefuseOptionValue(context);
         if (!context.Batch.IsSkipping)
         {
             if (BuiltInToken.Equals(unit, "SECONDS"))

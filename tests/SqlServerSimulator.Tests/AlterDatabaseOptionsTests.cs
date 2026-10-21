@@ -456,4 +456,32 @@ public class AlterDatabaseOptionsTests
     [DataRow("ALTER DATABASE simulated SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON")]
     public void UnmodeledDatabaseState_IsNotSupported(string sql)
         => _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(sql));
+
+    /// <summary>
+    /// A word an option doesn't take as its value is Msg 102 near it at state 6
+    /// (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter database current set page_verify bogus")]
+    [DataRow("alter database current set parameterization bogus")]
+    [DataRow("alter database current set cursor_default bogus")]
+    [DataRow("alter database current set target_recovery_time = 60 bogus")]
+    [DataRow("alter database current set recovery bogus")]
+    [DataRow("alter database current set ansi_nulls bogus")]
+    [DataRow("alter database current set page_verify bogus, ansi_nulls on")]
+    public void AnOptionValueOutsideItsSet_IsMsg102State6(string statement)
+    {
+        var ex = new Simulation().AssertSqlError(statement, 102);
+        AreEqual("Incorrect syntax near 'bogus'.", ex.Errors[0].Message);
+        AreEqual((byte)6, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("alter database current set page_verify none")]
+    [DataRow("alter database current set page_verify torn_page_detection")]
+    [DataRow("alter database current set page_verify checksum, parameterization forced")]
+    [DataRow("alter database current set parameterization simple, cursor_default local")]
+    [DataRow("alter database current set cursor_default global")]
+    [DataRow("alter database current set target_recovery_time = 60 minutes")]
+    public void AnOptionValueInItsSet_Runs(string statement) => _ = new Simulation().ExecuteNonQuery(statement);
 }
