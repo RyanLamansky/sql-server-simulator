@@ -31,6 +31,12 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
 {
     private readonly Dictionary<ushort, SmpSession> sessions = [];
     private readonly Lock sessionsGate = new();
+
+    /// <summary>
+    /// The batch loop of each session the client opened, which the read loop
+    /// waits out as it ends: the connection they share is torn down after it.
+    /// </summary>
+    private readonly List<Task> sessionLoops = [];
     private readonly SemaphoreSlim writeGate = new(1, 1);
 
     public void Dispose() => this.writeGate.Dispose();
@@ -97,8 +103,18 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
                 this.sessions.Clear();
             }
 
+            // A client gone, a request still running is cancelled, as real ends
+            // the requests of a dropped connection, and every session's loop
+            // ends before the connection under them goes.
             foreach (var session in live)
+            {
                 await session.InboundWriter.CompleteAsync().ConfigureAwait(false);
+                owner.CancelConnectionExecution(session);
+            }
+            Task[] loops;
+            lock (this.sessionsGate)
+                loops = [.. this.sessionLoops];
+            await Task.WhenAll(loops).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
 
@@ -121,7 +137,12 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
         //
         // The session's requests run on the engine's own threads, as the
         // connection's do (see EngineThreads).
-        _ = EngineThreads.RunAsync(() => owner.RunMarsSessionAsync(session, cancellationToken));
+        var loop = EngineThreads.RunAsync(() => owner.RunMarsSessionAsync(session, cancellationToken));
+        lock (this.sessionsGate)
+        {
+            _ = this.sessionLoops.RemoveAll(static ended => ended.IsCompleted);
+            this.sessionLoops.Add(loop);
+        }
         return ValueTask.CompletedTask;
     }
 

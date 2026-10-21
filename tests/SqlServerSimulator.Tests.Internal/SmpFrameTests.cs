@@ -198,4 +198,51 @@ public sealed class SmpFrameTests
         IsGreaterThan(0, dataCount, "The completed request must produce a DATA response.");
         IsGreaterThan(0, finCount, "The session must be FIN-ed on completion.");
     }
+
+    /// <summary>A session loop running a request until it is cancelled, as a long statement does.</summary>
+    private sealed class RunningHost : ISmpHost
+    {
+        public readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public readonly TaskCompletionSource Cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public volatile bool Ended;
+
+        public async Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken)
+        {
+            this.Started.SetResult();
+            await this.Cancelled.Task.ConfigureAwait(false);
+            this.Ended = true;
+        }
+
+        public void CancelConnectionExecution(SmpSession session) => this.Cancelled.TrySetResult();
+    }
+
+    /// <summary>
+    /// The client dropping the connection cancels a session's running request,
+    /// and the read loop ends only after the session's loop has, so the
+    /// connection they share is torn down after nothing runs on it.
+    /// </summary>
+    [TestMethod]
+    public async Task ClientGone_CancelsARunningSessionAndWaitsItOut()
+    {
+        var cancellationToken = TestContext.CancellationToken;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var clientSocket = new TcpClient();
+        var acceptTask = listener.AcceptTcpClientAsync(cancellationToken).AsTask();
+        await clientSocket.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cancellationToken);
+        using var serverTcp = await acceptTask;
+        await using var serverStream = serverTcp.GetStream();
+
+        var host = new RunningHost();
+        using var mux = new SmpMultiplexer(serverStream, host);
+        var muxTask = mux.RunAsync(cancellationToken);
+        await clientSocket.GetStream().WriteAsync(BuildFrame(Syn, sid: 1, seq: 0, window: 4), cancellationToken);
+        await host.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+        clientSocket.Dispose();
+
+        await muxTask.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+        IsTrue(host.Ended);
+    }
 }
