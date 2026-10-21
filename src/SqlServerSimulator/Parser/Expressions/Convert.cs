@@ -250,9 +250,11 @@ internal sealed class ConvertExpression : Expression
     /// </summary>
     private static SqlValue CoerceWithInternalSubset(SqlValue source, bool preserveWhitespace)
     {
-        if (source.Type.Category != SqlTypeCategory.String)
-            throw new NotSupportedException("CONVERT to xml with style 2 over a binary value carrying a DTD isn't built.");
-        var text = source.AsString;
+        // A binary value is read as text the way any binary conversion to
+        // xml reads it, its byte-order mark or declared encoding included.
+        var (text, national) = source.Type.Category == SqlTypeCategory.String
+            ? (source.AsString, SqlType.IsNationalStringCategory(source.Type))
+            : SqlValue.DecodeXmlBytes(source.AsBytes);
         var settings = new System.Xml.XmlReaderSettings
         {
             DtdProcessing = System.Xml.DtdProcessing.Parse,
@@ -269,7 +271,7 @@ internal sealed class ConvertExpression : Expression
         {
             try
             {
-                _ = SqlValue.FromString(source.Type, WithoutDoctype(text)).CoerceToXml(preserveWhitespace);
+                XmlWellFormedness.RejectWithEntities(WithoutDoctype(text), national, preserveWhitespace, InternalSubsetEntities(text));
             }
             catch (SimulatedSqlException parseError)
             {
@@ -285,6 +287,101 @@ internal sealed class ConvertExpression : Expression
                 _ = markup.Append(node.ToString(System.Xml.Linq.SaveOptions.DisableFormatting));
         }
         return SqlValue.FromString(SqlType.NVarcharMax, markup.ToString()).CoerceToXml(preserveWhitespace);
+    }
+
+    /// <summary>
+    /// The general entities the <c>DOCTYPE</c>'s internal subset declares,
+    /// name to replacement text: a literal's character references expanded
+    /// and its entity references kept, an external entity's text empty, and
+    /// the first declaration of a name the one that counts.
+    /// </summary>
+    private static Dictionary<string, string> InternalSubsetEntities(string text)
+    {
+        var entities = new Dictionary<string, string>();
+        var at = text.IndexOf("<!DOCTYPE", StringComparison.Ordinal);
+        while (at >= 0 && (at = text.IndexOf("<!ENTITY", at + 1, StringComparison.Ordinal)) >= 0)
+        {
+            var p = at + "<!ENTITY".Length;
+            SkipSpace(text, ref p);
+            if (p < text.Length && text[p] == '%')
+                continue;
+            var nameStart = p;
+            while (p < text.Length && !char.IsWhiteSpace(text[p]) && text[p] is not ('"' or '\'' or '>'))
+                p++;
+            var name = text[nameStart..p];
+            SkipSpace(text, ref p);
+            var value = string.Empty;
+            if (p < text.Length && text[p] is '"' or '\'')
+            {
+                var close = text.IndexOf(text[p], p + 1);
+                if (close < 0)
+                    break;
+                value = ExpandCharacterReferences(text, p + 1, close);
+                p = close + 1;
+                SkipSpace(text, ref p);
+                if (p < text.Length && text[p] != '>')
+                    throw ParseErrorAt(text, XmlParseError.GreaterThanExpected, p);
+            }
+            _ = entities.TryAdd(name, value);
+        }
+        return entities;
+
+        static void SkipSpace(string text, ref int p)
+        {
+            while (p < text.Length && char.IsWhiteSpace(text[p]))
+                p++;
+        }
+    }
+
+    /// <summary>
+    /// The entity literal between <paramref name="start"/> and
+    /// <paramref name="end"/> with its <c>&amp;#…;</c> references replaced by
+    /// their characters; one naming no XML character is Msg 9420 at its
+    /// <c>;</c>.
+    /// </summary>
+    private static string ExpandCharacterReferences(string text, int start, int end)
+    {
+        var builder = new System.Text.StringBuilder(end - start);
+        for (var i = start; i < end; i++)
+        {
+            if (text[i] == '&' && i + 2 < end && text[i + 1] == '#' && text.IndexOf(';', i, end - i) is > 0 and var close)
+            {
+                var hex = text[i + 2] is 'x';
+                var digits = text.AsSpan(i + (hex ? 3 : 2), close - i - (hex ? 3 : 2));
+                if (int.TryParse(digits, hex ? System.Globalization.NumberStyles.AllowHexSpecifier : System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var code))
+                {
+                    if (code is not (0x9 or 0xA or 0xD or (>= 0x20 and <= 0xD7FF) or (>= 0xE000 and <= 0xFFFD) or (>= 0x10000 and <= 0x10FFFF)))
+                        throw ParseErrorAt(text, XmlParseError.IllegalXmlCharacter, close);
+                    _ = builder.Append(char.ConvertFromUtf32(code));
+                    i = close;
+                    continue;
+                }
+            }
+            _ = builder.Append(text[i]);
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>Msg <paramref name="error"/>'s exception at <paramref name="index"/>'s line and character, counted as the XML parse counts them.</summary>
+    private static SimulatedSqlException ParseErrorAt(string text, XmlParseError error, int index)
+    {
+        var line = 1;
+        var lineStart = 0;
+        for (var i = 0; i < index; i++)
+        {
+            if (text[i] == '\n' || (text[i] == '\r' && (i + 1 >= text.Length || text[i + 1] != '\n')))
+            {
+                line++;
+                lineStart = i + 1;
+            }
+        }
+        var character = 0;
+        for (var i = lineStart; i <= index && i < text.Length; i++)
+        {
+            if (!(char.IsLowSurrogate(text[i]) && i > lineStart && char.IsHighSurrogate(text[i - 1])))
+                character++;
+        }
+        return SimulatedSqlException.XmlParsingFailed(error, line, character);
     }
 
     /// <summary><paramref name="text"/> with its <c>DOCTYPE</c> blanked to spaces, so every other character keeps its line and column.</summary>

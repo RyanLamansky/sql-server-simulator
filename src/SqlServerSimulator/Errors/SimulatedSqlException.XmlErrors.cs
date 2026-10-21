@@ -59,6 +59,8 @@ partial class SimulatedSqlException
             XmlParseError.XmlDeclarationNotAtBeginning => (9438, "text/xmldecl not at the beginning of input"),
             XmlParseError.ReservedXmlName => (9439, "namespaces beginning with \"xml\" are reserved"),
             XmlParseError.IncorrectXmlDeclarationSyntax => (9441, "incorrect xml declaration syntax"),
+            XmlParseError.EntityRecursion => (9446, "well formed check: no recursion"),
+            XmlParseError.EntityContentNotWellFormed => (9447, "entity content not well formed"),
             XmlParseError.UndeclaredEntity => (9448, "well formed check: undeclared entity"),
             XmlParseError.IncorrectProcessingInstructionSyntax => (9451, "incorrect processing instruction syntax"),
             XmlParseError.CDataEndInContent => (9454, "no ']]>' in element content"),

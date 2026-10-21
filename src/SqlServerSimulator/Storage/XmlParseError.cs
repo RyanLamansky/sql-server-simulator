@@ -31,6 +31,8 @@ internal enum XmlParseError : byte
     ReservedXmlName,
     IncorrectXmlDeclarationSyntax,
     UndeclaredEntity,
+    EntityContentNotWellFormed,
+    EntityRecursion,
     IncorrectProcessingInstructionSyntax,
     CDataEndInContent,
     IllegalQualifiedNameCharacter,

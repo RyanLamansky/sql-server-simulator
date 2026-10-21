@@ -1727,7 +1727,7 @@ internal readonly partial struct SqlValue
     /// XML character real reports there (<c>0x3C613EE9…</c>, a bare Latin-1
     /// <c>é</c>, is Msg 9420). Answers whether the text arrived as UTF-16.
     /// </summary>
-    private static (string Text, bool National) DecodeXmlBytes(byte[] bytes)
+    internal static (string Text, bool National) DecodeXmlBytes(byte[] bytes)
     {
         switch (bytes)
         {

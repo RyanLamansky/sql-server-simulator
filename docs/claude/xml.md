@@ -574,7 +574,7 @@ They were exported by real SQL Server and are therefore already in its canonical
 
 - **No precision cap on `decimal`.** Real applies an internal one that rejects a 29-digit integer part and truncates a long fractional part (`0.1234567890123456789012345678` stores as `0.123456789`); the simulator canonicalizes the digits as written. Values of the size real data carries are unaffected.
 - A collection that exists but whose `EXECUTE` the principal lacks is Msg 229 on both, where a missing one is the Msg 6314 above.
-- **The XSD compile checks' residue** (probed 2026-10-16 against SQL Server 2025): a complex-content restriction's particle is mapped onto its base's for the same-compositor and element-to-wildcard pairings and an element against a group; the pairings real maps by sum or unordered (a sequence restricting a choice or an `all`) are accepted here, as is anything the mapping can't place.
+- **The XSD compile checks' residue** (probed 2026-10-16 against SQL Server 2025): a complex-content restriction's particle is mapped onto its base's for the same-compositor and element-to-wildcard pairings, an element against a group and a sequence against a choice; a sequence restricting an `all`, which real maps unordered, and a group restricting a wildcard are accepted here, as is anything the mapping can't place.
   A pattern is checked by .NET's regular expressions after translating XSD's own escapes; Msg 572's state is real's for the syntax errors probed — an unclosed group or class, a stray `)`, a quantifier with nothing before it, a reversed range, an unknown escape or property, `(?`, a lazy quantifier, a `{,n}` — and another error .NET names is accepted, as is a pattern using character class subtraction or a negated name escape inside a class, which then matches every value.
 - Real's expected-element list in a Msg 6965 isn't in declaration order (`'n','f','s','i','dt','b'` for a sequence declared `d, i, s, b, dt, n, f`); the simulator lists the names as declared.
 
@@ -1290,11 +1290,14 @@ The same pass answers the **canonical form** real serializes the stored value as
 The declaration is dropped, which also keeps SqlClient from refusing a value whose declaration names an 8-bit encoding; whitespace-only text is dropped unless `CONVERT` style 1 or `xml:space="preserve"` keeps it.
 
 `CONVERT` styles 2 and 3 (3 keeps whitespace too) lift the `DOCTYPE`'s Msg 6359 with real's limited internal-subset support (`Convert.CoerceWithInternalSubset`, probed 2026-10-20 against SQL Server 2025): the subset's entities expand — in text and attribute values, nested, one holding markup parsed as markup — its attribute defaults apply (a `#FIXED` value isn't enforced), a tokenized attribute's value is whitespace-normalized, anything external is ignored, an external entity expanding to nothing, and the `DOCTYPE` is dropped.
+A binary value is read as text first, as any binary conversion to `xml` reads it.
 A document that doesn't parse reports the error its markup would without the `DOCTYPE`, positioned in the original text, then the informational **Msg 6338**; a `CATCH` reads the error.
+The markup is read knowing the subset's entities (probed 2026-10-21 against SQL Server 2025): a declared one's reference is no Msg 9448, its replacement text is content that must parse on its own — Msg 9447 at the position within that text — an entity reaching itself is Msg 9446 at character 0, and one bringing a `<` into an attribute value is Msg 9415 at the value's closing quote.
+The subset itself is read only for its entities, where a literal not followed by `>` is Msg 9412 and a character reference naming no XML character Msg 9420, both at their place in the original text.
 
 ### Not modeled yet
 
-- **`CONVERT` style 2 over a binary value carrying a `DOCTYPE`** raises `NotSupportedException`.
+- **The internal subset's own grammar under `CONVERT` style 2**: a malformed `ELEMENT`, `ATTLIST` or `ENTITY` declaration, a `DOCTYPE` without a name or not first, a second one, text ahead of the root and an unparsed entity's reference raise `NotSupportedException` where real raises its parse errors (Msg 9412, 9413, 9421, 9422, 9426, 9429, 9449, 9455 — probed 2026-10-21 against SQL Server 2025), once .NET's reader refuses the subset.
 
 ## Known gaps
 

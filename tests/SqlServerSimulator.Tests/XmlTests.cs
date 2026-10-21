@@ -1211,4 +1211,27 @@ public sealed class XmlTests
         AreEqual(6338, ex.Errors[^1].Number);
         AreEqual(9448, new Simulation().ExecuteScalar("declare @n int; begin try declare @x xml = convert(xml, '<!DOCTYPE a [<!ENTITY e \"v\">]><a>&undefined;</a>', 2) end try begin catch set @n = error_number() end catch; select @n"));
     }
+
+    [TestMethod]
+    [DataRow("cast('<!DOCTYPE r [<!ENTITY e \"v&#233;\">]><r a=\"&e;\">&e;</r>' as varbinary(max))", "<r a=\"vé\">vé</r>")]
+    [DataRow("0xFFFE + cast(N'<!DOCTYPE r [<!ENTITY e \"x\">]><r>&e;</r>' as varbinary(max))", "<r>x</r>")]
+    [DataRow("cast('<?xml version=\"1.0\" encoding=\"windows-1252\"?><!DOCTYPE r [<!ENTITY e \"' + char(233) + '\">]><r>&e;</r>' as varbinary(max))", "<r>é</r>")]
+    public void ConvertStyle2_ReadsABinaryValuesInternalSubset(string source, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select convert(nvarchar(max), convert(xml, {source}, 2))"));
+
+    [TestMethod]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"x\">]>' + char(10) + '<r>&e;</q>", 9436, "XML parsing: line 2, character 10, end tag does not match start tag")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"<b>\">]><r>&e;</r>", 9447, "XML parsing: line 1, character 3, entity content not well formed")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"</r>\">]><r>&e;</r>", 9447, "XML parsing: line 1, character 4, entity content not well formed")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"abc\">]><r a=\"&e;\" a=\"1\"/>", 9437, "XML parsing: line 1, character 50, duplicate attribute")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"&e;\">]><r>&e;</r>", 9446, "XML parsing: line 1, character 0, well formed check: no recursion")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"a<b\">]><r a=\"&e;\"/>", 9415, "XML parsing: line 1, character 42, well formed check: no '<' in attribute value")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"x\"]><r>&e;</r>", 9412, "XML parsing: line 1, character 28, '>' expected")]
+    [DataRow("<!DOCTYPE r [<!ENTITY e \"x\" >' + char(10) + '<!ENTITY f \"y&#1;\">]><r>&f;</r>", 9420, "XML parsing: line 2, character 17, illegal xml character")]
+    public void ConvertStyle2_ParseError_ReadsTheSubsetsEntities(string text, int number, string message)
+    {
+        var ex = new Simulation().AssertSqlError($"select convert(xml, '{text}', 2)", number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual(6338, ex.Errors[^1].Number);
+    }
 }

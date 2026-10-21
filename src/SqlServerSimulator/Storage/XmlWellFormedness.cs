@@ -71,11 +71,36 @@ internal static class XmlWellFormedness
     /// <paramref name="preserveWhitespace"/> is <c>CONVERT</c> style 1.
     /// </summary>
     public static string Canonical(string text, bool nationalSource, bool preserveWhitespace = false) =>
-        new Scanner(text, nationalSource, preserveWhitespace).Run();
+        new Scanner(text, nationalSource, preserveWhitespace, entities: null, entityContent: false).Run();
 
-    private sealed class Scanner(string text, bool nationalSource, bool preserveWhitespace)
+    /// <summary>
+    /// Raises the error real raises for <paramref name="text"/>, a document
+    /// whose <c>DOCTYPE</c> is blanked out, reading a reference to one of the
+    /// internal subset's <paramref name="entities"/> (name to replacement
+    /// text) as declared and its replacement text, where the reference is
+    /// content, as content that must itself be well-formed: Msg 9447 at the
+    /// position within that text where it fails (probed 2026-10-21 against
+    /// SQL Server 2025).
+    /// </summary>
+    public static void RejectWithEntities(string text, bool nationalSource, bool preserveWhitespace, Dictionary<string, string> entities) =>
+        _ = new Scanner(text, nationalSource, preserveWhitespace, entities, entityContent: false).Run();
+
+    private sealed class Scanner(string text, bool nationalSource, bool preserveWhitespace, Dictionary<string, string>? entities, bool entityContent)
     {
         private readonly string s = text;
+
+        /// <summary>The internal subset's general entities, for a document read past its <c>DOCTYPE</c>.</summary>
+        private readonly Dictionary<string, string>? entities = entities;
+
+        /// <summary>Whether the text is an entity's replacement text, every error in which is Msg 9447.</summary>
+        private readonly bool entityContent = entityContent;
+
+        /// <summary>The entities whose replacement texts enclose this one, shared with the scanners reading them.</summary>
+        private HashSet<string> enclosingEntities = [];
+
+        /// <summary>Whether a declared entity the attribute value being read references brings a <c>&lt;</c>, refused at the value's end.</summary>
+        private bool attributeEntityLessThan;
+
         private readonly int n = text.Length;
         private readonly bool nationalSource = nationalSource;
         private readonly bool preserveWhitespace = preserveWhitespace;
@@ -121,7 +146,7 @@ internal static class XmlWellFormedness
                 switch (c)
                 {
                     case '&':
-                        this.AppendText(this.Reference(), fromMarkup: true);
+                        this.AppendText(this.Reference(content: true), fromMarkup: true);
                         this.prologOnly = false;
                         break;
                     case '<':
@@ -304,19 +329,24 @@ internal static class XmlWellFormedness
                     throw this.Error(XmlParseError.StringLiteralExpected, this.p);
                 this.p++;
                 _ = this.attributeValue.Clear();
+                this.attributeEntityLessThan = false;
                 while (true)
                 {
                     if (this.p >= this.n)
                         throw this.Error(XmlParseError.UnexpectedEndOfInput, this.n - 1);
                     var c = this.s[this.p];
                     if (c == quote)
+                    {
+                        if (this.attributeEntityLessThan)
+                            throw this.Error(XmlParseError.LessThanInAttributeValue, this.p);
                         break;
+                    }
                     switch (c)
                     {
                         case '<':
                             throw this.Error(XmlParseError.LessThanInAttributeValue, this.p);
                         case '&':
-                            _ = this.attributeValue.Append(char.ConvertFromUtf32(this.Reference()));
+                            _ = this.attributeValue.Append(char.ConvertFromUtf32(this.Reference(content: false)));
                             break;
                         case '\t' or '\n' or '\r':
                             // A written tab or line end in a value reads as a space, CR LF as one.
@@ -496,7 +526,7 @@ internal static class XmlWellFormedness
 
         private void EndTag()
         {
-            if (this.openElements.Count == 0 && this.prologOnly)
+            if (this.openElements.Count == 0 && this.prologOnly && !this.entityContent)
                 throw this.Error(XmlParseError.IllegalQualifiedNameCharacter, this.p + 1);
             this.p += 2;
             if (this.p >= this.n)
@@ -824,9 +854,10 @@ internal static class XmlWellFormedness
 
         /// <summary>
         /// An entity or character reference, starting at its <c>&amp;</c>;
-        /// answers the code point it stands for.
+        /// answers the code point it stands for, a stand-in for a declared
+        /// entity's text, which only an error check reads.
         /// </summary>
-        private int Reference()
+        private int Reference(bool content)
         {
             this.p++;
             if (this.p >= this.n)
@@ -870,10 +901,51 @@ internal static class XmlWellFormedness
                 "gt" => '>',
                 "lt" => '<',
                 "quot" => '"',
+                var name when this.entities?.GetValueOrDefault(name.ToString()) is { } replacement => this.DeclaredEntity(name.ToString(), replacement, content),
                 _ => throw this.Error(XmlParseError.UndeclaredEntity, this.p),
             };
             this.p++;
             return entity;
+        }
+
+        /// <summary>
+        /// A reference to one of the internal subset's entities: as content,
+        /// its replacement text read as content in a scanner of its own; in an
+        /// attribute value, noting a <c>&lt;</c> the text brings. An entity
+        /// within its own replacement text is Msg 9446, placed nowhere.
+        /// </summary>
+        private char DeclaredEntity(string name, string replacement, bool content)
+        {
+            if (!this.enclosingEntities.Add(name))
+                throw SimulatedSqlException.XmlParsingFailed(XmlParseError.EntityRecursion, 1, 0);
+            if (content)
+            {
+                var nested = new Scanner(replacement, this.nationalSource, this.preserveWhitespace, this.entities, entityContent: true) { enclosingEntities = this.enclosingEntities };
+                _ = nested.Run();
+            }
+            else
+            {
+                this.attributeEntityLessThan |= this.BringsLessThan(replacement);
+            }
+            _ = this.enclosingEntities.Remove(name);
+            return 'x';
+        }
+
+        private bool BringsLessThan(string replacement)
+        {
+            for (var i = replacement.IndexOf('&', StringComparison.Ordinal); i >= 0; i = replacement.IndexOf('&', i + 1))
+            {
+                if (replacement.IndexOf(';', i) is > 0 and var end
+                    && this.entities!.GetValueOrDefault(replacement[(i + 1)..end]) is { } nested
+                    && this.enclosingEntities.Add(replacement[(i + 1)..end]))
+                {
+                    var brings = this.BringsLessThan(nested);
+                    _ = this.enclosingEntities.Remove(replacement[(i + 1)..end]);
+                    if (brings)
+                        return true;
+                }
+            }
+            return replacement.Contains('<', StringComparison.Ordinal);
         }
 
         private void RequireSemicolon()
@@ -1016,7 +1088,7 @@ internal static class XmlWellFormedness
                 if (!(char.IsLowSurrogate(this.s[i]) && i > lineStart && char.IsHighSurrogate(this.s[i - 1])))
                     character++;
             }
-            return SimulatedSqlException.XmlParsingFailed(error, line, character);
+            return SimulatedSqlException.XmlParsingFailed(this.entityContent ? XmlParseError.EntityContentNotWellFormed : error, line, character);
         }
 
         private readonly struct QName(int start, int length, int colon)
