@@ -401,4 +401,40 @@ public sealed class PermissionStatementTests
         _ = sim.ExecuteNonQuery("create role r1; create user u1 without login; create type dbo.tt from int");
         sim.AssertSqlError(sql, 4623, "The all permission has been deprecated and is not available for this class of entity");
     }
+
+    [TestMethod]
+    [DataRow("grant foo bar to u1", 2, "foo")]
+    [DataRow("grant select, Foo to u1", 2, "Foo")]
+    [DataRow("grant view definitionx on schema::dbo to u1", 2, "definitionx")]
+    [DataRow("grant alter any database scoped to u1", 2, "alter")]
+    [DataRow("grant alter any database scoped credential to u1", 2, "alter")]
+    [DataRow("grant alter\n  any\n  bogusword to u1", 4, "bogusword")]
+    public void AnUnknownPermission_IsASyntaxErrorBeforeTheBatchRuns(string grant, int line, string near)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login");
+        var ex = sim.AssertSqlError("create table t (a int);\n" + grant, 102);
+        AreEqual($"Incorrect syntax near '{near}'.", ex.Errors[0].Message);
+        AreEqual(line, ex.Errors[0].LineNumber);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.tables where name = 't'"));
+    }
+
+    [TestMethod]
+    public void APermissionTheClassDoesntCarry_IsRefusedBeforeTheBatchRuns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login");
+        _ = sim.AssertSqlError("create table t (a int); grant create sequence to u1", 102);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.tables where name = 't'"));
+    }
+
+    [TestMethod]
+    public void ServerAndDatabasePermissionsTogether_Raise4620BeforeTheBatchRuns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login");
+        sim.AssertSqlError("create table t (a int); grant alter any symmetric key, alter any credential to u1", 4620,
+            "All permissions in a grant/deny/revoke statement should be at the same scope (e.g., server or database)");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.tables where name = 't'"));
+    }
 }

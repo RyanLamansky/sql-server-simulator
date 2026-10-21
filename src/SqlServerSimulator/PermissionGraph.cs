@@ -48,6 +48,48 @@ internal static class PermissionGraph
     internal static bool IsPermissionOf(string classDescription, string name) =>
         AllPermissions.Contains((classDescription, name));
 
+    /// <summary>Whether <paramref name="name"/>, canonically spelled, is a permission some class carries, or <c>ALL</c>.</summary>
+    internal static bool IsKnownName(string name) => KnownNames.Contains(name);
+
+    /// <summary>
+    /// How many of <paramref name="words"/>, canonically spelled, some
+    /// permission name starts with — the words real's grammar takes before
+    /// the one it stops at.
+    /// </summary>
+    internal static int RecognizedWords(List<string> words)
+    {
+        var prefix = string.Empty;
+        for (var i = 0; i < words.Count; i++)
+        {
+            prefix = i == 0 ? words[0] : prefix + " " + words[i];
+            if (!NamePrefixes.Contains(prefix))
+                return i;
+        }
+        return words.Count;
+    }
+
+    private static readonly FrozenSet<string> KnownNames =
+        BuiltinPermissionRows.All.Select(static row => row.PermissionName).Concat(["ALL", "ALL PRIVILEGES"]).ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Every leading run of words of a known name — and of <c>ALTER ANY
+    /// DATABASE SCOPED CREDENTIAL</c>, which real's grammar reads through
+    /// though no class carries it (probed 2026-10-21 against SQL Server 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> NamePrefixes = BuildNamePrefixes();
+
+    private static FrozenSet<string> BuildNamePrefixes()
+    {
+        var prefixes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in KnownNames.Append("ALTER ANY DATABASE SCOPED CREDENTIAL"))
+        {
+            for (var space = name.IndexOf(' ', StringComparison.Ordinal); space > 0; space = name.IndexOf(' ', space + 1))
+                _ = prefixes.Add(name[..space]);
+            _ = prefixes.Add(name);
+        }
+        return prefixes.ToFrozenSet(StringComparer.Ordinal);
+    }
+
     /// <summary>The 4-char <c>type</c> code the built-in table lists for <paramref name="name"/>, or null for a name it doesn't carry.</summary>
     internal static string? TypeCodeOf(string name) =>
         TypeCodes.TryGetValue(name, out var code) ? code : null;

@@ -53,19 +53,23 @@ partial class Simulation
         // sequence ends at a comma, '(', ON, TO, FROM, or AS.
         var permissions = new List<(string Name, List<string>? Columns)>();
         var currentTokens = new List<string>();
+        var wordCheckpoints = new List<ParserContext.Checkpoint>();
         while (true)
         {
             var word = TryConsumePermissionWord(context);
             if (word is not null)
             {
                 currentTokens.Add(word);
+                wordCheckpoints.Add(context.SaveCheckpoint());
                 context.MoveNextRequired();
                 continue;
             }
             if (currentTokens.Count > 0)
             {
+                RejectUnknownPermissionName(context, currentTokens, wordCheckpoints);
                 var permName = string.Join(" ", currentTokens);
                 currentTokens.Clear();
+                wordCheckpoints.Clear();
                 var columns = context.Token is Operator { Character: '(' } ? ParsePermissionColumnList(context) : null;
                 permissions.Add((permName, columns));
             }
@@ -267,6 +271,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
+        RejectPermissionsOutsideTheClass(permClass, hadOnClause, serverScopeSecurable, principalClassWord, permissions);
         if (context.Batch.IsSkipping)
             return true;
 
@@ -323,19 +328,6 @@ partial class Simulation
             throw SimulatedSqlException.GrantSubEntityListNotAllowed().PinLine(0);
         }
 
-        // The permissions a type, an XML schema collection, a full-text
-        // catalog, a symmetric key and a certificate carry; any other is a
-        // syntax error at compile, at line 0 (probed 2026-09-29 and
-        // 2026-10-15 against SQL Server 2025).
-        if (IsDerivedSecurableClass(permClass))
-        {
-            foreach (var (permName, _) in permissions)
-            {
-                if (!IsAllPermission(permName) && !PermissionAcceptedOnDerivedClass(permClass, permName))
-                    throw SimulatedSqlException.SyntaxErrorNearText(permName.ToUpperInvariant()).PinLine(0);
-            }
-        }
-
         var database = context.CurrentDatabase;
         // A database-scope permission row is a write to that database's
         // catalog, so a read-only database refuses the whole family (the
@@ -351,14 +343,6 @@ partial class Simulation
         // against SQL Server 2025).
         if (userSecurableName is { } targetName)
         {
-            // The class word settles which permissions apply before the name
-            // resolves (probed 2026-10-07 against SQL Server 2025: SELECT on
-            // USER::nosuch is Msg 102, not the missing user's Msg 15151).
-            foreach (var (permName, _) in permissions)
-            {
-                if (!IsAllPermission(permName) && !PermissionGraph.IsPermissionOf(principalClassWord switch { "application role" => "APPLICATION ROLE", "role" => "ROLE", _ => "USER" }, CanonicalPermissionName(permName)))
-                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
-            }
             // A principal's name has one part; a qualified one names none, as
             // written without its brackets (probed 2026-10-17 against SQL
             // Server 2025: USER::[dbo].u is Msg 15151 naming 'dbo.u').
@@ -470,17 +454,9 @@ partial class Simulation
                 throw SimulatedSqlException.GrantSubEntityListNotAllowedOnSynonym();
             permissions = ExpandAll(context, permissions, obj.ObjectTypeCode);
             foreach (var (permName, _) in permissions)
-            {
-                if (!PermissionGraph.IsPermissionOf("OBJECT", CanonicalPermissionName(permName)))
-                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
                 ValidatePermissionAgainstObjectKind(permName, obj.ObjectTypeCode);
-            }
         }
 
-        // The permission names a class carries; any other is Msg 102 near the
-        // name at line 0 (probed 2026-10-04 against SQL Server 2025: CREATE
-        // TABLE on a schema, CONNECT on a table, CREATE SEQUENCE on the
-        // database, which is a schema permission).
         // ALL stands for a list on the database and an object alone; on any
         // other class it is Msg 4623 once the securable has resolved (probed
         // 2026-10-07 against SQL Server 2025).
@@ -488,20 +464,6 @@ partial class Simulation
             throw SimulatedSqlException.AllPermissionNotAvailableForClass();
         if (permClass == PermissionChecker.ClassDatabase)
             permissions = ExpandAll(context, permissions, objectTypeCode: null);
-        if (permClass is PermissionChecker.ClassDatabase or PermissionChecker.ClassSchema or PermissionChecker.ClassDatabasePrincipal)
-        {
-            var classDescription = permClass switch
-            {
-                PermissionChecker.ClassDatabase => "DATABASE",
-                PermissionChecker.ClassSchema => "SCHEMA",
-                _ => securablePrincipal!.TypeCode == "R" ? "ROLE" : "USER",
-            };
-            foreach (var (permName, _) in permissions)
-            {
-                if (!PermissionGraph.IsPermissionOf(classDescription, CanonicalPermissionName(permName)))
-                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
-            }
-        }
 
         // Every grantee resolves before any row changes, so a missing one
         // leaves the statement's other grantees untouched; a fixed database
@@ -1281,6 +1243,71 @@ partial class Simulation
                     ? catalog.Id
                     : throw SimulatedSqlException.CannotFindSecurable("fulltext catalog", name.ToString());
         }
+    }
+
+    /// <summary>
+    /// The class settles which permissions apply while the batch compiles,
+    /// before the securable resolves: a permission the class doesn't carry is
+    /// Msg 102 near its name at line 0 — <c>CREATE TABLE</c> on a schema,
+    /// <c>CONNECT</c> on a table, <c>SELECT</c> on <c>USER::nosuch</c> — and
+    /// server and database permissions together without an <c>ON</c> clause
+    /// are Msg 4620 (probed 2026-10-04, 2026-10-07 and 2026-10-21 against SQL
+    /// Server 2025). <c>ALL</c> waits for the securable.
+    /// </summary>
+    private static void RejectPermissionsOutsideTheClass(byte permClass, bool hadOnClause, bool serverScopeSecurable, string principalClassWord, List<(string Name, List<string>? Columns)> permissions)
+    {
+        if (serverScopeSecurable)
+            return;
+        if (!hadOnClause)
+        {
+            var serverPermissions = permissions.Count(static p => IsServerScopePermission(p.Name));
+            if (serverPermissions == permissions.Count)
+                return;
+            if (serverPermissions > 0)
+                throw SimulatedSqlException.PermissionsAtMixedScopes();
+        }
+        var classDescription = permClass switch
+        {
+            PermissionChecker.ClassDatabase => "DATABASE",
+            PermissionChecker.ClassObject => "OBJECT",
+            PermissionChecker.ClassSchema => "SCHEMA",
+            PermissionChecker.ClassDatabasePrincipal => principalClassWord switch { "application role" => "APPLICATION ROLE", "role" => "ROLE", _ => "USER" },
+            _ => null,
+        };
+        foreach (var (permName, _) in permissions)
+        {
+            if (IsAllPermission(permName))
+                continue;
+            if (classDescription is null)
+            {
+                if (!PermissionAcceptedOnDerivedClass(permClass, permName))
+                    throw SimulatedSqlException.SyntaxErrorNearText(permName.ToUpperInvariant()).PinLine(0);
+            }
+            else if (!PermissionGraph.IsPermissionOf(classDescription, CanonicalPermissionName(permName)))
+            {
+                throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A permission no class carries is Msg 102 while the batch compiles,
+    /// near the first of its words no permission name continues with, as
+    /// written and on its own line, or near its first word when every word
+    /// fits but the name is incomplete (probed 2026-10-21 against SQL Server
+    /// 2025: <c>view definitionx</c> is near <c>'definitionx'</c>,
+    /// <c>alter any database scoped</c> near <c>'alter'</c>).
+    /// </summary>
+    private static void RejectUnknownPermissionName(ParserContext context, List<string> words, List<ParserContext.Checkpoint> checkpoints)
+    {
+        var canonical = words.ConvertAll(static word => word.ToUpperInvariant());
+        if (canonical is ["EXEC"])
+            canonical[0] = "EXECUTE";
+        if (PermissionGraph.IsKnownName(string.Join(' ', canonical)))
+            return;
+        var recognized = PermissionGraph.RecognizedWords(canonical);
+        context.RestoreCheckpoint(checkpoints[recognized == words.Count ? 0 : recognized]);
+        throw SimulatedSqlException.SyntaxErrorNear(context.Token);
     }
 
     /// <summary>

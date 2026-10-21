@@ -64,6 +64,10 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 
+    /// <summary>Msg 4620: one permission statement naming both server and database permissions, refused while the batch compiles.</summary>
+    internal static SimulatedSqlException PermissionsAtMixedScopes() =>
+        new("All permissions in a grant/deny/revoke statement should be at the same scope (e.g., server or database)", 4620, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server error 4623: the deprecated <c>ALL</c> on a securable
     /// other than the database or an object — a schema, a principal, a type,
