@@ -328,10 +328,11 @@ partial class Simulation
     /// a NULL or empty token unbinds the session, the transaction going on for
     /// the others (probed 2026-10-07 against SQL Server 2025). A session
     /// already in a transaction leaves it first with Msg 3924, rolling its own
-    /// back. A token of a transaction that has ended binds nothing, silently,
-    /// while the session that began it remains and isn't the caller, and is
-    /// Msg 3922 otherwise; anything else is Msg 3909, and a token not passed
-    /// as <c>varchar</c> Msg 257.
+    /// back. A token of a transaction that has ended — committed, rolled back,
+    /// or gone with the session that began it — is Msg 3922 whoever the caller
+    /// is and whether or not the issuer remains (probed 2026-10-21 against SQL
+    /// Server 2025); anything else is Msg 3909, and a token not passed as
+    /// <c>varchar</c> Msg 257.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpBindSession(BatchContext batch)
     {
@@ -359,11 +360,7 @@ partial class Simulation
             LeaveTransaction(connection);
         }
         if (!issue.Transaction.TryGetTarget(out var transaction) || transaction.Ended)
-        {
-            if (ReferenceEquals(issue.Issuer, connection.Session) || !connection.Simulation.HasSession(issue.Issuer))
-                throw SimulatedSqlException.BindTransactionDoesNotExist();
-            yield break;
-        }
+            throw SimulatedSqlException.BindTransactionDoesNotExist();
         transaction.Attach(connection, TransactionMembership.Bound, running: true);
         // Ended by another member while this one waited its turn.
         if (transaction.Ended)

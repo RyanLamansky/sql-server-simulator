@@ -1035,7 +1035,7 @@ public sealed partial class Simulation
         "5---".AsSpan().CopyTo(token[22..]);
         "--".AsSpan().CopyTo(token[30..]);
         var text = new string(token);
-        this.BindTokens[text] = new BindTokenIssue(new WeakReference<SimulatedDbTransaction>(transaction), transaction.Owner.Session);
+        this.BindTokens[text] = new BindTokenIssue(new WeakReference<SimulatedDbTransaction>(transaction));
         return transaction.BindToken = text;
     }
 
@@ -1102,13 +1102,6 @@ public sealed partial class Simulation
     {
         lock (this.Sessions)
             return this.ResettingSpids.Contains(spid);
-    }
-
-    /// <summary>Whether <paramref name="session"/> is still one of the simulation's sessions.</summary>
-    internal bool HasSession(SessionToken session)
-    {
-        lock (this.Sessions)
-            return this.Sessions.Contains(session) && session.TryResolveOwner() is { State: System.Data.ConnectionState.Open };
     }
 
     /// <summary>When a LOB chain a write gave up may go to another row (see <see cref="Storage.LobReclamation"/>).</summary>

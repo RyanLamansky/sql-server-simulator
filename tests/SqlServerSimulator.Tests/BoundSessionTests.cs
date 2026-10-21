@@ -254,18 +254,20 @@ public class BoundSessionTests
     }
 
     [TestMethod]
-    public void AnEndedTransactionsToken_BindsNothing_OrIsMsg3922()
+    public void AnEndedTransactionsToken_IsMsg3922()
     {
         var sim = Seeded();
         using var owner = sim.CreateOpenConnection();
         using var bound = sim.CreateOpenConnection();
         var token = (string)Scalar(owner, "declare @t varchar(255); begin tran; exec sp_getbindtoken @t output; select @t")!;
         // The session that began it binding to its own token defects from it
-        // first, which leaves nothing to bind to.
+        // first, rolling it back, then meets its own ended transaction.
         var refused = Throws<SimulatedSqlException>(() => owner.CreateCommand($"exec sp_bindsession '{token}'").ExecuteNonQuery());
         AreEqual(3922, refused.Number);
         AreEqual(0, Scalar(owner, "select @@trancount"));
-        AreEqual(0, Scalar(bound, $"exec sp_bindsession '{token}'; select @@trancount"));
+        // Another session binding the ended token is Msg 3922 too, whether
+        // or not the issuer remains (probed 2026-10-21 against SQL Server 2025).
+        AreEqual(3922, Throws<SimulatedSqlException>(() => bound.CreateCommand($"exec sp_bindsession '{token}'").ExecuteNonQuery()).Number);
         owner.Dispose();
         AreEqual(3922, Throws<SimulatedSqlException>(() => bound.CreateCommand($"exec sp_bindsession '{token}'").ExecuteNonQuery()).Number);
     }

@@ -1120,14 +1120,8 @@ internal enum TransactionEvent : byte
     StatementRollback,
 }
 
-/// <summary>
-/// A token <c>sp_getbindtoken</c> handed out: the transaction it names, held
-/// weakly, and the session that began that transaction, whose presence decides
-/// how <c>sp_bindsession</c> answers once the transaction has ended.
-/// </summary>
-internal sealed class BindTokenIssue(WeakReference<SimulatedDbTransaction> transaction, SessionToken issuer)
+/// <summary>A token <c>sp_getbindtoken</c> handed out: the transaction it names, held weakly.</summary>
+internal sealed class BindTokenIssue(WeakReference<SimulatedDbTransaction> transaction)
 {
     public readonly WeakReference<SimulatedDbTransaction> Transaction = transaction;
-
-    public readonly SessionToken Issuer = issuer;
 }
