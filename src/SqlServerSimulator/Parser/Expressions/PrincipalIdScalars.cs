@@ -432,6 +432,8 @@ internal sealed class HasPermsByName : Expression
         }
         if (string.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "LOGIN", StringComparison.OrdinalIgnoreCase))
             return LoginAnswer(connection, securableVal, permissionVal.CoerceTo(SqlType.NVarchar).AsString);
+        if (string.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "SERVER ROLE", StringComparison.OrdinalIgnoreCase))
+            return ServerRoleAnswer(connection, securableVal, permissionVal.CoerceTo(SqlType.NVarchar).AsString);
         if (!this.TryReadColumnSubSecurable(runtime, classVal, out var column))
             return SqlValue.Null(SqlType.Int32);
 
@@ -621,6 +623,37 @@ internal sealed class HasPermsByName : Expression
         var holds = !effective.IsDatabaseScoped
             && (simulation.HasNoSqlLogins()
                 || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, permission, serverWide));
+        return SqlValue.FromInt32(holds ? 1 : 0);
+    }
+
+    /// <summary>
+    /// <see cref="LoginAnswer"/> for a server role, fixed or custom: each
+    /// permission the class takes is covered by its server-wide one — <c>ALTER
+    /// ANY SERVER ROLE</c> for <c>ALTER</c>, <c>CONTROL SERVER</c> for
+    /// <c>CONTROL</c> and <c>TAKE OWNERSHIP</c>, <c>VIEW ANY SECURITY
+    /// DEFINITION</c> for <c>VIEW DEFINITION</c> — and any other is NULL; a
+    /// name that is no server role is 0 (probed 2026-10-21 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SqlValue ServerRoleAnswer(SimulatedDbConnection connection, SqlValue securableVal, string permissionName)
+    {
+        var simulation = connection.Simulation;
+        var permission = Permission.Resolve(permissionName);
+        Permission? blanket = permission switch
+        {
+            Permission.Alter => Permission.AlterAnyServerRole,
+            Permission.Control or Permission.TakeOwnership => Permission.ControlServer,
+            Permission.ViewDefinition => Permission.ViewAnySecurityDefinition,
+            _ => null,
+        };
+        if (blanket is not { } serverWide || securableVal.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        if (!simulation.TryResolveServerRole(securableVal.CoerceTo(SqlType.NVarchar).AsString, out var roleId, out _))
+            return SqlValue.FromInt32(0);
+        var effective = connection.Security.Effective;
+        var holds = !effective.IsDatabaseScoped
+            && (simulation.HasNoSqlLogins()
+                || simulation.HoldsServerPrincipalPermission(effective.LoginName, roleId, permission, serverWide));
         return SqlValue.FromInt32(holds ? 1 : 0);
     }
 

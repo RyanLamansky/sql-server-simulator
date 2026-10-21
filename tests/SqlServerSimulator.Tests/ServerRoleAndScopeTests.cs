@@ -520,4 +520,34 @@ public sealed class ServerRoleAndScopeTests
     [TestMethod]
     public void DropServerRole_Missing_IsMsg15151()
         => new Simulation().AssertSqlError("drop server role nosuchrole", 15151, "Cannot drop the server role 'nosuchrole', because it does not exist or you do not have permission.");
+
+    [TestMethod]
+    public void OnServerRoleSecurable_GrantsClass101_AndHasPermsByNameReadsIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create server role r");
+        _ = sim.ExecuteNonQuery("use master; grant view definition on server role::r to l");
+        AreEqual("SERVER_PRINCIPAL:VIEW DEFINITION", sim.ExecuteScalar(
+            "select class_desc + ':' + permission_name from sys.server_permissions where class = 101 and major_id = suser_id('r')"));
+        AreEqual("1|0|0", sim.ExecuteScalar("""
+            use master;
+            execute as login = 'l';
+            declare @r varchar(20) = concat(has_perms_by_name('r', 'SERVER ROLE', 'VIEW DEFINITION'), '|', has_perms_by_name('r', 'SERVER ROLE', 'ALTER'), '|', has_perms_by_name('nosuch', 'SERVER ROLE', 'ALTER'));
+            revert;
+            select @r;
+            """));
+        _ = sim.ExecuteNonQuery("use master; drop server role r");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_permissions where class = 101"));
+    }
+
+    [TestMethod]
+    [DataRow("grant view definition on server role::nosuch to l", "Cannot find the server role 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("grant view definition on server role::sysadmin to l", "Cannot find the object 'sysadmin', because it does not exist or you do not have permission.")]
+    [DataRow("grant control on login::r to l", "Cannot find the login 'r', because it does not exist or you do not have permission.")]
+    public void ServerPrincipalSecurables_FindOnlyTheirOwnKind(string grant, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create server role r");
+        sim.AssertSqlError("use master; " + grant, 15151, message);
+    }
 }

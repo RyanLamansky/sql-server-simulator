@@ -98,6 +98,7 @@ partial class Simulation
         // (class 101) both route to the Simulation-level server registry.
         var serverScopeSecurable = false;
         string? loginSecurableName = null;
+        string? serverRoleSecurableName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
         {
             hadOnClause = true;
@@ -187,6 +188,10 @@ partial class Simulation
                 case "SERVER":
                     serverScopeSecurable = true;
                     break;
+                case "SERVER ROLE":
+                    serverScopeSecurable = true;
+                    serverRoleSecurableName = securableName.Leaf;
+                    break;
                 case "SERVICE":
                     permClass = PermissionChecker.ClassService;
                     objectSecurableName = securableName;
@@ -271,7 +276,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        RejectPermissionsOutsideTheClass(permClass, hadOnClause, serverScopeSecurable, principalClassWord, permissions);
+        RejectPermissionsOutsideTheClass(permClass, hadOnClause, serverScopeSecurable && serverRoleSecurableName is null, principalClassWord, serverRoleSecurableName is null ? null : "SERVER ROLE", permissions);
         if (context.Batch.IsSkipping)
             return true;
 
@@ -291,7 +296,7 @@ partial class Simulation
         {
             if (permissions.Exists(p => p.Columns is not null))
                 throw SimulatedSqlException.GrantSubEntityListNotAllowed();
-            ApplyServerScopeGrant(context, kind, permissions.ConvertAll(p => p.Name), granteeNames, loginSecurableName);
+            ApplyServerScopeGrant(context, kind, permissions.ConvertAll(p => p.Name), granteeNames, loginSecurableName, serverRoleSecurableName);
             return true;
         }
 
@@ -1252,9 +1257,11 @@ partial class Simulation
     /// <c>CONNECT</c> on a table, <c>SELECT</c> on <c>USER::nosuch</c> — and
     /// server and database permissions together without an <c>ON</c> clause
     /// are Msg 4620 (probed 2026-10-04, 2026-10-07 and 2026-10-21 against SQL
-    /// Server 2025). <c>ALL</c> waits for the securable.
+    /// Server 2025). <c>ALL</c> waits for the securable. A server-scope
+    /// securable is checked only as <paramref name="serverClass"/>, the
+    /// <c>SERVER ROLE</c> class.
     /// </summary>
-    private static void RejectPermissionsOutsideTheClass(byte permClass, bool hadOnClause, bool serverScopeSecurable, string principalClassWord, List<(string Name, List<string>? Columns)> permissions)
+    private static void RejectPermissionsOutsideTheClass(byte permClass, bool hadOnClause, bool serverScopeSecurable, string principalClassWord, string? serverClass, List<(string Name, List<string>? Columns)> permissions)
     {
         if (serverScopeSecurable)
             return;
@@ -1266,7 +1273,7 @@ partial class Simulation
             if (serverPermissions > 0)
                 throw SimulatedSqlException.PermissionsAtMixedScopes();
         }
-        var classDescription = permClass switch
+        var classDescription = serverClass ?? permClass switch
         {
             PermissionChecker.ClassDatabase => "DATABASE",
             PermissionChecker.ClassObject => "OBJECT",

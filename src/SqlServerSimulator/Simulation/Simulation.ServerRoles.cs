@@ -553,6 +553,13 @@ partial class Simulation
             return ifExists ? true : throw SimulatedSqlException.CannotDropServerRole(name);
         lock (simulation.ServerRoleMembers)
             _ = simulation.ServerRoleMembers.RemoveAll(m => m.RoleId == removed.PrincipalId || m.MemberId == removed.PrincipalId);
+        // The permissions granted on it and to it go with it (probed
+        // 2026-10-21 against SQL Server 2025).
+        lock (simulation.ServerPermissions)
+        {
+            _ = simulation.ServerPermissions.RemoveAll(p =>
+                p.GranteeId == removed.PrincipalId || (p.Class == PermissionChecker.ClassServerPrincipal && p.MajorId == removed.PrincipalId));
+        }
         return true;
     }
 
@@ -602,21 +609,35 @@ partial class Simulation
     /// <c>master</c> (Msg 4621 elsewhere). Server-scope DENY replaces the prior
     /// GRANT row (unlike database scope, where G and D coexist — probe6 N4).
     /// </summary>
-    internal static void ApplyServerScopeGrant(ParserContext context, PermissionStatementKind kind, List<string> permissions, List<string> granteeNames, string? loginSecurableName = null)
+    internal static void ApplyServerScopeGrant(ParserContext context, PermissionStatementKind kind, List<string> permissions, List<string> granteeNames, string? loginSecurableName = null, string? serverRoleSecurableName = null)
     {
         if (!BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, MasterDatabaseName))
             throw SimulatedSqlException.ServerPermissionsMasterOnly();
         var simulation = context.Batch.Connection.Simulation;
         var grantorId = context.Connection.Security.Effective.DatabasePrincipalId;
 
-        // ON LOGIN::x → class 101 against the named login's principal_id; the
-        // ON-less / ON SERVER:: form → class 100, major 0.
+        // ON LOGIN::x and ON SERVER ROLE::x → class 101 against the named
+        // principal's principal_id, each finding only its own kind — a fixed
+        // role is no server role's securable, but a missing object (probed
+        // 2026-10-21 against SQL Server 2025); the ON-less / ON SERVER:: form
+        // → class 100, major 0.
         var permClass = PermissionChecker.ClassServer;
         var majorId = 0;
         if (loginSecurableName is not null)
         {
-            if (!simulation.TryResolveServerPrincipalId(loginSecurableName, out majorId))
+            if (!(BuiltInToken.Comparer.Equals(loginSecurableName, "sa") || simulation.Logins.ContainsKey(loginSecurableName))
+                || !simulation.TryResolveServerPrincipalId(loginSecurableName, out majorId))
+            {
                 throw SimulatedSqlException.CannotFindLogin(loginSecurableName);
+            }
+            permClass = PermissionChecker.ClassServerPrincipal;
+        }
+        else if (serverRoleSecurableName is not null)
+        {
+            if (!simulation.TryResolveServerRole(serverRoleSecurableName, out majorId, out var isFixed))
+                throw SimulatedSqlException.CannotFindSecurable("server role", serverRoleSecurableName);
+            if (isFixed)
+                throw SimulatedSqlException.CannotFindSecurable("object", serverRoleSecurableName);
             permClass = PermissionChecker.ClassServerPrincipal;
         }
 

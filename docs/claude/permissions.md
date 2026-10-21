@@ -612,6 +612,10 @@ A class-101 row answers only when it names the same target, and covers through t
 **DENY over either class binds first**, so `DENY IMPERSONATE ON LOGIN::x` beats `GRANT IMPERSONATE ANY LOGIN` (probe-confirmed).
 
 Three gates consume it: `EXECUTE AS LOGIN` (IMPERSONATE — a login may always impersonate itself, probed 2026-09-29), [server-principal metadata visibility](#server-principal-metadata-visibility) (VIEW DEFINITION / ALTER / IMPERSONATE), and [login DDL](#login-ddl-gating) (ALTER); `HAS_PERMS_BY_NAME(<login>, 'LOGIN', …)` and `fn_my_permissions(<login>, 'LOGIN')` read it too.
+`LOGIN::` finds logins alone, a server role there being a missing login (probed 2026-10-21 against SQL Server 2025).
+
+`ON SERVER ROLE::<role>` stores the same class 101 row against a custom server role, which takes `ALTER`, `CONTROL`, `TAKE OWNERSHIP` and `VIEW DEFINITION` (any other is the compile-time Msg 102 at line 0); a fixed role there is a missing object and any other name a missing server role, both Msg 15151, and dropping the role drops the rows on and to it.
+`HAS_PERMS_BY_NAME(<role>, 'SERVER ROLE', …)` reads them as `LOGIN`'s does, over a fixed role too, with `ALTER ANY SERVER ROLE` the blanket for `ALTER`, `CONTROL SERVER` for `CONTROL` and `TAKE OWNERSHIP` and `VIEW ANY SECURITY DEFINITION` for `VIEW DEFINITION`; a name that is no server role is 0 (probed 2026-10-21 against SQL Server 2025).
 
 ### Server-principal metadata visibility
 
@@ -797,7 +801,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 - The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-notification and availability-group families and `ALTER RESOURCES`.
 - `UNSAFE ASSEMBLY` as a signing certificate's or key's login holds it under `clr strict security`; it is read only as a `TRUSTWORTHY` database's owner's (see [`clr-assemblies.md`](clr-assemblies.md#what-the-server-takes-the-edition-the-catalog-and-clr-strict-security)).
-- `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
+- A server role's owner: `ALTER AUTHORIZATION ON SERVER ROLE::` raises `NotSupportedException`, and `owning_principal_id` doesn't follow a change.
 - `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry, and `ALTER LOGIN [sa] WITH PASSWORD` (or `sp_password` on it) meets real's policy check (Msg 33062 for a too-short password, probed 2026-09-30 against SQL Server 2025) and then `NotSupportedException`: recording a password for `sa` would switch the TDS endpoint from accepting any credentials to enforcing them, and real's own answer to a wrong `OLD_PASSWORD` is Msg 15151.
 - `KILL` is built (see [`locking.md`](locking.md#kill)), gated on `ALTER ANY CONNECTION`.
 
