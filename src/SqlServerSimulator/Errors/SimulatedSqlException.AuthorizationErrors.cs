@@ -75,6 +75,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DatabaseCannotBeOwnedByRole() =>
         new("An entity of type database cannot be owned by a role, a group, an approle, or by principals mapped to certificates or asymmetric keys.", 15353, 16, 1);
 
+    /// <summary>Msg 15141: <c>DROP LOGIN</c> or <c>DROP SERVER ROLE</c> of a server principal that owns a server role.</summary>
+    internal static SimulatedSqlException ServerPrincipalOwnsServerRoles() =>
+        new("The server principal owns one or more server role(s) and cannot be dropped.", 15141, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server error 15174: <c>DROP LOGIN</c> of a login that owns a
     /// database. Probed 2026-09-27 against SQL Server 2025.

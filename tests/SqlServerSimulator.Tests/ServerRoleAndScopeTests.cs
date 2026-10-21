@@ -550,4 +550,50 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create server role r");
         sim.AssertSqlError("use master; " + grant, 15151, message);
     }
+
+    [TestMethod]
+    public void AServerRolesOwner_IsItsAuthorization_AndHoldsEveryPermissionOnIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create login m with password = 'P@ss1word'; create server role r authorization l; create server role q authorization r");
+        AreEqual("q:r,r:l", sim.ExecuteScalar("""
+            select string_agg(p.name + ':' + o.name, ',') within group (order by p.name)
+            from sys.server_principals p join sys.server_principals o on o.principal_id = p.owning_principal_id where p.name in ('q', 'r')
+            """));
+        AreEqual("1|1|1|1|added", sim.ExecuteScalar("""
+            use master;
+            execute as login = 'l';
+            declare @r varchar(40) = concat(has_perms_by_name('r', 'SERVER ROLE', 'ALTER'), '|', has_perms_by_name('r', 'SERVER ROLE', 'CONTROL'), '|',
+                has_perms_by_name('r', 'SERVER ROLE', 'VIEW DEFINITION'), '|', has_perms_by_name('r', 'SERVER ROLE', 'TAKE OWNERSHIP'));
+            begin try alter server role r add member m; set @r += '|added'; end try begin catch set @r += concat('|', error_number()); end catch;
+            revert;
+            select @r;
+            """));
+        sim.AssertSqlError("drop login l", 15141, "The server principal owns one or more server role(s) and cannot be dropped.");
+        _ = sim.ExecuteNonQuery("alter authorization on server role::r to m");
+        AreEqual("m", sim.ExecuteScalar("select suser_name(owning_principal_id) from sys.server_principals where name = 'r'"));
+    }
+
+    [TestMethod]
+    [DataRow("create server role x authorization nosuch", "Cannot find the server principal 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on server role::nosuch to l", "Cannot find the server role 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter authorization on server role::r to nosuch", "Cannot find the principal 'nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("alter server role nosuch with name = x", "Cannot alter the server role 'nosuch', because it does not exist or you do not have permission.")]
+    public void ServerRoleOwnershipAndRename_RefuseAsRealDoes(string statement, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create server role r");
+        sim.AssertSqlError(statement, 15151, message);
+    }
+
+    [TestMethod]
+    public void AServerRole_RenamesWithName_AndTakesNoIfExistsToDrop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l with password = 'P@ss1word'; create server role r; create server role q");
+        _ = sim.ExecuteNonQuery("alter server role r with name = r2");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_principals where name = 'r2'"));
+        sim.AssertSqlError("alter server role r2 with name = l", 15023, "User, group, or role 'l' already exists in the current database.");
+        _ = sim.AssertSqlError("drop server role if exists q", 156);
+    }
 }

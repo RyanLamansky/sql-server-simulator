@@ -309,6 +309,10 @@ partial class Simulation
 
     private bool HoldsServerPrincipalPermission(HashSet<int> closure, int targetPrincipalId, Permission permission, Permission blanketEquivalent)
     {
+        // A server role's owner holds every permission on it (probed
+        // 2026-10-21 against SQL Server 2025).
+        if (targetPrincipalId != 0 && this.ServerRoleOwnerId(targetPrincipalId) is { } ownerId && closure.Contains(ownerId))
+            return true;
         lock (this.ServerPermissions)
         {
             // DENY binds first, over both classes — CONTROL SERVER included
@@ -430,7 +434,10 @@ partial class Simulation
     /// <summary>
     /// Parses <c>CREATE SERVER ROLE name [AUTHORIZATION owner]</c>. Cursor on
     /// entry: the <c>SERVER</c> word (the token after <c>CREATE</c>). The role
-    /// takes a fresh id from <see cref="AllocatePrincipalId"/>.
+    /// takes a fresh id from <see cref="AllocatePrincipalId"/>, and is owned
+    /// by the server principal <c>AUTHORIZATION</c> names — a login or a role,
+    /// Msg 15151 for neither — or by the creating login (probed 2026-10-21
+    /// against SQL Server 2025).
     /// </summary>
     internal static bool TryParseCreateServerRole(ParserContext context)
     {
@@ -442,9 +449,12 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = nameToken.Value;
         context.MoveNextOptional();
-        // AUTHORIZATION owner — parse-and-discard.
+        string? ownerName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Authorization })
-            ConsumeToStatementBoundary(context);
+        {
+            ownerName = context.GetNextRequired() is Name owner ? owner.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
         if (context.Batch.IsSkipping)
             return true;
         var simulation = context.Batch.Connection.Simulation;
@@ -453,8 +463,13 @@ partial class Simulation
         RecordServerSecurityUndo(context.Batch);
         if (simulation.TryResolveServerPrincipalId(name, out _))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        int ownerId;
+        if (ownerName is null)
+            _ = simulation.TryResolveServerPrincipalId(context.Connection.Security.Effective.LoginName, out ownerId);
+        else if (!simulation.TryResolveServerPrincipalId(ownerName, out ownerId))
+            throw SimulatedSqlException.CannotFindSecurable("server principal", ownerName);
         _ = simulation.ServerRoles.TryAdd(name,
-            new ServerRole(simulation.AllocatePrincipalId(), name, context.Batch.CurrentStatement.UtcNow));
+            new ServerRole(simulation.AllocatePrincipalId(), name, context.Batch.CurrentStatement.UtcNow, ownerId));
         return true;
     }
 
@@ -475,6 +490,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var roleName = roleNameToken.Value;
         context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            return TryParseRenameServerRole(context, roleName);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop } addOrDrop)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var isAdd = addOrDrop.Keyword == Keyword.Add;
@@ -519,7 +536,52 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>DROP SERVER ROLE [IF EXISTS] name</c>. Cursor on entry: the
+    /// Parses <c>ALTER SERVER ROLE role WITH NAME = new_name</c>, cursor on
+    /// <c>WITH</c> (probed 2026-10-21 against SQL Server 2025): it needs
+    /// <c>ALTER ANY SERVER ROLE</c>, which a role's owner without it lacks, a
+    /// missing role and a refusal being the same Msg 15151, a name any server
+    /// principal holds is Msg 15023 state 14, and <c>[]</c> Msg 1038.
+    /// </summary>
+    private static bool TryParseRenameServerRole(ParserContext context, string roleName)
+    {
+        if (context.GetNextRequired() is not UnquotedString { Value: var nameWord } || !nameWord.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var newName = context.GetNextRequired() switch
+        {
+            Name { Value.Length: 0 } => throw SimulatedSqlException.EmptyColumnAlias(),
+            Name name => name.Value,
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+        // A second NAME is refused at its value (probed 2026-10-21 against
+        // SQL Server 2025).
+        if (context.GetNextOptional() is Operator { Character: ',' }
+            && context.GetNextRequired() is UnquotedString { Value: var again } && again.Equals("NAME", StringComparison.OrdinalIgnoreCase)
+            && context.GetNextRequired() is Operator { Character: '=' })
+        {
+            context.MoveNextRequired();
+        }
+        if (!IsStatementBoundary(context.Token))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.Batch.IsSkipping)
+            return true;
+        var simulation = context.Batch.Connection.Simulation;
+        if (!simulation.ServerRoles.TryGetValue(roleName, out var role)
+            || !simulation.SessionHoldsServerPermission(context.Connection, Permission.AlterAnyServerRole))
+        {
+            throw SimulatedSqlException.CannotAlterServerRole(roleName);
+        }
+        if (simulation.TryResolveServerPrincipalId(newName, out var taken) && taken != role.PrincipalId)
+            throw SimulatedSqlException.PrincipalAlreadyExists(newName, state: 14);
+        RecordServerSecurityUndo(context.Batch);
+        _ = simulation.ServerRoles.TryRemove(roleName, out _);
+        simulation.ServerRoles[newName] = new ServerRole(role.PrincipalId, newName, role.CreateDate, role.OwnerId);
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>DROP SERVER ROLE name</c>. Cursor on entry: the
     /// <c>SERVER</c> word (the token after <c>DROP</c>). Dropping a fixed role
     /// raises Msg 15150; an unknown role (without IF EXISTS) raises Msg 15151.
     /// </summary>
@@ -528,16 +590,9 @@ partial class Simulation
         context.MoveNextRequired(); // consume SERVER
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Role })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        var ifExists = false;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.If })
-        {
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Exists })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            ifExists = true;
-            context.MoveNextRequired();
-        }
-        if (context.Token is not Name nameToken)
+        // No IF EXISTS: Msg 156 near IF (probed 2026-10-21 against SQL Server
+        // 2025).
+        if (context.GetNextRequired() is not Name nameToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = nameToken.Value;
         context.MoveNextOptional();
@@ -549,8 +604,10 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropFixedServerRole(name);
         if (simulation.ServerRoles.ContainsKey(name) && !simulation.SessionHoldsServerPermission(context.Connection, Permission.AlterAnyServerRole))
             throw SimulatedSqlException.CannotDropServerRole(name);
+        if (simulation.ServerRoles.TryGetValue(name, out var owning) && simulation.OwnsServerRole(owning.PrincipalId))
+            throw SimulatedSqlException.ServerPrincipalOwnsServerRoles();
         if (!simulation.ServerRoles.TryRemove(name, out var removed))
-            return ifExists ? true : throw SimulatedSqlException.CannotDropServerRole(name);
+            throw SimulatedSqlException.CannotDropServerRole(name);
         lock (simulation.ServerRoleMembers)
             _ = simulation.ServerRoleMembers.RemoveAll(m => m.RoleId == removed.PrincipalId || m.MemberId == removed.PrincipalId);
         // The permissions granted on it and to it go with it (probed
@@ -577,11 +634,36 @@ partial class Simulation
     {
         var effective = connection.Security.Effective;
         if (!isFixed)
-            return this.SessionHoldsServerPermission(connection, Permission.AlterAnyServerRole);
+        {
+            return this.SessionHoldsServerPermission(connection, Permission.AlterAnyServerRole)
+                || (!effective.IsDatabaseScoped && this.HoldsServerPrincipalPermission(effective.LoginName, roleId, Permission.Alter, Permission.AlterAnyServerRole));
+        }
         return !effective.IsDatabaseScoped
             && (this.HasNoSqlLogins()
                 || this.IsLoginSysadmin(effective.LoginName)
                 || this.IsLoginInServerRole(effective.LoginName, roleId));
+    }
+
+    /// <summary>The owner of the custom server role <paramref name="roleId"/>, null for any other principal.</summary>
+    internal int? ServerRoleOwnerId(int roleId)
+    {
+        foreach (var (_, role) in this.ServerRoles)
+        {
+            if (role.PrincipalId == roleId)
+                return role.OwnerId;
+        }
+        return null;
+    }
+
+    /// <summary>Whether the server principal <paramref name="principalId"/> owns a custom server role.</summary>
+    internal bool OwnsServerRole(int principalId)
+    {
+        foreach (var (_, role) in this.ServerRoles)
+        {
+            if (role.OwnerId == principalId)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>Resolves a server-role name (fixed or custom) to its id, reporting whether it's a fixed role; false for a non-role name.</summary>
@@ -691,12 +773,19 @@ partial class Simulation
     }
 }
 
-/// <summary>One custom server role created via <c>CREATE SERVER ROLE</c>.</summary>
-internal sealed class ServerRole(int principalId, string name, DateTime createDate)
+/// <summary>
+/// One custom server role created via <c>CREATE SERVER ROLE</c>, with the
+/// server principal that owns it — a login or another role — which holds
+/// every permission on it. Immutable: a change of owner replaces the entry.
+/// </summary>
+internal sealed class ServerRole(int principalId, string name, DateTime createDate, int ownerId)
 {
     public readonly int PrincipalId = principalId;
     public readonly string Name = name;
     public readonly DateTime CreateDate = createDate;
+    public readonly int OwnerId = ownerId;
+
+    public ServerRole WithOwner(int ownerId) => new(this.PrincipalId, this.Name, this.CreateDate, ownerId);
 }
 
 /// <summary>

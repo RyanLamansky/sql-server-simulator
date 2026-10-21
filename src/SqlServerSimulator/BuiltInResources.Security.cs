@@ -901,7 +901,7 @@ internal static partial class BuiltInResources
             rows.Add((role.PrincipalId, [
                 SqlValue.FromSystemName(role.Name), SqlValue.FromInt32(role.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(role.Name)),
                 roleType, serverRole, falseBit, SqlValue.FromDateTime(role.CreateDate), SqlValue.FromDateTime(role.CreateDate),
-                nullName, nullName, nullCredentialId, dboOwningId, falseBit, zeroTenant,
+                nullName, nullName, nullCredentialId, SqlValue.FromInt32(role.OwnerId), falseBit, zeroTenant,
             ]));
         }
 

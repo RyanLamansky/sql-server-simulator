@@ -111,9 +111,8 @@ partial class Simulation
                 ChangeSchemaOwner(context, entity, ownerName);
                 break;
             case "SERVER ROLE":
-                if (!context.Connection.Simulation.TryResolveServerRole(entity, out _, out _))
-                    throw SimulatedSqlException.CannotFindSecurable("server role", entity);
-                throw new NotSupportedException("ALTER AUTHORIZATION on a server role is not modeled: a server role's owner isn't carried.");
+                ChangeServerRoleOwner(context, entity, ownerName);
+                break;
             case "SYMMETRIC KEY":
                 ChangeKeyOwner(context, entityName.Leaf, ownerName, PermissionChecker.ClassSymmetricKey);
                 break;
@@ -444,6 +443,32 @@ partial class Simulation
         if (previous != newOwner)
             DropSecurablePermissions(context, database, PermissionChecker.ClassFulltextCatalog, catalog.Id);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
+    }
+
+    /// <summary>
+    /// <c>ALTER AUTHORIZATION ON SERVER ROLE::name</c>: the role and the new
+    /// owner, a login or a role, are each Msg 15151 when missing, and the
+    /// session needs <c>TAKE OWNERSHIP</c> of the role (probed 2026-10-21
+    /// against SQL Server 2025). A fixed role's owner real can't change — the
+    /// attempt ended the probing session — so it isn't modeled.
+    /// </summary>
+    private static void ChangeServerRoleOwner(ParserContext context, string name, string? ownerName)
+    {
+        var simulation = context.Connection.Simulation;
+        if (!simulation.TryResolveServerRole(name, out var roleId, out var isFixed))
+            throw SimulatedSqlException.CannotFindSecurable("server role", name);
+        if (isFixed)
+            throw new NotSupportedException("ALTER AUTHORIZATION on a fixed server role is not modeled: SQL Server 2025 ends the session.");
+        if (ownerName is null || !simulation.TryResolveServerPrincipalId(ownerName, out var ownerId))
+            throw SimulatedSqlException.CannotFindSecurable("principal", ownerName ?? "SCHEMA OWNER");
+        var effective = context.Connection.Security.Effective;
+        if (!simulation.SessionHoldsServerPermission(context.Connection, Permission.ControlServer)
+            && (effective.IsDatabaseScoped || !simulation.HoldsServerPrincipalPermission(effective.LoginName, roleId, Permission.TakeOwnership, Permission.ControlServer)))
+        {
+            throw SimulatedSqlException.CannotFindSecurable("server role", name);
+        }
+        RecordServerSecurityUndo(context.Batch);
+        simulation.ServerRoles[name] = simulation.ServerRoles[name].WithOwner(ownerId);
     }
 
     /// <summary>

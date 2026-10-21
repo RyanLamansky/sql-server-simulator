@@ -322,6 +322,10 @@ partial class Simulation
                 if (database.Collation.Equals(database.OwnerLoginName, name))
                     throw SimulatedSqlException.LoginOwnsDatabases(name);
             }
+            // Nor one owning a server role (probed 2026-10-21 against SQL
+            // Server 2025).
+            if (simulation.TryResolveServerPrincipalId(name, out var loginId) && simulation.OwnsServerRole(loginId))
+                throw SimulatedSqlException.ServerPrincipalOwnsServerRoles();
         }
         RecordServerSecurityUndo(context.Batch);
         if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out var dropped))
