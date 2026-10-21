@@ -200,11 +200,6 @@ A reference written through a synonym is enforced against the synonym and never 
 The redirect carries that provenance: `FromSource.ViaSynonym` for query sources, the written `MultiPartName` for DML / EXEC targets, both funnelling through `PermissionEnforcement.SecurableFor`.
 A synonym takes no column list at all (Msg 1020), so every check through one is object-grain → [`permissions.md`](permissions.md#reference-provenance-synonyms).
 
-### Divergences
-
-- **A grant on the synonym isn't honored at use.** The DML / FROM permission gate checks the resolved *base* object, so a principal holding `SELECT` on the synonym but not on the base gets Msg 229 where real reads through.
-  Closing it means carrying resolution provenance out of the redirect (`TryResolveTable` returns the base table with no record of the synonym it came through).
-
 ## ALTER SCHEMA TRANSFER
 `ALTER SCHEMA <dest> TRANSFER [(OBJECT | TYPE | XML SCHEMA COLLECTION)::] <source>.<obj>` moves a single object from one schema to another.
 Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`.
