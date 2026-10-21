@@ -143,7 +143,7 @@ public sealed partial class ExtendedEventsDeadlockTests
         StartsWith("\uFEFF<EVENT_INSTANCE><EventType>DEADLOCK_GRAPH</EventType>", body);
         Contains("<SPID>3</SPID><TextData><deadlock-list>\n <deadlock victim=\"process", body);
         Contains("\n  <process-list>\n   <process id=", body);
-        Contains("</resource-list>\n </deadlock>\n</deadlock-list>\n</TextData><TransactionID />", body);
+        Contains("</resource-list>\n </deadlock>\n</deadlock-list>\n</TextData><TransactionID/>", body);
         DoesNotContain("victim-list", body);
     }
 

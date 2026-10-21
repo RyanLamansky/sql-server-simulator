@@ -113,10 +113,9 @@ public sealed class DdlEventCoverageTests
             "alter application role ar2 with password = 'P@ssw0rd2!'",
             "drop application role ar2");
         AreEqual("CREATE_APPLICATION_ROLE,ALTER_APPLICATION_ROLE,ALTER_APPLICATION_ROLE,DROP_APPLICATION_ROLE", Types(sim));
-        AreEqual(
-            "<EVENT_INSTANCE><EventType>CREATE_APPLICATION_ROLE</EventType><ObjectName>ar</ObjectName><ObjectType>APPLICATION ROLE</ObjectType>"
-            + "<TSQLCommand><CommandText>create application role ar with password = '******', default_schema = dbo;</CommandText></TSQLCommand></EVENT_INSTANCE>",
-            sim.ExecuteScalar("select s from ev where n = 1"));
+        var created = (string)sim.ExecuteScalar("select s from ev where n = 1")!;
+        StartsWith("<EVENT_INSTANCE><EventType>CREATE_APPLICATION_ROLE</EventType><ObjectName>ar</ObjectName><ObjectType>APPLICATION ROLE</ObjectType><DefaultSchema>dbo</DefaultSchema><SID>", created);
+        Contains("<TSQLCommand><CommandText>create application role ar with password = '******', default_schema = dbo;</CommandText></TSQLCommand></EVENT_INSTANCE>", created);
         Contains("<ObjectName>ar2</ObjectName>", (string)sim.ExecuteScalar("select s from ev where n = 2")!);
     }
 
@@ -206,5 +205,52 @@ public sealed class DdlEventCoverageTests
         sim.ExecuteBatches("create default d1 as 0");
         sim.ExecuteBatches(statement);
         AreEqual(expected, Types(sim));
+    }
+
+    /// <summary>
+    /// The elements a principal event carries after <c>ObjectType</c>, by kind
+    /// (probed 2026-10-21 against SQL Server 2025); <c>SID</c>'s value is
+    /// stripped, its presence kept.
+    /// </summary>
+    [TestMethod]
+    public void PrincipalEvents_CarryTheirDefaultSchemaLanguageAndSid()
+    {
+        var sim = Logging("");
+        sim.ExecuteBatches(
+            "create user u without login with default_schema = sys",
+            "create role r",
+            "create role r2",
+            "alter role r add member u",
+            "alter role r add member r2",
+            "alter role r drop member u",
+            "alter role r drop member r2",
+            "drop user u",
+            "drop role r");
+        AreEqual(
+            "CREATE_USER:<DefaultSchema>sys</DefaultSchema><DefaultLanguage/><SID>|"
+            + "CREATE_ROLE:<SID>|"
+            + "CREATE_ROLE:<SID>|"
+            + "ADD_ROLE_MEMBER:<DefaultSchema>sys</DefaultSchema><SID>|"
+            + "ADD_ROLE_MEMBER:<DefaultSchema/><SID>|"
+            + "DROP_ROLE_MEMBER:<DefaultSchema>sys</DefaultSchema><SID>|"
+            + "DROP_ROLE_MEMBER:<DefaultSchema/><SID>|"
+            + "DROP_USER:<DefaultSchema>sys</DefaultSchema><DefaultLanguage/><SID>|"
+            + "DROP_ROLE:<SID/>",
+            sim.ExecuteScalar("""
+                select string_agg(cast(s as xml).value('(/EVENT_INSTANCE/EventType)[1]', 'sysname') + ':'
+                    + substring(s, charindex('</ObjectType>', s) + 13, charindex('<SID', s) - charindex('</ObjectType>', s) - 13)
+                    + iif(s like '%<SID/>%', '<SID/>', '<SID>'), '|') within group (order by n)
+                from ev
+                """));
+    }
+
+    [TestMethod]
+    [DataRow("create user u2 without login with default_language = English")]
+    [DataRow("alter user u with default_language = English")]
+    public void DefaultLanguage_IsRefusedForAUserOfADatabaseThatIsntContained(string statement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login");
+        sim.AssertSqlError(statement, 33234, "The parameter DEFAULT_LANGUAGE cannot be provided for users that cannot authenticate in a database.");
     }
 }

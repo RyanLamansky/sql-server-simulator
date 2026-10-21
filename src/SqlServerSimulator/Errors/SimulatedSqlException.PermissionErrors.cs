@@ -64,6 +64,10 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 
+    /// <summary>Msg 33234: <c>DEFAULT_LANGUAGE</c> on <c>CREATE</c> / <c>ALTER USER</c> in a database that isn't contained.</summary>
+    internal static SimulatedSqlException DefaultLanguageForNonAuthenticatingUser() =>
+        new("The parameter DEFAULT_LANGUAGE cannot be provided for users that cannot authenticate in a database.", 33234, 16, 1);
+
     /// <summary>Msg 4620: one permission statement naming both server and database permissions, refused while the batch compiles.</summary>
     internal static SimulatedSqlException PermissionsAtMixedScopes() =>
         new("All permissions in a grant/deny/revoke statement should be at the same scope (e.g., server or database)", 4620, 16, 1);

@@ -34,7 +34,7 @@ partial class Simulation
         var (loginLink, withoutLogin) = ParseCreateUserSource(context);
         if (bare)
             loginLink = name;
-        var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false);
+        var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false, acceptsNullSchema: false, out _, out var defaultLanguage);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -76,6 +76,11 @@ partial class Simulation
         {
             throw SimulatedSqlException.LoginAlreadyHasAccount(linkedUser.Name);
         }
+        // A user of a database that isn't contained authenticates through its
+        // login, if any, so it takes no language (probed 2026-10-21 against
+        // SQL Server 2025).
+        if (defaultLanguage)
+            throw SimulatedSqlException.DefaultLanguageForNonAuthenticatingUser();
         var id = context.CurrentDatabase.AllocatePrincipalId();
         RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
@@ -95,7 +100,7 @@ partial class Simulation
             permission: Permission.Connect, state: PermissionState.Grant));
         // Real emits no SchemaName for a principal event; ObjectType names the
         // user kind (the simulator models only the SQL flavor).
-        RecordDdlEvent(context, "CREATE_USER", null, name, "SQL USER");
+        RecordDdlEvent(context, "CREATE_USER", null, name, "SQL USER", principalElements: PrincipalEventElements(context.CurrentDatabase, context.CurrentDatabase.Principals[name]));
         return true;
     }
 
@@ -148,18 +153,20 @@ partial class Simulation
     /// otherwise the cursor ends on the first token past the list.
     /// </summary>
     private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName = true) =>
-        ParsePrincipalWithOptions(context, acceptsName, acceptsNullSchema: false, out _);
+        ParsePrincipalWithOptions(context, acceptsName, acceptsNullSchema: false, out _, out _);
 
     /// <summary>
     /// <see cref="ParsePrincipalWithOptions(ParserContext, bool)"/>, setting
     /// <paramref name="nullSchemaOption"/> to the <c>DEFAULT_SCHEMA</c> word as
     /// written when its value is <c>NULL</c> and <paramref name="acceptsNullSchema"/>
     /// — <c>ALTER USER</c>'s, which refuses it only as it runs; elsewhere it is
-    /// a syntax error near <c>NULL</c>.
+    /// a syntax error near <c>NULL</c> — and <paramref name="defaultLanguage"/>
+    /// to whether a <c>DEFAULT_LANGUAGE</c> is given.
     /// </summary>
-    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName, bool acceptsNullSchema, out string? nullSchemaOption)
+    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName, bool acceptsNullSchema, out string? nullSchemaOption, out bool defaultLanguage)
     {
         nullSchemaOption = null;
+        defaultLanguage = false;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return (null, null);
         string? defaultSchema = null, newName = null;
@@ -183,6 +190,10 @@ partial class Simulation
             {
                 newName = value is Name nameValue ? nameValue.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
             }
+            else if (option.Span.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase))
+            {
+                defaultLanguage = true;
+            }
         }
         while (context.GetNextOptional() is Operator { Character: ',' });
         return (defaultSchema, newName);
@@ -203,7 +214,7 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var (defaultSchema, newName) = ParsePrincipalWithOptions(context, acceptsName: true, acceptsNullSchema: true, out var nullSchemaOption);
+        var (defaultSchema, newName) = ParsePrincipalWithOptions(context, acceptsName: true, acceptsNullSchema: true, out var nullSchemaOption, out var defaultLanguage);
         context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
@@ -225,12 +236,14 @@ partial class Simulation
         // against SQL Server 2025).
         if (nullSchemaOption is not null)
             throw SimulatedSqlException.NullDefaultSchemaRefused(nullSchemaOption);
+        if (defaultLanguage)
+            throw SimulatedSqlException.DefaultLanguageForNonAuthenticatingUser();
         RecordSecurityUndo(context, database);
         if (newName is not null)
             RenamePrincipal(database, user, newName);
         if (defaultSchema is not null)
             user.DefaultSchemaName = defaultSchema;
-        RecordDdlEvent(context, "ALTER_USER", null, user.Name, "SQL USER");
+        RecordDdlEvent(context, "ALTER_USER", null, user.Name, "SQL USER", principalElements: PrincipalEventElements(database, database.Principals[user.Name]));
         return true;
     }
 
@@ -319,7 +332,7 @@ partial class Simulation
         {
             OwningPrincipalId = owner,
         };
-        RecordDdlEvent(context, "CREATE_ROLE", null, name, "ROLE");
+        RecordDdlEvent(context, "CREATE_ROLE", null, name, "ROLE", principalElements: PrincipalEventElements(context.CurrentDatabase, context.CurrentDatabase.Principals[name]));
         return true;
     }
 
@@ -387,7 +400,8 @@ partial class Simulation
         {
             _ = database.RoleMembers.Remove((role.PrincipalId, member.PrincipalId));
         }
-        RecordDdlEvent(context, isAdd ? "ADD_ROLE_MEMBER" : "DROP_ROLE_MEMBER", null, member.Name, member.TypeCode == "R" ? "ROLE" : "SQL USER", roleName: role.Name);
+        RecordDdlEvent(context, isAdd ? "ADD_ROLE_MEMBER" : "DROP_ROLE_MEMBER", null, member.Name, member.TypeCode == "R" ? "ROLE" : "SQL USER", roleName: role.Name,
+            principalElements: PrincipalEventElements(database, member, asMember: true));
     }
 
     /// <summary>
@@ -525,7 +539,7 @@ partial class Simulation
                 throw SimulatedSqlException.CannotAlterFixedRole(roleName);
             RecordSecurityUndo(context, context.CurrentDatabase);
             RenamePrincipal(context.CurrentDatabase, renamed, newName);
-            RecordDdlEvent(context, "ALTER_ROLE", null, newName, "ROLE");
+            RecordDdlEvent(context, "ALTER_ROLE", null, newName, "ROLE", principalElements: PrincipalEventElements(context.CurrentDatabase, context.CurrentDatabase.Principals[newName]));
             return true;
         }
         throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -612,7 +626,7 @@ partial class Simulation
             rm.RoleId == removed.PrincipalId || rm.MemberId == removed.PrincipalId);
         _ = context.CurrentDatabase.Permissions.RemoveAll(p =>
             p.GranteePrincipalId == removed.PrincipalId || (p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == removed.PrincipalId));
-        RecordDdlEvent(context, isRole ? "DROP_ROLE" : "DROP_USER", null, name, isRole ? "ROLE" : "SQL USER");
+        RecordDdlEvent(context, isRole ? "DROP_ROLE" : "DROP_USER", null, name, isRole ? "ROLE" : "SQL USER", principalElements: PrincipalEventElements(context.CurrentDatabase, removed, dropped: true));
         return true;
     }
 

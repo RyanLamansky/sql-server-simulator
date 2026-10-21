@@ -30,13 +30,14 @@ partial class Simulation
         string? roleName = null,
         string? ownerName = null,
         string? trailingElements = null,
-        (int Start, int End)[]? masks = null)
+        (int Start, int End)[]? masks = null,
+        string? principalElements = null)
     {
         if (!RaisesDdlEvents(context))
             return;
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
-            eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName,
+            eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, principalElements, roleName, ownerName,
             trailingElements: trailingElements, masks: masks));
     }
 
@@ -384,6 +385,8 @@ partial class Simulation
             AppendElement(builder, "TargetObjectName", targetName);
         if (info.TargetObjectType is { } targetType)
             AppendElement(builder, "TargetObjectType", targetType);
+        if (info.PrincipalElements is { } principalElements)
+            _ = builder.Append(principalElements);
         if (info.RoleName is { } roleName)
             AppendElement(builder, "RoleName", roleName);
         if (info.TrailingElements is { } trailingElements)
@@ -408,13 +411,35 @@ partial class Simulation
     internal static string EventSchemaName(MultiPartName name) =>
         name.ImmediateQualifier ?? Database.DefaultSchemaName;
 
+    /// <summary>
+    /// The elements a database principal's event carries after
+    /// <c>ObjectType</c> (probed 2026-10-21 against SQL Server 2025): a
+    /// user's <c>DefaultSchema</c>, an empty <c>DefaultLanguage</c> and its
+    /// <c>SID</c>, an application role's <c>DefaultSchema</c> and <c>SID</c>,
+    /// and a role's <c>SID</c>, empty once dropped; the member a role
+    /// membership event names carries its <c>DefaultSchema</c>, empty for a
+    /// role, and its <c>SID</c>.
+    /// </summary>
+    internal static string PrincipalEventElements(Database database, DatabasePrincipal principal, bool asMember = false, bool dropped = false)
+    {
+        var elements = new StringBuilder(96);
+        var isRole = principal.TypeCode == "R";
+        if (asMember || !isRole)
+            AppendElement(elements, "DefaultSchema", isRole ? string.Empty : principal.DefaultSchemaName ?? Database.DefaultSchemaName);
+        if (!asMember && principal.TypeCode is not ("R" or "A"))
+            AppendElement(elements, "DefaultLanguage", string.Empty);
+        AppendElement(elements, "SID", dropped && isRole ? string.Empty : Convert.ToBase64String(BuiltInResources.DatabasePrincipalSid(database, principal) ?? []));
+        return elements.ToString();
+    }
+
     private static void AppendElement(StringBuilder builder, string name, string value)
     {
         // An empty value is the self-closing form real's xml renders — an
-        // ALTER_AUTHORIZATION_DATABASE event's <SchemaName /> for a schema.
+        // ALTER_AUTHORIZATION_DATABASE event's <SchemaName/> for a schema
+        // (probed 2026-10-21 against SQL Server 2025).
         if (value.Length == 0)
         {
-            _ = builder.Append('<').Append(name).Append(" />");
+            _ = builder.Append('<').Append(name).Append("/>");
             return;
         }
         _ = builder.Append('<').Append(name).Append('>');

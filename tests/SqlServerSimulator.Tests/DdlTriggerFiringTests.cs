@@ -337,7 +337,7 @@ public sealed class DdlTriggerFiringTests
         var sim = NewLoggingSimulation();
         sim.ExecuteBatches("create trigger t2 on database for create_table as select 1");
         var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'CREATE_TRIGGER'")!;
-        Assert.Contains("<SchemaName /><ObjectName>t2</ObjectName><ObjectType>TRIGGER</ObjectType><TargetObjectName /><TargetObjectType>Database</TargetObjectType>", document);
+        Assert.Contains("<SchemaName/><ObjectName>t2</ObjectName><ObjectType>TRIGGER</ObjectType><TargetObjectName/><TargetObjectType>Database</TargetObjectType>", document);
     }
 
     [TestMethod]
@@ -375,7 +375,7 @@ public sealed class DdlTriggerFiringTests
         _ = sim.ExecuteNonQuery("create table dbo.t1 (a int)");
         _ = sim.ExecuteNonQuery("exec sp_rename @objname = 'dbo.t1', @newname = 't2'");
         var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'RENAME'")!;
-        Assert.Contains("<TargetObjectName /><TargetObjectType /><NewObjectName>t2</NewObjectName><Parameters><Param>dbo.t1</Param><Param>t2</Param><Param /></Parameters><TSQLCommand>", document);
+        Assert.Contains("<TargetObjectName/><TargetObjectType/><NewObjectName>t2</NewObjectName><Parameters><Param>dbo.t1</Param><Param>t2</Param><Param/></Parameters><TSQLCommand>", document);
     }
 
     /// <summary>

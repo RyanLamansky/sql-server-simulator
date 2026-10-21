@@ -55,7 +55,8 @@ partial class Simulation
             DefaultSchemaName = defaultSchema ?? Database.DefaultSchemaName,
             PasswordHash = PasswordHash.EncryptLegacy(password),
         };
-        RecordDdlEvent(context, "CREATE_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd));
+        RecordDdlEvent(context, "CREATE_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd),
+            principalElements: PrincipalEventElements(database, database.Principals[name]));
         return true;
     }
 
@@ -105,7 +106,8 @@ partial class Simulation
         }
         // The event names the role as the statement leaves it (probed
         // 2026-09-28 against SQL Server 2025).
-        RecordDdlEvent(context, "ALTER_APPLICATION_ROLE", schemaName: null, newName ?? name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd));
+        RecordDdlEvent(context, "ALTER_APPLICATION_ROLE", schemaName: null, newName ?? name, "APPLICATION ROLE", masks: PasswordMask(passwordStart, passwordEnd),
+            principalElements: PrincipalEventElements(database, database.Principals[newName ?? name]));
         return true;
     }
 
@@ -136,7 +138,7 @@ partial class Simulation
         // The permissions it held go with it, as a user's do.
         _ = database.Permissions.RemoveAll(p =>
             p.GranteePrincipalId == role.PrincipalId || (p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == role.PrincipalId));
-        RecordDdlEvent(context, "DROP_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE");
+        RecordDdlEvent(context, "DROP_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", principalElements: PrincipalEventElements(database, role, dropped: true));
         return true;
     }
 

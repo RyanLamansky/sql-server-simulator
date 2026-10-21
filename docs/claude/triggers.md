@@ -409,9 +409,12 @@ Four kinds carry elements of their own after the common ones (probed 2026-09-28 
 - a login, user (bar `DROP USER`), role, application-role, `GRANT` / `DENY` / `REVOKE`, `CREATE SYNONYM`, `CREATE` / `ALTER SEQUENCE`, `CREATE` / `DROP TYPE`, `DROP SCHEMA`, `ALTER AUTHORIZATION`, partition-scheme, `CREATE PARTITION FUNCTION`, full-text catalog or index, or `ALTER DATABASE SCOPED CONFIGURATION` statement reports everything up to the next statement's first token — its `;`, the whitespace and comments after it — or to the end of the batch;
 - a statement a batch must hold alone — `CREATE` / `ALTER` of a view, procedure, function or trigger, `CREATE DEFAULT` / `RULE` / `SCHEMA` — reports the whole batch, leading comments and whitespace included.
 
+A database principal's event carries its elements after `ObjectType` (`Simulation.PrincipalEventElements`, probed 2026-10-21 against SQL Server 2025): a user's `DefaultSchema`, an empty `DefaultLanguage` and its `SID`, an application role's `DefaultSchema` and `SID`, a role's `SID`, empty in `DROP_ROLE`, and a membership event's member its `DefaultSchema`, empty for a role, and `SID` ahead of `RoleName`.
+An empty element is written `<X/>`, as real's xml serializer writes one.
+
 ### Not modeled yet
 
-- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage`, an application role's included (the role-member events carry `RoleName` but not these two, and `sp_addrolemember`'s event reports its own `EXEC` text where real reports the `ALTER ROLE` it runs), and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
+- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), `sp_addrolemember`'s event reporting its own `EXEC` text where real reports the `ALTER ROLE` it runs, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
   The common header plus `TSQLCommand` is what an audit body reads.
 - **A binding procedure's rows-affected count** — an `EXEC sp_bindefault` a DDL trigger fires for reports the body's writes as its own count, where real reports its internal statements' (probed 2026-09-28 against SQL Server 2025).
 

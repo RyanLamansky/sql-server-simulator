@@ -39,6 +39,12 @@ namespace SqlServerSimulator.Parser;
 /// <paramref name="targetObjectName"/>. Null where real emits the name without
 /// a type — a synonym's base object.
 /// </param>
+/// <param name="principalElements">
+/// A database principal event's elements after <c>ObjectType</c>, rendered:
+/// the principal's <c>DefaultSchema</c>, <c>DefaultLanguage</c> and
+/// <c>SID</c> as its kind carries them, ahead of a membership event's
+/// <c>RoleName</c>.
+/// </param>
 /// <param name="roleName">
 /// The role an <c>ADD_ROLE_MEMBER</c> / <c>DROP_ROLE_MEMBER</c> event changed,
 /// whose member is the object.
@@ -71,6 +77,7 @@ internal sealed class DdlEventInfo(
     string? objectType,
     string? targetObjectName = null,
     string? targetObjectType = null,
+    string? principalElements = null,
     string? roleName = null,
     string? ownerName = null,
     string? serverLevelDatabase = null,
@@ -83,6 +90,7 @@ internal sealed class DdlEventInfo(
     public readonly string? ObjectType = objectType;
     public readonly string? TargetObjectName = targetObjectName;
     public readonly string? TargetObjectType = targetObjectType;
+    public readonly string? PrincipalElements = principalElements;
     public readonly string? RoleName = roleName;
     public readonly string? OwnerName = ownerName;
     public readonly string? ServerLevelDatabase = serverLevelDatabase;
